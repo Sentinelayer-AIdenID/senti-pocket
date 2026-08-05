@@ -8,7 +8,10 @@ The iOS foundation has hosted evidence, but the reconciled Registry V2 successor
 compile. Xcode is also required for CallKit, PushKit, signing, archive/export, and physical-device proof.
 
 ## Prereqs
-- macOS with Xcode or the Command Line Tools (`xcode-select --install`). Check: `swift --version`.
+- macOS with full Xcode, XcodeGen, and the authorized Developer Program account signed in under Xcode Settings →
+  Accounts. Check `xcodebuild -version`, `xcrun --sdk iphoneos --show-sdk-version`, and `xcodegen --version`.
+- The exact intended iPhone attached, unlocked, trusted, and in Developer Mode. Copy its physical provisioning UDID
+  from Xcode's Devices and Simulators window; do not post that value to GitHub or Senti.
 
 ## Steps
 ```bash
@@ -60,10 +63,32 @@ xcodebuild -project SentiPocketApp.xcodeproj -scheme SentiPocketApp \
   -destination "id=$DEVICE_ID" test
 ```
 
-For a signed device archive and verified `.ipa`, sign into the authorized Apple Developer account in Xcode and use
-`scripts/ios/archive_ipa.sh` from the repository root. It requires the non-secret Team ID, Release API/gateway HTTPS
-origins, and optionally an overridden bundle ID/build number; see `apps/SentiPocketApp/README.md`. A simulator build
-does not prove provisioning, APNs entitlements, archive export, or installability.
+For a signed device archive and verified `.ipa`, use `scripts/ios/archive_ipa.sh` from the clean repository root. The
+private Mac shell must already contain the authorized Team ID, exact physical provisioning UDID, and the actual
+deployed API/gateway HTTPS origins:
+
+```bash
+: "${SENTI_APPLE_TEAM_ID:?export the authorized Apple Team ID first}"
+: "${SENTI_DEVICE_UDID:?export the exact intended iPhone provisioning UDID first}"
+: "${SENTI_API_URL:?export the exact deployed API HTTPS origin first}"
+: "${SENTI_GATEWAY_URL:?export the exact deployed gateway HTTPS origin first}"
+export SENTI_APPLE_TEAM_ID SENTI_DEVICE_UDID SENTI_API_URL SENTI_GATEWAY_URL
+
+# Optional external-state actions. Uncomment deliberately; registration is development-export-only.
+# Both flags default to 0.
+# export SENTI_REGISTER_CONNECTED_DEVICE=1
+# export SENTI_INSTALL_CONNECTED_DEVICE=1
+scripts/ios/archive_ipa.sh
+```
+
+The archive gate requires exact UDID membership in the decoded embedded profile and requires its
+`DeveloperCertificates` array to contain the actual signing leaf before an opted-in install can run. The device/OS
+remains the authority that verifies Apple's profile CMS trust chain. The script emits `IPA_MANIFEST.json`; retain the
+commit, IPA SHA-256, and sanitized manifest. A development/ad-hoc IPA and `.xcarchive` expose the profile's registered-device
+list by design, so keep both private and never upload them to GitHub/Senti/CI. Raw signing diagnostics are deleted by
+default. A simulator or unsigned hosted Release build does not prove provisioning, APNs entitlements, export,
+installation, launch, PushKit/APNs delivery, or CallKit behavior. After an opted-in `devicectl` command succeeds,
+confirm the intended installed device in Xcode; the manifest deliberately does not claim a parsed CoreDevice identity.
 
 ## Expected
 - **Every listed build and test exits zero.** Registry V2 coverage must include
