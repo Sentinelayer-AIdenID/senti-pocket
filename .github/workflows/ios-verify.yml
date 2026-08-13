@@ -198,7 +198,7 @@ jobs:
           SWIFTC_ALTERNATE_LINKER_PATH=
           "SWIFT_TOOLS_DIR=$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin"
           SWIFT_TOOLCHAIN_FLAGS=
-          SWIFT_RESPONSE_FILE_PATH=
+          'SWIFT_RESPONSE_FILE_PATH=$(SWIFT_RESPONSE_FILE_PATH_$(variant)_$(arch))'
           SWIFT_USE_INTEGRATED_DRIVER=YES
           -resolvePackageDependencies
       - name: Capture and verify unsigned device build settings
@@ -248,7 +248,7 @@ jobs:
               SWIFTC_ALTERNATE_LINKER_PATH= \
               "SWIFT_TOOLS_DIR=$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin" \
               SWIFT_TOOLCHAIN_FLAGS= \
-              SWIFT_RESPONSE_FILE_PATH= \
+              'SWIFT_RESPONSE_FILE_PATH=$(SWIFT_RESPONSE_FILE_PATH_$(variant)_$(arch))' \
               SWIFT_USE_INTEGRATED_DRIVER=YES \
               -showBuildSettings -json >"$settings_json"
 
@@ -313,7 +313,7 @@ jobs:
           SWIFTC_ALTERNATE_LINKER_PATH=
           "SWIFT_TOOLS_DIR=$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin"
           SWIFT_TOOLCHAIN_FLAGS=
-          SWIFT_RESPONSE_FILE_PATH=
+          'SWIFT_RESPONSE_FILE_PATH=$(SWIFT_RESPONSE_FILE_PATH_$(variant)_$(arch))'
           SWIFT_USE_INTEGRATED_DRIVER=YES
           build
       - name: Verify unsigned Release bundle
