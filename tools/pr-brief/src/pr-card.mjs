@@ -68,8 +68,9 @@ export function buildPrCard(observation, { deployment = null, omar = null } = {}
   const whoWorkedOnIt = {
     author: o.author.login,
     commitAuthors: o.commitAuthors.map((c) => c.login || c.name).filter(Boolean),
-    reviewers: o.reviewers.map((r) => ({ login: r.login, disposition: r.state })),
+    reviewers: o.reviewers.map((r) => ({ login: r.login, disposition: r.state, onHead: r.onHead })),
     independenceNote: o.reviewIndependence.sharedAccountWarning ? o.reviewIndependence.note : null,
+    provenanceNote: (o.provenance && o.provenance.note) || null,
   };
 
   // --- "What it does" (bounded, factual; no model summary) ---
@@ -80,14 +81,19 @@ export function buildPrCard(observation, { deployment = null, omar = null } = {}
   };
 
   // --- TWO distinct measures (never one blended %) ---
+  const approvedWithoutChecks = o.approvalCount > 0 && o.checks.total === 0; // approval with zero observed checks != verified
   const verifiedAcceptance = {
     checks: { total: o.checks.total, byConclusion: o.checks.byConclusion, pending: o.checks.pending, hasFailures: o.checks.hasFailures },
-    approvals: o.approvalCount,
-    independentReviewers: o.reviewIndependence.distinctReviewerLogins,
+    approvals: o.approvalCount, // head-valid, non-self, non-bot approvals only
+    staleApprovals: o.staleApprovals || 0, // approvals on a prior head — reported, never counted as current
+    independentReviewers: o.reviewIndependence.independentReviewerLogins,
+    approvedWithoutChecks,
     omar: omar ? { state: omar.state, mergeAuthorized: omar.mergeAuthorized === true, findingCounts: omar.findingCounts || null } : null,
     unknowns: [
       ...(deployment == null ? ['deployment-status'] : []),
       ...(o.checks.total === 0 ? ['no-checks-observed'] : []),
+      ...(approvedWithoutChecks ? ['approved-without-checks'] : []),
+      ...((o.staleApprovals || 0) > 0 ? ['stale-head-approvals'] : []),
     ],
   };
   const sourceCoverage = {

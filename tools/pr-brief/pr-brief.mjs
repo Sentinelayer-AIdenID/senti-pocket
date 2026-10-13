@@ -23,19 +23,28 @@ function gh(args) {
   }
 }
 
+// Paginated fetch → the COMPLETE set across all pages (not just page 1). `--jq '.[]'` /
+// '.check_runs[]' streams one JSON object per line (JSONL) across all pages; parse line-by-line.
+function ghJsonl(args) {
+  try {
+    const out = execFileSync('gh', ['api', '--paginate', ...args], { encoding: 'utf8', maxBuffer: 50_000_000 });
+    return out.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => JSON.parse(l));
+  } catch {
+    return [];
+  }
+}
+
 export function fetchPr(repo, n) {
   const pull = gh(['api', `repos/${repo}/pulls/${n}`]);
   if (pull._error) return { repoId: repo, pull };
   const head = pull.head && pull.head.sha;
-  const reviews = gh(['api', `repos/${repo}/pulls/${n}/reviews`]);
-  const commits = gh(['api', `repos/${repo}/pulls/${n}/commits`]);
-  const checks = head ? gh(['api', `repos/${repo}/commits/${head}/check-runs`]) : {};
   return {
     repoId: repo,
     pull,
-    reviews: Array.isArray(reviews) ? reviews : [],
-    commits: Array.isArray(commits) ? commits : [],
-    checkRuns: (checks && checks.check_runs) || [],
+    // reviews carry commit_id (for the stale-head check); all three arrays fully paginated.
+    reviews: ghJsonl([`repos/${repo}/pulls/${n}/reviews`, '--jq', '.[]']),
+    commits: ghJsonl([`repos/${repo}/pulls/${n}/commits`, '--jq', '.[]']),
+    checkRuns: head ? ghJsonl([`repos/${repo}/commits/${head}/check-runs`, '--jq', '.check_runs[]']) : [],
   };
 }
 
