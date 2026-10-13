@@ -35,15 +35,24 @@ DO → client (JSON):
 - `{ type:'directives', state, subscriptions, remoteTracks }` — broadcast to every member after
   any change; `remoteTracks` is the exact CF `tracks/new` subscribe body for that listener.
 
-## Deploy (needs CF account + wrangler; flag Carter for access)
+## Authorization (mirrors the gateway — not a reinvention)
+
+The Pocket gateway holds **no signing key**: it authorizes by forwarding the caller's own Senti bearer to the
+SentinelLayer API and trusting the returned role (`senti-target-membership.mjs`). So this Worker mints nothing — it
+forwards the **client's own bearer** to a configured gateway authorize endpoint and trusts only a member role + the
+participant id the **gateway** bound to that bearer (the caller never chooses its own id — that shape is the
+confused-deputy bug). Fail-closed: with `GATEWAY_AUTHORIZE_URL` unset, every `/call/*` route 403s.
+
+The exact authorize endpoint is being **co-designed with warden** (gateway owns `/dial` + the resolver; a store-backed
+one-time join grant via the existing `dialSignalStore` is one candidate). Until it's wired, deploy stands up the
+transport but admits no one — intentionally.
+
+## Deploy (needs CF Realtime app + wrangler; co-set up with warden)
 
 ```sh
 cd tools/live-call
-# one-time secrets (NEVER committed):
-wrangler secret put CF_REALTIME_APP_SECRET   # CF Realtime App Secret
-wrangler secret put GATEWAY_TOKEN            # bearer for the gateway membership check
-# set CF_REALTIME_APP_ID + GATEWAY_URL in wrangler.toml [vars], then:
+# one-time secret (NEVER committed):
+wrangler secret put CF_REALTIME_APP_SECRET   # CF Realtime App Secret (stays server-side)
+# set CF_REALTIME_APP_ID + GATEWAY_AUTHORIZE_URL in wrangler.toml [vars], then:
 wrangler deploy
 ```
-
-Membership is fail-closed: with `GATEWAY_URL`/`GATEWAY_TOKEN` unset, every call/SFU route 403s.

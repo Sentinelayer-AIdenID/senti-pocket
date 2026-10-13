@@ -13,9 +13,10 @@ tag = "v1"
 new_sqlite_classes = ["CallRoomDO"]
 
 [vars]
-# CF_REALTIME_APP_ID is public. GATEWAY_URL is the Pocket gateway base used for membership verification.
-# The SECRETS are NEVER committed — set them once per environment with:
+# CF_REALTIME_APP_ID is public. GATEWAY_AUTHORIZE_URL is the gateway endpoint the Worker POSTs the CLIENT's own
+# bearer to for a bearer->role decision (co-designed with warden; unset => fail closed, admits no one). There is NO
+# shared admin token — authorization is the connecting client's own Senti bearer, forwarded.
+# The App Secret is NEVER committed — set it once per environment:
 #   wrangler secret put CF_REALTIME_APP_SECRET   # the CF Realtime App Secret (stays server-side)
-#   wrangler secret put GATEWAY_TOKEN            # bearer for the gateway membership check
 CF_REALTIME_APP_ID = ""
-GATEWAY_URL = ""
+GATEWAY_AUTHORIZE_URL = ""
