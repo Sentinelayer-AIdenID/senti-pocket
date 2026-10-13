@@ -1,0 +1,21 @@
+name = "senti-live-call"
+main = "worker.mjs"
+compatibility_date = "2025-01-01"
+
+# One Durable Object instance per call room (idFromName(roomId) in worker.mjs).
+[[durable_objects.bindings]]
+name = "CALL_ROOM"
+class_name = "CallRoomDO"
+
+# SQLite-backed DO (the default for new classes); supports storage KV + alarms used by call-do.mjs.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["CallRoomDO"]
+
+[vars]
+# CF_REALTIME_APP_ID is public. GATEWAY_URL is the Pocket gateway base used for membership verification.
+# The SECRETS are NEVER committed — set them once per environment with:
+#   wrangler secret put CF_REALTIME_APP_SECRET   # the CF Realtime App Secret (stays server-side)
+#   wrangler secret put GATEWAY_TOKEN            # bearer for the gateway membership check
+CF_REALTIME_APP_ID = ""
+GATEWAY_URL = ""
