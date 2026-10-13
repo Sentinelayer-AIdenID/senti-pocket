@@ -4,6 +4,8 @@
 attributable Mac evidence. On any Mac with Xcode command-line tools, this verifies the listed SwiftPM packages and
 the `project.yml`-linked app closure. macOS has **CryptoKit**, so every `#if canImport(CryptoKit)` test path
 (hashing, ed25519 signature verification) actually runs — which is exactly what can't run on Windows.
+The iOS foundation has hosted evidence, but the reconciled Registry V2 successor still needs its own exact-head Mac
+compile. Xcode is also required for CallKit, PushKit, signing, archive/export, and physical-device proof.
 
 ## Prereqs
 - macOS with Xcode or the Command Line Tools (`xcode-select --install`). Check: `swift --version`.
@@ -37,12 +39,25 @@ echo "==== packages/PocketVoice (external deps) ===="
 ( cd packages/PocketVoice && swift build && swift test )
 ```
 
-## The production-linked app closure
-Build the packages actually linked by `apps/SentiPocketApp/project.yml` via XcodeGen. `PocketInference` remains a
-standalone package/device-integration gate here; this app target does not yet link it or `PocketReasoningGemma`.
+## The production-linked app and test closure
+Build the packages actually linked by `apps/SentiPocketApp/project.yml` via XcodeGen, then run the complete hosted app
+test target. `PocketInference` remains a standalone package/device-integration gate here; this app target does not yet
+link it or `PocketReasoningGemma`.
 ```bash
-cd apps/SentiPocketApp && xcodegen generate && xcodebuild -scheme SentiPocketApp \
+cd apps/SentiPocketApp
+xcodegen generate
+xcodebuild -project SentiPocketApp.xcodeproj -scheme SentiPocketApp \
   -destination 'generic/platform=iOS Simulator' build
+DEVICE_ID="$(xcrun simctl list devices available -j | python3 -c '
+import json, sys
+for devices in json.load(sys.stdin).get("devices", {}).values():
+    for device in devices:
+        if device.get("isAvailable") and device.get("name", "").startswith("iPhone"):
+            print(device["udid"]); raise SystemExit(0)
+raise SystemExit("no available iPhone simulator")
+')"
+xcodebuild -project SentiPocketApp.xcodeproj -scheme SentiPocketApp \
+  -destination "id=$DEVICE_ID" test
 ```
 
 For a signed device archive and verified `.ipa`, sign into the authorized Apple Developer account in Xcode and use
@@ -51,7 +66,11 @@ origins, and optionally an overridden bundle ID/build number; see `apps/SentiPoc
 does not prove provisioning, APNs entitlements, archive export, or installability.
 
 ## Expected
-- **Every package listed above builds clean and all tests pass** (0 failures). Coverage that MUST pass:
+- **Every listed build and test exits zero.** Registry V2 coverage must include
+  `DeviceRingRegistryStateTests`, `DeviceRingRegistrationClientTests`, `DeviceRingRegistrarTests`,
+  `DialCoordinatorTests`, `DialHostTests`, `DialHostLifecycleTests`, `SentiCallDecodeTests`,
+  `GatewayEndpointTests`, and `PhoneWriteOutboxDurabilityTests`.
+- Package coverage that MUST pass:
   - **PocketContracts** — cross-module construction; Codable round-trips; `ActionResultRef` tagged-union
     Codable + canonical-token KAVs (`6:action…`, `8:sequence…`); receipt canonical **v4** KAV
     (`pocket.actionreceipt.v4\n…15:8:sequence3:200…`); proposal canonical **v3** KAV +
