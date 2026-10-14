@@ -25,6 +25,16 @@ const FLOOR_ROLES = new Set(['owner', 'admin']);
 const decode = (raw) => (typeof raw === 'string' ? raw : new TextDecoder().decode(raw));
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
+// Constant-time string compare for the internal key (content compare doesn't short-circuit; length is allowed to leak).
+function ctEqual(a, b) {
+  const x = typeof a === 'string' ? a : '';
+  const y = typeof b === 'string' ? b : '';
+  if (x.length !== y.length) return false;
+  let diff = 0;
+  for (let i = 0; i < x.length; i += 1) diff |= x.charCodeAt(i) ^ y.charCodeAt(i);
+  return diff === 0;
+}
+
 export class CallRoomDO {
   constructor(state, env) {
     this.state = state;
@@ -64,7 +74,7 @@ export class CallRoomDO {
     // as a fresh GET upgrade to the /ws URL, so this path is unreachable by any client request.
     if (request.method === 'POST' && url.pathname === INTERNAL_OP_PATH) {
       const key = this.env.INTERNAL_BIND_KEY;
-      if (!key || request.headers.get('x-live-call-internal') !== key) return json({ ok: false }, 403);
+      if (!key || !ctEqual(request.headers.get('x-live-call-internal'), key)) return json({ ok: false }, 403);
       return this.handleInternal((await request.json().catch(() => ({}))) || {});
     }
 
@@ -177,12 +187,12 @@ export class CallRoomDO {
   }
 
   forget(participantId) {
+    // NB: mintCount is NOT reset here. It is a durable per-participant lifetime count — resetting it on leave/close
+    // would let a viewer mint, leave, and re-mint without bound (the CF sessions are not closed server-side).
     this.sockets.delete(participantId);
     delete this.publishedTracks[participantId];
     delete this.mintedTracks[participantId];
-    delete this.mintCount[participantId];
     void this.state.storage.put('mintedTracks', this.mintedTracks);
-    void this.state.storage.put('mintCount', this.mintCount);
   }
 
   broadcast() {

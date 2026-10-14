@@ -205,3 +205,12 @@ test('mint-reserve caps minting per participant', async () => {
   for (let i = 0; i < 5; i += 1) assert.equal((await internal(doo, 'mint-reserve', { participantId: 'a' })).body.ok, true);
   assert.equal((await internal(doo, 'mint-reserve', { participantId: 'a' })).body.ok, false); // 6th over the cap
 });
+
+test('the mint cap is a durable lifetime count — leave does NOT reset it (no mint-then-leave loop)', async () => {
+  const doo = await newDO();
+  const ws = await connect(doo, { p: 'a' });
+  for (let i = 0; i < 5; i += 1) assert.equal((await internal(doo, 'mint-reserve', { participantId: 'a' })).body.ok, true);
+  assert.equal((await internal(doo, 'mint-reserve', { participantId: 'a' })).body.ok, false);
+  await doo.webSocketMessage(ws, JSON.stringify({ type: 'leave' })); // forget() runs — must NOT reset the count
+  assert.equal((await internal(doo, 'mint-reserve', { participantId: 'a' })).body.ok, false); // still capped; resetting it would pass
+});
