@@ -29,8 +29,10 @@ function ghJsonl(args) {
   try {
     const out = execFileSync('gh', ['api', '--paginate', ...args], { encoding: 'utf8', maxBuffer: 50_000_000 });
     return out.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => JSON.parse(l));
-  } catch {
-    return [];
+  } catch (e) {
+    // A FAILED FETCH is a source error, not an empty result — surface it so it never reads as
+    // "zero checks / no reviews" (which would wrongly pass as green/met downstream).
+    return { _error: String(e.stderr || e.message).slice(0, 200) };
   }
 }
 

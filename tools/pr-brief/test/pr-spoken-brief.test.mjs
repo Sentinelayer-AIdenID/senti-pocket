@@ -43,6 +43,34 @@ test('shared-account reviews surface the independence caveat in the spoken who-l
   assert.match(who.text, /not independent verification/i);
 });
 
+const synthBrief = ({ reviews = [], checkRuns = [{ name: 'ci', status: 'completed', conclusion: 'success', app: 'gh' }], mergeableState } = {}) =>
+  cardToSpokenBrief(buildPrCard(buildPrObservation({
+    repoId: 'x/y',
+    pull: { number: 9, state: 'open', title: 'T', user: { login: 'dev' }, head: { sha: HEAD }, base: {}, changed_files: 1, commits: 1, ...(mergeableState ? { mergeable_state: mergeableState } : {}) },
+    commits: [{ author: { login: 'dev' }, commit: { author: { name: 'Dev' }, message: 'x' } }],
+    reviews, checkRuns,
+  })));
+const appr = (login, commit = HEAD, at = '2026-01-01') => ({ user: { login }, state: 'APPROVED', submitted_at: at, commit_id: commit });
+
+test('P1 finding-6: a STALE-head approval is NOT spoken as a real approval (uses head-valid count)', () => {
+  const who = synthBrief({ reviews: [appr('rev', 'OLDSHA')] }).segments.find((s) => s.kind === 'who');
+  // must NOT claim a valid/real approval; "reviewed but not yet approved" is the correct phrasing.
+  assert.doesNotMatch(who.text, /valid approval|reviews? approved/i, 'stale approval must not be voiced as a real approval');
+  assert.match(who.text, /not yet approved/i);
+});
+
+test('P1 finding-6: an ON-HEAD valid approval IS spoken, counted head-valid', () => {
+  const who = synthBrief({ reviews: [appr('rev', HEAD)] }).segments.find((s) => s.kind === 'who');
+  assert.match(who.text, /1 valid approval/);
+});
+
+test('a standing CHANGES_REQUESTED is voiced and caveated', () => {
+  const b = synthBrief({ reviews: [{ user: { login: 'rev' }, state: 'CHANGES_REQUESTED', submitted_at: '2026-01-01', commit_id: HEAD }] });
+  const who = b.segments.find((s) => s.kind === 'who');
+  assert.match(who.text, /change request/i);
+  assert.match(b.text, /changes/i);
+});
+
 test('unreadable card -> honest failure line, not a fabricated brief', () => {
   const b = cardToSpokenBrief({ available: false });
   assert.match(b.text, /could not be read/);

@@ -86,11 +86,96 @@ test('P1 provenance: a noreply Co-Authored-By commit is surfaced', () => {
   assert.match(o.provenance.note, /AI\/noreply co-authored/i);
 });
 
-test('P1 provenance: a noreply AUTHOR email is surfaced', () => {
+test('P1 provenance: a genuine AI (anthropic) AUTHOR email is surfaced', () => {
   const o = synth({ commits: [
-    { author: { login: null }, commit: { author: { name: 'bot', email: 'x@users.noreply.github.com' }, message: 'auto' } },
+    { author: { login: null }, commit: { author: { name: 'Claude', email: 'noreply@anthropic.com' }, message: 'auto' } },
   ] });
   assert.equal(o.provenance.aiCoAuthoredCommits, 1);
+});
+
+test('P3 provenance: Carter\'s HUMAN GitHub noreply is NOT flagged as AI', () => {
+  const o = synth({ commits: [
+    // per-user users.noreply.github.com = human privacy email; noreply@github.com = web-commit committer.
+    { author: { login: 'mrrCarter' }, commit: { author: { name: 'Carter Theogene', email: '32074640+mrrCarter@users.noreply.github.com' }, message: 'real human work' } },
+    { author: { login: 'mrrCarter' }, commit: { author: { name: 'GitHub', email: 'noreply@github.com' }, message: 'web edit' } },
+  ] });
+  assert.equal(o.provenance.aiCoAuthoredCommits, 0, 'human noreply addresses must not be marked AI');
+  assert.equal(o.provenance.note, null);
+});
+
+test('P3 provenance: a Co-Authored-By: Claude trailer IS flagged even with a human email', () => {
+  const o = synth({ commits: [
+    { author: { login: 'mrrCarter' }, commit: { author: { name: 'Carter', email: '32074640+mrrCarter@users.noreply.github.com' }, message: 'do it\n\nCo-Authored-By: Claude <noreply@anthropic.com>' } },
+  ] });
+  assert.equal(o.provenance.aiCoAuthoredCommits, 1);
+});
+
+test('P1 reviews: a later COMMENTED does NOT erase a standing APPROVED', () => {
+  const o = synth({ reviews: [
+    review('rev', { state: 'APPROVED', commit: HEAD, at: '2026-01-01' }),
+    { user: { login: 'rev' }, state: 'COMMENTED', submitted_at: '2026-01-02', commit_id: HEAD },
+  ] });
+  assert.equal(o.approvalCount, 1, 'the approval stands despite a later comment');
+});
+
+test('P1 reviews: a standing CHANGES_REQUESTED is tracked and blocks (not erased by a later COMMENTED)', () => {
+  const o = synth({ reviews: [
+    { user: { login: 'rev' }, state: 'CHANGES_REQUESTED', submitted_at: '2026-01-01', commit_id: HEAD },
+    { user: { login: 'rev' }, state: 'COMMENTED', submitted_at: '2026-01-02', commit_id: HEAD },
+  ] });
+  assert.equal(o.changesRequested, 1);
+  assert.equal(o.approvalCount, 0);
+});
+
+test('P1 reviews: a later APPROVED supersedes an earlier CHANGES_REQUESTED', () => {
+  const o = synth({ reviews: [
+    { user: { login: 'rev' }, state: 'CHANGES_REQUESTED', submitted_at: '2026-01-01', commit_id: HEAD },
+    review('rev', { state: 'APPROVED', commit: HEAD, at: '2026-01-02' }),
+  ] });
+  assert.equal(o.changesRequested, 0);
+  assert.equal(o.approvalCount, 1);
+});
+
+test('P2 checks: startup_failure, stale, and null conclusions do NOT read as green', () => {
+  const o = synth({ checkRuns: [
+    { name: 'a', status: 'completed', conclusion: 'success' },
+    { name: 'b', status: 'completed', conclusion: 'startup_failure' },
+    { name: 'c', status: 'completed', conclusion: 'stale' },
+    { name: 'd', status: 'completed', conclusion: null },
+  ] });
+  assert.equal(o.checks.allGreen, false, 'non-success terminal conclusions are not green');
+  assert.equal(o.checks.hasFailures, true, 'startup_failure is a failure');
+  assert.ok(o.checks.inconclusive >= 2, 'stale + null are inconclusive, not green');
+});
+
+test('P2 checks: all-success completed checks are green', () => {
+  const o = synth({ checkRuns: [
+    { name: 'a', status: 'completed', conclusion: 'success' },
+    { name: 'b', status: 'completed', conclusion: 'skipped' },
+  ] });
+  assert.equal(o.checks.allGreen, true);
+  assert.equal(o.checks.hasFailures, false);
+  assert.equal(o.checks.inconclusive, 0);
+});
+
+test('P2 checks: a FAILED FETCH is a source-error, not zero-checks, and is never green', () => {
+  const o = buildPrObservation({
+    repoId: 'x/y',
+    pull: { number: 7, state: 'open', title: 'T', user: { login: 'dev' }, head: { sha: HEAD }, base: {}, changed_files: 1, commits: 1 },
+    reviews: [], commits: [], checkRuns: { _error: 'gh api failed' },
+  });
+  assert.equal(o.checks.sourceError, true);
+  assert.equal(o.checks.allGreen, false);
+  assert.equal(o.sourceErrors.checks, true);
+});
+
+test('P2 mergeable_state blocked/dirty is captured', () => {
+  const o = buildPrObservation({
+    repoId: 'x/y',
+    pull: { number: 7, state: 'open', title: 'T', user: { login: 'dev' }, head: { sha: HEAD }, base: {}, mergeable_state: 'dirty', changed_files: 1, commits: 1 },
+    reviews: [], commits: [], checkRuns: [],
+  });
+  assert.equal(o.mergeableState, 'dirty');
 });
 
 test('checks: failures detected, pending counted', () => {

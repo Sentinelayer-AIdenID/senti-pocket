@@ -33,6 +33,16 @@ export function buildPrCard(observation, { deployment = null, omar = null } = {}
   }
   const o = observation;
 
+  // --- Acceptance signals (observed facts only; never inferred green) ---
+  const checksUnknown = o.checks.total === 0 || o.checks.sourceError === true; // no checks OR fetch failed
+  const checksInconclusive = (o.checks.inconclusive || 0) > 0; // completed-but-not-green (null/unknown/stale)
+  const changesRequested = o.changesRequested || 0;
+  const mergeBlocked = o.mergeableState === 'dirty' || o.mergeableState === 'blocked';
+  const hasConflicts = o.mergeableState === 'dirty';
+  // "Requirements met" is TRUE only with a head-valid approval, all checks green, no standing change
+  // request, and no merge block. Absent/errored/inconclusive checks keep it UNVERIFIED, never met.
+  const requirementsVerified = o.approvalCount >= 1 && o.checks.allGreen === true && changesRequested === 0 && !mergeBlocked;
+
   // --- State chip + responsible owner (deterministic; observed facts only) ---
   let state;
   let responsibleOwner;
@@ -43,21 +53,35 @@ export function buildPrCard(observation, { deployment = null, omar = null } = {}
     state = STATES.IMPL; responsibleOwner = o.author.login || 'the author';
   } else if (o.checks.hasFailures) {
     state = STATES.IMPL; responsibleOwner = o.author.login || 'the author'; // red checks -> back to implementation
+  } else if (changesRequested > 0) {
+    state = STATES.IMPL; responsibleOwner = o.author.login || 'the author'; // a reviewer asked for changes
+  } else if (hasConflicts) {
+    state = STATES.IMPL; responsibleOwner = o.author.login || 'the author'; // merge conflicts -> author resolves
   } else if (o.checks.pending > 0) {
     state = STATES.REVIEW; responsibleOwner = 'checks in progress';
+  } else if (checksInconclusive) {
+    state = STATES.REVIEW; responsibleOwner = 'inconclusive checks'; // completed but not green -> not acceptable
   } else if (o.approvalCount < 1) {
     state = STATES.REVIEW; responsibleOwner = 'a reviewer';
   } else {
-    // ready, green, approved -> the owner must decide to merge. "Needs you", never auto-"Available".
+    // approved + no failures/conflicts -> the owner decides to merge. "Needs you", never auto-"Available".
     state = STATES.NEEDS_YOU; responsibleOwner = 'the session owner';
   }
+
+  // Why requirements aren't verified at a NEEDS_YOU state (checks unknown/errored, or merge blocked).
+  const unverifiedReason = o.checks.sourceError ? 'the checks could not be fetched'
+    : checksUnknown ? 'no checks were observed'
+    : mergeBlocked ? `GitHub reports the merge ${o.mergeableState}`
+    : 'acceptance is unverified';
 
   // --- One next action. Button text never implies a merge occurred. ---
   const nextAction = {
     text:
-      state === STATES.IMPL ? (o.checks.hasFailures ? 'Fix the failing checks, then re-request review.' : 'Finish the implementation and mark ready.')
+      state === STATES.IMPL ? (o.checks.hasFailures ? 'Fix the failing checks, then re-request review.' : changesRequested > 0 ? 'Address the requested changes, then re-request review.' : hasConflicts ? 'Resolve the merge conflicts, then re-request review.' : 'Finish the implementation and mark ready.')
       : state === STATES.REVIEW ? 'Review on GitHub.'
-      : state === STATES.NEEDS_YOU ? 'Decide whether to merge (requirements appear met — this does not merge it for you).'
+      : state === STATES.NEEDS_YOU ? (requirementsVerified
+          ? 'Decide whether to merge (requirements appear met — this does not merge it for you).'
+          : `Decide whether to merge — requirements are UNVERIFIED (${unverifiedReason}); this does not merge it for you.`)
       : state === STATES.DEPLOY ? 'Confirm deployment of the merged change.'
       : 'Nothing — the change is merged and deployed.',
     button: state === STATES.REVIEW ? 'Review on GitHub' : 'Open PR',
@@ -83,17 +107,25 @@ export function buildPrCard(observation, { deployment = null, omar = null } = {}
   // --- TWO distinct measures (never one blended %) ---
   const approvedWithoutChecks = o.approvalCount > 0 && o.checks.total === 0; // approval with zero observed checks != verified
   const verifiedAcceptance = {
-    checks: { total: o.checks.total, byConclusion: o.checks.byConclusion, pending: o.checks.pending, hasFailures: o.checks.hasFailures },
+    checks: { total: o.checks.total, byConclusion: o.checks.byConclusion, pending: o.checks.pending, inconclusive: o.checks.inconclusive || 0, hasFailures: o.checks.hasFailures, allGreen: o.checks.allGreen === true, sourceError: o.checks.sourceError === true },
     approvals: o.approvalCount, // head-valid, non-self, non-bot approvals only
     staleApprovals: o.staleApprovals || 0, // approvals on a prior head — reported, never counted as current
+    changesRequested, // standing CHANGES_REQUESTED — blocks "met"
     independentReviewers: o.reviewIndependence.independentReviewerLogins,
     approvedWithoutChecks,
+    requirementsVerified, // the single honest verdict: approved + all-green + no change-request + not merge-blocked
+    mergeableState: o.mergeableState || null,
+    mergeBlocked,
     omar: omar ? { state: omar.state, mergeAuthorized: omar.mergeAuthorized === true, findingCounts: omar.findingCounts || null } : null,
     unknowns: [
       ...(deployment == null ? ['deployment-status'] : []),
-      ...(o.checks.total === 0 ? ['no-checks-observed'] : []),
+      ...(o.checks.total === 0 && !o.checks.sourceError ? ['no-checks-observed'] : []),
+      ...(o.checks.sourceError ? ['checks-source-error'] : []),
+      ...(checksInconclusive ? ['checks-inconclusive'] : []),
       ...(approvedWithoutChecks ? ['approved-without-checks'] : []),
       ...((o.staleApprovals || 0) > 0 ? ['stale-head-approvals'] : []),
+      ...(changesRequested > 0 ? ['changes-requested'] : []),
+      ...(mergeBlocked ? ['merge-blocked'] : []),
     ],
   };
   const sourceCoverage = {

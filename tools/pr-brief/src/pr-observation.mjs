@@ -22,8 +22,18 @@ const lc = (v) => str(v).toLowerCase();
 const int = (v) => (Number.isFinite(v) ? v : null);
 // An automation/bot login, not an independent human reviewer.
 const isBot = (login) => /\[bot\]$/i.test(str(login)) || /^(github-actions|dependabot|renovate)(\[bot\])?$/i.test(str(login));
-// Email / trailer marking AI or noreply authorship routed through a human's account.
-const NOREPLY_RE = /noreply@anthropic\.com|users\.noreply\.github\.com|noreply@github\.com/i;
+// AI/automation provenance only. A GitHub per-user noreply (`<id>+<user>@users.noreply.github.com`) and the
+// web-commit committer (`noreply@github.com`) are HUMAN privacy/web addresses — they must NOT be flagged as AI
+// (that wrongly marked Carter's own commits). The genuine signals are a real agent noreply (Anthropic) or a
+// `Co-Authored-By:` trailer crediting an AI co-author.
+const AI_EMAIL_RE = /\bnoreply@anthropic\.com\b/i;
+const AI_TRAILER_RE = /^\s*co-authored-by:.*(claude|noreply@anthropic\.com)/im;
+// Decisive review states change a reviewer's stance; COMMENTED/PENDING never erase a standing one.
+const DECISIVE_REVIEW = new Set(['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED']);
+// Terminal check conclusions that are NOT green.
+const FAILURE_CONCLUSIONS = new Set(['failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure']);
+const GREEN_CONCLUSIONS = new Set(['success', 'neutral', 'skipped']);
+const isSourceError = (v) => Boolean(v && !Array.isArray(v) && v._error);
 
 /**
  * @param {object} input - composite of raw GitHub shapes:
@@ -64,13 +74,13 @@ export function buildPrObservation(input, { checkedAt = new Date().toISOString()
 
   const commits = Array.isArray(input.commits) ? input.commits : [];
   const commitAuthorMap = new Map();
-  let aiCoAuthoredCommits = 0; // provenance: commits AI/noreply co-authored through a human account
+  let aiCoAuthoredCommits = 0; // provenance: commits AI co-authored through a human account
   for (const c of commits) {
     const login = str(c?.author?.login);
     const name = str(c?.commit?.author?.name);
     const email = lc(c?.commit?.author?.email);
     const message = str(c?.commit?.message);
-    const noreply = NOREPLY_RE.test(email) || /co-authored-by:[^\n]*noreply/i.test(message);
+    const noreply = AI_EMAIL_RE.test(email) || AI_TRAILER_RE.test(message);
     if (noreply) aiCoAuthoredCommits += 1;
     const key = login ? `login:${login.toLowerCase()}` : email ? `email:${email}` : name ? `name:${name.toLowerCase()}` : null;
     if (!key) continue;
@@ -82,11 +92,12 @@ export function buildPrObservation(input, { checkedAt = new Date().toISOString()
   const commitAuthors = [...commitAuthorMap.values()];
   const commitSubjects = commits.map((c) => str(c?.commit?.message).split('\n')[0]).filter(Boolean).slice(0, 24);
 
-  // --- Reviews: head-valid approvals only (stale-head + self-approval + bot guards) ---
+  // --- Reviews: each reviewer's EFFECTIVE stance = their latest DECISIVE review ---
   const headSha = str(pull.head?.sha);
   const authorLogin = lc(pull.user?.login);
+  const reviewsSourceError = isSourceError(input.reviews);
   const reviews = Array.isArray(input.reviews) ? input.reviews : [];
-  const reviewerMap = new Map();
+  const byReviewer = new Map(); // login -> rows[]
   for (const r of reviews) {
     const login = str(r?.user?.login);
     if (!login) continue;
@@ -98,14 +109,26 @@ export function buildPrObservation(input, { checkedAt = new Date().toISOString()
       commitId: str(r.commit_id) || null,
       onHead: headSha ? str(r.commit_id) === headSha : false,
     };
-    const prev = reviewerMap.get(login.toLowerCase());
-    if (!prev || (row.submittedAt || '') >= (prev.submittedAt || '')) reviewerMap.set(login.toLowerCase(), row);
+    const k = login.toLowerCase();
+    if (!byReviewer.has(k)) byReviewer.set(k, []);
+    byReviewer.get(k).push(row);
+  }
+  const reviewerMap = new Map();
+  for (const [k, rows] of byReviewer) {
+    rows.sort((a, b) => (a.submittedAt || '').localeCompare(b.submittedAt || ''));
+    // Latest DECISIVE review is the reviewer's stance; a later COMMENTED/PENDING never erases an
+    // APPROVED or CHANGES_REQUESTED. Only if the reviewer never issued a decisive review do we fall
+    // back to their latest (COMMENTED) row.
+    const decisive = rows.filter((r) => DECISIVE_REVIEW.has(r.state));
+    reviewerMap.set(k, decisive.length ? decisive[decisive.length - 1] : rows[rows.length - 1]);
   }
   const reviewers = [...reviewerMap.values()];
-  // A CURRENT valid approval: APPROVED, on the current head (stale +1 doesn't carry), not the
-  // author's own review (shared-account self-approval), not a bot.
+  // A CURRENT valid approval: effective state APPROVED, on the current head (stale +1 doesn't carry),
+  // not the author's own review (shared-account self-approval), not a bot.
   const validApprovals = reviewers.filter((r) => r.state === 'APPROVED' && r.onHead && lc(r.login) !== authorLogin && !isBot(r.login));
   const staleApprovals = reviewers.filter((r) => r.state === 'APPROVED' && !r.onHead).length;
+  // A standing CHANGES_REQUESTED (non-author, non-bot) blocks "requirements met" until re-reviewed.
+  const changesRequested = reviewers.filter((r) => r.state === 'CHANGES_REQUESTED' && lc(r.login) !== authorLogin && !isBot(r.login)).length;
   const approvalCount = validApprovals.length;
   const distinctReviewerLogins = reviewerMap.size;
   const independentReviewerLogins = new Set(validApprovals.map((r) => lc(r.login))).size;
@@ -113,10 +136,14 @@ export function buildPrObservation(input, { checkedAt = new Date().toISOString()
   const sharedAccountWarning = reviews.length >= 2 && independentReviewerLogins < 2;
 
   // --- Checks: producers + conclusions (observed, never inferred green) ---
+  // A FAILED FETCH is a source error, NOT "zero checks" — it must never read as green/met.
+  const checksSourceError = isSourceError(input.checkRuns);
   const checkRuns = Array.isArray(input.checkRuns) ? input.checkRuns : [];
   const byConclusion = {};
   const producers = new Set();
   let pending = 0;
+  let failures = 0;
+  let inconclusive = 0; // completed but not green and not a hard failure: null/unknown/stale → blocks green
   for (const cr of checkRuns) {
     if (str(cr.app)) producers.add(str(cr.app));
     const status = lc(cr.status);
@@ -124,11 +151,16 @@ export function buildPrObservation(input, { checkedAt = new Date().toISOString()
       pending += 1;
       continue;
     }
-    const concl = lc(cr.conclusion) || 'unknown';
+    const concl = lc(cr.conclusion) || 'unknown'; // a completed run with null conclusion is NOT success
     byConclusion[concl] = (byConclusion[concl] || 0) + 1;
+    if (FAILURE_CONCLUSIONS.has(concl)) failures += 1;
+    else if (!GREEN_CONCLUSIONS.has(concl)) inconclusive += 1; // unknown/null/stale/anything-else
   }
-  const hasFailures = (byConclusion.failure || 0) + (byConclusion.timed_out || 0) + (byConclusion.cancelled || 0) + (byConclusion.action_required || 0) > 0;
-  const checks = { total: checkRuns.length, byConclusion, pending, producers: [...producers], hasFailures };
+  const hasFailures = failures > 0;
+  // Green ONLY when there are checks, none pending, none failed, none inconclusive, and the fetch succeeded.
+  const allGreen = checkRuns.length > 0 && pending === 0 && failures === 0 && inconclusive === 0 && !checksSourceError;
+  const checks = { total: checkRuns.length, byConclusion, pending, inconclusive, producers: [...producers], hasFailures, allGreen, sourceError: checksSourceError };
+  const mergeableState = lc(pull.mergeable_state) || null; // clean|blocked|dirty|behind|unstable|draft|unknown|null
 
   return {
     available: true,
@@ -160,6 +192,13 @@ export function buildPrObservation(input, { checkedAt = new Date().toISOString()
     reviewers,
     approvalCount, // head-valid, non-self, non-bot approvals only
     staleApprovals, // approvals on a prior head — reported, never counted as current
+    changesRequested, // standing CHANGES_REQUESTED (non-author, non-bot) — blocks "requirements met"
+    mergeableState, // GitHub mergeable_state: dirty/blocked surface as blockers
+    sourceErrors: {
+      reviews: reviewsSourceError,
+      commits: isSourceError(input.commits),
+      checks: checksSourceError,
+    },
     reviewIndependence: {
       distinctReviewerLogins,
       independentReviewerLogins,

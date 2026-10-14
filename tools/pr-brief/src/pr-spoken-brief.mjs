@@ -27,8 +27,12 @@ function whoWorkedOnIt(card) {
   const parts = [`Opened by ${w.author || 'an unknown author'}`];
   const others = (w.commitAuthors || []).filter((a) => a && a !== w.author);
   if (others.length) parts.push(`with commits also from ${others.slice(0, 3).join(', ')}`);
-  const approvals = (w.reviewers || []).filter((r) => r.disposition === 'APPROVED');
-  if (approvals.length) parts.push(`${approvals.length} review${approvals.length === 1 ? '' : 's'} approved`);
+  // Speak the card's HEAD-VALID approval count (non-self, non-bot, on-head) — never the raw APPROVED
+  // dispositions, which would count stale-head, self, and bot approvals as real.
+  const approvals = card.measures.verifiedAcceptance.approvals || 0;
+  const changes = card.measures.verifiedAcceptance.changesRequested || 0;
+  if (changes > 0) parts.push(`${changes} change request${changes === 1 ? '' : 's'} outstanding`);
+  else if (approvals > 0) parts.push(`${approvals} valid approval${approvals === 1 ? '' : 's'}`);
   else if ((w.reviewers || []).length) parts.push(`reviewed but not yet approved`);
   let s = sentence(parts.join(', '));
   if (w.independenceNote) s += ` Note: ${sentence(w.independenceNote)}`;
@@ -44,7 +48,15 @@ function caveats(card) {
   // Drop deployment-status here: the state line already conveys it for merged PRs and it is noise otherwise.
   const unknowns = (card.measures.verifiedAcceptance.unknowns || []).filter((u) => u !== 'deployment-status');
   if (!unknowns.length) return '';
-  const phrase = { 'no-checks-observed': 'no CI checks were observed' };
+  const phrase = {
+    'no-checks-observed': 'no CI checks were observed',
+    'checks-source-error': 'the checks could not be fetched',
+    'checks-inconclusive': 'some checks were inconclusive',
+    'approved-without-checks': 'it was approved with no checks observed',
+    'stale-head-approvals': 'some approvals are on an older commit',
+    'changes-requested': 'a reviewer requested changes',
+    'merge-blocked': 'GitHub reports the merge is blocked',
+  };
   const parts = unknowns.map((u) => phrase[u] || `${u.replace(/-/g, ' ')} is unknown`);
   return sentence(`${unknowns.length === 1 ? 'Caveat' : 'Caveats'}: ${parts.join('; ')}`);
 }
