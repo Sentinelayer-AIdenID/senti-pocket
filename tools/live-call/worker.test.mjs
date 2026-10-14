@@ -4,29 +4,37 @@ import assert from 'node:assert/strict';
 globalThis.Response = class { constructor(body, init = {}) { this.body = body; this.status = init.status ?? 200; this.webSocket = init.webSocket; } };
 
 const worker = await import('./worker.mjs');
-const { authorizeEndpoint, authorize, buildForwardUrl } = worker;
+const { authorizeEndpoint, authorize, buildForwardUrl, doName } = worker;
 
-function mkReq(url, { upgrade = false, auth = null } = {}) {
+function mkReq(url, { method = 'GET', upgrade = false, auth = null } = {}) {
   const h = new Map();
   if (upgrade) h.set('upgrade', 'websocket');
   if (auth) h.set('authorization', auth);
-  return { url, method: 'GET', headers: { get: (k) => (h.has(k.toLowerCase()) ? h.get(k.toLowerCase()) : null) } };
+  return { url, method, headers: { get: (k) => (h.has(k.toLowerCase()) ? h.get(k.toLowerCase()) : null) } };
 }
+const GW = { GATEWAY_AUTHORIZE_URL: 'https://gw.example/authorize', GATEWAY_HOST: 'gw.example' };
 
-test('authorizeEndpoint pins https + host', () => {
-  assert.equal(authorizeEndpoint({ GATEWAY_AUTHORIZE_URL: 'https://gw.example/authorize', GATEWAY_HOST: 'gw.example' }), 'https://gw.example/authorize');
-  assert.equal(authorizeEndpoint({ GATEWAY_AUTHORIZE_URL: 'http://gw.example/authorize' }), null); // not https
+test('authorizeEndpoint pins https + host, and FAILS CLOSED when GATEWAY_HOST is unset', () => {
+  assert.equal(authorizeEndpoint(GW), 'https://gw.example/authorize');
+  assert.equal(authorizeEndpoint({ GATEWAY_AUTHORIZE_URL: 'https://gw.example/authorize' }), null); // host pin unset -> closed
+  assert.equal(authorizeEndpoint({ GATEWAY_AUTHORIZE_URL: 'http://gw.example/x', GATEWAY_HOST: 'gw.example' }), null); // not https
   assert.equal(authorizeEndpoint({ GATEWAY_AUTHORIZE_URL: 'https://evil.example/x', GATEWAY_HOST: 'gw.example' }), null); // host mismatch
   assert.equal(authorizeEndpoint({}), null);
 });
 
+test('doName keys the DO by BOTH session and room (reverting to roomId-only is the squat regression)', () => {
+  assert.notEqual(doName('S1', 'R'), doName('S2', 'R')); // different sessions, same room -> different DO
+  assert.notEqual(doName('S', 'R1'), doName('S', 'R2'));
+  // a session id containing the separator can't forge another (session, room) pair
+  assert.notEqual(doName('a::b', 'c'), doName('a', 'b::c'));
+});
+
 test('buildForwardUrl strips the bearer token and binds the AUTHORIZED participant + role', () => {
-  const out = buildForwardUrl('https://w/call/R/ws?session=S&token=secret&participant=iamroot&role=owner', {
+  const u = new URL(buildForwardUrl('https://w/call/R/ws?session=S&token=secret&participant=iamroot&role=owner', {
     roomId: 'R', participantId: 'alice', role: 'viewer',
-  });
-  const u = new URL(out);
-  assert.equal(u.searchParams.get('token'), null); // stripped — removing the delete makes this fail
-  assert.equal(u.searchParams.get('participant'), 'alice'); // authorized, not the caller's 'iamroot'
+  }));
+  assert.equal(u.searchParams.get('token'), null);
+  assert.equal(u.searchParams.get('participant'), 'alice');
   assert.equal(u.searchParams.get('role'), 'viewer');
   assert.equal(u.searchParams.get('room'), 'R');
 });
@@ -36,39 +44,48 @@ test('authorize fails closed with no endpoint (and never calls fetch)', async ()
   const saved = globalThis.fetch;
   globalThis.fetch = async () => { called = true; return { ok: true, json: async () => ({}) }; };
   try {
-    const r = await authorize({}, { authorization: 'Bearer t', sessionId: 'S', roomId: 'R' });
-    assert.equal(r.ok, false);
+    assert.equal((await authorize({}, { authorization: 'Bearer t', sessionId: 'S', roomId: 'R' })).ok, false);
     assert.equal(called, false);
   } finally { globalThis.fetch = saved; }
 });
 
-test('authorize returns the gateway-bound principal + role for a member, and rejects a non-member role', async () => {
-  const env = { GATEWAY_AUTHORIZE_URL: 'https://gw.example/authorize', GATEWAY_HOST: 'gw.example' };
+test('authorize uses redirect:manual (never follow a redirect with the bearer) + returns the bound principal', async () => {
+  const saved = globalThis.fetch;
+  let opts;
+  try {
+    globalThis.fetch = async (_u, o) => { opts = o; return { ok: true, json: async () => ({ sessionId: 'S', roomId: 'R', role: 'admin', participantId: 'p1' }) }; };
+    const r = await authorize(GW, { authorization: 'Bearer t', sessionId: 'S', roomId: 'R' });
+    assert.deepEqual(r, { ok: true, participantId: 'p1', role: 'admin' });
+    assert.equal(opts.redirect, 'manual'); // removing redirect:manual makes this fail
+  } finally { globalThis.fetch = saved; }
+});
+
+test('authorize rejects a non-member role and a mismatched (session, room) echo', async () => {
   const saved = globalThis.fetch;
   try {
-    globalThis.fetch = async () => ({ ok: true, json: async () => ({ sessionId: 'S', roomId: 'R', role: 'admin', participantId: 'p1' }) });
-    assert.deepEqual(await authorize(env, { authorization: 'Bearer t', sessionId: 'S', roomId: 'R' }), { ok: true, participantId: 'p1', role: 'admin' });
-
     globalThis.fetch = async () => ({ ok: true, json: async () => ({ sessionId: 'S', roomId: 'R', role: 'stranger', participantId: 'p1' }) });
-    assert.equal((await authorize(env, { authorization: 'Bearer t', sessionId: 'S', roomId: 'R' })).ok, false); // bad role
-  } finally { globalThis.fetch = saved; }
-});
-
-test('authorize rejects a mismatched (session, room) echo (confused-deputy)', async () => {
-  const env = { GATEWAY_AUTHORIZE_URL: 'https://gw.example/authorize', GATEWAY_HOST: 'gw.example' };
-  const saved = globalThis.fetch;
-  try {
+    assert.equal((await authorize(GW, { authorization: 'Bearer t', sessionId: 'S', roomId: 'R' })).ok, false);
     globalThis.fetch = async () => ({ ok: true, json: async () => ({ sessionId: 'OTHER', roomId: 'R', role: 'owner', participantId: 'p1' }) });
-    assert.equal((await authorize(env, { authorization: 'Bearer t', sessionId: 'S', roomId: 'R' })).ok, false);
+    assert.equal((await authorize(GW, { authorization: 'Bearer t', sessionId: 'S', roomId: 'R' })).ok, false);
   } finally { globalThis.fetch = saved; }
 });
 
-test('default fetch: /health is open; an unauthorized call route is 403', async () => {
+test('default fetch: /health open; unauthorized call 403; a POST to /ws is refused (bind-bypass closed)', async () => {
   const health = await worker.default.fetch(mkReq('https://w/health'), {});
   assert.equal(health.status, 200);
   assert.equal(JSON.parse(health.body).ok, true);
 
-  // No GATEWAY_AUTHORIZE_URL configured -> fail closed.
-  const forbidden = await worker.default.fetch(mkReq('https://w/call/R/ws?session=S', { upgrade: true, auth: 'Bearer t' }), {});
-  assert.equal(forbidden.status, 403);
+  // No gateway config -> fail closed.
+  assert.equal((await worker.default.fetch(mkReq('https://w/call/R/ws?session=S', { upgrade: true, auth: 'Bearer t' }), {})).status, 403);
+
+  // Even an AUTHORIZED POST to /ws is refused (not forwarded) — the WS route is GET-only.
+  const saved = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ sessionId: 'S', roomId: 'R', role: 'owner', participantId: 'p1' }) });
+    const res = await worker.default.fetch(
+      mkReq('https://w/call/R/ws?session=S', { method: 'POST', upgrade: true, auth: 'Bearer t' }),
+      { ...GW, CALL_ROOM: { idFromName: () => ({}), get: () => ({ fetch: async () => { throw new Error('must not forward'); } }) } },
+    );
+    assert.equal(res.status, 426); // removing the GET-only guard would forward the POST
+  } finally { globalThis.fetch = saved; }
 });

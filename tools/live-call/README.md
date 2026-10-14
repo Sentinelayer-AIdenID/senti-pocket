@@ -46,10 +46,16 @@ The Pocket gateway holds **no signing key**: it authorizes by forwarding the cal
 SentinelLayer API and trusting the returned role (`senti-target-membership.mjs`). So this Worker mints nothing — it
 forwards the **client's own bearer** to a configured gateway authorize endpoint, which returns a member role + the
 participant id the **gateway** bound to that bearer for the **(session, room)** pair (the caller never chooses its own
-id or room — those shapes are the confused-deputy / room-squatting bugs). The DO is keyed by `${session}::${room}`, so
-one session can't reach another's room. Fail-closed: `GATEWAY_AUTHORIZE_URL` unset — or its host ≠ `GATEWAY_HOST` — and
-every `/call/*` route 403s; the authorize fetch is `redirect:'manual'` + 3 s timeout, and the gateway must echo the
-(session, room) it authorized. The bearer token is never forwarded past the Worker.
+id or room — those shapes are the confused-deputy / room-squatting bugs). The DO is keyed by
+`${encode(session)}::${encode(room)}`, so one session can't reach (or collide into) another's room. Fail-closed:
+`GATEWAY_AUTHORIZE_URL` or `GATEWAY_HOST` unset, or the URL host ≠ `GATEWAY_HOST`, and every `/call/*` route 403s; the
+authorize fetch is `redirect:'manual'` + 3 s timeout, and the gateway must echo the (session, room) it authorized.
+The WS forward is **GET-only** and a **fresh** request — no client header or body (the bearer, any
+`x-live-call-internal`, any POST body) reaches the DO. Every SFU op is authorized against the DO, which owns the
+per-participant minted sessions + the room's published set: `/sfu/session` is mint-capped per participant, and
+`/sfu/tracks` + `/sfu/renegotiate` accept only a sessionId minted for that participant with remote tracks drawn only
+from the room's published set. The Worker↔DO internal ops live at an **exact path** gated by a **required**
+`INTERNAL_BIND_KEY` (no default), unreachable by any client request.
 
 The exact authorize endpoint is being **co-designed with warden** (gateway owns `/dial` + the resolver; a store-backed
 one-time join grant via the existing `dialSignalStore` is one candidate). Until it's wired, deploy stands up the

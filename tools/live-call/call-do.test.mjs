@@ -50,7 +50,7 @@ function mkReq(url, { method = 'GET', upgrade = false, internal = null, json = n
 globalThis.WebSocketPair = function () { return { 0: {}, 1: makeWs() }; };
 globalThis.Response = class { constructor(body, init = {}) { this.body = body; this.status = init.status ?? 200; this.webSocket = init.webSocket; } };
 
-const { CallRoomDO } = await import('./call-do.mjs');
+const { CallRoomDO, INTERNAL_OP_PATH } = await import('./call-do.mjs');
 
 async function newDO(env = {}) {
   const state = makeState();
@@ -58,8 +58,15 @@ async function newDO(env = {}) {
   await state.ready;
   return doo;
 }
+function opReq(op, payload, { key = 'k' } = {}) {
+  return mkReq(`https://do${INTERNAL_OP_PATH}`, { method: 'POST', internal: key, json: { op, ...payload } });
+}
+async function internal(doo, op, payload, opts) {
+  const r = await doo.fetch(opReq(op, payload, opts));
+  return { status: r.status, body: r.body ? JSON.parse(r.body) : {} };
+}
 async function mint(doo, participantId, cfSessionId) {
-  await doo.fetch(mkReq('https://do/bind', { method: 'POST', internal: 'k', json: { participantId, cfSessionId } }));
+  await internal(doo, 'bind', { participantId, cfSessionId });
 }
 async function connect(doo, { p, session = 'S', role = 'viewer', room = 'R' }) {
   await doo.fetch(mkReq(`https://do/call/${room}/ws?participant=${p}&session=${session}&role=${role}&room=${room}`, { upgrade: true }));
@@ -155,4 +162,46 @@ test('hibernation rebuild restores membership from the surviving sockets', async
   await state.ready;
   assert.equal(doo2.meta.sessionId, 'S');
   assert.deepEqual(doo2.room.roster().map((r) => r.id), ['a']);
+});
+
+test('internal ops require the configured key — a wrong key is refused and binds nothing', async () => {
+  const doo = await newDO();
+  const r = await internal(doo, 'bind', { participantId: 'a', cfSessionId: 'SA' }, { key: 'WRONG' });
+  assert.equal(r.status, 403); // removing the key check makes this a 200
+  assert.equal(doo.mintedTracks.a, undefined);
+});
+
+test('internal ops are refused when INTERNAL_BIND_KEY is unset (no default key)', async () => {
+  const doo = await newDO({ INTERNAL_BIND_KEY: undefined });
+  const r = await internal(doo, 'bind', { participantId: 'a', cfSessionId: 'SA' }, { key: 'internal' });
+  assert.equal(r.status, 403); // a literal-'internal' default would accept this
+  assert.equal(doo.mintedTracks.a, undefined);
+});
+
+test('a client-shaped request can never reach the internal op path (only exact-path POST matches)', async () => {
+  const doo = await newDO();
+  // The DO treats anything else as a WS upgrade attempt, never as an internal op.
+  const asWs = await doo.fetch(mkReq(`https://do/call/R/ws`, { method: 'POST', internal: 'k', json: { op: 'bind', participantId: 'a', cfSessionId: 'SA' } }));
+  assert.notEqual(asWs.status, 200);
+  assert.equal(doo.mintedTracks.a, undefined);
+});
+
+test('sfu-authz: only a participant\'s OWN minted session, and remote tracks only from the published set', async () => {
+  const doo = await newDO();
+  await mint(doo, 'a', 'SA');
+  await mint(doo, 'b', 'SB');
+  const a = await connect(doo, { p: 'a' });
+  const b = await connect(doo, { p: 'b' });
+  await doo.webSocketMessage(a, JSON.stringify({ type: 'join', cfSessionId: 'SA', cfTrackName: 'mic' }));
+  await doo.webSocketMessage(b, JSON.stringify({ type: 'join', cfSessionId: 'SB', cfTrackName: 'mic' }));
+
+  assert.equal((await internal(doo, 'sfu-authz', { participantId: 'a', sessionId: 'SA', remoteSessionIds: ['SB'] })).body.ok, true);
+  assert.equal((await internal(doo, 'sfu-authz', { participantId: 'a', sessionId: 'SB' })).body.ok, false); // not a's session
+  assert.equal((await internal(doo, 'sfu-authz', { participantId: 'a', sessionId: 'SA', remoteSessionIds: ['SX'] })).body.ok, false); // SX not published
+});
+
+test('mint-reserve caps minting per participant', async () => {
+  const doo = await newDO();
+  for (let i = 0; i < 5; i += 1) assert.equal((await internal(doo, 'mint-reserve', { participantId: 'a' })).body.ok, true);
+  assert.equal((await internal(doo, 'mint-reserve', { participantId: 'a' })).body.ok, false); // 6th over the cap
 });
