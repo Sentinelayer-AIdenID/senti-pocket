@@ -13,22 +13,27 @@ Cloudflare Realtime SFU.
 | `signaling.mjs` | Typed message → CallRoom op, returns fresh subscriptions + state | unit tests |
 | `cf-realtime-sfu.mjs` | Thin CF Realtime HTTP adapter (Bearer App Secret, SDP passed through) + `remoteTracksForListener` | unit tests |
 | `call-fanout.mjs` | Per-listener subscribe directives (subscriptions × published tracks) | unit tests |
-| `call-do.mjs` | Durable Object shell: hibernatable WS, alarm sweep, broadcast, hibernation rebuild | deploy / miniflare |
-| `worker.mjs` | Edge router: fail-closed membership gate, DO routing, SFU session minting | deploy / miniflare |
+| `call-do.mjs` | Durable Object: hibernatable WS, role-gated floor, mint-bound tracks, reconnect-kick, sweep, rebuild | unit tests (mocked CF runtime) |
+| `worker.mjs` | Edge router: fail-closed (session,room) auth, host-pin, token-strip, DO routing, SFU mint + bind | unit tests (helpers) |
 | `join-call.mjs` | In-process demo of floor routing (no network) | `node join-call.mjs demo` |
 
-The decision logic is pure and unit-tested with no network. The DO + Worker are the CF-runtime
-shell and are exercised by deploy / miniflare, **not** by the node unit tests — do not read the
-green unit suite as proof the deployed path works end to end.
+The decision logic is pure and unit-tested with no network. The DO's orchestration (identity anti-spoof, floor-role
+gate, mint-binding, reconnect, sweep, hibernation rebuild) is unit-tested against a mocked CF runtime, and the
+Worker's auth/forward helpers are unit-tested directly. The **live WebSocket upgrade + real CF Realtime negotiation**
+still only run under deploy / miniflare — do not read the green unit suite as proof the end-to-end socket path works.
 
 ## Signaling protocol (client ⇄ DO over the WS)
 
 Client → DO (JSON): `{ type, ... }` where `type` ∈
 `join | leave | touch | set-floor | grant-floor | advance-floor | roster`.
 On `join`, a client that has already negotiated its publish with the SFU includes
-`cfSessionId` + `cfTrackName` so others can subscribe to it; `participantId` / `sessionId`
-on `join`/`leave`/`touch` are **ignored and overwritten** with the identity bound to the
-socket at accept time (anti-spoof). `grant-floor`'s `participantId` is the grantee.
+`cfSessionId` + `cfTrackName` — accepted **only if they match a session the Worker minted for that
+participant** (a client cannot claim another's CF session). `participantId` / `sessionId` on
+`join`/`leave`/`touch` are **ignored and overwritten** with the identity bound to the socket at
+accept time (anti-spoof). `grant-floor`'s `participantId` is the grantee. **Floor ops**
+(`set-floor` / `grant-floor` / `advance-floor`) are privileged — **owner/admin only**, by the
+gateway role carried in the socket; anyone else gets `ack ok:false reason:'forbidden-role'`. A
+reconnecting participant **kicks its own stale socket**; messages over 16 KiB are rejected.
 
 DO → client (JSON):
 - `{ type:'ack', op, ok, reason?, state }` — the result of the sender's own op.
@@ -39,20 +44,27 @@ DO → client (JSON):
 
 The Pocket gateway holds **no signing key**: it authorizes by forwarding the caller's own Senti bearer to the
 SentinelLayer API and trusting the returned role (`senti-target-membership.mjs`). So this Worker mints nothing — it
-forwards the **client's own bearer** to a configured gateway authorize endpoint and trusts only a member role + the
-participant id the **gateway** bound to that bearer (the caller never chooses its own id — that shape is the
-confused-deputy bug). Fail-closed: with `GATEWAY_AUTHORIZE_URL` unset, every `/call/*` route 403s.
+forwards the **client's own bearer** to a configured gateway authorize endpoint, which returns a member role + the
+participant id the **gateway** bound to that bearer for the **(session, room)** pair (the caller never chooses its own
+id or room — those shapes are the confused-deputy / room-squatting bugs). The DO is keyed by `${session}::${room}`, so
+one session can't reach another's room. Fail-closed: `GATEWAY_AUTHORIZE_URL` unset — or its host ≠ `GATEWAY_HOST` — and
+every `/call/*` route 403s; the authorize fetch is `redirect:'manual'` + 3 s timeout, and the gateway must echo the
+(session, room) it authorized. The bearer token is never forwarded past the Worker.
 
 The exact authorize endpoint is being **co-designed with warden** (gateway owns `/dial` + the resolver; a store-backed
 one-time join grant via the existing `dialSignalStore` is one candidate). Until it's wired, deploy stands up the
 transport but admits no one — intentionally.
 
+Routes: `GET /call/:room/ws` (WS signaling), `POST /call/:room/sfu/session` (mint — also binds the minted CF session
+to the participant inside the DO), `POST /call/:room/sfu/tracks`, `POST /call/:room/sfu/renegotiate`, `GET /health`.
+
 ## Deploy (needs CF Realtime app + wrangler; co-set up with warden)
 
 ```sh
 cd tools/live-call
-# one-time secret (NEVER committed):
+# one-time secrets (NEVER committed):
 wrangler secret put CF_REALTIME_APP_SECRET   # CF Realtime App Secret (stays server-side)
-# set CF_REALTIME_APP_ID + GATEWAY_AUTHORIZE_URL in wrangler.toml [vars], then:
+wrangler secret put INTERNAL_BIND_KEY        # Worker->DO minted-session bind key (defense-in-depth)
+# set CF_REALTIME_APP_ID + GATEWAY_AUTHORIZE_URL + GATEWAY_HOST in wrangler.toml [vars], then:
 wrangler deploy
 ```
