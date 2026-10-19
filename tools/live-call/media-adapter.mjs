@@ -25,37 +25,75 @@ function readVarint(bytes, pos, maxBytes) {
   return fail('varint too long');
 }
 
-/** Decode one adapter message. Unknown fields are skipped (forward compatible); malformed input throws. */
+const MAX_FIELD = 2 ** 29 - 1; // protobuf's largest field number
+const EXPECTED_WIRE = { 1: 0, 2: 0, 5: 2 }; // sequenceNumber, timestamp: varint; payload: length-delimited
+
+function readKey(bytes, pos) {
+  const key = readVarint(bytes, pos, 5);
+  const field = Math.floor(key.value / 8);
+  if (field === 0 || field > MAX_FIELD) fail('field number out of range');
+  return { field, wire: key.value % 8, next: key.next };
+}
+
+// Skip one value of an UNKNOWN field. Groups (deprecated wire types 3/4) are skipped to their matching end tag.
+function skipValue(bytes, pos, field, wire, depth = 0) {
+  if (wire === 0) return readVarint(bytes, pos, 10).next;
+  if (wire === 1 || wire === 5) {
+    const next = pos + (wire === 1 ? 8 : 4);
+    if (next > bytes.length) fail('truncated fixed field');
+    return next;
+  }
+  if (wire === 2) {
+    const len = readVarint(bytes, pos, 5);
+    if (len.next + len.value > bytes.length) fail('truncated length-delimited field');
+    return len.next + len.value;
+  }
+  if (wire === 3) {
+    if (depth >= 32) fail('groups nested too deeply');
+    let at = pos;
+    for (;;) {
+      if (at >= bytes.length) fail('unterminated group');
+      const inner = readKey(bytes, at);
+      if (inner.wire === 4) {
+        if (inner.field !== field) fail('mismatched group end');
+        return inner.next;
+      }
+      at = skipValue(bytes, inner.next, inner.field, inner.wire, depth + 1);
+    }
+  }
+  return fail('unsupported wire type');
+}
+
+/**
+ * Decode one adapter message. Unknown fields of every wire type (groups included) are skipped, forward compatibly. A
+ * known field with the wrong wire type, a truncation, an out-of-range uint32, or a non-canonical varint wider than
+ * protobuf allows for its role (tags and lengths: 5 bytes) throws; a canonical encoder never produces those.
+ */
 export function decodePacket(bytes) {
   if (!(bytes instanceof Uint8Array)) fail('packet must be bytes');
   if (bytes.length > MAX_MESSAGE_BYTES) fail('packet exceeds 32 KB');
   const packet = { sequenceNumber: 0, timestamp: 0, payload: new Uint8Array(0) };
   let pos = 0;
   while (pos < bytes.length) {
-    const key = readVarint(bytes, pos, 5);
-    pos = key.next;
-    const field = Math.floor(key.value / 8);
-    const wire = key.value % 8;
-    if (field === 0) fail('field number 0');
+    const { field, wire, next } = readKey(bytes, pos);
+    pos = next;
+    if (!Object.hasOwn(EXPECTED_WIRE, field)) {
+      if (wire === 4) fail('unexpected group end');
+      pos = skipValue(bytes, pos, field, wire);
+      continue;
+    }
+    if (wire !== EXPECTED_WIRE[field]) fail('wrong wire type for a known field');
     if (wire === 0) {
       const v = readVarint(bytes, pos, 10);
       pos = v.next;
-      if (field === 1 || field === 2) {
-        if (v.value > 0xffffffff) fail('uint32 out of range');
-        packet[field === 1 ? 'sequenceNumber' : 'timestamp'] = v.value;
-      }
-    } else if (wire === 2) {
+      if (v.value > 0xffffffff) fail('uint32 out of range');
+      packet[field === 1 ? 'sequenceNumber' : 'timestamp'] = v.value;
+    } else {
       const len = readVarint(bytes, pos, 5);
       pos = len.next;
       if (pos + len.value > bytes.length) fail('truncated length-delimited field');
-      if (field === 5) packet.payload = bytes.subarray(pos, pos + len.value);
+      packet.payload = bytes.subarray(pos, pos + len.value);
       pos += len.value;
-    } else if (wire === 1 || wire === 5) {
-      if (field === 1 || field === 2 || field === 5) fail('wrong wire type for a known field');
-      pos += wire === 1 ? 8 : 4;
-      if (pos > bytes.length) fail('truncated fixed field');
-    } else {
-      fail('unsupported wire type');
     }
   }
   return packet;
@@ -114,6 +152,9 @@ function lowPassTaps(count, cutoffHz, rateHz) {
  * decimation phase carry across calls, so the output does not depend on how the stream was chunked.
  */
 export function createDownsampler48kStereoTo16kMono({ taps = 63, cutoffHz = 7000 } = {}) {
+  // Odd length keeps the filter linear-phase; the cutoff must sit below the 8 kHz output Nyquist or it cannot anti-alias.
+  if (!Number.isInteger(taps) || taps < 3 || taps > 255 || taps % 2 === 0) fail('taps must be an odd integer in 3..255');
+  if (!Number.isFinite(cutoffHz) || cutoffHz <= 0 || cutoffHz >= 8000) fail('cutoffHz must be in (0, 8000)');
   const h = lowPassTaps(taps, cutoffHz, SFU_RATE);
   const history = new Float64Array(taps); // ring of the last `taps` mono samples
   let head = 0;
@@ -170,25 +211,58 @@ export function createUpsamplerMonoTo48kStereo(inputRate) {
  */
 export function createPacketizer({ frameMs = 20 } = {}) {
   const frameBytes = (SFU_RATE / 1000) * frameMs * SFU_BYTES_PER_FRAME;
-  if (!Number.isInteger(frameBytes) || frameBytes <= 0 || frameBytes + 16 > MAX_MESSAGE_BYTES) fail('invalid frame size');
-  let pending = new Uint8Array(0);
+  if (!Number.isInteger(frameBytes) || frameBytes <= 0 || frameBytes % SFU_BYTES_PER_FRAME !== 0 ||
+      frameBytes + 16 > MAX_MESSAGE_BYTES) fail('invalid frame size');
+  let chunks = [];
+  let held = 0;
+  const join = () => {
+    const all = new Uint8Array(held);
+    let at = 0;
+    for (const c of chunks) { all.set(c, at); at += c.length; }
+    return all;
+  };
   return {
     push(bytes) {
       stereoFrames(bytes);
-      const all = new Uint8Array(pending.length + bytes.length);
-      all.set(pending, 0);
-      all.set(bytes, pending.length);
+      chunks.push(bytes.slice());
+      held += bytes.length;
+      if (held < frameBytes) return []; // nothing complete yet: no copy of what is held
+      const all = join();
       const whole = all.length - (all.length % frameBytes);
       const payloads = [];
       for (let i = 0; i < whole; i += frameBytes) payloads.push(all.slice(i, i + frameBytes));
-      pending = all.slice(whole);
+      chunks = whole < all.length ? [all.slice(whole)] : [];
+      held = all.length - whole;
       return payloads;
     },
     flush() {
-      const rest = pending;
-      pending = new Uint8Array(0);
-      return rest.length ? [rest] : [];
+      const rest = held ? join() : null;
+      chunks = [];
+      held = 0;
+      return rest ? [rest] : [];
     },
+  };
+}
+
+/**
+ * Streaming bytes -> Int16Array for PCM s16le arriving in arbitrary chunks (a TTS response body can split a sample
+ * across chunks). An odd trailing byte is carried to the next push; `pending()` reports whether one is held.
+ */
+export function createPcm16Reader() {
+  let carry = null;
+  return {
+    push(bytes) {
+      if (!(bytes instanceof Uint8Array)) fail('PCM must be bytes');
+      let all = bytes;
+      if (carry !== null) { all = new Uint8Array(bytes.length + 1); all[0] = carry; all.set(bytes, 1); }
+      const even = all.length - (all.length % 2);
+      carry = even < all.length ? all[all.length - 1] : null;
+      const view = new DataView(all.buffer, all.byteOffset, even);
+      const out = new Int16Array(even / 2);
+      for (let i = 0; i < out.length; i += 1) out[i] = view.getInt16(i * 2, true);
+      return out;
+    },
+    pending: () => carry !== null,
   };
 }
 

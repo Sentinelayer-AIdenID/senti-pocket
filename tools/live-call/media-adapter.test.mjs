@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   MAX_MESSAGE_BYTES, decodePacket, encodePacket, createDownsampler48kStereoTo16kMono, createUpsamplerMonoTo48kStereo,
-  createPacketizer, createAdapterToken, verifyAdapterToken,
+  createPacketizer, createPcm16Reader, createAdapterToken, verifyAdapterToken,
 } from './media-adapter.mjs';
 
 // Hand-assembled from the protobuf wire format: field 1 varint 300 (08 AC 02), field 2 varint 1 (10 01),
@@ -125,4 +125,60 @@ test('adapter endpoint tokens: only the digest is stored, and only the exact tok
   assert.equal(await verifyAdapterToken(a.token.slice(0, -1) + (a.token.at(-1) === 'A' ? 'B' : 'A'), a.digest), false);
   for (const bad of [undefined, '', 'short', a.token + '=', a.digest]) assert.equal(await verifyAdapterToken(bad, a.digest), false);
   assert.equal(await verifyAdapterToken(a.token, 'not-a-digest'), false);
+});
+
+test('unknown groups are skipped to their matching end tag, and fields inside them are not read as top-level fields', () => {
+  const group = [0x1b, 0x08, 0x05, 0x23, 0x10, 0x07, 0x24, 0x1c]; // field 3 group { field 1 = 5, field 4 group { field 2 = 7 } }
+  const p = decodePacket(Uint8Array.from([...VECTOR, ...group]));
+  assert.equal(p.sequenceNumber, 300);
+  assert.equal(p.timestamp, 1);
+  for (const bad of [
+    [0x1b, 0x08, 0x01], // unterminated group
+    [0x1b, 0x24], // group 3 closed by field 4's end tag
+    [0x1c], // end tag with no start
+  ]) assert.throws(() => decodePacket(Uint8Array.from(bad)), /group/, JSON.stringify(bad));
+});
+
+test('a known field with the wrong wire type, or a field number past protobuf\'s maximum, throws', () => {
+  for (const bad of [
+    [0x0a, 0x01, 0x00], // sequenceNumber as length-delimited
+    [0x12, 0x00], // timestamp as length-delimited
+    [0x28, 0x01], // payload as varint
+    [0x80, 0x80, 0x80, 0x80, 0x10, 0x07], // field 2^29: one past the maximum
+  ]) assert.throws(() => decodePacket(Uint8Array.from(bad)), /media-adapter/, JSON.stringify(bad));
+  assert.equal(decodePacket(Uint8Array.from([0xf8, 0xff, 0xff, 0xff, 0x0f, 0x01])).sequenceNumber, 0); // max field: skipped
+});
+
+test('filter options that cannot anti-alias are refused instead of silently producing silence', () => {
+  for (const opts of [{ taps: 1 }, { taps: 64 }, { taps: 301 }, { cutoffHz: 0 }, { cutoffHz: 8000 }, { cutoffHz: 24000 }, { cutoffHz: NaN }]) {
+    assert.throws(() => createDownsampler48kStereoTo16kMono(opts), /taps|cutoffHz/, JSON.stringify(opts));
+  }
+});
+
+test('the packetizer only cuts whole stereo frames and handles tiny pushes in linear time', () => {
+  assert.throws(() => createPacketizer({ frameMs: 0.015625 }), /frame size/);
+  const input = stereoTone(500, 1, 9000);
+  const oneShot = createPacketizer();
+  const expected = [...oneShot.push(input), ...oneShot.flush()].map((x) => [...x].join(','));
+  const tiny = createPacketizer();
+  const got = [];
+  for (let i = 0; i < input.length; i += 4) got.push(...tiny.push(input.subarray(i, i + 4)));
+  got.push(...tiny.flush());
+  assert.deepEqual(got.map((x) => [...x].join(',')), expected);
+});
+
+test('the PCM reader carries a sample split across chunks and reads views at odd offsets', () => {
+  const samples = Int16Array.from([1, -2, 32767, -32768, 300]);
+  const bytes = new Uint8Array(samples.buffer.slice(0));
+  const backing = new Uint8Array(bytes.length + 3);
+  backing.set(bytes, 3);
+  const view = backing.subarray(3); // odd byteOffset
+  const reader = createPcm16Reader();
+  const out = [...reader.push(view.subarray(0, 3)), ...reader.push(view.subarray(3, 3)), ...reader.push(view.subarray(3, 7))];
+  assert.equal(reader.pending(), true, '7 of 10 bytes in: one byte of the 4th sample is held');
+  out.push(...reader.push(view.subarray(7)));
+  assert.equal(reader.pending(), false);
+  assert.deepEqual(out, [...samples]);
+  reader.push(Uint8Array.of(0x01));
+  assert.equal(reader.pending(), true);
 });
