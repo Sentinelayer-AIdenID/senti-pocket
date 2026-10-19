@@ -13,6 +13,7 @@ and each client is told which remote tracks to subscribe to on the Cloudflare Re
 | `cf-realtime-sfu.mjs` | Thin CF Realtime HTTP adapter (Bearer App Secret, SDP passed through) + `remoteTracksForListener` | unit tests |
 | `call-fanout.mjs` | Per-listener subscribe directives (subscriptions × published tracks) | unit tests |
 | `call-do.mjs` | Durable Object: hibernatable WS, role-gated floor, mint-bound tracks, reconnect-kick, sweep, rebuild | unit tests (mocked CF runtime) |
+| `sfu-revocation.mjs` | Server-side close of stale pulls: SFU session state → stale mids → forced `tracks/close` | unit tests (fake SFU state) |
 | `worker.mjs` | Edge router: fail-closed (session,room) auth, host-pin, token-strip, DO routing, SFU mint + bind | unit tests (helpers) |
 | `join-call.mjs` | In-process demo of floor routing (no network) | `node join-call.mjs demo` |
 
@@ -65,9 +66,17 @@ before SFU dispatch; local publication on the owned session remains possible bef
 requires `remoteTracks` coordinate pairs; legacy session-only lists are refused. The Worker↔DO internal ops live at an **exact path** gated by a **required**
 `INTERNAL_BIND_KEY` (no default), unreachable by any client request.
 
-The floor check is at authorization time. Floor changes and leave send fresh client directives, but this version
-does **not** server-close already negotiated SFU subscriptions or prove continuous media isolation. Existing clients
-must reconcile those directives; server-enforced revocation needs separate subscription-lifecycle integration.
+The floor check gates every new pull, and revocation is **server-side** (`sfu-revocation.mjs`): directives only ask
+clients to drop pulls, so the DO does not rely on them. It keeps a durable ledger of every SFU session it minted. After
+any floor or membership change (set/grant/advance floor, leave, socket close, reconnect kick, idle sweep), after every
+pull the Worker dispatches, and on the sweep alarm, it reads each session's SFU state (`GET /sessions/:id`, which
+lists every track whatever path created it) and force-closes (`tracks/close` with `force: true`, no SDP exchange)
+every pull the floor no longer permits, plus every track of a departed participant. Permission is the exact published
+(session, track) pair. A close counts only when the SFU reports it per track ("already closed" included); otherwise
+it retries on a 2 s alarm, backing off to the 30 s sweep after five attempts, and SFU calls from the DO are bounded
+at 3 s. A pull created between room changes is closed by the next pass, at most one sweep interval later. This is
+proven against a fake SFU that models session track state (`call-do-revocation.test.mjs`); it has not yet run
+against the live CF Realtime API.
 
 The exact authorize endpoint is being **co-designed with warden** (gateway owns `/dial` + the resolver; a store-backed
 one-time join grant via the existing `dialSignalStore` is one candidate). Until it's wired, deploy stands up the

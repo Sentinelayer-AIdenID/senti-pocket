@@ -145,6 +145,14 @@ test('a dropped socket is revoked the same way as an explicit leave', async () =
   assert.deepEqual(sfu.active('Salice'), ['hears:Scarol', 'publishes']);
 });
 
+test('a reconnect kicks the old socket out of the room: its pulls and every pull of its track are closed', async () => {
+  const { room, sfu } = await callInProgress();
+  await room.fetch(new Request('https://do/call/R/ws?participant=carol&session=S&room=R&role=viewer', { headers: { Upgrade: 'websocket' } }));
+  assert.deepEqual(sfu.active('Scarol'), ['publishes']); // not departed: carol may re-join with the same session
+  assert.deepEqual(sfu.active('Sbob'), ['hears:Salice', 'publishes']);
+  assert.deepEqual(sfu.active('Salice'), ['hears:Sbob', 'publishes']);
+});
+
 test('a failed close is never assumed closed: it is retried on the short alarm until the SFU confirms', async () => {
   const { state, room, sfu, ws } = await callInProgress();
   sfu.failCloses = 1;
