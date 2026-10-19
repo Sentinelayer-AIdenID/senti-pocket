@@ -368,3 +368,18 @@ test('PROP-8: a departed session whose close FAILED stays in the ledger and is r
   assert.deepEqual(sfu.active('Scarol'), []);
   assert.equal(room.sfuSessions.Scarol, undefined);
 });
+
+test('ADV-1: a pull that outlives its grace window is still closed: the Worker\'s reconcile re-adds the dropped session', async () => {
+  const { room, sfu, ws } = await callInProgress();
+  await internal(room, 'bind', { participantId: 'bob', cfSessionId: 'Sbob2' });
+  await workerPull(room, {
+    id: 'bob', sessionId: 'Sbob2', tracks: carolTrack,
+    duringDispatch: async () => {
+      room.sfuSessions.Sbob2.pullPendingUntil = 0; // the dispatch outlived the grace window
+      await say(room, ws.bob, { type: 'leave' }); // so this pass drops the empty, departed session
+      assert.equal(room.sfuSessions.Sbob2, undefined);
+      sfu.pull('Sbob2', 'Scarol');
+    },
+  });
+  assert.deepEqual(sfu.active('Sbob2'), []);
+});

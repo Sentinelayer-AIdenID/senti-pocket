@@ -72,11 +72,16 @@ any floor or membership change (set/grant/advance floor, leave, socket close, re
 pull the Worker dispatches, and on the sweep alarm, it reads each session's SFU state (`GET /sessions/:id`, which
 lists every track whatever path created it) and force-closes (`tracks/close` with `force: true`, no SDP exchange)
 every pull the floor no longer permits, plus every track of a departed participant. Permission is the exact published
-(session, track) pair. A close counts only when the SFU reports it per track ("already closed" included); otherwise
-it retries on a 2 s alarm, backing off to the 30 s sweep after five attempts, and SFU calls from the DO are bounded
-at 3 s. A pull created between room changes is closed by the next pass, at most one sweep interval later. This is
-proven against a fake SFU that models session track state (`call-do-revocation.test.mjs`); it has not yet run
-against the live CF Realtime API.
+(session, track) pair, and a pull may not reuse a transceiver (`mid` / `bidirectionalMediaStream` are refused), so a
+revoked pull never takes the puller's own publication with it. A track is finished only when its close is confirmed per
+track ("already closed" included; an `inactive` listing alone is not proof, since it can also mean unavailable).
+Failures retry on a 2 s alarm, backing off to the 30 s sweep after five attempts (the count survives hibernation); DO
+SFU calls are bounded at 3 s and run at most 4 at a time. An authorized pull holds its session in the ledger for 30 s
+(the Worker bounds its own SFU calls at 10 s) and the post-dispatch reconcile names that session, so a leave that lands
+while a pull is in flight cannot strand it. A session minted by someone who never joins is drained after the 5 min idle
+window. A pull created between room changes is closed by the next pass, at most one sweep interval later. This is
+proven against a fake SFU that models session track state (`call-do-revocation.test.mjs`, including the adversarial
+review's probes); it has not yet run against the live CF Realtime API.
 
 The exact authorize endpoint is being **co-designed with warden** (gateway owns `/dial` + the resolver; a store-backed
 one-time join grant via the existing `dialSignalStore` is one candidate). Until it's wired, deploy stands up the
