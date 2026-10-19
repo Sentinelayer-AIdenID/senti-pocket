@@ -9,6 +9,8 @@
 // which gates each segment on grounded support before it is spoken. This module never invents a merge, a
 // deployment, or an independent reviewer that the facts don't show.
 
+import { CARD_STATES } from './pr-card.mjs';
+
 const sentence = (s) => (s && /[.!?]$/.test(s.trim()) ? s.trim() : `${(s || '').trim()}.`);
 
 function whatItDoes(card) {
@@ -31,9 +33,10 @@ function whoWorkedOnIt(card) {
   // dispositions, which would count stale-head, self, and bot approvals as real.
   const approvals = card.measures.verifiedAcceptance.approvals || 0;
   const changes = card.measures.verifiedAcceptance.changesRequested || 0;
-  if (changes > 0) parts.push(`${changes} change request${changes === 1 ? '' : 's'} outstanding`);
-  else if (approvals > 0) parts.push(`${approvals} valid approval${approvals === 1 ? '' : 's'}`);
-  else if ((w.reviewers || []).length) parts.push(`reviewed but not yet approved`);
+  const closed = card.state === CARD_STATES.CLOSED;
+  if (changes > 0) parts.push(`${changes} change request${changes === 1 ? '' : 's'} ${closed ? 'recorded' : 'outstanding'}`);
+  else if (approvals > 0) parts.push(`${approvals} valid approval${approvals === 1 ? '' : 's'}${closed ? ' recorded' : ''}`);
+  else if ((w.reviewers || []).length) parts.push(closed ? 'review history recorded' : 'reviewed but not yet approved');
   let s = sentence(parts.join(', '));
   if (w.independenceNote) s += ` Note: ${sentence(w.independenceNote)}`;
   return s;

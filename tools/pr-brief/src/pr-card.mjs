@@ -6,10 +6,11 @@
 // and two distinct measures. A voice/notification layer reads this card; it grants nothing.
 //
 // Spec contract (Jev commitment-recovery spec, "non-developer ticket UX"):
-//  - State chip ∈ { 'Needs you', 'Waiting on implementation', 'Waiting on review', 'Waiting on deployment', 'Available' }.
+//  - State chip ∈ { 'Needs you', 'Waiting on implementation', 'Waiting on review', 'Waiting on deployment', 'Available', 'Closed' }.
 //  - Button text is 'Open PR' / 'Review on GitHub' — it MUST NOT imply a merge happened.
 //  - Keep TWO distinct measures: verified-acceptance-evidence vs source-coverage. Never collapse to one %.
 //  - merged != deployed != available: without deployment evidence a merged PR is 'Waiting on deployment', not 'Available'.
+//  - Closed without merging is terminal: no review/merge-ready action or verified requirements.
 //  - Agent names over one shared GitHub account are NOT independent reviewers (carried from the observation).
 
 const STATES = Object.freeze({
@@ -18,6 +19,7 @@ const STATES = Object.freeze({
   REVIEW: 'Waiting on review',
   DEPLOY: 'Waiting on deployment',
   AVAILABLE: 'Available',
+  CLOSED: 'Closed',
 });
 
 /**
@@ -39,9 +41,10 @@ export function buildPrCard(observation, { deployment = null, omar = null } = {}
   const changesRequested = o.changesRequested || 0;
   const mergeBlocked = o.mergeableState === 'dirty' || o.mergeableState === 'blocked';
   const hasConflicts = o.mergeableState === 'dirty';
+  const closedUnmerged = o.state === 'closed' && !o.merged;
   // "Requirements met" is TRUE only with a head-valid approval, all checks green, no standing change
   // request, and no merge block. Absent/errored/inconclusive checks keep it UNVERIFIED, never met.
-  const requirementsVerified = o.approvalCount >= 1 && o.checks.allGreen === true && changesRequested === 0 && !mergeBlocked;
+  const requirementsVerified = !closedUnmerged && o.approvalCount >= 1 && o.checks.allGreen === true && changesRequested === 0 && !mergeBlocked;
 
   // --- State chip + responsible owner (deterministic; observed facts only) ---
   let state;
@@ -49,6 +52,8 @@ export function buildPrCard(observation, { deployment = null, omar = null } = {}
   if (o.merged) {
     if (deployment && deployment.deployed === true) { state = STATES.AVAILABLE; responsibleOwner = null; }
     else { state = STATES.DEPLOY; responsibleOwner = 'deployment'; } // merged is not deployed until proven
+  } else if (closedUnmerged) {
+    state = STATES.CLOSED; responsibleOwner = null;
   } else if (o.draft) {
     state = STATES.IMPL; responsibleOwner = o.author.login || 'the author';
   } else if (o.checks.hasFailures) {
@@ -77,7 +82,8 @@ export function buildPrCard(observation, { deployment = null, omar = null } = {}
   // --- One next action. Button text never implies a merge occurred. ---
   const nextAction = {
     text:
-      state === STATES.IMPL ? (o.checks.hasFailures ? 'Fix the failing checks, then re-request review.' : changesRequested > 0 ? 'Address the requested changes, then re-request review.' : hasConflicts ? 'Resolve the merge conflicts, then re-request review.' : 'Finish the implementation and mark ready.')
+      state === STATES.CLOSED ? 'Closed without merging. View the pull request on GitHub.'
+      : state === STATES.IMPL ? (o.checks.hasFailures ? 'Fix the failing checks, then re-request review.' : changesRequested > 0 ? 'Address the requested changes, then re-request review.' : hasConflicts ? 'Resolve the merge conflicts, then re-request review.' : 'Finish the implementation and mark ready.')
       : state === STATES.REVIEW ? 'Review on GitHub.'
       : state === STATES.NEEDS_YOU ? (requirementsVerified
           ? 'Decide whether to merge (requirements appear met — this does not merge it for you).'
@@ -113,7 +119,7 @@ export function buildPrCard(observation, { deployment = null, omar = null } = {}
     changesRequested, // standing CHANGES_REQUESTED — blocks "met"
     independentReviewers: o.reviewIndependence.independentReviewerLogins,
     approvedWithoutChecks,
-    requirementsVerified, // the single honest verdict: approved + all-green + no change-request + not merge-blocked
+    requirementsVerified, // never closed/unmerged; otherwise approved + all-green + no change-request + not merge-blocked
     mergeableState: o.mergeableState || null,
     mergeBlocked,
     omar: omar ? { state: omar.state, mergeAuthorized: omar.mergeAuthorized === true, findingCounts: omar.findingCounts || null } : null,

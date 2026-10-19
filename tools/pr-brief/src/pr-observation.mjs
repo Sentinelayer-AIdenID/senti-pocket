@@ -34,6 +34,13 @@ const DECISIVE_REVIEW = new Set(['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED']);
 const FAILURE_CONCLUSIONS = new Set(['failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure']);
 const GREEN_CONCLUSIONS = new Set(['success', 'neutral', 'skipped']);
 const isSourceError = (v) => Boolean(v && !Array.isArray(v) && v._error);
+// The CLI supplies raw GitHub app objects; fixtures/older callers may supply a string.
+// Prefer the programmatic slug, then the stable app id. A display name alone is not an identifier.
+const checkProducer = (app) => {
+  if (typeof app === 'string') return app;
+  if (!app || typeof app !== 'object' || Array.isArray(app)) return '';
+  return str(app.slug).trim() || (Number.isSafeInteger(app.id) && app.id > 0 ? `github-app:${app.id}` : '');
+};
 
 /**
  * @param {object} input - composite of raw GitHub shapes:
@@ -145,7 +152,8 @@ export function buildPrObservation(input, { checkedAt = new Date().toISOString()
   let failures = 0;
   let inconclusive = 0; // completed but not green and not a hard failure: null/unknown/stale → blocks green
   for (const cr of checkRuns) {
-    if (str(cr.app)) producers.add(str(cr.app));
+    const producer = checkProducer(cr.app);
+    if (producer) producers.add(producer);
     const status = lc(cr.status);
     if (status && status !== 'completed') {
       pending += 1;
