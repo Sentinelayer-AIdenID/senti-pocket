@@ -16,6 +16,7 @@ and each client is told which remote tracks to subscribe to on the Cloudflare Re
 | `sfu-revocation.mjs` | Server-side close of stale pulls: SFU session state → stale mids → forced `tracks/close` | unit tests (fake SFU state) |
 | `worker.mjs` | Edge router: fail-closed (session,room) auth, host-pin, token-strip, DO routing, SFU mint + bind | unit tests (helpers) |
 | `media-adapter.mjs` | CF WebSocket-adapter wire (protobuf `Packet`) + 48 kHz stereo ⇄ 16 kHz mono / TTS-rate audio + 20 ms framing + scoped endpoint tokens, for the STT (VOICE-02) and TTS (VOICE-07) bridges | unit tests (wire vector, filter response, chunk invariance) |
+| `tts-ingest.mjs` | Synthesized speech (mono s16le, 16/24/48 kHz) → ingest-adapter messages, paced at real time with a 60 ms lead; measures first-frame latency and late frames (VOICE-07) | unit tests (fake clock) |
 | `join-call.mjs` | In-process demo of floor routing (no network) | `node join-call.mjs demo` |
 
 The decision logic is pure and unit-tested with no network. The DO's orchestration (identity anti-spoof, floor-role
