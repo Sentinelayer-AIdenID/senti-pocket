@@ -19,6 +19,8 @@ export { INTERNAL_OP_PATH };
 const MEMBER_ROLES = new Set(['owner', 'admin', 'contributor', 'viewer']);
 const MAX_SFU_BODY = 64 * 1024;
 const AUTHZ_TIMEOUT_MS = 3000;
+// Bounds every SFU call the Worker makes, so an authorized pull lands well inside the DO's PULL_GRACE_MS window.
+const SFU_DISPATCH_TIMEOUT_MS = 10000;
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
 function bearerFrom(request, url) {
@@ -103,6 +105,9 @@ function remoteTracks(body) {
     if (track.location === 'local') continue; // Publishing uses the caller's own minted session.
     if (track.location !== 'remote' || typeof track.sessionId !== 'string' || !track.sessionId ||
         typeof track.trackName !== 'string' || !track.trackName) return null;
+    // A pull may not reuse an existing transceiver (mid "#name" / bidirectional): closing such a pull on a floor change
+    // would also stop the listener's own publication on that transceiver.
+    if (Object.hasOwn(track, 'mid') || Object.hasOwn(track, 'bidirectionalMediaStream')) return null;
     remote.push({ sessionId: track.sessionId, trackName: track.trackName });
   }
   return remote;
@@ -134,7 +139,9 @@ export default {
         return json({ ok: false, error: 'bad-json' }, 400);
       }
       try {
-        const sfu = createCfRealtimeSfu({ appId: env.CF_REALTIME_APP_ID, appSecret: env.CF_REALTIME_APP_SECRET });
+        const sfu = createCfRealtimeSfu({
+          appId: env.CF_REALTIME_APP_ID, appSecret: env.CF_REALTIME_APP_SECRET, timeoutMs: SFU_DISPATCH_TIMEOUT_MS,
+        });
         if (route === 'sfu/session') {
           const reserve = await internalOp(env, sessionId, roomId, 'mint-reserve', { participantId: authz.participantId });
           if (!reserve.ok) return json({ ok: false, error: 'mint-cap' }, 429);
@@ -158,7 +165,9 @@ export default {
           const added = await sfu.addRemoteTracks(String(body.sessionId), body);
           // The floor may have changed while this pull was in flight; the DO re-decides against the room as it is now
           // and closes the pull server-side if it lost permission. A failed pass is retried by the DO's alarm.
-          if (requestedRemote.length) await internalOp(env, sessionId, roomId, 'reconcile', { participantId: authz.participantId });
+          if (requestedRemote.length) {
+            await internalOp(env, sessionId, roomId, 'reconcile', { participantId: authz.participantId, cfSessionId: String(body.sessionId) });
+          }
           return json(added);
         }
         return json(await sfu.renegotiate(String(body.sessionId), body));
