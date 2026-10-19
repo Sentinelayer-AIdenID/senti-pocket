@@ -95,10 +95,17 @@ async function internalOp(env, sessionId, roomId, op, payload) {
   return (res && typeof res.json === 'function' ? await res.json().catch(() => ({})) : {}) || {};
 }
 
-function remoteTrackSessionIds(body) {
-  return Array.isArray(body?.tracks)
-    ? body.tracks.filter((t) => t && t.location === 'remote' && t.sessionId).map((t) => String(t.sessionId))
-    : [];
+function remoteTracks(body) {
+  if (!Array.isArray(body?.tracks)) return null;
+  const remote = [];
+  for (const track of body.tracks) {
+    if (!track || typeof track !== 'object' || Array.isArray(track)) return null;
+    if (track.location === 'local') continue; // Publishing uses the caller's own minted session.
+    if (track.location !== 'remote' || typeof track.sessionId !== 'string' || !track.sessionId ||
+        typeof track.trackName !== 'string' || !track.trackName) return null;
+    remote.push({ sessionId: track.sessionId, trackName: track.trackName });
+  }
+  return remote;
 }
 
 export default {
@@ -137,12 +144,14 @@ export default {
           }
           return json(minted);
         }
-        // tracks + renegotiate: body.sessionId must be the one minted for THIS participant; remote tracks only from
-        // this room's published set.
+        // Validate every remote coordinate before dispatch; never silently filter malformed tracks away.
+        const requestedRemote = route === 'sfu/tracks' ? remoteTracks(body) : [];
+        if (requestedRemote === null) return json({ ok: false, error: 'bad-tracks' }, 400);
+        // The DO checks each exact coordinate against THIS listener's current floor subscriptions.
         const authzOp = await internalOp(env, sessionId, roomId, 'sfu-authz', {
           participantId: authz.participantId,
           sessionId: String(body.sessionId || ''),
-          remoteSessionIds: route === 'sfu/tracks' ? remoteTrackSessionIds(body) : [],
+          remoteTracks: requestedRemote,
         });
         if (!authzOp.ok) return new Response('forbidden', { status: 403 });
         if (route === 'sfu/tracks') return json(await sfu.addRemoteTracks(String(body.sessionId), body));

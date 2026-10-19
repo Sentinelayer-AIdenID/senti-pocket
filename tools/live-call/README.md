@@ -1,9 +1,8 @@
 # live-call transport
 
 Server side of multi-party live voice (PHONE05). Turns a Senti session into a call room:
-members join over a WebSocket signaling channel, the room decides **who hears whom** by a
-floor policy, and each client is told exactly which remote tracks to subscribe to on the
-Cloudflare Realtime SFU.
+members join over a WebSocket signaling channel, the floor policy authorizes **new remote-track pulls**,
+and each client is told which remote tracks to subscribe to on the Cloudflare Realtime SFU.
 
 ## Layers
 
@@ -35,6 +34,13 @@ accept time (anti-spoof). `grant-floor`'s `participantId` is the grantee. **Floo
 gateway role carried in the socket; anyone else gets `ack ok:false reason:'forbidden-role'`. A
 reconnecting participant **kicks its own stale socket**; messages over 16 KiB are rejected.
 
+An accepted socket is not a joined member. Only a successful `join` persists `joined:true` in its
+hibernation attachment. `leave` clears that marker, publication and minted-session binding before its
+acknowledgement; the healthy socket can explicitly join again (a new publication needs a newly bound
+session, still subject to the lifetime mint cap). Constructor rebuild restores only explicitly joined
+sockets and mint-matching publications. Legacy attachments without the marker must send `join` again.
+Replaced sockets are retired and cannot alter their replacement's membership.
+
 DO → client (JSON):
 - `{ type:'ack', op, ok, reason?, state }` — the result of the sender's own op.
 - `{ type:'directives', state, subscriptions, remoteTracks }` — broadcast to every member after
@@ -52,10 +58,16 @@ id or room — those shapes are the confused-deputy / room-squatting bugs). The 
 authorize fetch is `redirect:'manual'` + 3 s timeout, and the gateway must echo the (session, room) it authorized.
 The WS forward is **GET-only** and a **fresh** request — no client header or body (the bearer, any
 `x-live-call-internal`, any POST body) reaches the DO. Every SFU op is authorized against the DO, which owns the
-per-participant minted sessions + the room's published set: `/sfu/session` is mint-capped per participant, and
-`/sfu/tracks` + `/sfu/renegotiate` accept only a sessionId minted for that participant with remote tracks drawn only
-from the room's published set. The Worker↔DO internal ops live at an **exact path** gated by a **required**
+per-participant minted sessions: `/sfu/session` is mint-capped, and `/sfu/tracks` + `/sfu/renegotiate` accept only
+a sessionId minted for that participant. Each new remote pull must match an exact published session/track pair
+in that listener's current floor subscriptions. Malformed track coordinates and unknown locations are rejected
+before SFU dispatch; local publication on the owned session remains possible before `join`. Internal authorization
+requires `remoteTracks` coordinate pairs; legacy session-only lists are refused. The Worker↔DO internal ops live at an **exact path** gated by a **required**
 `INTERNAL_BIND_KEY` (no default), unreachable by any client request.
+
+The floor check is at authorization time. Floor changes and leave send fresh client directives, but this version
+does **not** server-close already negotiated SFU subscriptions or prove continuous media isolation. Existing clients
+must reconcile those directives; server-enforced revocation needs separate subscription-lifecycle integration.
 
 The exact authorize endpoint is being **co-designed with warden** (gateway owns `/dial` + the resolver; a store-backed
 one-time join grant via the existing `dialSignalStore` is one candidate). Until it's wired, deploy stands up the

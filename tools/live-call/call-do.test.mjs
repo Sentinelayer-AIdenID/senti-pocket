@@ -157,6 +157,7 @@ test('hibernation rebuild restores membership from the surviving sockets', async
   const doo1 = new CallRoomDO(state, { INTERNAL_BIND_KEY: 'k' });
   await state.ready;
   await doo1.fetch(mkReq('https://do/call/R/ws?participant=a&session=S&role=owner&room=R', { upgrade: true }));
+  await doo1.webSocketMessage(doo1.sockets.get('a'), JSON.stringify({ type: 'join' }));
   // New instance over the SAME state (same storage + surviving sockets) rebuilds the room.
   const doo2 = new CallRoomDO(state, { INTERNAL_BIND_KEY: 'k' });
   await state.ready;
@@ -195,9 +196,9 @@ test('sfu-authz: only a participant\'s OWN minted session, and remote tracks onl
   await doo.webSocketMessage(a, JSON.stringify({ type: 'join', cfSessionId: 'SA', cfTrackName: 'mic' }));
   await doo.webSocketMessage(b, JSON.stringify({ type: 'join', cfSessionId: 'SB', cfTrackName: 'mic' }));
 
-  assert.equal((await internal(doo, 'sfu-authz', { participantId: 'a', sessionId: 'SA', remoteSessionIds: ['SB'] })).body.ok, true);
-  assert.equal((await internal(doo, 'sfu-authz', { participantId: 'a', sessionId: 'SB' })).body.ok, false); // not a's session
-  assert.equal((await internal(doo, 'sfu-authz', { participantId: 'a', sessionId: 'SA', remoteSessionIds: ['SX'] })).body.ok, false); // SX not published
+  assert.equal((await internal(doo, 'sfu-authz', { participantId: 'a', sessionId: 'SA', remoteTracks: [{ sessionId: 'SB', trackName: 'mic' }] })).body.ok, true);
+  assert.equal((await internal(doo, 'sfu-authz', { participantId: 'a', sessionId: 'SB', remoteTracks: [] })).body.ok, false); // not a's session
+  assert.equal((await internal(doo, 'sfu-authz', { participantId: 'a', sessionId: 'SA', remoteTracks: [{ sessionId: 'SX', trackName: 'mic' }] })).body.ok, false); // SX not published
 });
 
 test('mint-reserve caps minting per participant', async () => {

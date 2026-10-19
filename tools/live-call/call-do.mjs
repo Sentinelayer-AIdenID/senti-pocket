@@ -10,7 +10,7 @@
 //   - published CF coords are accepted only if they match a session the Worker MINTED for that participant;
 //   - Worker-only internal ops (bind / mint-reserve / sfu-authz) are reachable ONLY at an exact path with a
 //     configured key (NO default) — the Worker forwards GET-only fresh upgrades, so a client can never reach them;
-//   - SFU session minting is capped per participant; renegotiate/pull is authorized against the owned + published set.
+//   - SFU session minting is capped; new pulls require owned sessions + exact floor-authorized published tracks.
 
 import { createCallRoom } from './call-room.mjs';
 import { handleSignal } from './signaling.mjs';
@@ -57,10 +57,14 @@ export class CallRoomDO {
       });
       for (const ws of state.getWebSockets()) {
         const a = ws.deserializeAttachment();
-        if (!a?.participantId || !this.meta.sessionId) continue;
+        if (!a?.participantId || a.retired || a.sessionId !== this.meta.sessionId) continue;
         this.sockets.set(a.participantId, ws);
-        this.room.join({ participantId: a.participantId, sessionId: a.sessionId, trackId: a.trackId });
-        if (a.published) this.publishedTracks[a.participantId] = a.published;
+        if (a.joined !== true) continue; // Accepted, left and legacy-unmarked sockets are not room members.
+        const restored = this.room.join({ participantId: a.participantId, sessionId: a.sessionId, trackId: a.trackId });
+        if (restored.ok && a.published && a.published.sessionId === this.mintedTracks[a.participantId] &&
+            typeof a.published.trackName === 'string' && a.published.trackName) {
+          this.publishedTracks[a.participantId] = a.published;
+        }
       }
       if (this.meta.floor && this.meta.floor !== 'open') this.room.setFloor(this.meta.floor);
       if (this.meta.holder) this.room.grantFloor(this.meta.holder);
@@ -95,6 +99,11 @@ export class CallRoomDO {
 
     const prior = this.sockets.get(participantId);
     if (prior) {
+      // A closing socket can still have queued events. Persist retirement before replacing it.
+      prior.serializeAttachment({ ...prior.deserializeAttachment(), joined: false, retired: true });
+      this.room.leave(participantId);
+      delete this.publishedTracks[participantId];
+      await this.persistRoomMeta();
       try {
         prior.close(1012, 'reconnected');
       } catch {
@@ -104,9 +113,9 @@ export class CallRoomDO {
 
     const { 0: client, 1: server } = new WebSocketPair();
     this.state.acceptWebSocket(server, [participantId]);
-    server.serializeAttachment({ participantId, sessionId, role });
+    server.serializeAttachment({ participantId, sessionId, role, joined: false });
     this.sockets.set(participantId, server);
-    this.room.sweep();
+    await this.sweepIdle();
     await this.ensureAlarm();
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -130,8 +139,11 @@ export class CallRoomDO {
     }
     if (b.op === 'sfu-authz') {
       const owns = Boolean(this.mintedTracks[pid]) && this.mintedTracks[pid] === b.sessionId;
-      const published = new Set(Object.values(this.publishedTracks).map((t) => t.sessionId));
-      const remoteOk = (Array.isArray(b.remoteSessionIds) ? b.remoteSessionIds : []).every((s) => published.has(s));
+      const permitted = (this.room.subscriptions()[pid] || []).map((id) => this.publishedTracks[id]).filter(Boolean);
+      // Session-only legacy requests cannot establish which track is permitted.
+      const remoteOk = !Object.hasOwn(b, 'remoteSessionIds') && Array.isArray(b.remoteTracks) && b.remoteTracks.every((track) =>
+        track && typeof track.sessionId === 'string' && typeof track.trackName === 'string' &&
+        permitted.some((published) => published.sessionId === track.sessionId && published.trackName === track.trackName));
       return json({ ok: owns && remoteOk });
     }
     return json({ ok: false, reason: 'unknown-op' }, 400);
@@ -147,14 +159,11 @@ export class CallRoomDO {
       return ws.send(JSON.stringify({ type: 'error', reason: 'bad-json' }));
     }
     const att = ws.deserializeAttachment() || {};
+    if (this.sockets.get(att.participantId) !== ws) return; // Replaced sockets cannot mutate the current membership.
 
     if (msg.type === 'join') {
       msg.participantId = att.participantId; // anti-spoof
       msg.sessionId = att.sessionId;
-      if (msg.cfSessionId && msg.cfTrackName && this.mintedTracks[att.participantId] === msg.cfSessionId) {
-        this.publishedTracks[att.participantId] = { sessionId: msg.cfSessionId, trackName: msg.cfTrackName };
-        ws.serializeAttachment({ ...att, trackId: msg.trackId, published: this.publishedTracks[att.participantId] });
-      }
     } else if (msg.type === 'leave' || msg.type === 'touch') {
       msg.participantId = att.participantId;
     } else if (FLOOR_OPS.has(msg.type) && !FLOOR_ROLES.has(att.role)) {
@@ -162,22 +171,27 @@ export class CallRoomDO {
     }
 
     const res = handleSignal(this.room, msg);
-    if (msg.type === 'leave') this.forget(att.participantId);
-    if (FLOOR_OPS.has(msg.type) && res.state) {
-      this.meta.floor = res.state.floor;
-      this.meta.holder = res.state.holder;
-      await this.persistMeta();
+    if (msg.type === 'join' && res.ok) {
+      if (typeof msg.cfSessionId === 'string' && msg.cfSessionId && typeof msg.cfTrackName === 'string' &&
+          msg.cfTrackName && this.mintedTracks[att.participantId] === msg.cfSessionId) {
+        this.publishedTracks[att.participantId] = { sessionId: msg.cfSessionId, trackName: msg.cfTrackName };
+      }
+      const { published: _oldPublished, trackId: _oldTrackId, ...identity } = att;
+      const published = this.publishedTracks[att.participantId];
+      ws.serializeAttachment({ ...identity, joined: true, trackId: msg.trackId || att.trackId, ...(published ? { published } : {}) });
     }
+    if (msg.type === 'leave') await this.forget(att.participantId, { keepSocket: true });
+    if ((FLOOR_OPS.has(msg.type) && res.state) || (msg.type === 'join' && res.ok)) await this.persistRoomMeta();
     ws.send(JSON.stringify({ type: 'ack', op: msg.type, ok: res.ok, reason: res.reason, state: res.state }));
     this.broadcast();
   }
 
   async webSocketClose(ws) {
     const att = ws.deserializeAttachment() || {};
-    if (!att.participantId) return;
+    if (!att.participantId || att.retired) return;
     if (this.sockets.get(att.participantId) === ws || !this.sockets.has(att.participantId)) {
       this.room.leave(att.participantId);
-      this.forget(att.participantId);
+      await this.forget(att.participantId);
       this.broadcast();
     }
   }
@@ -186,19 +200,26 @@ export class CallRoomDO {
     return this.webSocketClose(ws);
   }
 
-  forget(participantId) {
+  async forget(participantId, { keepSocket = false } = {}) {
     // NB: mintCount is NOT reset here. It is a durable per-participant lifetime count — resetting it on leave/close
     // would let a viewer mint, leave, and re-mint without bound (the CF sessions are not closed server-side).
-    this.sockets.delete(participantId);
+    const ws = this.sockets.get(participantId);
+    if (ws) {
+      const { published: _published, trackId: _trackId, ...identity } = ws.deserializeAttachment() || {};
+      ws.serializeAttachment({ ...identity, joined: false });
+    }
+    if (!keepSocket) this.sockets.delete(participantId);
     delete this.publishedTracks[participantId];
     delete this.mintedTracks[participantId];
-    void this.state.storage.put('mintedTracks', this.mintedTracks);
+    await this.state.storage.put('mintedTracks', this.mintedTracks);
+    await this.persistRoomMeta();
   }
 
   broadcast() {
     const { directives } = buildFanout(this.room, this.publishedTracks);
     for (const ws of this.state.getWebSockets()) {
       const att = ws.deserializeAttachment() || {};
+      if (att.joined !== true || att.retired || this.sockets.get(att.participantId) !== ws) continue;
       const d = directives[att.participantId];
       if (!d) continue;
       try {
@@ -213,10 +234,11 @@ export class CallRoomDO {
     if ((await this.state.storage.getAlarm()) === null) await this.state.storage.setAlarm(Date.now() + SWEEP_INTERVAL_MS);
   }
 
-  async alarm() {
+  async sweepIdle() {
     const dropped = this.room.sweep();
     for (const id of dropped) {
       const ws = this.sockets.get(id);
+      await this.forget(id);
       if (ws) {
         try {
           ws.close(1000, 'idle-timeout');
@@ -224,13 +246,24 @@ export class CallRoomDO {
           /* already gone */
         }
       }
-      this.forget(id);
     }
+    return dropped;
+  }
+
+  async alarm() {
+    const dropped = await this.sweepIdle();
     if (dropped.length) this.broadcast();
     if (this.state.getWebSockets().length > 0) await this.state.storage.setAlarm(Date.now() + SWEEP_INTERVAL_MS);
   }
 
   async persistMeta() {
     await this.state.storage.put('meta', this.meta);
+  }
+
+  async persistRoomMeta() {
+    const { floor, holder } = this.room.state();
+    this.meta.floor = floor;
+    this.meta.holder = holder;
+    await this.persistMeta();
   }
 }
