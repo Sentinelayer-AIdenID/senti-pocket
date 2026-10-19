@@ -182,3 +182,71 @@ test('the PCM reader carries a sample split across chunks and reads views at odd
   reader.push(Uint8Array.of(0x01));
   assert.equal(reader.pending(), true);
 });
+
+// Assertions that kill mutants the independent review (opus-proof, #169) found surviving.
+test('truncated UNKNOWN fixed and length-delimited fields throw (never a silently accepted short packet)', () => {
+  for (const bad of [
+    [0x35, 0x00, 0x00], // field 6 fixed32 with 2 of 4 bytes
+    [0x31, 0x00, 0x00, 0x00], // field 6 fixed64 with 3 of 8 bytes
+    [0x32, 0x05, 0x01], // field 6 length 5 with 1 byte
+  ]) assert.throws(() => decodePacket(Uint8Array.from([...VECTOR, ...bad])), /truncated/, JSON.stringify(bad));
+});
+
+test('groups nested past the depth cap throw', () => {
+  const nest = (n) => Uint8Array.from([...Array(n).fill(0x33), ...Array(n).fill(0x34)]); // field 6 groups
+  assert.equal(decodePacket(nest(30)).sequenceNumber, 0);
+  assert.throws(() => decodePacket(nest(40)), /nested too deeply/);
+});
+
+const leftChannel = (bytes) => { const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength); return Array.from({ length: bytes.length / 4 }, (_, i) => v.getInt16(i * 4, true)); };
+function goertzelDb(samples, hz, rate) {
+  const w = (2 * Math.PI * hz) / rate;
+  let s1 = 0; let s2 = 0;
+  for (const x of samples) { const s0 = x + 2 * Math.cos(w) * s1 - s2; s2 = s1; s1 = s0; }
+  return 10 * Math.log10(Math.max(1e-12, s1 * s1 + s2 * s2 - 2 * Math.cos(w) * s1 * s2));
+}
+const monoTone = (hz, rate, n, amp) => Int16Array.from({ length: n }, (_, i) => Math.round(amp * Math.sin((2 * Math.PI * hz * i) / rate)));
+
+test('filter overshoot is clamped, never wrapped to the opposite sign', () => {
+  const step = new Uint8Array(4 * 4800);
+  const v = new DataView(step.buffer);
+  for (let i = 2400; i < 4800; i += 1) { v.setInt16(i * 4, 32767, true); v.setInt16(i * 4 + 2, 32767, true); }
+  const down = createDownsampler48kStereoTo16kMono()(step);
+  assert.ok(down.slice(820).every((x) => x >= 0), 'a full-scale step wrapped negative in the downsampler');
+  const up = leftChannel(createUpsamplerMonoTo48kStereo(16000)(Int16Array.from({ length: 1600 }, (_, i) => (i < 800 ? 0 : 32767))));
+  assert.ok(up.slice(2460).every((x) => x >= 0), 'a full-scale step wrapped negative in the upsampler');
+});
+
+test('a digest that differs only in its last character is rejected', async () => {
+  const a = await createAdapterToken();
+  const flipped = a.digest.slice(0, 63) + (a.digest[63] === '0' ? '1' : '0');
+  assert.equal(await verifyAdapterToken(a.token, flipped), false);
+});
+
+test('the default anti-alias response: flat to 6 kHz, -6 dB at the 7 kHz cutoff, >= 40 dB down above 8.5 kHz', () => {
+  const at = (hz) => { const out = createDownsampler48kStereoTo16kMono()(stereoTone(hz, 0.2, 10000)); return 20 * Math.log10(rms(out, 100) / (10000 / Math.SQRT2)); };
+  assert.ok(at(6000) > -0.5, `6 kHz ${at(6000)}`);
+  assert.ok(Math.abs(at(7000) + 6) < 1, `7 kHz ${at(7000)}`);
+  assert.ok(at(8500) < -40, `8.5 kHz ${at(8500)}`);
+});
+
+test('fewer than 47 taps is refused; the minimum still anti-aliases', () => {
+  assert.throws(() => createDownsampler48kStereoTo16kMono({ taps: 45 }), /47/);
+  assert.throws(() => createDownsampler48kStereoTo16kMono({ taps: 3 }), /47/);
+  const out = createDownsampler48kStereoTo16kMono({ taps: 47 })(stereoTone(12000, 0.2, 10000));
+  assert.ok(rms(out, 100) < 0.01 * (10000 / Math.SQRT2));
+});
+
+test('the TTS upsampler keeps DC and the speech band, and suppresses interpolation images by >= 40 dB', () => {
+  const dc = leftChannel(createUpsamplerMonoTo48kStereo(16000)(new Int16Array(400).fill(1000)));
+  assert.ok(dc.slice(100).every((x) => x === 1000), 'unity DC gain');
+  // A 4 kHz tone: interpolation images sit at rate +/- 4 kHz and are strongest for high in-band tones (a 1 kHz tone's
+  // images are already ~44 dB down from linear interpolation alone, so it could not show a missing filter).
+  for (const [rate, images] of [[16000, [12000, 20000]], [24000, [20000]]]) {
+    const up = leftChannel(createUpsamplerMonoTo48kStereo(rate)(monoTone(4000, rate, rate / 2, 8000))).slice(200);
+    const tone = goertzelDb(up, 4000, 48000);
+    for (const hz of images) assert.ok(goertzelDb(up, hz, 48000) - tone < -40, `${rate}: image ${hz} only ${goertzelDb(up, hz, 48000) - tone} dBc`);
+    const band = leftChannel(createUpsamplerMonoTo48kStereo(rate)(monoTone(3000, rate, rate / 2, 8000))).slice(200);
+    assert.ok(Math.abs(rms(band) - 8000 / Math.SQRT2) < 0.12 * (8000 / Math.SQRT2), `${rate}: 3 kHz level ${rms(band)}`);
+  }
+});
