@@ -13,6 +13,7 @@ and each client is told which remote tracks to subscribe to on the Cloudflare Re
 | `cf-realtime-sfu.mjs` | Thin CF Realtime HTTP adapter (Bearer App Secret, SDP passed through) + `remoteTracksForListener` | unit tests |
 | `call-fanout.mjs` | Per-listener subscribe directives (subscriptions × published tracks) | unit tests |
 | `call-do.mjs` | Durable Object: hibernatable WS, role-gated floor, mint-bound tracks, reconnect-kick, sweep, rebuild | unit tests (mocked CF runtime) |
+| `sfu-revocation.mjs` | Server-side close of stale pulls: SFU session state → stale mids → forced `tracks/close` | unit tests (fake SFU state) |
 | `worker.mjs` | Edge router: fail-closed (session,room) auth, host-pin, token-strip, DO routing, SFU mint + bind | unit tests (helpers) |
 | `media-adapter.mjs` | CF WebSocket-adapter wire (protobuf `Packet`) + 48 kHz stereo ⇄ 16 kHz mono / TTS-rate audio + 20 ms framing + scoped endpoint tokens, for the STT (VOICE-02) and TTS (VOICE-07) bridges | unit tests (wire vector, filter response, chunk invariance) |
 | `tts-ingest.mjs` | Synthesized speech (mono s16le, 16/24/48 kHz) → ingest-adapter messages, paced at real time with a 60 ms lead; measures first-frame latency and late frames (VOICE-07) | unit tests (fake clock) |
@@ -67,9 +68,22 @@ before SFU dispatch; local publication on the owned session remains possible bef
 requires `remoteTracks` coordinate pairs; legacy session-only lists are refused. The Worker↔DO internal ops live at an **exact path** gated by a **required**
 `INTERNAL_BIND_KEY` (no default), unreachable by any client request.
 
-The floor check is at authorization time. Floor changes and leave send fresh client directives, but this version
-does **not** server-close already negotiated SFU subscriptions or prove continuous media isolation. Existing clients
-must reconcile those directives; server-enforced revocation needs separate subscription-lifecycle integration.
+The floor check gates every new pull, and revocation is **server-side** (`sfu-revocation.mjs`): directives only ask
+clients to drop pulls, so the DO does not rely on them. It keeps a durable ledger of every SFU session it minted. After
+any floor or membership change (set/grant/advance floor, leave, socket close, reconnect kick, idle sweep), after every
+pull the Worker dispatches, and on the sweep alarm, it reads each session's SFU state (`GET /sessions/:id`, which
+lists every track whatever path created it) and force-closes (`tracks/close` with `force: true`, no SDP exchange)
+every pull the floor no longer permits, plus every track of a departed participant. Permission is the exact published
+(session, track) pair, and a pull may not reuse a transceiver (`mid` / `bidirectionalMediaStream` are refused), so a
+revoked pull never takes the puller's own publication with it. A track is finished only when its close is confirmed per
+track ("already closed" included; an `inactive` listing alone is not proof, since it can also mean unavailable).
+Failures retry on a 2 s alarm, backing off to the 30 s sweep after five attempts (the count survives hibernation); DO
+SFU calls are bounded at 3 s and run at most 4 at a time. An authorized pull holds its session in the ledger for 30 s
+(the Worker bounds its own SFU calls at 10 s) and the post-dispatch reconcile names that session, so a leave that lands
+while a pull is in flight cannot strand it; the reconcile runs even when the SFU call throws, and the DO re-checks the session 12 s after authorizing a pull in case the Worker never reports back. Grace is judged at the time a session was read. Pulls are authorized only on a session that is still a live ledger entry, and an abandoned session also loses its owner. The Worker never forwards a client body: every SFU body is rebuilt from an exact allow-list and any other key (case variants included) is refused. A session minted by someone who never joins is drained after the 5 min idle
+window. A pull created between room changes is closed by the next pass, at most one sweep interval later. This is
+proven against a fake SFU that models session track state (`call-do-revocation.test.mjs`, including the adversarial
+review's probes); it has not yet run against the live CF Realtime API.
 
 The authorize endpoint is the Pocket gateway's `POST /call/authorize` (`services/pocket-gateway/API.md`): it resolves the
 caller's membership role in the session under the caller's own bearer and returns the authenticated account as the

@@ -15,6 +15,7 @@ export function createCfRealtimeSfu({
   appSecret = process.env.CF_REALTIME_APP_SECRET,
   base = BASE,
   fetchImpl = globalThis.fetch,
+  timeoutMs, // optional per-call bound; server-side revocation must not hang on a slow SFU
 } = {}) {
   if (!appId) throw new Error('cf-realtime requires appId');
   if (typeof fetchImpl !== 'function') throw new Error('cf-realtime requires a fetch implementation');
@@ -26,6 +27,7 @@ export function createCfRealtimeSfu({
       method,
       headers: { authorization: `Bearer ${appSecret}`, 'content-type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body),
+      ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
     });
     if (!res || !res.ok) throw new Error(`cf-realtime-${res ? res.status : 'no-response'}`);
     return res.json();

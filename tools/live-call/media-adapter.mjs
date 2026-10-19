@@ -65,7 +65,8 @@ function skipValue(bytes, pos, field, wire, depth = 0) {
 }
 
 /**
- * Decode one adapter message. Unknown fields of every wire type (groups included) are skipped, forward compatibly. A
+ * Decode one adapter message. The returned `payload` is a VIEW into `bytes` (no copy): copy it if `bytes` is reused.
+ * Unknown fields of every wire type (groups included) are skipped, forward compatibly. A
  * known field with the wrong wire type, a truncation, an out-of-range uint32, or a non-canonical varint wider than
  * protobuf allows for its role (tags and lengths: 5 bytes) throws; a canonical encoder never produces those.
  */
@@ -133,6 +134,22 @@ function stereoFrames(bytes) {
   return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 }
 
+const MIN_TAPS = 47;
+
+// Stateful FIR over one channel: each call takes the next input sample and returns the filtered output sample.
+function createFir(h) {
+  const n = h.length;
+  const history = new Float64Array(n);
+  let head = 0;
+  return (x) => {
+    history[head] = x;
+    head = (head + 1) % n;
+    let acc = 0;
+    for (let k = 0; k < n; k += 1) acc += h[k] * history[(head - 1 - k + 2 * n) % n];
+    return acc;
+  };
+}
+
 // Windowed-sinc low-pass (Hamming), unity DC gain. 7 kHz cutoff at 48 kHz keeps the speech band and stops content above
 // the 8 kHz Nyquist of the 16 kHz output from folding back into it.
 function lowPassTaps(count, cutoffHz, rateHz) {
@@ -152,8 +169,9 @@ function lowPassTaps(count, cutoffHz, rateHz) {
  * decimation phase carry across calls, so the output does not depend on how the stream was chunked.
  */
 export function createDownsampler48kStereoTo16kMono({ taps = 63, cutoffHz = 7000 } = {}) {
-  // Odd length keeps the filter linear-phase; the cutoff must sit below the 8 kHz output Nyquist or it cannot anti-alias.
-  if (!Number.isInteger(taps) || taps < 3 || taps > 255 || taps % 2 === 0) fail('taps must be an odd integer in 3..255');
+  // Odd length keeps the filter linear-phase; below ~47 taps the stopband is too shallow to anti-alias (15 taps leaves
+  // 9 kHz only -13.5 dB down); the cutoff must sit below the 8 kHz output Nyquist.
+  if (!Number.isInteger(taps) || taps < MIN_TAPS || taps > 255 || taps % 2 === 0) fail(`taps must be an odd integer in ${MIN_TAPS}..255`);
   if (!Number.isFinite(cutoffHz) || cutoffHz <= 0 || cutoffHz >= 8000) fail('cutoffHz must be in (0, 8000)');
   const h = lowPassTaps(taps, cutoffHz, SFU_RATE);
   const history = new Float64Array(taps); // ring of the last `taps` mono samples
@@ -180,11 +198,14 @@ export function createDownsampler48kStereoTo16kMono({ taps = 63, cutoffHz = 7000
 
 /**
  * Streaming mono (16, 24 or 48 kHz, what TTS providers emit) -> 48 kHz stereo s16le bytes for an ingest adapter.
- * Linear interpolation from the previous sample; stateful across calls, so chunk boundaries are seamless.
+ * Linear interpolation from the previous sample, then a low-pass just under the input Nyquist: interpolation alone leaves
+ * images of the input spectrum around multiples of the input rate (audible, and they survive Opus). Stateful across
+ * calls, so chunk boundaries are seamless. A 48 kHz input passes through unfiltered.
  */
 export function createUpsamplerMonoTo48kStereo(inputRate) {
   const factor = SFU_RATE / inputRate;
   if (![1, 2, 3].includes(factor)) fail('input rate must be 16000, 24000 or 48000');
+  const filter = factor === 1 ? (x) => x : createFir(lowPassTaps(63, inputRate * 0.45, SFU_RATE));
   let previous = null;
   return function push(samples) {
     if (!(samples instanceof Int16Array)) fail('samples must be Int16Array');
@@ -194,7 +215,7 @@ export function createUpsamplerMonoTo48kStereo(inputRate) {
     for (const s of samples) {
       const from = previous === null ? s : previous;
       for (let j = 1; j <= factor; j += 1) {
-        const v = clamp16(from + ((s - from) * j) / factor);
+        const v = clamp16(filter(from + ((s - from) * j) / factor));
         view.setInt16(o, v, true);
         view.setInt16(o + 2, v, true);
         o += SFU_BYTES_PER_FRAME;
