@@ -589,7 +589,8 @@ export function createGateway(deps) {
   // under that same bearer and returns the participant id bound to the bearer. It mints and authors nothing. The
   // participant is the authenticated human (never a body field), so a caller cannot join as someone else, and the
   // Worker keys the room's DO by (session, room), so a room id cannot reach another session's call. Viewer may join;
-  // floor control stays owner/admin inside the DO.
+  // floor control stays owner/admin inside the DO. The legacy knownSessionIdsFor seam (demo servers only) reports every
+  // known session as 'owner', so in demo mode every member gets floor control; production uses getTargetMembership.
   async function handleCallAuthorize(req, ctx) {
     if (!hasScope(ctx, SCOPES.call)) return callAuthorizeJson(403, { error: 'missing scope ' + SCOPES.call });
     const body = readBody(req.body);
