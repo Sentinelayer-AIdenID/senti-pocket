@@ -648,3 +648,21 @@ test('extra keys in a sessionDescription, and a bidirectional publication, are r
   assert.equal(bidi.response.status, 400);
   assert.deepEqual(bidi.dispatched, []);
 });
+
+test('the re-bind identity guard holds even when the replacement has no grace window of its own', async () => {
+  const { room, sfu } = await callInProgress();
+  await internal(room, 'bind', { participantId: 'bob', cfSessionId: 'Sbob2' });
+  room.sfuSessions.Sbob2.departed = true; // empty and departed: this pass will decide "drained"
+  const read = sfu.getSession.bind(sfu);
+  let release; const gate = new Promise((r) => { release = r; });
+  sfu.getSession = async (id) => { const st = await read(id); if (id === 'Sbob2') await gate; return st; };
+  const pass = room.alarm();
+  await tick();
+  // A live re-bind with nothing that would keep it on its own: only the identity guard protects it from the stale pass.
+  const replacement = { participantId: 'bob', departed: false, boundAt: Date.now(), closed: [] };
+  room.sfuSessions.Sbob2 = replacement;
+  release();
+  await pass;
+  assert.equal(room.sfuSessions.Sbob2, replacement);
+  assert.deepEqual(replacement.closed, []);
+});
