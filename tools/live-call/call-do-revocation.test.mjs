@@ -206,7 +206,7 @@ test('a pull that lands after the floor moved is closed by the Worker\'s post-di
 });
 
 // Drive the actual Worker's sfu/tracks pull; `duringDispatch` runs while the CF tracks/new call is in flight.
-async function workerPull(room, { id, sessionId, tracks, duringDispatch = async () => {}, signals = [] }) {
+async function workerPull(room, { id, sessionId, tracks, duringDispatch = async () => {}, signals = [], extra = {} }) {
   const savedFetch = globalThis.fetch;
   const dispatched = [];
   globalThis.fetch = async (url, options) => {
@@ -221,7 +221,7 @@ async function workerPull(room, { id, sessionId, tracks, duringDispatch = async 
   try {
     const response = await worker.fetch(new Request('https://worker.example/call/R/sfu/tracks?session=S', {
       method: 'POST', headers: { authorization: 'Bearer synthetic-user', 'content-type': 'application/json' },
-      body: JSON.stringify({ sessionId, tracks }),
+      body: JSON.stringify({ sessionId, tracks, ...extra }),
     }), {
       GATEWAY_AUTHORIZE_URL: 'https://gateway.example/authorize', GATEWAY_HOST: 'gateway.example',
       INTERNAL_BIND_KEY: KEY, CF_REALTIME_APP_ID: 'synthetic-app', CF_REALTIME_APP_SECRET: 'synthetic-inert-secret',
@@ -589,4 +589,62 @@ test('an authorized pull\'s grace is persisted by the authorization itself (evic
   const rebuilt = new CallRoomDO(state, { INTERNAL_BIND_KEY: KEY }); // evicted before anything else wrote storage
   await state.ready;
   assert.ok(rebuilt.sfuSessions.Sbob2.pullPendingUntil > Date.now());
+});
+
+// Properties the independent review (opus-proof) found unpinned at 55a4b968.
+test('read-time grace holds even with no reconcile: a pass that outlives the window keeps a session it read inside it', withClock(async (clock) => {
+  const { room, sfu, ws } = await callInProgress();
+  await internal(room, 'bind', { participantId: 'bob', cfSessionId: 'Sbob2' });
+  await internal(room, 'sfu-authz', { participantId: 'bob', sessionId: 'Sbob2', remoteTracks: carolTrack });
+  const read = sfu.getSession.bind(sfu);
+  let release; const gate = new Promise((r) => { release = r; });
+  let hold = true;
+  sfu.getSession = async (id) => { const st = await read(id); if (hold && id === 'Salice') await gate; return st; };
+  const leave = say(room, ws.bob, { type: 'leave' }); // reads Sbob2 empty, waits on a slow read of Salice
+  await tick();
+  sfu.pull('Sbob2', 'Scarol'); // lands after that read; the Worker never reports back
+  clock.skew = PULL_GRACE_MS + 1000;
+  hold = false; release();
+  await leave;
+  assert.ok(room.sfuSessions.Sbob2, 'kept: it was read inside its grace window');
+  await room.alarm();
+  assert.deepEqual(sfu.active('Sbob2'), []);
+}));
+
+test('a pass never deletes or mutates an entry re-bound under the same session while it was reading', async () => {
+  const { room, sfu } = await callInProgress();
+  await internal(room, 'bind', { participantId: 'bob', cfSessionId: 'Sbob2' });
+  room.sfuSessions.Sbob2.departed = true; // empty and departed: this pass will decide "drained"
+  const read = sfu.getSession.bind(sfu);
+  let release; const gate = new Promise((r) => { release = r; });
+  sfu.getSession = async (id) => { const st = await read(id); if (id === 'Sbob2') await gate; return st; };
+  const pass = room.alarm();
+  await tick();
+  const replacement = { participantId: 'bob', departed: true, boundAt: Date.now(), closed: [], pullPendingUntil: Date.now() + 60000 };
+  room.sfuSessions.Sbob2 = replacement; // e.g. a reconcile re-add while the pass was reading
+  release();
+  await pass;
+  assert.equal(room.sfuSessions.Sbob2, replacement);
+});
+
+test('permission is decided against the floor as it is AFTER the SFU read (no queued pass to rescue it)', async () => {
+  const { room, sfu } = await callInProgress();
+  const read = sfu.getSession.bind(sfu);
+  sfu.getSession = async (id) => {
+    const st = await read(id);
+    if (id === 'Sbob') room.room.setFloor('moderated'); // floor moves during the read, with no message and no new pass
+    return st;
+  };
+  await room.alarm();
+  assert.deepEqual(sfu.active('Sbob'), ['hears:Salice', 'publishes']);
+});
+
+test('extra keys in a sessionDescription, and a bidirectional publication, are refused (not dropped)', async () => {
+  const { room } = await callInProgress();
+  const sd = await workerPull(room, { id: 'bob', sessionId: 'Sbob', tracks: carolTrack, extra: { sessionDescription: { type: 'offer', sdp: 'v=0', Type: 'answer' } } });
+  assert.equal(sd.response.status, 400);
+  assert.deepEqual(sd.dispatched, []);
+  const bidi = await workerPull(room, { id: 'bob', sessionId: 'Sbob', tracks: [{ location: 'local', trackName: 'mic', bidirectionalMediaStream: true }] });
+  assert.equal(bidi.response.status, 400);
+  assert.deepEqual(bidi.dispatched, []);
 });

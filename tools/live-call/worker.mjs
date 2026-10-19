@@ -105,7 +105,9 @@ async function internalOp(env, sessionId, roomId, op, payload) {
 // key outside the exact allow-list is refused rather than dropped.
 const MAX_SDP = 60 * 1024;
 const TRACK_KEYS = {
-  local: new Set(['location', 'trackName', 'mid', 'kind', 'bidirectionalMediaStream']),
+  // No bidirectionalMediaStream on a publication either: nothing here needs a receive direction on a publisher's
+  // transceiver, so none can exist outside sfu-authz.
+  local: new Set(['location', 'trackName', 'mid', 'kind']),
   // A pull may not reuse an existing transceiver (mid "#name" / bidirectional): closing such a pull on a floor change
   // would also stop the listener's own publication on that transceiver.
   remote: new Set(['location', 'sessionId', 'trackName', 'kind', 'simulcast']),
@@ -139,9 +141,7 @@ function track(t) {
   if (t.kind !== undefined && !['audio', 'video'].includes(t.kind)) return null;
   if (t.location === 'local') {
     if (t.mid !== undefined && !nonEmpty(t.mid)) return null;
-    if (t.bidirectionalMediaStream !== undefined && typeof t.bidirectionalMediaStream !== 'boolean') return null;
-    return { location: 'local', trackName: t.trackName, ...(t.mid !== undefined ? { mid: t.mid } : {}),
-      ...(t.kind ? { kind: t.kind } : {}), ...(t.bidirectionalMediaStream !== undefined ? { bidirectionalMediaStream: t.bidirectionalMediaStream } : {}) };
+    return { location: 'local', trackName: t.trackName, ...(t.mid !== undefined ? { mid: t.mid } : {}), ...(t.kind ? { kind: t.kind } : {}) };
   }
   if (!nonEmpty(t.sessionId)) return null;
   const sim = t.simulcast === undefined ? undefined : simulcast(t.simulcast);
