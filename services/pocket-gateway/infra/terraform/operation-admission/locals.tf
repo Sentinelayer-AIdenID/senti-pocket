@@ -43,6 +43,7 @@ locals {
     "POST /deck",
     "POST /dial",
     "POST /dial/ring-owner",
+    "POST /call/authorize",
     "GET /dial",
     "GET /dial/register/context",
     "DELETE /dial/register",

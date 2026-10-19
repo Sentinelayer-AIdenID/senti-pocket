@@ -89,3 +89,14 @@ test('default fetch: /health open; unauthorized call 403; a POST to /ws is refus
     assert.equal(res.status, 426); // removing the GET-only guard would forward the POST
   } finally { globalThis.fetch = saved; }
 });
+
+test('a malformed percent-escape in the room segment is a 404, never an uncaught URIError, and never authorizes', async () => {
+  const saved = globalThis.fetch;
+  let authorizeCalls = 0;
+  try {
+    globalThis.fetch = async () => { authorizeCalls += 1; return { ok: true, json: async () => ({}) }; };
+    const res = await worker.default.fetch(mkReq('https://w/call/%E0%A4%A/ws?session=S', { upgrade: true, auth: 'Bearer t' }), GW);
+    assert.equal(res.status, 404);
+    assert.equal(authorizeCalls, 0);
+  } finally { globalThis.fetch = saved; }
+});

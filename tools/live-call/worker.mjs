@@ -18,7 +18,10 @@ export { INTERNAL_OP_PATH };
 
 const MEMBER_ROLES = new Set(['owner', 'admin', 'contributor', 'viewer']);
 const MAX_SFU_BODY = 64 * 1024;
-const AUTHZ_TIMEOUT_MS = 3000;
+// The gateway answers after its bearer check (/auth/me, up to 5 s) and then the membership lookup (up to 3 s), and a cold
+// start first loads its secrets (up to ~3.75 s): ~11.75 s worst case, well inside API Gateway's 29 s. A shorter bound here
+// would refuse a legitimate member whenever those are uncached and slow.
+const AUTHZ_TIMEOUT_MS = 14000;
 // Bounds every SFU call the Worker makes, so an authorized pull lands well inside the DO's PULL_GRACE_MS window.
 const SFU_DISPATCH_TIMEOUT_MS = 10000;
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -120,7 +123,12 @@ export default {
 
     const m = url.pathname.match(/^\/call\/([^/]+)\/(ws|sfu\/session|sfu\/tracks|sfu\/renegotiate)$/);
     if (!m) return new Response('not found', { status: 404 });
-    const roomId = decodeURIComponent(m[1]);
+    let roomId;
+    try {
+      roomId = decodeURIComponent(m[1]);
+    } catch {
+      return new Response('not found', { status: 404 });
+    }
     const sessionId = url.searchParams.get('session') || '';
 
     const authz = await authorize(env, { authorization: bearerFrom(request, url), sessionId, roomId });

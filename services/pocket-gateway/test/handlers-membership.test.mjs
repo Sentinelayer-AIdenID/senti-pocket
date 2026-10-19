@@ -92,6 +92,12 @@ const routeCases = [
     deniedStatus: 403,
   },
   {
+    name: 'POST /call/authorize',
+    target: SESSION,
+    request: { method: 'POST', path: '/call/authorize', body: { sessionId: SESSION, roomId: 'standup' }, headers: { authorization: AUTHORIZATION } },
+    deniedStatus: 403,
+  },
+  {
     name: 'POST /dial/register',
     target: SESSION,
     request: { method: 'POST', path: '/dial/register', body: { sessionId: SESSION, voipToken: 'abc123' }, headers: { authorization: AUTHORIZATION } },

@@ -215,3 +215,22 @@ test('the mint cap is a durable lifetime count — leave does NOT reset it (no m
   await doo.webSocketMessage(ws, JSON.stringify({ type: 'leave' })); // forget() runs — must NOT reset the count
   assert.equal((await internal(doo, 'mint-reserve', { participantId: 'a' })).body.ok, false); // still capped; resetting it would pass
 });
+
+test('the roster role is the gateway-bound socket role, never one declared in the join body', async () => {
+  const doo = await newDO();
+  const ws = await connect(doo, { p: 'v', role: 'viewer' });
+  await doo.webSocketMessage(ws, JSON.stringify({ type: 'join', role: 'owner' }));
+  assert.deepEqual(doo.room.roster().map(({ id, role }) => ({ id, role })), [{ id: 'v', role: 'viewer' }]);
+});
+
+test('after a hibernation rebuild the roster still shows the gateway-bound role, not a default', async () => {
+  const state = makeState();
+  const doo = new CallRoomDO(state, { INTERNAL_BIND_KEY: 'k' });
+  await state.ready;
+  await mint(doo, 'o', 'SO');
+  const ws = await connect(doo, { p: 'o', role: 'owner' });
+  await doo.webSocketMessage(ws, JSON.stringify({ type: 'join', cfSessionId: 'SO', cfTrackName: 'mic', role: 'viewer' }));
+  const rebuilt = new CallRoomDO(state, { INTERNAL_BIND_KEY: 'k' }); // eviction + wake: rebuilt from attachments
+  await state.ready;
+  assert.deepEqual(rebuilt.room.roster().map(({ id, role }) => ({ id, role })), [{ id: 'o', role: 'owner' }]);
+});
