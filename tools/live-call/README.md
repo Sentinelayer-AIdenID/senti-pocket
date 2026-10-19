@@ -79,7 +79,7 @@ track ("already closed" included; an `inactive` listing alone is not proof, sinc
 Failures retry on a 2 s alarm, backing off to the 30 s sweep after five attempts (the count survives hibernation); DO
 SFU calls are bounded at 3 s and run at most 4 at a time. An authorized pull holds its session in the ledger for 30 s
 (the Worker bounds its own SFU calls at 10 s) and the post-dispatch reconcile names that session, so a leave that lands
-while a pull is in flight cannot strand it. A session minted by someone who never joins is drained after the 5 min idle
+while a pull is in flight cannot strand it; the reconcile runs even when the SFU call throws, and the DO re-checks the session 12 s after authorizing a pull in case the Worker never reports back. Grace is judged at the time a session was read. Pulls are authorized only on a session that is still a live ledger entry, and an abandoned session also loses its owner. The Worker never forwards a client body: every SFU body is rebuilt from an exact allow-list and any other key (case variants included) is refused. A session minted by someone who never joins is drained after the 5 min idle
 window. A pull created between room changes is closed by the next pass, at most one sweep interval later. This is
 proven against a fake SFU that models session track state (`call-do-revocation.test.mjs`, including the adversarial
 review's probes); it has not yet run against the live CF Realtime API.
