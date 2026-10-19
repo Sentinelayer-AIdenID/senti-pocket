@@ -21,7 +21,8 @@ const identity = (scopes = ['sessions:read', 'sessions:write', 'pocket:voice', '
 function gatewayWith({ role = 'viewer', scopes, membership } = {}) {
   const calls = [];
   const gateway = createGateway({
-    verifyToken: async (token) => (token ? identity(scopes) : null),
+    // The gateway hands the verifier the request headers; only the known bearer authenticates.
+    verifyToken: async (headers) => (headers?.authorization === AUTHORIZATION ? identity(scopes) : null),
     getTargetMembership: async (input) => {
       calls.push(input);
       if (membership) return membership(input);
@@ -83,11 +84,14 @@ test('malformed admission requests are refused before any membership lookup', as
   }
 });
 
-test('no bearer is unauthenticated', async () => {
-  const { gateway, calls } = gatewayWith();
-  const response = await gateway.handle(authorizeRequest({ sessionId: SESSION, roomId: 'standup' }, {}));
-  assert.equal(response.status, 401);
-  assert.equal(calls.length, 0);
+test('no bearer, or a bearer the verifier rejects, is refused at the auth gate with an uncacheable 401', async () => {
+  for (const headers of [{}, { authorization: 'Bearer revoked-token' }]) {
+    const { gateway, calls } = gatewayWith();
+    const response = await gateway.handle(authorizeRequest({ sessionId: SESSION, roomId: 'standup' }, headers));
+    assert.equal(response.status, 401);
+    assert.equal(calls.length, 0, 'refused before any membership lookup');
+    noStore(response);
+  }
 });
 
 test('membership lookup failures stay fail-closed and uncacheable', async () => {

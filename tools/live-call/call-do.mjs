@@ -60,7 +60,7 @@ export class CallRoomDO {
         if (!a?.participantId || a.retired || a.sessionId !== this.meta.sessionId) continue;
         this.sockets.set(a.participantId, ws);
         if (a.joined !== true) continue; // Accepted, left and legacy-unmarked sockets are not room members.
-        const restored = this.room.join({ participantId: a.participantId, sessionId: a.sessionId, trackId: a.trackId });
+        const restored = this.room.join({ participantId: a.participantId, sessionId: a.sessionId, role: a.role, trackId: a.trackId });
         if (restored.ok && a.published && a.published.sessionId === this.mintedTracks[a.participantId] &&
             typeof a.published.trackName === 'string' && a.published.trackName) {
           this.publishedTracks[a.participantId] = a.published;
@@ -164,6 +164,7 @@ export class CallRoomDO {
     if (msg.type === 'join') {
       msg.participantId = att.participantId; // anti-spoof
       msg.sessionId = att.sessionId;
+      msg.role = att.role; // the roster shows the gateway-bound role, never a self-declared one
     } else if (msg.type === 'leave' || msg.type === 'touch') {
       msg.participantId = att.participantId;
     } else if (FLOOR_OPS.has(msg.type) && !FLOOR_ROLES.has(att.role)) {

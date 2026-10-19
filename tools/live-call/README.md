@@ -74,7 +74,8 @@ caller's membership role in the session under the caller's own bearer and return
 participant id. Set `GATEWAY_AUTHORIZE_URL=https://<gateway api domain>/call/authorize` and `GATEWAY_HOST=<gateway api
 domain>`. Until both are set (and the gateway route is deployed), every `/call/*` route 403s — intentionally. One
 participant per account: a second device or agent on the same account replaces the first. The authorize fetch allows
-9 s because the gateway checks the bearer (up to 5 s) and then membership (up to 3 s), uncached.
+14 s because the gateway checks the bearer (up to 5 s) and then membership (up to 3 s), uncached, after a cold start's
+secret load (up to ~3.75 s).
 
 Routes: `GET /call/:room/ws` (WS signaling), `POST /call/:room/sfu/session` (mint — also binds the minted CF session
 to the participant inside the DO), `POST /call/:room/sfu/tracks`, `POST /call/:room/sfu/renegotiate`, `GET /health`.

@@ -897,7 +897,9 @@ export function createGateway(deps) {
           ctx = await authenticate(req);
         }
         if (!ctx || typeof ctx.humanId !== 'string' || !ctx.humanId) {
-          const response = isDialRegistrationContext ? registrationContextJson : json;
+          const response = isDialRegistrationContext
+            ? registrationContextJson
+            : (method === 'POST' && path === '/call/authorize' ? callAuthorizeJson : json);
           return response(401, { error: 'authentication required' }, { 'www-authenticate': 'Bearer' });
         }
         // `return await` (not bare `return`): the handlers are async, so awaiting HERE keeps a rejection inside this
