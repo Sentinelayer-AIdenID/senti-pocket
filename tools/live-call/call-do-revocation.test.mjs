@@ -581,3 +581,12 @@ test('the post-dispatch reconcile reads only the session it dispatched on', asyn
   await internal(room, 'reconcile', { participantId: 'bob', cfSessionId: 'Sbob' });
   assert.deepEqual(sfu.calls.filter((c) => c[0] === 'get').map((c) => c[1]), ['Sbob']);
 });
+
+test('an authorized pull\'s grace is persisted by the authorization itself (eviction right after it keeps the session)', async () => {
+  const { state, room } = await callInProgress();
+  await internal(room, 'bind', { participantId: 'bob', cfSessionId: 'Sbob2' });
+  await internal(room, 'sfu-authz', { participantId: 'bob', sessionId: 'Sbob2', remoteTracks: carolTrack });
+  const rebuilt = new CallRoomDO(state, { INTERNAL_BIND_KEY: KEY }); // evicted before anything else wrote storage
+  await state.ready;
+  assert.ok(rebuilt.sfuSessions.Sbob2.pullPendingUntil > Date.now());
+});
