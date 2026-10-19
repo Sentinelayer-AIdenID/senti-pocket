@@ -47,16 +47,36 @@ test('frames are paced at real time with a small lead, and first-frame latency i
   assert.equal(stats.frames, 50);
   assert.equal(stats.audioMs, 1000);
   assert.equal(stats.firstFrameMs, 150);
-  assert.equal(stats.late, 0);
+  assert.equal(stats.stalls, 0);
   const first = sentAt[0];
   // Lead 60 ms: frames 0-3 go immediately, then one every 20 ms, ending 60 ms before the audio would finish playing.
   assert.deepEqual(sentAt.slice(0, 5).map((t) => t - first), [0, 0, 0, 0, 20]);
   assert.equal(sentAt.at(-1) - first, 49 * 20 - 60);
 });
 
-test('a slow sender is counted as late instead of silently piling frames up', async () => {
+test('a slow sender is reported as stalls instead of silently piling frames up', async () => {
   const clock = fakeClock();
   const stats = await streamToIngest(chunksOf(tone(24000), [48000]), async () => { clock.advance(45); }, { now: clock.now, sleep: clock.sleep });
-  assert.ok(stats.late > 0);
+  assert.ok(stats.stalls > 0 && stats.stallMs > 0);
   await assert.rejects(streamToIngest(chunksOf(tone(10), [20]), null), /send required/);
+});
+
+test('a mid-stream TTS stall is re-paced as a gap, never sent as a burst the SFU would clip', async () => {
+  const clock = fakeClock();
+  async function* stalling() {
+    yield tone(4800); // 200 ms of audio
+    clock.advance(600); // the provider stalls
+    yield tone(24000); // then 1 s more
+  }
+  const sentAt = [];
+  const stats = await streamToIngest(stalling(), async () => { sentAt.push(clock.now()); }, { now: clock.now, sleep: clock.sleep });
+  const perInstant = sentAt.reduce((m, t) => m.set(t, (m.get(t) || 0) + 1), new Map());
+  const maxBurst = Math.max(...perInstant.values());
+  assert.ok(maxBurst <= Math.ceil(60 / 20) + 1, `burst of ${maxBurst} frames at one instant`);
+  assert.equal(stats.frames, 60);
+  assert.equal(stats.stalls, 1);
+  assert.ok(stats.stallMs >= 400, `stall ${stats.stallMs} ms`);
+  // After the stall the frames are paced again: consecutive sends at most a lead apart, then every 20 ms.
+  const gaps = sentAt.slice(1).map((t, i) => t - sentAt[i]);
+  assert.ok(gaps.slice(-20).every((g) => g === 20));
 });
