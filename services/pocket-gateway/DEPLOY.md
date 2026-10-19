@@ -402,7 +402,7 @@ Provider credentials are required, but there is no host AWS CLI command or exter
 Lambda environment never enters Terraform state. Invocation failure or any response drift fails closed.
 
 Both API integrations and every Lambda resource-policy grant target numeric published versions. The protected routes
-invoke the module-published admission version; the 13 direct routes invoke the attested gateway version. No mutable
+invoke the module-published admission version; the 14 direct routes invoke the attested gateway version. No mutable
 Lambda alias exists in the ingress path, so an out-of-band `UpdateAlias` cannot redirect reviewed traffic.
 
 Production state uses the partial encrypted S3 backend in `versions.tf`. Initialize it only with an account-owned,
@@ -575,7 +575,7 @@ the deploy works.
   non-canonical base64, or an oversized decoded body returns the documented `400`/`413` before auth; a direct gateway
   invoke without a valid private assertion returns the generic admission `503`.
 - With a valid senti session bearer: `GET /sync`, `GET /checkpoint?sessionId=…`, `POST /answer`, `POST /brief`,
-  `POST /actions/execute`, `POST /tts`, `POST /deck`, `POST /dial`, `POST|DELETE /dial/register`, and authenticated
+  `POST /actions/execute`, `POST /tts`, `POST /deck`, `POST /dial`, `POST /call/authorize`, `POST|DELETE /dial/register`, and authenticated
   `GET /dial/register/context` plus `POST /dial/register/reconcile` per the contract in `API.md`.
 - In V2 mode, prove same-installation A→B movement: A stops resolving, B receives a `v:2` push with its exact nested
   binding tuple, stale A unregister/cleanup is a no-op (including a newer same-intent revision), a missing-scope and

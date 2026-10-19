@@ -18,7 +18,9 @@ export { INTERNAL_OP_PATH };
 
 const MEMBER_ROLES = new Set(['owner', 'admin', 'contributor', 'viewer']);
 const MAX_SFU_BODY = 64 * 1024;
-const AUTHZ_TIMEOUT_MS = 3000;
+// The gateway answers after its bearer check (/auth/me, up to 5 s) and then the membership lookup (up to 3 s); a shorter
+// bound here would refuse a legitimate member whenever both are uncached and slow.
+const AUTHZ_TIMEOUT_MS = 9000;
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
 function bearerFrom(request, url) {

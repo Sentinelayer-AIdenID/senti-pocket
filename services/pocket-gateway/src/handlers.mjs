@@ -44,6 +44,10 @@ const DIAL_HYDRATION_CACHE_HEADERS = Object.freeze({
 const dialHydrationJson = (status, body, headers = {}) =>
   json(status, body, { ...headers, ...DIAL_HYDRATION_CACHE_HEADERS });
 const DIAL_HYDRATION_GONE = Object.freeze({ error: 'dial signal unavailable', reason: 'gone' });
+// A call-admission answer discloses session membership: never cacheable, like dial hydration.
+const callAuthorizeJson = (status, body, headers = {}) =>
+  json(status, body, { ...headers, ...DIAL_HYDRATION_CACHE_HEADERS });
+const CALL_ROOM_ID = /^[A-Za-z0-9._-]{1,64}$/;
 const OPERATION_ADMISSION_UNAVAILABLE = Object.freeze({
   error: 'registration operation admission unavailable',
   reason: 'operation-admission-unavailable',
@@ -121,7 +125,7 @@ export function createGateway(deps) {
   // Route scope requirements, aligned to AIdenID's granted scopes. write => execute; read => sync. TTS requires a
   // DISTINCT least-privilege `pocket:voice` (Echo): it triggers third-party voice processing/egress, not a passive
   // read, so a read+write token must NOT authorize it. Override via deps.scopes if the contract changes.
-  const SCOPES = { execute: 'sessions:write', sync: 'sessions:read', tts: 'pocket:voice', dial: 'pocket:dial', ...(deps.scopes || {}) };
+  const SCOPES = { execute: 'sessions:write', sync: 'sessions:read', tts: 'pocket:voice', dial: 'pocket:dial', call: 'pocket:voice', ...(deps.scopes || {}) };
   // /dial/register substrate: binds a device VoIP token to a session (deploy wires deps.deviceRegistry to Dynamo; the
   // registry defers a missing backend to a register-time 501, so constructing it unconditionally is safe). Normalize
   // the gateway's injectable ISO clock to milliseconds so receipt expiry and the registry share one time source.
@@ -580,6 +584,27 @@ export function createGateway(deps) {
       });
   }
 
+  // POST /call/authorize — admission for the live-call Worker (tools/live-call/worker.mjs authorize()). The Worker forwards
+  // the CALLER's own bearer with the (sessionId, roomId) it asked for; this resolves the caller's role in that session
+  // under that same bearer and returns the participant id bound to the bearer. It mints and authors nothing. The
+  // participant is the authenticated human (never a body field), so a caller cannot join as someone else, and the
+  // Worker keys the room's DO by (session, room), so a room id cannot reach another session's call. Viewer may join;
+  // floor control stays owner/admin inside the DO.
+  async function handleCallAuthorize(req, ctx) {
+    if (!hasScope(ctx, SCOPES.call)) return callAuthorizeJson(403, { error: 'missing scope ' + SCOPES.call });
+    const body = readBody(req.body);
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return callAuthorizeJson(400, { error: 'invalid JSON body' });
+    const { sessionId, roomId } = body;
+    if (typeof sessionId !== 'string' || !sessionId) return callAuthorizeJson(400, { error: 'sessionId required' });
+    if (typeof roomId !== 'string' || !CALL_ROOM_ID.test(roomId)) return callAuthorizeJson(400, { error: 'invalid roomId' });
+    const access = await resolveTargetAccess(req, ctx, sessionId, 'viewer');
+    if (access.response) {
+      return callAuthorizeJson(access.response.status, access.response.body, access.response.headers);
+    }
+    if (!access.allowed) return callAuthorizeJson(403, { error: 'not a known session for this user' });
+    return callAuthorizeJson(200, { sessionId, roomId, role: access.membership.membershipRole, participantId: ctx.humanId });
+  }
+
   // POST /dial/ring-owner — the EXPLICIT ring path (sl ring-owner / an agent's MCP tool). The caller DESCRIBES a need
   // (question + kind + session context); RELAY builds the canonical NeedCarterSignal server-side (opaque GATEWAY-generated
   // id, so a caller cannot choose the store key), maps it to the RICH dial input + the storedSignal (PR-B2), and dispatches
@@ -886,6 +911,7 @@ export function createGateway(deps) {
         if (method === 'POST' && path === '/deck') return await handleDeck(req, ctx);
         if (method === 'POST' && path === '/dial') return await handleDial(req, ctx);
         if (method === 'POST' && path === '/dial/ring-owner') return await handleRingOwner(req, ctx);
+        if (method === 'POST' && path === '/call/authorize') return await handleCallAuthorize(req, ctx);
         if (method === 'GET' && path === '/dial') return await handleDialFetch(req, ctx);
         if (isDialRegistrationContext) {
           return await handleDialRegistrationContext(req, ctx);
