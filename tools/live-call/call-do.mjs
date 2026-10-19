@@ -10,17 +10,26 @@
 //   - published CF coords are accepted only if they match a session the Worker MINTED for that participant;
 //   - Worker-only internal ops (bind / mint-reserve / sfu-authz) are reachable ONLY at an exact path with a
 //     configured key (NO default) — the Worker forwards GET-only fresh upgrades, so a client can never reach them;
-//   - SFU session minting is capped; new pulls require owned sessions + exact floor-authorized published tracks.
+//   - SFU session minting is capped; new pulls require owned sessions + exact floor-authorized published tracks;
+//   - every minted SFU session stays in a durable ledger, and after any floor/membership change (and after every new
+//     pull) the DO reads each session's SFU state and force-closes pulls the floor no longer permits, plus every track
+//     of a departed participant. Failed closes retry on a short alarm (VOICE-08 server-side revocation).
 
 import { createCallRoom } from './call-room.mjs';
 import { handleSignal } from './signaling.mjs';
 import { buildFanout } from './call-fanout.mjs';
+import { createCfRealtimeSfu } from './cf-realtime-sfu.mjs';
+import { revokeSession } from './sfu-revocation.mjs';
 
 export const INTERNAL_OP_PATH = '/__live-call/internal/op'; // exact path; the client can never cause a forward here
 const SWEEP_INTERVAL_MS = 30000;
+export const REVOKE_RETRY_MS = 2000; // a failed server-side close is retried this soon, not at the next sweep
+const REVOKE_FAST_RETRIES = 5;
+const SFU_CALL_TIMEOUT_MS = 3000;
 const MAX_MSG_BYTES = 16 * 1024;
 const MINT_CAP = 5; // per-participant active-mint cap
 const FLOOR_OPS = new Set(['set-floor', 'grant-floor', 'advance-floor']);
+const READ_ONLY_OPS = new Set(['touch', 'roster']); // cannot narrow anyone's floor permissions
 const FLOOR_ROLES = new Set(['owner', 'admin']);
 const decode = (raw) => (typeof raw === 'string' ? raw : new TextDecoder().decode(raw));
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -42,13 +51,19 @@ export class CallRoomDO {
     this.publishedTracks = {}; // participantId -> { sessionId, trackName } actually published
     this.mintedTracks = {}; // participantId -> cfSessionId the Worker minted (authoritative)
     this.mintCount = {}; // participantId -> active mint count (cap)
+    this.sfuSessions = {}; // cfSessionId -> { participantId, departed } every minted session until it is drained
     this.sockets = new Map();
     this.meta = { roomId: '', sessionId: '', floor: 'open', holder: null };
+    // The App Secret is a Worker secret shared with this DO; without it no session can have been minted.
+    this.sfu = env.CF_REALTIME_APP_ID && env.CF_REALTIME_APP_SECRET
+      ? createCfRealtimeSfu({ appId: env.CF_REALTIME_APP_ID, appSecret: env.CF_REALTIME_APP_SECRET, timeoutMs: SFU_CALL_TIMEOUT_MS })
+      : null;
 
     state.blockConcurrencyWhile(async () => {
       this.meta = (await state.storage.get('meta')) || this.meta;
       this.mintedTracks = (await state.storage.get('mintedTracks')) || {};
       this.mintCount = (await state.storage.get('mintCount')) || {};
+      this.sfuSessions = (await state.storage.get('sfuSessions')) || {};
       this.room = createCallRoom({
         roomId: this.meta.roomId || 'room',
         sessionId: this.meta.sessionId || 'pending',
@@ -115,8 +130,11 @@ export class CallRoomDO {
     this.state.acceptWebSocket(server, [participantId]);
     server.serializeAttachment({ participantId, sessionId, role, joined: false });
     this.sockets.set(participantId, server);
-    await this.sweepIdle();
+    const dropped = await this.sweepIdle();
     await this.ensureAlarm();
+    // Only after the replacement is registered (a retired socket can no longer act while the SFU is awaited): a kicked
+    // or swept participant is no member, so its pulls and every pull of its track lose permission.
+    if (prior || dropped.length) await this.revokeStale();
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -133,13 +151,21 @@ export class CallRoomDO {
     if (b.op === 'bind') {
       if (typeof b.cfSessionId === 'string' && b.cfSessionId) {
         this.mintedTracks[pid] = b.cfSessionId;
+        this.sfuSessions[b.cfSessionId] = { participantId: pid, departed: false };
         await this.state.storage.put('mintedTracks', this.mintedTracks);
+        await this.state.storage.put('sfuSessions', this.sfuSessions);
       }
       return json({ ok: true });
     }
+    if (b.op === 'reconcile') {
+      // The Worker calls this after every pull it dispatched: a floor change that landed while the pull was in flight
+      // cannot leave that pull open, because the decision is taken against the room state now.
+      const { pending } = await this.revokeStale();
+      return json({ ok: pending === 0, pending });
+    }
     if (b.op === 'sfu-authz') {
       const owns = Boolean(this.mintedTracks[pid]) && this.mintedTracks[pid] === b.sessionId;
-      const permitted = (this.room.subscriptions()[pid] || []).map((id) => this.publishedTracks[id]).filter(Boolean);
+      const permitted = this.permittedPulls(pid);
       // Session-only legacy requests cannot establish which track is permitted.
       const remoteOk = !Object.hasOwn(b, 'remoteSessionIds') && Array.isArray(b.remoteTracks) && b.remoteTracks.every((track) =>
         track && typeof track.sessionId === 'string' && typeof track.trackName === 'string' &&
@@ -184,6 +210,8 @@ export class CallRoomDO {
     if ((FLOOR_OPS.has(msg.type) && res.state) || (msg.type === 'join' && res.ok)) await this.persistRoomMeta();
     ws.send(JSON.stringify({ type: 'ack', op: msg.type, ok: res.ok, reason: res.reason, state: res.state }));
     this.broadcast();
+    // Directives only ASK clients to drop pulls; the server closes them regardless of what a client does.
+    if (!READ_ONLY_OPS.has(msg.type)) await this.revokeStale();
   }
 
   async webSocketClose(ws) {
@@ -193,6 +221,7 @@ export class CallRoomDO {
       this.room.leave(att.participantId);
       await this.forget(att.participantId);
       this.broadcast();
+      await this.revokeStale();
     }
   }
 
@@ -211,8 +240,67 @@ export class CallRoomDO {
     if (!keepSocket) this.sockets.delete(participantId);
     delete this.publishedTracks[participantId];
     delete this.mintedTracks[participantId];
+    // Its minted sessions stay in the ledger, marked departed, until the SFU confirms nothing on them is active.
+    for (const entry of Object.values(this.sfuSessions)) if (entry.participantId === participantId) entry.departed = true;
     await this.state.storage.put('mintedTracks', this.mintedTracks);
+    await this.state.storage.put('sfuSessions', this.sfuSessions);
     await this.persistRoomMeta();
+  }
+
+  // The exact pulls the floor allows this participant now: [] unless it is a joined member hearing a published track.
+  permittedPulls(participantId) {
+    return (this.room.subscriptions()[participantId] || []).map((id) => this.publishedTracks[id]).filter(Boolean);
+  }
+
+  // At most one pass runs and one waits; a waiting pass reads the room state when it starts, so callers that arrive
+  // during a pass are covered by the next one instead of each starting their own.
+  revokeStale() {
+    if (this.revokeQueued) return this.revokeQueued;
+    const next = (this.revokeRunning || Promise.resolve()).catch(() => {}).then(async () => {
+      if (this.revokeQueued === next) this.revokeQueued = null;
+      this.revokeRunning = next;
+      try {
+        return await this.revokeOnce();
+      } finally {
+        if (this.revokeRunning === next) this.revokeRunning = null;
+      }
+    });
+    this.revokeQueued = next;
+    return next;
+  }
+
+  async revokeOnce() {
+    const entries = Object.entries(this.sfuSessions);
+    if (!entries.length) return { pending: 0 };
+    let pending = 0;
+    if (!this.sfu) {
+      pending = entries.length; // cannot reach the SFU: nothing is assumed closed
+    } else {
+      const results = await Promise.all(entries.map(([cfSessionId, entry]) => revokeSession(this.sfu, cfSessionId, {
+        departed: entry.departed === true,
+        permittedFor: () => this.permittedPulls(entry.participantId),
+      }).catch(() => ({ ok: false, drained: false }))));
+      results.forEach((r, i) => {
+        if (!r.ok) pending += 1;
+        if (r.drained) delete this.sfuSessions[entries[i][0]];
+      });
+      await this.state.storage.put('sfuSessions', this.sfuSessions);
+    }
+    this.revokeFailures = pending ? (this.revokeFailures || 0) + 1 : 0;
+    if (pending) await this.scheduleAlarm(this.retryDelay());
+    return { pending };
+  }
+
+  // Fast retries first; an SFU that stays unreachable falls back to the sweep cadence instead of a 2 s alarm forever.
+  retryDelay() {
+    return (this.revokeFailures || 0) <= REVOKE_FAST_RETRIES ? REVOKE_RETRY_MS : SWEEP_INTERVAL_MS;
+  }
+
+  // Never postpone an alarm that is already due sooner.
+  async scheduleAlarm(delayMs) {
+    const due = Date.now() + delayMs;
+    const current = await this.state.storage.getAlarm();
+    if (current === null || current > due) await this.state.storage.setAlarm(due);
   }
 
   broadcast() {
@@ -253,7 +341,10 @@ export class CallRoomDO {
   async alarm() {
     const dropped = await this.sweepIdle();
     if (dropped.length) this.broadcast();
-    if (this.state.getWebSockets().length > 0) await this.state.storage.setAlarm(Date.now() + SWEEP_INTERVAL_MS);
+    const { pending } = await this.revokeStale();
+    // Set explicitly: inside the handler the firing alarm can still read as set, so scheduleAlarm could skip it.
+    const live = this.state.getWebSockets().length > 0 || Object.keys(this.sfuSessions).length > 0;
+    if (pending || live) await this.state.storage.setAlarm(Date.now() + (pending ? this.retryDelay() : SWEEP_INTERVAL_MS));
   }
 
   async persistMeta() {

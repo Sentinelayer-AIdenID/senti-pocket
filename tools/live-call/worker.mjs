@@ -154,7 +154,13 @@ export default {
           remoteTracks: requestedRemote,
         });
         if (!authzOp.ok) return new Response('forbidden', { status: 403 });
-        if (route === 'sfu/tracks') return json(await sfu.addRemoteTracks(String(body.sessionId), body));
+        if (route === 'sfu/tracks') {
+          const added = await sfu.addRemoteTracks(String(body.sessionId), body);
+          // The floor may have changed while this pull was in flight; the DO re-decides against the room as it is now
+          // and closes the pull server-side if it lost permission. A failed pass is retried by the DO's alarm.
+          if (requestedRemote.length) await internalOp(env, sessionId, roomId, 'reconcile', { participantId: authz.participantId });
+          return json(added);
+        }
         return json(await sfu.renegotiate(String(body.sessionId), body));
       } catch (e) {
         return json({ ok: false, error: String(e && e.message) }, 502);
