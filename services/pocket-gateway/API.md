@@ -23,7 +23,7 @@ production ingress routes its two operation-creating POSTs through `src/operatio
 - **Per-session authorization is server-derived and bearer-bound**: production calls
   `GET /api/v1/sessions/{sessionId}/membership` under the exact authenticated bearer and preserves the returned role.
   The client cannot supply identity or an allowlist. Viewer is sufficient only for read/self-device paths;
-  `/actions/execute` and `/dial/ring-owner` require contributor, admin, or owner.
+  `/actions/execute` and `/dial/ring-owner` require contributor, admin, or owner; `/call/authorize` admits viewer and up.
 - **Cross-tenant isolation**: durable state and locks are namespaced by the verifier-owned full principal. The current
   Senti verifier uses the collision-free `pocket.principal.senti.v1` namespace plus a length-prefixed stable user id;
   an AIdenID verifier uses issuer/audience/resource/site/pairwise-sub context.
@@ -59,6 +59,16 @@ Body: `{ text, voiceId?, modelId?, outputFormat?, tone? }` (`text` 1..8192 UTF-8
 - 200 → `application/octet-stream` audio; format in `x-senti-audio-format` (default `pcm_s16le_24000`). `isBase64Encoded`
   on API Gateway. The voice-provider key lives ONLY server-side — it never reaches the phone.
 - 400 text required · 413 text > 8192 bytes · 501 not configured · 502 backend error.
+
+### `POST /call/authorize` — live-call admission (scope `pocket:voice`)
+Called only by the live-call Worker (`tools/live-call/worker.mjs`), which forwards the caller's own bearer.
+Body: `{ sessionId, roomId }` (`roomId` matches `^[A-Za-z0-9._-]{1,64}$`).
+- 200 → `{ sessionId, roomId, role, participantId }`: the session and room echoed, the caller's membership role
+  (`viewer` and up may join; floor control stays owner/admin inside the call), and `participantId` = the authenticated
+  human (`ConsumerAccount.id`), never a body field.
+- 400 invalid body / roomId · 401 no or rejected bearer · 403 missing scope or not a member · 429/503 membership lookup
+  rate-limited/unavailable. Every response is `cache-control: no-store` + `pragma: no-cache` (it discloses membership).
+- One participant per account: a second device or agent signed in as the same account replaces the first in the call.
 
 ### `GET /dial?id=<opaque dial id>` — LEAN-ring hydration (scope `pocket:dial`)
 

@@ -69,9 +69,13 @@ The floor check is at authorization time. Floor changes and leave send fresh cli
 does **not** server-close already negotiated SFU subscriptions or prove continuous media isolation. Existing clients
 must reconcile those directives; server-enforced revocation needs separate subscription-lifecycle integration.
 
-The exact authorize endpoint is being **co-designed with warden** (gateway owns `/dial` + the resolver; a store-backed
-one-time join grant via the existing `dialSignalStore` is one candidate). Until it's wired, deploy stands up the
-transport but admits no one — intentionally.
+The authorize endpoint is the Pocket gateway's `POST /call/authorize` (`services/pocket-gateway/API.md`): it resolves the
+caller's membership role in the session under the caller's own bearer and returns the authenticated account as the
+participant id. Set `GATEWAY_AUTHORIZE_URL=https://<gateway api domain>/call/authorize` and `GATEWAY_HOST=<gateway api
+domain>`. Until both are set (and the gateway route is deployed), every `/call/*` route 403s — intentionally. One
+participant per account: a second device or agent on the same account replaces the first. The authorize fetch allows
+14 s because the gateway checks the bearer (up to 5 s) and then membership (up to 3 s), uncached, after a cold start's
+secret load (up to ~3.75 s).
 
 Routes: `GET /call/:room/ws` (WS signaling), `POST /call/:room/sfu/session` (mint — also binds the minted CF session
 to the participant inside the DO), `POST /call/:room/sfu/tracks`, `POST /call/:room/sfu/renegotiate`, `GET /health`.

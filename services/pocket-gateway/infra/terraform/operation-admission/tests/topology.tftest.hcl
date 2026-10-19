@@ -116,6 +116,7 @@ run "provisioned_dark_is_explicit_and_numeric_version_pinned" {
       "POST /deck",
       "POST /dial",
       "POST /dial/ring-owner",
+      "POST /call/authorize",
       "GET /dial",
       "GET /dial/register/context",
       "DELETE /dial/register",
@@ -141,7 +142,7 @@ run "provisioned_dark_is_explicit_and_numeric_version_pinned" {
       aws_apigatewayv2_integration.gateway[0].payload_format_version == "2.0",
       aws_apigatewayv2_integration.gateway[0].timeout_milliseconds == 29000,
       length(aws_lambda_permission.admission_from_api) == 2,
-      length(aws_lambda_permission.gateway_from_api) == 13,
+      length(aws_lambda_permission.gateway_from_api) == 14,
     ])
     error_message = "Ingress must disable the provider endpoint and use bounded payload-v2 Lambda proxies."
   }
