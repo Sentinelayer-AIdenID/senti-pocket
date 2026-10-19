@@ -32,6 +32,9 @@ const SFU_PARALLEL = 4; // under the Workers per-invocation connection limit, so
 export const PULL_GRACE_MS = 30000;
 // A session minted for someone who never joined and holds no socket for this long is treated as departed.
 const ORPHAN_MS = 300000;
+// After an authorized pull the DO re-checks that session once the Worker's own 10 s dispatch bound has passed, so a pull
+// whose Worker never reported back (cancelled invocation) is still decided inside PULL_GRACE_MS.
+export const PULL_RECHECK_MS = 12000;
 const MAX_MSG_BYTES = 16 * 1024;
 const MINT_CAP = 5; // per-participant active-mint cap
 const FLOOR_OPS = new Set(['set-floor', 'grant-floor', 'advance-floor']);
@@ -190,24 +193,30 @@ export class CallRoomDO {
       // flight cannot leave that pull open, because the decision is taken against the room state now. It names the
       // session it dispatched on, and the session is re-added if a pass dropped it meanwhile.
       const sid = typeof b.cfSessionId === 'string' ? b.cfSessionId : '';
-      if (sid && !this.sfuSessions[sid]) {
+      if (!sid) return json({ ok: false, reason: 'no-session' }, 400);
+      if (!this.sfuSessions[sid]) {
         this.sfuSessions[sid] = { participantId: pid, departed: !this.isMember(pid), boundAt: Date.now(), closed: [] };
         await this.state.storage.put('sfuSessions', this.sfuSessions);
       }
-      const { pending } = await this.revokeStale();
+      // Only the session the Worker dispatched on: a pull costs one SFU read, not a pass over the whole room.
+      const { pending } = await this.revokeEntries([[sid, this.sfuSessions[sid]]]);
       return json({ ok: pending === 0, pending });
     }
     if (b.op === 'sfu-authz') {
-      const owns = Boolean(this.mintedTracks[pid]) && this.mintedTracks[pid] === b.sessionId;
+      // Only a session that is still in the ledger and not departed: a pull on any other session could never be revoked.
+      const entry = this.sfuSessions[b.sessionId];
+      const owns = Boolean(this.mintedTracks[pid]) && this.mintedTracks[pid] === b.sessionId &&
+        Boolean(entry) && entry.participantId === pid && entry.departed !== true;
       const permitted = this.permittedPulls(pid);
       // Session-only legacy requests cannot establish which track is permitted.
       const remoteOk = !Object.hasOwn(b, 'remoteSessionIds') && Array.isArray(b.remoteTracks) && b.remoteTracks.every((track) =>
         track && typeof track.sessionId === 'string' && typeof track.trackName === 'string' &&
         permitted.some((published) => published.sessionId === track.sessionId && published.trackName === track.trackName));
       const ok = owns && remoteOk;
-      if (ok && b.remoteTracks.length && this.sfuSessions[b.sessionId]) {
-        this.sfuSessions[b.sessionId].pullPendingUntil = Date.now() + PULL_GRACE_MS;
+      if (ok && b.remoteTracks.length) {
+        entry.pullPendingUntil = Date.now() + PULL_GRACE_MS;
         await this.state.storage.put('sfuSessions', this.sfuSessions);
+        await this.scheduleAlarm(PULL_RECHECK_MS);
       }
       return json({ ok });
     }
@@ -316,36 +325,58 @@ export class CallRoomDO {
 
   async revokeOnce() {
     const now = Date.now();
-    for (const entry of Object.values(this.sfuSessions)) {
+    let orphaned = false;
+    for (const [cfSessionId, entry] of Object.entries(this.sfuSessions)) {
       if (!entry.departed && !this.sockets.has(entry.participantId) && !this.isMember(entry.participantId) &&
-          now - (entry.boundAt || 0) > ORPHAN_MS) entry.departed = true;
+          now - (entry.boundAt || 0) > ORPHAN_MS) {
+        entry.departed = true;
+        // An abandoned session is no longer the participant's: it cannot publish or be authorized for pulls again.
+        if (this.mintedTracks[entry.participantId] === cfSessionId) {
+          delete this.mintedTracks[entry.participantId];
+          orphaned = true;
+        }
+      }
     }
-    const entries = Object.entries(this.sfuSessions);
+    if (orphaned) await this.state.storage.put('mintedTracks', this.mintedTracks);
+    return this.revokeEntries(Object.entries(this.sfuSessions));
+  }
+
+  // Reconcile the given ledger entries against the room as it is when each session's state is read.
+  async revokeEntries(entries) {
     if (!entries.length) return { pending: 0 };
     let pending = 0;
+    let waiting = Infinity; // earliest grace expiry among drained sessions that must still be kept
     if (!this.sfu) {
       pending = entries.length; // cannot reach the SFU: nothing is assumed closed
     } else {
-      const results = await mapLimit(entries, SFU_PARALLEL, ([cfSessionId, entry]) => revokeSession(this.sfu, cfSessionId, {
-        departed: entry.departed === true,
-        permittedFor: () => this.permittedPulls(entry.participantId),
-        closed: entry.closed || [],
-      }).catch(() => ({ ok: false, closed: [], drained: false })));
+      const results = await mapLimit(entries, SFU_PARALLEL, async ([cfSessionId, entry]) => {
+        const readAt = Date.now();
+        const r = await revokeSession(this.sfu, cfSessionId, {
+          departed: entry.departed === true,
+          permittedFor: () => this.permittedPulls(entry.participantId),
+          closed: entry.closed || [],
+        }).catch(() => ({ ok: false, closed: [], drained: false }));
+        return { ...r, readAt };
+      });
       results.forEach((r, i) => {
         const [cfSessionId, entry] = entries[i];
+        const live = this.sfuSessions[cfSessionId] === entry ? entry : null; // identity: never touch a re-bound entry
         if (!r.ok) pending += 1;
-        if (r.closed.length) entry.closed = [...new Set([...(entry.closed || []), ...r.closed])];
-        if (!r.drained) return;
-        // Never drop a session an authorized pull may still be landing on: no later pass would ever see that pull.
-        if (entry.pullPendingUntil > Date.now()) pending += 1;
-        else if (this.sfuSessions[cfSessionId] === entry) delete this.sfuSessions[cfSessionId];
+        if (live && r.closed.length) live.closed = [...new Set([...(live.closed || []), ...r.closed])];
+        if (!r.drained || !live) return;
+        // An authorized pull may land after this read: keep the session until its grace had passed AT READ TIME, or no
+        // later pass would ever see that pull.
+        if (live.pullPendingUntil > r.readAt) waiting = Math.min(waiting, live.pullPendingUntil);
+        else delete this.sfuSessions[cfSessionId];
       });
       await this.state.storage.put('sfuSessions', this.sfuSessions);
     }
     this.revokeFailures = pending ? (this.revokeFailures || 0) + 1 : 0;
     await this.state.storage.put('revokeFailures', this.revokeFailures);
     if (pending) await this.scheduleAlarm(this.retryDelay());
-    return { pending };
+    // Waiting out a grace window is not a failure: re-check just after it ends, without touching the backoff.
+    if (waiting !== Infinity) await this.scheduleAlarm(Math.max(0, waiting - Date.now()) + 50);
+    return { pending, waitUntil: waiting === Infinity ? null : waiting };
   }
 
   // Fast retries first; an SFU that stays unreachable falls back to the sweep cadence instead of a 2 s alarm forever.
@@ -398,10 +429,12 @@ export class CallRoomDO {
   async alarm() {
     const dropped = await this.sweepIdle();
     if (dropped.length) this.broadcast();
-    const { pending } = await this.revokeStale();
+    const { pending, waitUntil } = await this.revokeStale();
     // Set explicitly: inside the handler the firing alarm can still read as set, so scheduleAlarm could skip it.
     const live = this.state.getWebSockets().length > 0 || Object.keys(this.sfuSessions).length > 0;
-    if (pending || live) await this.state.storage.setAlarm(Date.now() + (pending ? this.retryDelay() : SWEEP_INTERVAL_MS));
+    let next = pending ? this.retryDelay() : SWEEP_INTERVAL_MS;
+    if (waitUntil) next = Math.min(next, Math.max(0, waitUntil - Date.now()) + 50); // just after a grace window ends
+    if (pending || waitUntil || live) await this.state.storage.setAlarm(Date.now() + next);
   }
 
   async persistMeta() {

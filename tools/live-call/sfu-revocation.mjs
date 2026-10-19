@@ -28,7 +28,9 @@ export function staleMids({ departed, tracks, permitted, closed = [] }) {
   const targets = [];
   let unclosable = 0;
   for (const t of Array.isArray(tracks) ? tracks : []) {
-    if (!t || typeof t !== 'object' || done.has(trackKey(t))) continue;
+    if (!t || typeof t !== 'object') continue;
+    // A confirmed close is final unless the SFU lists that track as active again (a recycled mid re-pulling it).
+    if (done.has(trackKey(t)) && t.status !== 'active') continue;
     const allowed = !departed && t.location === 'remote' ? permitted.some((p) => p.sessionId === t.sessionId && p.trackName === t.trackName) : false;
     // A live participant's own publication (location local) is never revoked here; a departed one's always is.
     if (allowed || (!departed && t.location !== 'remote')) continue;
@@ -53,8 +55,9 @@ export async function revokeSession(sfu, cfSessionId, { departed, permittedFor, 
   try {
     state = await sfu.getSession(cfSessionId);
   } catch (error) {
-    // The SFU no longer knows this session: nothing on it can flow. Anything else is a retry.
-    if (error?.message === 'cf-realtime-404') return { ok: true, closed: [], drained: true };
+    // The SFU no longer knows this session, so nothing on it can flow: a departed session is drained. A live member's
+    // session stays in the ledger (a 404 could be transient), so its pulls are still revisited on every later pass.
+    if (error?.message === 'cf-realtime-404') return { ok: true, closed: [], drained: departed === true };
     throw error;
   }
   if (state?.errorCode) return { ok: false, closed: [], drained: false };

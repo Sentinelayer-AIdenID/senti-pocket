@@ -100,20 +100,76 @@ async function internalOp(env, sessionId, roomId, op, payload) {
   return (res && typeof res.json === 'function' ? await res.json().catch(() => ({})) : {}) || {};
 }
 
-function remoteTracks(body) {
-  if (!Array.isArray(body?.tracks)) return null;
-  const remote = [];
-  for (const track of body.tracks) {
-    if (!track || typeof track !== 'object' || Array.isArray(track)) return null;
-    if (track.location === 'local') continue; // Publishing uses the caller's own minted session.
-    if (track.location !== 'remote' || typeof track.sessionId !== 'string' || !track.sessionId ||
-        typeof track.trackName !== 'string' || !track.trackName) return null;
-    // A pull may not reuse an existing transceiver (mid "#name" / bidirectional): closing such a pull on a floor change
-    // would also stop the listener's own publication on that transceiver.
-    if (Object.hasOwn(track, 'mid') || Object.hasOwn(track, 'bidirectionalMediaStream')) return null;
-    remote.push({ sessionId: track.sessionId, trackName: track.trackName });
+// The SFU only ever receives a body rebuilt here from validated fields. Client bodies are never forwarded: an extra or
+// case-variant key ("Location", "Mid") must not reach a decoder that might read it differently from this check, so any
+// key outside the exact allow-list is refused rather than dropped.
+const MAX_SDP = 60 * 1024;
+const TRACK_KEYS = {
+  local: new Set(['location', 'trackName', 'mid', 'kind', 'bidirectionalMediaStream']),
+  // A pull may not reuse an existing transceiver (mid "#name" / bidirectional): closing such a pull on a floor change
+  // would also stop the listener's own publication on that transceiver.
+  remote: new Set(['location', 'sessionId', 'trackName', 'kind', 'simulcast']),
+};
+const BODY_KEYS = {
+  'sfu/session': new Set(['sessionDescription']),
+  'sfu/tracks': new Set(['sessionId', 'sessionDescription', 'tracks', 'autoDiscover']),
+  'sfu/renegotiate': new Set(['sessionId', 'sessionDescription']),
+};
+const plainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+const onlyKeys = (v, allowed) => Object.keys(v).every((k) => allowed.has(k));
+const nonEmpty = (v) => typeof v === 'string' && v.length > 0 && v.length <= 256;
+
+function sessionDescription(v) {
+  if (!plainObject(v) || !onlyKeys(v, new Set(['type', 'sdp'])) || !['offer', 'answer'].includes(v.type) ||
+      typeof v.sdp !== 'string' || v.sdp.length > MAX_SDP) return null;
+  return { type: v.type, sdp: v.sdp };
+}
+
+function simulcast(v) {
+  const order = new Set(['none', 'asciibetical']);
+  if (!plainObject(v) || !onlyKeys(v, new Set(['preferredRid', 'priorityOrdering', 'ridNotAvailable']))) return null;
+  if (v.preferredRid !== undefined && !nonEmpty(v.preferredRid)) return null;
+  if (v.priorityOrdering !== undefined && !order.has(v.priorityOrdering)) return null;
+  if (v.ridNotAvailable !== undefined && !order.has(v.ridNotAvailable)) return null;
+  return { ...v };
+}
+
+function track(t) {
+  if (!plainObject(t) || !Object.hasOwn(TRACK_KEYS, t.location) || !onlyKeys(t, TRACK_KEYS[t.location]) || !nonEmpty(t.trackName)) return null;
+  if (t.kind !== undefined && !['audio', 'video'].includes(t.kind)) return null;
+  if (t.location === 'local') {
+    if (t.mid !== undefined && !nonEmpty(t.mid)) return null;
+    if (t.bidirectionalMediaStream !== undefined && typeof t.bidirectionalMediaStream !== 'boolean') return null;
+    return { location: 'local', trackName: t.trackName, ...(t.mid !== undefined ? { mid: t.mid } : {}),
+      ...(t.kind ? { kind: t.kind } : {}), ...(t.bidirectionalMediaStream !== undefined ? { bidirectionalMediaStream: t.bidirectionalMediaStream } : {}) };
   }
-  return remote;
+  if (!nonEmpty(t.sessionId)) return null;
+  const sim = t.simulcast === undefined ? undefined : simulcast(t.simulcast);
+  if (sim === null) return null;
+  return { location: 'remote', sessionId: t.sessionId, trackName: t.trackName, ...(t.kind ? { kind: t.kind } : {}), ...(sim ? { simulcast: sim } : {}) };
+}
+
+/** Rebuild the outgoing SFU body for `route`, or null if anything is outside the allow-list. */
+export function buildSfuBody(route, body) {
+  if (!plainObject(body) || !onlyKeys(body, BODY_KEYS[route])) return null;
+  const out = {};
+  if (body.sessionDescription !== undefined) {
+    const sd = sessionDescription(body.sessionDescription);
+    if (!sd) return null;
+    out.sessionDescription = sd;
+  }
+  if (route === 'sfu/session') return { out, listener: '', remote: [] };
+  if (!nonEmpty(body.sessionId)) return null;
+  if (route === 'sfu/renegotiate') return { out, listener: body.sessionId, remote: [] };
+  if (body.autoDiscover !== undefined) {
+    if (typeof body.autoDiscover !== 'boolean') return null;
+    out.autoDiscover = body.autoDiscover;
+  }
+  if (!Array.isArray(body.tracks) || body.tracks.length > 64) return null;
+  const tracks = body.tracks.map(track);
+  if (tracks.some((t) => t === null)) return null; // never silently filter a malformed track away
+  out.tracks = tracks;
+  return { out, listener: body.sessionId, remote: tracks.filter((t) => t.location === 'remote').map(({ sessionId, trackName }) => ({ sessionId, trackName })) };
 }
 
 export default {
@@ -150,35 +206,38 @@ export default {
         const sfu = createCfRealtimeSfu({
           appId: env.CF_REALTIME_APP_ID, appSecret: env.CF_REALTIME_APP_SECRET, timeoutMs: SFU_DISPATCH_TIMEOUT_MS,
         });
+        const built = buildSfuBody(route, body);
+        if (!built) return json({ ok: false, error: route === 'sfu/tracks' ? 'bad-tracks' : 'bad-body' }, 400);
         if (route === 'sfu/session') {
           const reserve = await internalOp(env, sessionId, roomId, 'mint-reserve', { participantId: authz.participantId });
           if (!reserve.ok) return json({ ok: false, error: 'mint-cap' }, 429);
-          const minted = await sfu.newSession(body);
+          const minted = await sfu.newSession(built.out);
           if (minted && minted.sessionId) {
             await internalOp(env, sessionId, roomId, 'bind', { participantId: authz.participantId, cfSessionId: minted.sessionId });
           }
           return json(minted);
         }
-        // Validate every remote coordinate before dispatch; never silently filter malformed tracks away.
-        const requestedRemote = route === 'sfu/tracks' ? remoteTracks(body) : [];
-        if (requestedRemote === null) return json({ ok: false, error: 'bad-tracks' }, 400);
         // The DO checks each exact coordinate against THIS listener's current floor subscriptions.
         const authzOp = await internalOp(env, sessionId, roomId, 'sfu-authz', {
           participantId: authz.participantId,
-          sessionId: String(body.sessionId || ''),
-          remoteTracks: requestedRemote,
+          sessionId: built.listener,
+          remoteTracks: built.remote,
         });
         if (!authzOp.ok) return new Response('forbidden', { status: 403 });
         if (route === 'sfu/tracks') {
-          const added = await sfu.addRemoteTracks(String(body.sessionId), body);
-          // The floor may have changed while this pull was in flight; the DO re-decides against the room as it is now
-          // and closes the pull server-side if it lost permission. A failed pass is retried by the DO's alarm.
-          if (requestedRemote.length) {
-            await internalOp(env, sessionId, roomId, 'reconcile', { participantId: authz.participantId, cfSessionId: String(body.sessionId) });
+          try {
+            return json(await sfu.addRemoteTracks(built.listener, built.out));
+          } finally {
+            // Success or not (a timeout or error can follow the SFU allocating the pull), the DO re-decides that session
+            // against the room as it is now and closes the pull server-side if it lost permission. If this invocation
+            // is cancelled before getting here, the DO's own post-authorization re-check covers it.
+            if (built.remote.length) {
+              await internalOp(env, sessionId, roomId, 'reconcile', { participantId: authz.participantId, cfSessionId: built.listener })
+                .catch(() => {});
+            }
           }
-          return json(added);
         }
-        return json(await sfu.renegotiate(String(body.sessionId), body));
+        return json(await sfu.renegotiate(built.listener, built.out));
       } catch (e) {
         return json({ ok: false, error: String(e && e.message) }, 502);
       }

@@ -68,16 +68,24 @@ test('a departed session is drained only when everything on it is confirmed clos
   const failing = sfuWith(tracks, () => ({ tracks: [{ mid: '0' }, { mid: '1', errorCode: 'internal_error' }] }));
   const first = await revokeSession(failing, 'SB', { departed: true, permittedFor: () => [] });
   assert.equal(first.drained, false);
-  const quiet = sfuWith(tracks, () => assert.fail('nothing left to close'));
-  const second = await revokeSession(quiet, 'SB', { departed: true, permittedFor: () => [], closed: tracks.map(trackKey) });
+  const afterClose = tracks.map((t) => ({ ...t, status: 'inactive' })); // CF lists closed tracks as inactive
+  const quiet = sfuWith(afterClose, () => assert.fail('nothing left to close'));
+  const second = await revokeSession(quiet, 'SB', { departed: true, permittedFor: () => [], closed: afterClose.map(trackKey) });
   assert.deepEqual(second, { ok: true, closed: [], drained: true });
 });
 
-test('an SFU read error is a retry; a session the SFU no longer knows (404) is drained', async () => {
+test('an SFU read error is a retry; a 404 drains a departed session but never a live member session', async () => {
   const erroring = { async getSession() { return { errorCode: 'internal_error' }; }, async closeTracks() { throw new Error('unreachable'); } };
   assert.deepEqual(await revokeSession(erroring, 'SB', { departed: true, permittedFor: () => [] }), { ok: false, closed: [], drained: false });
   const throwing = { async getSession() { throw new Error('cf-realtime-503'); } };
   await assert.rejects(revokeSession(throwing, 'SB', { departed: true, permittedFor: () => [] }), /503/);
   const gone = { async getSession() { throw new Error('cf-realtime-404'); } };
-  assert.deepEqual(await revokeSession(gone, 'SB', { departed: false, permittedFor: () => [] }), { ok: true, closed: [], drained: true });
+  assert.deepEqual(await revokeSession(gone, 'SB', { departed: true, permittedFor: () => [] }), { ok: true, closed: [], drained: true });
+  assert.deepEqual(await revokeSession(gone, 'SB', { departed: false, permittedFor: () => [] }), { ok: true, closed: [], drained: false });
+});
+
+test('a confirmed-closed track listed ACTIVE again (a recycled mid re-pulling it) is closed again', () => {
+  const t = remote('2', 'SC');
+  assert.deepEqual(mids(staleMids({ departed: false, tracks: [t], permitted: [], closed: [trackKey(t)] })), ['2']);
+  assert.deepEqual(mids(staleMids({ departed: false, tracks: [{ ...t, status: 'inactive' }], permitted: [], closed: [trackKey(t)] })), []);
 });

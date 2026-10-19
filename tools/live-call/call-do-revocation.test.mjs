@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CallRoomDO, INTERNAL_OP_PATH, REVOKE_RETRY_MS, PULL_GRACE_MS } from './call-do.mjs';
+import { CallRoomDO, INTERNAL_OP_PATH, REVOKE_RETRY_MS, PULL_GRACE_MS, PULL_RECHECK_MS } from './call-do.mjs';
 import worker from './worker.mjs';
 
 // Inert CF runtime doubles (as in worker-floor-state.test.mjs) plus a fake SFU that keeps per-session track state the
@@ -47,6 +47,12 @@ function fakeSfu() {
     calls: [], failCloses: 0, failGets: false,
     publish(id) { add(id, { location: 'local', trackName: 'mic' }); },
     pull(listener, publisher) { add(listener, { location: 'remote', sessionId: publisher, trackName: 'mic' }); },
+    publishOn(id, trackName) { add(id, { location: 'local', trackName }); },
+    pullWithMid(listener, publisher, m) {
+      if (!sessions.has(listener)) sessions.set(listener, []);
+      sessions.get(listener).push({ mid: m, status: 'active', location: 'remote', sessionId: publisher, trackName: 'mic' });
+    },
+    midOf(listener, publisher) { return (sessions.get(listener) || []).find((t) => t.sessionId === publisher).mid; },
     active(id) {
       return (sessions.get(id) || []).filter((t) => t.status === 'active')
         .map((t) => (t.location === 'remote' ? `hears:${t.sessionId}` : 'publishes')).sort();
@@ -200,13 +206,14 @@ test('a pull that lands after the floor moved is closed by the Worker\'s post-di
 });
 
 // Drive the actual Worker's sfu/tracks pull; `duringDispatch` runs while the CF tracks/new call is in flight.
-async function workerPull(room, { id, sessionId, tracks, duringDispatch = async () => {} }) {
+async function workerPull(room, { id, sessionId, tracks, duringDispatch = async () => {}, signals = [] }) {
   const savedFetch = globalThis.fetch;
   const dispatched = [];
   globalThis.fetch = async (url, options) => {
     if (String(url) === 'https://gateway.example/authorize') {
       return { ok: true, json: async () => ({ sessionId: 'S', roomId: 'R', participantId: id, role: 'viewer' }) };
     }
+    signals.push(options.signal);
     dispatched.push(JSON.parse(options.body));
     await duringDispatch();
     return { ok: true, json: async () => ({ tracks: [] }) };
@@ -382,4 +389,195 @@ test('ADV-1: a pull that outlives its grace window is still closed: the Worker\'
     },
   });
   assert.deepEqual(sfu.active('Sbob2'), []);
+});
+
+const tick = () => new Promise((r) => setTimeout(r, 10));
+function withClock(fn) {
+  return async () => {
+    const realNow = Date.now;
+    const clock = { skew: 0 };
+    Date.now = () => realNow() + clock.skew;
+    try { await fn(clock); } finally { Date.now = realNow; }
+  };
+}
+
+// Round-2 regressions (R2-n) of #167.
+test('R2-1: grace is judged at READ time: a pass that outlives the window cannot drop a session read inside it', withClock(async (clock) => {
+  const { room, sfu, ws } = await callInProgress();
+  await internal(room, 'bind', { participantId: 'bob', cfSessionId: 'Sbob2' });
+  assert.equal((await (await internal(room, 'sfu-authz', { participantId: 'bob', sessionId: 'Sbob2', remoteTracks: carolTrack })).json()).ok, true);
+  const read = sfu.getSession.bind(sfu);
+  let release; const gate = new Promise((r) => { release = r; });
+  let hold = true;
+  sfu.getSession = async (id) => { const st = await read(id); if (hold && id === 'Salice') await gate; return st; };
+  const leave = say(room, ws.bob, { type: 'leave' }); // reads Sbob2 empty, then waits on a slow read
+  await tick();
+  sfu.pull('Sbob2', 'Scarol'); // the authorized pull lands after that read
+  const rec = internal(room, 'reconcile', { participantId: 'bob', cfSessionId: 'Sbob2' });
+  await tick();
+  clock.skew = PULL_GRACE_MS + 1000; // the pass finishes after the grace window
+  hold = false; release();
+  await leave; await rec;
+  await room.alarm();
+  assert.deepEqual(sfu.active('Sbob2'), []);
+}));
+
+test('R2-2: an abandoned session is no longer the participant\'s: no publication, no pull authorization on it', async () => {
+  const { room } = await callInProgress();
+  await internal(room, 'bind', { participantId: 'dave', cfSessionId: 'Sdave' }); // HTTP mint, no socket
+  room.sfuSessions.Sdave.boundAt -= 300001;
+  await room.alarm();
+  assert.equal(room.sfuSessions.Sdave, undefined);
+  assert.equal(room.mintedTracks.dave, undefined, 'ownership dropped with the orphan');
+  await room.fetch(new Request('https://do/call/R/ws?participant=dave&session=S&room=R&role=viewer', { headers: { Upgrade: 'websocket' } }));
+  await say(room, room.sockets.get('dave'), { type: 'join', cfSessionId: 'Sdave', cfTrackName: 'mic' });
+  assert.equal(room.publishedTracks.dave, undefined, 'no publication on the abandoned session');
+  const { response, dispatched } = await workerPull(room, { id: 'dave', sessionId: 'Sdave', tracks: carolTrack });
+  assert.equal(response.status, 403);
+  assert.deepEqual(dispatched, []);
+});
+
+test('R2-2: sfu-authz refuses a session that is not a live ledger entry, even if still marked as minted', async () => {
+  const { room } = await callInProgress();
+  await internal(room, 'bind', { participantId: 'bob', cfSessionId: 'Sbob3' });
+  room.sfuSessions.Sbob3.departed = true;
+  const res = await (await internal(room, 'sfu-authz', { participantId: 'bob', sessionId: 'Sbob3', remoteTracks: carolTrack })).json();
+  assert.equal(res.ok, false);
+});
+
+test('R2-2: a pull whose SFU call throws is still reconciled (finally), and the DO re-checks after the dispatch bound', async () => {
+  const { state, room, sfu, ws } = await callInProgress();
+  await internal(room, 'bind', { participantId: 'bob', cfSessionId: 'Sbob2' });
+  const before = Date.now();
+  const { response } = await workerPull(room, {
+    id: 'bob', sessionId: 'Sbob2', tracks: carolTrack,
+    duringDispatch: async () => { await say(room, ws.bob, { type: 'leave' }); sfu.pull('Sbob2', 'Scarol'); throw new Error('aborted'); },
+  });
+  assert.equal(response.status, 502);
+  assert.deepEqual(sfu.active('Sbob2'), [], 'closed by the reconcile in finally');
+  const due = await state.storage.getAlarm();
+  assert.ok(due <= before + PULL_RECHECK_MS + 1000, 'a re-check is scheduled after the Worker dispatch bound');
+  assert.ok(PULL_RECHECK_MS > 10000 && PULL_RECHECK_MS < PULL_GRACE_MS);
+});
+
+test('R2-3: a 404 on a live member\'s session keeps it in the ledger, so its pulls are still revoked later', async () => {
+  const { room, sfu, ws } = await callInProgress();
+  const read = sfu.getSession.bind(sfu);
+  let once = true;
+  sfu.getSession = async (id) => { if (once && id === 'Sbob') { once = false; throw new Error('cf-realtime-404'); } return read(id); };
+  await room.alarm();
+  assert.ok(room.sfuSessions.Sbob);
+  await say(room, ws.alice, { type: 'set-floor', floor: 'moderated' });
+  assert.deepEqual(sfu.active('Sbob'), ['hears:Salice', 'publishes']);
+});
+
+test('R2-4: a re-pull that reuses a confirmed-closed mid for the same track is closed again', async () => {
+  const { room, sfu, ws } = await callInProgress();
+  const m = sfu.midOf('Sbob', 'Scarol');
+  await say(room, ws.alice, { type: 'set-floor', floor: 'moderated' });
+  await say(room, ws.alice, { type: 'set-floor', floor: 'open' });
+  sfu.pullWithMid('Sbob', 'Scarol', m); // permitted re-pull; the SFU recycles the transceiver
+  await say(room, ws.alice, { type: 'set-floor', floor: 'moderated' });
+  assert.deepEqual(sfu.active('Sbob'), ['hears:Salice', 'publishes']);
+});
+
+test('R2-5: the SFU only receives a body rebuilt from validated fields; unknown or case-variant keys are refused', async () => {
+  const { room } = await callInProgress();
+  for (const tracks of [
+    [{ ...carolTrack[0], Mid: '#mic' }],
+    [{ location: 'local', Location: 'remote', sessionId: 'Sx-other-room', trackName: 'mic' }],
+    [{ location: 'local', trackName: 'mic', sessionId: 'Sx' }], // a local track carrying a session id
+    [{ ...carolTrack[0], kind: 'screen' }],
+  ]) {
+    const { response, dispatched } = await workerPull(room, { id: 'bob', sessionId: 'Sbob', tracks });
+    assert.equal(response.status, 400, JSON.stringify(tracks));
+    assert.deepEqual(dispatched, []);
+  }
+  const ok = await workerPull(room, { id: 'bob', sessionId: 'Sbob', tracks: [{ ...carolTrack[0], kind: 'audio' }] });
+  assert.equal(ok.response.status, 200);
+  assert.deepEqual(ok.dispatched, [{ tracks: [{ location: 'remote', sessionId: 'Scarol', trackName: 'mic', kind: 'audio' }] }]);
+});
+
+// Properties the round-2 review showed no test guarded.
+test('the DO reads at most 4 sessions at a time', async () => {
+  const { room, sfu } = await callInProgress();
+  for (let i = 0; i < 9; i += 1) await internal(room, 'bind', { participantId: 'alice', cfSessionId: `Sx${i}` });
+  const read = sfu.getSession.bind(sfu);
+  let inFlight = 0; let peak = 0;
+  sfu.getSession = async (id) => { inFlight += 1; peak = Math.max(peak, inFlight); await tick(); inFlight -= 1; return read(id); };
+  await room.alarm();
+  assert.ok(peak > 1 && peak <= 4, `peak ${peak}`);
+});
+
+test('SFU calls are bounded: the DO and the Worker both pass an abort signal', async () => {
+  const state = makeState();
+  const savedFetch = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = async (url, options) => { seen.push(options.signal); return { ok: true, json: async () => ({ tracks: [] }) }; };
+  try {
+    const room = new CallRoomDO(state, { INTERNAL_BIND_KEY: KEY, CF_REALTIME_APP_ID: 'app', CF_REALTIME_APP_SECRET: 'inert' });
+    await state.ready;
+    await internal(room, 'bind', { participantId: 'a', cfSessionId: 'Sa' });
+    await room.alarm();
+  } finally { globalThis.fetch = savedFetch; }
+  assert.ok(seen.length > 0 && seen.every((s) => s instanceof AbortSignal), 'DO SFU reads carry a timeout signal');
+  const { room } = await callInProgress();
+  const signals = [];
+  await workerPull(room, { id: 'bob', sessionId: 'Sbob', tracks: carolTrack, signals });
+  assert.ok(signals.length === 1 && signals[0] instanceof AbortSignal, 'the Worker dispatch carries a timeout signal');
+});
+
+test('a floor op that did not apply costs no SFU pass', async () => {
+  const { room, sfu, ws } = await callInProgress();
+  sfu.calls.length = 0;
+  await say(room, ws.alice, { type: 'grant-floor', participantId: 'nobody' }); // open floor: refused
+  assert.equal(sfu.calls.length, 0);
+});
+
+test('grace and confirmed closes survive a hibernation rebuild', async () => {
+  const { state, room, sfu, ws } = await callInProgress();
+  await internal(room, 'bind', { participantId: 'bob', cfSessionId: 'Sbob2' });
+  await internal(room, 'sfu-authz', { participantId: 'bob', sessionId: 'Sbob2', remoteTracks: carolTrack });
+  await say(room, ws.alice, { type: 'set-floor', floor: 'moderated' }); // closes bob's pull of carol on Sbob
+  const rebuilt = new CallRoomDO(state, { INTERNAL_BIND_KEY: KEY });
+  await state.ready;
+  rebuilt.sfu = sfu;
+  assert.ok(rebuilt.sfuSessions.Sbob2.pullPendingUntil > Date.now());
+  assert.ok(rebuilt.sfuSessions.Sbob.closed.length > 0);
+  sfu.calls.length = 0;
+  await rebuilt.alarm();
+  assert.equal(sfu.calls.filter((c) => c[0] === 'close' && c[1] === 'Sbob').length, 0, 'no second close of a confirmed-closed track');
+});
+
+test('a re-added session of someone who left is closed entirely, publication included', async () => {
+  const { room, sfu, ws } = await callInProgress();
+  await internal(room, 'bind', { participantId: 'bob', cfSessionId: 'Sbob2' });
+  await workerPull(room, {
+    id: 'bob', sessionId: 'Sbob2', tracks: carolTrack,
+    duringDispatch: async () => {
+      room.sfuSessions.Sbob2.pullPendingUntil = 0;
+      await say(room, ws.bob, { type: 'leave' });
+      sfu.publishOn('Sbob2', 'cam');
+      sfu.pull('Sbob2', 'Scarol');
+    },
+  });
+  assert.deepEqual(sfu.active('Sbob2'), []);
+});
+
+test('the orphan rule spares a participant whose socket is open but who has not joined yet', async () => {
+  const { room, sfu } = await callInProgress();
+  await internal(room, 'bind', { participantId: 'erin', cfSessionId: 'Serin' });
+  sfu.publishOn('Serin', 'mic');
+  await room.fetch(new Request('https://do/call/R/ws?participant=erin&session=S&room=R&role=viewer', { headers: { Upgrade: 'websocket' } }));
+  room.sfuSessions.Serin.boundAt -= 300001;
+  await room.alarm();
+  assert.equal(room.sfuSessions.Serin.departed, false);
+  assert.deepEqual(sfu.active('Serin'), ['publishes']);
+});
+
+test('the post-dispatch reconcile reads only the session it dispatched on', async () => {
+  const { room, sfu } = await callInProgress();
+  sfu.calls.length = 0;
+  await internal(room, 'reconcile', { participantId: 'bob', cfSessionId: 'Sbob' });
+  assert.deepEqual(sfu.calls.filter((c) => c[0] === 'get').map((c) => c[1]), ['Sbob']);
 });
