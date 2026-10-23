@@ -17,7 +17,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Review pilot source with mandatory private configuration
-        uses: Sentinelayer-AIdenID/sentinelayer-v1-action@79ee93760547e637cdfcab5385903ebf9250ab57
+        uses: Sentinelayer-AIdenID/sentinelayer-v1-action@7e109850e2d8349ce9271a8226d5f55b5c69cee5
         with:
           review_routing: intent-cascade-v1
           llm_provider: typesafe
