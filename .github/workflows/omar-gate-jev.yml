@@ -5,9 +5,10 @@ on:
 permissions:
   contents: read
   pull-requests: read
+# Fork PRs are NOT skipped: a skipped job counts as a passing required check. The action's fork_policy: block fails them
+# closed instead (forks also receive no secrets, so the private configuration is missing and the review is refused).
 jobs:
   omar-jev:
-    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -26,6 +27,7 @@ jobs:
           intent_model_pin: ${{ secrets.INTENT_MODEL_PIN }}
           intent_policy: ${{ secrets.INTENT_POLICY }}
           intent_price_profile: typesafe-input-20261020
+          sentinelayer_token: ${{ secrets.SENTINELAYER_TOKEN }}
           scan_mode: pr-diff
           severity_gate: P1
           codex_model: gpt-6-sol
