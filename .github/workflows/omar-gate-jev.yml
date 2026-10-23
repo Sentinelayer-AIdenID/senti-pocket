@@ -2,11 +2,13 @@ name: Omar Gate (Jev)
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+# Write scopes publish the PR report (comment + check run, tagged jev so it never overwrites the legacy Omar Gate's),
+# exactly like the legacy omar-gate.yml. GitHub gives fork PRs a read-only token, and fork_policy: block fails them closed.
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write
   actions: read
-  checks: read
+  checks: write
 # Fork PRs are NOT skipped: a skipped job counts as a passing required check. The action's fork_policy: block fails them
 # closed instead (forks also receive no secrets, so the private configuration is missing and the review is refused).
 jobs:
@@ -39,7 +41,8 @@ jobs:
           sentinelayer_managed_llm: "false"
           llm_failure_policy: block
           fork_policy: block
-          publish_github: "false"
+          publish_github: "true"
+          comment_tag: jev
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
