@@ -5,6 +5,8 @@ on:
 permissions:
   contents: read
   pull-requests: read
+  actions: read
+  checks: read
 # Fork PRs are NOT skipped: a skipped job counts as a passing required check. The action's fork_policy: block fails them
 # closed instead (forks also receive no secrets, so the private configuration is missing and the review is refused).
 jobs:
@@ -20,6 +22,7 @@ jobs:
       - name: Omar Gate (Jev intent cascade)
         uses: Sentinelayer-AIdenID/sentinelayer-v1-action@ebfcb813126ff64f21bb1fccfef8ab30609af67c
         with:
+          github_token: ${{ github.token }}
           review_routing: intent-cascade-v1
           llm_provider: typesafe
           typesafe_api_key: ${{ secrets.TYPESAFE_API_KEY }}
