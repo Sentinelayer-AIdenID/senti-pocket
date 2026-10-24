@@ -1,21 +1,9 @@
 # Omar Gate — Senti Pocket
 
-Set up the **same way as the SentinelLayer org repos**: `.github/workflows/omar-gate.yml` calls the reusable `mrrCarter/sentinelayer-v1-action` (pinned SHA `c61fb388…`), which delegates a **real-LLM deep scan** to the Sentinelayer backend and posts a PR review + a required `Omar Gate` check.
+The canonical [Omar Gate workflow](../.github/workflows/omar-gate.yml) uses the pinned full SentinelLayer Action. On trusted pushes and pull requests, its Deep Scan calls the repository's OpenAI key directly with `gpt-6.1-sol`. It selects `review_routing: legacy`, sets all model inputs to `gpt-6.1-sol`, disables Codex CLI and managed LLM routing, and blocks on LLM failure. No second provider or Jev cascade is configured.
 
-## Configuration (matches the org default)
-- **Model:** `gpt-5.3-codex` (codex 5.3) — `use_codex: true`, `model_fallback: gemini-2.5-flash`
-- **Managed LLM:** `sentinelayer_managed_llm: true` (backend adjudication)
-- **Scan mode:** `deep` · **Severity gate:** `P1` (P1+ findings block merge)
-- **Failure policy:** `block` (fail-closed — if adjudication can't complete, the gate blocks; it does not silently pass)
-- **Fork PRs:** privileged scan skipped (precheck guard)
+`Omar Gate Precheck` keeps secrets away from fork pull requests. Forks run `Omar Gate Fork Static` against the untrusted head with persisted credentials disabled. `Omar Gate Finalize` consolidates the trusted scan or fork result and fails closed; this is the check to require in branch protection. Trusted scans also run `Telemetry Upload Assertion`.
 
-## Activation — NOT yet live. Three gates, all owner actions:
-1. **GitHub Actions billing.** Actions is account-suspended (billing lapse, 2026-07-17). The workflow will not execute on any repo under this account until billing is restored. Until then Omar is **dormant**.
-2. **Repo secret `SENTINELAYER_TOKEN`.** Required to authorize the scan. Add in `Settings → Secrets and variables → Actions` (same token the org repos use). Optional provider fallbacks: `OPENAI_API_KEY`, `GOOGLE_GEMINI_API_KEY`. Optional var `SENTINELAYER_SPEC_ID` to bind a spec-governance context. The backend must also recognize `mrrCarter/senti-pocket` for `managed_llm:invoke` (it's a new repo — confirm the Omar backend authorizes it).
-3. **Branch protection (required check).** Making `Omar Gate` a *required* status check needs **GitHub Pro** or a **public** repo — the branch-protection API currently returns `403 Upgrade to GitHub Pro or make this repository public` on this private/free combo. Until then the check runs but cannot be hard-required by GitHub.
+The workflow requires `OPENAI_API_KEY` for the direct model call and `SENTINELAYER_TOKEN` for Omar telemetry, artifacts, and PR checks. `SENTINELAYER_SPEC_ID` is an optional repository variable. On pull requests, the gate allows no P0/P1 findings and at most five P2 findings scoped to changed files. The push ceiling defaults to 40 P2 findings and can be set with `OMAR_PUSH_P2_MAX_ALLOWED` while the repository baseline is reduced.
 
-## Interim posture
-Until Omar is live, **claude-warden is the enforcing gate**: no merge to the demo branch without a warden audit vs `SWE_excellence_framework` + a security scan + a second distinct-role sign-off. CI/billing being down does not lower the bar.
-
-## Known operational risk (from org experience)
-Fail-closed + all providers dry ⇒ the gate can self-DoS merges during a provider-capacity outage. The org repos add a deterministic break-glass fallback lane (needs a `scripts/ci/classify_omar_provider_outage.py` classifier). Port that here if/when Pocket depends on Omar for release velocity.
+Keep the Action on a reviewed full commit SHA and run `python3 scripts/ci/check_omar_workflow_contract.py --self-test` after changes to its route, model, or check topology. Enable the canonical workflow and require `Omar Gate Finalize` in GitHub before relying on it as a merge gate.
