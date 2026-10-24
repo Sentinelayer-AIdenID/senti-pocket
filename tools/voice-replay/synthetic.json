@@ -1,0 +1,112 @@
+{
+  "schema": "voice-replay.dataset.v1",
+  "corpus_id": "invented_fixture",
+  "sessions": [
+    {
+      "session_id": "invented_dev",
+      "split": "development",
+      "source_kind": "synthetic",
+      "source_sha256": "a76dd5f7a2fc7daab527791b11fe89347de7652cfbe70d5f55539841b0310a66",
+      "agents": [
+        {
+          "id": "atlas",
+          "aliases": [
+            "atlas"
+          ],
+          "role": "Release planning"
+        },
+        {
+          "id": "cedar",
+          "aliases": [
+            "cedar"
+          ],
+          "role": "Security review"
+        },
+        {
+          "id": "rue",
+          "aliases": [
+            "rue"
+          ],
+          "role": "Interface design"
+        }
+      ],
+      "turns": [
+        {
+          "id": "turn_1",
+          "source_key": "invented_dev:1",
+          "start_us": 1000000,
+          "text": "Atlas, ask Cedar about the release. Rue, please answer the layout question.",
+          "context": [],
+          "label": {
+            "target": "rue",
+            "basis": "adjudicated"
+          }
+        },
+        {
+          "id": "turn_2",
+          "source_key": "invented_dev:2",
+          "start_us": 2000000,
+          "text": "The policy audit is blocked. Cedar, what is the next check?",
+          "context": [],
+          "label": {
+            "target": "cedar",
+            "basis": "adjudicated"
+          }
+        }
+      ]
+    },
+    {
+      "session_id": "invented_holdout",
+      "split": "holdout",
+      "source_kind": "synthetic",
+      "source_sha256": "24f9495a758e1f5195fc423c65a5f3618fdd662bd51f3a5c155a3b957c5fbdbf",
+      "agents": [
+        {
+          "id": "atlas",
+          "aliases": [
+            "atlas"
+          ],
+          "role": "Release planning"
+        },
+        {
+          "id": "cedar",
+          "aliases": [
+            "cedar"
+          ],
+          "role": "Security review"
+        },
+        {
+          "id": "rue",
+          "aliases": [
+            "rue"
+          ],
+          "role": "Interface design"
+        }
+      ],
+      "turns": [
+        {
+          "id": "turn_1",
+          "source_key": "invented_holdout:1",
+          "start_us": 1000000,
+          "text": "Rue, wait for Atlas to finish. Cedar, take the security question.",
+          "context": [],
+          "label": {
+            "target": "cedar",
+            "basis": "adjudicated"
+          }
+        },
+        {
+          "id": "turn_2",
+          "source_key": "invented_holdout:2",
+          "start_us": 2000000,
+          "text": "Atlas, who is scheduled for the release review?",
+          "context": [],
+          "label": {
+            "target": "atlas",
+            "basis": "adjudicated"
+          }
+        }
+      ]
+    }
+  ]
+}

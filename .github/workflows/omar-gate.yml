@@ -91,20 +91,21 @@ jobs:
 
       - name: Omar Gate
         id: omar
-        uses: mrrCarter/sentinelayer-v1-action@8afb7dbb42a5e1c25233d422c4cabe401ba02380 # full Omar action + managed capacity fallback
+        uses: mrrCarter/sentinelayer-v1-action@2d5a8edd485595148254926c9fb318e0adae416a # full Omar action; direct OpenAI legacy routing
         with:
           github_token: ${{ github.token }}
+          review_routing: legacy
           llm_provider: openai
           openai_api_key: ${{ secrets.OPENAI_API_KEY }}
           sentinelayer_token: ${{ secrets.SENTINELAYER_TOKEN }}
-          sentinelayer_managed_llm: ${{ secrets.SENTINELAYER_TOKEN != '' }}
+          sentinelayer_managed_llm: "false"
           sentinelayer_spec_id: ${{ vars.SENTINELAYER_SPEC_ID || '' }}
           scan_mode: ${{ github.event_name == 'workflow_dispatch' && inputs.scan_mode || 'deep' }}
           severity_gate: P1
-          model: gpt-5.3-codex
-          codex_model: gpt-5.3-codex
-          model_fallback: gpt-5.3-codex
-          use_codex: "true"
+          model: gpt-6.1-sol
+          codex_model: gpt-6.1-sol
+          model_fallback: gpt-6.1-sol
+          use_codex: "false"
           codex_only: "false"
           llm_failure_policy: block
 
@@ -112,19 +113,25 @@ jobs:
         shell: bash
         env:
           REQUESTED_LLM_PROVIDER: openai
-          REQUESTED_MODEL: gpt-5.3-codex
-          REQUESTED_CODEX_MODEL: gpt-5.3-codex
-          REQUESTED_FALLBACK_MODEL: gpt-5.3-codex
-          REQUESTED_USE_CODEX: "true"
+          REQUESTED_ROUTING: legacy
+          REQUESTED_MODEL: gpt-6.1-sol
+          REQUESTED_CODEX_MODEL: gpt-6.1-sol
+          REQUESTED_FALLBACK_MODEL: gpt-6.1-sol
+          REQUESTED_USE_CODEX: "false"
+          REQUESTED_CODEX_ONLY: "false"
+          REQUESTED_MANAGED_LLM: "false"
           REQUESTED_FAILURE_POLICY: block
           GATE_STATUS: ${{ steps.omar.outputs.gate_status || '' }}
         run: |
           set -euo pipefail
           provider="$(echo "${REQUESTED_LLM_PROVIDER}" | tr -d '\r' | xargs || true)"
+          routing="$(echo "${REQUESTED_ROUTING}" | tr -d '\r' | xargs || true)"
           model="$(echo "${REQUESTED_MODEL}" | tr -d '\r' | xargs || true)"
           codex_model="$(echo "${REQUESTED_CODEX_MODEL}" | tr -d '\r' | xargs || true)"
           fallback="$(echo "${REQUESTED_FALLBACK_MODEL}" | tr -d '\r' | xargs || true)"
           use_codex="$(echo "${REQUESTED_USE_CODEX}" | tr -d '\r' | xargs || true)"
+          codex_only="$(echo "${REQUESTED_CODEX_ONLY}" | tr -d '\r' | xargs || true)"
+          managed_llm="$(echo "${REQUESTED_MANAGED_LLM}" | tr -d '\r' | xargs || true)"
           failure_policy="$(echo "${REQUESTED_FAILURE_POLICY}" | tr -d '\r' | xargs || true)"
           provider_lc="$(echo "${provider}" | tr '[:upper:]' '[:lower:]')"
           model_lc="$(echo "${model}" | tr '[:upper:]' '[:lower:]')"
@@ -134,11 +141,10 @@ jobs:
             echo "::error::Omar requested model contract is incomplete (provider='${provider}' model='${model}' codex_model='${codex_model}' gate='${gate_status}'). Blocking merge."
             exit 1
           fi
-          # Deterministic codex contract (owner override): provider=openai,
-          # model/codex_model/model_fallback all pinned to gpt-5.3-codex,
-          # use_codex=true, llm_failure_policy=block. Any drift blocks merge.
-          if [ "${provider_lc}" != "openai" ] || [ "${model}" != "gpt-5.3-codex" ] || [ "${codex_model}" != "gpt-5.3-codex" ] || [ "${fallback}" != "gpt-5.3-codex" ] || [ "${use_codex}" != "true" ] || [ "${failure_policy}" != "block" ]; then
-            echo "::error::Omar deterministic codex contract drifted (provider='${provider}' model='${model}' codex_model='${codex_model}' fallback='${fallback}' use_codex='${use_codex}' failure='${failure_policy}'). Blocking merge."
+          # Direct OpenAI legacy contract: Sol 6.1 only, with no Codex CLI,
+          # managed capacity, or Jev cascade. Any drift blocks merge.
+          if [ "${provider_lc}" != "openai" ] || [ "${routing}" != "legacy" ] || [ "${model}" != "gpt-6.1-sol" ] || [ "${codex_model}" != "gpt-6.1-sol" ] || [ "${fallback}" != "gpt-6.1-sol" ] || [ "${use_codex}" != "false" ] || [ "${codex_only}" != "false" ] || [ "${managed_llm}" != "false" ] || [ "${failure_policy}" != "block" ]; then
+            echo "::error::Omar direct OpenAI contract drifted (provider='${provider}' routing='${routing}' model='${model}' codex_model='${codex_model}' fallback='${fallback}' use_codex='${use_codex}' codex_only='${codex_only}' managed_llm='${managed_llm}' failure='${failure_policy}'). Blocking merge."
             exit 1
           fi
           case "${model_lc}" in
@@ -157,7 +163,7 @@ jobs:
             echo "::error::Omar Gate did not pass (gate='${gate_status}'). Blocking merge."
             exit 1
           fi
-          echo "Omar LLM contract active: provider='${provider}' model='${model}' codex_model='${codex_model}' fallback='${fallback}' gate='${gate_status}'"
+          echo "Omar LLM contract active: provider='${provider}' routing='${routing}' model='${model}' fallback='${fallback}' gate='${gate_status}'"
 
       - name: Resolve sanitized Omar artifact directory
         id: artifact_path
@@ -312,7 +318,7 @@ jobs:
             echo "## Omar Gate Fork Static"
             echo "- mode: \`fork-pr-static-no-secrets\`"
             echo "- checkout: \`pull request head with persist-credentials=false\`"
-            echo "- canonical Omar Gate: \`runs on trusted branches with repo-owned OpenAI/Codex secrets plus managed fallback\`"
+            echo "- canonical Omar Gate: \`runs on trusted branches with repo-owned OpenAI Sol 6.1\`"
             echo "- deterministic static checks: \`passed\`"
             echo "- required_context: \`Omar Gate Finalize\`"
           } >> "$GITHUB_STEP_SUMMARY"

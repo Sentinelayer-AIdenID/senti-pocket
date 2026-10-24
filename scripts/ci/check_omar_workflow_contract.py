@@ -18,24 +18,22 @@ BRIDGE_OR_BROKEN_MARKERS = (
 )
 
 
-def _line_has_managed_llm_enabled(line: str) -> bool:
-    normalized = line.split("#", 1)[0].strip().lower().replace("'", '"')
-    return normalized in {
-        'sentinelayer_managed_llm: "true"',
-        "sentinelayer_managed_llm: true",
-    }
-
-
-# senti-pocket runs a DETERMINISTIC codex contract (owner override): no
-# OpenAI/Google conditional. Provider is pinned to openai, model/codex_model/
-# model_fallback are all pinned to gpt-5.3-codex, use_codex is "true", and the
-# managed-capacity fallback is enabled whenever SENTINELAYER_TOKEN is present.
+# The canonical Omar workflow uses the existing legacy route with only the
+# repository's OpenAI key. The action pin must include GPT-6 temperature
+# handling; no Codex CLI, managed capacity, or alternate provider may run.
+ALLOWED_ACTION_LINE = (
+    "uses: mrrCarter/sentinelayer-v1-action@2d5a8edd485595148254926c9fb318e0adae416a"
+)
 ALLOWED_OPENAI_API_KEY_LINE = "openai_api_key: ${{ secrets.OPENAI_API_KEY }}"
+ALLOWED_REVIEW_ROUTING_LINE = "review_routing: legacy"
 ALLOWED_LLM_PROVIDER_LINE = "llm_provider: openai"
-ALLOWED_MANAGED_LLM_LINE = "sentinelayer_managed_llm: ${{ secrets.SENTINELAYER_TOKEN != '' }}"
-ALLOWED_MODEL_LINE = "model: gpt-5.3-codex"
-ALLOWED_MODEL_FALLBACK_LINE = "model_fallback: gpt-5.3-codex"
-ALLOWED_USE_CODEX_LINE = 'use_codex: "true"'
+ALLOWED_MANAGED_LLM_LINE = 'sentinelayer_managed_llm: "false"'
+ALLOWED_MODEL_LINE = "model: gpt-6.1-sol"
+ALLOWED_CODEX_MODEL_LINE = "codex_model: gpt-6.1-sol"
+ALLOWED_MODEL_FALLBACK_LINE = "model_fallback: gpt-6.1-sol"
+ALLOWED_USE_CODEX_LINE = 'use_codex: "false"'
+ALLOWED_CODEX_ONLY_LINE = 'codex_only: "false"'
+ALLOWED_FAILURE_POLICY_LINE = "llm_failure_policy: block"
 TELEMETRY_LOG_DOWNLOAD_FRAGMENTS = (
     "curl --silent --show-error --location --fail-with-body",
     "--proto-redir '=https' --max-redirs 3",
@@ -44,15 +42,46 @@ TELEMETRY_LOG_DOWNLOAD_FRAGMENTS = (
 )
 
 
-def _repo_llm_configured(workflow_text: str) -> bool:
-    return (
-        ALLOWED_OPENAI_API_KEY_LINE in workflow_text
-        and ALLOWED_LLM_PROVIDER_LINE in workflow_text
-        and ALLOWED_MANAGED_LLM_LINE in workflow_text
-        and ALLOWED_MODEL_LINE in workflow_text
-        and ALLOWED_MODEL_FALLBACK_LINE in workflow_text
-        and ALLOWED_USE_CODEX_LINE in workflow_text
+def _direct_sol_configured(omar_job_lines: list[str]) -> bool:
+    action_steps = [
+        index
+        for index, line in enumerate(omar_job_lines)
+        if line.startswith("        uses: ") and "sentinelayer-v1-action@" in line
+    ]
+    if len(action_steps) != 1:
+        return False
+
+    action_start = action_steps[0]
+    if omar_job_lines[action_start].split("#", 1)[0].strip() != ALLOWED_ACTION_LINE:
+        return False
+    action_end = next(
+        (
+            index
+            for index in range(action_start + 1, len(omar_job_lines))
+            if omar_job_lines[index].startswith("      - ")
+        ),
+        len(omar_job_lines),
     )
+    action_lines = omar_job_lines[action_start:action_end]
+    if "        with:" not in action_lines:
+        return False
+    inputs = {
+        line.split("#", 1)[0].strip()
+        for line in action_lines[action_lines.index("        with:") + 1 :]
+        if line.startswith("          ") and not line.startswith("            ")
+    }
+    return {
+        ALLOWED_OPENAI_API_KEY_LINE,
+        ALLOWED_REVIEW_ROUTING_LINE,
+        ALLOWED_LLM_PROVIDER_LINE,
+        ALLOWED_MANAGED_LLM_LINE,
+        ALLOWED_MODEL_LINE,
+        ALLOWED_CODEX_MODEL_LINE,
+        ALLOWED_MODEL_FALLBACK_LINE,
+        ALLOWED_USE_CODEX_LINE,
+        ALLOWED_CODEX_ONLY_LINE,
+        ALLOWED_FAILURE_POLICY_LINE,
+    } <= inputs
 
 
 def _is_job_start(line: str) -> bool:
@@ -145,50 +174,80 @@ def validate_omar_workflow_text(workflow_text: str) -> None:
 
     for line in lines:
         stripped = line.split("#", 1)[0].strip()
+        if "sentinelayer-v1-action@" in stripped and stripped != ALLOWED_ACTION_LINE:
+            raise OmarWorkflowContractError(
+                "Omar action must use the reviewed GPT-6-compatible pin"
+            )
         if stripped.startswith("pr_number:"):
             raise OmarWorkflowContractError(
                 "full Omar action workflow must not pass bridge-only pr_number"
             )
-        if stripped.startswith("openai_api_key:") and stripped != ALLOWED_OPENAI_API_KEY_LINE:
+        if (
+            stripped.startswith("openai_api_key:")
+            and stripped != ALLOWED_OPENAI_API_KEY_LINE
+        ):
             raise OmarWorkflowContractError(
                 "openai_api_key must come from secrets.OPENAI_API_KEY"
             )
         if stripped.startswith(
-            ("anthropic_api_key:", "xai_api_key:", "google_api_key:")
+            (
+                "anthropic_api_key:",
+                "xai_api_key:",
+                "google_api_key:",
+                "typesafe_api_key:",
+            )
         ):
             raise OmarWorkflowContractError(
-                "deterministic codex Omar workflow must not pass non-OpenAI provider-key inputs"
+                "direct OpenAI Omar workflow must not pass alternate provider keys"
             )
-        if stripped.startswith("llm_provider:") and stripped != ALLOWED_LLM_PROVIDER_LINE:
+        if (
+            stripped.startswith("review_routing:")
+            and stripped != ALLOWED_REVIEW_ROUTING_LINE
+        ):
+            raise OmarWorkflowContractError("review_routing must remain legacy")
+        if (
+            stripped.startswith("llm_provider:")
+            and stripped != ALLOWED_LLM_PROVIDER_LINE
+        ):
             raise OmarWorkflowContractError(
-                "llm_provider must be pinned to openai on the deterministic codex path"
+                "llm_provider must be pinned to openai on the direct path"
             )
         if stripped.startswith("model:") and stripped != ALLOWED_MODEL_LINE:
+            raise OmarWorkflowContractError("model must be pinned to gpt-6.1-sol")
+        if stripped.startswith("codex_model:") and stripped != ALLOWED_CODEX_MODEL_LINE:
+            raise OmarWorkflowContractError("codex_model must be pinned to gpt-6.1-sol")
+        if (
+            stripped.startswith("model_fallback:")
+            and stripped != ALLOWED_MODEL_FALLBACK_LINE
+        ):
             raise OmarWorkflowContractError(
-                "model must be pinned to the deterministic codex model gpt-5.3-codex"
+                "model_fallback must be pinned to gpt-6.1-sol"
             )
-        if stripped.startswith("model_fallback:") and stripped != ALLOWED_MODEL_FALLBACK_LINE:
-            raise OmarWorkflowContractError(
-                "model_fallback must be pinned to gpt-5.3-codex on the deterministic codex path"
-            )
-        if stripped.startswith("sentinelayer_managed_llm:") and stripped != ALLOWED_MANAGED_LLM_LINE:
-            raise OmarWorkflowContractError(
-                "sentinelayer_managed_llm must match the SENTINELAYER_TOKEN-present managed-capacity expression"
-            )
-
-    managed_llm_enabled = any(_line_has_managed_llm_enabled(line) for line in lines)
-    repo_llm_configured = _repo_llm_configured(workflow_text)
-    if managed_llm_enabled or not repo_llm_configured:
-        raise OmarWorkflowContractError(
-            "omar-gate.yml must use repo-owned OpenAI/Codex with Gemini fallback, and managed only when BYO keys are absent"
-        )
+        if (
+            stripped.startswith("sentinelayer_managed_llm:")
+            and stripped != ALLOWED_MANAGED_LLM_LINE
+        ):
+            raise OmarWorkflowContractError("sentinelayer_managed_llm must be false")
+        if stripped.startswith("use_codex:") and stripped != ALLOWED_USE_CODEX_LINE:
+            raise OmarWorkflowContractError("use_codex must be false")
+        if stripped.startswith("codex_only:") and stripped != ALLOWED_CODEX_ONLY_LINE:
+            raise OmarWorkflowContractError("codex_only must be false")
+        if (
+            stripped.startswith("llm_failure_policy:")
+            and stripped != ALLOWED_FAILURE_POLICY_LINE
+        ):
+            raise OmarWorkflowContractError("llm_failure_policy must be block")
 
     if not _top_level_permissions_include_oidc_write(lines):
         raise OmarWorkflowContractError(
-            "top-level permissions must include id-token: write for managed/provenance-capable Omar scans"
+            "top-level permissions must include id-token: write for Omar telemetry and provenance"
         )
 
     omar_job_lines = _find_omar_review_job_lines(lines)
+    if not _direct_sol_configured(omar_job_lines):
+        raise OmarWorkflowContractError(
+            "Omar review action must use repo-owned OpenAI Sol 6.1 on the legacy route"
+        )
     if not _job_permissions_include_oidc_write(omar_job_lines):
         raise OmarWorkflowContractError(
             "jobs.omar-review.permissions must include id-token: write"
@@ -262,22 +321,27 @@ def validate_omar_workflow_text(workflow_text: str) -> None:
         "check_forbidden_omar_surface.py",
         "Validate Omar provider secrets",
         "OPENAI_API_KEY is required for repo-owned Omar LLM scans",
-        "mrrCarter/sentinelayer-v1-action@8afb7dbb42a5e1c25233d422c4cabe401ba02380",
+        ALLOWED_ACTION_LINE,
         "Omar Gate",
-        "openai_api_key: ${{ secrets.OPENAI_API_KEY }}",
-        "llm_provider: openai",
-        "sentinelayer_managed_llm: ${{ secrets.SENTINELAYER_TOKEN != '' }}",
-        "model: gpt-5.3-codex",
-        "codex_model: gpt-5.3-codex",
-        "model_fallback: gpt-5.3-codex",
-        'use_codex: "true"',
-        "llm_failure_policy: block",
+        ALLOWED_OPENAI_API_KEY_LINE,
+        ALLOWED_REVIEW_ROUTING_LINE,
+        ALLOWED_LLM_PROVIDER_LINE,
+        ALLOWED_MANAGED_LLM_LINE,
+        ALLOWED_MODEL_LINE,
+        ALLOWED_CODEX_MODEL_LINE,
+        ALLOWED_MODEL_FALLBACK_LINE,
+        ALLOWED_USE_CODEX_LINE,
+        ALLOWED_CODEX_ONLY_LINE,
+        ALLOWED_FAILURE_POLICY_LINE,
         "Assert Omar LLM contract is active",
         "REQUESTED_LLM_PROVIDER: openai",
-        "REQUESTED_MODEL: gpt-5.3-codex",
-        "REQUESTED_CODEX_MODEL: gpt-5.3-codex",
-        "REQUESTED_FALLBACK_MODEL: gpt-5.3-codex",
-        'REQUESTED_USE_CODEX: "true"',
+        "REQUESTED_ROUTING: legacy",
+        "REQUESTED_MODEL: gpt-6.1-sol",
+        "REQUESTED_CODEX_MODEL: gpt-6.1-sol",
+        "REQUESTED_FALLBACK_MODEL: gpt-6.1-sol",
+        'REQUESTED_USE_CODEX: "false"',
+        'REQUESTED_CODEX_ONLY: "false"',
+        'REQUESTED_MANAGED_LLM: "false"',
         "REQUESTED_FAILURE_POLICY: block",
         "Omar LLM contract active",
         "Omar Gate did not pass",
@@ -339,24 +403,28 @@ jobs:
           echo "SENTINELAYER_TOKEN is required for Omar Gate telemetry, artifacts, and PR checks."
           echo "OPENAI_API_KEY is required for repo-owned Omar LLM scans."
       - name: Omar Gate
-        uses: mrrCarter/sentinelayer-v1-action@8afb7dbb42a5e1c25233d422c4cabe401ba02380
+        uses: mrrCarter/sentinelayer-v1-action@2d5a8edd485595148254926c9fb318e0adae416a
         with:
           openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+          review_routing: legacy
           llm_provider: openai
-          sentinelayer_managed_llm: ${{ secrets.SENTINELAYER_TOKEN != '' }}
-          model: gpt-5.3-codex
-          codex_model: gpt-5.3-codex
-          model_fallback: gpt-5.3-codex
-          use_codex: "true"
+          sentinelayer_managed_llm: "false"
+          model: gpt-6.1-sol
+          codex_model: gpt-6.1-sol
+          model_fallback: gpt-6.1-sol
+          use_codex: "false"
           codex_only: "false"
           llm_failure_policy: block
       - name: Assert Omar LLM contract is active
         env:
           REQUESTED_LLM_PROVIDER: openai
-          REQUESTED_MODEL: gpt-5.3-codex
-          REQUESTED_CODEX_MODEL: gpt-5.3-codex
-          REQUESTED_FALLBACK_MODEL: gpt-5.3-codex
-          REQUESTED_USE_CODEX: "true"
+          REQUESTED_ROUTING: legacy
+          REQUESTED_MODEL: gpt-6.1-sol
+          REQUESTED_CODEX_MODEL: gpt-6.1-sol
+          REQUESTED_FALLBACK_MODEL: gpt-6.1-sol
+          REQUESTED_USE_CODEX: "false"
+          REQUESTED_CODEX_ONLY: "false"
+          REQUESTED_MANAGED_LLM: "false"
           REQUESTED_FAILURE_POLICY: block
         run: |
           echo "Omar LLM contract active"
@@ -419,9 +487,7 @@ jobs:
             1,
         )
     )
-    _assert_fails(
-        valid.replace(TELEMETRY_LOG_DOWNLOAD_FRAGMENTS[2], "", 1)
-    )
+    _assert_fails(valid.replace(TELEMETRY_LOG_DOWNLOAD_FRAGMENTS[2], "", 1))
     _assert_fails(
         valid.replace(
             "--location --fail-with-body",
@@ -450,114 +516,49 @@ jobs:
 """
     )
 
-    # A literal managed_llm=true (phantom managed-only) instead of the
-    # SENTINELAYER_TOKEN-gated expression must be rejected.
+    # Each independent route/model guard must fail if changed, even if the
+    # workflow still includes all of the other expected evidence.
+    mutations = (
+        (
+            ALLOWED_ACTION_LINE,
+            "uses: mrrCarter/sentinelayer-v1-action@8afb7dbb42a5e1c25233d422c4cabe401ba02380",
+        ),
+        (ALLOWED_REVIEW_ROUTING_LINE, "review_routing: intent-cascade-v1"),
+        (ALLOWED_LLM_PROVIDER_LINE, "llm_provider: anthropic"),
+        (ALLOWED_MANAGED_LLM_LINE, 'sentinelayer_managed_llm: "true"'),
+        (ALLOWED_MODEL_LINE, "model: gpt-4o"),
+        (ALLOWED_CODEX_MODEL_LINE, "codex_model: gpt-4o"),
+        (ALLOWED_MODEL_FALLBACK_LINE, "model_fallback: gemini-2.5-flash"),
+        (ALLOWED_USE_CODEX_LINE, 'use_codex: "true"'),
+        (ALLOWED_CODEX_ONLY_LINE, 'codex_only: "true"'),
+        (ALLOWED_FAILURE_POLICY_LINE, "llm_failure_policy: warn"),
+    )
+    for original, replacement in mutations:
+        assert original in valid
+        _assert_fails(valid.replace(original, replacement, 1))
+
+    # A commented model line elsewhere in the job does not configure the action.
     _assert_fails(
-        """
-name: Omar Gate
-permissions:
-  contents: read
-  id-token: write
-jobs:
-  omar-review:
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: mrrCarter/sentinelayer-v1-action@8afb7dbb42a5e1c25233d422c4cabe401ba02380
-        with:
-          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
-          llm_provider: openai
-          sentinelayer_managed_llm: "true"
-          model: gpt-5.3-codex
-          codex_model: gpt-5.3-codex
-          model_fallback: gpt-5.3-codex
-          use_codex: "true"
-"""
+        valid.replace(
+            "          model: gpt-6.1-sol", "          # model: gpt-6.1-sol", 1
+        )
     )
 
-    # Provider drift away from the pinned openai path must be rejected.
+    # Supplying an alternate-provider credential can bypass the intended
+    # single-provider behavior, regardless of the selected model.
     _assert_fails(
-        """
-name: Omar Gate
-permissions:
-  contents: read
-  id-token: write
-jobs:
-  omar-review:
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: mrrCarter/sentinelayer-v1-action@8afb7dbb42a5e1c25233d422c4cabe401ba02380
-        with:
-          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
-          llm_provider: anthropic
-          sentinelayer_managed_llm: ${{ secrets.SENTINELAYER_TOKEN != '' }}
-          model: gpt-5.3-codex
-          codex_model: gpt-5.3-codex
-          model_fallback: gpt-5.3-codex
-          use_codex: "true"
-"""
-    )
-
-    # Model drift away from the pinned deterministic codex model must be
-    # rejected (exercises the per-line model pin).
-    _assert_fails(
-        """
-name: Omar Gate
-permissions:
-  contents: read
-  id-token: write
-jobs:
-  omar-review:
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: mrrCarter/sentinelayer-v1-action@8afb7dbb42a5e1c25233d422c4cabe401ba02380
-        with:
-          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
-          llm_provider: openai
-          sentinelayer_managed_llm: ${{ secrets.SENTINELAYER_TOKEN != '' }}
-          model: gpt-4o
-          codex_model: gpt-5.3-codex
-          model_fallback: gpt-5.3-codex
-          use_codex: "true"
-"""
-    )
-
-    # Any non-OpenAI provider-key input must be rejected on the codex path.
-    _assert_fails(
-        """
-name: Omar Gate
-permissions:
-  contents: read
-  id-token: write
-jobs:
-  omar-review:
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: mrrCarter/sentinelayer-v1-action@8afb7dbb42a5e1c25233d422c4cabe401ba02380
-        with:
-          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
-          google_api_key: ${{ secrets.GOOGLE_API_KEY }}
-          xai_api_key: ${{ secrets.XAI_API_KEY }}
-          llm_provider: openai
-          sentinelayer_managed_llm: ${{ secrets.SENTINELAYER_TOKEN != '' }}
-          model: gpt-5.3-codex
-          codex_model: gpt-5.3-codex
-          model_fallback: gpt-5.3-codex
-          use_codex: "true"
-"""
+        valid.replace(
+            ALLOWED_OPENAI_API_KEY_LINE,
+            ALLOWED_OPENAI_API_KEY_LINE
+            + "\n          google_api_key: ${{ secrets.GOOGLE_API_KEY }}",
+            1,
+        )
     )
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Verify the senti-pocket Omar Gate workflow pins the deterministic repo-owned codex LLM contract."
+        description="Verify the senti-pocket Omar Gate workflow pins direct repo-owned OpenAI Sol 6.1."
     )
     parser.add_argument(
         "--workflow",

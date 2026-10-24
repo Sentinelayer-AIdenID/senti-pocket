@@ -44,6 +44,10 @@ const DIAL_HYDRATION_CACHE_HEADERS = Object.freeze({
 const dialHydrationJson = (status, body, headers = {}) =>
   json(status, body, { ...headers, ...DIAL_HYDRATION_CACHE_HEADERS });
 const DIAL_HYDRATION_GONE = Object.freeze({ error: 'dial signal unavailable', reason: 'gone' });
+// A call-admission answer discloses session membership: never cacheable, like dial hydration.
+const callAuthorizeJson = (status, body, headers = {}) =>
+  json(status, body, { ...headers, ...DIAL_HYDRATION_CACHE_HEADERS });
+const CALL_ROOM_ID = /^[A-Za-z0-9._-]{1,64}$/;
 const OPERATION_ADMISSION_UNAVAILABLE = Object.freeze({
   error: 'registration operation admission unavailable',
   reason: 'operation-admission-unavailable',
@@ -121,7 +125,7 @@ export function createGateway(deps) {
   // Route scope requirements, aligned to AIdenID's granted scopes. write => execute; read => sync. TTS requires a
   // DISTINCT least-privilege `pocket:voice` (Echo): it triggers third-party voice processing/egress, not a passive
   // read, so a read+write token must NOT authorize it. Override via deps.scopes if the contract changes.
-  const SCOPES = { execute: 'sessions:write', sync: 'sessions:read', tts: 'pocket:voice', dial: 'pocket:dial', ...(deps.scopes || {}) };
+  const SCOPES = { execute: 'sessions:write', sync: 'sessions:read', tts: 'pocket:voice', dial: 'pocket:dial', call: 'pocket:voice', ...(deps.scopes || {}) };
   // /dial/register substrate: binds a device VoIP token to a session (deploy wires deps.deviceRegistry to Dynamo; the
   // registry defers a missing backend to a register-time 501, so constructing it unconditionally is safe). Normalize
   // the gateway's injectable ISO clock to milliseconds so receipt expiry and the registry share one time source.
@@ -580,6 +584,28 @@ export function createGateway(deps) {
       });
   }
 
+  // POST /call/authorize — admission for the live-call Worker (tools/live-call/worker.mjs authorize()). The Worker forwards
+  // the CALLER's own bearer with the (sessionId, roomId) it asked for; this resolves the caller's role in that session
+  // under that same bearer and returns the participant id bound to the bearer. It mints and authors nothing. The
+  // participant is the authenticated human (never a body field), so a caller cannot join as someone else, and the
+  // Worker keys the room's DO by (session, room), so a room id cannot reach another session's call. Viewer may join;
+  // floor control stays owner/admin inside the DO. The legacy knownSessionIdsFor seam (demo servers only) reports every
+  // known session as 'owner', so in demo mode every member gets floor control; production uses getTargetMembership.
+  async function handleCallAuthorize(req, ctx) {
+    if (!hasScope(ctx, SCOPES.call)) return callAuthorizeJson(403, { error: 'missing scope ' + SCOPES.call });
+    const body = readBody(req.body);
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return callAuthorizeJson(400, { error: 'invalid JSON body' });
+    const { sessionId, roomId } = body;
+    if (typeof sessionId !== 'string' || !sessionId) return callAuthorizeJson(400, { error: 'sessionId required' });
+    if (typeof roomId !== 'string' || !CALL_ROOM_ID.test(roomId)) return callAuthorizeJson(400, { error: 'invalid roomId' });
+    const access = await resolveTargetAccess(req, ctx, sessionId, 'viewer');
+    if (access.response) {
+      return callAuthorizeJson(access.response.status, access.response.body, access.response.headers);
+    }
+    if (!access.allowed) return callAuthorizeJson(403, { error: 'not a known session for this user' });
+    return callAuthorizeJson(200, { sessionId, roomId, role: access.membership.membershipRole, participantId: ctx.humanId });
+  }
+
   // POST /dial/ring-owner — the EXPLICIT ring path (sl ring-owner / an agent's MCP tool). The caller DESCRIBES a need
   // (question + kind + session context); RELAY builds the canonical NeedCarterSignal server-side (opaque GATEWAY-generated
   // id, so a caller cannot choose the store key), maps it to the RICH dial input + the storedSignal (PR-B2), and dispatches
@@ -667,7 +693,8 @@ export function createGateway(deps) {
       const r = await doDispatch();
       return json(r.status, r.body);
     }
-    const rateMax = Number.isInteger(deps.ringRateMax) && deps.ringRateMax > 0 ? deps.ringRateMax : 20;             // rings per window per human
+    const rateMax = Number.isInteger(deps.ringRateMax) && deps.ringRateMax > 0 ? deps.ringRateMax : 20;             // per-TOKEN (principal): rings per window from one credential
+    const sessionRateMax = Number.isInteger(deps.ringSessionRateMax) && deps.ringSessionRateMax > 0 ? deps.ringSessionRateMax : 10; // per-SESSION: rings per window ABOUT one session (AMEND-1)
     const rateWindowSec = Number.isInteger(deps.ringRateWindowSec) && deps.ringRateWindowSec > 0 ? deps.ringRateWindowSec : 60;
     const idemTtlSec = Number.isInteger(deps.ringIdemTtlSec) && deps.ringIdemTtlSec > 0 ? deps.ringIdemTtlSec : 120; // dedupe window for an identical/keyed retry
     const nowSec = Math.floor(nowMs / 1000);
@@ -680,14 +707,26 @@ export function createGateway(deps) {
       if (prior && typeof prior.dialId === 'string' && Number.isFinite(prior.expiresAtSec) && nowSec < prior.expiresAtSec) {
         return { status: 200, body: { dialId: prior.dialId, dispatched: true, idempotent: true } };
       }
-      // 2. Soft per-human ring rate-limit (fixed window; get->check->put, fail-open on store error). Only a genuine
-      //    (non-replay) ring consumes a token — a deduped retry above never counts against the limit.
+      // 2. Soft ring rate-limit — per-TOKEN (principal) AND per-SESSION (AMEND-1, Call-Me contract v0.2). Fixed window;
+      //    a genuine (non-replay) ring consumes one token in EACH bucket. Either bucket over budget -> 429 with a
+      //    standard Retry-After HEADER (not just a body field) + a `scope` telling which limit bit. The per-token bucket
+      //    bounds one credential storming; the per-session bucket (keyed within the principal + sessionId) bounds rings
+      //    ABOUT one session, so a single noisy session can't monopolize the per-token budget OR spam the owner. Only a
+      //    genuine ring counts — a deduped retry above never consumes a token. Fail-open on any store error (a missed
+      //    ring is worse than a rare over-limit ring). A rejected ring consumes NOTHING (both puts run only when both
+      //    buckets pass), so a 429'd caller isn't charged toward the next window.
       const bucket = Math.floor(nowSec / rateWindowSec);
-      const rateKey = storeKey(ctx.principal || ctx.humanId, 'ringrate:' + bucket);
-      let cnt = 0;
-      try { const rr = await store.get(rateKey); cnt = rr && Number.isFinite(rr.count) ? rr.count : 0; } catch { cnt = 0; }
-      if (cnt >= rateMax) return { status: 429, body: { error: 'ring rate limit exceeded', reason: 'rate-limited', retryAfterSec: (bucket + 1) * rateWindowSec - nowSec } };
-      try { await store.put(rateKey, { count: cnt + 1 }, { ttlEpochSec: (bucket + 2) * rateWindowSec }); } catch { /* best-effort */ }
+      const retryAfterSec = (bucket + 1) * rateWindowSec - nowSec;
+      const rateHeaders = { 'retry-after': String(Math.max(0, Math.min(3600, retryAfterSec))) };
+      const humanRateKey = storeKey(ctx.principal || ctx.humanId, 'ringrate:' + bucket);
+      const sessionRateKey = storeKey(ctx.principal || ctx.humanId, 'ringrate:sess:' + sessionId + ':' + bucket);
+      let humanCnt = 0, sessionCnt = 0;
+      try { const rr = await store.get(humanRateKey); humanCnt = rr && Number.isFinite(rr.count) ? rr.count : 0; } catch { humanCnt = 0; }
+      try { const sr = await store.get(sessionRateKey); sessionCnt = sr && Number.isFinite(sr.count) ? sr.count : 0; } catch { sessionCnt = 0; }
+      if (humanCnt >= rateMax) return { status: 429, headers: rateHeaders, body: { error: 'ring rate limit exceeded', reason: 'rate-limited', scope: 'principal', retryAfterSec } };
+      if (sessionCnt >= sessionRateMax) return { status: 429, headers: rateHeaders, body: { error: 'ring rate limit exceeded', reason: 'rate-limited', scope: 'session', retryAfterSec } };
+      try { await store.put(humanRateKey, { count: humanCnt + 1 }, { ttlEpochSec: (bucket + 2) * rateWindowSec }); } catch { /* best-effort */ }
+      try { await store.put(sessionRateKey, { count: sessionCnt + 1 }, { ttlEpochSec: (bucket + 2) * rateWindowSec }); } catch { /* best-effort */ }
       // 3. Dispatch the ring, then 4. record the idempotency result ONLY on a successful dispatch (a failed ring is
       //    immediately retryable — we never cache a failure).
       const r = await doDispatch();
@@ -713,7 +752,7 @@ export function createGateway(deps) {
     let guarded;
     try { guarded = await runGuarded(); }
     finally { try { await store.releaseLock(idemStoreKey, token); } catch { /* best-effort: the lock self-heals via TTL */ } }
-    return json(guarded.status, guarded.body);
+    return json(guarded.status, guarded.body, guarded.headers);
   }
 
   // POST /dial/register — bind THIS device's VoIP token to a session the human belongs to (the onVoipToken(hex) seam,
@@ -872,7 +911,9 @@ export function createGateway(deps) {
           ctx = await authenticate(req);
         }
         if (!ctx || typeof ctx.humanId !== 'string' || !ctx.humanId) {
-          const response = isDialRegistrationContext ? registrationContextJson : json;
+          const response = isDialRegistrationContext
+            ? registrationContextJson
+            : (method === 'POST' && path === '/call/authorize' ? callAuthorizeJson : json);
           return response(401, { error: 'authentication required' }, { 'www-authenticate': 'Bearer' });
         }
         // `return await` (not bare `return`): the handlers are async, so awaiting HERE keeps a rejection inside this
@@ -886,6 +927,7 @@ export function createGateway(deps) {
         if (method === 'POST' && path === '/deck') return await handleDeck(req, ctx);
         if (method === 'POST' && path === '/dial') return await handleDial(req, ctx);
         if (method === 'POST' && path === '/dial/ring-owner') return await handleRingOwner(req, ctx);
+        if (method === 'POST' && path === '/call/authorize') return await handleCallAuthorize(req, ctx);
         if (method === 'GET' && path === '/dial') return await handleDialFetch(req, ctx);
         if (isDialRegistrationContext) {
           return await handleDialRegistrationContext(req, ctx);
