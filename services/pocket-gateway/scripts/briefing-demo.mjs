@@ -1,3 +1,4 @@
+// Jev caller pilot marker (do not merge): source-only, behavior-neutral change.
 // briefing-demo.mjs — run the WHOLE gateway briefing pipeline end-to-end and PRINT the human-readable briefing the
 // phone would speak. Proves the backend produces a grounded, signature-verified briefing from a checkpoint — the
 // content side of the demo, before the Swift app exists. No live services; a throwaway keypair signs+verifies locally.
