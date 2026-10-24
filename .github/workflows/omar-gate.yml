@@ -63,6 +63,34 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Assert exact Omar source checkout
+        shell: bash
+        env:
+          EXPECTED_SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          actual_source_sha="$(git rev-parse HEAD)"
+          if [ "${actual_source_sha}" != "${EXPECTED_SOURCE_SHA}" ]; then
+            echo "::error::Omar source checkout does not match this event head."
+            exit 1
+          fi
+
+      - name: Reject tracked symlinks before Omar provider calls
+        shell: bash
+        run: |
+          set -euo pipefail
+          index_file="$(mktemp)"
+          trap 'rm -f "${index_file}"' EXIT
+          git ls-files --stage > "${index_file}"
+          if grep -q '^120000 ' "${index_file}"; then
+            echo "::error::Tracked symlinks are not admitted to Omar provider context."
+            exit 1
+          fi
 
       - name: Validate Omar workflow contract
         shell: bash
@@ -70,6 +98,7 @@ jobs:
           set -euo pipefail
           python3 scripts/ci/check_omar_workflow_contract.py --self-test
           python3 scripts/ci/check_omar_workflow_contract.py
+          python3 scripts/ci/check_omar_cascade_evidence.py --self-test
           python3 scripts/ci/check_forbidden_omar_surface.py --self-test
           python3 scripts/ci/check_forbidden_omar_surface.py
 
@@ -78,6 +107,9 @@ jobs:
         env:
           SENTINELAYER_TOKEN: ${{ secrets.SENTINELAYER_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          INTENT_MODEL_PIN: ${{ secrets.INTENT_MODEL_PIN }}
+          INTENT_POLICY: ${{ secrets.INTENT_POLICY }}
         run: |
           set -euo pipefail
           if [ -z "${SENTINELAYER_TOKEN:-}" ]; then
@@ -85,79 +117,58 @@ jobs:
             exit 1
           fi
           if [ -z "${OPENAI_API_KEY:-}" ]; then
-            echo "::error::OPENAI_API_KEY is required for repo-owned Omar LLM scans."
+            echo "::error::OPENAI_API_KEY is required for the Omar cascade deep-review handoff."
+            exit 1
+          fi
+          if [ -z "${TYPESAFE_API_KEY:-}" ] || [ -z "${INTENT_MODEL_PIN:-}" ] || [ -z "${INTENT_POLICY:-}" ]; then
+            echo "::error::TypeSafe key, private model pin, and private review policy are required for the Omar cascade."
             exit 1
           fi
 
       - name: Omar Gate
         id: omar
-        uses: mrrCarter/sentinelayer-v1-action@8afb7dbb42a5e1c25233d422c4cabe401ba02380 # full Omar action + managed capacity fallback
+        uses: Sentinelayer-AIdenID/sentinelayer-v1-action@e416dc53d2bc3177323d9717731dd07eaa59444d # reviewed cascade and cost-preflight release
         with:
           github_token: ${{ github.token }}
-          llm_provider: openai
+          review_routing: intent-cascade-v1
+          llm_provider: typesafe
+          typesafe_api_key: ${{ secrets.TYPESAFE_API_KEY }}
           openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+          intent_model_pin: ${{ secrets.INTENT_MODEL_PIN }}
+          intent_policy: ${{ secrets.INTENT_POLICY }}
+          intent_price_profile: typesafe-input-20261020
           sentinelayer_token: ${{ secrets.SENTINELAYER_TOKEN }}
-          sentinelayer_managed_llm: ${{ secrets.SENTINELAYER_TOKEN != '' }}
+          sentinelayer_managed_llm: "false"
           sentinelayer_spec_id: ${{ vars.SENTINELAYER_SPEC_ID || '' }}
           scan_mode: ${{ github.event_name == 'workflow_dispatch' && inputs.scan_mode || 'deep' }}
           severity_gate: P1
-          model: gpt-5.3-codex
-          codex_model: gpt-5.3-codex
-          model_fallback: gpt-5.3-codex
-          use_codex: "true"
+          codex_model: gpt-6-sol
+          use_codex: "false"
           codex_only: "false"
           llm_failure_policy: block
+          fork_policy: block
+          publish_github: "true"
 
-      - name: Assert Omar LLM contract is active
+      - name: Assert Omar cascade evidence and gate status
         shell: bash
         env:
-          REQUESTED_LLM_PROVIDER: openai
-          REQUESTED_MODEL: gpt-5.3-codex
-          REQUESTED_CODEX_MODEL: gpt-5.3-codex
-          REQUESTED_FALLBACK_MODEL: gpt-5.3-codex
-          REQUESTED_USE_CODEX: "true"
-          REQUESTED_FAILURE_POLICY: block
           GATE_STATUS: ${{ steps.omar.outputs.gate_status || '' }}
+          RUN_ID: ${{ steps.omar.outputs.run_id || '' }}
+          EXPECTED_SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
-          provider="$(echo "${REQUESTED_LLM_PROVIDER}" | tr -d '\r' | xargs || true)"
-          model="$(echo "${REQUESTED_MODEL}" | tr -d '\r' | xargs || true)"
-          codex_model="$(echo "${REQUESTED_CODEX_MODEL}" | tr -d '\r' | xargs || true)"
-          fallback="$(echo "${REQUESTED_FALLBACK_MODEL}" | tr -d '\r' | xargs || true)"
-          use_codex="$(echo "${REQUESTED_USE_CODEX}" | tr -d '\r' | xargs || true)"
-          failure_policy="$(echo "${REQUESTED_FAILURE_POLICY}" | tr -d '\r' | xargs || true)"
-          provider_lc="$(echo "${provider}" | tr '[:upper:]' '[:lower:]')"
-          model_lc="$(echo "${model}" | tr '[:upper:]' '[:lower:]')"
-          codex_model_lc="$(echo "${codex_model}" | tr '[:upper:]' '[:lower:]')"
-          gate_status="$(echo "${GATE_STATUS}" | tr -d '\r' | xargs || true)"
-          if [ -z "${provider}" ] || [ -z "${model}" ] || [ -z "${codex_model}" ]; then
-            echo "::error::Omar requested model contract is incomplete (provider='${provider}' model='${model}' codex_model='${codex_model}' gate='${gate_status}'). Blocking merge."
+          if [ "${GATE_STATUS}" != "passed" ]; then
+            echo "::error::Omar Gate did not pass (gate='${GATE_STATUS}'). Blocking merge."
             exit 1
           fi
-          # Deterministic codex contract (owner override): provider=openai,
-          # model/codex_model/model_fallback all pinned to gpt-5.3-codex,
-          # use_codex=true, llm_failure_policy=block. Any drift blocks merge.
-          if [ "${provider_lc}" != "openai" ] || [ "${model}" != "gpt-5.3-codex" ] || [ "${codex_model}" != "gpt-5.3-codex" ] || [ "${fallback}" != "gpt-5.3-codex" ] || [ "${use_codex}" != "true" ] || [ "${failure_policy}" != "block" ]; then
-            echo "::error::Omar deterministic codex contract drifted (provider='${provider}' model='${model}' codex_model='${codex_model}' fallback='${fallback}' use_codex='${use_codex}' failure='${failure_policy}'). Blocking merge."
+          if ! echo "${RUN_ID}" | grep -Eq '^[A-Za-z0-9._-]+$'; then
+            echo "::error::Omar Gate passed without a valid run ID. Blocking merge."
             exit 1
           fi
-          case "${model_lc}" in
-            disabled|none|null|n/a)
-              echo "::error::Omar LLM model is disabled/invalid ('${model}'). Blocking merge."
-              exit 1
-              ;;
-          esac
-          case "${codex_model_lc}" in
-            disabled|none|null|n/a)
-              echo "::error::Omar Codex model is disabled/invalid ('${codex_model}'). Blocking merge."
-              exit 1
-              ;;
-          esac
-          if [ "${gate_status}" != "passed" ]; then
-            echo "::error::Omar Gate did not pass (gate='${gate_status}'). Blocking merge."
-            exit 1
-          fi
-          echo "Omar LLM contract active: provider='${provider}' model='${model}' codex_model='${codex_model}' fallback='${fallback}' gate='${gate_status}'"
+          python3 scripts/ci/check_omar_cascade_evidence.py \
+            --run-dir ".sentinelayer/runs/${RUN_ID}" \
+            --expected-head "${EXPECTED_SOURCE_SHA}"
+          echo "Omar deep cascade source scope complete; gate passed."
 
       - name: Resolve sanitized Omar artifact directory
         id: artifact_path
@@ -312,7 +323,7 @@ jobs:
             echo "## Omar Gate Fork Static"
             echo "- mode: \`fork-pr-static-no-secrets\`"
             echo "- checkout: \`pull request head with persist-credentials=false\`"
-            echo "- canonical Omar Gate: \`runs on trusted branches with repo-owned OpenAI/Codex secrets plus managed fallback\`"
+            echo "- canonical Omar Gate: \`runs on trusted branches with TypeSafe intent cascade and repo-owned OpenAI deep handoff\`"
             echo "- deterministic static checks: \`passed\`"
             echo "- required_context: \`Omar Gate Finalize\`"
           } >> "$GITHUB_STEP_SUMMARY"

@@ -26,16 +26,20 @@ def _line_has_managed_llm_enabled(line: str) -> bool:
     }
 
 
-# senti-pocket runs a DETERMINISTIC codex contract (owner override): no
-# OpenAI/Google conditional. Provider is pinned to openai, model/codex_model/
-# model_fallback are all pinned to gpt-5.3-codex, use_codex is "true", and the
-# managed-capacity fallback is enabled whenever SENTINELAYER_TOKEN is present.
+# The canonical deep Omar Gate runs the released TypeSafe intent cascade. The
+# cascade itself selects gpt-6-sol/max for unresolved reviews; the caller must
+# not override model selection or silently fall back to a second legacy scan.
 ALLOWED_OPENAI_API_KEY_LINE = "openai_api_key: ${{ secrets.OPENAI_API_KEY }}"
-ALLOWED_LLM_PROVIDER_LINE = "llm_provider: openai"
-ALLOWED_MANAGED_LLM_LINE = "sentinelayer_managed_llm: ${{ secrets.SENTINELAYER_TOKEN != '' }}"
-ALLOWED_MODEL_LINE = "model: gpt-5.3-codex"
-ALLOWED_MODEL_FALLBACK_LINE = "model_fallback: gpt-5.3-codex"
-ALLOWED_USE_CODEX_LINE = 'use_codex: "true"'
+ALLOWED_TYPESAFE_API_KEY_LINE = "typesafe_api_key: ${{ secrets.TYPESAFE_API_KEY }}"
+ALLOWED_INTENT_MODEL_PIN_LINE = "intent_model_pin: ${{ secrets.INTENT_MODEL_PIN }}"
+ALLOWED_INTENT_POLICY_LINE = "intent_policy: ${{ secrets.INTENT_POLICY }}"
+ALLOWED_LLM_PROVIDER_LINE = "llm_provider: typesafe"
+ALLOWED_REVIEW_ROUTING_LINE = "review_routing: intent-cascade-v1"
+ALLOWED_MANAGED_LLM_LINE = 'sentinelayer_managed_llm: "false"'
+ALLOWED_CODEX_MODEL_LINE = "codex_model: gpt-6-sol"
+ALLOWED_USE_CODEX_LINE = 'use_codex: "false"'
+ALLOWED_PRICE_PROFILE_LINE = "intent_price_profile: typesafe-input-20261020"
+ALLOWED_SCAN_MODE_LINE = "scan_mode: ${{ github.event_name == 'workflow_dispatch' && inputs.scan_mode || 'deep' }}"
 TELEMETRY_LOG_DOWNLOAD_FRAGMENTS = (
     "curl --silent --show-error --location --fail-with-body",
     "--proto-redir '=https' --max-redirs 3",
@@ -47,11 +51,16 @@ TELEMETRY_LOG_DOWNLOAD_FRAGMENTS = (
 def _repo_llm_configured(workflow_text: str) -> bool:
     return (
         ALLOWED_OPENAI_API_KEY_LINE in workflow_text
+        and ALLOWED_TYPESAFE_API_KEY_LINE in workflow_text
+        and ALLOWED_INTENT_MODEL_PIN_LINE in workflow_text
+        and ALLOWED_INTENT_POLICY_LINE in workflow_text
         and ALLOWED_LLM_PROVIDER_LINE in workflow_text
+        and ALLOWED_REVIEW_ROUTING_LINE in workflow_text
         and ALLOWED_MANAGED_LLM_LINE in workflow_text
-        and ALLOWED_MODEL_LINE in workflow_text
-        and ALLOWED_MODEL_FALLBACK_LINE in workflow_text
+        and ALLOWED_CODEX_MODEL_LINE in workflow_text
         and ALLOWED_USE_CODEX_LINE in workflow_text
+        and ALLOWED_PRICE_PROFILE_LINE in workflow_text
+        and ALLOWED_SCAN_MODE_LINE in workflow_text
     )
 
 
@@ -153,34 +162,47 @@ def validate_omar_workflow_text(workflow_text: str) -> None:
             raise OmarWorkflowContractError(
                 "openai_api_key must come from secrets.OPENAI_API_KEY"
             )
+        for input_name, allowed in (
+            ("typesafe_api_key", ALLOWED_TYPESAFE_API_KEY_LINE),
+            ("intent_model_pin", ALLOWED_INTENT_MODEL_PIN_LINE),
+            ("intent_policy", ALLOWED_INTENT_POLICY_LINE),
+            ("intent_price_profile", ALLOWED_PRICE_PROFILE_LINE),
+            ("review_routing", ALLOWED_REVIEW_ROUTING_LINE),
+            ("codex_model", ALLOWED_CODEX_MODEL_LINE),
+            ("use_codex", ALLOWED_USE_CODEX_LINE),
+            ("sentinelayer_managed_llm", ALLOWED_MANAGED_LLM_LINE),
+            ("scan_mode", ALLOWED_SCAN_MODE_LINE),
+        ):
+            if line.startswith("          ") and stripped.startswith(f"{input_name}:") and stripped != allowed:
+                raise OmarWorkflowContractError(f"{input_name} drifted from the pinned Omar cascade contract")
         if stripped.startswith(
             ("anthropic_api_key:", "xai_api_key:", "google_api_key:")
         ):
             raise OmarWorkflowContractError(
-                "deterministic codex Omar workflow must not pass non-OpenAI provider-key inputs"
+                "Omar cascade must not pass an unapproved provider key"
             )
         if stripped.startswith("llm_provider:") and stripped != ALLOWED_LLM_PROVIDER_LINE:
             raise OmarWorkflowContractError(
-                "llm_provider must be pinned to openai on the deterministic codex path"
+                "llm_provider must be pinned to typesafe"
             )
-        if stripped.startswith("model:") and stripped != ALLOWED_MODEL_LINE:
+        if stripped.startswith(("model:", "model_fallback:")):
             raise OmarWorkflowContractError(
-                "model must be pinned to the deterministic codex model gpt-5.3-codex"
+                "the intent cascade owns model selection; remove model overrides"
             )
-        if stripped.startswith("model_fallback:") and stripped != ALLOWED_MODEL_FALLBACK_LINE:
+        if stripped.startswith("comment_tag:"):
             raise OmarWorkflowContractError(
-                "model_fallback must be pinned to gpt-5.3-codex on the deterministic codex path"
+                "canonical Omar Gate must publish its untagged required check"
             )
-        if stripped.startswith("sentinelayer_managed_llm:") and stripped != ALLOWED_MANAGED_LLM_LINE:
+        if stripped.startswith("publish_github:") and stripped != 'publish_github: "true"':
             raise OmarWorkflowContractError(
-                "sentinelayer_managed_llm must match the SENTINELAYER_TOKEN-present managed-capacity expression"
+                "canonical Omar Gate must publish its PR check and comment"
             )
 
     managed_llm_enabled = any(_line_has_managed_llm_enabled(line) for line in lines)
     repo_llm_configured = _repo_llm_configured(workflow_text)
     if managed_llm_enabled or not repo_llm_configured:
         raise OmarWorkflowContractError(
-            "omar-gate.yml must use repo-owned OpenAI/Codex with Gemini fallback, and managed only when BYO keys are absent"
+            "omar-gate.yml must use the pinned TypeSafe intent cascade and repo-owned OpenAI handoff"
         )
 
     if not _top_level_permissions_include_oidc_write(lines):
@@ -192,6 +214,38 @@ def validate_omar_workflow_text(workflow_text: str) -> None:
     if not _job_permissions_include_oidc_write(omar_job_lines):
         raise OmarWorkflowContractError(
             "jobs.omar-review.permissions must include id-token: write"
+        )
+    action_uses = [
+        line.split("#", 1)[0].strip()
+        for line in omar_job_lines
+        if "sentinelayer-v1-action@" in line and line.lstrip().startswith("uses:")
+    ]
+    _require(
+        action_uses == [
+            "uses: Sentinelayer-AIdenID/sentinelayer-v1-action@e416dc53d2bc3177323d9717731dd07eaa59444d"
+        ],
+        "canonical Omar review must invoke the released cascade action exactly once",
+    )
+    for required_input in (
+        ALLOWED_OPENAI_API_KEY_LINE,
+        ALLOWED_TYPESAFE_API_KEY_LINE,
+        ALLOWED_INTENT_MODEL_PIN_LINE,
+        ALLOWED_INTENT_POLICY_LINE,
+        ALLOWED_PRICE_PROFILE_LINE,
+        ALLOWED_REVIEW_ROUTING_LINE,
+        ALLOWED_LLM_PROVIDER_LINE,
+        ALLOWED_MANAGED_LLM_LINE,
+        ALLOWED_SCAN_MODE_LINE,
+        ALLOWED_CODEX_MODEL_LINE,
+        ALLOWED_USE_CODEX_LINE,
+        'codex_only: "false"',
+        "llm_failure_policy: block",
+        "fork_policy: block",
+        'publish_github: "true"',
+    ):
+        _require(
+            any(line.split("#", 1)[0].strip() == required_input for line in omar_job_lines),
+            f"canonical Omar review is missing required input: {required_input.split(':', 1)[0]}",
         )
 
     fork_job_lines = _find_job_lines(lines, "omar-fork-static")
@@ -257,29 +311,44 @@ def validate_omar_workflow_text(workflow_text: str) -> None:
             )
 
     required_direct_fragments = (
+        "Assert exact Omar source checkout",
+        "ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}",
+        "fetch-depth: 0",
+        "persist-credentials: false",
+        'if [ "${actual_source_sha}" != "${EXPECTED_SOURCE_SHA}" ]; then',
+        "Reject tracked symlinks before Omar provider calls",
+        'git ls-files --stage > "${index_file}"',
+        "grep -q '^120000 '",
         "Validate Omar workflow contract",
+        "check_omar_cascade_evidence.py --self-test",
         "check_forbidden_omar_surface.py --self-test",
         "check_forbidden_omar_surface.py",
         "Validate Omar provider secrets",
-        "OPENAI_API_KEY is required for repo-owned Omar LLM scans",
-        "mrrCarter/sentinelayer-v1-action@8afb7dbb42a5e1c25233d422c4cabe401ba02380",
+        "OPENAI_API_KEY is required for the Omar cascade deep-review handoff",
+        "TypeSafe key, private model pin, and private review policy are required",
+        "Sentinelayer-AIdenID/sentinelayer-v1-action@e416dc53d2bc3177323d9717731dd07eaa59444d",
         "Omar Gate",
         "openai_api_key: ${{ secrets.OPENAI_API_KEY }}",
-        "llm_provider: openai",
-        "sentinelayer_managed_llm: ${{ secrets.SENTINELAYER_TOKEN != '' }}",
-        "model: gpt-5.3-codex",
-        "codex_model: gpt-5.3-codex",
-        "model_fallback: gpt-5.3-codex",
-        'use_codex: "true"',
+        "typesafe_api_key: ${{ secrets.TYPESAFE_API_KEY }}",
+        "intent_model_pin: ${{ secrets.INTENT_MODEL_PIN }}",
+        "intent_policy: ${{ secrets.INTENT_POLICY }}",
+        "intent_price_profile: typesafe-input-20261020",
+        "review_routing: intent-cascade-v1",
+        "llm_provider: typesafe",
+        'sentinelayer_managed_llm: "false"',
+        ALLOWED_SCAN_MODE_LINE,
+        "codex_model: gpt-6-sol",
+        'use_codex: "false"',
+        'codex_only: "false"',
         "llm_failure_policy: block",
-        "Assert Omar LLM contract is active",
-        "REQUESTED_LLM_PROVIDER: openai",
-        "REQUESTED_MODEL: gpt-5.3-codex",
-        "REQUESTED_CODEX_MODEL: gpt-5.3-codex",
-        "REQUESTED_FALLBACK_MODEL: gpt-5.3-codex",
-        'REQUESTED_USE_CODEX: "true"',
-        "REQUESTED_FAILURE_POLICY: block",
-        "Omar LLM contract active",
+        "fork_policy: block",
+        'publish_github: "true"',
+        "Assert Omar cascade evidence and gate status",
+        "check_omar_cascade_evidence.py",
+        "python3 scripts/ci/check_omar_cascade_evidence.py \\",
+        '--run-dir ".sentinelayer/runs/${RUN_ID}"',
+        '--expected-head "${EXPECTED_SOURCE_SHA}"',
+        "Omar deep cascade source scope complete; gate passed",
         "Omar Gate did not pass",
         "Resolve sanitized Omar artifact directory",
         'artifact_dir=".sentinelayer/runs/${normalized_run_id}"',
@@ -328,38 +397,58 @@ jobs:
       contents: read
       id-token: write
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Assert exact Omar source checkout
+        run: |
+          if [ "${actual_source_sha}" != "${EXPECTED_SOURCE_SHA}" ]; then
+            exit 1
+          fi
+      - name: Reject tracked symlinks before Omar provider calls
+        run: |
+          git ls-files --stage > "${index_file}"
+          if grep -q '^120000 ' "${index_file}"; then
+            exit 1
+          fi
       - name: Validate Omar workflow contract
         run: |
           python3 scripts/ci/check_omar_workflow_contract.py --self-test
           python3 scripts/ci/check_omar_workflow_contract.py
+          python3 scripts/ci/check_omar_cascade_evidence.py --self-test
           python3 scripts/ci/check_forbidden_omar_surface.py --self-test
           python3 scripts/ci/check_forbidden_omar_surface.py
       - name: Validate Omar provider secrets
         run: |
           echo "SENTINELAYER_TOKEN is required for Omar Gate telemetry, artifacts, and PR checks."
-          echo "OPENAI_API_KEY is required for repo-owned Omar LLM scans."
+          echo "OPENAI_API_KEY is required for the Omar cascade deep-review handoff."
+          echo "TypeSafe key, private model pin, and private review policy are required."
       - name: Omar Gate
-        uses: mrrCarter/sentinelayer-v1-action@8afb7dbb42a5e1c25233d422c4cabe401ba02380
+        uses: Sentinelayer-AIdenID/sentinelayer-v1-action@e416dc53d2bc3177323d9717731dd07eaa59444d
         with:
+          review_routing: intent-cascade-v1
+          llm_provider: typesafe
+          typesafe_api_key: ${{ secrets.TYPESAFE_API_KEY }}
           openai_api_key: ${{ secrets.OPENAI_API_KEY }}
-          llm_provider: openai
-          sentinelayer_managed_llm: ${{ secrets.SENTINELAYER_TOKEN != '' }}
-          model: gpt-5.3-codex
-          codex_model: gpt-5.3-codex
-          model_fallback: gpt-5.3-codex
-          use_codex: "true"
+          intent_model_pin: ${{ secrets.INTENT_MODEL_PIN }}
+          intent_policy: ${{ secrets.INTENT_POLICY }}
+          intent_price_profile: typesafe-input-20261020
+          sentinelayer_managed_llm: "false"
+          scan_mode: ${{ github.event_name == 'workflow_dispatch' && inputs.scan_mode || 'deep' }}
+          codex_model: gpt-6-sol
+          use_codex: "false"
           codex_only: "false"
           llm_failure_policy: block
-      - name: Assert Omar LLM contract is active
-        env:
-          REQUESTED_LLM_PROVIDER: openai
-          REQUESTED_MODEL: gpt-5.3-codex
-          REQUESTED_CODEX_MODEL: gpt-5.3-codex
-          REQUESTED_FALLBACK_MODEL: gpt-5.3-codex
-          REQUESTED_USE_CODEX: "true"
-          REQUESTED_FAILURE_POLICY: block
+          fork_policy: block
+          publish_github: "true"
+      - name: Assert Omar cascade evidence and gate status
         run: |
-          echo "Omar LLM contract active"
+          python3 scripts/ci/check_omar_cascade_evidence.py \
+            --run-dir ".sentinelayer/runs/${RUN_ID}" \
+            --expected-head "${EXPECTED_SOURCE_SHA}"
+          echo "Omar deep cascade source scope complete; gate passed"
           echo "Omar Gate did not pass"
       - name: Resolve sanitized Omar artifact directory
         run: |
@@ -430,134 +519,55 @@ jobs:
         )
     )
 
-    # Bridge/broken action pin plus bridge-only pr_number must be rejected.
-    _assert_fails(
-        """
-name: Omar Gate
-permissions:
-  contents: read
-  id-token: write
-jobs:
-  omar-review:
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: mrrCarter/sentinelayer-v1-action@721bc7efe1402fcce416becea3d247b838119ed2
-        with:
-          pr_number: 259
-          sentinelayer_managed_llm: "true"
-"""
-    )
+    # Every mutation starts from the valid cascade fixture, so each rejection
+    # exercises one real contract rather than failing on unrelated missing data.
+    for before, after in (
+        ("Sentinelayer-AIdenID/sentinelayer-v1-action@e416dc53d2bc3177323d9717731dd07eaa59444d",
+         "mrrCarter/sentinelayer-v1-action@8afb7dbb42a5e1c25233d422c4cabe401ba02380"),
+        ("review_routing: intent-cascade-v1", "review_routing: legacy"),
+        ("llm_provider: typesafe", "llm_provider: openai"),
+        ("typesafe_api_key: ${{ secrets.TYPESAFE_API_KEY }}", "typesafe_api_key: ${{ secrets.OTHER_KEY }}"),
+        ("intent_model_pin: ${{ secrets.INTENT_MODEL_PIN }}", ""),
+        ("intent_policy: ${{ secrets.INTENT_POLICY }}", ""),
+        ("intent_price_profile: typesafe-input-20261020", "intent_price_profile: future-alias"),
+        ('sentinelayer_managed_llm: "false"', 'sentinelayer_managed_llm: "true"'),
+        ("codex_model: gpt-6-sol", "codex_model: gpt-5.3-codex"),
+        ('use_codex: "false"', 'use_codex: "true"'),
+        ("llm_failure_policy: block", "llm_failure_policy: deterministic_only"),
+        ("fork_policy: block", "fork_policy: allow"),
+        ('publish_github: "true"', 'publish_github: "false"'),
+        ("scan_mode: ${{ github.event_name == 'workflow_dispatch' && inputs.scan_mode || 'deep' }}",
+         "scan_mode: pr-diff"),
+        ("ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}",
+         "ref: ${{ github.sha }}"),
+        ("Assert exact Omar source checkout", "Source checkout unchecked"),
+        ("Reject tracked symlinks before Omar provider calls", "Symlinks unchecked"),
+        ('git ls-files --stage > "${index_file}"', 'echo skipped > "${index_file}"'),
+        ("python3 scripts/ci/check_omar_cascade_evidence.py \\", "echo \\"),
+        ("needs: [omar-precheck, omar-review, omar-fork-static]", "needs: [omar-precheck, omar-review]"),
+    ):
+        assert before in valid, before
+        try:
+            _assert_fails(valid.replace(before, after, 1))
+        except AssertionError as exc:
+            raise AssertionError(f"mutation passed validation: {before}") from exc
 
-    # A literal managed_llm=true (phantom managed-only) instead of the
-    # SENTINELAYER_TOKEN-gated expression must be rejected.
-    _assert_fails(
-        """
-name: Omar Gate
-permissions:
-  contents: read
-  id-token: write
-jobs:
-  omar-review:
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: mrrCarter/sentinelayer-v1-action@8afb7dbb42a5e1c25233d422c4cabe401ba02380
-        with:
-          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
-          llm_provider: openai
-          sentinelayer_managed_llm: "true"
-          model: gpt-5.3-codex
-          codex_model: gpt-5.3-codex
-          model_fallback: gpt-5.3-codex
-          use_codex: "true"
-"""
-    )
-
-    # Provider drift away from the pinned openai path must be rejected.
-    _assert_fails(
-        """
-name: Omar Gate
-permissions:
-  contents: read
-  id-token: write
-jobs:
-  omar-review:
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: mrrCarter/sentinelayer-v1-action@8afb7dbb42a5e1c25233d422c4cabe401ba02380
-        with:
-          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
-          llm_provider: anthropic
-          sentinelayer_managed_llm: ${{ secrets.SENTINELAYER_TOKEN != '' }}
-          model: gpt-5.3-codex
-          codex_model: gpt-5.3-codex
-          model_fallback: gpt-5.3-codex
-          use_codex: "true"
-"""
-    )
-
-    # Model drift away from the pinned deterministic codex model must be
-    # rejected (exercises the per-line model pin).
-    _assert_fails(
-        """
-name: Omar Gate
-permissions:
-  contents: read
-  id-token: write
-jobs:
-  omar-review:
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: mrrCarter/sentinelayer-v1-action@8afb7dbb42a5e1c25233d422c4cabe401ba02380
-        with:
-          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
-          llm_provider: openai
-          sentinelayer_managed_llm: ${{ secrets.SENTINELAYER_TOKEN != '' }}
-          model: gpt-4o
-          codex_model: gpt-5.3-codex
-          model_fallback: gpt-5.3-codex
-          use_codex: "true"
-"""
-    )
-
-    # Any non-OpenAI provider-key input must be rejected on the codex path.
-    _assert_fails(
-        """
-name: Omar Gate
-permissions:
-  contents: read
-  id-token: write
-jobs:
-  omar-review:
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: mrrCarter/sentinelayer-v1-action@8afb7dbb42a5e1c25233d422c4cabe401ba02380
-        with:
-          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
-          google_api_key: ${{ secrets.GOOGLE_API_KEY }}
-          xai_api_key: ${{ secrets.XAI_API_KEY }}
-          llm_provider: openai
-          sentinelayer_managed_llm: ${{ secrets.SENTINELAYER_TOKEN != '' }}
-          model: gpt-5.3-codex
-          codex_model: gpt-5.3-codex
-          model_fallback: gpt-5.3-codex
-          use_codex: "true"
-"""
-    )
+    # A second provider key, caller model override, or tagged report cannot
+    # replace the single canonical required check.
+    for extra in (
+        "          google_api_key: ${{ secrets.GOOGLE_API_KEY }}\n",
+        "          model: gpt-4o\n",
+        "          model_fallback: gpt-4o\n",
+        "          comment_tag: jev\n",
+        "          pr_number: 259\n",
+    ):
+        _assert_fails(valid.replace("          review_routing: intent-cascade-v1\n",
+                                    "          review_routing: intent-cascade-v1\n" + extra, 1))
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Verify the senti-pocket Omar Gate workflow pins the deterministic repo-owned codex LLM contract."
+        description="Verify the canonical Pocket Omar Gate pins the released TypeSafe intent cascade."
     )
     parser.add_argument(
         "--workflow",
@@ -573,6 +583,11 @@ def main(argv: list[str] | None = None) -> int:
     workflow_path = Path(args.workflow)
     try:
         validate_omar_workflow_text(workflow_path.read_text(encoding="utf-8"))
+        parallel_jev = workflow_path.parent / "omar-gate-jev.yml"
+        if parallel_jev.is_file():
+            raise OmarWorkflowContractError(
+                "parallel Omar Jev workflow would duplicate the canonical review"
+            )
     except OmarWorkflowContractError as exc:
         print(f"::error::{exc}", file=sys.stderr)
         return 1
