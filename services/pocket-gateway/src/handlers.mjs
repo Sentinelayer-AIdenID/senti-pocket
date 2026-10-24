@@ -2,9 +2,10 @@
 // Framework-agnostic: createGateway(deps).handle({method,path,query,headers,body}) -> {status,headers,body,isBase64Encoded?}.
 // Drop into Lambda/API Gateway or a local http server via a thin adapter. All I/O is injected (hermetic tests, no live calls).
 //
-// AUTH BOUNDARY (fail-closed): every non-health route REQUIRES a valid AIdenID-issued token. The human identity comes
-// from the token (ConsumerAccount.id), NEVER from the request body. Authorization to write is server-derived
-// (knownSessionIdsFor(humanId)) — a client can never name an arbitrary target session.
+// AUTH BOUNDARY (fail-closed): direct/V1 non-health routes use the configured token verifier. The two protected V2
+// writes instead require a privately branded, request-bound admission context that the Lambda adapter verifies before
+// normalization; they never revalidate the public bearer. Human identity is verifier/assertion-owned, NEVER read from
+// the request body. Authorization to write remains server-derived, so a client cannot name an arbitrary target session.
 // Token model (per Echo's AIdenID research): atk_ = workload/project token; the phone uses a human-bound,
 // audience/resource-scoped token minted via /v1/sessions/exchange (DPoP-bound). deps.verifyToken owns that check.
 import { randomUUID, createHash } from 'node:crypto';
@@ -22,8 +23,35 @@ import { buildStoryboard, assembleDeckVideo } from './deck/video.mjs';
 import { createDialRegistry } from './dial-registry.mjs';
 import { mapSignalToPushInput } from './need-carter-dial.mjs';
 import { groundingIdsFromBundle, keepGrounded, isGrounded } from './grounding-gate.mjs';
+import { isOperationAdmissionAssertionContext } from './operation-admission-assertion.mjs';
+import { isRegistryOperationAdmissionRoute } from './operation-admission.mjs';
+import {
+  SENTI_TARGET_MEMBERSHIP_ERROR_CODES,
+  SentiTargetMembershipUnavailableError,
+} from './senti-target-membership.mjs';
 
 const json = (status, body, headers = {}) => ({ status, headers: { 'content-type': 'application/json', ...headers }, body });
+const REGISTRATION_CONTEXT_CACHE_HEADERS = Object.freeze({
+  'cache-control': 'no-store',
+  pragma: 'no-cache',
+});
+const registrationContextJson = (status, body, headers = {}) =>
+  json(status, body, { ...headers, ...REGISTRATION_CONTEXT_CACHE_HEADERS });
+const DIAL_HYDRATION_CACHE_HEADERS = Object.freeze({
+  'cache-control': 'no-store',
+  pragma: 'no-cache',
+});
+const dialHydrationJson = (status, body, headers = {}) =>
+  json(status, body, { ...headers, ...DIAL_HYDRATION_CACHE_HEADERS });
+const DIAL_HYDRATION_GONE = Object.freeze({ error: 'dial signal unavailable', reason: 'gone' });
+// A call-admission answer discloses session membership: never cacheable, like dial hydration.
+const callAuthorizeJson = (status, body, headers = {}) =>
+  json(status, body, { ...headers, ...DIAL_HYDRATION_CACHE_HEADERS });
+const CALL_ROOM_ID = /^[A-Za-z0-9._-]{1,64}$/;
+const OPERATION_ADMISSION_UNAVAILABLE = Object.freeze({
+  error: 'registration operation admission unavailable',
+  reason: 'operation-admission-unavailable',
+});
 
 /**
  * Map an ActionReceipt to a response (warden contract ruling): a receipt whose confirmation binding was NEVER
@@ -46,6 +74,7 @@ const readBody = (body) => {
   return body;
 };
 const hasScope = (ctx, scope) => Array.isArray(ctx.scopes) && ctx.scopes.includes(scope);
+const TARGET_ROLE_RANK = Object.freeze({ viewer: 0, contributor: 1, admin: 2, owner: 3 });
 
 /**
  * Durable-state key namespaced by the authenticated human. A NUL separator is injection-safe: it cannot appear in a
@@ -74,10 +103,12 @@ export function ringIdempotencyKey(body = {}) {
 /**
  * @param {{
  *   verifyToken: (headers:object)=>Promise<{humanId:string,scopes?:string[]}|null>,
+ *   requireOperationAdmissionAssertion?: boolean,
  *   store: object,                       // async store (store.mjs)
  *   run: (args:string[])=>string,        // sl runner (actions execute + read-back)
  *   signingKey: any, signingKeyId: string,
- *   knownSessionIdsFor: (humanId:string)=>Promise<string[]>,
+ *   getTargetMembership?: (input:{sessionId:string,authorization:string})=>Promise<null|{sessionId:string,membershipRole:'owner'|'admin'|'contributor'|'viewer'}>,
+ *   knownSessionIdsFor?: (humanId:string, context?:{sessionId:string,authorization:string,access:'member'|'write'})=>Promise<string[]>, // legacy test/demo seam only
  *   bundleStore?: { listForHuman:(humanId:string,since:number)=>Promise<object[]> },
  *   dialSignalStore?: { get:(dialId:string)=>Promise<object|undefined> },  // GET /dial?id= LEAN-ring hydration (createDialSignalStore)
  *   ttsBackend?: (text:string,opts:object)=>Promise<{audio:Buffer,format:string}>,
@@ -85,19 +116,105 @@ export function ringIdempotencyKey(body = {}) {
  * }} deps
  */
 export function createGateway(deps) {
+  if (
+    deps.requireOperationAdmissionAssertion !== undefined &&
+    typeof deps.requireOperationAdmissionAssertion !== 'boolean'
+  ) {
+    throw new Error('requireOperationAdmissionAssertion must be boolean');
+  }
   // Route scope requirements, aligned to AIdenID's granted scopes. write => execute; read => sync. TTS requires a
   // DISTINCT least-privilege `pocket:voice` (Echo): it triggers third-party voice processing/egress, not a passive
   // read, so a read+write token must NOT authorize it. Override via deps.scopes if the contract changes.
-  const SCOPES = { execute: 'sessions:write', sync: 'sessions:read', tts: 'pocket:voice', dial: 'pocket:dial', ...(deps.scopes || {}) };
+  const SCOPES = { execute: 'sessions:write', sync: 'sessions:read', tts: 'pocket:voice', dial: 'pocket:dial', call: 'pocket:voice', ...(deps.scopes || {}) };
   // /dial/register substrate: binds a device VoIP token to a session (deploy wires deps.deviceRegistry to Dynamo; the
-  // registry defers a missing backend to a register-time 501, so constructing it unconditionally is safe). now defaults
-  // to Date.now (ms) — the registeredAt stamp only.
-  const dialReg = createDialRegistry({ deviceRegistry: deps.deviceRegistry });
+  // registry defers a missing backend to a register-time 501, so constructing it unconditionally is safe). Normalize
+  // the gateway's injectable ISO clock to milliseconds so receipt expiry and the registry share one time source.
+  const dialNow = () => {
+    if (typeof deps.now !== 'function') return Date.now();
+    const value = deps.now();
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    const parsed = Date.parse(value);
+    if (!Number.isFinite(parsed)) throw new Error('gateway clock returned an invalid value');
+    return parsed;
+  };
+  const dialReg = createDialRegistry({ deviceRegistry: deps.deviceRegistry, now: dialNow });
 
   async function authenticate(req) {
     if (typeof deps.verifyToken !== 'function') return null; // no verifier wired => deny everything (fail-closed)
     try { return await deps.verifyToken(req.headers || {}); } catch { return null; }
   }
+
+  // Resolve authorization for exactly one target. Production injects the fixed-origin, bearer-bound role resolver;
+  // the legacy list seam remains solely so existing hermetic createGateway tests/demos can migrate independently.
+  // No production composition is allowed to inject or fall back to that static/list seam.
+  const requestAuthorization = (req) => {
+    const headers = req && req.headers && typeof req.headers === 'object' ? req.headers : {};
+    const hasLower = Object.hasOwn(headers, 'authorization');
+    const hasUpper = Object.hasOwn(headers, 'Authorization');
+    const lower = headers.authorization;
+    const upper = headers.Authorization;
+    if ((hasLower && typeof lower !== 'string') || (hasUpper && typeof upper !== 'string')) return null;
+    if (hasLower && hasUpper && lower !== upper) return null;
+    const value = hasLower ? lower : (hasUpper ? upper : null);
+    return typeof value === 'string' && value.length > 0 ? value : null;
+  };
+
+  const membershipFailureResponse = (error) => {
+    if (error && error.code === SENTI_TARGET_MEMBERSHIP_ERROR_CODES.invalidTarget) {
+      return json(400, { error: 'invalid target session' });
+    }
+    if (error && error.code === SENTI_TARGET_MEMBERSHIP_ERROR_CODES.credentialRejected) {
+      return json(401, { error: 'authentication required' }, { 'www-authenticate': 'Bearer' });
+    }
+    if (error && error.code === SENTI_TARGET_MEMBERSHIP_ERROR_CODES.rateLimited) {
+      const headers = Number.isSafeInteger(error.retryAfterSeconds) &&
+        error.retryAfterSeconds >= 0 && error.retryAfterSeconds <= 3_600
+        ? { 'retry-after': String(error.retryAfterSeconds) }
+        : {};
+      return json(429, { error: 'authorization lookup rate limited', retryable: true }, headers);
+    }
+    return json(503, { error: 'authorization lookup unavailable', retryable: true });
+  };
+
+  const resolveTargetAccess = async (req, ctx, sessionId, minimumRole = 'viewer') => {
+    const authorization = requestAuthorization(req);
+    if (!authorization) {
+      return { response: membershipFailureResponse({ code: SENTI_TARGET_MEMBERSHIP_ERROR_CODES.credentialRejected }) };
+    }
+    try {
+      let membership;
+      if (typeof deps.getTargetMembership === 'function') {
+        membership = await deps.getTargetMembership(Object.freeze({ sessionId, authorization }));
+      } else if (typeof deps.knownSessionIdsFor === 'function') {
+        const access = minimumRole === 'viewer' ? 'member' : 'write';
+        const known = await deps.knownSessionIdsFor(
+          ctx.humanId,
+          Object.freeze({ sessionId, authorization, access }),
+        );
+        membership = Array.isArray(known) && known.includes(sessionId)
+          ? { sessionId, membershipRole: 'owner' }
+          : null;
+      } else {
+        throw new SentiTargetMembershipUnavailableError();
+      }
+      if (membership === null) return { allowed: false, membership: null };
+      if (
+        !membership ||
+        typeof membership !== 'object' ||
+        membership.sessionId !== sessionId ||
+        !Object.hasOwn(TARGET_ROLE_RANK, membership.membershipRole) ||
+        !Object.hasOwn(TARGET_ROLE_RANK, minimumRole)
+      ) {
+        throw new SentiTargetMembershipUnavailableError();
+      }
+      return {
+        allowed: TARGET_ROLE_RANK[membership.membershipRole] >= TARGET_ROLE_RANK[minimumRole],
+        membership,
+      };
+    } catch (error) {
+      return { response: membershipFailureResponse(error) };
+    }
+  };
 
   async function handleSync(req, ctx) {
     if (!hasScope(ctx, SCOPES.sync)) return json(403, { error: 'missing scope ' + SCOPES.sync });
@@ -120,13 +237,11 @@ export function createGateway(deps) {
     const sessionId = req.query && req.query.sessionId;
     if (typeof sessionId !== 'string' || sessionId.length === 0) return json(400, { error: 'sessionId required' });
     if (!deps.signingKey) return json(501, { error: 'signing not configured' });
-    // Server-derived membership authz: knownSessionIdsFor is keyed by HUMANID (the contract + the write path
-    // handleExecute), so scope by ctx.humanId — NOT the synthetic principal string (which never matches -> 403s a valid
-    // member in prod). Durable state stays principal-namespaced (below); membership is humanId. The token's claim alone
-    // still can never name an arbitrary target session.
-    let known = [];
-    try { known = await deps.knownSessionIdsFor(ctx.humanId); } catch { return json(500, { error: 'authorization lookup failed' }); }
-    if (!Array.isArray(known) || !known.includes(sessionId)) return json(403, { error: 'not a known session for this principal' });
+    // The API derives identity from this request's exact bearer and returns the role for this one target; viewer is
+    // sufficient for checkpoint reads. The humanId remains verifier-owned but is never trusted as probe authority.
+    const access = await resolveTargetAccess(req, ctx, sessionId, 'viewer');
+    if (access.response) return access.response;
+    if (!access.allowed) return json(403, { error: 'not a known session for this principal' });
     const now = () => (typeof deps.now === 'function' ? deps.now() : new Date().toISOString());
     let bundle;
     try {
@@ -158,10 +273,10 @@ export function createGateway(deps) {
     if (typeof sessionId !== 'string' || sessionId.length === 0) return json(400, { error: 'sessionId required' });
     if (!question) return json(400, { error: 'question required' });
     if (Buffer.byteLength(question, 'utf8') > 4096) return json(413, { error: 'question exceeds 4096 bytes' });
-    // Server-derived membership authz: reason ONLY over a session this HUMAN belongs to (humanId-keyed, matching the write).
-    let known = [];
-    try { known = await deps.knownSessionIdsFor(ctx.humanId); } catch { return json(500, { error: 'authorization lookup failed' }); }
-    if (!Array.isArray(known) || !known.includes(sessionId)) return json(403, { error: 'not a known session for this principal' });
+    // Reason only over a target for which the exact caller bearer has at least viewer membership.
+    const access = await resolveTargetAccess(req, ctx, sessionId, 'viewer');
+    if (access.response) return access.response;
+    if (!access.allowed) return json(403, { error: 'not a known session for this principal' });
     const now = () => (typeof deps.now === 'function' ? deps.now() : new Date().toISOString());
     // Fail-closed: reason ONLY over a signature-verified checkpoint bundle (never over an unverified/synthesized one).
     let bundle;
@@ -207,9 +322,9 @@ export function createGateway(deps) {
     if (!body) return json(400, { error: 'invalid JSON body' });
     const sessionId = body.sessionId;
     if (typeof sessionId !== 'string' || sessionId.length === 0) return json(400, { error: 'sessionId required' });
-    let known = [];
-    try { known = await deps.knownSessionIdsFor(ctx.humanId); } catch { return json(500, { error: 'authorization lookup failed' }); }
-    if (!Array.isArray(known) || !known.includes(sessionId)) return json(403, { error: 'not a known session for this principal' });
+    const access = await resolveTargetAccess(req, ctx, sessionId, 'viewer');
+    if (access.response) return access.response;
+    if (!access.allowed) return json(403, { error: 'not a known session for this principal' });
     const now = () => (typeof deps.now === 'function' ? deps.now() : new Date().toISOString());
     let bundle;
     try {
@@ -247,15 +362,20 @@ export function createGateway(deps) {
     const { proposal, confirmation } = body;
     if (!proposal || typeof proposal.id !== 'string' || proposal.id.length === 0) return json(400, { error: 'proposal.id required' });
 
-    // Authorization is server-derived: this human may only write to sessions they actually belong to.
-    let known = [];
-    try { known = await deps.knownSessionIdsFor(ctx.humanId); } catch { return json(500, { error: 'authorization lookup failed' }); }
+    // A governed write requires contributor-or-higher for this exact bearer+target. Preserve executeAction's existing
+    // structural allowlist by passing the one already-authorized target; never perform a second network lookup.
+    if (typeof proposal.targetSessionId !== 'string' || proposal.targetSessionId.length === 0) {
+      return json(403, { error: 'not a member of the target session', proposalId: proposal.id });
+    }
+    const access = await resolveTargetAccess(req, ctx, proposal.targetSessionId, 'contributor');
+    if (access.response) return access.response;
+    const known = access.allowed ? [proposal.targetSessionId] : [];
 
     // MEMBERSHIP PRECHECK (Forge nit / Warden hardening): reject a non-member BEFORE the durable in-flight reservation
     // below, so an authenticated `sessions:write` principal can't amplify self-namespace storage by spamming /execute for
     // sessions they don't belong to. executeAction re-checks membership authoritatively (validateProposal, fail-closed on
     // empty `known`); this is the earlier, cheaper gate with the SAME notion of membership — no store touch on refuse.
-    if (!known.includes(proposal.targetSessionId)) {
+    if (!access.allowed) {
       return json(403, { error: 'not a member of the target session', proposalId: proposal.id });
     }
 
@@ -434,18 +554,56 @@ export function createGateway(deps) {
     const sessionId = body.sessionId;
     if (typeof sessionId !== 'string' || !sessionId) return json(400, { error: 'sessionId required' });
     const priority = ['low', 'medium', 'high', 'urgent'].includes(body.priority) ? body.priority : 'medium';
-    // Membership: only ring about a session this human belongs to (humanId-keyed, same as the read endpoints).
-    let known = [];
-    try { known = await deps.knownSessionIdsFor(ctx.humanId); } catch { return json(500, { error: 'authorization lookup failed' }); }
-    if (!Array.isArray(known) || !known.includes(sessionId)) return json(403, { error: 'not a known session for this user' });
+    // A viewer may ring their own registered devices about a session they can read.
+    const access = await resolveTargetAccess(req, ctx, sessionId, 'viewer');
+    if (access.response) return access.response;
+    if (!access.allowed) return json(403, { error: 'not a known session for this user' });
     // context may echo session text -> best-effort scrub + bound before it leaves via the push payload.
     const context = typeof body.context === 'string' ? scrubText(body.context).text.slice(0, 2048) : undefined;
     let out;
-    try { out = await deps.pushBackend({ message, context, priority, sessionId, humanId: ctx.humanId }); }
+    try {
+      out = await deps.pushBackend({
+        message,
+        context,
+        priority,
+        sessionId,
+        principal: ctx.principal || ctx.humanId,
+        humanId: ctx.humanId,
+      });
+    }
     catch { return json(502, { error: 'dial backend error', reason: 'dispatch-failed' }); }
     const dispatched = !!(out && out.dispatched);
     const dialId = out && typeof out.dialId === 'string' ? out.dialId : null;
-    return json(dispatched ? 200 : 502, dispatched ? { dialId, dispatched: true } : { dialId, dispatched: false, reason: (out && out.reason) || 'not-dispatched' });
+    return json(dispatched ? 200 : 502, dispatched
+      ? { dialId, dispatched: true }
+      : {
+        error: 'dial dispatch failed',
+        dialId,
+        dispatched: false,
+        reason: (out && out.reason) || 'not-dispatched',
+      });
+  }
+
+  // POST /call/authorize — admission for the live-call Worker (tools/live-call/worker.mjs authorize()). The Worker forwards
+  // the CALLER's own bearer with the (sessionId, roomId) it asked for; this resolves the caller's role in that session
+  // under that same bearer and returns the participant id bound to the bearer. It mints and authors nothing. The
+  // participant is the authenticated human (never a body field), so a caller cannot join as someone else, and the
+  // Worker keys the room's DO by (session, room), so a room id cannot reach another session's call. Viewer may join;
+  // floor control stays owner/admin inside the DO. The legacy knownSessionIdsFor seam (demo servers only) reports every
+  // known session as 'owner', so in demo mode every member gets floor control; production uses getTargetMembership.
+  async function handleCallAuthorize(req, ctx) {
+    if (!hasScope(ctx, SCOPES.call)) return callAuthorizeJson(403, { error: 'missing scope ' + SCOPES.call });
+    const body = readBody(req.body);
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return callAuthorizeJson(400, { error: 'invalid JSON body' });
+    const { sessionId, roomId } = body;
+    if (typeof sessionId !== 'string' || !sessionId) return callAuthorizeJson(400, { error: 'sessionId required' });
+    if (typeof roomId !== 'string' || !CALL_ROOM_ID.test(roomId)) return callAuthorizeJson(400, { error: 'invalid roomId' });
+    const access = await resolveTargetAccess(req, ctx, sessionId, 'viewer');
+    if (access.response) {
+      return callAuthorizeJson(access.response.status, access.response.body, access.response.headers);
+    }
+    if (!access.allowed) return callAuthorizeJson(403, { error: 'not a known session for this user' });
+    return callAuthorizeJson(200, { sessionId, roomId, role: access.membership.membershipRole, participantId: ctx.humanId });
   }
 
   // POST /dial/ring-owner — the EXPLICIT ring path (sl ring-owner / an agent's MCP tool). The caller DESCRIBES a need
@@ -471,10 +629,10 @@ export function createGateway(deps) {
     if (body.kind === 'pickOption' && (!Array.isArray(body.options) || body.options.length === 0)) {
       return json(400, { error: 'pickOption requires at least one option' });
     }
-    // Membership: only ring about a session this human belongs to (humanId-keyed, same gate as /dial + the read endpoints).
-    let known = [];
-    try { known = await deps.knownSessionIdsFor(ctx.humanId); } catch { return json(500, { error: 'authorization lookup failed' }); }
-    if (!Array.isArray(known) || !known.includes(sessionId)) return json(403, { error: 'not a known session for this user' });
+    // An explicit agent-originated owner ring is active notification authority, so require contributor-or-higher.
+    const access = await resolveTargetAccess(req, ctx, sessionId, 'contributor');
+    if (access.response) return access.response;
+    if (!access.allowed) return json(403, { error: 'not a known session for this user' });
     // Build the canonical NeedCarterSignal server-side. id = GATEWAY-generated opaque (caller must NOT choose the store
     // key). confidence defaults to 1.0 (an explicit ask clears the ring floor). createdAt = Unix-epoch SECONDS (seam (c)
     // contract: atlas's NeedCarterSignal custom-decodes Unix-seconds-or-absent -> Date). question + whatWeNeed are
@@ -503,11 +661,27 @@ export function createGateway(deps) {
       const mapped = mapSignalToPushInput(signal, { humanId: ctx.humanId });
       if (!mapped.ring) return { status: 422, body: { error: 'signal not rung', reason: mapped.reason, ...(mapped.error ? { detail: mapped.error } : {}) } };
       let out;
-      try { out = await deps.pushBackend({ ...mapped.input, storedSignal: mapped.storedSignal }); }
+      try {
+        out = await deps.pushBackend({
+          ...mapped.input,
+          principal: ctx.principal || ctx.humanId,
+          storedSignal: mapped.storedSignal,
+        });
+      }
       catch { return { status: 502, body: { error: 'dial backend error', reason: 'dispatch-failed' } }; }
       const dispatched = !!(out && out.dispatched);
       const dialId = (out && typeof out.dialId === 'string' ? out.dialId : null) || mapped.input.id;
-      return { status: dispatched ? 200 : 502, body: dispatched ? { dialId, dispatched: true, kind: mapped.kind.slug } : { dialId, dispatched: false, reason: (out && out.reason) || 'not-dispatched' } };
+      return {
+        status: dispatched ? 200 : 502,
+        body: dispatched
+          ? { dialId, dispatched: true, kind: mapped.kind.slug }
+          : {
+            error: 'dial dispatch failed',
+            dialId,
+            dispatched: false,
+            reason: (out && out.reason) || 'not-dispatched',
+          },
+      };
     };
 
     // ROBUSTNESS (Warden #86 follow-up): idempotency + a soft per-human ring rate-limit, BEST-EFFORT over deps.store.
@@ -519,7 +693,8 @@ export function createGateway(deps) {
       const r = await doDispatch();
       return json(r.status, r.body);
     }
-    const rateMax = Number.isInteger(deps.ringRateMax) && deps.ringRateMax > 0 ? deps.ringRateMax : 20;             // rings per window per human
+    const rateMax = Number.isInteger(deps.ringRateMax) && deps.ringRateMax > 0 ? deps.ringRateMax : 20;             // per-TOKEN (principal): rings per window from one credential
+    const sessionRateMax = Number.isInteger(deps.ringSessionRateMax) && deps.ringSessionRateMax > 0 ? deps.ringSessionRateMax : 10; // per-SESSION: rings per window ABOUT one session (AMEND-1)
     const rateWindowSec = Number.isInteger(deps.ringRateWindowSec) && deps.ringRateWindowSec > 0 ? deps.ringRateWindowSec : 60;
     const idemTtlSec = Number.isInteger(deps.ringIdemTtlSec) && deps.ringIdemTtlSec > 0 ? deps.ringIdemTtlSec : 120; // dedupe window for an identical/keyed retry
     const nowSec = Math.floor(nowMs / 1000);
@@ -532,14 +707,26 @@ export function createGateway(deps) {
       if (prior && typeof prior.dialId === 'string' && Number.isFinite(prior.expiresAtSec) && nowSec < prior.expiresAtSec) {
         return { status: 200, body: { dialId: prior.dialId, dispatched: true, idempotent: true } };
       }
-      // 2. Soft per-human ring rate-limit (fixed window; get->check->put, fail-open on store error). Only a genuine
-      //    (non-replay) ring consumes a token — a deduped retry above never counts against the limit.
+      // 2. Soft ring rate-limit — per-TOKEN (principal) AND per-SESSION (AMEND-1, Call-Me contract v0.2). Fixed window;
+      //    a genuine (non-replay) ring consumes one token in EACH bucket. Either bucket over budget -> 429 with a
+      //    standard Retry-After HEADER (not just a body field) + a `scope` telling which limit bit. The per-token bucket
+      //    bounds one credential storming; the per-session bucket (keyed within the principal + sessionId) bounds rings
+      //    ABOUT one session, so a single noisy session can't monopolize the per-token budget OR spam the owner. Only a
+      //    genuine ring counts — a deduped retry above never consumes a token. Fail-open on any store error (a missed
+      //    ring is worse than a rare over-limit ring). A rejected ring consumes NOTHING (both puts run only when both
+      //    buckets pass), so a 429'd caller isn't charged toward the next window.
       const bucket = Math.floor(nowSec / rateWindowSec);
-      const rateKey = storeKey(ctx.principal || ctx.humanId, 'ringrate:' + bucket);
-      let cnt = 0;
-      try { const rr = await store.get(rateKey); cnt = rr && Number.isFinite(rr.count) ? rr.count : 0; } catch { cnt = 0; }
-      if (cnt >= rateMax) return { status: 429, body: { error: 'ring rate limit exceeded', reason: 'rate-limited', retryAfterSec: (bucket + 1) * rateWindowSec - nowSec } };
-      try { await store.put(rateKey, { count: cnt + 1 }, { ttlEpochSec: (bucket + 2) * rateWindowSec }); } catch { /* best-effort */ }
+      const retryAfterSec = (bucket + 1) * rateWindowSec - nowSec;
+      const rateHeaders = { 'retry-after': String(Math.max(0, Math.min(3600, retryAfterSec))) };
+      const humanRateKey = storeKey(ctx.principal || ctx.humanId, 'ringrate:' + bucket);
+      const sessionRateKey = storeKey(ctx.principal || ctx.humanId, 'ringrate:sess:' + sessionId + ':' + bucket);
+      let humanCnt = 0, sessionCnt = 0;
+      try { const rr = await store.get(humanRateKey); humanCnt = rr && Number.isFinite(rr.count) ? rr.count : 0; } catch { humanCnt = 0; }
+      try { const sr = await store.get(sessionRateKey); sessionCnt = sr && Number.isFinite(sr.count) ? sr.count : 0; } catch { sessionCnt = 0; }
+      if (humanCnt >= rateMax) return { status: 429, headers: rateHeaders, body: { error: 'ring rate limit exceeded', reason: 'rate-limited', scope: 'principal', retryAfterSec } };
+      if (sessionCnt >= sessionRateMax) return { status: 429, headers: rateHeaders, body: { error: 'ring rate limit exceeded', reason: 'rate-limited', scope: 'session', retryAfterSec } };
+      try { await store.put(humanRateKey, { count: humanCnt + 1 }, { ttlEpochSec: (bucket + 2) * rateWindowSec }); } catch { /* best-effort */ }
+      try { await store.put(sessionRateKey, { count: sessionCnt + 1 }, { ttlEpochSec: (bucket + 2) * rateWindowSec }); } catch { /* best-effort */ }
       // 3. Dispatch the ring, then 4. record the idempotency result ONLY on a successful dispatch (a failed ring is
       //    immediately retryable — we never cache a failure).
       const r = await doDispatch();
@@ -565,22 +752,97 @@ export function createGateway(deps) {
     let guarded;
     try { guarded = await runGuarded(); }
     finally { try { await store.releaseLock(idemStoreKey, token); } catch { /* best-effort: the lock self-heals via TTL */ } }
-    return json(guarded.status, guarded.body);
+    return json(guarded.status, guarded.body, guarded.headers);
   }
 
   // POST /dial/register — bind THIS device's VoIP token to a session the human belongs to (the onVoipToken(hex) seam,
   // forge PR #40). The registry is dispatch-substrate for /dial: it AUTHORS NOTHING and holds no key. humanId comes from
   // the VERIFIED token (ctx.humanId), NEVER the body — a caller can only register a device under their OWN identity,
   // which is what makes /dial's ctx.humanId dispatch secure (register + dial + pushBackend lookup share the one key).
-  // Same least-privilege pocket:dial scope. Fail-closed: no registry -> 501, bad token -> 400/413, non-member -> 403.
+  // Same least-privilege pocket:dial scope for new writes. A revoked caller first persists a denial outcome for the
+  // exact V2 operation. That barrier and the original registration transaction contend on one Dynamo item, so a 403
+  // cannot be followed by a late route commit. A commit that linearized first returns revocation-only fences instead.
   async function handleDialRegister(req, ctx) {
-    if (!hasScope(ctx, SCOPES.dial)) return json(403, { error: 'missing scope ' + SCOPES.dial });
+    if (!hasScope(ctx, SCOPES.dial)) {
+      const replayBody = readBody(req.body);
+      if (replayBody) {
+        dialNow(); // fail before a durable denial write if the shared receipt clock is invalid
+        try {
+          const replay = await dialReg.denyRegistration({
+            principal: ctx.principal || ctx.humanId,
+            humanId: ctx.humanId,
+            body: replayBody,
+            deniedError: 'missing scope ' + SCOPES.dial,
+          });
+          if (replay) return json(replay.status, replay.body);
+        } catch {
+          // A non-definitive storage/corruption failure is retryable: the client must retain its pending request. Collapse
+          // all causes to one response so the failure itself does not become a registry-record existence oracle.
+          return json(502, {
+            error: 'registry denial failed',
+            reason: 'registry-denial-failed',
+          });
+        }
+      }
+      return json(403, { error: 'missing scope ' + SCOPES.dial });
+    }
     const body = readBody(req.body);
     if (!body) return json(400, { error: 'invalid JSON body' });
+    dialNow(); // validate the response clock before any registry mutation
+    let membershipFailure;
     const r = await dialReg.register({
+      principal: ctx.principal || ctx.humanId,
       humanId: ctx.humanId,
       body,
-      isMember: async (sid) => { const known = await deps.knownSessionIdsFor(ctx.humanId); return Array.isArray(known) && known.includes(sid); },
+      isMember: async (sid) => {
+        const access = await resolveTargetAccess(req, ctx, sid, 'viewer');
+        if (access.response) {
+          membershipFailure = access.response;
+          throw new Error('target membership lookup failed');
+        }
+        return access.allowed;
+      },
+    });
+    if (membershipFailure) return membershipFailure;
+    return json(r.status, r.body);
+  }
+
+  // DELETE /dial/register — authenticated, existence-oblivious V2 compare-delete. Scope and membership are deliberately
+  // not required: a device must be able to revoke a binding after either grant disappears. The registry derives the
+  // target from ctx.humanId + sessionId and deletes only the exact server bindingId/revision, so late A cannot erase B.
+  async function handleDialUnregister(req, ctx) {
+    const body = readBody(req.body);
+    if (!body) return json(400, { error: 'invalid JSON body' });
+    const r = await dialReg.unregister({
+      principal: ctx.principal || ctx.humanId,
+      humanId: ctx.humanId,
+      body,
+    });
+    return json(r.status, r.body);
+  }
+
+  // GET /dial/register/context — authenticated, auth-only owner continuity bootstrap. It derives a stable opaque
+  // handle from the verifier-owned principal and returns no registration/binding authority. Keeping this as its own
+  // read-only route makes it independently rate-limitable at the edge without coupling rate state to registry writes.
+  async function handleDialRegistrationContext(_req, ctx) {
+    const r = await dialReg.registrationContext({
+      principal: ctx.principal || ctx.humanId,
+      humanId: ctx.humanId,
+    });
+    return registrationContextJson(r.status, r.body);
+  }
+
+  // POST /dial/register/reconcile — authenticated and strictly subtractive. It needs neither pocket:dial scope nor
+  // membership: a phone that lost its raw PushKit token can use its durable SHA-256 digest to barrier an unknown commit
+  // and remove only that exact operation's server-issued binding. The response never grants lease authority.
+  async function handleDialRegistrationCleanup(req, ctx) {
+    const body = readBody(req.body);
+    if (!body) return json(400, { error: 'invalid JSON body' });
+    dialNow(); // cleanup returns serverTime; never mutate if it cannot issue a valid receipt
+    const r = await dialReg.cleanupRegistration({
+      principal: ctx.principal || ctx.humanId,
+      humanId: ctx.humanId,
+      body,
     });
     return json(r.status, r.body);
   }
@@ -592,43 +854,67 @@ export function createGateway(deps) {
   // authorization boundary. OPAQUE-ID: the caller supplies a high-entropy dialId, NOT a session they named — so we must
   // never leak whether an id is valid to someone who can't access it. Absent, expired, AND non-member therefore collapse
   // to ONE 410 (gone): there is honestly no signal available to this caller, and it closes the existence oracle (distinct
-  // from /checkpoint, where the client names the session so a 403 reveals nothing). No store wired -> 501; bad id -> 400.
+  // from /checkpoint, where the client names the session so a 403 reveals nothing). The high-entropy id and uniform
+  // status/body/cache policy limit disclosure; the store-first implementation does not claim constant-time behavior.
+  // No store wired -> 501; bad id -> 400. Every response is no-store because both existence and content are private.
   async function handleDialFetch(req, ctx) {
-    if (!hasScope(ctx, SCOPES.dial)) return json(403, { error: 'missing scope ' + SCOPES.dial });
+    if (!hasScope(ctx, SCOPES.dial)) return dialHydrationJson(403, { error: 'missing scope ' + SCOPES.dial });
     if (!deps.dialSignalStore || typeof deps.dialSignalStore.get !== 'function') {
-      return json(501, { error: 'dial hydration not configured', reason: 'dial-signal-store-not-configured' });
+      return dialHydrationJson(501, { error: 'dial hydration not configured', reason: 'dial-signal-store-not-configured' });
     }
     const id = req.query && typeof req.query.id === 'string' ? req.query.id : '';
-    if (id.trim().length === 0) return json(400, { error: 'id required' });
-    if (Buffer.byteLength(id, 'utf8') > 256) return json(400, { error: 'id too long' }); // bound before a store round-trip
+    if (id.trim().length === 0) return dialHydrationJson(400, { error: 'id required' });
+    if (Buffer.byteLength(id, 'utf8') > 256) return dialHydrationJson(400, { error: 'id too long' }); // bound before a store round-trip
     let signal;
     try { signal = await deps.dialSignalStore.get(id); }
-    catch { return json(503, { error: 'dial hydration lookup failed', retryable: true }); }
+    catch { return dialHydrationJson(503, { error: 'dial hydration lookup failed', retryable: true }); }
     // Resolve membership from the STORED signal's session (only when a signal exists). Absent signal -> skip the lookup
-    // (no session to check) -> the uniform 410 below; this also avoids a knownSessionIdsFor call per bogus-id probe.
+    // (no session to check) -> the uniform 410 below; this also avoids a membership call per bogus-id probe.
     let member = false;
     const sessionId = signal && signal.context && typeof signal.context.sessionId === 'string' ? signal.context.sessionId : null;
     if (sessionId) {
-      let known = [];
-      try { known = await deps.knownSessionIdsFor(ctx.humanId); } catch { return json(500, { error: 'authorization lookup failed' }); }
-      member = Array.isArray(known) && known.includes(sessionId);
+      const access = await resolveTargetAccess(req, ctx, sessionId, 'viewer');
+      // The dial id is caller-supplied but sessionId is stored server state. ANY target-authorization outcome here
+      // (invalid stored target, stale credential, rate limit, or outage) must remain indistinguishable from an absent
+      // id; returning its typed status only when a record exists would turn the membership service into an id oracle.
+      if (access.response) {
+        return dialHydrationJson(410, DIAL_HYDRATION_GONE);
+      }
+      member = access.allowed;
     }
-    if (!signal || !member) return json(410, { error: 'dial signal unavailable', reason: 'gone' }); // absent | expired | non-member -> uniform gone
-    return json(200, signal);
+    if (!signal || !member) return dialHydrationJson(410, DIAL_HYDRATION_GONE); // absent | expired | non-member -> uniform gone
+    return dialHydrationJson(200, signal);
   }
 
   return {
-    async handle(req) {
+    async handle(req, operationAdmissionContext) {
       // handle() is the gateway's contract boundary — it must NEVER throw to an adapter (a throw becomes a runtime crash
       // / adapter-specific 5xx that can leak a stack). Any unexpected error from a handler collapses to a clean 500 here.
       try {
         const method = (req.method || 'GET').toUpperCase();
         const path = req.path || '/';
+        const isDialRegistrationContext = method === 'GET' && path === '/dial/register/context';
+        const isOperationAdmissionRoute = isRegistryOperationAdmissionRoute(method, path);
+        if (operationAdmissionContext !== undefined && !isOperationAdmissionRoute) {
+          return json(503, OPERATION_ADMISSION_UNAVAILABLE);
+        }
         if (method === 'GET' && path === '/health') return json(200, { ok: true });
 
-        const ctx = await authenticate(req);
+        let ctx;
+        if (isOperationAdmissionRoute && deps.requireOperationAdmissionAssertion === true) {
+          if (!isOperationAdmissionAssertionContext(operationAdmissionContext)) {
+            return json(503, OPERATION_ADMISSION_UNAVAILABLE);
+          }
+          ctx = operationAdmissionContext;
+        } else {
+          if (operationAdmissionContext !== undefined) return json(503, OPERATION_ADMISSION_UNAVAILABLE);
+          ctx = await authenticate(req);
+        }
         if (!ctx || typeof ctx.humanId !== 'string' || !ctx.humanId) {
-          return json(401, { error: 'authentication required' }, { 'www-authenticate': 'Bearer' });
+          const response = isDialRegistrationContext
+            ? registrationContextJson
+            : (method === 'POST' && path === '/call/authorize' ? callAuthorizeJson : json);
+          return response(401, { error: 'authentication required' }, { 'www-authenticate': 'Bearer' });
         }
         // `return await` (not bare `return`): the handlers are async, so awaiting HERE keeps a rejection inside this
         // try/catch — a bare `return handleX()` would settle in the caller's await, escaping the boundary.
@@ -641,11 +927,20 @@ export function createGateway(deps) {
         if (method === 'POST' && path === '/deck') return await handleDeck(req, ctx);
         if (method === 'POST' && path === '/dial') return await handleDial(req, ctx);
         if (method === 'POST' && path === '/dial/ring-owner') return await handleRingOwner(req, ctx);
+        if (method === 'POST' && path === '/call/authorize') return await handleCallAuthorize(req, ctx);
         if (method === 'GET' && path === '/dial') return await handleDialFetch(req, ctx);
+        if (isDialRegistrationContext) {
+          return await handleDialRegistrationContext(req, ctx);
+        }
         if (method === 'POST' && path === '/dial/register') return await handleDialRegister(req, ctx);
+        if (method === 'POST' && path === '/dial/register/reconcile') return await handleDialRegistrationCleanup(req, ctx);
+        if (method === 'DELETE' && path === '/dial/register') return await handleDialUnregister(req, ctx);
         return json(404, { error: 'not found' });
       } catch {
-        return json(500, { error: 'internal error' }); // no stack/detail leaked to the client
+        const isDialRegistrationContext =
+          (req?.method || 'GET').toUpperCase() === 'GET' && (req?.path || '/') === '/dial/register/context';
+        const response = isDialRegistrationContext ? registrationContextJson : json;
+        return response(500, { error: 'internal error' }); // no stack/detail leaked to the client
       }
     },
   };

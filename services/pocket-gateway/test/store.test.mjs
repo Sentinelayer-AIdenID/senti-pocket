@@ -65,3 +65,118 @@ test('putIfAbsent keeps atomic-reserve semantics with a valid ttl (conditional p
   assert.equal(c.puts[0].Item.ttl, VALID);
   assert.equal(c.puts[0].ConditionExpression, 'attribute_not_exists(pk)', 'still conditional (atomic reserve)');
 });
+
+test('advanceGeneration is monotonic in memory: equal/lower stalled writers cannot replace a newer durable head', async () => {
+  const store = createInMemoryStore();
+  const generation2 = { generationOrder: '00000000000000000002', generation: '2', operation: 'register' };
+  const generation3 = { generationOrder: '00000000000000000003', generation: '3', operation: 'register' };
+  assert.equal((await store.advanceGeneration('install', generation2)).advanced, true);
+  assert.equal((await store.advanceGeneration('install', generation3)).advanced, true);
+  const delayed = await store.advanceGeneration('install', generation2);
+  assert.equal(delayed.advanced, false);
+  assert.equal(delayed.current.generation, '3');
+  assert.equal((await store.get('install')).generation, '3');
+});
+
+test('compareAndSwap is exact-version atomic in memory and rejects stale index writers', async () => {
+  const store = createInMemoryStore();
+  assert.equal((await store.compareAndSwap('index', null, {
+    recordVersion: '1', installationHashes: ['a'],
+  })).swapped, true);
+  assert.equal((await store.compareAndSwap('index', null, {
+    recordVersion: '1', installationHashes: ['lost'],
+  })).swapped, false, 'absent-CAS cannot overwrite an existing index');
+  assert.equal((await store.compareAndSwap('index', '1', {
+    recordVersion: '2', installationHashes: ['a', 'b'],
+  })).swapped, true);
+  assert.equal((await store.compareAndSwap('index', '1', {
+    recordVersion: '2', installationHashes: ['stale'],
+  })).swapped, false);
+  assert.deepEqual((await store.get('index')).installationHashes, ['a', 'b']);
+});
+
+test('compareAndSwap shares the strict TTL option contract on both adapters', async () => {
+  const mem = createInMemoryStore();
+  await assert.rejects(
+    mem.compareAndSwap('index', null, { recordVersion: '1' }, { ttlEpochSec: 0 }),
+    /positive safe integer/,
+  );
+  assert.equal(mem._records.size, 0, 'invalid in-memory TTL fails before the CAS write');
+
+  let ttlReads = 0;
+  const opts = { get ttlEpochSec() { ttlReads += 1; return VALID; } };
+  const c = fakeClient();
+  await createDynamoStore({ client: c, table: 'T' }).compareAndSwap(
+    'index',
+    null,
+    { recordVersion: '1' },
+    opts,
+  );
+  assert.equal(ttlReads, 1, 'CAS TTL getter is read exactly once');
+  assert.equal(c.puts[0].Item.ttl, VALID, 'CAS TTL is top-level for Dynamo cleanup');
+  assert.equal(c.puts[0].Item.value.ttl, undefined, 'CAS TTL never contaminates the logical record');
+
+  const bad = fakeClient();
+  await assert.rejects(
+    createDynamoStore({ client: bad, table: 'T' }).compareAndSwap(
+      'index',
+      null,
+      { recordVersion: '1' },
+      { ttlEpochSec: 'forever' },
+    ),
+    /positive safe integer/,
+  );
+  assert.equal(bad.puts.length, 0, 'invalid Dynamo TTL fails before the conditional write');
+});
+
+test('Dynamo supports an explicit strongly-consistent record read and uses one after CAS contention', async () => {
+  const condition = Object.assign(new Error('conditional'), { name: 'ConditionalCheckFailedException' });
+  const gets = [];
+  const client = {
+    async get(params) {
+      gets.push(structuredClone(params));
+      return { Item: { value: { recordVersion: '7' } } };
+    },
+    async put() { throw condition; },
+    async delete() {},
+  };
+  const store = createDynamoStore({ client, table: 'T' });
+  assert.deepEqual(await store.get('index', { consistent: true }), { recordVersion: '7' });
+  const refused = await store.compareAndSwap('index', '6', { recordVersion: '7' });
+  assert.equal(refused.swapped, false);
+  assert.equal(gets.length, 2);
+  assert.equal(gets[0].ConsistentRead, true);
+  assert.equal(gets[1].ConsistentRead, true, 'conditional loser re-reads the winning state strongly');
+});
+
+test('Dynamo generation/index CAS emit conditional puts and return the current value after a failed condition', async () => {
+  const condition = Object.assign(new Error('conditional'), { name: 'ConditionalCheckFailedException' });
+  const current = { generationOrder: '00000000000000000003', generation: '3' };
+  const calls = [];
+  let rejectPut = false;
+  const client = {
+    async get() { return { Item: { value: current } }; },
+    async put(params) {
+      calls.push(params);
+      if (rejectPut) throw condition;
+      return {};
+    },
+    async delete() {},
+  };
+  const store = createDynamoStore({ client, table: 'T' });
+  const next = { generationOrder: '00000000000000000002', generation: '2' };
+  assert.equal((await store.advanceGeneration('head', next)).advanced, true);
+  assert.equal(calls[0].ConditionExpression, 'attribute_not_exists(pk) OR #go < :next');
+  assert.equal(calls[0].Item.generationOrder, next.generationOrder, 'generation order is top-level for Dynamo comparison');
+
+  await store.compareAndSwap('index', null, { recordVersion: '1', installationHashes: [] });
+  assert.equal(calls[1].ConditionExpression, 'attribute_not_exists(pk)');
+  await store.compareAndSwap('index', '1', { recordVersion: '2', installationHashes: ['a'] });
+  assert.equal(calls[2].ConditionExpression, '#rv = :expected');
+  assert.equal(calls[2].ExpressionAttributeValues[':expected'], '1');
+
+  rejectPut = true;
+  const refused = await store.advanceGeneration('head', next);
+  assert.equal(refused.advanced, false);
+  assert.equal(refused.current.generation, '3');
+});
