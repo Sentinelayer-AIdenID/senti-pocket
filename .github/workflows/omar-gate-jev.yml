@@ -22,7 +22,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Omar Gate (Jev intent cascade)
-        uses: Sentinelayer-AIdenID/sentinelayer-v1-action@ebfcb813126ff64f21bb1fccfef8ab30609af67c
+        uses: Sentinelayer-AIdenID/sentinelayer-v1-action@e0d91642f8e49e407d85d9b2a42de37a4ecd0e1d
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           review_routing: intent-cascade-v1

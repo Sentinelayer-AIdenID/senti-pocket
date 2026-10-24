@@ -1,3 +1,4 @@
+// Jev caller pilot marker (do not merge): source-only, behavior-neutral change.
 // brief-live.mjs — LIVE AI briefing + voice, turnkey the instant a key is set. Zero-dep (Node 20 global fetch).
 // Grounds a spoken briefing on a SIGNATURE-VERIFIED checkpoint, so the "AI speaks your briefing" moment is REAL
 // (live LLM) and honest (refuses if the bundle doesn't verify). Voice: OpenAI TTS by default, ElevenLabs if its key is set.
