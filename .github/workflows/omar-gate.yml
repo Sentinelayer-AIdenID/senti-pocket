@@ -155,6 +155,7 @@ jobs:
           GATE_STATUS: ${{ steps.omar.outputs.gate_status || '' }}
           RUN_ID: ${{ steps.omar.outputs.run_id || '' }}
           EXPECTED_SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          EXPECTED_SCAN_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.scan_mode || 'deep' }}
         run: |
           set -euo pipefail
           if [ "${GATE_STATUS}" != "passed" ]; then
@@ -167,8 +168,9 @@ jobs:
           fi
           python3 scripts/ci/check_omar_cascade_evidence.py \
             --run-dir ".sentinelayer/runs/${RUN_ID}" \
-            --expected-head "${EXPECTED_SOURCE_SHA}"
-          echo "Omar deep cascade source scope complete; gate passed."
+            --expected-head "${EXPECTED_SOURCE_SHA}" \
+            --expected-mode "${EXPECTED_SCAN_MODE}"
+          echo "Omar ${EXPECTED_SCAN_MODE} cascade source scope complete; gate passed."
 
       - name: Resolve sanitized Omar artifact directory
         id: artifact_path

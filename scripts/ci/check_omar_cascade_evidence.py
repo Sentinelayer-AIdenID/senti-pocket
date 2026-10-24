@@ -1,4 +1,4 @@
-"""Fail closed unless a passed deep cascade reviewed this exact source tree."""
+"""Fail closed unless a passed full-scope cascade reviewed this exact source tree."""
 
 from __future__ import annotations
 
@@ -19,7 +19,10 @@ def _require(condition: bool, message: str) -> None:
         raise CascadeEvidenceError(message)
 
 
-def validate_deep_evidence(run_dir: Path, repo_root: Path, expected_head: str) -> None:
+def validate_full_scope_evidence(
+    run_dir: Path, repo_root: Path, expected_head: str, expected_mode: str,
+) -> None:
+    _require(expected_mode in {"deep", "nightly"}, "unsupported expected full-source mode")
     scope = json.loads((run_dir / "SOURCE_SCOPE.json").read_text(encoding="utf-8"))
     routing = json.loads((run_dir / "REVIEW_ROUTING.json").read_text(encoding="utf-8"))
     _require(isinstance(scope, dict) and isinstance(routing, dict), "deep evidence is malformed")
@@ -30,7 +33,7 @@ def validate_deep_evidence(run_dir: Path, repo_root: Path, expected_head: str) -
 
     manifest = scope.get("scope")
     _require(isinstance(manifest, dict), "deep source manifest is missing")
-    _require(manifest.get("scan_mode") == "deep", "Omar did not review the full deep scope")
+    _require(manifest.get("scan_mode") == expected_mode, "Omar reviewed a different full-source mode")
     _require(manifest.get("source_head") == expected_head, "reviewed source head differs from the event")
     hashes = manifest.get("source_hashes")
     _require(isinstance(hashes, dict) and bool(hashes), "deep source hashes are missing")
@@ -95,13 +98,35 @@ def _self_test() -> None:
             (run_dir / "REVIEW_ROUTING.json").write_text(
                 json.dumps({"source_scope": candidate}), encoding="utf-8")
             try:
-                validate_deep_evidence(run_dir, root, head)
+                validate_full_scope_evidence(run_dir, root, head, "deep")
             except CascadeEvidenceError:
                 assert not should_pass
             else:
                 assert should_pass
 
         check(scope, should_pass=True)
+        nightly = copy.deepcopy(scope)
+        nightly["scope"]["scan_mode"] = "nightly"
+        (run_dir / "SOURCE_SCOPE.json").write_text(json.dumps(nightly), encoding="utf-8")
+        (run_dir / "REVIEW_ROUTING.json").write_text(
+            json.dumps({"source_scope": nightly}), encoding="utf-8")
+        validate_full_scope_evidence(run_dir, root, head, "nightly")
+        for candidate, expected_mode in ((scope, "nightly"), (nightly, "deep")):
+            (run_dir / "SOURCE_SCOPE.json").write_text(json.dumps(candidate), encoding="utf-8")
+            (run_dir / "REVIEW_ROUTING.json").write_text(
+                json.dumps({"source_scope": candidate}), encoding="utf-8")
+            try:
+                validate_full_scope_evidence(run_dir, root, head, expected_mode)
+            except CascadeEvidenceError:
+                pass
+            else:
+                raise AssertionError("mismatched full-source mode was accepted")
+        try:
+            validate_full_scope_evidence(run_dir, root, head, "pr-diff")
+        except CascadeEvidenceError:
+            pass
+        else:
+            raise AssertionError("pr-diff was accepted as a full-source mode")
         for field, invalid in (("complete", False), ("residual_partition_ids", [partition]),
                                ("reviewed_partition_ids", [])):
             candidate = copy.deepcopy(scope)
@@ -118,7 +143,7 @@ def _self_test() -> None:
         (run_dir / "REVIEW_ROUTING.json").write_text(
             json.dumps({"source_scope": {}}), encoding="utf-8")
         try:
-            validate_deep_evidence(run_dir, root, head)
+            validate_full_scope_evidence(run_dir, root, head, "deep")
         except CascadeEvidenceError:
             pass
         else:
@@ -132,17 +157,18 @@ def main() -> int:
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument("--repo-root", type=Path, default=Path("."))
     parser.add_argument("--expected-head")
+    parser.add_argument("--expected-mode", choices=("deep", "nightly"))
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     if args.self_test:
         _self_test()
         return 0
-    if not args.run_dir or not args.expected_head:
-        parser.error("--run-dir and --expected-head are required")
+    if not args.run_dir or not args.expected_head or not args.expected_mode:
+        parser.error("--run-dir, --expected-head, and --expected-mode are required")
     try:
-        validate_deep_evidence(args.run_dir, args.repo_root, args.expected_head)
+        validate_full_scope_evidence(args.run_dir, args.repo_root, args.expected_head, args.expected_mode)
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        print(f"::error::Omar deep cascade evidence invalid: {exc}")
+        print(f"::error::Omar full-scope cascade evidence invalid: {exc}")
         return 1
     return 0
 

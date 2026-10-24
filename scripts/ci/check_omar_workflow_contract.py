@@ -40,6 +40,7 @@ ALLOWED_CODEX_MODEL_LINE = "codex_model: gpt-6-sol"
 ALLOWED_USE_CODEX_LINE = 'use_codex: "false"'
 ALLOWED_PRICE_PROFILE_LINE = "intent_price_profile: typesafe-input-20261020"
 ALLOWED_SCAN_MODE_LINE = "scan_mode: ${{ github.event_name == 'workflow_dispatch' && inputs.scan_mode || 'deep' }}"
+ALLOWED_EXPECTED_SCAN_MODE_LINE = "EXPECTED_SCAN_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.scan_mode || 'deep' }}"
 TELEMETRY_LOG_DOWNLOAD_FRAGMENTS = (
     "curl --silent --show-error --location --fail-with-body",
     "--proto-redir '=https' --max-redirs 3",
@@ -348,7 +349,9 @@ def validate_omar_workflow_text(workflow_text: str) -> None:
         "python3 scripts/ci/check_omar_cascade_evidence.py \\",
         '--run-dir ".sentinelayer/runs/${RUN_ID}"',
         '--expected-head "${EXPECTED_SOURCE_SHA}"',
-        "Omar deep cascade source scope complete; gate passed",
+        ALLOWED_EXPECTED_SCAN_MODE_LINE,
+        '--expected-mode "${EXPECTED_SCAN_MODE}"',
+        "Omar ${EXPECTED_SCAN_MODE} cascade source scope complete; gate passed",
         "Omar Gate did not pass",
         "Resolve sanitized Omar artifact directory",
         'artifact_dir=".sentinelayer/runs/${normalized_run_id}"',
@@ -444,11 +447,14 @@ jobs:
           fork_policy: block
           publish_github: "true"
       - name: Assert Omar cascade evidence and gate status
+        env:
+          EXPECTED_SCAN_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.scan_mode || 'deep' }}
         run: |
           python3 scripts/ci/check_omar_cascade_evidence.py \
             --run-dir ".sentinelayer/runs/${RUN_ID}" \
-            --expected-head "${EXPECTED_SOURCE_SHA}"
-          echo "Omar deep cascade source scope complete; gate passed"
+            --expected-head "${EXPECTED_SOURCE_SHA}" \
+            --expected-mode "${EXPECTED_SCAN_MODE}"
+          echo "Omar ${EXPECTED_SCAN_MODE} cascade source scope complete; gate passed"
           echo "Omar Gate did not pass"
       - name: Resolve sanitized Omar artifact directory
         run: |
@@ -538,6 +544,8 @@ jobs:
         ('publish_github: "true"', 'publish_github: "false"'),
         ("scan_mode: ${{ github.event_name == 'workflow_dispatch' && inputs.scan_mode || 'deep' }}",
          "scan_mode: pr-diff"),
+        (ALLOWED_EXPECTED_SCAN_MODE_LINE, "EXPECTED_SCAN_MODE: deep"),
+        ('--expected-mode "${EXPECTED_SCAN_MODE}"', '--expected-mode "deep"'),
         ("ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}",
          "ref: ${{ github.sha }}"),
         ("Assert exact Omar source checkout", "Source checkout unchecked"),
