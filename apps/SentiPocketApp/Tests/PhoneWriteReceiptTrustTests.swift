@@ -154,6 +154,7 @@ final class PhoneWriteReceiptTrustTests: XCTestCase {
         ReceiptTrustStubURLProtocol.reset(body: try wireBody(untrustedPostedReceipt(for: persisted)))
         let viewModel = PhoneWriteViewModel(
             sessionId: "session-A",
+            receiptTrustAvailable: true,
             client: client()
         )
 
@@ -179,7 +180,7 @@ final class PhoneWriteReceiptTrustTests: XCTestCase {
 
     func testMalformedSuccessResponsePreservesConfirmedIntentForReconciliation() async throws {
         ReceiptTrustStubURLProtocol.reset(body: Data("{".utf8))
-        let viewModel = PhoneWriteViewModel(sessionId: "session-A", client: client())
+        let viewModel = PhoneWriteViewModel(sessionId: "session-A", receiptTrustAvailable: true, client: client())
 
         viewModel.draft("ambiguous malformed response")
         viewModel.confirm()
@@ -211,7 +212,7 @@ final class PhoneWriteReceiptTrustTests: XCTestCase {
             body: try wireBody(untrustedPostedReceipt(for: intentA)),
             requestHook: { OutboxStore.save(intentB) }
         )
-        let viewModel = PhoneWriteViewModel(sessionId: "session-A", client: client())
+        let viewModel = PhoneWriteViewModel(sessionId: "session-A", receiptTrustAvailable: true, client: client())
 
         guard case .pending = viewModel.state else {
             return XCTFail("precondition: intent A must restore as pending")

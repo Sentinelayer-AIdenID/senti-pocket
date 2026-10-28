@@ -151,7 +151,7 @@ struct GatewayReasoningHTTPClient: GatewayReasoningClient {
         try Task.checkCancellation()
         try requireCurrentToken(token)
         guard let http = response as? HTTPURLResponse,
-              response.url == req.url else {
+              response.url?.absoluteURL == req.url?.absoluteURL else {
             throw GatewayReasoningError.malformedResponse
         }
         if !(200..<300).contains(http.statusCode) {

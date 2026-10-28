@@ -345,7 +345,7 @@ final class PhoneWriteOutboxDurabilityTests: XCTestCase {
     /// So an app-kill in the `.sending` window finds the confirmed write in the durable outbox. Before the fix nothing
     /// was persisted until an offline error, leaving the in-flight window unprotected.
     func test_confirm_persists_the_intent_before_the_send() async {
-        let vm = PhoneWriteViewModel(sessionId: "6cf7e861", client: makeClient())
+        let vm = PhoneWriteViewModel(sessionId: "6cf7e861", receiptTrustAvailable: true, client: makeClient())
 
         vm.draft("Merge now")
         XCTAssertNil(OutboxStore.load(), "draft() alone must not persist — nothing is confirmed yet")
@@ -373,7 +373,7 @@ final class PhoneWriteOutboxDurabilityTests: XCTestCase {
             confirmedAt: Date(timeIntervalSince1970: 1_784_000_000))
         OutboxStore.save(PersistedWriteIntent(proposal: proposal, confirmation: confirmation))
 
-        let vm = PhoneWriteViewModel(sessionId: "6cf7e861", client: makeClient())
+        let vm = PhoneWriteViewModel(sessionId: "6cf7e861", receiptTrustAvailable: true, client: makeClient())
         guard case .pending(let message) = vm.state else {
             return XCTFail("a restored confirmed intent must surface as .pending")
         }
@@ -398,7 +398,7 @@ final class PhoneWriteOutboxDurabilityTests: XCTestCase {
         let persisted = PersistedWriteIntent(proposal: proposal, confirmation: confirmation)
         OutboxStore.save(persisted)
 
-        let sessionB = PhoneWriteViewModel(sessionId: "session-B", client: makeClient())
+        let sessionB = PhoneWriteViewModel(sessionId: "session-B", receiptTrustAvailable: true, client: makeClient())
         XCTAssertEqual(sessionB.state, .blockedByPendingSession("session-A"))
 
         sessionB.retryPending()
@@ -427,7 +427,7 @@ final class PhoneWriteOutboxDurabilityTests: XCTestCase {
         XCTAssertTrue(UTF8ExactIdentity.matches(boundSessionId, composedSessionId))
         XCTAssertFalse(UTF8ExactIdentity.matches(boundSessionId, decomposedSessionId))
 
-        let variantSelection = PhoneWriteViewModel(sessionId: decomposedSessionId, client: makeClient())
+        let variantSelection = PhoneWriteViewModel(sessionId: decomposedSessionId, receiptTrustAvailable: true, client: makeClient())
         guard case .blockedByPendingSession(let blockedSessionId) = variantSelection.state else {
             return XCTFail("the byte-distinct selection must be blocked by the persisted owner")
         }
@@ -447,7 +447,7 @@ final class PhoneWriteOutboxDurabilityTests: XCTestCase {
     }
 
     func test_confirm_compare_and_set_cannot_overwrite_an_intent_claimed_after_view_model_init() {
-        let sessionB = PhoneWriteViewModel(sessionId: "session-B", client: makeClient())
+        let sessionB = PhoneWriteViewModel(sessionId: "session-B", receiptTrustAvailable: true, client: makeClient())
         let proposalA = PocketWriteClient.makeHumanMessageProposal(
             sessionId: "session-A",
             message: "A claimed the slot after B was composed",
@@ -540,7 +540,7 @@ final class PhoneWriteOutboxDurabilityTests: XCTestCase {
         )
         OutboxStore.save(PersistedWriteIntent(proposal: proposal, confirmation: mismatched))
 
-        let vm = PhoneWriteViewModel(sessionId: "session-A", client: makeClient())
+        let vm = PhoneWriteViewModel(sessionId: "session-A", receiptTrustAvailable: true, client: makeClient())
 
         guard case .refused(let message) = vm.state else {
             return XCTFail("a tampered outbox must fail closed")
@@ -577,7 +577,7 @@ final class PhoneWriteOutboxDurabilityTests: XCTestCase {
         XCTAssertEqual(persisted.binding(to: "session-A"), .invalid)
         OutboxStore.save(persisted)
 
-        let restored = PhoneWriteViewModel(sessionId: "session-A", client: makeClient())
+        let restored = PhoneWriteViewModel(sessionId: "session-A", receiptTrustAvailable: true, client: makeClient())
         guard case .refused(let message) = restored.state else {
             return XCTFail("a byte-distinct confirmation proposal id must be refused")
         }
@@ -588,7 +588,7 @@ final class PhoneWriteOutboxDurabilityTests: XCTestCase {
     /// Regression for the moved persist: a cancelled decision must still leave NOTHING queued. cancel() after the
     /// confirm-time persist must clear the durable outbox.
     func test_cancel_after_confirm_clears_the_durable_outbox() async {
-        let vm = PhoneWriteViewModel(sessionId: "6cf7e861", client: makeClient())
+        let vm = PhoneWriteViewModel(sessionId: "6cf7e861", receiptTrustAvailable: true, client: makeClient())
         vm.draft("Split the PR")
         vm.confirm()
         XCTAssertNotNil(OutboxStore.load(), "precondition: confirm() persisted the intent")
@@ -614,7 +614,7 @@ final class PhoneWriteOutboxDurabilityTests: XCTestCase {
             )
         )
         OutboxStore.save(persisted)
-        let restored = PhoneWriteViewModel(sessionId: "session-A", client: makeClient())
+        let restored = PhoneWriteViewModel(sessionId: "session-A", receiptTrustAvailable: true, client: makeClient())
         let laterDial = PhoneWriteAdapter(restored)
         guard case .pending = restored.state else {
             return XCTFail("precondition: the earlier committed operation must restore as pending")

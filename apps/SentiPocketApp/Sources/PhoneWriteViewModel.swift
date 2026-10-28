@@ -31,6 +31,8 @@ final class PhoneWriteViewModel: ObservableObject {
     private let client: PocketWriteClient
     private let onReauthenticationRequired: @MainActor (String?) -> Void
     private let isWriteAuthorized: @MainActor () -> Bool
+    /// False when no compiled key can verify the gateway's receipts (today's production builds): nothing is sent.
+    private let receiptTrustAvailable: Bool
 
     /// The confirmed intent, retained across an offline failure so `retryPending()` can resend the SAME bytes (the
     /// hash/confirmation are already bound — a retry re-posts identically; the gateway is idempotent by proposal id).
@@ -39,11 +41,13 @@ final class PhoneWriteViewModel: ObservableObject {
 
     init(
         sessionId: String,
+        receiptTrustAvailable: Bool = VerifiedActionReceipt.isReceiptTrustConfigured,
         client: PocketWriteClient,
         onReauthenticationRequired: @escaping @MainActor (String?) -> Void = { _ in },
         isWriteAuthorized: @escaping @MainActor () -> Bool = { true }
     ) {
         self.sessionId = sessionId
+        self.receiptTrustAvailable = receiptTrustAvailable
         self.client = client
         self.onReauthenticationRequired = onReauthenticationRequired
         self.isWriteAuthorized = isWriteAuthorized
@@ -125,6 +129,15 @@ final class PhoneWriteViewModel: ObservableObject {
             state = .pending(
                 "Session \(sessionId): selection changed before send. Return to this session to retry."
             )
+            return
+        }
+        // No compiled receipt key means the gateway's answer can never be verified: a send would stay "pending"
+        // forever and hold the one outbox slot against every other room. Send nothing and say so. A write restored
+        // from an earlier build is released too, with a pointer to check whether it posted.
+        guard receiptTrustAvailable else {
+            pendingIntent = nil
+            OutboxStore.clear(matching: intent)
+            state = .refused("Not sent: this build can't verify the gateway's receipts yet. If you sent this message earlier, check the room to see whether it posted.")
             return
         }
         // Persist the confirmed intent BEFORE the send so a crash / app-kill during the `.sending` window can't

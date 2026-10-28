@@ -66,13 +66,16 @@ final class VerifiedCheckpointNarrationCoordinatorTests: XCTestCase {
             first.spokenText.count,
             VerifiedCheckpointNarrationPlan.maximumCharacterCount
         )
+        // Agent names come from the signed fixture itself, in its order.
+        let agents = verified.bundle.summary.perAgent.map(\.agentId)
+        XCTAssertEqual(agents.count, 2)
         assertOrdered(
             [
                 verified.bundle.summary.headline,
-                "Agent cobalt-pocket-relay.",
+                "Agent \(agents[0]).",
                 "Fact: Live checkpoint extraction works on room 954233b7 (41 auto-checkpoints).",
                 "Recommendation: Freeze contracts before broad writeback to avoid rework.",
-                "Agent cobalt-warden.",
+                "Agent \(agents[1]).",
                 "Inference: The stack is safe to merge once billing/CI returns.",
                 "Risks.",
                 "Blockers."

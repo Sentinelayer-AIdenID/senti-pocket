@@ -258,6 +258,7 @@ final class GatewayEndpointTests: XCTestCase {
         defer { OutboxStore.clear() }
         let viewModel = PhoneWriteViewModel(
             sessionId: "6cf7e861",
+            receiptTrustAvailable: true,
             client: PocketWriteClient(apiBaseURL: nil, tokenProvider: { "must-not-be-used" })
         )
 
@@ -273,6 +274,36 @@ final class GatewayEndpointTests: XCTestCase {
         }
         XCTAssertTrue(message.contains("not configured"))
         XCTAssertNil(OutboxStore.load(), "a terminal build configuration error must not remain queued as offline work")
+    }
+
+    @MainActor
+    func test_without_a_receipt_key_nothing_is_sent_or_queued() async {
+        OutboxStore.clear()
+        defer { OutboxStore.clear() }
+        var tokenReads = 0
+        let viewModel = PhoneWriteViewModel(
+            sessionId: "6cf7e861",
+            receiptTrustAvailable: false,
+            client: PocketWriteClient(
+                apiBaseURL: URL(string: "https://trusted-gateway.example"),
+                tokenProvider: {
+                    tokenReads += 1
+                    return "must-not-be-used"
+                }
+            )
+        )
+
+        viewModel.draft("A receipt this build could never verify")
+        viewModel.confirm()
+
+        guard case .refused(let message) = viewModel.state else {
+            return XCTFail("an unverifiable write must be refused up front, got \(viewModel.state)")
+        }
+        XCTAssertTrue(message.contains("can't verify"))
+        XCTAssertNil(OutboxStore.load(), "nothing may hold the one outbox slot against other rooms")
+        XCTAssertEqual(tokenReads, 0, "nothing was sent")
+        XCTAssertFalse(VerifiedActionReceipt.isReceiptTrustConfigured,
+                       "builds carry no receipt anchor until reviewed key material is activated")
     }
 
     #if canImport(CallKit) && canImport(PushKit)
@@ -419,6 +450,7 @@ final class GatewayEndpointTests: XCTestCase {
         var invalidationCount = 0
         let viewModel = PhoneWriteViewModel(
             sessionId: "session-A",
+            receiptTrustAvailable: true,
             client: PocketWriteClient(
                 apiBaseURL: URL(string: "https://trusted-gateway.example"),
                 urlSession: URLSession(configuration: configuration),
@@ -741,6 +773,7 @@ final class GatewayEndpointTests: XCTestCase {
         var invalidationCount = 0
         let viewModel = PhoneWriteViewModel(
             sessionId: "session-A",
+            receiptTrustAvailable: true,
             client: PocketWriteClient(
                 apiBaseURL: URL(string: "https://trusted-gateway.example"),
                 urlSession: URLSession(configuration: configuration),
@@ -870,6 +903,7 @@ final class GatewayEndpointTests: XCTestCase {
         var isAuthorized = true
         let viewModel = PhoneWriteViewModel(
             sessionId: "session-A",
+            receiptTrustAvailable: true,
             client: PocketWriteClient(
                 apiBaseURL: URL(string: "https://trusted-gateway.example"),
                 urlSession: URLSession(configuration: configuration),
@@ -935,6 +969,7 @@ final class GatewayEndpointTests: XCTestCase {
         configuration.protocolClasses = [GatewayEndpointStubURLProtocol.self]
         let viewModel = PhoneWriteViewModel(
             sessionId: sessionId,
+            receiptTrustAvailable: true,
             client: PocketWriteClient(
                 apiBaseURL: URL(string: "https://trusted-gateway.example"),
                 urlSession: URLSession(configuration: configuration),
@@ -976,6 +1011,7 @@ final class GatewayEndpointTests: XCTestCase {
         var isAuthorized = true
         let viewModel = PhoneWriteViewModel(
             sessionId: "session-A",
+            receiptTrustAvailable: true,
             client: PocketWriteClient(
                 apiBaseURL: URL(string: "https://trusted-gateway.example"),
                 urlSession: URLSession(configuration: configuration),
@@ -1015,6 +1051,7 @@ final class GatewayEndpointTests: XCTestCase {
         configuration.protocolClasses = [GatewayEndpointStubURLProtocol.self]
         let viewModel = PhoneWriteViewModel(
             sessionId: "session-A",
+            receiptTrustAvailable: true,
             client: PocketWriteClient(
                 apiBaseURL: URL(string: "https://trusted-gateway.example"),
                 urlSession: URLSession(configuration: configuration),

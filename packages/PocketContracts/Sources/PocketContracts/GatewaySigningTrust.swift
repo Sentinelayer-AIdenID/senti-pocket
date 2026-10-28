@@ -47,9 +47,19 @@ struct PocketGatewaySigningKeyRegistry: Sendable {
     private let keysById: [OpaqueUTF8Identity: ResolvedKey]
     let isStructurallyValid: Bool
 
-    static let production = Self(keys: [
-        // Offline/demo bundle anchors are intentionally bundle-only. Production receipt trust remains empty until
-        // Carter supplies reviewed PUBLIC key material plus a signed bundle+receipt canary in a data-only activation.
+    static let production: Self = {
+        #if DEBUG
+        return Self(keys: debugBundleAnchors)
+        #else
+        // Release trusts no demo material. Production receipt trust stays empty until reviewed PUBLIC key material
+        // and a signed bundle+receipt canary are activated in a data-only change.
+        return Self(keys: [])
+        #endif
+    }()
+
+    #if DEBUG
+    // Offline/demo bundle anchors for Debug builds, previews and tests: bundle-only, never receipt anchors.
+    private static let debugBundleAnchors: [PocketGatewaySigningKey] = [
         PocketGatewaySigningKey(
             signingKeyId: PocketDemoGatewayKey.signingKeyId,
             publicKeyBase64url: PocketDemoGatewayKey.publicKeyBase64url,
@@ -62,7 +72,8 @@ struct PocketGatewaySigningKeyRegistry: Sendable {
             publicKeySHA256Base64url: "0TlrCO0wTvwvF3ugD_FiIh64TM8_UYVRqnpkmVM_i1s",
             purposes: [.bundle]
         ),
-    ])
+    ]
+    #endif
 
     init(keys: [PocketGatewaySigningKey]) {
         var resolved: [OpaqueUTF8Identity: ResolvedKey] = [:]
@@ -129,6 +140,12 @@ public struct VerifiedActionReceipt: Equatable, Sendable {
         self.receipt = receipt
         self.result = result
         self.signingKeyId = signingKeyId
+    }
+
+    /// Whether this build has any compiled receipt anchor. Without one no gateway receipt can ever verify, so a
+    /// governed write must not be sent: it would sit "pending" forever and hold the single outbox slot.
+    public static var isReceiptTrustConfigured: Bool {
+        PocketGatewaySigningKeyRegistry.production.hasKey(for: .actionReceipt)
     }
 
     /// Mints only through the compiled production receipt registry. There is intentionally no caller-supplied key or
