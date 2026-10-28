@@ -32,6 +32,19 @@ final class RoomChatCoordinator: ObservableObject {
     }
     private var pending: [PendingSend] = []
     private var identityRequested = false
+
+    // Replies and reactions (GET /actions projection), and the open thread.
+    private let actionSender: (any RoomActionSending)?
+    private var summaries: [Int64: RoomReactionSummary] = [:]
+    private var lastActionsRefresh: Date?
+    private var actionsRefreshInFlight = false
+    private var openThreadSequence: Int64?
+    private var threadReplies: [RoomReply] = []
+    private var threadLoading = false
+    private var threadFailure: String?
+    private var threadPending: [PendingSend] = []
+    /// Arrivals refresh reactions at most this often (the web polls about every 15s).
+    static let actionsRefreshInterval: TimeInterval = 10
     static let viewerReason = "You're a viewer in this room: you can read it, but not post."
     /// How long an accepted message waits for its echo before the pending row is dropped (the next poll still
     /// brings it in).
@@ -62,6 +75,7 @@ final class RoomChatCoordinator: ObservableObject {
         title: String,
         transport: any RoomTransport,
         sender: (any RoomMessageSending)? = nil,
+        actionSender: (any RoomActionSending)? = nil,
         identity: (any AccountIdentityProviding)? = nil,
         membershipRole: String? = nil,
         ownAuthorIds: Set<String> = [],
@@ -76,6 +90,7 @@ final class RoomChatCoordinator: ObservableObject {
         self.title = title
         self.transport = transport
         self.sender = sender
+        self.actionSender = actionSender
         self.identity = identity
         // The web lets a viewer react but never post; the API refuses the post anyway.
         let refusedReason = membershipRole?.lowercased() == "viewer" ? Self.viewerReason : nil
@@ -119,6 +134,7 @@ final class RoomChatCoordinator: ObservableObject {
             }
             guard current == self.generation, !self.failureIsTerminal else { return }
             self.startLive(current)
+            await self.refreshActions(force: true)
         })
     }
 
@@ -159,7 +175,159 @@ final class RoomChatCoordinator: ObservableObject {
             deliver(clientId)
         case .discardSend(let clientId):
             pending.removeAll { $0.clientId == clientId }
+            threadPending.removeAll { $0.clientId == clientId }
             publish()
+        case .react(let sequenceId, let type):
+            react(type, on: sequenceId)
+        case .openThread(let sequenceId):
+            openThread(sequenceId)
+        case .closeThread:
+            openThreadSequence = nil
+            threadReplies = []
+            threadPending = []
+            threadFailure = nil
+            publish()
+        case .sendReply(let sequenceId, let text):
+            sendReply(text, to: sequenceId)
+        }
+    }
+
+    // MARK: - Replies and reactions
+
+    private var canReact: Bool { actionSender != nil && !failureIsTerminal }
+
+    /// Re-reads the room's reply and reaction projection. Unforced calls (after arrivals) are throttled.
+    func refreshActions(force: Bool = false) async {
+        guard !actionsRefreshInFlight, !failureIsTerminal else { return }
+        if !force, let last = lastActionsRefresh, now().timeIntervalSince(last) < Self.actionsRefreshInterval { return }
+        actionsRefreshInFlight = true
+        defer { actionsRefreshInFlight = false }
+        lastActionsRefresh = now()
+        guard let page = try? await transport.roomActions(sessionId: sessionId, targetSequenceId: nil, limit: 500) else {
+            return
+        }
+        // The projection covers the newest actions; keep older summaries it no longer includes.
+        for (sequence, summary) in page.byTarget { summaries[sequence] = summary }
+        publish()
+    }
+
+    private func react(_ type: String, on sequenceId: Int64) {
+        guard let actionSender, canReact, RoomActionRequest.reactionTypes.contains(type) else { return }
+        let actor = ownAuthorIds.sorted().first ?? "me"
+        applyOptimisticReaction(type, on: sequenceId, actor: actor)
+        let request = RoomActionRequest.reaction(type, sessionId: sessionId, sequenceId: sequenceId, actor: actor)
+        Task { [weak self] in
+            do {
+                try await actionSender.sendAction(request)
+            } catch RoomSendError.reauthenticationRequired {
+                self?.onReauthenticationRequired()
+            } catch {
+                // Fall through: the refresh below restores the server's truth.
+            }
+            await self?.refreshActions(force: true)
+        }
+    }
+
+    private func applyOptimisticReaction(_ type: String, on sequenceId: Int64, actor: String) {
+        let current = summaries[sequenceId] ?? RoomReactionSummary(targetSequenceId: sequenceId)
+        var counts = current.counts
+        var actors = current.actorsByType
+        var liked = current.likedByViewer
+        var disliked = current.dislikedByViewer
+        switch type {
+        case "like" where !liked:
+            counts["like", default: 0] += 1
+            liked = true
+        case "unlike" where liked:
+            counts["like"] = max((counts["like"] ?? 1) - 1, 0)
+            liked = false
+        case "dislike" where !disliked:
+            counts["dislike", default: 0] += 1
+            disliked = true
+        case "undislike" where disliked:
+            counts["dislike"] = max((counts["dislike"] ?? 1) - 1, 0)
+            disliked = false
+        case "ack" where !(actors["ack"] ?? []).contains(actor):
+            counts["ack", default: 0] += 1
+            actors["ack"] = ((actors["ack"] ?? []) + [actor]).sorted()
+        default:
+            return
+        }
+        summaries[sequenceId] = RoomReactionSummary(
+            targetSequenceId: sequenceId,
+            counts: counts.filter { $0.value > 0 },
+            actorsByType: actors,
+            activeOwners: current.activeOwners,
+            likedByViewer: liked,
+            dislikedByViewer: disliked,
+            replyTotal: current.replyTotal,
+            latestReplies: current.latestReplies,
+            hasMoreReplies: current.hasMoreReplies,
+            isPinned: current.isPinned
+        )
+        publish()
+    }
+
+    private func openThread(_ sequenceId: Int64) {
+        openThreadSequence = sequenceId
+        threadReplies = summaries[sequenceId]?.latestReplies ?? []
+        threadFailure = nil
+        threadLoading = true
+        publish()
+        Task { [weak self] in await self?.loadThread(sequenceId) }
+    }
+
+    private func loadThread(_ sequenceId: Int64) async {
+        do {
+            let page = try await transport.roomActions(sessionId: sessionId, targetSequenceId: sequenceId, limit: 500)
+            guard openThreadSequence == sequenceId else { return }
+            threadReplies = page.replies.filter { $0.targetSequenceId == sequenceId }
+            threadFailure = nil
+        } catch {
+            guard openThreadSequence == sequenceId else { return }
+            threadFailure = "Replies could not be loaded. Pull to try again later."
+        }
+        threadLoading = false
+        publish()
+    }
+
+    private func sendReply(_ raw: String, to sequenceId: Int64) {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let actionSender, postingRefusedReason == nil, !text.isEmpty else { return }
+        guard text.count <= RoomActionRequest.replyLimit else {
+            threadPending.append(PendingSend(
+                clientId: Self.makeClientId(),
+                text: String(text.prefix(280)) + "…",
+                status: .failed(reason: "Too long for a reply (the limit is 4,000 characters).", canRetry: false)
+            ))
+            publish()
+            return
+        }
+        let actor = ownAuthorIds.sorted().first ?? "me"
+        let request = RoomActionRequest.reply(sessionId: sessionId, sequenceId: sequenceId, text: text, actor: actor)
+        let clientId = request.idempotencyKey
+        threadPending.append(PendingSend(clientId: clientId, text: text, status: .sending))
+        publish()
+        Task { [weak self] in
+            do {
+                try await actionSender.sendAction(request)
+                guard let self else { return }
+                self.threadPending.removeAll { $0.clientId == clientId }
+                await self.loadThread(sequenceId)
+                await self.refreshActions(force: true)
+            } catch let error as RoomSendError {
+                guard let self else { return }
+                if case .reauthenticationRequired = error { self.onReauthenticationRequired() }
+                if case .notAllowed = error { self.postingRefusedReason = Self.viewerReason }
+                if let index = self.threadPending.firstIndex(where: { $0.clientId == clientId }) {
+                    // A reply retry is a new tap with a fresh key; the failed row explains and can be discarded.
+                    self.threadPending[index].status = .failed(reason: error.userMessage, canRetry: false)
+                }
+                self.publish()
+            } catch {
+                self?.threadPending.removeAll { $0.clientId == clientId }
+                self?.publish()
+            }
         }
     }
 
@@ -407,6 +575,7 @@ final class RoomChatCoordinator: ObservableObject {
             await sleep(connection == .live ? Self.pollWhileLive : Self.pollWhileDown)
             guard current == generation, !Task.isCancelled else { return }
             await catchUp(current)
+            await refreshActions(force: true)
             pruneComposing()
         }
     }
@@ -423,6 +592,7 @@ final class RoomChatCoordinator: ObservableObject {
             reconcilePending(with: [message])
             unread.noteArrivals(result.inserted, readerIsAtBottom: readerAtBottom, selfAuthorIds: ownAuthorIds)
             publish()
+            Task { [weak self] in await self?.refreshActions() }
             return true
         case .nonDisplayable(let sequenceId):
             connection = .live
@@ -508,6 +678,7 @@ final class RoomChatCoordinator: ObservableObject {
                 date = ParsedSessionTimestamp(message.timestamp).date
                 if let date { dateCache[message.id] = date }
             }
+            let summary = summaries[message.sequenceId]
             return RoomChatMessageInput(
                 id: message.id,
                 sequenceId: message.sequenceId,
@@ -519,7 +690,38 @@ final class RoomChatCoordinator: ObservableObject {
                 timestamp: message.timestamp,
                 replyToSequenceId: message.replyToSequenceId,
                 isEdited: message.isEdited,
-                date: date
+                date: date,
+                reactions: summary.map {
+                    RoomChatReactions.make(
+                        counts: $0.counts,
+                        actorsByType: $0.actorsByType,
+                        activeOwners: $0.activeOwners,
+                        likedByViewer: $0.likedByViewer,
+                        dislikedByViewer: $0.dislikedByViewer,
+                        replyCount: $0.replyTotal,
+                        isPinned: $0.isPinned
+                    )
+                }
+            )
+        }
+        let threadInput = openThreadSequence.map { sequence in
+            RoomChatThreadInput(
+                sequenceId: sequence,
+                replies: threadReplies.map { reply in
+                    RoomChatReplyRow(
+                        id: reply.id,
+                        authorName: reply.isHuman ? String(reply.authorId.dropFirst("human-".count)) : reply.authorId,
+                        isHuman: reply.isHuman,
+                        isOwn: ownAuthorIds.contains(reply.authorId.lowercased()),
+                        text: reply.text,
+                        date: ParsedSessionTimestamp(reply.createdAt).date,
+                        isEdited: reply.isEdited
+                    )
+                },
+                pending: threadPending.map { RoomChatPendingRow(clientId: $0.clientId, text: $0.text, status: $0.status) },
+                isLoading: threadLoading,
+                failureText: threadFailure,
+                canReply: actionSender != nil && postingRefusedReason == nil
             )
         }
         state = RoomChatPresentationState(
@@ -539,7 +741,9 @@ final class RoomChatCoordinator: ObservableObject {
                 .sorted(),
             failure: failure,
             pending: pending.map { RoomChatPendingRow(clientId: $0.clientId, text: $0.text, status: $0.status) },
-            composer: composerState
+            composer: composerState,
+            canReact: canReact,
+            thread: threadInput
         )
     }
 

@@ -18,6 +18,7 @@ enum RoomPreview {
                 route: RoomRoute(sessionId: "preview-room", title: "Design review", membershipRole: "owner"),
                 transport: RoomPreviewTransport(),
                 sender: RoomPreviewSender(),
+                actionSender: RoomPreviewSender(),
                 onReauthenticationRequired: {}
             )
         }
@@ -25,9 +26,13 @@ enum RoomPreview {
 }
 
 /// Accepts every message after a short delay, so the composer's pending states can be seen in the preview.
-private struct RoomPreviewSender: RoomMessageSending {
+private struct RoomPreviewSender: RoomMessageSending, RoomActionSending {
     func sendHumanMessage(sessionId: String, text: String, clientId: String) async throws {
         try? await Task.sleep(nanoseconds: 600_000_000)
+    }
+
+    func sendAction(_ action: RoomActionRequest) async throws {
+        try? await Task.sleep(nanoseconds: 300_000_000)
     }
 }
 
@@ -79,6 +84,32 @@ private struct RoomPreviewTransport: RoomTransport {
         try? await Task.sleep(nanoseconds: 300_000_000)
         let rows = beforeSequence.map { before in Self.history.filter { $0.sequenceId < before } } ?? Self.history
         return RoomEventPage(messages: rows, nextBeforeSequence: nil, hasMore: false)
+    }
+
+    private static let threadReplies: [RoomReply] = [
+        RoomReply(id: "r1", targetSequenceId: 111, authorId: "human-alex", text: "Is finding 2 also in the onboarding module?", createdAt: "2026-10-28T13:25:00Z"),
+        RoomReply(id: "r2", targetSequenceId: 111, authorId: "review-agent", text: "Yes, `OnboardingForm.swift`. Same PR.", createdAt: "2026-10-28T13:27:00Z")
+    ]
+
+    func roomActions(sessionId: String, targetSequenceId: Int64?, limit: Int) async throws -> RoomActionsPage {
+        if targetSequenceId == 111 { return RoomActionsPage(replies: Self.threadReplies) }
+        return RoomActionsPage(byTarget: [
+            111: RoomReactionSummary(
+                targetSequenceId: 111,
+                counts: ["ack": 2, "like": 3, "reply": 2],
+                actorsByType: ["ack": ["build-agent", "human-alex"]],
+                likedByViewer: true,
+                replyTotal: 2,
+                latestReplies: Self.threadReplies
+            ),
+            113: RoomReactionSummary(targetSequenceId: 113, counts: ["like": 1]),
+            120: RoomReactionSummary(
+                targetSequenceId: 120,
+                counts: ["ack": 1, "working_on": 1],
+                actorsByType: ["ack": ["review-agent"]],
+                activeOwners: ["review-agent"]
+            )
+        ])
     }
 
     func roomEventsAfter(sessionId: String, fromSequence: Int64, limit: Int) async throws -> RoomEventPage {

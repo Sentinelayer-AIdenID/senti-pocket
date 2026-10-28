@@ -271,6 +271,15 @@ public final class HTTPSessionTransport: SessionTransport, @unchecked Sendable {
         return (request, token)
     }
 
+    /// Module-internal entry to the shared authorized GET, for room reads defined in other files.
+    func getDecodable<Response: Decodable>(
+        _ responseType: Response.Type,
+        path: [String],
+        query: [URLQueryItem]
+    ) async throws -> Response {
+        try await get(responseType, path: path, query: query)
+    }
+
     private func get<Response: Decodable>(
         _ responseType: Response.Type,
         path: [String],

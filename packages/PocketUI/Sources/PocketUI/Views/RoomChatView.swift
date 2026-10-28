@@ -1,6 +1,11 @@
 #if canImport(SwiftUI)
 import SwiftUI
 import PocketContracts
+#if os(iOS)
+import UIKit
+#elseif os(macOS)
+import AppKit
+#endif
 
 /// The live room: the same conversation the web shows, newest at the bottom, with jump-to-latest, an unread
 /// divider and older history loaded on demand.
@@ -29,6 +34,14 @@ public struct RoomChatView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             RoomComposerBar(composer: state.composer) { text in
                 send(.sendMessage(text: text))
+            }
+        }
+        .sheet(isPresented: Binding(
+            get: { state.thread != nil },
+            set: { presented in if !presented { send(.closeThread) } }
+        )) {
+            if let thread = state.thread {
+                RoomThreadSheet(thread: thread, ownHandles: state.ownMentionHandles, send: send)
             }
         }
         .navigationTitle(state.title)
@@ -159,7 +172,10 @@ public struct RoomChatView: View {
                 row: message,
                 ownHandles: state.ownMentionHandles,
                 isHighlighted: highlightedRowId == row.id,
-                onOpenReplyTarget: { jump(to: $0, proxy: proxy) }
+                canReact: state.canReact,
+                canReply: state.composer.canPost,
+                onOpenReplyTarget: { jump(to: $0, proxy: proxy) },
+                send: send
             )
         }
     }
@@ -258,7 +274,10 @@ private struct RoomMessageRowView: View {
     let row: RoomChatMessageRow
     let ownHandles: Set<String>
     let isHighlighted: Bool
+    var canReact = false
+    var canReply = false
     let onOpenReplyTarget: (Int64) -> Void
+    var send: (RoomChatIntent) -> Void = { _ in }
 
     var body: some View {
         switch row.kind {
@@ -330,6 +349,14 @@ private struct RoomMessageRowView: View {
                     .font(.caption2)
                     .foregroundStyle(PocketPalette.textSecondary)
             }
+            if let reactions = row.reactions {
+                RoomReactionBar(
+                    reactions: reactions,
+                    canReact: canReact,
+                    onReact: { send(.react(sequenceId: row.sequenceId, type: $0)) },
+                    onOpenThread: { send(.openThread(sequenceId: row.sequenceId)) }
+                )
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
@@ -338,8 +365,207 @@ private struct RoomMessageRowView: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(isHighlighted ? PocketPalette.warning.opacity(0.18) : (row.isOwn ? PocketPalette.listening.opacity(0.08) : Color.clear))
         )
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("pocket.room.message.\(row.sequenceId)")
+        .contextMenu { messageMenu }
+    }
+
+    @ViewBuilder
+    private var messageMenu: some View {
+        Button {
+            send(.openThread(sequenceId: row.sequenceId))
+        } label: {
+            Label(canReply ? "Reply in thread" : "Open thread", systemImage: "bubble.left.and.bubble.right")
+        }
+        if canReact {
+            let liked = row.reactions?.chips.contains { $0.type == "like" && $0.isMine } == true
+            let disliked = row.reactions?.chips.contains { $0.type == "dislike" && $0.isMine } == true
+            Button {
+                send(.react(sequenceId: row.sequenceId, type: liked ? "unlike" : "like"))
+            } label: {
+                Label(liked ? "Remove like" : "Like", systemImage: liked ? "hand.thumbsup.fill" : "hand.thumbsup")
+            }
+            Button {
+                send(.react(sequenceId: row.sequenceId, type: disliked ? "undislike" : "dislike"))
+            } label: {
+                Label(disliked ? "Remove dislike" : "Dislike", systemImage: disliked ? "hand.thumbsdown.fill" : "hand.thumbsdown")
+            }
+            Button {
+                send(.react(sequenceId: row.sequenceId, type: "ack"))
+            } label: {
+                Label("Acknowledge", systemImage: "checkmark.circle")
+            }
+        }
+        Button {
+            copyToPasteboard(row.text)
+        } label: {
+            Label("Copy text", systemImage: "doc.on.doc")
+        }
+    }
+}
+
+private func copyToPasteboard(_ text: String) {
+    #if os(iOS)
+    UIPasteboard.general.string = text
+    #elseif os(macOS)
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(text, forType: .string)
+    #endif
+}
+
+/// Reaction chips, the acknowledged and working lines, and the reply count under a message.
+private struct RoomReactionBar: View {
+    let reactions: RoomChatReactions
+    let canReact: Bool
+    let onReact: (String) -> Void
+    let onOpenThread: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if !reactions.chips.isEmpty || reactions.replyCount > 0 || reactions.isPinned {
+                HStack(spacing: 6) {
+                    if reactions.isPinned {
+                        Image(systemName: "pin.fill")
+                            .font(.caption)
+                            .foregroundStyle(PocketPalette.warning)
+                            .accessibilityLabel("Pinned")
+                    }
+                    ForEach(reactions.chips) { chip in
+                        Button {
+                            if chip.type == "like" { onReact(chip.isMine ? "unlike" : "like") }
+                            else if chip.type == "dislike" { onReact(chip.isMine ? "undislike" : "dislike") }
+                            else if chip.type == "ack" { onReact("ack") }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: chip.isMine ? chip.symbol + ".fill" : chip.symbol)
+                                Text("\(chip.count)").monospacedDigit()
+                            }
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(
+                                Capsule().fill(chip.isMine ? PocketPalette.accent.opacity(0.18) : PocketPalette.raised)
+                            )
+                            .overlay(Capsule().stroke(PocketPalette.separator.opacity(0.6), lineWidth: 0.5))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!canReact || chip.type == "disregard")
+                        .accessibilityLabel("\(chip.label), \(chip.count)\(chip.isMine ? ", yours" : "")")
+                    }
+                    if reactions.replyCount > 0 {
+                        Button(action: onOpenThread) {
+                            Label("\(reactions.replyCount) \(reactions.replyCount == 1 ? "reply" : "replies")", systemImage: "arrow.turn.down.right")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(PocketPalette.accent)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("pocket.room.openThread")
+                    }
+                }
+            }
+            if let acked = reactions.ackedBy {
+                Text(acked).font(.caption2).foregroundStyle(PocketPalette.textSecondary)
+            }
+            if let working = reactions.working {
+                Text(working).font(.caption2).foregroundStyle(PocketPalette.listening)
+            }
+        }
+        .padding(.top, 2)
+    }
+}
+
+/// The thread sheet: the parent message, its replies oldest first, and a reply box when you can post.
+private struct RoomThreadSheet: View {
+    let thread: RoomChatThreadState
+    let ownHandles: Set<String>
+    let send: (RoomChatIntent) -> Void
+    @State private var draft = ""
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(thread.parent.authorName)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(thread.parent.isHuman ? PocketPalette.listening : PocketPalette.textPrimary)
+                        ChatMarkdownView(text: thread.parent.text, ownHandles: ownHandles)
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                    if thread.isLoading && thread.replies.isEmpty {
+                        ProgressView("Loading replies").frame(maxWidth: .infinity)
+                    }
+                    if let failure = thread.failureText {
+                        Text(failure).font(.footnote).foregroundStyle(PocketPalette.warning)
+                    }
+                    ForEach(thread.replies) { reply in
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 6) {
+                                Text(reply.authorName)
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(reply.isHuman ? PocketPalette.listening : PocketPalette.textPrimary)
+                                if let date = reply.date {
+                                    Text(date, style: .time).font(.caption).foregroundStyle(PocketPalette.textSecondary)
+                                }
+                                if reply.isEdited {
+                                    Text("edited").font(.caption2).foregroundStyle(PocketPalette.textSecondary)
+                                }
+                            }
+                            ChatMarkdownView(text: reply.text, ownHandles: ownHandles)
+                        }
+                        .padding(.leading, 12)
+                        .overlay(alignment: .leading) {
+                            Rectangle().fill(PocketPalette.separator).frame(width: 2)
+                        }
+                    }
+                    ForEach(thread.pending) { pending in
+                        RoomPendingRowView(
+                            row: pending,
+                            onRetry: { send(.retrySend(clientId: pending.clientId)) },
+                            onDiscard: { send(.discardSend(clientId: pending.clientId)) }
+                        )
+                    }
+                }
+                .padding(16)
+            }
+            .navigationTitle(thread.replies.count == 1 ? "1 reply" : "\(thread.replies.count) replies")
+            .navigationBarTitleDisplayModeInlineIfAvailable()
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { send(.closeThread) }
+                }
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if thread.canReply {
+                    HStack(alignment: .bottom, spacing: 8) {
+                        TextField("Reply", text: $draft, axis: .vertical)
+                            .lineLimit(1...6)
+                            .textFieldStyle(.plain)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 9)
+                            .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                            .accessibilityIdentifier("pocket.thread.composer")
+                        Button {
+                            let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard !text.isEmpty else { return }
+                            send(.sendReply(sequenceId: thread.parent.sequenceId, text: text))
+                            draft = ""
+                        } label: {
+                            Image(systemName: "arrow.up.circle.fill").font(.system(size: 32))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .accessibilityLabel("Send reply")
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(.bar)
+                }
+            }
+        }
     }
 }
 
