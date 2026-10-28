@@ -89,14 +89,8 @@ public struct RoomChatView: View {
                     Color.clear
                         .frame(height: 1)
                         .id(Self.bottomId)
-                        .onAppear {
-                            readerAtBottom = true
-                            send(.readerAtBottom(true))
-                        }
-                        .onDisappear {
-                            readerAtBottom = false
-                            send(.readerAtBottom(false))
-                        }
+                        .onAppear { setReaderAtBottom(true) }
+                        .onDisappear { setReaderAtBottom(false) }
                 }
                 .padding(.horizontal, 12)
                 .padding(.bottom, 8)
@@ -255,14 +249,27 @@ public struct RoomChatView: View {
 
     private func scrollToInitialPosition(_ proxy: ScrollViewProxy) {
         guard !didInitialScroll, !state.isEmpty else { return }
+        // A room opened at a message (a link or notification) is positioned by `focusIfNeeded` instead.
+        guard state.focusSequenceId == nil else { return }
         didInitialScroll = true
+        // Say where the reader is now: the bottom marker may never render when the first scroll lands elsewhere,
+        // and a reader who is not at the bottom must not be pulled down by the next message.
+        let opensAtDivider = state.rows.contains(.unreadDivider)
+        setReaderAtBottom(!opensAtDivider)
         DispatchQueue.main.async {
-            if state.rows.contains(.unreadDivider) {
+            if opensAtDivider {
                 proxy.scrollTo(RoomChatRow.unreadDivider.id, anchor: .top)
             } else {
                 proxy.scrollTo(Self.bottomId, anchor: .bottom)
             }
         }
+    }
+
+    /// The reader's place, kept in step with the coordinator (which counts arrivals as unread while away).
+    private func setReaderAtBottom(_ atBottom: Bool) {
+        guard readerAtBottom != atBottom else { return }
+        readerAtBottom = atBottom
+        send(.readerAtBottom(atBottom))
     }
 
     /// Brings the focused message into view once it is loaded, highlights it, and reports it handled.
@@ -274,6 +281,9 @@ public struct RoomChatView: View {
         }
         guard let target else { return }
         didInitialScroll = true
+        // Reading a message elsewhere in the room: new messages must not pull the view down. If the bottom is in
+        // view after the scroll, the bottom marker says so.
+        setReaderAtBottom(false)
         DispatchQueue.main.async {
             withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(target.id, anchor: .center) }
             highlightedRowId = target.id
@@ -293,6 +303,7 @@ public struct RoomChatView: View {
             send(.jumpToMessage(sequenceId: sequenceId))
             return
         }
+        setReaderAtBottom(false)
         withAnimation(.easeInOut(duration: 0.25)) {
             proxy.scrollTo(target.id, anchor: .center)
         }
