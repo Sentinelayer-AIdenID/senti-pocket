@@ -14,6 +14,10 @@ public enum RoomMessageKind: String, Equatable, Sendable {
     case message
     case checkpoint
     case memberJoined
+    /// A breakout started from this room (`session_breakout_opened`); see `breakout`.
+    case breakoutOpened
+    /// A breakout's published outcome (`session_breakout_outcome`); see `breakout`.
+    case breakoutOutcome
 }
 
 public struct RoomMessage: Equatable, Identifiable, Sendable {
@@ -30,6 +34,8 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
     public let clientMessageId: String?
     public let revision: Int64
     public let isEdited: Bool
+    /// The breakout a `.breakoutOpened` or `.breakoutOutcome` row refers to.
+    public let breakout: RoomBreakoutEvent?
 
     public init(
         id: String,
@@ -43,7 +49,8 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         replyToSequenceId: Int64? = nil,
         clientMessageId: String? = nil,
         revision: Int64 = 1,
-        isEdited: Bool = false
+        isEdited: Bool = false,
+        breakout: RoomBreakoutEvent? = nil
     ) {
         self.id = id
         self.sequenceId = sequenceId
@@ -57,6 +64,7 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         self.clientMessageId = clientMessageId
         self.revision = revision
         self.isEdited = isEdited
+        self.breakout = breakout
     }
 
     /// Projects one wire event. Returns nil for events a room does not display (control, presence, edit
@@ -73,6 +81,8 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         case "session_message", "human_relay": kind = .message
         case "session_checkpoint": kind = .checkpoint
         case "session_member_joined": kind = .memberJoined
+        case "session_breakout_opened": kind = .breakoutOpened
+        case "session_breakout_outcome": kind = .breakoutOutcome
         default: return nil
         }
         let payload = json["payload"] ?? .null
@@ -86,10 +96,21 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
             text = (payload["message"]?.stringValue ?? payload["text"]?.stringValue ?? "")
         case .checkpoint:
             text = (payload["title"]?.stringValue ?? payload["summary"]?.stringValue ?? "Checkpoint")
-        case .memberJoined:
+        case .memberJoined, .breakoutOpened:
             text = ""
+        case .breakoutOutcome:
+            text = payload["text"]?.stringValue ?? ""
         }
         if kind == .message && text.trimmed.isEmpty { return nil }
+        let breakout: RoomBreakoutEvent?
+        switch kind {
+        case .breakoutOpened, .breakoutOutcome:
+            // A breakout row without a valid child room (or an outcome without text) is not shown.
+            guard let parsed = RoomBreakoutEvent(payload: payload, isOutcome: kind == .breakoutOutcome) else { return nil }
+            breakout = parsed
+        default:
+            breakout = nil
+        }
 
         self.id = id
         self.sequenceId = sequenceId
@@ -109,6 +130,7 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
             .flatMap { $0.isEmpty ? nil : $0 }
         self.revision = json["messageRevision"]?.intValue ?? 1
         self.isEdited = json["editedAt"]?.stringValue.map { !$0.isEmpty } ?? false
+        self.breakout = breakout
     }
 
     /// Human identities are server-authored as `human-<user>`; agents can never claim that prefix.

@@ -130,8 +130,53 @@ private struct RoomPreviewTransport: RoomTransport {
         row(115, "senti", minutesAgo: 70, "Onboarding review: 2 findings, 1 fixed", kind: .checkpoint),
         row(120, "human-alex", minutesAgo: 12, "Thanks. Ship the fix for finding 1 first, then the retry counter."),
         row(121, "review-agent", minutesAgo: 10, "@alex fix for finding 1 is up: validation now runs on paste and on blur. Call me at [support](tel:5551234) if you'd rather talk it through."),
-        row(122, "build-agent", minutesAgo: 4, "Rebuilding with the fix now.")
-    ]
+        row(122, "build-agent", minutesAgo: 4, "Rebuilding with the fix now."),
+        breakoutOpened(117, minutesAgo: 60),
+        breakoutOutcome(119, minutesAgo: 30)
+    ].sorted { $0.sequenceId < $1.sequenceId }
+
+    private static let breakoutRoom = "preview-breakout"
+
+    private static func breakoutOpened(_ seq: Int64, minutesAgo: Double) -> RoomMessage {
+        let base = row(seq, "review-agent", minutesAgo: minutesAgo, "")
+        return RoomMessage(id: base.id, sequenceId: seq, kind: .breakoutOpened, authorId: "review-agent",
+                           authorName: "review-agent", isHuman: false, text: "", timestamp: base.timestamp,
+                           breakout: RoomBreakoutEvent(childSessionId: breakoutRoom))
+    }
+
+    private static func breakoutOutcome(_ seq: Int64, minutesAgo: Double) -> RoomMessage {
+        let base = row(seq, "review-agent", minutesAgo: minutesAgo, "")
+        let text = "Ship the paste fix first; the retry counter follows in build 320."
+        return RoomMessage(id: base.id, sequenceId: seq, kind: .breakoutOutcome, authorId: "review-agent",
+                           authorName: "review-agent", isHuman: false, text: text, timestamp: base.timestamp,
+                           breakout: RoomBreakoutEvent(childSessionId: breakoutRoom, outcome: RoomBreakoutOutcome(
+                               outcomeId: "preview-outcome", revision: 1, text: text, authorId: "review-agent",
+                               acknowledgements: [
+                                   RoomBreakoutAcknowledgement(principalId: "review-agent", isHuman: false, state: .ack),
+                                   RoomBreakoutAcknowledgement(principalId: "build-agent", isHuman: false, state: .ack),
+                                   RoomBreakoutAcknowledgement(principalId: "human-alex", isHuman: true, state: .missing)
+                               ]
+                           )))
+    }
+
+    func roomBreakouts(parentSessionId: String, cursor: String?, limit: Int) async throws -> RoomBreakoutsPage {
+        guard parentSessionId != Self.breakoutRoom else { return RoomBreakoutsPage() }
+        return RoomBreakoutsPage(items: [RoomBreakout(
+            childSessionId: Self.breakoutRoom,
+            parentSessionId: parentSessionId,
+            title: "Order of the onboarding fixes",
+            isLocked: true,
+            participants: [
+                .init(id: "review-agent", isHuman: false),
+                .init(id: "build-agent", isHuman: false),
+                .init(id: "human-alex", name: "Alex", isHuman: true)
+            ],
+            messageCount: 14,
+            unreadCount: 3,
+            canRead: true,
+            canPost: true
+        )])
+    }
 
     /// The reading-position scenario: forty earlier notes before the usual history.
     var anchorScenario = false

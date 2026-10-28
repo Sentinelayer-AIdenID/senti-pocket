@@ -8,6 +8,10 @@ public struct RoomChatMessageInput: Equatable, Sendable {
         case message
         case checkpoint
         case memberJoined
+        /// A breakout started here; its card comes from `RoomChatPresentationState.breakouts`.
+        case breakoutOpened(childSessionId: String)
+        /// A breakout's published outcome.
+        case breakoutOutcome(RoomBreakoutOutcomeCard)
     }
 
     public let id: String
@@ -360,6 +364,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     public let focusSequenceId: Int64?
     /// Who the composer can @-mention, in suggestion order.
     public let mentionCandidates: [MentionCandidate]
+    /// Breakout cards by child room id, as this viewer may see them.
+    public let breakouts: [String: RoomBreakoutCard]
 
     /// Same-author rows closer together than this share one header.
     public static let groupingWindow: TimeInterval = 5 * 60
@@ -384,6 +390,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         focusFallbackCount: Int = 0,
         focusSequenceId: Int64? = nil,
         mentionCandidates: [MentionCandidate] = [],
+        breakouts: [String: RoomBreakoutCard] = [:],
         calendar: Calendar = .current
     ) {
         self.sessionId = sessionId
@@ -403,6 +410,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         self.focusFallbackCount = focusFallbackCount
         self.focusSequenceId = protectedFailure ? nil : focusSequenceId
         self.mentionCandidates = protectedFailure ? [] : mentionCandidates
+        self.breakouts = protectedFailure ? [:] : breakouts
 
         // Protected content never renders beside an auth or access failure.
         guard failure?.suppressesProtectedContent != true else {
@@ -539,6 +547,8 @@ public enum RoomChatIntent: Equatable, Sendable {
     case sendReply(sequenceId: Int64, text: String)
     /// The view brought `focusSequenceId` into view.
     case focusHandled
+    /// Open a breakout started from this room (the screen navigates; the room keeps running).
+    case openBreakout(childSessionId: String)
 }
 
 /// A request to put a failed message's text back into the composer. Each request is distinct, so editing the same

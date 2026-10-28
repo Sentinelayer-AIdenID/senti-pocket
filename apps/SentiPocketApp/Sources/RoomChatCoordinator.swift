@@ -79,6 +79,9 @@ final class RoomChatCoordinator: ObservableObject {
     private var isLoadingOlder = false
     private var hasLoadedInitial = false
     private var dateCache: [String: Date] = [:]
+    /// Breakouts started from this room, by child room id, as this viewer may see them (GET .../breakouts).
+    private var breakouts: [String: RoomBreakout] = [:]
+    private var breakoutsRefreshInFlight = false
     private var generation: UInt64 = 0
     private var liveTasks: [Task<Void, Never>] = []
 
@@ -155,6 +158,7 @@ final class RoomChatCoordinator: ObservableObject {
             self.pursueFocus()
             self.startLive(current)
             await self.refreshActions(force: true)
+            await self.refreshBreakouts()
         })
     }
 
@@ -220,6 +224,8 @@ final class RoomChatCoordinator: ObservableObject {
             guard focusTarget != nil else { return }
             focusTarget = nil
             publish()
+        case .openBreakout:
+            break   // the room screen opens the breakout's own room
         }
     }
 
@@ -259,6 +265,28 @@ final class RoomChatCoordinator: ObservableObject {
     private var canReact: Bool { actionSender != nil && !failureIsTerminal }
 
     /// Re-reads the room's reply and reaction projection. Unforced calls (after arrivals) are throttled.
+    /// Re-reads the breakouts started from this room. A failed read keeps the cards already shown.
+    func refreshBreakouts() async {
+        guard !breakoutsRefreshInFlight, !failureIsTerminal else { return }
+        breakoutsRefreshInFlight = true
+        defer { breakoutsRefreshInFlight = false }
+        guard let page = try? await transport.roomBreakouts(parentSessionId: sessionId, cursor: nil, limit: 50) else {
+            return
+        }
+        for breakout in page.items { breakouts[breakout.childSessionId] = breakout }
+        publish()
+    }
+
+    /// A breakout card arrived for a room this phone has not described yet: read its descriptor now.
+    private func refreshBreakoutsIfNeeded(for messages: [RoomMessage]) {
+        let unknown = messages.contains { message in
+            guard let child = message.breakout?.childSessionId else { return false }
+            return breakouts[child] == nil
+        }
+        guard unknown else { return }
+        Task { [weak self] in await self?.refreshBreakouts() }
+    }
+
     func refreshActions(force: Bool = false) async {
         guard !actionsRefreshInFlight, !failureIsTerminal else { return }
         if !force, let last = lastActionsRefresh, now().timeIntervalSince(last) < Self.actionsRefreshInterval { return }
@@ -699,6 +727,7 @@ final class RoomChatCoordinator: ObservableObject {
             guard current == generation, !Task.isCancelled else { return }
             await catchUp(current)
             await refreshActions(force: true)
+            await refreshBreakouts()
             pruneComposing()
         }
     }
@@ -717,6 +746,7 @@ final class RoomChatCoordinator: ObservableObject {
             publish()
             pursueFocus()
             Task { [weak self] in await self?.refreshActions() }
+            refreshBreakoutsIfNeeded(for: [message])
             return true
         case .nonDisplayable(let sequenceId):
             connection = .live
@@ -808,7 +838,7 @@ final class RoomChatCoordinator: ObservableObject {
             return RoomChatMessageInput(
                 id: message.id,
                 sequenceId: message.sequenceId,
-                kind: Self.kind(message.kind),
+                kind: Self.kind(of: message),
                 authorId: message.authorId,
                 authorName: message.authorName,
                 isHuman: message.isHuman,
@@ -875,7 +905,8 @@ final class RoomChatCoordinator: ObservableObject {
             thread: threadInput,
             focusFallbackCount: focusFallbackCount,
             focusSequenceId: focusTarget,
-            mentionCandidates: mentionCandidates()
+            mentionCandidates: mentionCandidates(),
+            breakouts: breakouts.mapValues(Self.card)
         )
     }
 
@@ -896,11 +927,52 @@ final class RoomChatCoordinator: ObservableObject {
         )
     }
 
-    private static func kind(_ kind: RoomMessageKind) -> RoomChatMessageInput.Kind {
-        switch kind {
+    private static func kind(of message: RoomMessage) -> RoomChatMessageInput.Kind {
+        switch message.kind {
         case .message: return .message
         case .checkpoint: return .checkpoint
         case .memberJoined: return .memberJoined
+        case .breakoutOpened:
+            return .breakoutOpened(childSessionId: message.breakout?.childSessionId ?? "")
+        case .breakoutOutcome:
+            guard let breakout = message.breakout, let outcome = breakout.outcome else { return .message }
+            return .breakoutOutcome(RoomBreakoutOutcomeCard(
+                childSessionId: breakout.childSessionId,
+                text: outcome.text,
+                authorName: principalName(outcome.authorId.isEmpty ? message.authorId : outcome.authorId),
+                acknowledgements: outcome.acknowledgements.map { ack in
+                    RoomBreakoutOutcomeCard.Acknowledgement(
+                        name: principalName(ack.principalId),
+                        state: {
+                            switch ack.state {
+                            case .ack: return .ack
+                            case .disagree: return .disagree
+                            case .missing: return .missing
+                            }
+                        }()
+                    )
+                }
+            ))
         }
+    }
+
+    /// People are shown by login without the server's `human-` prefix; agents by their id.
+    private static func principalName(_ principalId: String) -> String {
+        principalId.hasPrefix("human-") ? String(principalId.dropFirst("human-".count)) : principalId
+    }
+
+    private static func card(_ breakout: RoomBreakout) -> RoomBreakoutCard {
+        RoomBreakoutCard(
+            childSessionId: breakout.childSessionId,
+            title: breakout.title,
+            participantNames: breakout.participants?.map { $0.name ?? principalName($0.id) },
+            messageCount: breakout.messageCount,
+            unreadCount: breakout.unreadCount,
+            isLocked: breakout.isLocked,
+            isOpen: breakout.isOpen,
+            canRead: breakout.canRead,
+            canPost: breakout.canPost,
+            createdDate: ParsedSessionTimestamp(breakout.createdAt).date
+        )
     }
 }

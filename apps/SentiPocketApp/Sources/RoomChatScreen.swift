@@ -14,6 +14,8 @@ struct RoomRoute: Hashable {
     var focusTicketId: String?
     /// Opens the room's agent requests (a link's `?admission=`), for owners and admins.
     var opensAdmissions = false
+    /// A breakout's own room: no agent requests or tickets of its own in v1-a.
+    var isBreakout = false
 }
 
 /// A ticket opened from a link, shown over the room.
@@ -30,6 +32,7 @@ struct RoomChatScreen: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var showsTickets = false
     @State private var showsAdmissions = false
+    @State private var showsBreakouts = false
     @State private var linkedTicket: LinkedTicket?
     @State private var appliedRouteLinks = false
     private let route: RoomRoute
@@ -38,6 +41,7 @@ struct RoomChatScreen: View {
     private let admissionDecider: (any AdmissionDeciding)?
     private let ticketAnswerSender: (any RoomMessageSending)?
     private let openRoom: @MainActor (SentiLink) -> Void
+    private let openChildRoom: @MainActor (RoomRoute) -> Void
     private let onReauthenticationRequired: @MainActor () -> Void
 
     init(
@@ -50,6 +54,7 @@ struct RoomChatScreen: View {
         admissionsTransport: (any RoomAdmissionsTransport)? = nil,
         admissionDecider: (any AdmissionDeciding)? = nil,
         openRoom: @escaping @MainActor (SentiLink) -> Void = { _ in },
+        openChildRoom: @escaping @MainActor (RoomRoute) -> Void = { _ in },
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.route = route
@@ -59,6 +64,7 @@ struct RoomChatScreen: View {
         // A viewer cannot post, so cannot answer a ticket's decision either.
         self.ticketAnswerSender = route.membershipRole.lowercased() == "viewer" ? nil : sender
         self.openRoom = openRoom
+        self.openChildRoom = openChildRoom
         self.onReauthenticationRequired = onReauthenticationRequired
         _coordinator = StateObject(wrappedValue: RoomChatCoordinator(
             sessionId: route.sessionId,
@@ -75,8 +81,21 @@ struct RoomChatScreen: View {
 
     /// Only owners and admins decide agent requests (the API enforces it; the screen follows it).
     private var decidesAdmissions: Bool {
-        admissionsTransport != nil && admissionDecider != nil
+        !route.isBreakout && admissionsTransport != nil && admissionDecider != nil
             && ["owner", "admin"].contains(route.membershipRole.lowercased())
+    }
+
+    /// Opens a breakout as its own room. Posting there follows the breakout's own permission, not the parent's.
+    private func openBreakout(_ childSessionId: String) {
+        let card = coordinator.state.breakouts[childSessionId]
+        guard card?.canRead == true else { return }
+        let role = card?.canPost == true ? (route.membershipRole.isEmpty ? "contributor" : route.membershipRole) : "viewer"
+        openChildRoom(RoomRoute(
+            sessionId: childSessionId,
+            title: card?.title ?? "Breakout",
+            membershipRole: role,
+            isBreakout: true
+        ))
     }
 
     private var linkAction: OpenURLAction {
@@ -85,7 +104,11 @@ struct RoomChatScreen: View {
 
     var body: some View {
         RoomChatView(state: coordinator.state) { intent in
-            coordinator.send(intent)
+            if case .openBreakout(let childSessionId) = intent {
+                openBreakout(childSessionId)
+            } else {
+                coordinator.send(intent)
+            }
         }
         .toolbar {
             if decidesAdmissions {
@@ -98,7 +121,17 @@ struct RoomChatScreen: View {
                     .accessibilityIdentifier("pocket.room.admissions")
                 }
             }
-            if ticketsTransport != nil {
+            if !route.isBreakout, !coordinator.state.breakouts.isEmpty {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        showsBreakouts = true
+                    } label: {
+                        Label("Breakouts", systemImage: "bubble.left.and.bubble.right")
+                    }
+                    .accessibilityIdentifier("pocket.room.breakouts.open")
+                }
+            }
+            if ticketsTransport != nil, !route.isBreakout {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
                         showsTickets = true
@@ -130,6 +163,12 @@ struct RoomChatScreen: View {
                     onReauthenticationRequired: onReauthenticationRequired
                 )
                 .environment(\.openURL, linkAction)
+            }
+        }
+        .navigationDestination(isPresented: $showsBreakouts) {
+            RoomBreakoutsView(cards: Array(coordinator.state.breakouts.values)) { childSessionId in
+                showsBreakouts = false
+                openBreakout(childSessionId)
             }
         }
         .sheet(item: $linkedTicket) { linked in
