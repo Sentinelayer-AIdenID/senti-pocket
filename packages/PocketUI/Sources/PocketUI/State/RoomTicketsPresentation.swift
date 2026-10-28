@@ -87,6 +87,8 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
     public let canAnswerDecisions: Bool
     /// Per ticket: the answer being sent, sent, or why it failed.
     public let decisionStatus: [String: String]
+    /// Tickets whose answer failed in a way the same message may fix (Retry sends it again, same client id).
+    public let retryableDecisions: Set<String>
 
     public init(
         tickets: [RoomTicketInput],
@@ -96,7 +98,8 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
         isStale: Bool = false,
         failure: SessionLoadFailure? = nil,
         canAnswerDecisions: Bool = false,
-        decisionStatus: [String: String] = [:]
+        decisionStatus: [String: String] = [:],
+        retryableDecisions: Set<String> = []
     ) {
         let all = tickets.map { input in
             let body = input.body
@@ -125,6 +128,7 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
         self.failure = failure
         self.canAnswerDecisions = canAnswerDecisions && failure?.suppressesProtectedContent != true
         self.decisionStatus = decisionStatus
+        self.retryableDecisions = retryableDecisions
 
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let visible: [RoomTicketRow]

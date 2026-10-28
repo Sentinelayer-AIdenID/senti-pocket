@@ -7,6 +7,8 @@ public enum RoomTicketsIntent: Equatable, Sendable {
     case refresh
     case openSourceMessage(sequenceId: Int64)
     case answerDecision(ticketId: String, answer: String, detail: String)
+    /// Sends the ticket's last answer again, as the same message.
+    case retryDecision(ticketId: String)
 }
 
 /// The room's Tickets tab: Active / Archived (N), search across all tickets, ranked by impact. Tapping a ticket
@@ -60,6 +62,7 @@ public struct RoomTicketsView: View {
                         row: row,
                         canAnswer: state.canAnswerDecisions,
                         decisionStatus: state.decisionStatus[row.id],
+                        canRetryDecision: state.retryableDecisions.contains(row.id),
                         send: send
                     )
                 } label: {
@@ -132,13 +135,21 @@ public struct RoomTicketDetailView: View {
     let row: RoomTicketRow
     var canAnswer = false
     var decisionStatus: String?
+    var canRetryDecision = false
     let send: (RoomTicketsIntent) -> Void
     @State private var customAnswer = ""
 
-    public init(row: RoomTicketRow, canAnswer: Bool = false, decisionStatus: String? = nil, send: @escaping (RoomTicketsIntent) -> Void) {
+    public init(
+        row: RoomTicketRow,
+        canAnswer: Bool = false,
+        decisionStatus: String? = nil,
+        canRetryDecision: Bool = false,
+        send: @escaping (RoomTicketsIntent) -> Void
+    ) {
         self.row = row
         self.canAnswer = canAnswer
         self.decisionStatus = decisionStatus
+        self.canRetryDecision = canRetryDecision
         self.send = send
     }
 
@@ -185,7 +196,14 @@ public struct RoomTicketDetailView: View {
                         .foregroundStyle(PocketPalette.textSecondary)
                 }
                 if let decisionStatus {
-                    Text(decisionStatus).font(.footnote.weight(.semibold)).foregroundStyle(PocketPalette.accent)
+                    HStack(spacing: 12) {
+                        Text(decisionStatus).font(.footnote.weight(.semibold)).foregroundStyle(PocketPalette.accent)
+                        if canRetryDecision {
+                            Button("Retry") { send(.retryDecision(ticketId: row.id)) }
+                                .font(.footnote.weight(.semibold))
+                                .accessibilityIdentifier("pocket.ticket.decision.retry")
+                        }
+                    }
                 }
             }
             .padding(12)

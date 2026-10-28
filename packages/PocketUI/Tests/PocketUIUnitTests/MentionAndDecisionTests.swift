@@ -37,7 +37,8 @@ final class MentionSuggesterTests: XCTestCase {
             MentionCandidate(handle: "griff", displayName: "Griff Ryan", isHuman: true)
         ]
         XCTAssertEqual(MentionSuggester.suggestions(for: "", among: candidates).map(\.handle), ["all", "cobalt-warden", "griff"])
-        XCTAssertEqual(MentionSuggester.suggestions(for: "al", among: candidates).map(\.handle), ["all"])
+        XCTAssertEqual(MentionSuggester.suggestions(for: "al", among: candidates).map(\.handle), ["all", "cobalt-warden"],
+                       "everyone first for a prefix of all, then any handle that contains the query")
         XCTAssertEqual(MentionSuggester.suggestions(for: "ryan", among: candidates).map(\.handle), ["griff"], "display names match too")
         XCTAssertEqual(MentionSuggester.apply(candidates[0], to: "thanks @cob"), "thanks @cobalt-warden ")
     }

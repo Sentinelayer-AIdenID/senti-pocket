@@ -34,6 +34,30 @@ private final class CapturingSender: RoomMessageSending, @unchecked Sendable {
     }
 }
 
+/// Fails the first `failures` sends as retryable, then accepts; records every client id.
+private final class FlakySender: RoomMessageSending, @unchecked Sendable {
+    private let lock = NSLock()
+    private var failures: Int
+    private var ids: [String] = []
+
+    init(failures: Int) { self.failures = failures }
+
+    func sendHumanMessage(sessionId: String, text: String, clientId: String) async throws {
+        lock.lock()
+        ids.append(clientId)
+        let fail = failures > 0
+        if fail { failures -= 1 }
+        lock.unlock()
+        if fail { throw RoomSendError.retryable(retryAfterSeconds: nil) }
+    }
+
+    func clientIds() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return ids
+    }
+}
+
 private final class AuthorsTransport: RoomTransport, @unchecked Sendable {
     let history: [RoomMessage]
     init(_ history: [RoomMessage]) { self.history = history }
@@ -82,6 +106,31 @@ final class ComposerExtrasTests: XCTestCase {
             sender.messages().first?.text,
             "Decision on [Ticket: Where should the gateway run?](/dashboard/sessions/room_1?ticket=t1): The cloud @cobalt-warden"
         )
+    }
+
+    func test_a_retried_answer_is_the_same_message_and_a_new_answer_is_not() async {
+        let ticket = RoomTicket(id: "t1", title: "T", body: "## Decision\nQuestion: Go?\nOptions: Yes · No", version: 1)
+        let sender = FlakySender(failures: 1)
+        let coordinator = RoomTicketsCoordinator(
+            sessionId: "room_1",
+            transport: OneTicketTransport(ticket),
+            sender: sender,
+            sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) },
+            onReauthenticationRequired: {}
+        )
+        await coordinator.refresh()
+        coordinator.send(.answerDecision(ticketId: "t1", answer: "Yes", detail: ""))
+        await waitUntil("retry offered") { coordinator.state.retryableDecisions.contains("t1") }
+
+        coordinator.send(.retryDecision(ticketId: "t1"))
+        await waitUntil("sent") { coordinator.state.decisionStatus["t1"] == "Answer sent to the room." }
+        XCTAssertEqual(sender.clientIds().count, 2)
+        XCTAssertEqual(sender.clientIds()[0], sender.clientIds()[1], "a retry is the same message, so it never posts twice")
+        XCTAssertFalse(coordinator.state.retryableDecisions.contains("t1"))
+
+        coordinator.send(.answerDecision(ticketId: "t1", answer: "No", detail: ""))
+        await waitUntil("new answer sent") { sender.clientIds().count == 3 }
+        XCTAssertNotEqual(sender.clientIds()[2], sender.clientIds()[0], "a different answer is a new message")
     }
 
     func test_without_a_sender_decisions_are_read_only() async {

@@ -25,6 +25,10 @@ final class RoomTicketsCoordinator: ObservableObject {
     private var pollTask: Task<Void, Never>?
     private var decisionStatus: [String: String] = [:]
     private var answering: Set<String> = []
+    /// The last answer per ticket. Its client id is minted once per answer: Retry, or the same answer again, sends
+    /// the same message, which the API de-duplicates, so an attempt that did land is never posted twice.
+    private var lastAnswer: [String: (text: String, clientId: String)] = [:]
+    private var retryableDecisions: Set<String> = []
 
     static let pollInterval: TimeInterval = 30
 
@@ -76,12 +80,15 @@ final class RoomTicketsCoordinator: ObservableObject {
             break   // the room screen handles jumping to a message
         case .answerDecision(let ticketId, let answer, let detail):
             answerDecision(ticketId: ticketId, answer: answer, detail: detail)
+        case .retryDecision(let ticketId):
+            guard retryableDecisions.contains(ticketId) else { return }
+            deliverAnswer(ticketId)
         }
     }
 
     /// Posts the web's decision line to the room as you: one message that @-mentions the ticket's assignee.
     private func answerDecision(ticketId: String, answer: String, detail: String) {
-        guard let sender, let ticket = board?.tickets[ticketId], !answering.contains(ticketId) else { return }
+        guard sender != nil, let ticket = board?.tickets[ticketId], !answering.contains(ticketId) else { return }
         let text = TicketDecision.chatLine(
             sessionId: sessionId,
             ticketId: ticket.id,
@@ -91,24 +98,40 @@ final class RoomTicketsCoordinator: ObservableObject {
             assignee: ticket.assignee,
             personLabel: { _ in "the assignee" }
         )
-        let clientId = "hm_" + UUID().uuidString.lowercased()
+        let clientId = lastAnswer[ticketId].flatMap { $0.text == text ? $0.clientId : nil }
+            ?? "hm_" + UUID().uuidString.lowercased()
+        lastAnswer[ticketId] = (text, clientId)
+        deliverAnswer(ticketId)
+    }
+
+    /// Sends (or sends again, as the same message) the ticket's last answer.
+    private func deliverAnswer(_ ticketId: String) {
+        guard let sender, let answer = lastAnswer[ticketId], !answering.contains(ticketId) else { return }
         answering.insert(ticketId)
+        retryableDecisions.remove(ticketId)
         decisionStatus[ticketId] = "Sending your answer…"
         publish()
         let sessionId = self.sessionId
         Task { [weak self] in
             var status = "Answer sent to the room."
+            var canRetry = false
             do {
-                try await sender.sendHumanMessage(sessionId: sessionId, text: text, clientId: clientId)
+                try await sender.sendHumanMessage(sessionId: sessionId, text: answer.text, clientId: answer.clientId)
             } catch let error as RoomSendError {
                 if case .reauthenticationRequired = error { self?.onReauthenticationRequired() }
                 status = error.userMessage
+                switch error {
+                case .retryable, .reauthenticationRequired: canRetry = true
+                case .notConfigured, .notAllowed, .rejected: canRetry = false
+                }
             } catch {
                 status = RoomSendError.retryable(retryAfterSeconds: nil).userMessage
+                canRetry = true
             }
             guard let self else { return }
             self.answering.remove(ticketId)
             self.decisionStatus[ticketId] = status
+            if canRetry { self.retryableDecisions.insert(ticketId) }
             self.publish()
         }
     }
@@ -182,7 +205,8 @@ final class RoomTicketsCoordinator: ObservableObject {
             isStale: isStale,
             failure: failure,
             canAnswerDecisions: sender != nil,
-            decisionStatus: decisionStatus
+            decisionStatus: decisionStatus,
+            retryableDecisions: retryableDecisions
         )
     }
 }
