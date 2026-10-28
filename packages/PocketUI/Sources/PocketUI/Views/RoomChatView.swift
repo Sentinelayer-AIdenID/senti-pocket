@@ -113,6 +113,10 @@ public struct RoomChatView: View {
             }
             .onChange(of: state.focusSequenceId) { _ in focusIfNeeded(proxy) }
             .onChange(of: state.focusFallbackCount) { _ in showLatest(proxy) }
+            // At the bottom, stay at the bottom when rows above change size: an image preview loading, reactions
+            // or a reply count arriving. A reader scrolled up is never moved.
+            .onChange(of: state.rows) { _ in keepAtBottomIfThere(proxy) }
+            .onChange(of: state.attachmentPreviews.count) { _ in keepAtBottomIfThere(proxy) }
             .onChange(of: state.rows.count) { _ in focusIfNeeded(proxy) }
             .onChange(of: state.lastMessageId) { _ in
                 if !didInitialScroll {
@@ -333,6 +337,14 @@ public struct RoomChatView: View {
         highlightedRowId = target.id
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
             if highlightedRowId == target.id { highlightedRowId = nil }
+        }
+    }
+
+    /// Decided now, before layout can scroll the bottom marker out of view; scrolled after layout settles.
+    private func keepAtBottomIfThere(_ proxy: ScrollViewProxy) {
+        guard didInitialScroll, readerAtBottom, state.focusSequenceId == nil else { return }
+        DispatchQueue.main.async {
+            proxy.scrollTo(Self.bottomId, anchor: .bottom)
         }
     }
 
