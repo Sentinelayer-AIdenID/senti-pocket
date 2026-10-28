@@ -8,6 +8,8 @@ struct RoomRoute: Hashable {
     let title: String
     /// owner, admin, contributor or viewer. A viewer can read but not post.
     var membershipRole: String = ""
+    /// A message to open the room at (from a notification or link).
+    var focusSequenceId: Int64?
 }
 
 /// Hosts one room's live chat. The room streams while it is on screen and the app is active, and pauses (keeping
@@ -39,6 +41,7 @@ struct RoomChatScreen: View {
             actionSender: actionSender,
             identity: identity,
             membershipRole: route.membershipRole,
+            focusSequenceId: route.focusSequenceId,
             onReauthenticationRequired: onReauthenticationRequired
         ))
     }

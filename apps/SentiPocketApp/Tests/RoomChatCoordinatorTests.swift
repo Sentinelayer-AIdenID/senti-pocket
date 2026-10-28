@@ -242,6 +242,32 @@ final class RoomChatCoordinatorTests: XCTestCase {
         coordinator.pause()
     }
 
+    func test_a_room_opened_at_a_message_pages_back_to_it_and_clears_the_focus_once_shown() async {
+        let transport = ScriptedRoomTransport(before: [
+            .success(page([90, 100], hasMore: true)),
+            .success(page([70, 80], hasMore: true)),
+            .success(page([50, 60], hasMore: true))
+        ])
+        let coordinator = RoomChatCoordinator(
+            sessionId: "room_1",
+            title: "Room",
+            transport: transport,
+            focusSequenceId: 70,
+            sleep: { seconds in
+                if seconds > 5 { try? await Task.sleep(nanoseconds: 3_600_000_000_000) }
+            },
+            onReauthenticationRequired: {}
+        )
+        coordinator.resume()
+        await waitUntil("focus target loaded") { messageSequences(coordinator).contains(70) && !coordinator.state.isLoadingOlder }
+        XCTAssertEqual(coordinator.state.focusSequenceId, 70)
+        XCTAssertEqual(transport.snapshot().before, [nil, 90], "paging stops once the focused message is loaded")
+
+        coordinator.send(.focusHandled)
+        XCTAssertNil(coordinator.state.focusSequenceId, "the focus is applied once")
+        coordinator.pause()
+    }
+
     func test_jumping_to_an_unloaded_reply_target_pages_back_until_it_is_found() async {
         let transport = ScriptedRoomTransport(before: [
             .success(page([90, 100], hasMore: true)),

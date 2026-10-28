@@ -56,6 +56,8 @@ final class RoomChatCoordinator: ObservableObject {
     private var pendingReplies: [PendingReply] = []
     /// You in action keys, from your account (see `SignedInAccount.actorRef`).
     private var actorRef: String?
+    /// A message to bring into view once (opened from a notification or link); cleared when the view shows it.
+    private var focusTarget: Int64?
     /// Arrivals refresh reactions at most this often (the web polls about every 15s).
     static let actionsRefreshInterval: TimeInterval = 10
     static let viewerReason = "You're a viewer in this room: you can read it, but not post."
@@ -91,6 +93,7 @@ final class RoomChatCoordinator: ObservableObject {
         actionSender: (any RoomActionSending)? = nil,
         identity: (any AccountIdentityProviding)? = nil,
         membershipRole: String? = nil,
+        focusSequenceId: Int64? = nil,
         ownAuthorIds: Set<String> = [],
         sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
             guard seconds > 0 else { return }
@@ -105,6 +108,7 @@ final class RoomChatCoordinator: ObservableObject {
         self.sender = sender
         self.actionSender = actionSender
         self.identity = identity
+        self.focusTarget = focusSequenceId
         // The web lets a viewer react but never post; the API refuses the post anyway.
         let refusedReason = membershipRole?.lowercased() == "viewer" ? Self.viewerReason : nil
         self.postingRefusedReason = refusedReason
@@ -146,6 +150,9 @@ final class RoomChatCoordinator: ObservableObject {
                 await self.catchUp(current)
             }
             guard current == self.generation, !self.failureIsTerminal else { return }
+            if let target = self.focusTarget, self.timeline.index(ofSequence: target) == nil {
+                self.loadOlder(until: target)
+            }
             self.startLive(current)
             await self.refreshActions(force: true)
         })
@@ -209,6 +216,10 @@ final class RoomChatCoordinator: ObservableObject {
             publish()
         case .sendReply(let sequenceId, let text):
             sendReply(text, to: sequenceId)
+        case .focusHandled:
+            guard focusTarget != nil else { return }
+            focusTarget = nil
+            publish()
         }
     }
 
@@ -819,7 +830,8 @@ final class RoomChatCoordinator: ObservableObject {
             pending: pending.map { RoomChatPendingRow(clientId: $0.clientId, text: $0.text, status: $0.status) },
             composer: composerState,
             canReact: canReact,
-            thread: threadInput
+            thread: threadInput,
+            focusSequenceId: focusTarget
         )
     }
 

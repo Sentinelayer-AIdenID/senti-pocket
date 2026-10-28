@@ -353,6 +353,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     /// Whether you can react (ack, like, dislike): any member, including a viewer, when actions are wired.
     public let canReact: Bool
     public let thread: RoomChatThreadState?
+    /// A message to bring into view and highlight once (opened from a notification or link).
+    public let focusSequenceId: Int64?
 
     /// Same-author rows closer together than this share one header.
     public static let groupingWindow: TimeInterval = 5 * 60
@@ -374,6 +376,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         composer: RoomComposerState = .hidden,
         canReact: Bool = false,
         thread threadInput: RoomChatThreadInput? = nil,
+        focusSequenceId: Int64? = nil,
         calendar: Calendar = .current
     ) {
         self.sessionId = sessionId
@@ -390,6 +393,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         self.pending = protectedFailure ? [] : pending
         self.composer = protectedFailure ? .hidden : composer
         self.canReact = protectedFailure ? false : canReact
+        self.focusSequenceId = protectedFailure ? nil : focusSequenceId
 
         // Protected content never renders beside an auth or access failure.
         guard failure?.suppressesProtectedContent != true else {
@@ -524,6 +528,8 @@ public enum RoomChatIntent: Equatable, Sendable {
     case openThread(sequenceId: Int64)
     case closeThread
     case sendReply(sequenceId: Int64, text: String)
+    /// The view brought `focusSequenceId` into view.
+    case focusHandled
 }
 
 /// Link policy for chat text, matching the web (`safeLinkUrl.ts`): only http(s) links and in-app paths are

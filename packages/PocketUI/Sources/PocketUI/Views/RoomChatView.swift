@@ -106,7 +106,12 @@ public struct RoomChatView: View {
                     jumpToLatestButton(proxy: proxy)
                 }
             }
-            .onAppear { scrollToInitialPosition(proxy) }
+            .onAppear {
+                scrollToInitialPosition(proxy)
+                focusIfNeeded(proxy)
+            }
+            .onChange(of: state.focusSequenceId) { _ in focusIfNeeded(proxy) }
+            .onChange(of: state.rows.count) { _ in focusIfNeeded(proxy) }
             .onChange(of: state.lastMessageId) { _ in
                 if !didInitialScroll {
                     scrollToInitialPosition(proxy)
@@ -256,6 +261,25 @@ public struct RoomChatView: View {
                 proxy.scrollTo(RoomChatRow.unreadDivider.id, anchor: .top)
             } else {
                 proxy.scrollTo(Self.bottomId, anchor: .bottom)
+            }
+        }
+    }
+
+    /// Brings the focused message into view once it is loaded, highlights it, and reports it handled.
+    private func focusIfNeeded(_ proxy: ScrollViewProxy) {
+        guard let focus = state.focusSequenceId else { return }
+        let target = state.rows.first { row in
+            if case .message(let message) = row { return message.sequenceId == focus }
+            return false
+        }
+        guard let target else { return }
+        didInitialScroll = true
+        DispatchQueue.main.async {
+            withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(target.id, anchor: .center) }
+            highlightedRowId = target.id
+            send(.focusHandled)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                if highlightedRowId == target.id { highlightedRowId = nil }
             }
         }
     }

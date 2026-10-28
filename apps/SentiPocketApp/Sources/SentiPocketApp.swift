@@ -161,6 +161,9 @@ private struct AuthenticatedRootView: View {
     @StateObject private var checkpointPocket: CheckpointPocketCoordinator
     @StateObject private var checkpointNarrationRevocation: VerifiedCheckpointNarrationRevocationRelay
     @StateObject private var revocationRelay: AuthenticatedSessionRevocationRelay
+    @StateObject private var notifications: NotificationsCoordinator
+    @State private var presentsNotifications = false
+    @Environment(\.scenePhase) private var rootScenePhase
     @ObservedObject private var whisperModelCoordinator: WhisperModelProvisioningCoordinator
     @State private var selectedTab: PocketTab = .sessions
     @State private var presentsSettings = false
@@ -249,6 +252,14 @@ private struct AuthenticatedRootView: View {
         _checkpointPocket = StateObject(wrappedValue: checkpointPocket)
         _checkpointNarrationRevocation = StateObject(wrappedValue: checkpointNarrationRevocation)
         _revocationRelay = StateObject(wrappedValue: revocationRelay)
+        _notifications = StateObject(wrappedValue: NotificationsCoordinator(
+            transport: transport,
+            marker: HTTPNotificationReadMarker(apiBaseURL: apiURL),
+            roomTitle: { sessionId in
+                sessions.state.rows.first { UTF8ExactIdentity.matches($0.sessionId, sessionId) }?.title
+            },
+            onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
+        ))
         _whisperModelCoordinator = ObservedObject(wrappedValue: whisperModelCoordinator)
         self.roomTransport = transport
         self.ticketsTransport = transport
@@ -293,6 +304,28 @@ private struct AuthenticatedRootView: View {
                         )
                     }
                     .toolbar {
+                        ToolbarItem(placement: .navigationBarLeading) {
+                            Button {
+                                presentsNotifications = true
+                                Task { await notifications.refresh() }
+                            } label: {
+                                Image(systemName: notifications.unreadCount > 0 ? "bell.badge" : "bell")
+                                    .overlay(alignment: .topTrailing) {
+                                        if notifications.unreadCount > 0 {
+                                            Text(notifications.unreadCount > 99 ? "99+" : "\(notifications.unreadCount)")
+                                                .font(.caption2.weight(.bold))
+                                                .foregroundStyle(.white)
+                                                .padding(.horizontal, 4)
+                                                .background(Capsule().fill(Color.red))
+                                                .offset(x: 10, y: -8)
+                                        }
+                                    }
+                            }
+                            .accessibilityLabel(notifications.unreadCount > 0
+                                ? "Notifications, \(notifications.unreadCount) unread"
+                                : "Notifications")
+                            .accessibilityIdentifier("sessions.notifications")
+                        }
                         ToolbarItem(placement: .navigationBarTrailing) {
                             Button {
                                 presentsSettings = true
@@ -330,6 +363,27 @@ private struct AuthenticatedRootView: View {
                 selectedTab = .pocket
             }
         }
+        .sheet(isPresented: $presentsNotifications) {
+            NotificationsView(state: notifications.state) { intent in
+                switch intent {
+                case .open(let id):
+                    guard let link = notifications.open(id) else { return }
+                    presentsNotifications = false
+                    open(link)
+                case .markRead(let id):
+                    notifications.markRead(id)
+                case .markAllRead:
+                    notifications.markAllRead()
+                case .refresh:
+                    Task { await notifications.refresh() }
+                case .close:
+                    presentsNotifications = false
+                }
+            }
+        }
+        .onChange(of: rootScenePhase) { phase in
+            if phase == .active { notifications.startPolling() } else { notifications.stopPolling() }
+        }
         .sheet(isPresented: $presentsSettings) {
             WhisperModelSettingsView(
                 coordinator: whisperModelCoordinator,
@@ -349,8 +403,10 @@ private struct AuthenticatedRootView: View {
                 authenticationRevision: authenticationRevision
             )
             sessions.start()
+            notifications.startPolling()
         }
         .onDisappear {
+            notifications.stopPolling()
             sessions.clearSelection()
             details.clearSelection()
             checkpointPocket.clearSelection()
@@ -360,6 +416,19 @@ private struct AuthenticatedRootView: View {
     @MainActor
     private func invalidateProtectedAuthentication() {
         revocationRelay.invalidateAuthentication()
+    }
+
+    /// Opens a Senti link in the app: the room, scrolled to the message it names.
+    @MainActor
+    private func open(_ link: SentiLink) {
+        let row = sessions.state.rows.first { UTF8ExactIdentity.matches($0.sessionId, link.sessionId) }
+        selectedTab = .sessions
+        roomPath = [RoomRoute(
+            sessionId: link.sessionId,
+            title: row?.title ?? "Room",
+            membershipRole: row?.membershipRole ?? "",
+            focusSequenceId: link.messageSequence
+        )]
     }
 }
 
