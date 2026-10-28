@@ -110,12 +110,15 @@ private struct AdmissionRequestCard: View {
                     .font(.subheadline)
                 }
             }
-            Picker("For", selection: $ttlSeconds) {
-                ForEach(AdmissionRow.ttlOptions(forRequested: row.requestedTTLSeconds), id: \.self) { option in
-                    Text(AdmissionRow.durationLabel(option)).tag(option)
+            let ttlOptions = AdmissionRow.ttlOptions(forRequested: row.requestedTTLSeconds)
+            if !ttlOptions.isEmpty {
+                Picker("For", selection: $ttlSeconds) {
+                    ForEach(ttlOptions, id: \.self) { option in
+                        Text(AdmissionRow.durationLabel(option)).tag(option)
+                    }
                 }
+                .pickerStyle(.segmented)
             }
-            .pickerStyle(.segmented)
             HStack {
                 Button(role: .destructive) {
                     send(.deny(id: row.id))
@@ -124,7 +127,11 @@ private struct AdmissionRequestCard: View {
                 }
                 .buttonStyle(.bordered)
                 Button {
-                    send(.approve(id: row.id, actions: row.requestedActions.filter(selectedActions.contains), ttlSeconds: ttlSeconds))
+                    send(.approve(
+                        id: row.id,
+                        actions: row.requestedActions.filter(selectedActions.contains),
+                        ttlSeconds: row.grantedTTL(choosing: ttlSeconds)
+                    ))
                 } label: {
                     Text("Approve").frame(maxWidth: .infinity)
                 }

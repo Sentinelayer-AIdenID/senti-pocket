@@ -68,6 +68,12 @@ public struct AdmissionRow: Equatable, Identifiable, Sendable {
         return choices.filter { $0 < requested && $0 >= 300 } + (requested > 0 ? [requested] : [])
     }
 
+    /// The duration an approval sends: the chosen option, or nil when it is not one of the options (a request
+    /// that names no duration offers none). The API is never sent 0; without a duration it keeps the request's.
+    public func grantedTTL(choosing chosen: Int) -> Int? {
+        Self.ttlOptions(forRequested: requestedTTLSeconds).contains(chosen) ? chosen : nil
+    }
+
     public static func durationLabel(_ seconds: Int) -> String {
         if seconds > 0, seconds % 3600 == 0 { return "\(seconds / 3600)h" }
         if seconds > 0, seconds % 60 == 0 { return "\(seconds / 60)m" }
@@ -105,7 +111,8 @@ public struct AdmissionsPresentationState: Equatable, Sendable {
 }
 
 public enum AdmissionsIntent: Equatable, Sendable {
-    case approve(id: String, actions: [String], ttlSeconds: Int)
+    /// `ttlSeconds` is nil when no duration was chosen; none is sent then.
+    case approve(id: String, actions: [String], ttlSeconds: Int?)
     case deny(id: String)
     case refresh
 }

@@ -117,6 +117,14 @@ final class AdmissionDeciderTests: XCTestCase {
         XCTAssertEqual(Set(json.keys), ["decision", "grantedActions", "ttlSeconds"], "the API forbids extra fields")
     }
 
+    func test_an_approval_without_a_duration_sends_none() async throws {
+        let decider = makeDecider()
+        try await decider.decide(sessionId: "room_1", admissionId: admission, approve: true,
+                                 grantedActions: ["session.read"], ttlSeconds: nil)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(AdmissionURLProtocol.requests().first).1) as? [String: Any])
+        XCTAssertEqual(Set(json.keys), ["decision", "grantedActions"], "no ttlSeconds, not 0")
+    }
+
     func test_a_denial_sends_only_the_decision() async throws {
         let decider = makeDecider()
         try await decider.decide(sessionId: "room_1", admissionId: admission, approve: false, grantedActions: [], ttlSeconds: nil)
