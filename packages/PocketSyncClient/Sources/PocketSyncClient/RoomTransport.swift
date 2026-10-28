@@ -18,3 +18,11 @@ extension RoomTransport {
 }
 
 extension HTTPSessionTransport: RoomTransport {}
+
+/// The room's ticket board reads: the snapshot pages and the event feed.
+public protocol RoomTicketsTransport: Sendable {
+    func roomTicketSnapshot(sessionId: String, afterId: String?, limit: Int) async throws -> RoomTicketSnapshotPage
+    func roomTicketEvents(sessionId: String, after: Int64, limit: Int) async throws -> RoomTicketEventsPage
+}
+
+extension HTTPSessionTransport: RoomTicketsTransport {}
