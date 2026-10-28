@@ -105,6 +105,7 @@ public struct RoomChatView: View {
                 focusIfNeeded(proxy)
             }
             .onChange(of: state.focusSequenceId) { _ in focusIfNeeded(proxy) }
+            .onChange(of: state.focusFallbackCount) { _ in showLatest(proxy) }
             .onChange(of: state.rows.count) { _ in focusIfNeeded(proxy) }
             .onChange(of: state.lastMessageId) { _ in
                 if !didInitialScroll {
@@ -270,6 +271,19 @@ public struct RoomChatView: View {
         guard readerAtBottom != atBottom else { return }
         readerAtBottom = atBottom
         send(.readerAtBottom(atBottom))
+    }
+
+    /// A linked message could not be loaded: open as the room normally opens (the latest messages, or the unread
+    /// divider), or, when already open, go to the latest messages, instead of staying in older history.
+    private func showLatest(_ proxy: ScrollViewProxy) {
+        guard didInitialScroll else {
+            scrollToInitialPosition(proxy)
+            return
+        }
+        setReaderAtBottom(true)
+        DispatchQueue.main.async {
+            withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
+        }
     }
 
     /// Brings the focused message into view once it is loaded, highlights it, and reports it handled.
