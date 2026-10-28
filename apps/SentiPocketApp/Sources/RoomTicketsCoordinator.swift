@@ -118,7 +118,7 @@ final class RoomTicketsCoordinator: ObservableObject {
         publish()
         let sessionId = self.sessionId
         Task { [weak self] in
-            var status = "Answer sent to the room."
+            var status = RoomTicketsPresentationState.decisionSentStatus
             var canRetry = false
             var landed = false
             do {

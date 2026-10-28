@@ -541,6 +541,26 @@ public enum RoomChatIntent: Equatable, Sendable {
     case focusHandled
 }
 
+/// A request to put a failed message's text back into the composer. Each request is distinct, so editing the same
+/// text twice still restores it.
+public struct RoomComposerRestore: Equatable, Sendable {
+    public let id: UUID
+    public let text: String
+
+    public init(id: UUID = UUID(), text: String) {
+        self.id = id
+        self.text = text
+    }
+}
+
+/// How restored text joins what is already being typed: it fills an empty composer, and otherwise follows the
+/// current draft on a new line, so nothing typed since is lost.
+public enum RoomComposerDraft {
+    public static func restoring(_ text: String, into draft: String) -> String {
+        draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? text : draft + "\n" + text
+    }
+}
+
 /// Link policy for chat text, matching the web (`safeLinkUrl.ts`): http(s) links to a real host, and in-app paths
 /// (`/dashboard/sessions/...`), which open on the Senti web origin as the web resolves them. Protocol-relative
 /// (`//host`) and backslash (`/\host`) paths, control characters, credentials and every other scheme (tel:, sms:,

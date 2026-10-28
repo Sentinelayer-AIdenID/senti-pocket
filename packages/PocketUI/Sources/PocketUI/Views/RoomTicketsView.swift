@@ -180,7 +180,7 @@ public struct RoomTicketDetailView: View {
                                 } else {
                                     send(.answerDecision(ticketId: row.id, answer: "Custom", detail: text))
                                 }
-                                customAnswer = ""
+                                // Cleared only once the room has the answer (below): a failed send keeps it.
                             }
                             .buttonStyle(.borderedProminent)
                             .tint(PocketPalette.accent)
@@ -209,6 +209,9 @@ public struct RoomTicketDetailView: View {
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(PocketPalette.warning.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .onChange(of: decisionStatus) { status in
+                if status == RoomTicketsPresentationState.decisionSentStatus { customAnswer = "" }
+            }
         }
     }
 
