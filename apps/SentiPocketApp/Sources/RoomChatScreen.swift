@@ -19,6 +19,8 @@ struct RoomChatScreen: View {
     @Environment(\.scenePhase) private var scenePhase
     private let route: RoomRoute
     private let ticketsTransport: (any RoomTicketsTransport)?
+    private let admissionsTransport: (any RoomAdmissionsTransport)?
+    private let admissionDecider: (any AdmissionDeciding)?
     private let onReauthenticationRequired: @MainActor () -> Void
 
     init(
@@ -28,10 +30,14 @@ struct RoomChatScreen: View {
         actionSender: (any RoomActionSending)? = nil,
         identity: (any AccountIdentityProviding)? = nil,
         ticketsTransport: (any RoomTicketsTransport)? = nil,
+        admissionsTransport: (any RoomAdmissionsTransport)? = nil,
+        admissionDecider: (any AdmissionDeciding)? = nil,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.route = route
         self.ticketsTransport = ticketsTransport
+        self.admissionsTransport = admissionsTransport
+        self.admissionDecider = admissionDecider
         self.onReauthenticationRequired = onReauthenticationRequired
         _coordinator = StateObject(wrappedValue: RoomChatCoordinator(
             sessionId: route.sessionId,
@@ -51,6 +57,23 @@ struct RoomChatScreen: View {
             coordinator.send(intent)
         }
         .toolbar {
+            // Only owners and admins decide agent requests (the API enforces it; the button follows it).
+            if let admissionsTransport, let admissionDecider,
+               ["owner", "admin"].contains(route.membershipRole.lowercased()) {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    NavigationLink {
+                        AdmissionsScreen(
+                            sessionId: route.sessionId,
+                            transport: admissionsTransport,
+                            decider: admissionDecider,
+                            onReauthenticationRequired: onReauthenticationRequired
+                        )
+                    } label: {
+                        Label("Agent requests", systemImage: "person.badge.shield.checkmark")
+                    }
+                    .accessibilityIdentifier("pocket.room.admissions")
+                }
+            }
             if let ticketsTransport {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     NavigationLink {
