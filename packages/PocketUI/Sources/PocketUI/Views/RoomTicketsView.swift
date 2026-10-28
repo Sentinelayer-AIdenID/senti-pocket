@@ -103,6 +103,12 @@ private struct RoomTicketRowView: View {
                 Text(row.statusLabel)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(RoomTicketPalette.status(row.status))
+                if row.decision != nil {
+                    Label("Decision needed", systemImage: "questionmark.bubble")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(PocketPalette.warning)
+                        .accessibilityIdentifier("pocket.tickets.row.decision")
+                }
                 if let assignee = row.assignee {
                     Label(RoomTicketRow.displayName(assignee), systemImage: "person")
                         .font(.caption)
@@ -137,7 +143,7 @@ public struct RoomTicketDetailView: View {
 
     @ViewBuilder
     private var decisionCard: some View {
-        if let decision = TicketDecision.parse(row.body), row.status != "done" {
+        if let decision = row.decision {
             VStack(alignment: .leading, spacing: 10) {
                 Label("Decision needed", systemImage: "questionmark.bubble")
                     .font(.caption.weight(.bold))

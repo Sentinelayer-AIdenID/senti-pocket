@@ -54,4 +54,16 @@ final class RoomTicketsPresentationTests: XCTestCase {
         XCTAssertTrue(denied.rows.isEmpty)
         XCTAssertEqual(denied.activeCount, 0)
     }
+
+    func test_an_open_ticket_with_a_decision_section_is_marked_until_done() {
+        let ask = "## Decision\nQuestion: Ship it?\nOptions: Yes · No"
+        let state = RoomTicketsPresentationState(tickets: [
+            input("asks", body: ask),
+            input("plain", body: "## Intent\nNothing to decide")
+        ])
+        XCTAssertEqual(state.rows.first { $0.id == "asks" }?.decision?.question, "Ship it?")
+        XCTAssertNil(state.rows.first { $0.id == "plain" }?.decision)
+        let done = RoomTicketsPresentationState(tickets: [input("asks", status: "done", body: ask)], showsArchived: true)
+        XCTAssertNil(done.rows.first?.decision, "a done ticket no longer asks")
+    }
 }

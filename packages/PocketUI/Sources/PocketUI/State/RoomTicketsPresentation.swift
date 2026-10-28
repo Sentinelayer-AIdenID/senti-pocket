@@ -54,6 +54,8 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
     public let updatedDate: Date?
     public let sourceSequenceId: Int64?
     public let isVerifiedDone: Bool
+    /// The question the ticket keeper is waiting on, while the ticket is not done.
+    public let decision: TicketDecision?
 
     public var statusLabel: String {
         switch status {
@@ -97,10 +99,11 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
         decisionStatus: [String: String] = [:]
     ) {
         let all = tickets.map { input in
-            RoomTicketRow(
+            let body = input.body
+            return RoomTicketRow(
                 id: input.id,
                 title: input.title,
-                body: input.body,
+                body: body,
                 status: input.status,
                 createdBy: input.createdBy,
                 assignee: input.assignee,
@@ -108,7 +111,8 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
                 createdDate: ParsedSessionTimestamp(input.createdAt).date,
                 updatedDate: ParsedSessionTimestamp(input.updatedAt).date,
                 sourceSequenceId: input.sourceSequenceId,
-                isVerifiedDone: input.isVerifiedDone
+                isVerifiedDone: input.isVerifiedDone,
+                decision: input.status == "done" ? nil : TicketDecision.parse(body)
             )
         }
         let protected = failure?.suppressesProtectedContent == true
