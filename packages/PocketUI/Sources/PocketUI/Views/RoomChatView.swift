@@ -350,7 +350,7 @@ private struct RoomPendingRowView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            ChatMarkdownView(text: row.text)
+            ChatMarkdownView(text: row.displayText)
                 .font(.body)
                 .foregroundStyle(PocketPalette.textPrimary.opacity(row.isFailed ? 0.7 : 1))
             switch row.status {
@@ -407,6 +407,15 @@ private struct RoomComposerBar: View {
 
     var body: some View {
         if composer.canPost {
+            VStack(alignment: .leading, spacing: 4) {
+            if let problem = composer.lengthProblem(for: draft) {
+                Text(problem)
+                    .font(.caption)
+                    .foregroundStyle(PocketPalette.danger)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 6)
+                    .accessibilityIdentifier("pocket.room.composer.tooLong")
+            }
             HStack(alignment: .bottom, spacing: 8) {
                 TextField("Message", text: $draft, axis: .vertical)
                     .lineLimit(1...6)
@@ -436,6 +445,7 @@ private struct RoomComposerBar: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
+            }
             .background(.bar)
         } else if let reason = composer.disabledReason {
             Text(reason)
@@ -449,7 +459,7 @@ private struct RoomComposerBar: View {
     }
 
     private var canSend: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && composer.lengthProblem(for: draft) == nil
     }
 }
 

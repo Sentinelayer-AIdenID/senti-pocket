@@ -107,8 +107,14 @@ public struct RoomChatPendingRow: Equatable, Identifiable, Sendable {
 
     public var id: String { clientId }
     public let clientId: String
+    /// The full text, always: retry and edit use it.
     public let text: String
     public let status: Status
+
+    /// What the row shows: very long text is cut for display only.
+    public var displayText: String {
+        text.count > 2_000 ? String(text.prefix(280)) + "…" : text
+    }
 
     public init(clientId: String, text: String, status: Status) {
         self.clientId = clientId
@@ -121,13 +127,29 @@ public struct RoomChatPendingRow: Equatable, Identifiable, Sendable {
 public struct RoomComposerState: Equatable, Sendable {
     public let canPost: Bool
     public let disabledReason: String?
+    /// The longest message the API accepts, in characters; nil when there is no known limit.
+    public let maximumLength: Int?
 
     public static let enabled = RoomComposerState(canPost: true, disabledReason: nil)
     public static let hidden = RoomComposerState(canPost: false, disabledReason: nil)
 
-    public init(canPost: Bool, disabledReason: String?) {
+    public init(canPost: Bool, disabledReason: String?, maximumLength: Int? = nil) {
         self.canPost = canPost
         self.disabledReason = disabledReason
+        self.maximumLength = maximumLength
+    }
+
+    /// Why this draft cannot be sent as it is, or nil. A draft over the limit stays in the composer (nothing is
+    /// cleared and no failed row appears), so the writer can shorten it.
+    public func lengthProblem(for draft: String) -> String? {
+        guard let maximumLength else { return nil }
+        let count = draft.trimmingCharacters(in: .whitespacesAndNewlines).count
+        guard count > maximumLength else { return nil }
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        let have = formatter.string(from: NSNumber(value: count)) ?? String(count)
+        let limit = formatter.string(from: NSNumber(value: maximumLength)) ?? String(maximumLength)
+        return "Too long to send: \(have) of \(limit) characters."
     }
 }
 

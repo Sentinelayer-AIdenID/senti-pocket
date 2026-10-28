@@ -125,6 +125,15 @@ final class RoomMessageSenderTests: XCTestCase {
         XCTAssertTrue(RoomSendURLProtocol.requests().isEmpty)
     }
 
+    func test_protected_room_reads_keep_no_disk_cache_cookies_or_credentials() {
+        let configuration = SentiHTTPTransportPolicy.makeProtectedReadConfiguration()
+        XCTAssertNil(configuration.urlCache)
+        XCTAssertEqual(configuration.requestCachePolicy, .reloadIgnoringLocalCacheData)
+        XCTAssertNil(configuration.httpCookieStorage)
+        XCTAssertNil(configuration.urlCredentialStorage)
+        XCTAssertEqual(configuration.timeoutIntervalForRequest, SentiHTTPTransportPolicy.requestTimeout)
+    }
+
     func test_room_stream_session_outlives_the_server_keepalive() {
         let configuration = SentiHTTPTransportPolicy.makeRoomStreamConfiguration()
         XCTAssertGreaterThan(configuration.timeoutIntervalForRequest, 15, "idle deadline above the 15s keep-alive")
@@ -232,7 +241,8 @@ final class RoomComposerCoordinatorTests: XCTestCase {
         let sender = ScriptedSender([.success(())])
         let coordinator = makeCoordinator(sender: sender)
         coordinator.resume()
-        XCTAssertEqual(coordinator.state.composer, .enabled)
+        XCTAssertTrue(coordinator.state.composer.canPost)
+        XCTAssertEqual(coordinator.state.composer.maximumLength, HTTPRoomMessageSender.maximumLength)
 
         coordinator.send(.sendMessage(text: "  ship it  "))
         XCTAssertEqual(coordinator.state.pending.first?.text, "ship it", "the text is trimmed")
@@ -263,6 +273,21 @@ final class RoomComposerCoordinatorTests: XCTestCase {
 
         coordinator.send(.discardSend(clientId: clientId))
         XCTAssertTrue(coordinator.state.pending.isEmpty)
+        coordinator.pause()
+    }
+
+    func test_a_message_over_the_limit_keeps_every_character_and_is_never_sent() async {
+        let sender = ScriptedSender([])
+        let coordinator = makeCoordinator(sender: sender)
+        coordinator.resume()
+        let huge = String(repeating: "a", count: HTTPRoomMessageSender.maximumLength + 1)
+        coordinator.send(.sendMessage(text: huge))
+        XCTAssertEqual(coordinator.state.pending.first?.text.count, huge.count, "nothing typed is lost")
+        guard case .failed(_, let canRetry)? = coordinator.state.pending.first?.status else {
+            return XCTFail("an oversized message is refused before the network")
+        }
+        XCTAssertFalse(canRetry)
+        XCTAssertTrue(sender.snapshot().isEmpty)
         coordinator.pause()
     }
 

@@ -91,7 +91,7 @@ final class RoomChatCoordinator: ObservableObject {
         } else if let reason = refusedReason {
             initialComposer = RoomComposerState(canPost: false, disabledReason: reason)
         } else {
-            initialComposer = .enabled
+            initialComposer = RoomComposerState(canPost: true, disabledReason: nil, maximumLength: HTTPRoomMessageSender.maximumLength)
         }
         self.state = RoomChatPresentationState(
             sessionId: sessionId,
@@ -168,16 +168,18 @@ final class RoomChatCoordinator: ObservableObject {
     private var composerState: RoomComposerState {
         guard sender != nil else { return .hidden }
         if let postingRefusedReason { return RoomComposerState(canPost: false, disabledReason: postingRefusedReason) }
-        return .enabled
+        return RoomComposerState(canPost: true, disabledReason: nil, maximumLength: HTTPRoomMessageSender.maximumLength)
     }
 
     private func enqueueSend(_ raw: String) {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard sender != nil, postingRefusedReason == nil, !text.isEmpty else { return }
         guard text.count <= HTTPRoomMessageSender.maximumLength else {
+            // The composer refuses this before sending; this is the backstop. The full text is kept (only the row's
+            // display is cut), so nothing typed is lost.
             pending.append(PendingSend(
                 clientId: Self.makeClientId(),
-                text: String(text.prefix(280)) + "…",
+                text: text,
                 status: .failed(reason: "Too long to send (the limit is 64,000 characters).", canRetry: false)
             ))
             publish()
