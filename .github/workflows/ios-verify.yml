@@ -65,7 +65,7 @@ jobs:
           - name: PocketSyncClient
             path: packages/PocketSyncClient
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Verify source release inputs before tool execution
         run: >-
           python3 scripts/ios/verify_unsigned_release.py preflight
@@ -92,7 +92,7 @@ jobs:
       IOS_API_URL: "https://api.ci.invalid"
       IOS_GATEWAY_URL: "https://gateway.ci.invalid"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Verify source release inputs before tool execution
         run: >-
           python3 scripts/ios/verify_unsigned_release.py preflight
@@ -164,7 +164,20 @@ jobs:
       - name: Run unsigned verifier synthetic tests
         run: python3 scripts/ios/tests/verify_unsigned_release_test.py
       - name: Install XcodeGen
-        run: brew install xcodegen
+        # Pinned release, verified against its published SHA-256 before it runs (not an unversioned Homebrew
+        # formula), so the project generator is the same reviewed binary on every run.
+        env:
+          XCODEGEN_VERSION: "2.46.0"
+          XCODEGEN_SHA256: "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806"
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/xcodegen-$XCODEGEN_VERSION.zip"
+          url="https://github.com/yonaskolb/XcodeGen/releases/download/$XCODEGEN_VERSION/xcodegen.zip"
+          curl -fsSL --retry 3 -o "$archive" "$url"
+          echo "$XCODEGEN_SHA256  $archive" | shasum -a 256 -c -
+          unzip -q "$archive" -d "$RUNNER_TEMP/xcodegen-dist"
+          "$RUNNER_TEMP/xcodegen-dist/xcodegen/bin/xcodegen" --version | grep -F "$XCODEGEN_VERSION"
+          echo "$RUNNER_TEMP/xcodegen-dist/xcodegen/bin" >> "$GITHUB_PATH"
       - name: Generate project
         working-directory: apps/SentiPocketApp
         run: xcodegen generate
@@ -376,7 +389,7 @@ jobs:
           test
       - name: Upload XCTest result bundle
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874 # v4.4.0
         with:
           name: SentiPocketAppTests-xcresult
           path: ${{ runner.temp }}/SentiPocketAppTests.xcresult
