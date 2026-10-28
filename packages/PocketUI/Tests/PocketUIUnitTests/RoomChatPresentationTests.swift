@@ -138,8 +138,8 @@ final class RoomChatPresentationTests: XCTestCase {
     #if canImport(SwiftUI)
     func test_chat_text_keeps_safe_links_and_disarms_the_rest() {
         let text = RoomChatText.attributed("see [pr](https://github.com/a/b/pull/1) or [call](tel:5551234) **now**")
-        let links = text.runs.compactMap { $0.link }
-        XCTAssertEqual(links, [URL(string: "https://github.com/a/b/pull/1")!])
+        let links = Set(text.runs.compactMap { $0.link })
+        XCTAssertEqual(links, [URL(string: "https://github.com/a/b/pull/1")!], "one link, styled as text plus chip")
         XCTAssertTrue(String(text.characters).contains("call"), "a disarmed link keeps its visible text")
         XCTAssertTrue(String(text.characters).contains("now"))
     }

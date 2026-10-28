@@ -136,6 +136,7 @@ public struct RoomChatView: View {
         case .message(let message):
             RoomMessageRowView(
                 row: message,
+                ownHandles: state.ownMentionHandles,
                 isHighlighted: highlightedRowId == row.id,
                 onOpenReplyTarget: { jump(to: $0, proxy: proxy) }
             )
@@ -234,6 +235,7 @@ public struct RoomChatView: View {
 
 private struct RoomMessageRowView: View {
     let row: RoomChatMessageRow
+    let ownHandles: Set<String>
     let isHighlighted: Bool
     let onOpenReplyTarget: (Int64) -> Void
 
@@ -262,7 +264,11 @@ private struct RoomMessageRowView: View {
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(PocketPalette.inset, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(PocketPalette.separator.opacity(0.6), lineWidth: 0.5)
+            )
             .padding(.vertical, 6)
         case .message:
             message
@@ -295,11 +301,9 @@ private struct RoomMessageRowView: View {
                 }
                 .buttonStyle(.plain)
             }
-            Text(RoomChatText.attributed(row.text))
+            ChatMarkdownView(text: row.text, ownHandles: ownHandles)
                 .font(.body)
                 .foregroundStyle(PocketPalette.textPrimary)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
             if row.isEdited {
                 Text("edited")
                     .font(.caption2)
@@ -364,25 +368,12 @@ private struct RoomConnectionPill: View {
     }
 }
 
-/// Inline Markdown for chat bodies (bold, italic, code, links), with the web's link policy applied: a link whose
-/// URL is not http(s) to a real host stays visible as text but is not tappable.
+/// Inline Markdown for one chat line (bold, italic, code, links), with the web's link policy applied: a link whose
+/// URL is not http(s) to a real host stays visible as text but is not tappable. Rows use `ChatMarkdownView`,
+/// which adds block layout, pull-request chips and mentions on top of the same rules.
 enum RoomChatText {
     static func attributed(_ text: String) -> AttributedString {
-        let options = AttributedString.MarkdownParsingOptions(
-            interpretedSyntax: .inlineOnlyPreservingWhitespace,
-            failurePolicy: .returnPartiallyParsedIfPossible
-        )
-        guard var attributed = try? AttributedString(markdown: text, options: options) else {
-            return AttributedString(text)
-        }
-        let blocked = attributed.runs.compactMap { run -> Range<AttributedString.Index>? in
-            guard let url = run.link, !RoomLinkPolicy.isAllowed(url) else { return nil }
-            return run.range
-        }
-        for range in blocked {
-            attributed[range].link = nil
-        }
-        return attributed
+        ChatInlineMarkdown.attributed(text)
     }
 }
 

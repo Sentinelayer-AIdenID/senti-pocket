@@ -109,6 +109,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     /// Agent ids currently preparing a reply (from the stream's `agent_composing` controls).
     public let composingAgents: [String]
     public let failure: SessionLoadFailure?
+    /// Mention handles that mean "you" (`@<your handle>` and `@all`), highlighted more strongly in message text.
+    public let ownMentionHandles: Set<String>
 
     /// Same-author rows closer together than this share one header.
     public static let groupingWindow: TimeInterval = 5 * 60
@@ -137,6 +139,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         self.connection = connection
         self.composingAgents = composingAgents
         self.failure = failure
+        self.ownMentionHandles = RoomChatPresentationState.mentionHandles(forOwnAuthorIds: ownAuthorIds)
 
         // Protected content never renders beside an auth or access failure.
         guard failure?.suppressesProtectedContent != true else {
@@ -215,6 +218,17 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     }
 
     public var isEmpty: Bool { lastMessageId == nil }
+
+    /// `human-mrrcarter` is mentioned as `@mrrcarter`; `@all` mentions everyone, including you.
+    static func mentionHandles(forOwnAuthorIds ids: Set<String>) -> Set<String> {
+        guard !ids.isEmpty else { return [] }
+        var handles: Set<String> = ["all"]
+        for id in ids {
+            let lowered = id.lowercased()
+            handles.insert(lowered.hasPrefix("human-") ? String(lowered.dropFirst("human-".count)) : lowered)
+        }
+        return handles
+    }
 
     static func dayLabel(for date: Date, calendar: Calendar) -> String {
         if calendar.isDateInToday(date) { return "Today" }
