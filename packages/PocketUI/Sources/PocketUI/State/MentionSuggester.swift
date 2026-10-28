@@ -3,7 +3,9 @@ import Foundation
 /// Someone you can @-mention in a room.
 public struct MentionCandidate: Equatable, Identifiable, Sendable {
     public var id: String { handle }
-    /// What gets typed after the @: a human's display name lowercased without spaces, or an agent's id.
+    /// What gets typed after the @: a person's login or an agent's id. The API notifies people by login
+    /// (sentinelayer-api `session_mention_notifications.py` matches `github_username`), which their server-authored
+    /// id carries as `human-<login>`; a display name never notifies anyone.
     public let handle: String
     public let displayName: String
     public let isHuman: Bool
@@ -55,7 +57,10 @@ public enum MentionSuggester {
         for author in authors {
             let handle: String
             if author.isHuman {
-                handle = author.name.lowercased().replacingOccurrences(of: " ", with: "")
+                let id = author.id.lowercased()
+                handle = id.hasPrefix("human-")
+                    ? String(id.dropFirst("human-".count))
+                    : author.name.lowercased().replacingOccurrences(of: " ", with: "")
             } else {
                 handle = author.id.lowercased()
             }
