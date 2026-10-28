@@ -15,11 +15,19 @@ enum RoomPreview {
     static var rootView: some View {
         NavigationStack {
             RoomChatScreen(
-                route: RoomRoute(sessionId: "preview-room", title: "Design review"),
+                route: RoomRoute(sessionId: "preview-room", title: "Design review", membershipRole: "owner"),
                 transport: RoomPreviewTransport(),
+                sender: RoomPreviewSender(),
                 onReauthenticationRequired: {}
             )
         }
+    }
+}
+
+/// Accepts every message after a short delay, so the composer's pending states can be seen in the preview.
+private struct RoomPreviewSender: RoomMessageSending {
+    func sendHumanMessage(sessionId: String, text: String, clientId: String) async throws {
+        try? await Task.sleep(nanoseconds: 600_000_000)
     }
 }
 

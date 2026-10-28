@@ -6,6 +6,8 @@ import PocketUI
 struct RoomRoute: Hashable {
     let sessionId: String
     let title: String
+    /// owner, admin, contributor or viewer. A viewer can read but not post.
+    var membershipRole: String = ""
 }
 
 /// Hosts one room's live chat. The room streams while it is on screen and the app is active, and pauses (keeping
@@ -17,12 +19,17 @@ struct RoomChatScreen: View {
     init(
         route: RoomRoute,
         transport: any RoomTransport,
+        sender: (any RoomMessageSending)? = nil,
+        identity: (any AccountIdentityProviding)? = nil,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         _coordinator = StateObject(wrappedValue: RoomChatCoordinator(
             sessionId: route.sessionId,
             title: route.title,
             transport: transport,
+            sender: sender,
+            identity: identity,
+            membershipRole: route.membershipRole,
             onReauthenticationRequired: onReauthenticationRequired
         ))
     }

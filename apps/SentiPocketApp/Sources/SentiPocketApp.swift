@@ -166,6 +166,8 @@ private struct AuthenticatedRootView: View {
     @State private var presentsSettings = false
     @State private var roomPath: [RoomRoute] = []
     private let roomTransport: any RoomTransport
+    private let roomSender: any RoomMessageSending
+    private let accountIdentity: any AccountIdentityProviding
     private let authenticationRevision: UInt64
     private let onSignOut: @MainActor () -> Void
 
@@ -247,6 +249,10 @@ private struct AuthenticatedRootView: View {
         _revocationRelay = StateObject(wrappedValue: revocationRelay)
         _whisperModelCoordinator = ObservedObject(wrappedValue: whisperModelCoordinator)
         self.roomTransport = transport
+        // Typed room messages go straight to the Senti API as you, like the web; the gateway's confirm-and-receipt
+        // flow stays for AI-drafted writes (the Pocket tab and voice replies).
+        self.roomSender = HTTPRoomMessageSender(apiBaseURL: apiURL)
+        self.accountIdentity = HTTPAccountIdentity(apiBaseURL: apiURL)
         self.authenticationRevision = authenticationEpoch
         self.onSignOut = onSignOut
     }
@@ -261,16 +267,22 @@ private struct AuthenticatedRootView: View {
                         if case .selectSession(let sessionId) = intent,
                            UTF8ExactIdentity.matches(sessions.selectedSessionId, sessionId) {
                             // Tapping a room opens its live chat; the Pocket and Activity tabs follow the selection.
-                            let title = sessions.state.rows.first {
+                            let row = sessions.state.rows.first {
                                 UTF8ExactIdentity.matches($0.sessionId, sessionId)
-                            }?.title ?? "Room"
-                            roomPath = [RoomRoute(sessionId: sessionId, title: title)]
+                            }
+                            roomPath = [RoomRoute(
+                                sessionId: sessionId,
+                                title: row?.title ?? "Room",
+                                membershipRole: row?.membershipRole ?? ""
+                            )]
                         }
                     }
                     .navigationDestination(for: RoomRoute.self) { route in
                         RoomChatScreen(
                             route: route,
                             transport: roomTransport,
+                            sender: roomSender,
+                            identity: accountIdentity,
                             onReauthenticationRequired: invalidateProtectedAuthentication
                         )
                     }

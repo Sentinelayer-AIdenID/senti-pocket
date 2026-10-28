@@ -96,6 +96,41 @@ public enum RoomChatRow: Equatable, Identifiable, Sendable {
     }
 }
 
+/// A message you sent that the room has not echoed back yet.
+public struct RoomChatPendingRow: Equatable, Identifiable, Sendable {
+    public enum Status: Equatable, Sendable {
+        case sending
+        /// Accepted by Senti; waiting for the room to show it.
+        case sent
+        case failed(reason: String, canRetry: Bool)
+    }
+
+    public var id: String { clientId }
+    public let clientId: String
+    public let text: String
+    public let status: Status
+
+    public init(clientId: String, text: String, status: Status) {
+        self.clientId = clientId
+        self.text = text
+        self.status = status
+    }
+}
+
+/// Whether the composer can post, and why not when it cannot.
+public struct RoomComposerState: Equatable, Sendable {
+    public let canPost: Bool
+    public let disabledReason: String?
+
+    public static let enabled = RoomComposerState(canPost: true, disabledReason: nil)
+    public static let hidden = RoomComposerState(canPost: false, disabledReason: nil)
+
+    public init(canPost: Bool, disabledReason: String?) {
+        self.canPost = canPost
+        self.disabledReason = disabledReason
+    }
+}
+
 /// Everything the room screen renders, built from the coordinator's timeline in one pure step.
 public struct RoomChatPresentationState: Equatable, Sendable {
     public let sessionId: String
@@ -111,6 +146,9 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     public let failure: SessionLoadFailure?
     /// Mention handles that mean "you" (`@<your handle>` and `@all`), highlighted more strongly in message text.
     public let ownMentionHandles: Set<String>
+    /// Your sent messages the room has not echoed yet, shown after the timeline.
+    public let pending: [RoomChatPendingRow]
+    public let composer: RoomComposerState
 
     /// Same-author rows closer together than this share one header.
     public static let groupingWindow: TimeInterval = 5 * 60
@@ -128,6 +166,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         connection: RoomConnectionState = .connecting,
         composingAgents: [String] = [],
         failure: SessionLoadFailure? = nil,
+        pending: [RoomChatPendingRow] = [],
+        composer: RoomComposerState = .hidden,
         calendar: Calendar = .current
     ) {
         self.sessionId = sessionId
@@ -140,6 +180,9 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         self.composingAgents = composingAgents
         self.failure = failure
         self.ownMentionHandles = RoomChatPresentationState.mentionHandles(forOwnAuthorIds: ownAuthorIds)
+        let protectedFailure = failure?.suppressesProtectedContent == true
+        self.pending = protectedFailure ? [] : pending
+        self.composer = protectedFailure ? .hidden : composer
 
         // Protected content never renders beside an auth or access failure.
         guard failure?.suppressesProtectedContent != true else {
@@ -217,7 +260,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         return nil
     }
 
-    public var isEmpty: Bool { lastMessageId == nil }
+    public var isEmpty: Bool { lastMessageId == nil && pending.isEmpty }
 
     /// `human-mrrcarter` is mentioned as `@mrrcarter`; `@all` mentions everyone, including you.
     static func mentionHandles(forOwnAuthorIds ids: Set<String>) -> Set<String> {
@@ -248,6 +291,9 @@ public enum RoomChatIntent: Equatable, Sendable {
     case readerAtBottom(Bool)
     case retry
     case jumpToMessage(sequenceId: Int64)
+    case sendMessage(text: String)
+    case retrySend(clientId: String)
+    case discardSend(clientId: String)
 }
 
 /// Link policy for chat text, matching the web (`safeLinkUrl.ts`): only http(s) links and in-app paths are
