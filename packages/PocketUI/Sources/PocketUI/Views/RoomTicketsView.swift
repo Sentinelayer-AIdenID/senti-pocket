@@ -99,16 +99,17 @@ private struct RoomTicketRowView: View {
                     .font(.body.weight(.semibold))
                     .lineLimit(2)
             }
+            // Its own line, so the status row never wraps on a phone.
+            if row.decision != nil {
+                Label("Decision needed", systemImage: "questionmark.bubble")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(PocketPalette.warning)
+                    .accessibilityIdentifier("pocket.tickets.row.decision")
+            }
             HStack(spacing: 8) {
                 Text(row.statusLabel)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(RoomTicketPalette.status(row.status))
-                if row.decision != nil {
-                    Label("Decision needed", systemImage: "questionmark.bubble")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(PocketPalette.warning)
-                        .accessibilityIdentifier("pocket.tickets.row.decision")
-                }
                 if let assignee = row.assignee {
                     Label(RoomTicketRow.displayName(assignee), systemImage: "person")
                         .font(.caption)
