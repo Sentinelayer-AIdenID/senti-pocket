@@ -127,22 +127,26 @@ public struct RoomChatPresence: Equatable, Sendable {
 
     /// "2 humans here", "1 human here", "0 humans here", or "presence unavailable" when the server cannot tell.
     public let label: String
+    /// The people count for a compact pill: "2", or "?" when the server cannot tell.
+    public let compactCount: String
     public let isAvailable: Bool
     /// People first, then agents, each in the server's most-recent-first order.
     public let people: [Person]
 
-    public init(label: String, isAvailable: Bool, people: [Person] = []) {
+    public init(label: String, compactCount: String, isAvailable: Bool, people: [Person] = []) {
         self.label = label
+        self.compactCount = compactCount
         self.isAvailable = isAvailable
         self.people = people
     }
 
     public static func make(isAvailable: Bool, humansOnline: Int?, people: [Person]) -> RoomChatPresence {
         guard isAvailable, let humans = humansOnline else {
-            return RoomChatPresence(label: "presence unavailable", isAvailable: false)
+            return RoomChatPresence(label: "presence unavailable", compactCount: "?", isAvailable: false)
         }
         return RoomChatPresence(
             label: "\(humans) human\(humans == 1 ? "" : "s") here",
+            compactCount: String(humans),
             isAvailable: true,
             people: people.filter(\.isHuman) + people.filter { !$0.isHuman }
         )

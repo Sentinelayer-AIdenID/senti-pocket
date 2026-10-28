@@ -61,21 +61,26 @@ public struct RoomChatView: View {
         .navigationTitle(state.title)
         .navigationBarTitleDisplayModeInlineIfAvailable()
         .toolbar {
+            // One item for the connection and who is here, so the room's title keeps as much room as it can.
             ToolbarItem(placement: .primaryAction) {
-                RoomConnectionPill(connection: state.connection)
-            }
-            if let presence = state.presence {
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        showsPresence = true
-                    } label: {
-                        Label(presence.label, systemImage: "person.2")
-                            .labelStyle(.titleAndIcon)
-                            .font(.caption)
-                            .italic(!presence.isAvailable)
+                HStack(spacing: 10) {
+                    RoomConnectionPill(connection: state.connection)
+                    if let presence = state.presence {
+                        Button {
+                            showsPresence = true
+                        } label: {
+                            // A toolbar shows a label's icon only, so the count sits beside the icon itself.
+                            HStack(spacing: 3) {
+                                Image(systemName: "person.2")
+                                Text(presence.compactCount)
+                                    .font(.caption.weight(.semibold))
+                                    .monospacedDigit()
+                            }
+                        }
+                        .disabled(presence.people.isEmpty)
+                        .accessibilityLabel(presence.label)
+                        .accessibilityIdentifier("pocket.room.presence")
                     }
-                    .disabled(presence.people.isEmpty)
-                    .accessibilityIdentifier("pocket.room.presence")
                 }
             }
         }

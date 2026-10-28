@@ -73,11 +73,13 @@ final class RoomViewsPresentationTests: XCTestCase {
         ]
         let presence = RoomChatPresence.make(isAvailable: true, humansOnline: 1, people: people)
         XCTAssertEqual(presence.label, "1 human here")
+        XCTAssertEqual(presence.compactCount, "1")
         XCTAssertEqual(presence.people.map(\.name), ["griff", "cobalt-warden"])
         XCTAssertEqual(RoomChatPresence.make(isAvailable: true, humansOnline: 3, people: []).label, "3 humans here")
         XCTAssertEqual(RoomChatPresence.make(isAvailable: true, humansOnline: 0, people: []).label, "0 humans here")
         let unknown = RoomChatPresence.make(isAvailable: false, humansOnline: nil, people: people)
         XCTAssertEqual(unknown.label, "presence unavailable")
+        XCTAssertEqual(unknown.compactCount, "?", "unknown never reads as zero")
         XCTAssertTrue(unknown.people.isEmpty, "unknown is never shown as an empty room")
     }
 }
