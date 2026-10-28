@@ -561,6 +561,17 @@ public enum RoomComposerDraft {
     }
 }
 
+/// How a failed row keeps its text. Edit puts it back into the composer, so it needs one; when posting is refused
+/// (a viewer, or a room you no longer belong to) there is none, so the row offers Copy and stays.
+public enum RoomPendingRecovery: Equatable, Sendable {
+    case edit
+    case copy
+
+    public init(canPost: Bool) {
+        self = canPost ? .edit : .copy
+    }
+}
+
 /// Link policy for chat text, matching the web (`safeLinkUrl.ts`): http(s) links to a real host, and in-app paths
 /// (`/dashboard/sessions/...`), which open on the Senti web origin as the web resolves them. Protocol-relative
 /// (`//host`) and backslash (`/\host`) paths, control characters, credentials and every other scheme (tel:, sms:,

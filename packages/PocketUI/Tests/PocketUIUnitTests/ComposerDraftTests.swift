@@ -16,4 +16,10 @@ final class ComposerDraftTests: XCTestCase {
         XCTAssertNotEqual(RoomComposerRestore(text: "Ship it"), RoomComposerRestore(text: "Ship it"),
                           "editing the same failed text twice must restore it twice")
     }
+
+    func test_a_failed_row_offers_copy_when_there_is_no_composer_to_edit_in() {
+        XCTAssertEqual(RoomPendingRecovery(canPost: true), .edit)
+        XCTAssertEqual(RoomPendingRecovery(canPost: false), .copy,
+                       "after a refusal the composer is gone, so Edit would discard the text")
+    }
 }

@@ -80,6 +80,7 @@ public struct RoomChatView: View {
                     ForEach(state.pending) { pending in
                         RoomPendingRowView(
                             row: pending,
+                            recovery: RoomPendingRecovery(canPost: state.composer.canPost),
                             onRetry: { send(.retrySend(clientId: pending.clientId)) },
                             onDiscard: { send(.discardSend(clientId: pending.clientId)) },
                             onEdit: {
@@ -590,6 +591,7 @@ private struct RoomThreadSheet: View {
                     ForEach(thread.pending) { pending in
                         RoomPendingRowView(
                             row: pending,
+                            recovery: RoomPendingRecovery(canPost: thread.canReply),
                             onRetry: { send(.retrySend(clientId: pending.clientId)) },
                             onDiscard: { send(.discardSend(clientId: pending.clientId)) },
                             onEdit: {
@@ -655,6 +657,7 @@ private struct RoomThreadSheet: View {
 
 private struct RoomPendingRowView: View {
     let row: RoomChatPendingRow
+    let recovery: RoomPendingRecovery
     let onRetry: () -> Void
     let onDiscard: () -> Void
     /// Puts the text back where it was typed, so a refused message can be changed and sent again.
@@ -685,9 +688,17 @@ private struct RoomPendingRowView: View {
                             .font(.caption.weight(.semibold))
                             .accessibilityIdentifier("pocket.room.pending.retry")
                     }
-                    Button("Edit", action: onEdit)
-                        .font(.caption.weight(.semibold))
-                        .accessibilityIdentifier("pocket.room.pending.edit")
+                    switch recovery {
+                    case .edit:
+                        Button("Edit", action: onEdit)
+                            .font(.caption.weight(.semibold))
+                            .accessibilityIdentifier("pocket.room.pending.edit")
+                    case .copy:
+                        // Copies the full text, not the shortened display; the row stays until discarded.
+                        Button("Copy") { copyToPasteboard(row.text) }
+                            .font(.caption.weight(.semibold))
+                            .accessibilityIdentifier("pocket.room.pending.copy")
+                    }
                     Button("Discard", role: .destructive, action: onDiscard)
                         .font(.caption.weight(.semibold))
                         .accessibilityIdentifier("pocket.room.pending.discard")
