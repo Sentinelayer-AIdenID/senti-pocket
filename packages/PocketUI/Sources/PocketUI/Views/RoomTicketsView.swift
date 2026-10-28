@@ -6,6 +6,7 @@ public enum RoomTicketsIntent: Equatable, Sendable {
     case search(String)
     case refresh
     case openSourceMessage(sequenceId: Int64)
+    case answerDecision(ticketId: String, answer: String, detail: String)
 }
 
 /// The room's Tickets tab: Active / Archived (N), search across all tickets, ranked by impact. Tapping a ticket
@@ -55,7 +56,12 @@ public struct RoomTicketsView: View {
 
             ForEach(state.rows) { row in
                 NavigationLink {
-                    RoomTicketDetailView(row: row, send: send)
+                    RoomTicketDetailView(
+                        row: row,
+                        canAnswer: state.canAnswerDecisions,
+                        decisionStatus: state.decisionStatus[row.id],
+                        send: send
+                    )
                 } label: {
                     RoomTicketRowView(row: row)
                 }
@@ -117,11 +123,68 @@ private struct RoomTicketRowView: View {
 /// One ticket: its title, status, people and dates, and the full body rendered as Markdown.
 public struct RoomTicketDetailView: View {
     let row: RoomTicketRow
+    var canAnswer = false
+    var decisionStatus: String?
     let send: (RoomTicketsIntent) -> Void
+    @State private var customAnswer = ""
 
-    public init(row: RoomTicketRow, send: @escaping (RoomTicketsIntent) -> Void) {
+    public init(row: RoomTicketRow, canAnswer: Bool = false, decisionStatus: String? = nil, send: @escaping (RoomTicketsIntent) -> Void) {
         self.row = row
+        self.canAnswer = canAnswer
+        self.decisionStatus = decisionStatus
         self.send = send
+    }
+
+    @ViewBuilder
+    private var decisionCard: some View {
+        if let decision = TicketDecision.parse(row.body), row.status != "done" {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Decision needed", systemImage: "questionmark.bubble")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(PocketPalette.warning)
+                Text(decision.question).font(.body.weight(.semibold))
+                if canAnswer {
+                    if !decision.options.isEmpty {
+                        FlexibleOptions(options: decision.options) { option in
+                            send(.answerDecision(ticketId: row.id, answer: option, detail: ""))
+                        }
+                    }
+                    if decision.allowsCustom {
+                        HStack {
+                            TextField(decision.options.isEmpty ? "Your answer" : "Something else", text: $customAnswer, axis: .vertical)
+                                .lineLimit(1...4)
+                                .textFieldStyle(.roundedBorder)
+                            Button("Send") {
+                                let text = customAnswer.trimmingCharacters(in: .whitespacesAndNewlines)
+                                guard !text.isEmpty else { return }
+                                if decision.options.isEmpty {
+                                    send(.answerDecision(ticketId: row.id, answer: text, detail: ""))
+                                } else {
+                                    send(.answerDecision(ticketId: row.id, answer: "Custom", detail: text))
+                                }
+                                customAnswer = ""
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(PocketPalette.accent)
+                        }
+                    }
+                    Text(row.assignee.map { "Your answer goes to the room as one line, mentioning @\(RoomTicketRow.displayName($0))." }
+                         ?? "Your answer goes to the room as one line.")
+                        .font(.caption)
+                        .foregroundStyle(PocketPalette.textSecondary)
+                } else {
+                    Text("Answer this from a room you can post in.")
+                        .font(.caption)
+                        .foregroundStyle(PocketPalette.textSecondary)
+                }
+                if let decisionStatus {
+                    Text(decisionStatus).font(.footnote.weight(.semibold)).foregroundStyle(PocketPalette.accent)
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(PocketPalette.warning.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
     }
 
     public var body: some View {
@@ -164,6 +227,8 @@ public struct RoomTicketDetailView: View {
                 .font(.footnote)
                 .foregroundStyle(PocketPalette.textSecondary)
 
+                decisionCard
+
                 if let sequence = row.sourceSequenceId {
                     Button {
                         send(.openSourceMessage(sequenceId: sequence))
@@ -186,6 +251,27 @@ public struct RoomTicketDetailView: View {
         }
         .navigationTitle(row.priorityLabel ?? "Ticket")
         .accessibilityIdentifier("pocket.tickets.detail")
+    }
+}
+
+/// Decision options as wrapping buttons.
+private struct FlexibleOptions: View {
+    let options: [String]
+    let choose: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(options, id: \.self) { option in
+                Button {
+                    choose(option)
+                } label: {
+                    Text(option)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("pocket.tickets.decision.option")
+            }
+        }
     }
 }
 

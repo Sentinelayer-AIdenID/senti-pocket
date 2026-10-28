@@ -12,6 +12,7 @@ final class RoomTicketsCoordinator: ObservableObject {
 
     private let sessionId: String
     private let transport: any RoomTicketsTransport
+    private let sender: (any RoomMessageSending)?
     private let sleep: @Sendable (TimeInterval) async -> Void
     private let onReauthenticationRequired: @MainActor () -> Void
 
@@ -22,12 +23,15 @@ final class RoomTicketsCoordinator: ObservableObject {
     private var isStale = false
     private var failure: SessionLoadFailure?
     private var pollTask: Task<Void, Never>?
+    private var decisionStatus: [String: String] = [:]
+    private var answering: Set<String> = []
 
     static let pollInterval: TimeInterval = 30
 
     init(
         sessionId: String,
         transport: any RoomTicketsTransport,
+        sender: (any RoomMessageSending)? = nil,
         sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
             try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
         },
@@ -35,6 +39,7 @@ final class RoomTicketsCoordinator: ObservableObject {
     ) {
         self.sessionId = sessionId
         self.transport = transport
+        self.sender = sender
         self.sleep = sleep
         self.onReauthenticationRequired = onReauthenticationRequired
     }
@@ -69,6 +74,42 @@ final class RoomTicketsCoordinator: ObservableObject {
             Task { await refresh() }
         case .openSourceMessage:
             break   // the room screen handles jumping to a message
+        case .answerDecision(let ticketId, let answer, let detail):
+            answerDecision(ticketId: ticketId, answer: answer, detail: detail)
+        }
+    }
+
+    /// Posts the web's decision line to the room as you: one message that @-mentions the ticket's assignee.
+    private func answerDecision(ticketId: String, answer: String, detail: String) {
+        guard let sender, let ticket = board?.tickets[ticketId], !answering.contains(ticketId) else { return }
+        let text = TicketDecision.chatLine(
+            sessionId: sessionId,
+            ticketId: ticket.id,
+            title: ticket.title,
+            answer: answer,
+            detail: detail,
+            assignee: ticket.assignee,
+            personLabel: { _ in "the assignee" }
+        )
+        let clientId = "hm_" + UUID().uuidString.lowercased()
+        answering.insert(ticketId)
+        decisionStatus[ticketId] = "Sending your answer…"
+        publish()
+        let sessionId = self.sessionId
+        Task { [weak self] in
+            var status = "Answer sent to the room."
+            do {
+                try await sender.sendHumanMessage(sessionId: sessionId, text: text, clientId: clientId)
+            } catch let error as RoomSendError {
+                if case .reauthenticationRequired = error { self?.onReauthenticationRequired() }
+                status = error.userMessage
+            } catch {
+                status = RoomSendError.retryable(retryAfterSeconds: nil).userMessage
+            }
+            guard let self else { return }
+            self.answering.remove(ticketId)
+            self.decisionStatus[ticketId] = status
+            self.publish()
         }
     }
 
@@ -139,7 +180,9 @@ final class RoomTicketsCoordinator: ObservableObject {
             query: query,
             isLoading: isLoading,
             isStale: isStale,
-            failure: failure
+            failure: failure,
+            canAnswerDecisions: sender != nil,
+            decisionStatus: decisionStatus
         )
     }
 }
@@ -148,10 +191,16 @@ final class RoomTicketsCoordinator: ObservableObject {
 struct RoomTicketsScreen: View {
     @StateObject private var coordinator: RoomTicketsCoordinator
 
-    init(sessionId: String, transport: any RoomTicketsTransport, onReauthenticationRequired: @escaping @MainActor () -> Void) {
+    init(
+        sessionId: String,
+        transport: any RoomTicketsTransport,
+        sender: (any RoomMessageSending)? = nil,
+        onReauthenticationRequired: @escaping @MainActor () -> Void
+    ) {
         _coordinator = StateObject(wrappedValue: RoomTicketsCoordinator(
             sessionId: sessionId,
             transport: transport,
+            sender: sender,
             onReauthenticationRequired: onReauthenticationRequired
         ))
     }

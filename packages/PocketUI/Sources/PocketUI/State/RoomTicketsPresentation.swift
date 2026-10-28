@@ -81,6 +81,10 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
     public let isLoading: Bool
     public let isStale: Bool
     public let failure: SessionLoadFailure?
+    /// Whether this phone can answer a ticket's decision (it can post to the room).
+    public let canAnswerDecisions: Bool
+    /// Per ticket: the answer being sent, sent, or why it failed.
+    public let decisionStatus: [String: String]
 
     public init(
         tickets: [RoomTicketInput],
@@ -88,7 +92,9 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
         query: String = "",
         isLoading: Bool = false,
         isStale: Bool = false,
-        failure: SessionLoadFailure? = nil
+        failure: SessionLoadFailure? = nil,
+        canAnswerDecisions: Bool = false,
+        decisionStatus: [String: String] = [:]
     ) {
         let all = tickets.map { input in
             RoomTicketRow(
@@ -113,6 +119,8 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
         self.isLoading = isLoading
         self.isStale = isStale
         self.failure = failure
+        self.canAnswerDecisions = canAnswerDecisions && failure?.suppressesProtectedContent != true
+        self.decisionStatus = decisionStatus
 
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let visible: [RoomTicketRow]
