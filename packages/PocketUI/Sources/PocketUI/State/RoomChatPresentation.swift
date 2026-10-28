@@ -28,6 +28,8 @@ public struct RoomChatMessageInput: Equatable, Sendable {
     public let date: Date?
     public let reactions: RoomChatReactions?
     public let attachments: [RoomAttachmentChip]
+    /// Who has viewed this revision, once the room has read it.
+    public let views: RoomChatViews?
 
     public init(
         id: String,
@@ -42,7 +44,8 @@ public struct RoomChatMessageInput: Equatable, Sendable {
         isEdited: Bool = false,
         date: Date? = nil,
         reactions: RoomChatReactions? = nil,
-        attachments: [RoomAttachmentChip] = []
+        attachments: [RoomAttachmentChip] = [],
+        views: RoomChatViews? = nil
     ) {
         self.id = id
         self.sequenceId = sequenceId
@@ -57,6 +60,7 @@ public struct RoomChatMessageInput: Equatable, Sendable {
         self.date = date ?? ParsedSessionTimestamp(timestamp).date
         self.reactions = reactions
         self.attachments = attachments
+        self.views = views
     }
 }
 
@@ -181,6 +185,7 @@ public struct RoomChatMessageRow: Equatable, Identifiable, Sendable {
     public let showsHeader: Bool
     public let reactions: RoomChatReactions?
     public let attachments: [RoomAttachmentChip]
+    public let views: RoomChatViews?
 }
 
 public enum RoomChatRow: Equatable, Identifiable, Sendable {
@@ -233,8 +238,19 @@ public struct RoomChatReplyRow: Equatable, Identifiable, Sendable {
     public let text: String
     public let date: Date?
     public let isEdited: Bool
+    /// Who has viewed this revision, once the room has read it.
+    public let views: RoomChatViews?
 
-    public init(id: String, authorName: String, isHuman: Bool, isOwn: Bool, text: String, date: Date?, isEdited: Bool) {
+    public init(
+        id: String,
+        authorName: String,
+        isHuman: Bool,
+        isOwn: Bool,
+        text: String,
+        date: Date?,
+        isEdited: Bool,
+        views: RoomChatViews? = nil
+    ) {
         self.id = id
         self.authorName = authorName
         self.isHuman = isHuman
@@ -242,6 +258,7 @@ public struct RoomChatReplyRow: Equatable, Identifiable, Sendable {
         self.text = text
         self.date = date
         self.isEdited = isEdited
+        self.views = views
     }
 }
 
@@ -372,6 +389,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     public let breakouts: [String: RoomBreakoutCard]
     /// Small image previews by attachment id, loaded as their messages come into view.
     public let attachmentPreviews: [String: Data]
+    /// Who is here now; nil until the room has asked.
+    public let presence: RoomChatPresence?
 
     /// Same-author rows closer together than this share one header.
     public static let groupingWindow: TimeInterval = 5 * 60
@@ -398,6 +417,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         mentionCandidates: [MentionCandidate] = [],
         breakouts: [String: RoomBreakoutCard] = [:],
         attachmentPreviews: [String: Data] = [:],
+        presence: RoomChatPresence? = nil,
         calendar: Calendar = .current
     ) {
         self.sessionId = sessionId
@@ -419,6 +439,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         self.mentionCandidates = protectedFailure ? [] : mentionCandidates
         self.breakouts = protectedFailure ? [:] : breakouts
         self.attachmentPreviews = protectedFailure ? [:] : attachmentPreviews
+        self.presence = protectedFailure ? nil : presence
 
         // Protected content never renders beside an auth or access failure.
         guard failure?.suppressesProtectedContent != true else {
@@ -474,7 +495,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 isEdited: input.isEdited,
                 showsHeader: !continuesRun,
                 reactions: input.reactions.flatMap { $0.isEmpty ? nil : $0 },
-                attachments: input.attachments
+                attachments: input.attachments,
+                views: input.views
             )))
             if input.kind == .message, let date = input.date {
                 run = (input.authorId, date)
@@ -562,6 +584,9 @@ public enum RoomChatIntent: Equatable, Sendable {
     case openAttachment(attachmentId: String)
     /// An image attachment came into view: load its small preview if it has none.
     case attachmentAppeared(attachmentId: String)
+    /// A message (by event id) or a reply (by action id) came on screen or left it, for read receipts.
+    case messageOnScreen(id: String, isOnScreen: Bool)
+    case replyOnScreen(id: String, isOnScreen: Bool)
 }
 
 /// A request to put a failed message's text back into the composer. Each request is distinct, so editing the same

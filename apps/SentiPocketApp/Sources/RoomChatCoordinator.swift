@@ -56,6 +56,11 @@ final class RoomChatCoordinator: ObservableObject {
     private var pendingReplies: [PendingReply] = []
     /// You in action keys, from your account (see `SignedInAccount.actorRef`).
     private var actorRef: String?
+    /// Your account id and login, which read receipts name you by.
+    private var accountId: String?
+    private var ownLogin: String?
+    /// Read receipts and presence, when the room is wired for them.
+    private var receiptsTracker: RoomReceiptsTracker?
     /// A message to bring into view once (opened from a notification or link); cleared when the view shows it.
     private var focusTarget: Int64?
     /// Links whose message could not be loaded; each one sends the reader to the latest messages.
@@ -116,6 +121,7 @@ final class RoomChatCoordinator: ObservableObject {
         },
         now: @escaping @Sendable () -> Date = { Date() },
         attachmentFetcher: any AttachmentFileFetching = URLSessionAttachmentFetcher(),
+        receipts: (any RoomReceiptsClient)? = nil,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.attachmentFetcher = attachmentFetcher
@@ -150,6 +156,15 @@ final class RoomChatCoordinator: ObservableObject {
             isLoadingInitial: true,
             composer: initialComposer
         )
+        if let receipts {
+            receiptsTracker = RoomReceiptsTracker(
+                sessionId: sessionId,
+                client: receipts,
+                sleep: sleep,
+                now: now,
+                onChange: { [weak self] in self?.publish() }
+            )
+        }
     }
 
     // MARK: - Lifecycle
@@ -158,6 +173,7 @@ final class RoomChatCoordinator: ObservableObject {
     func resume() {
         guard liveTasks.isEmpty, !failureIsTerminal else { return }
         learnOwnIdentityIfNeeded()
+        receiptsTracker?.start()
         generation &+= 1
         let current = generation
         liveTasks.append(Task { [weak self] in
@@ -181,6 +197,7 @@ final class RoomChatCoordinator: ObservableObject {
         generation &+= 1
         liveTasks.forEach { $0.cancel() }
         liveTasks.removeAll()
+        receiptsTracker?.stop()
         if !failureIsTerminal { connection = .paused }
         publish()
     }
@@ -240,6 +257,15 @@ final class RoomChatCoordinator: ObservableObject {
             publish()
         case .openBreakout, .openAttachment:
             break   // the room screen navigates or presents
+        case .messageOnScreen(let id, let isOnScreen):
+            guard let message = timeline.messages.first(where: { $0.id == id }),
+                  message.kind == .message, message.eventType == "session_message",
+                  let target = RoomViewTarget(kind: .message, id: message.id, revision: message.revision) else { return }
+            receiptsTracker?.setOnScreen(target, isOnScreen)
+        case .replyOnScreen(let id, let isOnScreen):
+            guard let reply = threadReplies.first(where: { $0.id == id }),
+                  let target = RoomViewTarget(kind: .reply, id: reply.id, revision: reply.revision) else { return }
+            receiptsTracker?.setOnScreen(target, isOnScreen)
         case .attachmentAppeared(let attachmentId):
             loadPreview(attachmentId)
         }
@@ -627,6 +653,8 @@ final class RoomChatCoordinator: ObservableObject {
 
     private func learn(_ account: SignedInAccount) {
         actorRef = account.actorRef
+        accountId = account.accountId
+        ownLogin = account.login
         ownAuthorIds.insert(account.authorId)
         publish()
     }
@@ -935,7 +963,10 @@ final class RoomChatCoordinator: ObservableObject {
                         isPinned: $0.isPinned
                     )
                 },
-                attachments: message.attachments.map(Self.chip)
+                attachments: message.attachments.map(Self.chip),
+                views: message.eventType == "session_message"
+                    ? views(of: message.id, at: message.revision, author: viewAuthor(message.authorId, isHuman: message.isHuman))
+                    : nil
             )
         }
         let threadInput = openThreadSequence.map { sequence in
@@ -949,7 +980,8 @@ final class RoomChatCoordinator: ObservableObject {
                         isOwn: ownAuthorIds.contains(reply.authorId.lowercased()),
                         text: reply.text,
                         date: ParsedSessionTimestamp(reply.createdAt).date,
-                        isEdited: reply.isEdited
+                        isEdited: reply.isEdited,
+                        views: views(of: reply.id, at: reply.revision, author: viewAuthor(reply.authorId, isHuman: reply.isHuman))
                     )
                 },
                 pending: pendingReplies.filter { $0.targetSequenceId == sequence }.map {
@@ -985,7 +1017,51 @@ final class RoomChatCoordinator: ObservableObject {
             focusSequenceId: focusTarget,
             mentionCandidates: mentionCandidates(),
             breakouts: breakouts.mapValues(Self.card),
-            attachmentPreviews: previews
+            attachmentPreviews: previews,
+            presence: presenceState
+        )
+    }
+
+    // MARK: - Read receipts and presence
+
+    /// The read line and ticks for a message or reply, once the room has read its views at the revision shown.
+    private func views(of id: String, at revision: Int64, author: String?) -> RoomChatViews? {
+        guard let tracker = receiptsTracker, let summary = tracker.summaries[id.lowercased()],
+              summary.revision == revision else { return nil }
+        return RoomChatViews.make(
+            viewedCount: summary.viewedCount,
+            viewers: summary.viewers.map {
+                RoomChatViews.Viewer(isHuman: $0.isHuman, actorId: $0.actorId, viewedAt: ParsedSessionTimestamp($0.viewedAt).date)
+            },
+            selfViewed: summary.selfViewed,
+            authorActorId: author,
+            ownAccountId: accountId,
+            ownName: ownLogin,
+            names: tracker.names,
+            time: { $0.formatted(date: .omitted, time: .shortened) }
+        )
+    }
+
+    /// The author as viewers carry them: your account id for your own row, the agent id for an agent's. Another
+    /// person's account id is not known here, so their own view is not left out of the ticks.
+    private func viewAuthor(_ authorId: String, isHuman: Bool) -> String? {
+        if ownAuthorIds.contains(authorId.lowercased()) { return accountId }
+        return isHuman ? nil : authorId
+    }
+
+    private var presenceState: RoomChatPresence? {
+        guard let presence = receiptsTracker?.presence else { return nil }
+        return RoomChatPresence.make(
+            isAvailable: presence.isAvailable,
+            humansOnline: presence.humansOnline,
+            people: presence.participants.map {
+                RoomChatPresence.Person(
+                    id: $0.id,
+                    name: $0.isHuman ? ($0.displayName ?? RoomChatViews.unnamedPerson) : $0.id,
+                    isHuman: $0.isHuman,
+                    isIdle: $0.isIdle
+                )
+            }
         )
     }
 
