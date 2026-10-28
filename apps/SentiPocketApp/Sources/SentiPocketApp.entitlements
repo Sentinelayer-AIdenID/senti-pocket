@@ -5,5 +5,12 @@
 	<!-- Used by both UserNotifications and PushKit. The build configuration supplies development/production. -->
 	<key>aps-environment</key>
 	<string>$(APS_ENVIRONMENT)</string>
+	<!-- Universal links: sentinelayer.com room links open the room in the app. The site's
+	     /.well-known/apple-app-site-association names this app; SentiLink decides what opens in-app. -->
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>applinks:sentinelayer.com</string>
+		<string>applinks:www.sentinelayer.com</string>
+	</array>
 </dict>
 </plist>

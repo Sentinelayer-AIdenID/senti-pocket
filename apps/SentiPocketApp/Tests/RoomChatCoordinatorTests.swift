@@ -284,4 +284,28 @@ final class RoomChatCoordinatorTests: XCTestCase {
         XCTAssertEqual(transport.snapshot().before, [nil, 90, 70], "paging stops once the target is loaded")
         coordinator.pause()
     }
+
+    func test_a_link_to_an_unloaded_message_pages_back_and_focuses_it() async {
+        let transport = ScriptedRoomTransport(before: [
+            .success(page([90, 100], hasMore: true)),
+            .success(page([70, 80], hasMore: true)),
+            .success(page([50, 60], hasMore: true))
+        ])
+        let coordinator = makeCoordinator(transport)
+        coordinator.resume()
+        await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
+
+        coordinator.focus(on: 500)
+        XCTAssertEqual(coordinator.state.focusSequenceId, 500)
+        XCTAssertEqual(transport.snapshot().before, [nil], "a message newer than the loaded rows arrives live; no paging")
+
+        coordinator.focus(on: 60)
+        XCTAssertEqual(coordinator.state.focusSequenceId, 60)
+        await waitUntil("target loaded") { messageSequences(coordinator).contains(60) && !coordinator.state.isLoadingOlder }
+        XCTAssertEqual(transport.snapshot().before, [nil, 90, 70])
+        XCTAssertEqual(coordinator.state.focusSequenceId, 60, "the focus stays until the view has shown it")
+        coordinator.send(.focusHandled)
+        XCTAssertNil(coordinator.state.focusSequenceId)
+        coordinator.pause()
+    }
 }

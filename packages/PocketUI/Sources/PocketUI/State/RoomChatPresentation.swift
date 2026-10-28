@@ -536,13 +536,28 @@ public enum RoomChatIntent: Equatable, Sendable {
     case focusHandled
 }
 
-/// Link policy for chat text, matching the web (`safeLinkUrl.ts`): only http(s) links and in-app paths are
-/// tappable. Anything else (tel:, sms:, custom app schemes, javascript:) is shown as plain text.
+/// Link policy for chat text, matching the web (`safeLinkUrl.ts`): http(s) links to a real host, and in-app paths
+/// (`/dashboard/sessions/...`), which open on the Senti web origin as the web resolves them. Protocol-relative
+/// (`//host`) and backslash (`/\host`) paths, control characters, credentials and every other scheme (tel:, sms:,
+/// custom app schemes, javascript:) are shown as plain text.
 public enum RoomLinkPolicy {
+    /// Where an in-app path opens.
+    public static let webOrigin = URL(string: "https://sentinelayer.com")
+
     public static func isAllowed(_ url: URL) -> Bool {
-        guard let scheme = url.scheme?.lowercased() else { return false }
-        guard scheme == "https" || scheme == "http" else { return false }
-        guard let host = url.host, !host.isEmpty else { return false }
-        return url.user == nil && url.password == nil
+        resolved(url) != nil
+    }
+
+    /// The absolute URL a tap opens, or nil when the link is not tappable.
+    public static func resolved(_ url: URL) -> URL? {
+        let raw = url.absoluteString
+        guard !raw.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }) else { return nil }
+        if let scheme = url.scheme?.lowercased() {
+            guard scheme == "https" || scheme == "http", let host = url.host, !host.isEmpty,
+                  url.user == nil, url.password == nil else { return nil }
+            return url
+        }
+        guard raw.hasPrefix("/"), !raw.hasPrefix("//"), !raw.hasPrefix("/\\") else { return nil }
+        return webOrigin.flatMap { URL(string: raw, relativeTo: $0)?.absoluteURL }
     }
 }

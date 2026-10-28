@@ -223,6 +223,17 @@ final class RoomChatCoordinator: ObservableObject {
         }
     }
 
+    /// Brings a message into view and highlights it (a link to this room), paging back until it is loaded. A message
+    /// newer than the loaded rows arrives through the live stream and is focused when it lands.
+    func focus(on sequenceId: Int64) {
+        focusTarget = sequenceId
+        publish()
+        if hasLoadedInitial, timeline.index(ofSequence: sequenceId) == nil,
+           let oldest = timeline.oldestSequence, sequenceId < oldest {
+            loadOlder(until: sequenceId)
+        }
+    }
+
     // MARK: - Replies and reactions
 
     private var canReact: Bool { actionSender != nil && !failureIsTerminal }

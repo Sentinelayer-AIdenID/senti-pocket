@@ -8,7 +8,12 @@ import PocketSyncClient
 /// Release.
 enum RoomPreview {
     static var isRequested: Bool {
-        ProcessInfo.processInfo.arguments.contains("-PocketRoomPreview") || isTicketsRequested
+        ProcessInfo.processInfo.arguments.contains("-PocketRoomPreview") || isTicketsRequested || isTicketLinkRequested
+    }
+
+    /// `-PocketTicketLinkPreview` opens the room as a link to ticket t1 would: the ticket over the chat.
+    static var isTicketLinkRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-PocketTicketLinkPreview")
     }
 
     /// `-PocketTicketsPreview` opens the Tickets tab on sample tickets.
@@ -32,10 +37,16 @@ enum RoomPreview {
     private static var roomRoot: some View {
         NavigationStack {
             RoomChatScreen(
-                route: RoomRoute(sessionId: "preview-room", title: "Design review", membershipRole: "owner"),
+                route: RoomRoute(
+                    sessionId: "preview-room",
+                    title: "Design review",
+                    membershipRole: "owner",
+                    focusTicketId: isTicketLinkRequested ? "t1" : nil
+                ),
                 transport: RoomPreviewTransport(),
                 sender: RoomPreviewSender(),
                 actionSender: RoomPreviewSender(),
+                ticketsTransport: RoomPreviewTickets(),
                 onReauthenticationRequired: {}
             )
         }
@@ -46,7 +57,7 @@ enum RoomPreview {
 private struct RoomPreviewTickets: RoomTicketsTransport {
     func roomTicketSnapshot(sessionId: String, afterId: String?, limit: Int) async throws -> RoomTicketSnapshotPage {
         RoomTicketSnapshotPage(items: [
-            RoomTicket(id: "t1", title: "Fix paste validation on the email step", body: "## Priority\nP0\n\nPasting skips validation.", status: "working", createdBy: "human-alex", assignee: "review-agent", createdAt: "2026-10-28T13:00:00Z", updatedAt: "2026-10-28T18:40:00Z", version: 3),
+            RoomTicket(id: "t1", title: "Fix paste validation on the email step", body: "## Priority\nP0\n\n## Decision\nQuestion: Ship the fix today?\nOptions: Yes · No · Custom\n\nPasting skips validation.", status: "working", createdBy: "human-alex", assignee: "review-agent", createdAt: "2026-10-28T13:00:00Z", updatedAt: "2026-10-28T18:40:00Z", version: 3),
             RoomTicket(id: "t2", title: "Reset retryCount only after success", body: "## Priority\nP1", status: "assigned", createdBy: "human-alex", assignee: "build-agent", createdAt: "2026-10-28T13:05:00Z", updatedAt: "2026-10-28T17:00:00Z", version: 2),
             RoomTicket(id: "t3", title: "Add onboarding screenshots to the PR", body: "## Priority\nP2", status: "in_review", createdBy: "review-agent", assignee: "build-agent", createdAt: "2026-10-28T12:00:00Z", updatedAt: "2026-10-28T16:00:00Z", version: 4),
             RoomTicket(id: "t4", title: "Draft release notes", status: "open", createdBy: "human-alex", createdAt: "2026-10-28T11:00:00Z", updatedAt: "2026-10-28T11:00:00Z", version: 1),

@@ -126,13 +126,17 @@ final class RoomChatPresentationTests: XCTestCase {
         XCTAssertFalse(offline.isEmpty, "a network failure keeps the rows already loaded")
     }
 
-    func test_link_policy_only_allows_web_links_to_a_real_host() {
+    func test_link_policy_allows_web_links_and_in_app_paths_like_the_web() {
         XCTAssertTrue(RoomLinkPolicy.isAllowed(URL(string: "https://github.com/a/b/pull/1")!))
         XCTAssertTrue(RoomLinkPolicy.isAllowed(URL(string: "http://example.com")!))
         XCTAssertFalse(RoomLinkPolicy.isAllowed(URL(string: "tel:5551234")!))
         XCTAssertFalse(RoomLinkPolicy.isAllowed(URL(string: "javascript:alert(1)")!))
-        XCTAssertFalse(RoomLinkPolicy.isAllowed(URL(string: "/dashboard/sessions/x")!))
         XCTAssertFalse(RoomLinkPolicy.isAllowed(URL(string: "https://user:pw@example.com")!))
+        XCTAssertFalse(RoomLinkPolicy.isAllowed(URL(string: "#section")!), "the phone has no page anchors")
+        XCTAssertEqual(RoomLinkPolicy.resolved(URL(string: "/dashboard/sessions/x?ticket=t1")!),
+                       URL(string: "https://sentinelayer.com/dashboard/sessions/x?ticket=t1"),
+                       "an in-app path opens on the Senti web origin")
+        XCTAssertNil(RoomLinkPolicy.resolved(URL(string: "//evil.example/x")!), "protocol-relative paths can cross origins")
     }
 
     #if canImport(SwiftUI)

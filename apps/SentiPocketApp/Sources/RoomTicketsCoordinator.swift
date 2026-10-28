@@ -13,6 +13,7 @@ final class RoomTicketsCoordinator: ObservableObject {
     private let sessionId: String
     private let transport: any RoomTicketsTransport
     private let sender: (any RoomMessageSending)?
+    private let focusTicketId: String?
     private let sleep: @Sendable (TimeInterval) async -> Void
     private let onReauthenticationRequired: @MainActor () -> Void
 
@@ -38,6 +39,7 @@ final class RoomTicketsCoordinator: ObservableObject {
         sessionId: String,
         transport: any RoomTicketsTransport,
         sender: (any RoomMessageSending)? = nil,
+        focusTicketId: String? = nil,
         sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
             try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
         },
@@ -46,6 +48,7 @@ final class RoomTicketsCoordinator: ObservableObject {
         self.sessionId = sessionId
         self.transport = transport
         self.sender = sender
+        self.focusTicketId = focusTicketId
         self.sleep = sleep
         self.onReauthenticationRequired = onReauthenticationRequired
     }
@@ -211,7 +214,8 @@ final class RoomTicketsCoordinator: ObservableObject {
             failure: failure,
             canAnswerDecisions: sender != nil,
             decisionStatus: decisionStatus,
-            retryableDecisions: retryableDecisions
+            retryableDecisions: retryableDecisions,
+            focusTicketId: focusTicketId
         )
     }
 }
@@ -219,13 +223,16 @@ final class RoomTicketsCoordinator: ObservableObject {
 /// Hosts the Tickets tab for one room; the board polls only while this screen is visible.
 struct RoomTicketsScreen: View {
     @StateObject private var coordinator: RoomTicketsCoordinator
+    private let onOpenMessage: (@MainActor (Int64) -> Void)?
 
     init(
         sessionId: String,
         transport: any RoomTicketsTransport,
         sender: (any RoomMessageSending)? = nil,
+        onOpenMessage: (@MainActor (Int64) -> Void)? = nil,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
+        self.onOpenMessage = onOpenMessage
         _coordinator = StateObject(wrappedValue: RoomTicketsCoordinator(
             sessionId: sessionId,
             transport: transport,
@@ -235,8 +242,93 @@ struct RoomTicketsScreen: View {
     }
 
     var body: some View {
-        RoomTicketsView(state: coordinator.state) { coordinator.send($0) }
-            .onAppear { coordinator.start() }
-            .onDisappear { coordinator.stop() }
+        RoomTicketsView(state: coordinator.state) { intent in
+            if case .openSourceMessage(let sequence) = intent, let onOpenMessage {
+                onOpenMessage(sequence)
+            } else {
+                coordinator.send(intent)
+            }
+        }
+        .onAppear { coordinator.start() }
+        .onDisappear { coordinator.stop() }
+    }
+}
+
+/// One ticket opened from a link, over the room (the web's `?ticket=` drawer). It loads the room's board and shows that
+/// ticket wherever its status or the list's filters would put it; the board polls while the sheet is open.
+struct RoomTicketLinkScreen: View {
+    @StateObject private var coordinator: RoomTicketsCoordinator
+    @Environment(\.dismiss) private var dismiss
+    private let onOpenMessage: @MainActor (Int64) -> Void
+
+    init(
+        sessionId: String,
+        ticketId: String,
+        transport: any RoomTicketsTransport,
+        sender: (any RoomMessageSending)? = nil,
+        onOpenMessage: @escaping @MainActor (Int64) -> Void,
+        onReauthenticationRequired: @escaping @MainActor () -> Void
+    ) {
+        self.onOpenMessage = onOpenMessage
+        _coordinator = StateObject(wrappedValue: RoomTicketsCoordinator(
+            sessionId: sessionId,
+            transport: transport,
+            sender: sender,
+            focusTicketId: ticketId,
+            onReauthenticationRequired: onReauthenticationRequired
+        ))
+    }
+
+    var body: some View {
+        NavigationStack {
+            content
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { dismiss() }
+                            .accessibilityIdentifier("pocket.tickets.link.done")
+                    }
+                }
+        }
+        .onAppear { coordinator.start() }
+        .onDisappear { coordinator.stop() }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        let state = coordinator.state
+        if let row = state.focusedTicket {
+            RoomTicketDetailView(
+                row: row,
+                canAnswer: state.canAnswerDecisions,
+                decisionStatus: state.decisionStatus[row.id],
+                canRetryDecision: state.retryableDecisions.contains(row.id)
+            ) { intent in
+                if case .openSourceMessage(let sequence) = intent {
+                    onOpenMessage(sequence)
+                } else {
+                    coordinator.send(intent)
+                }
+            }
+        } else if let failure = state.failure {
+            unavailable(failure.title, detail: failure.detail)
+        } else if state.isLoading {
+            ProgressView("Loading the ticket…")
+                .navigationTitle("Ticket")
+        } else {
+            unavailable("Ticket not found", detail: "This ticket is not in this room, or you cannot see it.")
+        }
+    }
+
+    private func unavailable(_ title: String, detail: String) -> some View {
+        VStack(spacing: 8) {
+            Text(title).font(.headline)
+            Text(detail)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding()
+        .navigationTitle("Ticket")
     }
 }
