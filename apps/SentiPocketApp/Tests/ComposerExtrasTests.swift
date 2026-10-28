@@ -17,6 +17,26 @@ private final class OneTicketTransport: RoomTicketsTransport, @unchecked Sendabl
     }
 }
 
+/// A ticket that moves to its next version on the first catch-up after the snapshot.
+private final class SteppingTicketTransport: RoomTicketsTransport, @unchecked Sendable {
+    let first: RoomTicket
+    let next: RoomTicket
+    init(_ first: RoomTicket, then next: RoomTicket) {
+        self.first = first
+        self.next = next
+    }
+
+    func roomTicketSnapshot(sessionId: String, afterId: String?, limit: Int) async throws -> RoomTicketSnapshotPage {
+        RoomTicketSnapshotPage(items: [first], hasMore: false, cursor: 1)
+    }
+
+    func roomTicketEvents(sessionId: String, after: Int64, limit: Int) async throws -> RoomTicketEventsPage {
+        after < 2
+            ? RoomTicketEventsPage(tickets: [next], eventCount: 1, cursor: 2)
+            : RoomTicketEventsPage(tickets: [], eventCount: 0, cursor: after)
+    }
+}
+
 private final class CapturingSender: RoomMessageSending, @unchecked Sendable {
     private let lock = NSLock()
     private var sent: [(sessionId: String, text: String)] = []
@@ -168,5 +188,47 @@ final class ComposerExtrasTests: XCTestCase {
         await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
         XCTAssertEqual(coordinator.state.mentionCandidates.map(\.handle), ["griff", "cobalt-warden"])
         coordinator.pause()
+    }
+
+    func test_an_answer_that_landed_is_forgotten_so_the_same_words_post_again() async {
+        let ticket = RoomTicket(id: "t1", title: "T", body: "## Decision\nQuestion: Go?\nOptions: Yes · No", version: 1)
+        let sender = FlakySender(failures: 0)
+        let coordinator = RoomTicketsCoordinator(
+            sessionId: "room_1",
+            transport: OneTicketTransport(ticket),
+            sender: sender,
+            sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) },
+            onReauthenticationRequired: {}
+        )
+        await coordinator.refresh()
+        coordinator.send(.answerDecision(ticketId: "t1", answer: "Yes", detail: ""))
+        await waitUntil("first sent") { coordinator.state.decisionStatus["t1"] == "Answer sent to the room." }
+        coordinator.send(.answerDecision(ticketId: "t1", answer: "Yes", detail: ""))
+        await waitUntil("second sent") {
+            sender.clientIds().count == 2 && coordinator.state.decisionStatus["t1"] == "Answer sent to the room."
+        }
+        XCTAssertNotEqual(sender.clientIds()[0], sender.clientIds()[1],
+                          "the API keeps a client id forever, so a landed answer's id is never reused")
+    }
+
+    func test_the_same_words_to_a_new_version_of_the_ticket_are_a_new_message() async {
+        let step1 = RoomTicket(id: "t1", title: "T", body: "## Decision\nQuestion: Step 1?\nOptions: Yes · No", version: 1)
+        let step2 = RoomTicket(id: "t1", title: "T", body: "## Decision\nQuestion: Step 2?\nOptions: Yes · No", version: 2)
+        let sender = FlakySender(failures: 1)
+        let coordinator = RoomTicketsCoordinator(
+            sessionId: "room_1",
+            transport: SteppingTicketTransport(step1, then: step2),
+            sender: sender,
+            sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) },
+            onReauthenticationRequired: {}
+        )
+        await coordinator.refresh()
+        coordinator.send(.answerDecision(ticketId: "t1", answer: "Yes", detail: ""))
+        await waitUntil("first failed") { coordinator.state.retryableDecisions.contains("t1") }
+        await coordinator.refresh()
+        coordinator.send(.answerDecision(ticketId: "t1", answer: "Yes", detail: ""))
+        await waitUntil("sent") { coordinator.state.decisionStatus["t1"] == "Answer sent to the room." }
+        XCTAssertEqual(sender.clientIds().count, 2)
+        XCTAssertNotEqual(sender.clientIds()[0], sender.clientIds()[1], "an answer to the next step is a new message")
     }
 }

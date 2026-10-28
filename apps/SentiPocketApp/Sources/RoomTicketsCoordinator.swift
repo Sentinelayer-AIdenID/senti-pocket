@@ -25,9 +25,11 @@ final class RoomTicketsCoordinator: ObservableObject {
     private var pollTask: Task<Void, Never>?
     private var decisionStatus: [String: String] = [:]
     private var answering: Set<String> = []
-    /// The last answer per ticket. Its client id is minted once per answer: Retry, or the same answer again, sends
-    /// the same message, which the API de-duplicates, so an attempt that did land is never posted twice.
-    private var lastAnswer: [String: (text: String, clientId: String)] = [:]
+    /// The answer being sent or last tried per ticket, until the room has it. Its client id is minted once per answer
+    /// to one ticket version: Retry, or the same answer again to that version, sends the same message, which the API
+    /// de-duplicates (on your user and the client id, with no time window), so an attempt that did land is never
+    /// posted twice. An answer that lands is forgotten, so the same words to a later step post again.
+    private var lastAnswer: [String: (text: String, clientId: String, version: Int64)] = [:]
     private var retryableDecisions: Set<String> = []
 
     static let pollInterval: TimeInterval = 30
@@ -98,9 +100,9 @@ final class RoomTicketsCoordinator: ObservableObject {
             assignee: ticket.assignee,
             personLabel: { _ in "the assignee" }
         )
-        let clientId = lastAnswer[ticketId].flatMap { $0.text == text ? $0.clientId : nil }
+        let clientId = lastAnswer[ticketId].flatMap { $0.text == text && $0.version == ticket.version ? $0.clientId : nil }
             ?? "hm_" + UUID().uuidString.lowercased()
-        lastAnswer[ticketId] = (text, clientId)
+        lastAnswer[ticketId] = (text, clientId, ticket.version)
         deliverAnswer(ticketId)
     }
 
@@ -115,8 +117,10 @@ final class RoomTicketsCoordinator: ObservableObject {
         Task { [weak self] in
             var status = "Answer sent to the room."
             var canRetry = false
+            var landed = false
             do {
                 try await sender.sendHumanMessage(sessionId: sessionId, text: answer.text, clientId: answer.clientId)
+                landed = true
             } catch let error as RoomSendError {
                 if case .reauthenticationRequired = error { self?.onReauthenticationRequired() }
                 status = error.userMessage
@@ -132,6 +136,7 @@ final class RoomTicketsCoordinator: ObservableObject {
             self.answering.remove(ticketId)
             self.decisionStatus[ticketId] = status
             if canRetry { self.retryableDecisions.insert(ticketId) }
+            if landed { self.lastAnswer[ticketId] = nil }
             self.publish()
         }
     }
