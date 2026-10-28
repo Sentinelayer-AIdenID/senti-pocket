@@ -9,11 +9,18 @@ import PocketSyncClient
 enum RoomPreview {
     static var isRequested: Bool {
         ProcessInfo.processInfo.arguments.contains("-PocketRoomPreview") || isTicketsRequested || isTicketLinkRequested
+            || isAnchorRequested
     }
 
     /// `-PocketTicketLinkPreview` opens the room as a link to ticket t1 would: the ticket over the chat.
     static var isTicketLinkRequested: Bool {
         ProcessInfo.processInfo.arguments.contains("-PocketTicketLinkPreview")
+    }
+
+    /// `-PocketRoomAnchorPreview` opens the room scrolled up at message 30 of a longer history, then grows message 5
+    /// (far above the screen) with an edit and appends a new message: what you are reading must not move.
+    static var isAnchorRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-PocketRoomAnchorPreview")
     }
 
     /// `-PocketTicketsPreview` opens the Tickets tab on sample tickets.
@@ -41,9 +48,10 @@ enum RoomPreview {
                     sessionId: "preview-room",
                     title: "Design review",
                     membershipRole: "owner",
+                    focusSequenceId: isAnchorRequested ? 30 : nil,
                     focusTicketId: isTicketLinkRequested ? "t1" : nil
                 ),
-                transport: RoomPreviewTransport(),
+                transport: RoomPreviewTransport(anchorScenario: isAnchorRequested),
                 sender: RoomPreviewSender(),
                 actionSender: RoomPreviewSender(),
                 ticketsTransport: RoomPreviewTickets(),
@@ -125,9 +133,19 @@ private struct RoomPreviewTransport: RoomTransport {
         row(122, "build-agent", minutesAgo: 4, "Rebuilding with the fix now.")
     ]
 
+    /// The reading-position scenario: forty earlier notes before the usual history.
+    var anchorScenario = false
+
+    private static let earlier: [RoomMessage] = (1...40).map { seq in
+        row(Int64(seq), seq.isMultiple(of: 3) ? "human-alex" : "review-agent", minutesAgo: Double(30 * 60 - seq),
+            "Earlier note \(seq): checking the onboarding copy, step \(seq).")
+    }
+
+    private var allHistory: [RoomMessage] { anchorScenario ? Self.earlier + Self.history : Self.history }
+
     func roomEventsBefore(sessionId: String, beforeSequence: Int64?, limit: Int) async throws -> RoomEventPage {
         try? await Task.sleep(nanoseconds: 300_000_000)
-        let rows = beforeSequence.map { before in Self.history.filter { $0.sequenceId < before } } ?? Self.history
+        let rows = beforeSequence.map { before in allHistory.filter { $0.sequenceId < before } } ?? allHistory
         return RoomEventPage(messages: rows, nextBeforeSequence: nil, hasMore: false)
     }
 
@@ -162,7 +180,8 @@ private struct RoomPreviewTransport: RoomTransport {
     }
 
     func roomStream(sessionId: String, fromSequence: Int64?) -> AsyncStream<RoomStreamEvent> {
-        AsyncStream { continuation in
+        if anchorScenario { return anchorStream() }
+        return AsyncStream { continuation in
             let task = Task {
                 continuation.yield(.frame(.control))
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -175,6 +194,33 @@ private struct RoomPreviewTransport: RoomTransport {
                     "Build 319 is green. Ready for a look on device."
                 ))))
                 // Stay connected like a quiet live room.
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    /// At 6s message 5 (far above the screen) is edited to be much longer; at 7s a new message arrives at the bottom.
+    private func anchorStream() -> AsyncStream<RoomStreamEvent> {
+        AsyncStream { continuation in
+            let task = Task {
+                continuation.yield(.frame(.control))
+                try? await Task.sleep(nanoseconds: 6_000_000_000)
+                let original = Self.earlier[4]
+                let longer = (1...12).map { "Line \($0) of a much longer edit to note 5." }.joined(separator: "\n")
+                continuation.yield(.frame(.message(RoomMessage(
+                    id: original.id,
+                    sequenceId: original.sequenceId,
+                    kind: original.kind,
+                    authorId: original.authorId,
+                    authorName: original.authorName,
+                    isHuman: original.isHuman,
+                    text: longer,
+                    timestamp: original.timestamp,
+                    revision: 3,
+                    isEdited: true
+                ))))
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                continuation.yield(.frame(.message(Self.row(124, "build-agent", minutesAgo: 0, "Build 320 is green."))))
             }
             continuation.onTermination = { _ in task.cancel() }
         }
