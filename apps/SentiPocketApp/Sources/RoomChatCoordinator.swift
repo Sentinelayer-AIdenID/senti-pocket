@@ -242,12 +242,13 @@ final class RoomChatCoordinator: ObservableObject {
         }
     }
 
-    /// A linked message still not loaded and not newer than the loaded rows (more than ten pages back, before the
-    /// start of the room, not a chat row, or gone) is let go, and the view takes the reader to the latest messages
-    /// instead of leaving them wherever loading older pages put them.
+    /// A linked message still not loaded although the room has reached its sequence (more than ten pages back,
+    /// before the start of the room, not a chat row, or gone) is let go, and the view takes the reader to the latest
+    /// messages instead of leaving them wherever loading older pages put them. Newer than anything seen, it may
+    /// still arrive live.
     private func dropFocusIfUnreachable(_ target: Int64) {
-        guard focusTarget == target, timeline.index(ofSequence: target) == nil,
-              target <= (timeline.newestSequence ?? .max) else { return }
+        let seenThrough = max(timeline.newestSequence ?? 0, lastAppliedSequence)
+        guard focusTarget == target, timeline.index(ofSequence: target) == nil, target <= seenThrough else { return }
         focusTarget = nil
         focusFallbackCount += 1
         publish()
@@ -630,6 +631,7 @@ final class RoomChatCoordinator: ObservableObject {
                 guard current == generation else { return }
                 apply(page, older: false)
                 publish()
+                pursueFocus()
                 if page.rawCount < 200 { return }
             } catch {
                 guard current == generation else { return }
@@ -713,11 +715,14 @@ final class RoomChatCoordinator: ObservableObject {
             reconcilePending(with: [message])
             unread.noteArrivals(result.inserted, readerIsAtBottom: readerAtBottom, selfAuthorIds: ownAuthorIds)
             publish()
+            pursueFocus()
             Task { [weak self] in await self?.refreshActions() }
             return true
         case .nonDisplayable(let sequenceId):
             connection = .live
             lastAppliedSequence = max(lastAppliedSequence, sequenceId)
+            // A linked event that is not a chat row has now passed.
+            pursueFocus()
             return true
         case .composing(let agentId, _):
             connection = .live

@@ -346,4 +346,25 @@ final class RoomChatCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.state.focusFallbackCount, 2)
         coordinator.pause()
     }
+
+    func test_a_link_to_a_newer_event_that_is_not_a_chat_row_is_let_go_once_the_room_passes_it() async {
+        let transport = ScriptedRoomTransport(before: [.success(page([90, 100], hasMore: false))])
+        let coordinator = makeCoordinator(transport)
+        coordinator.resume()
+        await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
+
+        coordinator.focus(on: 105)
+        XCTAssertEqual(coordinator.state.focusSequenceId, 105, "newer than the loaded rows: it may still arrive")
+        coordinator.handle(.nonDisplayable(sequenceId: 104))
+        XCTAssertEqual(coordinator.state.focusSequenceId, 105, "the room has not reached it yet")
+        coordinator.handle(.nonDisplayable(sequenceId: 105))
+        XCTAssertNil(coordinator.state.focusSequenceId, "the room passed it without a chat row")
+        XCTAssertEqual(coordinator.state.focusFallbackCount, 1)
+
+        coordinator.focus(on: 110)
+        coordinator.handle(.message(message(110)))
+        XCTAssertEqual(coordinator.state.focusSequenceId, 110, "a linked message that arrives is focused by the view")
+        XCTAssertEqual(coordinator.state.focusFallbackCount, 1)
+        coordinator.pause()
+    }
 }
