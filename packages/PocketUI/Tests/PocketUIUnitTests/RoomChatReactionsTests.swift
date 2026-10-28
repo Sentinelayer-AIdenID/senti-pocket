@@ -67,4 +67,18 @@ final class RoomChatReactionsTests: XCTestCase {
         XCTAssertNil(denied.thread)
         XCTAssertFalse(denied.canReact)
     }
+
+    func test_a_reply_over_the_limit_is_held_in_the_reply_box() {
+        let message = RoomChatMessageInput(
+            id: "e1", sequenceId: 7, kind: .message, authorId: "cobalt-warden", authorName: "cobalt-warden",
+            isHuman: false, text: "parent", timestamp: "2026-10-28T10:00:00Z"
+        )
+        let state = RoomChatPresentationState(
+            sessionId: "room", title: "Room", messages: [message],
+            thread: RoomChatThreadInput(sequenceId: 7, replies: [], canReply: true, maximumReplyLength: 4_000)
+        )
+        XCTAssertNil(state.thread?.replyLengthProblem(for: String(repeating: "a", count: 4_000)))
+        let problem = state.thread?.replyLengthProblem(for: String(repeating: "a", count: 4_001))
+        XCTAssertTrue(problem?.hasPrefix("Too long to send: ") == true, problem ?? "nil")
+    }
 }

@@ -42,7 +42,18 @@ final class RoomChatCoordinator: ObservableObject {
     private var threadReplies: [RoomReply] = []
     private var threadLoading = false
     private var threadFailure: String?
-    private var threadPending: [PendingSend] = []
+    /// A reply you sent that its thread has not shown yet. Kept per thread, so closing the sheet keeps it. Its nonce
+    /// is minted once: a retry is the same request, which the API de-duplicates on its key.
+    private struct PendingReply {
+        let nonce: String
+        let targetSequenceId: Int64
+        let text: String
+        var status: RoomChatPendingRow.Status
+        var clientId: String { "rp_" + nonce }
+    }
+    private var pendingReplies: [PendingReply] = []
+    /// You in action keys, from your account (see `SignedInAccount.actorRef`).
+    private var actorRef: String?
     /// Arrivals refresh reactions at most this often (the web polls about every 15s).
     static let actionsRefreshInterval: TimeInterval = 10
     static let viewerReason = "You're a viewer in this room: you can read it, but not post."
@@ -168,6 +179,13 @@ final class RoomChatCoordinator: ObservableObject {
         case .sendMessage(let text):
             enqueueSend(text)
         case .retrySend(let clientId):
+            if let index = pendingReplies.firstIndex(where: { $0.clientId == clientId }) {
+                guard case .failed(_, true) = pendingReplies[index].status else { return }
+                pendingReplies[index].status = .sending
+                publish()
+                deliverReply(clientId)
+                return
+            }
             guard let index = pending.firstIndex(where: { $0.clientId == clientId }),
                   case .failed(_, true) = pending[index].status else { return }
             pending[index].status = .sending
@@ -175,16 +193,16 @@ final class RoomChatCoordinator: ObservableObject {
             deliver(clientId)
         case .discardSend(let clientId):
             pending.removeAll { $0.clientId == clientId }
-            threadPending.removeAll { $0.clientId == clientId }
+            pendingReplies.removeAll { $0.clientId == clientId }
             publish()
         case .react(let sequenceId, let type):
             react(type, on: sequenceId)
         case .openThread(let sequenceId):
             openThread(sequenceId)
         case .closeThread:
+            // Unsent replies stay with their thread and show again when it reopens.
             openThreadSequence = nil
             threadReplies = []
-            threadPending = []
             threadFailure = nil
             publish()
         case .sendReply(let sequenceId, let text):
@@ -213,16 +231,19 @@ final class RoomChatCoordinator: ObservableObject {
 
     private func react(_ type: String, on sequenceId: Int64) {
         guard let actionSender, canReact, RoomActionRequest.reactionTypes.contains(type) else { return }
-        let actor = ownAuthorIds.sorted().first ?? "me"
-        applyOptimisticReaction(type, on: sequenceId, actor: actor)
-        let request = RoomActionRequest.reaction(type, sessionId: sessionId, sequenceId: sequenceId, actor: actor)
+        // Shown at once (display only: the refresh replaces it with the server's truth).
+        applyOptimisticReaction(type, on: sequenceId, actor: ownAuthorIds.sorted().first ?? "you")
+        let sessionId = self.sessionId
         Task { [weak self] in
-            do {
-                try await actionSender.sendAction(request)
-            } catch RoomSendError.reauthenticationRequired {
-                self?.onReauthenticationRequired()
-            } catch {
-                // Fall through: the refresh below restores the server's truth.
+            // Not sent while you are unknown; the refresh then just restores the server's truth.
+            if let actor = await self?.resolvedActorRef() {
+                do {
+                    try await actionSender.sendAction(.reaction(type, sessionId: sessionId, sequenceId: sequenceId, actor: actor))
+                } catch RoomSendError.reauthenticationRequired {
+                    self?.onReauthenticationRequired()
+                } catch {
+                    // Fall through: the refresh below restores the server's truth.
+                }
             }
             await self?.refreshActions(force: true)
         }
@@ -293,41 +314,78 @@ final class RoomChatCoordinator: ObservableObject {
 
     private func sendReply(_ raw: String, to sequenceId: Int64) {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let actionSender, postingRefusedReason == nil, !text.isEmpty else { return }
+        guard actionSender != nil, postingRefusedReason == nil, !text.isEmpty else { return }
+        let nonce = UUID().uuidString.lowercased()
         guard text.count <= RoomActionRequest.replyLimit else {
-            threadPending.append(PendingSend(
-                clientId: Self.makeClientId(),
-                text: String(text.prefix(280)) + "…",
+            // The reply box holds this before sending; this is the backstop. The full text is kept (only the row's
+            // display is cut), so nothing typed is lost.
+            pendingReplies.append(PendingReply(
+                nonce: nonce,
+                targetSequenceId: sequenceId,
+                text: text,
                 status: .failed(reason: "Too long for a reply (the limit is 4,000 characters).", canRetry: false)
             ))
             publish()
             return
         }
-        let actor = ownAuthorIds.sorted().first ?? "me"
-        let request = RoomActionRequest.reply(sessionId: sessionId, sequenceId: sequenceId, text: text, actor: actor)
-        let clientId = request.idempotencyKey
-        threadPending.append(PendingSend(clientId: clientId, text: text, status: .sending))
+        pendingReplies.append(PendingReply(nonce: nonce, targetSequenceId: sequenceId, text: text, status: .sending))
         publish()
+        deliverReply("rp_" + nonce)
+    }
+
+    /// Posts (or re-posts, with the same key) one pending reply.
+    private func deliverReply(_ clientId: String) {
+        guard let actionSender, let item = pendingReplies.first(where: { $0.clientId == clientId }) else { return }
+        let sessionId = self.sessionId
         Task { [weak self] in
+            guard let actor = await self?.resolvedActorRef() else {
+                // Never sent under a placeholder name; the row offers Retry.
+                self?.updateReply(clientId) {
+                    $0.status = .failed(reason: RoomSendError.retryable(retryAfterSeconds: nil).userMessage, canRetry: true)
+                }
+                return
+            }
+            let request = RoomActionRequest.reply(
+                sessionId: sessionId, sequenceId: item.targetSequenceId, text: item.text, actor: actor, nonce: item.nonce
+            )
             do {
                 try await actionSender.sendAction(request)
                 guard let self else { return }
-                self.threadPending.removeAll { $0.clientId == clientId }
-                await self.loadThread(sequenceId)
-                await self.refreshActions(force: true)
-            } catch let error as RoomSendError {
-                guard let self else { return }
-                if case .reauthenticationRequired = error { self.onReauthenticationRequired() }
-                if case .notAllowed = error { self.postingRefusedReason = Self.viewerReason }
-                if let index = self.threadPending.firstIndex(where: { $0.clientId == clientId }) {
-                    // A reply retry is a new tap with a fresh key; the failed row explains and can be discarded.
-                    self.threadPending[index].status = .failed(reason: error.userMessage, canRetry: false)
-                }
+                if self.openThreadSequence == item.targetSequenceId { await self.loadThread(item.targetSequenceId) }
+                self.pendingReplies.removeAll { $0.clientId == clientId }
                 self.publish()
+                await self.refreshActions(force: true)
             } catch {
-                self?.threadPending.removeAll { $0.clientId == clientId }
-                self?.publish()
+                guard let self else { return }
+                let status = self.failedStatus(for: error)
+                self.updateReply(clientId) { $0.status = status }
             }
+        }
+    }
+
+    private func updateReply(_ clientId: String, _ change: (inout PendingReply) -> Void) {
+        guard let index = pendingReplies.firstIndex(where: { $0.clientId == clientId }) else { return }
+        change(&pendingReplies[index])
+        publish()
+    }
+
+    /// How a failed write shows, with its side effects: sign in again, or no more posting for a viewer. Retry is
+    /// offered only when the same request may simply not have landed.
+    private func failedStatus(for error: Error) -> RoomChatPendingRow.Status {
+        guard let error = error as? RoomSendError else {
+            return .failed(reason: RoomSendError.retryable(retryAfterSeconds: nil).userMessage, canRetry: true)
+        }
+        switch error {
+        case .reauthenticationRequired:
+            onReauthenticationRequired()
+            return .failed(reason: error.userMessage, canRetry: true)
+        case .notAllowed:
+            postingRefusedReason = Self.viewerReason
+            return .failed(reason: error.userMessage, canRetry: false)
+        case .retryable:
+            return .failed(reason: error.userMessage, canRetry: true)
+        case .rejected, .notConfigured:
+            return .failed(reason: error.userMessage, canRetry: false)
         }
     }
 
@@ -375,24 +433,10 @@ final class RoomChatCoordinator: ObservableObject {
                 await self.sleep(Self.sentEchoGrace)
                 self.pending.removeAll { $0.clientId == clientId && $0.status == .sent }
                 self.publish()
-            } catch let error as RoomSendError {
-                guard let self else { return }
-                switch error {
-                case .reauthenticationRequired:
-                    self.updatePending(clientId) { $0.status = .failed(reason: error.userMessage, canRetry: true) }
-                    self.onReauthenticationRequired()
-                case .notAllowed:
-                    self.postingRefusedReason = Self.viewerReason
-                    self.updatePending(clientId) { $0.status = .failed(reason: error.userMessage, canRetry: false) }
-                case .retryable:
-                    self.updatePending(clientId) { $0.status = .failed(reason: error.userMessage, canRetry: true) }
-                case .rejected, .notConfigured:
-                    self.updatePending(clientId) { $0.status = .failed(reason: error.userMessage, canRetry: false) }
-                }
             } catch {
-                self?.updatePending(clientId) {
-                    $0.status = .failed(reason: RoomSendError.retryable(retryAfterSeconds: nil).userMessage, canRetry: true)
-                }
+                guard let self else { return }
+                let status = self.failedStatus(for: error)
+                self.updatePending(clientId) { $0.status = status }
             }
         }
     }
@@ -418,10 +462,27 @@ final class RoomChatCoordinator: ObservableObject {
         guard !identityRequested, let identity else { return }
         identityRequested = true
         Task { [weak self] in
-            guard let authorId = await identity.currentAuthorId(), let self else { return }
-            self.ownAuthorIds.insert(authorId.lowercased())
-            self.publish()
+            guard let account = await identity.currentAccount(), let self else { return }
+            self.learn(account)
         }
+    }
+
+    private func learn(_ account: SignedInAccount) {
+        actorRef = account.actorRef
+        ownAuthorIds.insert(account.authorId)
+        publish()
+    }
+
+    /// You in an action's key: your account (GitHub username, else account id), asked again if the first look
+    /// failed, else the login in an author id you are known by. Never a shared placeholder: the API would take a
+    /// second person's ack as the first one's duplicate. nil while you are unknown.
+    private func resolvedActorRef() async -> String? {
+        if let actorRef { return actorRef }
+        if let identity, let account = await identity.currentAccount() {
+            learn(account)
+            return account.actorRef
+        }
+        return ownAuthorIds.sorted().first { $0.hasPrefix("human-") }.map { String($0.dropFirst("human-".count)) }
     }
 
     static func makeClientId() -> String {
@@ -718,10 +779,13 @@ final class RoomChatCoordinator: ObservableObject {
                         isEdited: reply.isEdited
                     )
                 },
-                pending: threadPending.map { RoomChatPendingRow(clientId: $0.clientId, text: $0.text, status: $0.status) },
+                pending: pendingReplies.filter { $0.targetSequenceId == sequence }.map {
+                    RoomChatPendingRow(clientId: $0.clientId, text: $0.text, status: $0.status)
+                },
                 isLoading: threadLoading,
                 failureText: threadFailure,
-                canReply: actionSender != nil && postingRefusedReason == nil
+                canReply: actionSender != nil && postingRefusedReason == nil,
+                maximumReplyLength: RoomActionRequest.replyLimit
             )
         }
         state = RoomChatPresentationState(

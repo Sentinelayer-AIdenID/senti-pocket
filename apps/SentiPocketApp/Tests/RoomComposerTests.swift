@@ -188,8 +188,8 @@ private final class ScriptedSender: RoomMessageSending, @unchecked Sendable {
 }
 
 private struct FixedIdentity: AccountIdentityProviding {
-    let authorId: String?
-    func currentAuthorId() async -> String? { authorId }
+    let account: SignedInAccount?
+    func currentAccount() async -> SignedInAccount? { account }
 }
 
 @MainActor
@@ -321,7 +321,7 @@ final class RoomComposerCoordinatorTests: XCTestCase {
     }
 
     func test_identity_is_learned_from_the_account_and_no_sender_hides_the_composer() async {
-        let coordinator = makeCoordinator(sender: nil, identity: FixedIdentity(authorId: "human-mrrcarter"))
+        let coordinator = makeCoordinator(sender: nil, identity: FixedIdentity(account: SignedInAccount(githubUsername: "mrrCarter", accountId: "u-1")))
         XCTAssertEqual(coordinator.state.composer, .hidden)
         coordinator.resume()
         await waitUntil("identity") { coordinator.state.ownMentionHandles.contains("mrrcarter") }

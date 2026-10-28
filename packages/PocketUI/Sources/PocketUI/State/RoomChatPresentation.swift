@@ -245,6 +245,8 @@ public struct RoomChatThreadState: Equatable, Sendable {
     public let isLoading: Bool
     public let failureText: String?
     public let canReply: Bool
+    /// The longest reply the API accepts, in characters; nil when there is no known limit.
+    public let maximumReplyLength: Int?
 
     public init(
         parent: RoomChatMessageRow,
@@ -252,7 +254,8 @@ public struct RoomChatThreadState: Equatable, Sendable {
         pending: [RoomChatPendingRow] = [],
         isLoading: Bool = false,
         failureText: String? = nil,
-        canReply: Bool = false
+        canReply: Bool = false,
+        maximumReplyLength: Int? = nil
     ) {
         self.parent = parent
         self.replies = replies
@@ -260,6 +263,12 @@ public struct RoomChatThreadState: Equatable, Sendable {
         self.isLoading = isLoading
         self.failureText = failureText
         self.canReply = canReply
+        self.maximumReplyLength = maximumReplyLength
+    }
+
+    /// Why this reply cannot be sent as it is, or nil. A reply over the limit stays in the reply box.
+    public func replyLengthProblem(for draft: String) -> String? {
+        RoomComposerState(canPost: canReply, disabledReason: nil, maximumLength: maximumReplyLength).lengthProblem(for: draft)
     }
 }
 
@@ -271,6 +280,7 @@ public struct RoomChatThreadInput: Equatable, Sendable {
     public let isLoading: Bool
     public let failureText: String?
     public let canReply: Bool
+    public let maximumReplyLength: Int?
 
     public init(
         sequenceId: Int64,
@@ -278,7 +288,8 @@ public struct RoomChatThreadInput: Equatable, Sendable {
         pending: [RoomChatPendingRow] = [],
         isLoading: Bool = false,
         failureText: String? = nil,
-        canReply: Bool = false
+        canReply: Bool = false,
+        maximumReplyLength: Int? = nil
     ) {
         self.sequenceId = sequenceId
         self.replies = replies
@@ -286,6 +297,7 @@ public struct RoomChatThreadInput: Equatable, Sendable {
         self.isLoading = isLoading
         self.failureText = failureText
         self.canReply = canReply
+        self.maximumReplyLength = maximumReplyLength
     }
 }
 
@@ -451,7 +463,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 pending: threadInput.pending,
                 isLoading: threadInput.isLoading,
                 failureText: threadInput.failureText,
-                canReply: threadInput.canReply
+                canReply: threadInput.canReply,
+                maximumReplyLength: threadInput.maximumReplyLength
             )
         } else {
             self.thread = nil

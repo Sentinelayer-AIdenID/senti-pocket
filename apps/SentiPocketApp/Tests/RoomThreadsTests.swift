@@ -52,6 +52,41 @@ private final class RoomActionURLProtocol: URLProtocol {
     override func stopLoading() {}
 }
 
+private final class AuthMeURLProtocol: URLProtocol {
+    private static let lock = NSLock()
+    private static var body = Data()
+    private static var path: String?
+
+    static func respond(_ json: String) {
+        lock.lock()
+        body = Data(json.utf8)
+        path = nil
+        lock.unlock()
+    }
+
+    static func lastPath() -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return path
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.lock.lock()
+        Self.path = request.url?.path
+        let body = Self.body
+        Self.lock.unlock()
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: [:])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
 final class RoomActionSenderTests: XCTestCase {
     private func makeSender(status: Int = 200) -> HTTPRoomActionSender {
         RoomActionURLProtocol.reset(status: status)
@@ -66,7 +101,7 @@ final class RoomActionSenderTests: XCTestCase {
 
     func test_a_reply_posts_the_web_action_shape() async throws {
         let sender = makeSender()
-        let request = RoomActionRequest.reply(sessionId: "room_1", sequenceId: 1234, text: "on it", actor: "human-mrrcarter")
+        let request = RoomActionRequest.reply(sessionId: "room_1", sequenceId: 1234, text: "on it", actor: "mrrCarter", nonce: "n-1")
         try await sender.sendAction(request)
 
         let (http, body) = try XCTUnwrap(RoomActionURLProtocol.requests().first)
@@ -78,7 +113,7 @@ final class RoomActionSenderTests: XCTestCase {
         XCTAssertEqual(json["targetSequenceId"] as? Int, 1234)
         XCTAssertEqual(json["note"] as? String, "on it")
         let key = try XCTUnwrap(json["idempotencyKey"] as? String)
-        XCTAssertTrue(key.hasPrefix("reply:room_1:1234:human-mrrcarter:"), key)
+        XCTAssertEqual(key, "reply:room_1:1234:mrrCarter:n-1", "the web's key; a retry with the same nonce is the same reply")
         XCTAssertEqual(http.value(forHTTPHeaderField: "Idempotency-Key"), key)
         XCTAssertNil(json["actorId"], "the API takes the actor from the token")
     }
@@ -113,6 +148,39 @@ final class RoomActionSenderTests: XCTestCase {
             }
         }
         XCTAssertTrue(RoomActionURLProtocol.requests().isEmpty)
+    }
+
+    func test_your_account_names_you_in_action_keys_as_the_web_does() {
+        let github = SignedInAccount(githubUsername: "mrrCarter", accountId: "6f1c2d3e-0000-4000-8000-000000000001")
+        XCTAssertEqual(github?.actorRef, "mrrCarter", "the GitHub username, as the web writes it")
+        XCTAssertEqual(github?.authorId, "human-mrrcarter")
+        let noLogin = SignedInAccount(githubUsername: "", accountId: "6f1c2d3e-0000-4000-8000-000000000001")
+        XCTAssertEqual(noLogin?.actorRef, "6f1c2d3e-0000-4000-8000-000000000001", "no GitHub username: the account id")
+        XCTAssertEqual(noLogin?.authorId, "human-6f1c2d3e-0000-4000-8000-000000000001", "as the API authors your messages")
+        let odd = SignedInAccount(githubUsername: nil, accountId: "A b/c")
+        XCTAssertEqual(odd?.actorRef, "A-b-c", "the web's key normalization")
+        XCTAssertEqual(odd?.authorId, "human-a-b-c", "the API's author normalization")
+        XCTAssertNil(SignedInAccount(githubUsername: " ", accountId: nil), "nothing names you: no shared placeholder")
+    }
+
+    func test_the_account_is_read_from_auth_me() async {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [AuthMeURLProtocol.self]
+        let identity = HTTPAccountIdentity(
+            apiBaseURL: URL(string: "https://api.example.test"),
+            urlSession: URLSession(configuration: configuration),
+            tokenProvider: { "user-token" }
+        )
+        AuthMeURLProtocol.respond(#"{"id":"6f1c2d3e-0000-4000-8000-000000000001","github_username":"mrrCarter","is_admin":false}"#)
+        let account = await identity.currentAccount()
+        XCTAssertEqual(account?.actorRef, "mrrCarter")
+        XCTAssertEqual(account?.authorId, "human-mrrcarter")
+        XCTAssertEqual(AuthMeURLProtocol.lastPath(), "/api/v1/auth/me")
+
+        AuthMeURLProtocol.respond(#"{"id":"6f1c2d3e-0000-4000-8000-000000000001","github_username":""}"#)
+        let noLogin = await identity.currentAccount()
+        XCTAssertEqual(noLogin?.actorRef, "6f1c2d3e-0000-4000-8000-000000000001")
+        XCTAssertEqual(noLogin?.authorId, "human-6f1c2d3e-0000-4000-8000-000000000001")
     }
 }
 
@@ -162,14 +230,20 @@ private final class RecordingActionSender: RoomActionSending, @unchecked Sendabl
     private let lock = NSLock()
     private var sent: [RoomActionRequest] = []
     private let failure: RoomSendError?
+    private var failFirst: [RoomSendError]
 
-    init(failure: RoomSendError? = nil) { self.failure = failure }
+    /// Fails every request with `failure`, or just the first ones with `failFirst`, in order.
+    init(failure: RoomSendError? = nil, failFirst: [RoomSendError] = []) {
+        self.failure = failure
+        self.failFirst = failFirst
+    }
 
     func sendAction(_ action: RoomActionRequest) async throws {
         lock.lock()
         sent.append(action)
+        let scripted = failFirst.isEmpty ? nil : failFirst.removeFirst()
         lock.unlock()
-        if let failure { throw failure }
+        if let error = scripted ?? failure { throw error }
     }
 
     func requests() -> [RoomActionRequest] {
@@ -177,6 +251,11 @@ private final class RecordingActionSender: RoomActionSending, @unchecked Sendabl
         defer { lock.unlock() }
         return sent
     }
+}
+
+private struct AccountStub: AccountIdentityProviding {
+    let account: SignedInAccount?
+    func currentAccount() async -> SignedInAccount? { account }
 }
 
 @MainActor
@@ -192,15 +271,18 @@ final class RoomThreadsCoordinatorTests: XCTestCase {
     private func makeCoordinator(
         _ transport: ActionsRoomTransport,
         actions: RecordingActionSender?,
-        role: String = "owner"
+        role: String = "owner",
+        identity: (any AccountIdentityProviding)? = nil,
+        ownAuthorIds: Set<String> = ["human-mrrcarter"]
     ) -> RoomChatCoordinator {
         RoomChatCoordinator(
             sessionId: "room_1",
             title: "Room",
             transport: transport,
             actionSender: actions,
+            identity: identity,
             membershipRole: role,
-            ownAuthorIds: ["human-mrrcarter"],
+            ownAuthorIds: ownAuthorIds,
             sleep: { seconds in
                 if seconds > 5 { try? await Task.sleep(nanoseconds: 3_600_000_000_000) }
             },
@@ -308,6 +390,103 @@ final class RoomThreadsCoordinatorTests: XCTestCase {
         coordinator.send(.react(sequenceId: 3, type: "ack"))
         await waitUntil("ack sent") { sender.requests().count == 1 }
         XCTAssertEqual(sender.requests().map(\.actionType), ["ack"], "the viewer's reply was never sent")
+        coordinator.pause()
+    }
+
+    private func failedRetryably(_ coordinator: RoomChatCoordinator) -> Bool {
+        if case .failed(_, true)? = coordinator.state.thread?.pending.first?.status { return true }
+        return false
+    }
+
+    func test_an_ack_and_a_reply_are_keyed_by_your_account_as_on_the_web() async {
+        let transport = ActionsRoomTransport(history: [message(3)], projections: [RoomActionsPage()])
+        let sender = RecordingActionSender()
+        let account = SignedInAccount(githubUsername: "mrrCarter", accountId: "6f1c2d3e-0000-4000-8000-000000000001")
+        let coordinator = makeCoordinator(transport, actions: sender, identity: AccountStub(account: account), ownAuthorIds: [])
+        coordinator.resume()
+        await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
+
+        coordinator.send(.react(sequenceId: 3, type: "ack"))
+        await waitUntil("ack sent") { sender.requests().count == 1 }
+        XCTAssertEqual(sender.requests().first?.idempotencyKey, "ack:room_1:3:mrrCarter", "the key the web writes")
+
+        coordinator.send(.openThread(sequenceId: 3))
+        coordinator.send(.sendReply(sequenceId: 3, text: "on it"))
+        await waitUntil("reply sent") { sender.requests().count == 2 }
+        let replyKey = sender.requests()[1].idempotencyKey
+        XCTAssertTrue(replyKey.hasPrefix("reply:room_1:3:mrrCarter:"), replyKey)
+        coordinator.pause()
+    }
+
+    func test_nothing_is_sent_under_a_placeholder_name_while_you_are_unknown() async {
+        let transport = ActionsRoomTransport(history: [message(3)], projections: [RoomActionsPage()])
+        let sender = RecordingActionSender()
+        let coordinator = makeCoordinator(transport, actions: sender, identity: AccountStub(account: nil), ownAuthorIds: [])
+        coordinator.resume()
+        await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
+
+        coordinator.send(.openThread(sequenceId: 3))
+        coordinator.send(.sendReply(sequenceId: 3, text: "hello"))
+        await waitUntil("held for retry") { self.failedRetryably(coordinator) }
+        XCTAssertEqual(coordinator.state.thread?.pending.first?.text, "hello")
+        XCTAssertTrue(sender.requests().isEmpty)
+        coordinator.pause()
+    }
+
+    func test_a_failed_reply_keeps_its_text_and_a_retry_resends_the_same_key() async {
+        let transport = ActionsRoomTransport(history: [message(9)], projections: [RoomActionsPage()])
+        let sender = RecordingActionSender(failFirst: [.retryable(retryAfterSeconds: nil)])
+        let coordinator = makeCoordinator(transport, actions: sender)
+        coordinator.resume()
+        await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
+
+        coordinator.send(.openThread(sequenceId: 9))
+        coordinator.send(.sendReply(sequenceId: 9, text: "on it"))
+        await waitUntil("failed") { self.failedRetryably(coordinator) }
+        XCTAssertEqual(coordinator.state.thread?.pending.first?.text, "on it")
+        let clientId = coordinator.state.thread?.pending.first?.clientId ?? ""
+
+        coordinator.send(.retrySend(clientId: clientId))
+        await waitUntil("sent") { sender.requests().count == 2 && coordinator.state.thread?.pending.isEmpty == true }
+        XCTAssertEqual(sender.requests()[0].idempotencyKey, sender.requests()[1].idempotencyKey,
+                       "a retry is the same reply to the API")
+        coordinator.pause()
+    }
+
+    func test_closing_a_thread_keeps_its_unsent_replies_for_when_it_reopens() async {
+        let transport = ActionsRoomTransport(history: [message(9), message(10)], projections: [RoomActionsPage()])
+        let sender = RecordingActionSender(failure: .retryable(retryAfterSeconds: nil))
+        let coordinator = makeCoordinator(transport, actions: sender)
+        coordinator.resume()
+        await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
+
+        coordinator.send(.openThread(sequenceId: 9))
+        coordinator.send(.sendReply(sequenceId: 9, text: "keep me"))
+        await waitUntil("failed") { self.failedRetryably(coordinator) }
+        coordinator.send(.closeThread)
+        XCTAssertNil(coordinator.state.thread)
+
+        coordinator.send(.openThread(sequenceId: 10))
+        XCTAssertEqual(coordinator.state.thread?.pending.isEmpty, true, "a reply shows only under its own thread")
+        coordinator.send(.closeThread)
+        coordinator.send(.openThread(sequenceId: 9))
+        XCTAssertEqual(coordinator.state.thread?.pending.map(\.text), ["keep me"])
+        coordinator.pause()
+    }
+
+    func test_a_reply_over_the_limit_keeps_every_character_and_is_never_sent() async {
+        let transport = ActionsRoomTransport(history: [message(9)], projections: [RoomActionsPage()])
+        let sender = RecordingActionSender()
+        let coordinator = makeCoordinator(transport, actions: sender)
+        coordinator.resume()
+        await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
+
+        coordinator.send(.openThread(sequenceId: 9))
+        let long = String(repeating: "r", count: RoomActionRequest.replyLimit + 1)
+        XCTAssertNotNil(coordinator.state.thread?.replyLengthProblem(for: long), "the reply box holds it")
+        coordinator.send(.sendReply(sequenceId: 9, text: long))
+        XCTAssertEqual(coordinator.state.thread?.pending.first?.text.count, RoomActionRequest.replyLimit + 1)
+        XCTAssertTrue(sender.requests().isEmpty)
         coordinator.pause()
     }
 }

@@ -99,10 +99,36 @@ final class HTTPRoomMessageSender: RoomMessageSending, @unchecked Sendable {
     }
 }
 
-/// Who is signed in, for "is this my message" and "am I mentioned". `GET /api/v1/auth/me` returns the GitHub
-/// username the API authors human messages under (`human-<username>`).
+/// Who is signed in, from `GET /api/v1/auth/me`: the GitHub username the API authors your messages under
+/// (`human-<username>`), for "is this my message" and "am I mentioned", and who you are in action keys.
+struct SignedInAccount: Equatable, Sendable {
+    /// The author id the API writes your messages under: `human-<GitHub username, else account id>`, normalized
+    /// as the API does (`_normalize_human_sender`).
+    let authorId: String
+    /// You in action idempotency keys, written as the web writes it (`createMessageActionIdempotencyKey`): the
+    /// GitHub username, else the account id. Never a shared placeholder, so the API never takes one person's ack
+    /// for another person's duplicate.
+    let actorRef: String
+
+    init?(githubUsername: String?, accountId: String?) {
+        let username = (githubUsername ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let id = (accountId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let source = username.isEmpty ? id : username
+        let ref = String(source
+            .replacingOccurrences(of: #"[^A-Za-z0-9._:-]+"#, with: "-", options: .regularExpression)
+            .prefix(48))
+        let sender = source
+            .replacingOccurrences(of: #"[^A-Za-z0-9._-]+"#, with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+            .lowercased()
+        guard !ref.isEmpty, !sender.isEmpty else { return nil }
+        authorId = "human-" + sender
+        actorRef = ref
+    }
+}
+
 protocol AccountIdentityProviding: Sendable {
-    func currentAuthorId() async -> String?
+    func currentAccount() async -> SignedInAccount?
 }
 
 final class HTTPAccountIdentity: AccountIdentityProviding, @unchecked Sendable {
@@ -120,7 +146,7 @@ final class HTTPAccountIdentity: AccountIdentityProviding, @unchecked Sendable {
         self.tokenProvider = tokenProvider
     }
 
-    func currentAuthorId() async -> String? {
+    func currentAccount() async -> SignedInAccount? {
         guard let apiBaseURL,
               var components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false),
               let token = tokenProvider(), !token.isEmpty else { return nil }
@@ -133,12 +159,10 @@ final class HTTPAccountIdentity: AccountIdentityProviding, @unchecked Sendable {
         guard let (data, response) = try? await urlSession.data(for: request),
               (response as? HTTPURLResponse)?.statusCode == 200,
               tokenProvider() == token,
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let username = object["github_username"] as? String,
-              username.range(of: #"^[A-Za-z0-9-]{1,39}$"#, options: .regularExpression) != nil else {
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }
-        return "human-\(username.lowercased())"
+        return SignedInAccount(githubUsername: object["github_username"] as? String, accountId: object["id"] as? String)
     }
 }
 
@@ -160,15 +184,23 @@ struct RoomActionRequest: Equatable, Sendable {
     static let replyLimit = 4_000
     static let reactionTypes: Set<String> = ["ack", "like", "dislike", "unlike", "undislike"]
 
-    /// A reply to a message (or, with `targetActionId`, to a reply). The key is fresh per reply and reused on retry.
-    static func reply(sessionId: String, sequenceId: Int64, toReply: String? = nil, text: String, actor: String) -> RoomActionRequest {
+    /// A reply to a message (or, with `targetActionId`, to a reply). `nonce` is minted once per reply, so a retry
+    /// sends the same key and the API de-duplicates it.
+    static func reply(
+        sessionId: String,
+        sequenceId: Int64,
+        toReply: String? = nil,
+        text: String,
+        actor: String,
+        nonce: String = UUID().uuidString.lowercased()
+    ) -> RoomActionRequest {
         RoomActionRequest(
             sessionId: sessionId,
             actionType: "reply",
             targetSequenceId: sequenceId,
             targetActionId: toReply,
             note: text,
-            idempotencyKey: boundedKey("reply:\(sessionId):\(sequenceId):\(actor):\(UUID().uuidString.lowercased())")
+            idempotencyKey: boundedKey("reply:\(sessionId):\(sequenceId):\(actor):\(nonce)")
         )
     }
 

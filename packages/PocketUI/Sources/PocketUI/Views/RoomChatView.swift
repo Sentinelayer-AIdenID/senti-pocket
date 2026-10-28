@@ -13,6 +13,8 @@ public struct RoomChatView: View {
     private let state: RoomChatPresentationState
     private let send: (RoomChatIntent) -> Void
 
+    /// The reply being typed in each thread, kept while the room is open: closing the sheet does not lose it.
+    @State private var threadDrafts: [Int64: String] = [:]
     @State private var readerAtBottom = true
     @State private var didInitialScroll = false
     @State private var anchorBeforeOlderLoad: String?
@@ -21,6 +23,10 @@ public struct RoomChatView: View {
     public init(state: RoomChatPresentationState, send: @escaping (RoomChatIntent) -> Void) {
         self.state = state
         self.send = send
+    }
+
+    private func threadDraft(_ sequenceId: Int64) -> Binding<String> {
+        Binding(get: { threadDrafts[sequenceId] ?? "" }, set: { threadDrafts[sequenceId] = $0 })
     }
 
     public var body: some View {
@@ -41,7 +47,12 @@ public struct RoomChatView: View {
             set: { presented in if !presented { send(.closeThread) } }
         )) {
             if let thread = state.thread {
-                RoomThreadSheet(thread: thread, ownHandles: state.ownMentionHandles, send: send)
+                RoomThreadSheet(
+                    thread: thread,
+                    ownHandles: state.ownMentionHandles,
+                    send: send,
+                    draft: threadDraft(thread.parent.sequenceId)
+                )
             }
         }
         .navigationTitle(state.title)
@@ -479,7 +490,7 @@ private struct RoomThreadSheet: View {
     let thread: RoomChatThreadState
     let ownHandles: Set<String>
     let send: (RoomChatIntent) -> Void
-    @State private var draft = ""
+    @Binding var draft: String
 
     var body: some View {
         NavigationStack {
@@ -540,6 +551,15 @@ private struct RoomThreadSheet: View {
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if thread.canReply {
+                    VStack(alignment: .leading, spacing: 4) {
+                    if let problem = thread.replyLengthProblem(for: draft) {
+                        Text(problem)
+                            .font(.caption)
+                            .foregroundStyle(PocketPalette.danger)
+                            .padding(.horizontal, 16)
+                            .padding(.top, 6)
+                            .accessibilityIdentifier("pocket.thread.composer.tooLong")
+                    }
                     HStack(alignment: .bottom, spacing: 8) {
                         TextField("Reply", text: $draft, axis: .vertical)
                             .lineLimit(1...6)
@@ -550,22 +570,27 @@ private struct RoomThreadSheet: View {
                             .accessibilityIdentifier("pocket.thread.composer")
                         Button {
                             let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-                            guard !text.isEmpty else { return }
+                            guard canSendReply else { return }
                             send(.sendReply(sequenceId: thread.parent.sequenceId, text: text))
                             draft = ""
                         } label: {
                             Image(systemName: "arrow.up.circle.fill").font(.system(size: 32))
                         }
                         .buttonStyle(.plain)
-                        .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(!canSendReply)
                         .accessibilityLabel("Send reply")
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
+                    }
                     .background(.bar)
                 }
             }
         }
+    }
+
+    private var canSendReply: Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && thread.replyLengthProblem(for: draft) == nil
     }
 }
 
