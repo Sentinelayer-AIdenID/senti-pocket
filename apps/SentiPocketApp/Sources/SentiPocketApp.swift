@@ -160,6 +160,8 @@ private struct AuthenticatedRootView: View {
     @ObservedObject private var whisperModelCoordinator: WhisperModelProvisioningCoordinator
     @State private var selectedTab: PocketTab = .sessions
     @State private var presentsSettings = false
+    @State private var roomPath: [RoomRoute] = []
+    private let roomTransport: any RoomTransport
     private let authenticationRevision: UInt64
     private let onSignOut: @MainActor () -> Void
 
@@ -177,6 +179,7 @@ private struct AuthenticatedRootView: View {
         let transport = HTTPSessionTransport(
             apiBaseURL: apiURL,
             urlSession: SentiHTTPTransportPolicy.liveSession,
+            streamingSession: SentiHTTPTransportPolicy.roomStreamSession,
             tokenProvider: { SessionTokenStore.load() }
         )
         let checkpointTransport = HTTPCheckpointTransport(
@@ -239,6 +242,7 @@ private struct AuthenticatedRootView: View {
         _checkpointNarrationRevocation = StateObject(wrappedValue: checkpointNarrationRevocation)
         _revocationRelay = StateObject(wrappedValue: revocationRelay)
         _whisperModelCoordinator = ObservedObject(wrappedValue: whisperModelCoordinator)
+        self.roomTransport = transport
         self.authenticationRevision = authenticationEpoch
         self.onSignOut = onSignOut
     }
@@ -247,13 +251,24 @@ private struct AuthenticatedRootView: View {
         AppShell(
             selection: $selectedTab,
             sessions: {
-                NavigationStack {
+                NavigationStack(path: $roomPath) {
                     SessionListView(state: sessions.state) { intent in
                         sessions.send(intent)
                         if case .selectSession(let sessionId) = intent,
                            UTF8ExactIdentity.matches(sessions.selectedSessionId, sessionId) {
-                            selectedTab = .pocket
+                            // Tapping a room opens its live chat; the Pocket and Activity tabs follow the selection.
+                            let title = sessions.state.rows.first {
+                                UTF8ExactIdentity.matches($0.sessionId, sessionId)
+                            }?.title ?? "Room"
+                            roomPath = [RoomRoute(sessionId: sessionId, title: title)]
                         }
+                    }
+                    .navigationDestination(for: RoomRoute.self) { route in
+                        RoomChatScreen(
+                            route: route,
+                            transport: roomTransport,
+                            onReauthenticationRequired: invalidateProtectedAuthentication
+                        )
                     }
                     .toolbar {
                         ToolbarItem(placement: .navigationBarTrailing) {
