@@ -97,7 +97,11 @@ struct SentiPocketApp: App {
 
     @ViewBuilder private var rootView: some View {
         #if DEBUG
-        RootAppView(model: model, whisperModelCoordinator: whisperModel)
+        if RoomPreview.isRequested {
+            RoomPreview.rootView
+        } else {
+            RootAppView(model: model, whisperModelCoordinator: whisperModel)
+        }
         #else
         // WARDEN gate #1 (322268): the authed surfaces are unreachable until a REAL token is stored.
         if signIn.isAuthenticated {
