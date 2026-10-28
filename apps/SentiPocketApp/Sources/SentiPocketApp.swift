@@ -182,7 +182,7 @@ private struct AuthenticatedRootView: View {
         let apiURL = GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_API_URL", "SENTI_GATEWAY_URL"])
         let transport = HTTPSessionTransport(
             apiBaseURL: apiURL,
-            urlSession: SentiHTTPTransportPolicy.liveSession,
+            urlSession: SentiHTTPTransportPolicy.protectedReadSession,
             streamingSession: SentiHTTPTransportPolicy.roomStreamSession,
             tokenProvider: { SessionTokenStore.load() }
         )

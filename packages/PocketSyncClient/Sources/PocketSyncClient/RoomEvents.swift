@@ -259,8 +259,11 @@ public struct RoomTimeline: Equatable, Sendable {
     private func indexOfSameMessage(as message: RoomMessage) -> Int? {
         if let bySequence = index(ofSequence: message.sequenceId) { return bySequence }
         if let byId = messages.firstIndex(where: { $0.id == message.id }) { return byId }
+        // A client id is only unique per author: another author's message with the same id is a different row.
         if let clientId = message.clientMessageId,
-           let byClient = messages.firstIndex(where: { $0.clientMessageId == clientId }) {
+           let byClient = messages.firstIndex(where: {
+               $0.clientMessageId == clientId && $0.authorId.lowercased() == message.authorId.lowercased()
+           }) {
             return byClient
         }
         return nil

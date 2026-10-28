@@ -142,6 +142,14 @@ final class RoomEventsTests: XCTestCase {
         XCTAssertEqual(timeline.oldestSequence, 10)
     }
 
+    func test_a_client_message_id_only_matches_the_same_author() {
+        var timeline = RoomTimeline()
+        timeline.merge([message(40, author: "human-alex", clientId: "hm_x")])
+        let other = timeline.merge([message(41, id: "other", author: "human-sam", clientId: "hm_x")])
+        XCTAssertEqual(other.inserted.map(\.sequenceId), [41], "another author's row with the same client id is a new message")
+        XCTAssertEqual(timeline.messages.map(\.authorId), ["human-alex", "human-sam"])
+    }
+
     func test_timeline_replaces_a_body_only_on_a_strictly_higher_revision() {
         var timeline = RoomTimeline()
         timeline.merge([message(5, text: "v2", revision: 2)])
