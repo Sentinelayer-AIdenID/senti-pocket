@@ -193,6 +193,7 @@ public struct RoomChatView: View {
                 canReact: state.canReact,
                 canReply: state.composer.canPost,
                 breakouts: state.breakouts,
+                attachmentPreviews: state.attachmentPreviews,
                 onOpenReplyTarget: { jump(to: $0, proxy: proxy) },
                 send: send
             )
@@ -345,6 +346,7 @@ private struct RoomMessageRowView: View {
     var canReact = false
     var canReply = false
     var breakouts: [String: RoomBreakoutCard] = [:]
+    var attachmentPreviews: [String: Data] = [:]
     let onOpenReplyTarget: (Int64) -> Void
     var send: (RoomChatIntent) -> Void = { _ in }
 
@@ -427,6 +429,9 @@ private struct RoomMessageRowView: View {
             ChatMarkdownView(text: row.text, ownHandles: ownHandles)
                 .font(.body)
                 .foregroundStyle(PocketPalette.textPrimary)
+            if !row.attachments.isEmpty {
+                RoomAttachmentsView(chips: row.attachments, previews: attachmentPreviews, send: send)
+            }
             if row.isEdited {
                 Text("edited")
                     .font(.caption2)

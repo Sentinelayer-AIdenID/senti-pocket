@@ -27,6 +27,7 @@ public struct RoomChatMessageInput: Equatable, Sendable {
     /// Parsed `timestamp`. Callers that render many rows pass a cached value; otherwise it is parsed here.
     public let date: Date?
     public let reactions: RoomChatReactions?
+    public let attachments: [RoomAttachmentChip]
 
     public init(
         id: String,
@@ -40,7 +41,8 @@ public struct RoomChatMessageInput: Equatable, Sendable {
         replyToSequenceId: Int64? = nil,
         isEdited: Bool = false,
         date: Date? = nil,
-        reactions: RoomChatReactions? = nil
+        reactions: RoomChatReactions? = nil,
+        attachments: [RoomAttachmentChip] = []
     ) {
         self.id = id
         self.sequenceId = sequenceId
@@ -54,6 +56,7 @@ public struct RoomChatMessageInput: Equatable, Sendable {
         self.isEdited = isEdited
         self.date = date ?? ParsedSessionTimestamp(timestamp).date
         self.reactions = reactions
+        self.attachments = attachments
     }
 }
 
@@ -177,6 +180,7 @@ public struct RoomChatMessageRow: Equatable, Identifiable, Sendable {
     /// False when this row continues a run by the same author within a few minutes, so the name is not repeated.
     public let showsHeader: Bool
     public let reactions: RoomChatReactions?
+    public let attachments: [RoomAttachmentChip]
 }
 
 public enum RoomChatRow: Equatable, Identifiable, Sendable {
@@ -366,6 +370,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     public let mentionCandidates: [MentionCandidate]
     /// Breakout cards by child room id, as this viewer may see them.
     public let breakouts: [String: RoomBreakoutCard]
+    /// Small image previews by attachment id, loaded as their messages come into view.
+    public let attachmentPreviews: [String: Data]
 
     /// Same-author rows closer together than this share one header.
     public static let groupingWindow: TimeInterval = 5 * 60
@@ -391,6 +397,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         focusSequenceId: Int64? = nil,
         mentionCandidates: [MentionCandidate] = [],
         breakouts: [String: RoomBreakoutCard] = [:],
+        attachmentPreviews: [String: Data] = [:],
         calendar: Calendar = .current
     ) {
         self.sessionId = sessionId
@@ -411,6 +418,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         self.focusSequenceId = protectedFailure ? nil : focusSequenceId
         self.mentionCandidates = protectedFailure ? [] : mentionCandidates
         self.breakouts = protectedFailure ? [:] : breakouts
+        self.attachmentPreviews = protectedFailure ? [:] : attachmentPreviews
 
         // Protected content never renders beside an auth or access failure.
         guard failure?.suppressesProtectedContent != true else {
@@ -465,7 +473,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 replyToSequenceId: input.replyToSequenceId,
                 isEdited: input.isEdited,
                 showsHeader: !continuesRun,
-                reactions: input.reactions.flatMap { $0.isEmpty ? nil : $0 }
+                reactions: input.reactions.flatMap { $0.isEmpty ? nil : $0 },
+                attachments: input.attachments
             )))
             if input.kind == .message, let date = input.date {
                 run = (input.authorId, date)
@@ -549,6 +558,10 @@ public enum RoomChatIntent: Equatable, Sendable {
     case focusHandled
     /// Open a breakout started from this room (the screen navigates; the room keeps running).
     case openBreakout(childSessionId: String)
+    /// Open a file attached to a message, full size.
+    case openAttachment(attachmentId: String)
+    /// An image attachment came into view: load its small preview if it has none.
+    case attachmentAppeared(attachmentId: String)
 }
 
 /// A request to put a failed message's text back into the composer. Each request is distinct, so editing the same

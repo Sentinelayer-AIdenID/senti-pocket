@@ -33,6 +33,9 @@ struct RoomChatScreen: View {
     @State private var showsTickets = false
     @State private var showsAdmissions = false
     @State private var showsBreakouts = false
+    @State private var attachmentPreview: AttachmentPreviewItem?
+    @State private var attachmentProblem: String?
+    @State private var openingAttachment = false
     @State private var linkedTicket: LinkedTicket?
     @State private var appliedRouteLinks = false
     private let route: RoomRoute
@@ -55,6 +58,7 @@ struct RoomChatScreen: View {
         admissionDecider: (any AdmissionDeciding)? = nil,
         openRoom: @escaping @MainActor (SentiLink) -> Void = { _ in },
         openChildRoom: @escaping @MainActor (RoomRoute) -> Void = { _ in },
+        attachmentFetcher: any AttachmentFileFetching = URLSessionAttachmentFetcher(),
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.route = route
@@ -75,6 +79,7 @@ struct RoomChatScreen: View {
             identity: identity,
             membershipRole: route.membershipRole,
             focusSequenceId: route.focusSequenceId,
+            attachmentFetcher: attachmentFetcher,
             onReauthenticationRequired: onReauthenticationRequired
         ))
     }
@@ -106,6 +111,8 @@ struct RoomChatScreen: View {
         RoomChatView(state: coordinator.state) { intent in
             if case .openBreakout(let childSessionId) = intent {
                 openBreakout(childSessionId)
+            } else if case .openAttachment(let attachmentId) = intent {
+                openAttachment(attachmentId)
             } else {
                 coordinator.send(intent)
             }
@@ -171,6 +178,18 @@ struct RoomChatScreen: View {
                 openBreakout(childSessionId)
             }
         }
+        .sheet(item: $attachmentPreview) { item in
+            AttachmentQuickLook(url: item.url)
+                .ignoresSafeArea()
+        }
+        .alert("Couldn't open the file", isPresented: Binding(
+            get: { attachmentProblem != nil },
+            set: { if !$0 { attachmentProblem = nil } }
+        )) {
+            Button("OK", role: .cancel) { attachmentProblem = nil }
+        } message: {
+            Text(attachmentProblem ?? "")
+        }
         .sheet(item: $linkedTicket) { linked in
             if let ticketsTransport {
                 RoomTicketLinkScreen(
@@ -207,6 +226,24 @@ struct RoomChatScreen: View {
             linkedTicket = LinkedTicket(id: ticketId)
         } else if route.opensAdmissions, decidesAdmissions {
             showsAdmissions = true
+        }
+    }
+
+    /// Downloads the file and shows it full size; one open at a time.
+    private func openAttachment(_ attachmentId: String) {
+        guard !openingAttachment else { return }
+        openingAttachment = true
+        Task {
+            defer { openingAttachment = false }
+            do {
+                attachmentPreview = AttachmentPreviewItem(url: try await coordinator.prepareAttachment(attachmentId))
+            } catch AttachmentFetchError.tooLarge {
+                attachmentProblem = "This file is too large to open on the phone."
+            } catch let error as SessionTransportError where error == .accessDenied {
+                attachmentProblem = "You no longer have access to this file."
+            } catch {
+                attachmentProblem = "Check your connection and try again. If it keeps failing, the file may still be processing."
+            }
         }
     }
 
