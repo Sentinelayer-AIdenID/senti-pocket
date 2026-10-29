@@ -35,12 +35,14 @@ ALLOWED_USE_CODEX_LINE = 'use_codex: "false"'
 ALLOWED_CODEX_ONLY_LINE = 'codex_only: "false"'
 ALLOWED_FAILURE_POLICY_LINE = "llm_failure_policy: block"
 # One retry, and only this shape: after a billing or quota 429 the same action, model and contract run again on
-# its backup endpoint. The key and the endpoint are secrets, so neither is ever printed in a log.
+# its backup endpoint. The dispatch drill and the org's Azure route (vars.OMAR_ROUTE is azure) skip the first
+# attempt and run only that one. The key and the endpoint are secrets, so neither is ever printed in a log.
 ALLOWED_RETRY_API_KEY_LINE = "openai_api_key: ${{ secrets.AZURE_SOL61_API_KEY }}"
 ALLOWED_RETRY_BASE_URL_LINE = "OPENAI_BASE_URL: ${{ secrets.AZURE_SOL61_BASE_URL }}"
 FIRST_ATTEMPT_IF_LINE = (
-    "if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.quota_retry_drill) }}"
+    "if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.quota_retry_drill) && vars.OMAR_ROUTE != 'azure' }}"
 )
+CLASSIFY_ROUTE_LINE = "ROUTE: ${{ vars.OMAR_ROUTE || '' }}"
 RETRY_IF_LINE = "if: ${{ steps.classify.outputs.retry == 'true' }}"
 CONTINUE_ON_ERROR_LINE = "continue-on-error: true"
 RESOLVE_FAIL_CLOSED_LINES = (
@@ -126,7 +128,8 @@ def _direct_sol_configured(omar_job_lines: list[str]) -> bool:
         return False
     if ALLOWED_RETRY_API_KEY_LINE in _nested_lines(first, "with:") or _nested_lines(first, "env:"):
         return False
-    # The retry: only after a classified billing or quota 429 (or the dispatch drill), and its failure fails the job.
+    # The retry: only after a classified billing or quota 429 (or the dispatch drill, or the org's Azure route), and
+    # its failure fails the job.
     if not {"id: omar_retry", RETRY_IF_LINE} <= retry_keys or CONTINUE_ON_ERROR_LINE in retry_keys:
         return False
     if not COMMON_ACTION_INPUT_LINES | {ALLOWED_RETRY_API_KEY_LINE} <= _nested_lines(retry, "with:"):
@@ -420,6 +423,8 @@ def validate_omar_workflow_text(workflow_text: str) -> None:
         "python3 .github/scripts/omar_quota_failure.py --self-test",
         "quota_retry_drill:",
         "Classify Omar provider failure",
+        CLASSIFY_ROUTE_LINE,
+        "reason=azure_route",
         "DRILL: ${{ github.event_name == 'workflow_dispatch' && inputs.quota_retry_drill && 'true' || 'false' }}",
         'python3 .github/scripts/omar_quota_failure.py "${findings}"',
         "reason=billing_quota_429",
@@ -500,7 +505,7 @@ jobs:
           echo "OPENAI_API_KEY is required for repo-owned Omar LLM scans."
       - name: Omar Gate
         id: omar
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.quota_retry_drill) }}
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.quota_retry_drill) && vars.OMAR_ROUTE != 'azure' }}
         continue-on-error: true
         uses: mrrCarter/sentinelayer-v1-action@2d5a8edd485595148254926c9fb318e0adae416a
         with:
@@ -517,10 +522,12 @@ jobs:
       - name: Classify Omar provider failure
         id: classify
         env:
+          ROUTE: ${{ vars.OMAR_ROUTE || '' }}
           DRILL: ${{ github.event_name == 'workflow_dispatch' && inputs.quota_retry_drill && 'true' || 'false' }}
           FIRST_FAILURE_CLASS: ${{ steps.omar.outputs.llm_failure_class || '' }}
         run: |
           echo "quota_retry_drill:"
+          reason=azure_route
           python3 .github/scripts/omar_quota_failure.py "${findings}"
           reason=billing_quota_429
       - name: Validate the quota retry route
@@ -732,6 +739,10 @@ def _run_retry_self_tests(valid: str) -> None:
         "a drill switch any event can set": valid.replace(
             FIRST_ATTEMPT_IF_LINE, "if: ${{ !inputs.quota_retry_drill }}", 1
         ),
+        "a first attempt the org route does not skip": valid.replace(
+            FIRST_ATTEMPT_IF_LINE, "if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.quota_retry_drill) }}", 1
+        ),
+        "an org route the classifier does not read": valid.replace("          " + CLASSIFY_ROUTE_LINE + "\n", "", 1),
         "a later step that ignores its own failure": valid.replace(
             "      - name: Assert Omar LLM contract is active\n",
             "      - name: Assert Omar LLM contract is active\n        continue-on-error: true\n",
