@@ -88,17 +88,27 @@ public protocol SessionTransport: Sendable {
 public final class HTTPSessionTransport: SessionTransport, @unchecked Sendable {
     private let apiBaseURL: URL?
     private let urlSession: URLSession
+    private let streamingURLSession: URLSession
     private let tokenProvider: @Sendable () -> String?
 
+    /// `streamingSession` carries the long-lived room stream. It needs a long resource timeout (the server keeps a
+    /// stream open for hours) and an idle timeout above the server's 15-second keep-alive ticks; it defaults to
+    /// `urlSession` for tests.
     public init(
         apiBaseURL: URL?,
         urlSession: URLSession,
+        streamingSession: URLSession? = nil,
         tokenProvider: @escaping @Sendable () -> String?
     ) {
         self.apiBaseURL = Self.validOrigin(apiBaseURL)
         self.urlSession = urlSession
+        self.streamingURLSession = streamingSession ?? urlSession
         self.tokenProvider = tokenProvider
     }
+
+    var streamingSession: URLSession { streamingURLSession }
+
+    func currentToken() -> String? { tokenProvider() }
 
     public func listSessions(
         includeArchived: Bool = false,
@@ -195,12 +205,55 @@ public final class HTTPSessionTransport: SessionTransport, @unchecked Sendable {
         )
     }
 
-    private func get<Response: Decodable>(
-        _ responseType: Response.Type,
+    /// Room page: `GET /events/before`, newest first on the wire, decoded row by row. `displayOnly` asks the server
+    /// to skip control rows, as the web does, so a page is mostly chat.
+    public func roomEventsBefore(
+        sessionId: String,
+        beforeSequence: Int64? = nil,
+        limit: Int = 100
+    ) async throws -> RoomEventPage {
+        try Self.requireIdentifier(sessionId)
+        try Self.requireLimit(limit, allowed: 1...200)
+        if let beforeSequence, beforeSequence < 1 { throw SessionTransportError.invalidRequest }
+        return try await get(
+            RoomEventPage.self,
+            path: ["api", "v1", "sessions", sessionId, "events", "before"],
+            query: [
+                beforeSequence.map { URLQueryItem(name: "beforeSequence", value: String($0)) },
+                URLQueryItem(name: "displayOnly", value: "true"),
+                URLQueryItem(name: "limit", value: String(limit))
+            ].compactMap { $0 }
+        )
+    }
+
+    /// Room catch-up: `GET /events?fromSequence=` returns rows after `fromSequence`, oldest first. This is the
+    /// safety poll behind the stream and the resume path after the app returns to the foreground.
+    public func roomEventsAfter(
+        sessionId: String,
+        fromSequence: Int64,
+        limit: Int = 200
+    ) async throws -> RoomEventPage {
+        try Self.requireIdentifier(sessionId)
+        try Self.requireLimit(limit, allowed: 1...200)
+        guard fromSequence >= 0 else { throw SessionTransportError.invalidRequest }
+        return try await get(
+            RoomEventPage.self,
+            path: ["api", "v1", "sessions", sessionId, "events"],
+            query: [
+                URLQueryItem(name: "fromSequence", value: String(fromSequence)),
+                URLQueryItem(name: "limit", value: String(limit))
+            ]
+        )
+    }
+
+    /// Builds a bearer-authorized request for `path`, validating the token shape and the configured origin.
+    /// Returns the token so the caller can detect a sign-out or account switch while the request is in flight.
+    func authorizedRequest(
         path: [String],
         query: [URLQueryItem],
-        hideNotFound: Bool = true
-    ) async throws -> Response {
+        accept: String = "application/json",
+        timeout: TimeInterval? = nil
+    ) throws -> (URLRequest, String) {
         guard let apiBaseURL else { throw SessionTransportError.notConfigured }
         guard let token = tokenProvider(), !token.isEmpty else {
             throw SessionTransportError.notLoggedIn
@@ -212,8 +265,19 @@ public final class HTTPSessionTransport: SessionTransport, @unchecked Sendable {
         let url = try Self.makeURL(baseURL: apiBaseURL, path: path, query: query)
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue(accept, forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        if let timeout { request.timeoutInterval = timeout }
+        return (request, token)
+    }
+
+    private func get<Response: Decodable>(
+        _ responseType: Response.Type,
+        path: [String],
+        query: [URLQueryItem],
+        hideNotFound: Bool = true
+    ) async throws -> Response {
+        let (request, token) = try authorizedRequest(path: path, query: query)
 
         let data: Data
         let response: URLResponse
@@ -316,7 +380,7 @@ public final class HTTPSessionTransport: SessionTransport, @unchecked Sendable {
         return url
     }
 
-    private static func requireIdentifier(_ value: String) throws {
+    static func requireIdentifier(_ value: String) throws {
         guard SessionIdentifier.isValid(value) else {
             throw SessionTransportError.invalidRequest
         }
@@ -330,7 +394,7 @@ public final class HTTPSessionTransport: SessionTransport, @unchecked Sendable {
         }
     }
 
-    private static func requireLimit(_ value: Int, allowed: ClosedRange<Int>) throws {
+    static func requireLimit(_ value: Int, allowed: ClosedRange<Int>) throws {
         guard allowed.contains(value) else { throw SessionTransportError.invalidRequest }
     }
 }

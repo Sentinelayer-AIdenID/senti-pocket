@@ -10,6 +10,40 @@ enum SentiHTTPTransportPolicy {
     static let resourceTimeout: TimeInterval = 60
     static let liveSession = URLSession(configuration: makeConfiguration())
     static let checkpointSession = URLSession(configuration: makeCheckpointConfiguration())
+    static let roomStreamSession = URLSession(configuration: makeRoomStreamConfiguration())
+    static let protectedReadSession = URLSession(configuration: makeProtectedReadConfiguration())
+
+    /// Reads of protected room data (sessions, room events, reactions, tickets): the live deadlines, but no URL
+    /// cache, cookies or credential store, so room content never lands in Foundation's disk cache. The bearer is
+    /// attached per request.
+    static func makeProtectedReadConfiguration() -> URLSessionConfiguration {
+        precondition(resourceTimeout >= requestTimeout)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = requestTimeout
+        configuration.timeoutIntervalForResource = resourceTimeout
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
+        configuration.httpShouldSetCookies = false
+        configuration.httpCookieStorage = nil
+        configuration.urlCredentialStorage = nil
+        return configuration
+    }
+
+    /// The live room stream stays open for a long time, so it gets its own session: the idle deadline sits above
+    /// the server's 15-second keep-alive ticks, and the resource deadline lets one connection run for two hours
+    /// before the room coordinator reconnects. Like the checkpoint session it keeps no cache, cookies or
+    /// credentials; the bearer is attached per request.
+    static func makeRoomStreamConfiguration() -> URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 45
+        configuration.timeoutIntervalForResource = 2 * 60 * 60
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
+        configuration.httpShouldSetCookies = false
+        configuration.httpCookieStorage = nil
+        configuration.urlCredentialStorage = nil
+        return configuration
+    }
 
     static func makeConfiguration() -> URLSessionConfiguration {
         precondition(resourceTimeout >= requestTimeout)

@@ -150,6 +150,58 @@ final class SessionHTTPTransportTests: XCTestCase {
         XCTAssertEqual(queries[3], ["limit": "120"])
     }
 
+    func test_room_reads_use_the_web_query_names_and_decode_row_by_row() async throws {
+        let transport = makeTransport { request in
+            let body: String
+            switch request.url!.path {
+            case "/api/v1/sessions/room_1/events/before":
+                body = """
+                {"events":[{"id":"e2","event":"session_message","sequenceId":20,"agentId":"a","payload":{"message":"b"}},
+                {"id":"bad","event":"session_message","payload":{"message":"no sequence"}}],
+                "count":2,"next_before_sequence":20,"has_more":true,"partial":false}
+                """
+            default:
+                body = #"{"events":[{"id":"e3","event":"session_message","sequenceId":21,"agentId":"a","payload":{"message":"c"}}]}"#
+            }
+            return (self.http(request, status: 200), Data(body.utf8))
+        }
+
+        let older = try await transport.roomEventsBefore(sessionId: "room_1", beforeSequence: 25, limit: 100)
+        let newer = try await transport.roomEventsAfter(sessionId: "room_1", fromSequence: 20, limit: 200)
+
+        XCTAssertEqual(older.messages.map(\.sequenceId), [20])
+        XCTAssertEqual(older.undecodableCount, 1)
+        XCTAssertEqual(newer.messages.map(\.sequenceId), [21])
+        let requests = SessionTransportURLProtocol.capturedRequests()
+        let queries = requests.map {
+            Dictionary(uniqueKeysWithValues: (URLComponents(
+                url: $0.url!,
+                resolvingAgainstBaseURL: false
+            )?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+        }
+        XCTAssertEqual(queries[0], ["beforeSequence": "25", "displayOnly": "true", "limit": "100"])
+        XCTAssertEqual(queries[1], ["fromSequence": "20", "limit": "200"])
+        XCTAssertEqual(requests[1].value(forHTTPHeaderField: "Authorization"), "Bearer session-token")
+    }
+
+    func test_room_reads_reject_out_of_range_inputs_before_the_network() async {
+        let transport = makeTransport { request in (self.http(request, status: 200), Data("{}".utf8)) }
+        for call in [
+            { try await transport.roomEventsBefore(sessionId: "room_1", beforeSequence: 0, limit: 10) },
+            { try await transport.roomEventsBefore(sessionId: "room_1", beforeSequence: nil, limit: 201) },
+            { try await transport.roomEventsAfter(sessionId: "../x", fromSequence: 1, limit: 10) },
+            { try await transport.roomEventsAfter(sessionId: "room_1", fromSequence: -1, limit: 10) }
+        ] as [() async throws -> RoomEventPage] {
+            do {
+                _ = try await call()
+                XCTFail("expected invalidRequest")
+            } catch {
+                XCTAssertEqual(error as? SessionTransportError, .invalidRequest)
+            }
+        }
+        XCTAssertTrue(SessionTransportURLProtocol.capturedRequests().isEmpty)
+    }
+
     func test_missing_or_invalid_configuration_fails_before_token_and_network() async {
         let invalidOrigins: [URL?] = [
             nil,
