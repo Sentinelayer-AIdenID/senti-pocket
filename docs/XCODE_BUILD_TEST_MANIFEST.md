@@ -12,9 +12,11 @@ Everything below this block is retained as historical lane evidence; where it co
 - Held PR #123 (`efdb431c7b7ce4b543fa3451e9c62df7c6e5eb71`) is phone/demo evidence only. Do not merge it: it contains obsolete
   gateway paths. Publish and build the clean iOS-only foundation from `master`, then the Registry V2 authority PR stacked
   on that foundation. Record `git rev-parse HEAD` and `git status --short` with every result.
-- Preserve `com.plexaura.sentipocket.app`, Swift 5.9, automatic signing, tracked entitlements, Debug development/Release
-  production APNs environments, `audio` + `voip`, the UI-test target, and `scripts/ios/archive_ipa.sh`. Change the bundle
-  ID only to an explicitly registered Push-enabled App ID, with the APNs topic/provider/profile changed in the same atom.
+- Preserve `com.plexaura.sentipocket.app`, Swift 5.9, automatic signing, tracked entitlements, `audio` + `voip`, the
+  UI-test target, and `scripts/ios/archive_ipa.sh`. Debug defaults to development and Release defaults to production in
+  unsigned build settings, but the signed export method/profile is authoritative for the final APNs environment. Change
+  the bundle ID only to an explicitly registered Push-enabled App ID, with the APNs topic/provider/profile changed in
+  the same atom.
 
 Mac build/test gate:
 
@@ -44,7 +46,7 @@ confirmation, durable post-confirm outcomes, and sign-out ordering (local author
 
 Phone gate after simulator green:
 
-1. Run `scripts/ios/archive_ipa.sh` from a clean exact commit and retain `IPA_MANIFEST.txt`, provisioning receipt, Team ID,
+1. Run `scripts/ios/archive_ipa.sh` from a clean exact commit and retain `IPA_MANIFEST.json`, provisioning receipt, Team ID,
    bundle-qualified App ID, APNs environment, `audio`/`voip`, signature, and IPA hash evidence.
 2. Install on a registered physical iPhone and prove a real PushKit token plus genuine provider-sent VoIP push. A signed
    IPA or DEBUG-local ring does not prove APNs delivery.
@@ -117,6 +119,7 @@ _(each lane appends here)_
   - Confirm the Activity tab loads only the exact row selected from the authenticated Sessions allowlist; events/actions appear atomically; room checkpoints remain membership-authorized and never receive a signed-bundle badge; changing session or authentication epoch immediately clears the old content/navigation.
   - Simulator proof: `cd apps/SentiPocketApp && xcodegen generate && xcodebuild -project SentiPocketApp.xcodeproj -scheme SentiPocketApp -destination 'generic/platform=iOS Simulator' build`.
   - Signed development IPA proof: sign into the authorized Developer Program account in Xcode, then provide `SENTI_APPLE_TEAM_ID`, `SENTI_API_URL`, and `SENTI_GATEWAY_URL` to `scripts/ios/archive_ipa.sh`. Expected: one verified IPA plus `IPA_MANIFEST.txt`; signed `aps-environment=development`; Info.plist contains `audio` and `voip`; bundle ID equals the configured ID; `codesign --verify --deep --strict` and ZIP integrity both pass.
+  - **Superseding signed-device gate (2026-08-05; replaces the stale `eed910d` source instruction above and historical phone-gate/attribution bullets below that mention `IPA_MANIFEST.txt` or omit the UDID):** build a clean descendant of iOS PR #130 and also provide the exact private `SENTI_DEVICE_UDID` plus the actual deployed HTTPS API/gateway origins. Device-bound export must fail unless the decoded embedded profile contains that exact UDID and lists the app's extracted signing leaf in `DeveloperCertificates`; the device/OS remains the authority that verifies Apple's profile CMS trust chain. The sanitized result is `IPA_MANIFEST.json` with source/toolchain/profile/certificate/artifact hashes, per-run salted device commitment, and narrowly named registration/install command results. `SENTI_REGISTER_CONNECTED_DEVICE=1` is an explicit development-only Developer Program mutation; `SENTI_INSTALL_CONNECTED_DEVICE=1` is an explicit post-verification install. The IPA/xcarchive and retained private diagnostics are device-private and must never be uploaded to GitHub, Senti, or CI. Hosted CI separately requires LF/shell/plist tooling gates plus an unsigned Release `generic/platform=iOS` build; none of these claims launch, APNs delivery, or CallKit/audio proof.
   - Registry V2 app tests: run the complete `SentiPocketAppTests` target, including `DeviceRingBindingStoreTests`, `DeviceRingRegistrationClientTests`, `DeviceRingRegistrarTests`, `SentiCallDecodeTests`, and `DialHydrationTests`. Expected: Keychain identity/generation transitions compile; exact proof admits only the current unexpired binding; stale/partial/V1 pushes fail closed; a typed stale-generation 409 receives one forced retry; capacity/unknown conflicts never churn generations.
   - Registry V2 gateway parity: `cd services/pocket-gateway && node --test` → **525/525** on this Windows checkpoint. Re-run on the archive commit and require zero failures before device testing. The total includes V1/V2 full-principal isolation, pre-head capacity reservation, same-generation-fenced synchronous loser rollback, stale-unregister/activation races, concurrent last-slot ownership, global scoped-token claims, matching-V1 migration fencing, and injected crash/retry phases.
   - Signed-account attribution: the archive script must verify `com.apple.developer.team-identifier == SENTI_APPLE_TEAM_ID` and that `application-identifier` ends in the configured bundle ID (legacy accounts can use an App ID prefix distinct from Team ID); both values must appear in `IPA_MANIFEST.txt`. It must also decode `embedded.mobileprovision` and verify its expiry, team, application identifier, APNs entitlement, and export-method-specific device/profile class. This proves the exported app used the intended Developer Program team and a profile eligible for the requested channel without storing Apple credentials in the repository.

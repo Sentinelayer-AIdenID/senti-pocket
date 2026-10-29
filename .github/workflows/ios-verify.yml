@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
   push:
     paths:
+      - ".gitattributes"
       - ".github/workflows/ios-verify.yml"
       - "apps/SentiPocketApp/**"
       - "packages/PocketCall/**"
@@ -14,8 +15,10 @@ on:
       - "packages/PocketSyncClient/**"
       - "packages/PocketUI/**"
       - "packages/PocketVoice/**"
+      - "scripts/ios/**"
   pull_request:
     paths:
+      - ".gitattributes"
       - ".github/workflows/ios-verify.yml"
       - "apps/SentiPocketApp/**"
       - "packages/PocketCall/**"
@@ -26,6 +29,7 @@ on:
       - "packages/PocketSyncClient/**"
       - "packages/PocketUI/**"
       - "packages/PocketVoice/**"
+      - "scripts/ios/**"
 
 permissions:
   contents: read
@@ -43,8 +47,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - name: PocketContracts
+            path: packages/PocketContracts
           - name: PocketCall
             path: packages/PocketCall
+          - name: PocketReasoning
+            path: packages/PocketReasoning
+          - name: PocketUI
+            path: packages/PocketUI
           - name: PocketVoice
             path: packages/PocketVoice
           - name: PocketDialVoice
@@ -55,7 +65,11 @@ jobs:
           - name: PocketSyncClient
             path: packages/PocketSyncClient
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Verify source release inputs before tool execution
+        run: >-
+          python3 scripts/ios/verify_unsigned_release.py preflight
+          --repository-root "$GITHUB_WORKSPACE"
       - name: Show toolchain
         run: swift --version
       - name: Build and test package
@@ -68,22 +82,273 @@ jobs:
 
   hosted-app-tests:
     name: Hosted app build and tests
-    runs-on: macos-15
-    timeout-minutes: 45
+    # App Store Connect requires Xcode 26+ with the iOS 26+ SDK for uploads.
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      IOS_BUNDLE_ID: "com.plexaura.sentipocket.app"
+      IOS_MARKETING_VERSION: "0.1.0"
+      IOS_BUILD_NUMBER: "4242"
+      IOS_API_URL: "https://api.ci.invalid"
+      IOS_GATEWAY_URL: "https://gateway.ci.invalid"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Verify source release inputs before tool execution
+        run: >-
+          python3 scripts/ios/verify_unsigned_release.py preflight
+          --repository-root "$GITHUB_WORKSPACE"
+      - name: Validate and bind App Store submission toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          xcode_output="$(xcodebuild -version)"
+          developer_dir_input="$(xcode-select -p)"
+          sdk_version="$(xcrun --sdk iphoneos --show-sdk-version)"
+          sdk_path_input="$(xcrun --sdk iphoneos --show-sdk-path)"
+          developer_dir="$(cd "$developer_dir_input" && pwd -P)"
+          sdk_root="$(cd "$sdk_path_input" && pwd -P)"
+
+          printf '%s\n' "$xcode_output"
+          printf 'Selected developer directory: %s\n' "$developer_dir"
+          printf 'iPhoneOS SDK version: %s\n' "$sdk_version"
+          printf 'iPhoneOS SDK path: %s\n' "$sdk_root"
+
+          xcode_version="$(awk '$1 == "Xcode" { print $2; exit }' <<<"$xcode_output")"
+          if [[ ! "$xcode_version" =~ ^([0-9]+)(\.[0-9]+)*$ ]]; then
+            echo "Could not parse the selected Xcode version: $xcode_version" >&2
+            exit 1
+          fi
+          xcode_major="${BASH_REMATCH[1]}"
+
+          if [[ ! "$sdk_version" =~ ^([0-9]+)(\.[0-9]+)*$ ]]; then
+            echo "Could not parse the selected iPhoneOS SDK version: $sdk_version" >&2
+            exit 1
+          fi
+          sdk_major="${BASH_REMATCH[1]}"
+
+          if (( 10#$xcode_major < 26 || 10#$sdk_major < 26 )); then
+            echo "App Store submission proof requires Xcode 26+ and iPhoneOS SDK 26+" >&2
+            exit 1
+          fi
+
+          test -x "$developer_dir/usr/bin/xcodebuild"
+          case "$sdk_root" in
+            "$developer_dir"/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS*.sdk) ;;
+            *)
+              echo "iPhoneOS SDK is not owned by the selected Xcode developer directory" >&2
+              exit 1
+              ;;
+          esac
+          safe_xcode_path="$developer_dir/Toolchains/XcodeDefault.xctoolchain/usr/bin:$developer_dir/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+          printf 'DEVELOPER_DIR=%s\n' "$developer_dir" >>"$GITHUB_ENV"
+          printf 'IOS_SDK_ROOT=%s\n' "$sdk_root" >>"$GITHUB_ENV"
+          printf 'IOS_SDK_VERSION=%s\n' "$sdk_version" >>"$GITHUB_ENV"
+          printf 'SAFE_XCODE_PATH=%s\n' "$safe_xcode_path" >>"$GITHUB_ENV"
+      - name: Validate iOS release tooling
+        shell: bash
+        run: |
+          test -x scripts/ios/archive_ipa.sh
+          bash -n scripts/ios/archive_ipa.sh
+          bash scripts/ios/tests/archive_ipa_validation_test.sh
+          /usr/bin/plutil -lint apps/SentiPocketApp/ExportOptions.example.plist
+          /usr/bin/plutil -lint apps/SentiPocketApp/Sources/SentiPocketApp.entitlements
+          /usr/bin/plutil -lint apps/SentiPocketApp/Resources/PrivacyInfo.xcprivacy
+          for script in scripts/ios/archive_ipa.sh scripts/ios/tests/archive_ipa_validation_test.sh; do
+            test "$(git check-attr eol -- "$script")" = "$script: eol: lf"
+            if LC_ALL=C grep -n $'\r' "$script"; then
+              echo "$script contains CR bytes" >&2
+              exit 1
+            fi
+          done
+      - name: Run unsigned verifier synthetic tests
+        run: python3 scripts/ios/tests/verify_unsigned_release_test.py
       - name: Install XcodeGen
-        run: brew install xcodegen
+        # Pinned release, verified against its published SHA-256 before it runs (not an unversioned Homebrew
+        # formula), so the project generator is the same reviewed binary on every run.
+        env:
+          XCODEGEN_VERSION: "2.46.0"
+          XCODEGEN_SHA256: "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806"
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/xcodegen-$XCODEGEN_VERSION.zip"
+          url="https://github.com/yonaskolb/XcodeGen/releases/download/$XCODEGEN_VERSION/xcodegen.zip"
+          curl -fsSL --retry 3 -o "$archive" "$url"
+          echo "$XCODEGEN_SHA256  $archive" | shasum -a 256 -c -
+          unzip -q "$archive" -d "$RUNNER_TEMP/xcodegen-dist"
+          "$RUNNER_TEMP/xcodegen-dist/xcodegen/bin/xcodegen" --version | grep -F "$XCODEGEN_VERSION"
+          echo "$RUNNER_TEMP/xcodegen-dist/xcodegen/bin" >> "$GITHUB_PATH"
       - name: Generate project
         working-directory: apps/SentiPocketApp
         run: xcodegen generate
+      - name: Verify generated release project before Xcode resolution
+        run: >-
+          python3 scripts/ios/verify_unsigned_release.py source
+          --project-file apps/SentiPocketApp/SentiPocketApp.xcodeproj/project.pbxproj
+      - name: Validate generated Info.plist
+        run: /usr/bin/plutil -lint apps/SentiPocketApp/Sources/Info.plist
       - name: Resolve local packages
         run: >-
-          xcodebuild
+          env PATH="$SAFE_XCODE_PATH"
+          "$DEVELOPER_DIR/usr/bin/xcodebuild"
           -project apps/SentiPocketApp/SentiPocketApp.xcodeproj
-          -scheme SentiPocketApp
+          -scheme SentiPocketAppRelease
           -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages"
+          "ASSETCATALOG_EXEC=$DEVELOPER_DIR/usr/bin/actool"
+          CODESIGN=/usr/bin/codesign
+          "CODESIGN_ALLOCATE=$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/codesign_allocate"
+          COMPILATION_CACHE_ENABLE_PLUGIN=NO
+          COMPILATION_CACHE_PLUGIN_PATH=
+          SWIFT_ENABLE_COMPILE_CACHE=NO
+          ALL_OTHER_LDFLAGS=
+          ALTERNATE_LINKER=
+          ALTERNATE_LINKER_PATH=
+          CLANG_ALTERNATE_LINKER=
+          CLANG_ALTERNATE_LINKER_PATH=
+          LD_FLAGS=
+          PRODUCT_SPECIFIC_LDFLAGS=
+          SECTORDER_FLAGS=
+          SWIFTC_ALTERNATE_LINKER=
+          SWIFTC_ALTERNATE_LINKER_PATH=
+          "SWIFT_TOOLS_DIR=$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin"
+          SWIFT_TOOLCHAIN_FLAGS=
+          'SWIFT_RESPONSE_FILE_PATH=$(SWIFT_RESPONSE_FILE_PATH_$(variant)_$(arch))'
+          SWIFT_USE_INTEGRATED_DRIVER=YES
           -resolvePackageDependencies
+      - name: Capture and verify unsigned device build settings
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          capture_and_verify_settings() {
+            configuration="$1"
+            aps_environment="$2"
+            derived_data="$3"
+            settings_json="$4"
+
+            env PATH="$SAFE_XCODE_PATH" "$DEVELOPER_DIR/usr/bin/xcodebuild" -quiet \
+              -project apps/SentiPocketApp/SentiPocketApp.xcodeproj \
+              -scheme SentiPocketAppRelease \
+              -configuration "$configuration" \
+              -destination 'generic/platform=iOS' \
+              -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
+              -derivedDataPath "$derived_data" \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              DEVELOPMENT_TEAM= \
+              ONLY_ACTIVE_ARCH=NO \
+              "PRODUCT_BUNDLE_IDENTIFIER=$IOS_BUNDLE_ID" \
+              "MARKETING_VERSION=$IOS_MARKETING_VERSION" \
+              "CURRENT_PROJECT_VERSION=$IOS_BUILD_NUMBER" \
+              "SENTI_API_URL=$IOS_API_URL" \
+              "SENTI_GATEWAY_URL=$IOS_GATEWAY_URL" \
+              "PATH=$SAFE_XCODE_PATH" \
+              "SDKROOT=$IOS_SDK_ROOT" \
+              "ASSETCATALOG_EXEC=$DEVELOPER_DIR/usr/bin/actool" \
+              CODESIGN=/usr/bin/codesign \
+              "CODESIGN_ALLOCATE=$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/codesign_allocate" \
+              COMPILATION_CACHE_ENABLE_PLUGIN=NO \
+              COMPILATION_CACHE_PLUGIN_PATH= \
+              SWIFT_ENABLE_COMPILE_CACHE=NO \
+              ALL_OTHER_LDFLAGS= \
+              ALTERNATE_LINKER= \
+              ALTERNATE_LINKER_PATH= \
+              CLANG_ALTERNATE_LINKER= \
+              CLANG_ALTERNATE_LINKER_PATH= \
+              LD_FLAGS= \
+              PRODUCT_SPECIFIC_LDFLAGS= \
+              SECTORDER_FLAGS= \
+              SWIFTC_ALTERNATE_LINKER= \
+              SWIFTC_ALTERNATE_LINKER_PATH= \
+              "SWIFT_TOOLS_DIR=$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin" \
+              SWIFT_TOOLCHAIN_FLAGS= \
+              'SWIFT_RESPONSE_FILE_PATH=$(SWIFT_RESPONSE_FILE_PATH_$(variant)_$(arch))' \
+              SWIFT_USE_INTEGRATED_DRIVER=YES \
+              -showBuildSettings -json >"$settings_json"
+
+            python3 scripts/ios/verify_unsigned_release.py settings \
+              --settings-json "$settings_json" \
+              --project-file apps/SentiPocketApp/SentiPocketApp.xcodeproj/project.pbxproj \
+              --configuration "$configuration" \
+              --aps-environment "$aps_environment" \
+              --bundle-id "$IOS_BUNDLE_ID" \
+              --marketing-version "$IOS_MARKETING_VERSION" \
+              --build-number "$IOS_BUILD_NUMBER" \
+              --api-url "$IOS_API_URL" \
+              --gateway-url "$IOS_GATEWAY_URL" \
+              --products-root "$derived_data/Build/Products" \
+              --developer-dir "$DEVELOPER_DIR" \
+              --sdk-root "$IOS_SDK_ROOT" \
+              --sdk-version "$IOS_SDK_VERSION"
+          }
+
+          capture_and_verify_settings Debug development \
+            "$RUNNER_TEMP/DebugDeviceDerivedData" \
+            "$RUNNER_TEMP/SentiPocketApp-Debug-settings.json"
+          capture_and_verify_settings Release production \
+            "$RUNNER_TEMP/ReleaseDeviceDerivedData" \
+            "$RUNNER_TEMP/SentiPocketApp-Release-settings.json"
+      - name: Build unsigned Release device closure
+        shell: bash
+        run: >-
+          env PATH="$SAFE_XCODE_PATH"
+          "$DEVELOPER_DIR/usr/bin/xcodebuild"
+          -project apps/SentiPocketApp/SentiPocketApp.xcodeproj
+          -scheme SentiPocketAppRelease
+          -configuration Release
+          -destination 'generic/platform=iOS'
+          -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages"
+          -derivedDataPath "$RUNNER_TEMP/ReleaseDeviceDerivedData"
+          CODE_SIGNING_ALLOWED=NO
+          CODE_SIGNING_REQUIRED=NO
+          DEVELOPMENT_TEAM=
+          ONLY_ACTIVE_ARCH=NO
+          "PRODUCT_BUNDLE_IDENTIFIER=$IOS_BUNDLE_ID"
+          "MARKETING_VERSION=$IOS_MARKETING_VERSION"
+          "CURRENT_PROJECT_VERSION=$IOS_BUILD_NUMBER"
+          "SENTI_API_URL=$IOS_API_URL"
+          "SENTI_GATEWAY_URL=$IOS_GATEWAY_URL"
+          "PATH=$SAFE_XCODE_PATH"
+          "SDKROOT=$IOS_SDK_ROOT"
+          "ASSETCATALOG_EXEC=$DEVELOPER_DIR/usr/bin/actool"
+          CODESIGN=/usr/bin/codesign
+          "CODESIGN_ALLOCATE=$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/codesign_allocate"
+          COMPILATION_CACHE_ENABLE_PLUGIN=NO
+          COMPILATION_CACHE_PLUGIN_PATH=
+          SWIFT_ENABLE_COMPILE_CACHE=NO
+          ALL_OTHER_LDFLAGS=
+          ALTERNATE_LINKER=
+          ALTERNATE_LINKER_PATH=
+          CLANG_ALTERNATE_LINKER=
+          CLANG_ALTERNATE_LINKER_PATH=
+          LD_FLAGS=
+          PRODUCT_SPECIFIC_LDFLAGS=
+          SECTORDER_FLAGS=
+          SWIFTC_ALTERNATE_LINKER=
+          SWIFTC_ALTERNATE_LINKER_PATH=
+          "SWIFT_TOOLS_DIR=$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin"
+          SWIFT_TOOLCHAIN_FLAGS=
+          'SWIFT_RESPONSE_FILE_PATH=$(SWIFT_RESPONSE_FILE_PATH_$(variant)_$(arch))'
+          SWIFT_USE_INTEGRATED_DRIVER=YES
+          build
+      - name: Verify unsigned Release bundle
+        shell: bash
+        run: |
+          python3 scripts/ios/verify_unsigned_release.py bundle \
+            --settings-json "$RUNNER_TEMP/SentiPocketApp-Release-settings.json" \
+            --project-file apps/SentiPocketApp/SentiPocketApp.xcodeproj/project.pbxproj \
+            --source-privacy apps/SentiPocketApp/Resources/PrivacyInfo.xcprivacy \
+            --configuration Release \
+            --aps-environment production \
+            --bundle-id "$IOS_BUNDLE_ID" \
+            --marketing-version "$IOS_MARKETING_VERSION" \
+            --build-number "$IOS_BUILD_NUMBER" \
+            --api-url "$IOS_API_URL" \
+            --gateway-url "$IOS_GATEWAY_URL" \
+            --products-root "$RUNNER_TEMP/ReleaseDeviceDerivedData/Build/Products" \
+            --developer-dir "$DEVELOPER_DIR" \
+            --sdk-root "$IOS_SDK_ROOT" \
+            --sdk-version "$IOS_SDK_VERSION"
       - name: Build simulator closure
         run: >-
           xcodebuild
@@ -124,7 +389,7 @@ jobs:
           test
       - name: Upload XCTest result bundle
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874 # v4.4.0
         with:
           name: SentiPocketAppTests-xcresult
           path: ${{ runner.temp }}/SentiPocketAppTests.xcresult

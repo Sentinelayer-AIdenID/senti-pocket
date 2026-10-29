@@ -28,13 +28,32 @@ enum SessionDetailDestination: Hashable, Identifiable {
     case event(sequenceId: Int64, eventId: String)
     case action(actionId: String)
 
-    var id: String {
+    var id: UTF8ExactIdentity {
+        UTF8ExactIdentity(serializedIdentity)
+    }
+
+    private var serializedIdentity: String {
         switch self {
         case .event(let sequenceId, let eventId):
             return "event:\(sequenceId):\(eventId.utf8.count):\(eventId)"
         case .action(let actionId):
             return "action:\(actionId.utf8.count):\(actionId)"
         }
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        switch (lhs, rhs) {
+        case (.event(let lhsSequence, let lhsEvent), .event(let rhsSequence, let rhsEvent)):
+            return lhsSequence == rhsSequence && UTF8ExactIdentity.matches(lhsEvent, rhsEvent)
+        case (.action(let lhsAction), .action(let rhsAction)):
+            return UTF8ExactIdentity.matches(lhsAction, rhsAction)
+        default:
+            return false
+        }
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
     }
 }
 
@@ -56,6 +75,12 @@ final class SelectedSessionDetailCoordinator: ObservableObject {
         let authenticationRevision: UInt64
         let sessionId: String
         let requestRevision: UInt64
+
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.authenticationRevision == rhs.authenticationRevision
+                && UTF8ExactIdentity.matches(lhs.sessionId, rhs.sessionId)
+                && lhs.requestRevision == rhs.requestRevision
+        }
     }
 
     private struct ActivitySnapshot {
@@ -78,6 +103,7 @@ final class SelectedSessionDetailCoordinator: ObservableObject {
     private let clock: @Sendable () -> Date
     private let onReauthenticationRequired: @MainActor () -> Void
     private let onSelectionRevoked: @MainActor (String) -> Void
+    private let onOpenCheckpoint: @MainActor (ExactCheckpointTarget) -> Void
 
     private var authenticationRevision: UInt64?
     private var requestRevision: UInt64 = 0
@@ -92,12 +118,14 @@ final class SelectedSessionDetailCoordinator: ObservableObject {
         transport: any SessionTransport,
         clock: @escaping @Sendable () -> Date = { Date() },
         onReauthenticationRequired: @escaping @MainActor () -> Void = {},
-        onSelectionRevoked: @escaping @MainActor (String) -> Void = { _ in }
+        onSelectionRevoked: @escaping @MainActor (String) -> Void = { _ in },
+        onOpenCheckpoint: @escaping @MainActor (ExactCheckpointTarget) -> Void = { _ in }
     ) {
         self.transport = transport
         self.clock = clock
         self.onReauthenticationRequired = onReauthenticationRequired
         self.onSelectionRevoked = onSelectionRevoked
+        self.onOpenCheckpoint = onOpenCheckpoint
     }
 
     deinit {
@@ -117,7 +145,7 @@ final class SelectedSessionDetailCoordinator: ObservableObject {
         if sessionId == nil, selectedSessionId == nil {
             return nil
         }
-        guard selectedSessionId != sessionId
+        guard !UTF8ExactIdentity.matches(selectedSessionId, sessionId)
                 || self.authenticationRevision != authenticationRevision else {
             return nil
         }
@@ -159,29 +187,38 @@ final class SelectedSessionDetailCoordinator: ObservableObject {
     func send(_ intent: PocketProductIntent) {
         switch intent {
         case .refreshActivity(let sessionId):
-            guard sessionId == selectedSessionId else { return }
+            guard UTF8ExactIdentity.matches(selectedSessionId, sessionId) else { return }
             refreshActivity()
         case .refreshCheckpoints(let sessionId):
-            guard sessionId == selectedSessionId else { return }
+            guard UTF8ExactIdentity.matches(selectedSessionId, sessionId) else { return }
             refreshCheckpoints()
         case .openEvent(let sessionId, let sequenceId):
-            guard sessionId == selectedSessionId,
+            guard UTF8ExactIdentity.matches(selectedSessionId, sessionId),
                   let event = activityState?.events.first(where: {
-                      $0.sessionId == sessionId && $0.sequenceId == sequenceId
+                      UTF8ExactIdentity.matches($0.sessionId, sessionId)
+                          && $0.sequenceId == sequenceId
                   }) else { return }
             destination = .event(sequenceId: sequenceId, eventId: event.id.eventId)
         case .openAction(let sessionId, let actionId):
-            guard sessionId == selectedSessionId,
+            guard UTF8ExactIdentity.matches(selectedSessionId, sessionId),
                   activityState?.actions.contains(where: {
-                      $0.sessionId == sessionId && $0.id.actionId == actionId
+                      UTF8ExactIdentity.matches($0.sessionId, sessionId)
+                          && UTF8ExactIdentity.matches($0.id.actionId, actionId)
                   }) == true else { return }
             destination = .action(actionId: actionId)
         case .openCheckpoint(let sessionId, let checkpointId):
-            guard sessionId == selectedSessionId,
+            guard let authenticationRevision,
+                  let selectedSessionId,
+                  Self.byteExact(sessionId, selectedSessionId),
                   checkpointState?.rows.contains(where: {
-                      $0.sessionId == sessionId && $0.checkpointId == checkpointId
+                      Self.byteExact($0.sessionId, sessionId)
+                          && Self.byteExact($0.checkpointId, checkpointId)
                   }) == true else { return }
-            // Membership-authorized checkpoints never fall through to the signed-bundle Pocket path.
+            onOpenCheckpoint(ExactCheckpointTarget(
+                authenticationRevision: authenticationRevision,
+                sessionId: sessionId,
+                checkpointId: checkpointId
+            ))
         default:
             break
         }
@@ -193,12 +230,12 @@ final class SelectedSessionDetailCoordinator: ObservableObject {
 
     func event(sequenceId: Int64, eventId: String) -> SessionEventRowPresentation? {
         activityState?.events.first {
-            $0.sequenceId == sequenceId && $0.id.eventId == eventId
+            $0.sequenceId == sequenceId && UTF8ExactIdentity.matches($0.id.eventId, eventId)
         }
     }
 
     func action(actionId: String) -> SessionActionRowPresentation? {
-        activityState?.actions.first { $0.id.actionId == actionId }
+        activityState?.actions.first { UTF8ExactIdentity.matches($0.id.actionId, actionId) }
     }
 
     @discardableResult
@@ -507,13 +544,13 @@ final class SelectedSessionDetailCoordinator: ObservableObject {
         !Task.isCancelled
             && requestRevision == token.requestRevision
             && authenticationRevision == token.authenticationRevision
-            && selectedSessionId == token.sessionId
+            && UTF8ExactIdentity.matches(selectedSessionId, token.sessionId)
     }
 
     private func restoreAfterCallerCancellation(_ token: RequestToken) {
         guard requestRevision == token.requestRevision,
               authenticationRevision == token.authenticationRevision,
-              selectedSessionId == token.sessionId else { return }
+              UTF8ExactIdentity.matches(selectedSessionId, token.sessionId) else { return }
         cancelAndFence()
         if activityLoadState == .loading {
             restoreRetainedState(for: .activity)
@@ -584,5 +621,9 @@ final class SelectedSessionDetailCoordinator: ObservableObject {
             isRefreshing: isRefreshing,
             failure: failure
         )
+    }
+
+    private static func byteExact(_ lhs: String, _ rhs: String) -> Bool {
+        lhs.utf8.elementsEqual(rhs.utf8)
     }
 }
