@@ -1,0 +1,129 @@
+import Foundation
+import PocketSyncClient
+import PocketUI
+import XCTest
+@testable import SentiPocketApp
+
+private final class ScriptedSearch: RoomSearching, @unchecked Sendable {
+    private let lock = NSLock()
+    private var pages: [Result<RoomSearchPage, Error>]
+    /// Answers by query when set, so concurrent searches cannot swap their answers.
+    private let byQuery: [String: RoomSearchPage]
+    private var calls: [(query: String, before: Int64?)] = []
+    /// Holds each answer until released, so a test can make an older answer arrive late.
+    private let gate: Bool
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    init(_ pages: [Result<RoomSearchPage, Error>] = [], byQuery: [String: RoomSearchPage] = [:], gate: Bool = false) {
+        self.pages = pages
+        self.byQuery = byQuery
+        self.gate = gate
+    }
+
+    func searchRoom(sessionId: String, query: String, beforeSequence: Int64?, limit: Int) async throws -> RoomSearchPage {
+        let next: Result<RoomSearchPage, Error> = lock.withLock {
+            calls.append((query, beforeSequence))
+            if let page = byQuery[query] { return .success(page) }
+            return pages.isEmpty ? .success(RoomSearchPage(query: query)) : pages.removeFirst()
+        }
+        if gate { await withCheckedContinuation { continuation in lock.withLock { waiting.append(continuation) } } }
+        return try next.get()
+    }
+
+    /// Answers the newest search first, so the older answer arrives last: the one a model must not show.
+    func releaseNewestFirst() async {
+        let all: [CheckedContinuation<Void, Never>] = lock.withLock {
+            defer { waiting.removeAll() }
+            return waiting
+        }
+        for continuation in all.reversed() {
+            continuation.resume()
+            for _ in 0..<20 { await Task.yield() }
+        }
+    }
+
+    func recorded() -> [(query: String, before: Int64?)] {
+        lock.withLock { calls }
+    }
+
+    func waitingCount() -> Int {
+        lock.withLock { waiting.count }
+    }
+}
+
+@MainActor
+final class RoomSearchModelTests: XCTestCase {
+    private func result(_ seq: Int64, _ snippet: String) -> RoomSearchResult {
+        RoomSearchResult(sequenceId: seq, snippet: snippet, message: RoomMessage(
+            id: "e\(seq)", sequenceId: seq, kind: .message, authorId: "review-agent", authorName: "review-agent",
+            isHuman: false, text: snippet, timestamp: "2026-10-28T18:00:00Z"
+        ))
+    }
+
+    private func waitUntil(_ description: String, _ condition: @MainActor () -> Bool) async {
+        for _ in 0..<500 {
+            if condition() { return }
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+        XCTFail("timed out waiting for: \(description)")
+    }
+
+    func test_a_short_query_asks_for_more_and_sends_nothing() {
+        let search = ScriptedSearch([])
+        let model = RoomSearchModel(sessionId: "room_1", searcher: search, onReauthenticationRequired: {})
+        model.send(.submit(" a "))
+        XCTAssertEqual(model.state.message, "Type at least 2 characters.")
+        XCTAssertTrue(search.recorded().isEmpty)
+    }
+
+    func test_matches_come_newest_first_and_older_ones_load_on_demand_once_each() async {
+        let search = ScriptedSearch([
+            .success(RoomSearchPage(query: "paste", results: [result(52, "runs on paste"), result(47, "paste skips")], nextBeforeSequence: 47)),
+            .success(RoomSearchPage(query: "paste", results: [result(47, "paste skips"), result(12, "paste test")]))
+        ])
+        let model = RoomSearchModel(sessionId: "room_1", searcher: search, onReauthenticationRequired: {})
+        model.send(.submit("  paste "))
+        XCTAssertTrue(model.state.isSearching)
+        await waitUntil("first page") { model.state.rows.count == 2 }
+        XCTAssertEqual(model.state.query, "paste")
+        XCTAssertTrue(model.state.hasMore)
+        XCTAssertEqual(model.state.rows.first?.author, "review-agent")
+
+        model.send(.loadMore)
+        await waitUntil("second page") { model.state.rows.count == 3 }
+        XCTAssertEqual(model.state.rows.map(\.sequenceId), [52, 47, 12], "a match already listed is not repeated")
+        XCTAssertFalse(model.state.hasMore)
+        XCTAssertEqual(search.recorded().map(\.before), [nil, 47])
+    }
+
+    func test_a_newer_search_makes_an_older_answer_stale() async {
+        let search = ScriptedSearch(byQuery: [
+            "old": RoomSearchPage(query: "old", results: [result(9, "old match")]),
+            "new": RoomSearchPage(query: "new", results: [result(30, "new match")])
+        ], gate: true)
+        let model = RoomSearchModel(sessionId: "room_1", searcher: search, onReauthenticationRequired: {})
+        model.send(.submit("old"))
+        model.send(.submit("new"))
+        await waitUntil("both waiting") { search.waitingCount() == 2 }
+        await search.releaseNewestFirst()
+        await waitUntil("new results") { model.state.rows.map(\.sequenceId) == [30] }
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(model.state.rows.map(\.sequenceId), [30], "the old answer never replaces the new one")
+        XCTAssertEqual(model.state.query, "new")
+    }
+
+    func test_no_matches_and_a_failed_search_say_so() async {
+        let search = ScriptedSearch([
+            .success(RoomSearchPage(query: "zzz")),
+            .failure(SessionTransportError.reauthenticationRequired)
+        ])
+        var reauth = 0
+        let model = RoomSearchModel(sessionId: "room_1", searcher: search, onReauthenticationRequired: { reauth += 1 })
+        model.send(.submit("zzz"))
+        await waitUntil("no matches") { model.state.message?.hasPrefix("No messages match") == true }
+        model.send(.submit("again"))
+        await waitUntil("failure") { model.state.message?.hasPrefix("Search did not finish") == true }
+        XCTAssertEqual(reauth, 1, "an expired sign-in asks you to sign in again")
+    }
+}

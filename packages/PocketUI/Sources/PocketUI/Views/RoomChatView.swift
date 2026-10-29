@@ -64,7 +64,9 @@ public struct RoomChatView: View {
             // One item for the connection and who is here, so the room's title keeps as much room as it can.
             ToolbarItem(placement: .primaryAction) {
                 HStack(spacing: 10) {
-                    RoomConnectionPill(connection: state.connection)
+                    // Beside the presence count the pill is its dot alone, so the title menu keeps its room;
+                    // the word is still read aloud, and spelled out in the "who is here" sheet.
+                    RoomConnectionPill(connection: state.connection, compact: state.presence != nil)
                     if let presence = state.presence {
                         Button {
                             showsPresence = true
@@ -77,7 +79,6 @@ public struct RoomChatView: View {
                                     .monospacedDigit()
                             }
                         }
-                        .disabled(presence.people.isEmpty)
                         .accessibilityLabel(presence.label)
                         .accessibilityIdentifier("pocket.room.presence")
                     }
@@ -85,7 +86,7 @@ public struct RoomChatView: View {
             }
         }
         .sheet(isPresented: $showsPresence) {
-            RoomPresenceSheet(presence: state.presence)
+            RoomPresenceSheet(presence: state.presence, connection: state.connection)
         }
         .accessibilityIdentifier("pocket.room.screen")
         .pocketCanvas()
@@ -143,15 +144,16 @@ public struct RoomChatView: View {
             }
             .onAppear {
                 scrollToInitialPosition(proxy)
-                focusIfNeeded(proxy)
+                focus(onRow: focusRowId, proxy: proxy)
             }
-            .onChange(of: state.focusSequenceId) { _ in focusIfNeeded(proxy) }
+            // The new value carries what the action needs: an `onChange(of:perform:)` action can still see the
+            // view's previous `state`, where a focus set while the room is open is not there yet.
+            .onChange(of: focusRowId) { rowId in focus(onRow: rowId, proxy: proxy) }
             .onChange(of: state.focusFallbackCount) { _ in showLatest(proxy) }
             // At the bottom, stay at the bottom when rows above change size: an image preview loading, reactions
             // or a reply count arriving. A reader scrolled up is never moved.
             .onChange(of: state.rows) { _ in keepAtBottomIfThere(proxy) }
             .onChange(of: state.attachmentPreviews.count) { _ in keepAtBottomIfThere(proxy) }
-            .onChange(of: state.rows.count) { _ in focusIfNeeded(proxy) }
             .onChange(of: state.lastMessageId) { _ in
                 if !didInitialScroll {
                     scrollToInitialPosition(proxy)
@@ -302,7 +304,7 @@ public struct RoomChatView: View {
 
     private func scrollToInitialPosition(_ proxy: ScrollViewProxy) {
         guard !didInitialScroll, !state.isEmpty else { return }
-        // A room opened at a message (a link or notification) is positioned by `focusIfNeeded` instead.
+        // A room opened at a message (a link or notification) is positioned by `focus(onRow:proxy:)` instead.
         guard state.focusSequenceId == nil else { return }
         didInitialScroll = true
         // Say where the reader is now: the bottom marker may never render when the first scroll lands elsewhere,
@@ -338,24 +340,28 @@ public struct RoomChatView: View {
         }
     }
 
-    /// Brings the focused message into view once it is loaded, highlights it, and reports it handled.
-    private func focusIfNeeded(_ proxy: ScrollViewProxy) {
-        guard let focus = state.focusSequenceId else { return }
-        let target = state.rows.first { row in
+    /// The focused message's row once it is loaded; nil when nothing is focused or it has not loaded yet.
+    private var focusRowId: String? {
+        guard let focus = state.focusSequenceId else { return nil }
+        return state.rows.first { row in
             if case .message(let message) = row { return message.sequenceId == focus }
             return false
-        }
-        guard let target else { return }
+        }?.id
+    }
+
+    /// Brings the focused message's row into view, highlights it, and reports it handled.
+    private func focus(onRow rowId: String?, proxy: ScrollViewProxy) {
+        guard let rowId else { return }
         didInitialScroll = true
         // Reading a message elsewhere in the room: new messages must not pull the view down. If the bottom is in
         // view after the scroll, the bottom marker says so.
         setReaderAtBottom(false)
         DispatchQueue.main.async {
-            withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(target.id, anchor: .center) }
-            highlightedRowId = target.id
+            withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(rowId, anchor: .center) }
+            highlightedRowId = rowId
             send(.focusHandled)
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-                if highlightedRowId == target.id { highlightedRowId = nil }
+                if highlightedRowId == rowId { highlightedRowId = nil }
             }
         }
     }
@@ -944,21 +950,29 @@ private struct RoomComposingLine: View {
 
 private struct RoomConnectionPill: View {
     let connection: RoomConnectionState
+    /// The dot alone; the word is still read aloud.
+    var compact = false
 
     var body: some View {
         HStack(spacing: 5) {
             Circle()
-                .fill(color)
+                .fill(Self.color(for: connection))
                 .frame(width: 7, height: 7)
-            Text(connection.label)
-                .font(.caption.weight(.semibold))
+            if !compact {
+                Text(connection.label)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+            }
         }
+        // Never squeezed into a broken word: when the bar is tight, the room's title gives way instead.
+        .fixedSize()
         .foregroundStyle(PocketPalette.textSecondary)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(connection.label)
         .accessibilityIdentifier("pocket.room.connection")
     }
 
-    private var color: Color {
+    static func color(for connection: RoomConnectionState) -> Color {
         switch connection {
         case .live: return PocketPalette.listening
         case .connecting, .reconnecting: return PocketPalette.warning
@@ -976,7 +990,8 @@ enum RoomChatText {
     }
 }
 
-private extension View {
+extension View {
+    /// An inline navigation title on iOS; other platforms keep their default.
     @ViewBuilder
     func navigationBarTitleDisplayModeInlineIfAvailable() -> some View {
         #if os(iOS)
@@ -1033,29 +1048,47 @@ private struct RoomViewedLine: View {
     }
 }
 
-/// Who is here: people first, then agents, active or idle.
+/// The room's connection in words, then who is here: people first, then agents, active or idle.
 private struct RoomPresenceSheet: View {
     let presence: RoomChatPresence?
+    let connection: RoomConnectionState
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
-            List(presence?.people ?? []) { person in
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(person.isIdle ? PocketPalette.textSecondary.opacity(0.5) : PocketPalette.verified)
-                        .frame(width: 8, height: 8)
-                        .accessibilityHidden(true)
-                    Text(person.name)
-                    Spacer(minLength: 0)
-                    if !person.isHuman {
-                        Text("agent").font(.caption).foregroundStyle(PocketPalette.textSecondary)
+            List {
+                Section {
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(RoomConnectionPill.color(for: connection))
+                            .frame(width: 8, height: 8)
+                            .accessibilityHidden(true)
+                        Text(connection.label)
                     }
-                    if person.isIdle {
-                        Text("idle").font(.caption).foregroundStyle(PocketPalette.textSecondary)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("pocket.room.presence.connection")
+                }
+                if let people = presence?.people, !people.isEmpty {
+                    Section {
+                        ForEach(people) { person in
+                            HStack(spacing: 8) {
+                                Circle()
+                                    .fill(person.isIdle ? PocketPalette.textSecondary.opacity(0.5) : PocketPalette.verified)
+                                    .frame(width: 8, height: 8)
+                                    .accessibilityHidden(true)
+                                Text(person.name)
+                                Spacer(minLength: 0)
+                                if !person.isHuman {
+                                    Text("agent").font(.caption).foregroundStyle(PocketPalette.textSecondary)
+                                }
+                                if person.isIdle {
+                                    Text("idle").font(.caption).foregroundStyle(PocketPalette.textSecondary)
+                                }
+                            }
+                            .accessibilityElement(children: .combine)
+                        }
                     }
                 }
-                .accessibilityElement(children: .combine)
             }
             .navigationTitle(presence?.label ?? "Who is here")
             .navigationBarTitleDisplayModeInlineIfAvailable()

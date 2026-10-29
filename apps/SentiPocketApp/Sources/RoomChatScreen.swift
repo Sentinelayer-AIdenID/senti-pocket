@@ -33,6 +33,7 @@ struct RoomChatScreen: View {
     @State private var showsTickets = false
     @State private var showsAdmissions = false
     @State private var showsBreakouts = false
+    @State private var showsSearch = false
     @State private var attachmentPreview: AttachmentPreviewItem?
     @State private var attachmentProblem: String?
     @State private var openingAttachment = false
@@ -43,6 +44,7 @@ struct RoomChatScreen: View {
     private let admissionsTransport: (any RoomAdmissionsTransport)?
     private let admissionDecider: (any AdmissionDeciding)?
     private let ticketAnswerSender: (any RoomMessageSending)?
+    private let search: (any RoomSearching)?
     private let openRoom: @MainActor (SentiLink) -> Void
     private let openChildRoom: @MainActor (RoomRoute) -> Void
     private let onReauthenticationRequired: @MainActor () -> Void
@@ -60,9 +62,11 @@ struct RoomChatScreen: View {
         openChildRoom: @escaping @MainActor (RoomRoute) -> Void = { _ in },
         attachmentFetcher: any AttachmentFileFetching = URLSessionAttachmentFetcher(),
         receipts: (any RoomReceiptsClient)? = nil,
+        search: (any RoomSearching)? = nil,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.route = route
+        self.search = search
         self.ticketsTransport = ticketsTransport
         self.admissionsTransport = admissionsTransport
         self.admissionDecider = admissionDecider
@@ -180,6 +184,27 @@ struct RoomChatScreen: View {
                 openBreakout(childSessionId)
             }
         }
+        // Room-wide actions sit under the room's title, so the toolbar keeps its width.
+        .toolbarTitleMenu {
+            if search != nil {
+                Button {
+                    showsSearch = true
+                } label: {
+                    Label("Search messages", systemImage: "magnifyingglass")
+                }
+            }
+        }
+        .sheet(isPresented: $showsSearch) {
+            if let search {
+                RoomSearchSheet(
+                    sessionId: route.sessionId,
+                    searcher: search,
+                    onReauthenticationRequired: onReauthenticationRequired
+                ) { sequenceId in
+                    coordinator.focus(on: sequenceId)
+                }
+            }
+        }
         .sheet(item: $attachmentPreview) { item in
             AttachmentQuickLook(url: item.url)
                 .ignoresSafeArea()
@@ -278,6 +303,36 @@ struct RoomChatScreen: View {
             return .systemAction(absolute)
         case .ignore:
             return .discarded
+        }
+    }
+}
+
+/// The room's search in a sheet; choosing a match closes it and jumps there in the room.
+private struct RoomSearchSheet: View {
+    @StateObject private var model: RoomSearchModel
+    private let onOpen: (Int64) -> Void
+
+    init(
+        sessionId: String,
+        searcher: any RoomSearching,
+        onReauthenticationRequired: @escaping @MainActor () -> Void,
+        onOpen: @escaping (Int64) -> Void
+    ) {
+        _model = StateObject(wrappedValue: RoomSearchModel(
+            sessionId: sessionId,
+            searcher: searcher,
+            onReauthenticationRequired: onReauthenticationRequired
+        ))
+        self.onOpen = onOpen
+    }
+
+    var body: some View {
+        RoomSearchView(state: model.state) { intent in
+            if case .open(let sequenceId) = intent {
+                onOpen(sequenceId)
+            } else {
+                model.send(intent)
+            }
         }
     }
 }

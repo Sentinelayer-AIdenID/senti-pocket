@@ -182,6 +182,7 @@ private struct AuthenticatedRootView: View {
     private let roomActionSender: any RoomActionSending
     private let accountIdentity: any AccountIdentityProviding
     private let roomReceipts: any RoomReceiptsClient
+    private let roomSearch: any RoomSearching
     private let authenticationRevision: UInt64
     private let onSignOut: @MainActor () -> Void
 
@@ -283,6 +284,7 @@ private struct AuthenticatedRootView: View {
         self.accountIdentity = HTTPAccountIdentity(apiBaseURL: apiURL)
         // Read receipts and presence, as yourself, like the web.
         self.roomReceipts = HTTPRoomReceipts(apiBaseURL: apiURL)
+        self.roomSearch = transport
         self.authenticationRevision = authenticationEpoch
         self.onSignOut = onSignOut
     }
@@ -320,6 +322,7 @@ private struct AuthenticatedRootView: View {
                             openRoom: { link in open(link) },
                             openChildRoom: { child in roomPath.append(child) },
                             receipts: roomReceipts,
+                            search: roomSearch,
                             onReauthenticationRequired: invalidateProtectedAuthentication
                         )
                     }
