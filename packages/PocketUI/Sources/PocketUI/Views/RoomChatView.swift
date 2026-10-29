@@ -64,7 +64,9 @@ public struct RoomChatView: View {
             // One item for the connection and who is here, so the room's title keeps as much room as it can.
             ToolbarItem(placement: .primaryAction) {
                 HStack(spacing: 10) {
-                    RoomConnectionPill(connection: state.connection)
+                    // Beside the presence count the pill is its dot alone, so the title menu keeps its room;
+                    // the word is still read aloud, and spelled out in the "who is here" sheet.
+                    RoomConnectionPill(connection: state.connection, compact: state.presence != nil)
                     if let presence = state.presence {
                         Button {
                             showsPresence = true
@@ -77,7 +79,6 @@ public struct RoomChatView: View {
                                     .monospacedDigit()
                             }
                         }
-                        .disabled(presence.people.isEmpty)
                         .accessibilityLabel(presence.label)
                         .accessibilityIdentifier("pocket.room.presence")
                     }
@@ -85,7 +86,7 @@ public struct RoomChatView: View {
             }
         }
         .sheet(isPresented: $showsPresence) {
-            RoomPresenceSheet(presence: state.presence)
+            RoomPresenceSheet(presence: state.presence, connection: state.connection)
         }
         .accessibilityIdentifier("pocket.room.screen")
         .pocketCanvas()
@@ -949,21 +950,29 @@ private struct RoomComposingLine: View {
 
 private struct RoomConnectionPill: View {
     let connection: RoomConnectionState
+    /// The dot alone; the word is still read aloud.
+    var compact = false
 
     var body: some View {
         HStack(spacing: 5) {
             Circle()
-                .fill(color)
+                .fill(Self.color(for: connection))
                 .frame(width: 7, height: 7)
-            Text(connection.label)
-                .font(.caption.weight(.semibold))
+            if !compact {
+                Text(connection.label)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+            }
         }
+        // Never squeezed into a broken word: when the bar is tight, the room's title gives way instead.
+        .fixedSize()
         .foregroundStyle(PocketPalette.textSecondary)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(connection.label)
         .accessibilityIdentifier("pocket.room.connection")
     }
 
-    private var color: Color {
+    static func color(for connection: RoomConnectionState) -> Color {
         switch connection {
         case .live: return PocketPalette.listening
         case .connecting, .reconnecting: return PocketPalette.warning
@@ -1039,29 +1048,47 @@ private struct RoomViewedLine: View {
     }
 }
 
-/// Who is here: people first, then agents, active or idle.
+/// The room's connection in words, then who is here: people first, then agents, active or idle.
 private struct RoomPresenceSheet: View {
     let presence: RoomChatPresence?
+    let connection: RoomConnectionState
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
-            List(presence?.people ?? []) { person in
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(person.isIdle ? PocketPalette.textSecondary.opacity(0.5) : PocketPalette.verified)
-                        .frame(width: 8, height: 8)
-                        .accessibilityHidden(true)
-                    Text(person.name)
-                    Spacer(minLength: 0)
-                    if !person.isHuman {
-                        Text("agent").font(.caption).foregroundStyle(PocketPalette.textSecondary)
+            List {
+                Section {
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(RoomConnectionPill.color(for: connection))
+                            .frame(width: 8, height: 8)
+                            .accessibilityHidden(true)
+                        Text(connection.label)
                     }
-                    if person.isIdle {
-                        Text("idle").font(.caption).foregroundStyle(PocketPalette.textSecondary)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("pocket.room.presence.connection")
+                }
+                if let people = presence?.people, !people.isEmpty {
+                    Section {
+                        ForEach(people) { person in
+                            HStack(spacing: 8) {
+                                Circle()
+                                    .fill(person.isIdle ? PocketPalette.textSecondary.opacity(0.5) : PocketPalette.verified)
+                                    .frame(width: 8, height: 8)
+                                    .accessibilityHidden(true)
+                                Text(person.name)
+                                Spacer(minLength: 0)
+                                if !person.isHuman {
+                                    Text("agent").font(.caption).foregroundStyle(PocketPalette.textSecondary)
+                                }
+                                if person.isIdle {
+                                    Text("idle").font(.caption).foregroundStyle(PocketPalette.textSecondary)
+                                }
+                            }
+                            .accessibilityElement(children: .combine)
+                        }
                     }
                 }
-                .accessibilityElement(children: .combine)
             }
             .navigationTitle(presence?.label ?? "Who is here")
             .navigationBarTitleDisplayModeInlineIfAvailable()
