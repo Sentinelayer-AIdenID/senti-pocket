@@ -34,6 +34,38 @@ ALLOWED_MODEL_FALLBACK_LINE = "model_fallback: gpt-6.1-sol"
 ALLOWED_USE_CODEX_LINE = 'use_codex: "false"'
 ALLOWED_CODEX_ONLY_LINE = 'codex_only: "false"'
 ALLOWED_FAILURE_POLICY_LINE = "llm_failure_policy: block"
+# One retry, and only this shape: after a billing or quota 429 the same action, model and contract run again on
+# its backup endpoint. The key and the endpoint are secrets, so neither is ever printed in a log.
+ALLOWED_RETRY_API_KEY_LINE = "openai_api_key: ${{ secrets.AZURE_SOL61_API_KEY }}"
+ALLOWED_RETRY_BASE_URL_LINE = "OPENAI_BASE_URL: ${{ secrets.AZURE_SOL61_BASE_URL }}"
+FIRST_ATTEMPT_IF_LINE = (
+    "if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.quota_retry_drill) }}"
+)
+RETRY_IF_LINE = "if: ${{ steps.classify.outputs.retry == 'true' }}"
+CONTINUE_ON_ERROR_LINE = "continue-on-error: true"
+RESOLVE_FAIL_CLOSED_LINES = (
+    "FIRST_OUTCOME: ${{ steps.omar.outcome }}",
+    'if [ "${RETRIED}" != "true" ] && [ "${FIRST_OUTCOME}" != "success" ]; then',
+    'echo "::error::The first Omar attempt did not succeed and was not retried (outcome: ${FIRST_OUTCOME}). Blocking merge."',
+    "exit 1",
+)
+FIRST_ATTEMPT_READERS = (
+    "name: Classify Omar provider failure",
+    "name: Resolve the Omar result that counts",
+)
+COMMON_ACTION_INPUT_LINES = frozenset(
+    {
+        "review_routing: legacy",
+        "llm_provider: openai",
+        'sentinelayer_managed_llm: "false"',
+        "model: gpt-6.1-sol",
+        "codex_model: gpt-6.1-sol",
+        "model_fallback: gpt-6.1-sol",
+        'use_codex: "false"',
+        'codex_only: "false"',
+        "llm_failure_policy: block",
+    }
+)
 TELEMETRY_LOG_DOWNLOAD_FRAGMENTS = (
     "curl --silent --show-error --location --fail-with-body",
     "--proto-redir '=https' --max-redirs 3",
@@ -42,46 +74,66 @@ TELEMETRY_LOG_DOWNLOAD_FRAGMENTS = (
 )
 
 
+def _step_blocks(job_lines: list[str]) -> list[list[str]]:
+    starts = [index for index, line in enumerate(job_lines) if line.startswith("      - ")]
+    return [job_lines[a:b] for a, b in zip(starts, starts[1:] + [len(job_lines)])]
+
+
+def _uncommented(line: str) -> str:
+    return line.split("#", 1)[0].strip()
+
+
+def _step_keys(step: list[str]) -> set[str]:
+    """The step's own keys ("id: omar", "if: ...", "uses: ..."), not the lines nested under with: or env:."""
+    keys = {_uncommented(step[0][len("      - "):])}
+    for line in step[1:]:
+        if line.startswith("        ") and not line.startswith("         "):
+            keys.add(_uncommented(line))
+    return keys
+
+
+def _nested_lines(step: list[str], block: str) -> set[str]:
+    """The lines directly under the step's `with:` or `env:`."""
+    header = f"        {block}"
+    lines = [line.rstrip() for line in step]
+    if header not in lines:
+        return set()
+    nested: set[str] = set()
+    for line in lines[lines.index(header) + 1 :]:
+        if not line.startswith("          "):
+            break
+        if not line.startswith("            "):
+            nested.add(_uncommented(line))
+    return nested
+
+
 def _direct_sol_configured(omar_job_lines: list[str]) -> bool:
     action_steps = [
-        index
-        for index, line in enumerate(omar_job_lines)
-        if line.startswith("        uses: ") and "sentinelayer-v1-action@" in line
+        step
+        for step in _step_blocks(omar_job_lines)
+        if any("sentinelayer-v1-action@" in _uncommented(line) for line in step)
     ]
-    if len(action_steps) != 1:
+    if len(action_steps) != 2:
         return False
-
-    action_start = action_steps[0]
-    if omar_job_lines[action_start].split("#", 1)[0].strip() != ALLOWED_ACTION_LINE:
+    first, retry = action_steps
+    first_keys, retry_keys = _step_keys(first), _step_keys(retry)
+    if ALLOWED_ACTION_LINE not in first_keys or ALLOWED_ACTION_LINE not in retry_keys:
         return False
-    action_end = next(
-        (
-            index
-            for index in range(action_start + 1, len(omar_job_lines))
-            if omar_job_lines[index].startswith("      - ")
-        ),
-        len(omar_job_lines),
-    )
-    action_lines = omar_job_lines[action_start:action_end]
-    if "        with:" not in action_lines:
+    # The first attempt: repo-owned OpenAI; its failure is judged by the steps after it, never ignored.
+    if not {"id: omar", FIRST_ATTEMPT_IF_LINE, CONTINUE_ON_ERROR_LINE} <= first_keys:
         return False
-    inputs = {
-        line.split("#", 1)[0].strip()
-        for line in action_lines[action_lines.index("        with:") + 1 :]
-        if line.startswith("          ") and not line.startswith("            ")
-    }
-    return {
-        ALLOWED_OPENAI_API_KEY_LINE,
-        ALLOWED_REVIEW_ROUTING_LINE,
-        ALLOWED_LLM_PROVIDER_LINE,
-        ALLOWED_MANAGED_LLM_LINE,
-        ALLOWED_MODEL_LINE,
-        ALLOWED_CODEX_MODEL_LINE,
-        ALLOWED_MODEL_FALLBACK_LINE,
-        ALLOWED_USE_CODEX_LINE,
-        ALLOWED_CODEX_ONLY_LINE,
-        ALLOWED_FAILURE_POLICY_LINE,
-    } <= inputs
+    if not COMMON_ACTION_INPUT_LINES | {ALLOWED_OPENAI_API_KEY_LINE} <= _nested_lines(first, "with:"):
+        return False
+    if ALLOWED_RETRY_API_KEY_LINE in _nested_lines(first, "with:") or _nested_lines(first, "env:"):
+        return False
+    # The retry: only after a classified billing or quota 429 (or the dispatch drill), and its failure fails the job.
+    if not {"id: omar_retry", RETRY_IF_LINE} <= retry_keys or CONTINUE_ON_ERROR_LINE in retry_keys:
+        return False
+    if not COMMON_ACTION_INPUT_LINES | {ALLOWED_RETRY_API_KEY_LINE} <= _nested_lines(retry, "with:"):
+        return False
+    if ALLOWED_OPENAI_API_KEY_LINE in _nested_lines(retry, "with:"):
+        return False
+    return _nested_lines(retry, "env:") == {ALLOWED_RETRY_BASE_URL_LINE}
 
 
 def _is_job_start(line: str) -> bool:
@@ -182,12 +234,20 @@ def validate_omar_workflow_text(workflow_text: str) -> None:
             raise OmarWorkflowContractError(
                 "full Omar action workflow must not pass bridge-only pr_number"
             )
-        if (
-            stripped.startswith("openai_api_key:")
-            and stripped != ALLOWED_OPENAI_API_KEY_LINE
+        if stripped.startswith("openai_api_key:") and stripped not in (
+            ALLOWED_OPENAI_API_KEY_LINE,
+            ALLOWED_RETRY_API_KEY_LINE,
         ):
             raise OmarWorkflowContractError(
-                "openai_api_key must come from secrets.OPENAI_API_KEY"
+                "openai_api_key must come from secrets.OPENAI_API_KEY (or secrets.AZURE_SOL61_API_KEY on the quota retry)"
+            )
+        if stripped.startswith("OPENAI_BASE_URL:") and stripped != ALLOWED_RETRY_BASE_URL_LINE:
+            raise OmarWorkflowContractError(
+                "OPENAI_BASE_URL may only be the AZURE_SOL61_BASE_URL secret on the quota retry"
+            )
+        if "vars.AZURE_SOL61_BASE_URL" in stripped:
+            raise OmarWorkflowContractError(
+                "the retry endpoint must come from secrets.AZURE_SOL61_BASE_URL: a variable is printed in step logs"
             )
         if stripped.startswith(
             (
@@ -246,8 +306,32 @@ def validate_omar_workflow_text(workflow_text: str) -> None:
     omar_job_lines = _find_omar_review_job_lines(lines)
     if not _direct_sol_configured(omar_job_lines):
         raise OmarWorkflowContractError(
-            "Omar review action must use repo-owned OpenAI Sol 6.1 on the legacy route"
+            "Omar review action must use repo-owned OpenAI Sol 6.1 on the legacy route, with one quota retry gated on the classifier"
         )
+    if sum(_uncommented(line) == CONTINUE_ON_ERROR_LINE for line in omar_job_lines) != 1:
+        raise OmarWorkflowContractError(
+            "only the first Omar attempt may continue on error; every other Omar step must fail closed"
+        )
+    resolve_steps = [
+        step
+        for step in _step_blocks(omar_job_lines)
+        if "name: Resolve the Omar result that counts" in _step_keys(step)
+    ]
+    _require(
+        len(resolve_steps) == 1
+        and all(
+            fragment in {line.strip() for line in resolve_steps[0]}
+            for fragment in RESOLVE_FAIL_CLOSED_LINES
+        ),
+        "a first Omar attempt that failed and was not retried must fail the job, whatever gate_status it wrote",
+    )
+    for step in _step_blocks(omar_job_lines):
+        if any("steps.omar.outputs." in line for line in step) and not (
+            _step_keys(step) & set(FIRST_ATTEMPT_READERS)
+        ):
+            raise OmarWorkflowContractError(
+                "after the retry only the resolved result counts: read steps.result.outputs, not steps.omar.outputs"
+            )
     if not _job_permissions_include_oidc_write(omar_job_lines):
         raise OmarWorkflowContractError(
             "jobs.omar-review.permissions must include id-token: write"
@@ -333,6 +417,17 @@ def validate_omar_workflow_text(workflow_text: str) -> None:
         ALLOWED_USE_CODEX_LINE,
         ALLOWED_CODEX_ONLY_LINE,
         ALLOWED_FAILURE_POLICY_LINE,
+        "python3 .github/scripts/omar_quota_failure.py --self-test",
+        "quota_retry_drill:",
+        "Classify Omar provider failure",
+        "DRILL: ${{ github.event_name == 'workflow_dispatch' && inputs.quota_retry_drill && 'true' || 'false' }}",
+        'python3 .github/scripts/omar_quota_failure.py "${findings}"',
+        "reason=billing_quota_429",
+        "Validate the quota retry route",
+        ALLOWED_RETRY_API_KEY_LINE,
+        ALLOWED_RETRY_BASE_URL_LINE,
+        "Resolve the Omar result that counts",
+        "GATE_STATUS: ${{ steps.result.outputs.gate_status || '' }}",
         "Assert Omar LLM contract is active",
         "REQUESTED_LLM_PROVIDER: openai",
         "REQUESTED_ROUTING: legacy",
@@ -398,11 +493,15 @@ jobs:
           python3 scripts/ci/check_omar_workflow_contract.py
           python3 scripts/ci/check_forbidden_omar_surface.py --self-test
           python3 scripts/ci/check_forbidden_omar_surface.py
+          python3 .github/scripts/omar_quota_failure.py --self-test
       - name: Validate Omar provider secrets
         run: |
           echo "SENTINELAYER_TOKEN is required for Omar Gate telemetry, artifacts, and PR checks."
           echo "OPENAI_API_KEY is required for repo-owned Omar LLM scans."
       - name: Omar Gate
+        id: omar
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.quota_retry_drill) }}
+        continue-on-error: true
         uses: mrrCarter/sentinelayer-v1-action@2d5a8edd485595148254926c9fb318e0adae416a
         with:
           openai_api_key: ${{ secrets.OPENAI_API_KEY }}
@@ -415,8 +514,50 @@ jobs:
           use_codex: "false"
           codex_only: "false"
           llm_failure_policy: block
+      - name: Classify Omar provider failure
+        id: classify
+        env:
+          DRILL: ${{ github.event_name == 'workflow_dispatch' && inputs.quota_retry_drill && 'true' || 'false' }}
+          FIRST_FAILURE_CLASS: ${{ steps.omar.outputs.llm_failure_class || '' }}
+        run: |
+          echo "quota_retry_drill:"
+          python3 .github/scripts/omar_quota_failure.py "${findings}"
+          reason=billing_quota_429
+      - name: Validate the quota retry route
+        if: ${{ steps.classify.outputs.retry == 'true' }}
+        run: echo "route"
+      - name: Omar Gate (quota retry)
+        id: omar_retry
+        if: ${{ steps.classify.outputs.retry == 'true' }}
+        uses: mrrCarter/sentinelayer-v1-action@2d5a8edd485595148254926c9fb318e0adae416a
+        env:
+          OPENAI_BASE_URL: ${{ secrets.AZURE_SOL61_BASE_URL }}
+        with:
+          openai_api_key: ${{ secrets.AZURE_SOL61_API_KEY }}
+          review_routing: legacy
+          llm_provider: openai
+          sentinelayer_managed_llm: "false"
+          model: gpt-6.1-sol
+          codex_model: gpt-6.1-sol
+          model_fallback: gpt-6.1-sol
+          use_codex: "false"
+          codex_only: "false"
+          llm_failure_policy: block
+      - name: Resolve the Omar result that counts
+        id: result
+        env:
+          FIRST_OUTCOME: ${{ steps.omar.outcome }}
+          FIRST_GATE_STATUS: ${{ steps.omar.outputs.gate_status || '' }}
+          RETRY_GATE_STATUS: ${{ steps.omar_retry.outputs.gate_status || '' }}
+        run: |
+          echo "resolved"
+          if [ "${RETRIED}" != "true" ] && [ "${FIRST_OUTCOME}" != "success" ]; then
+            echo "::error::The first Omar attempt did not succeed and was not retried (outcome: ${FIRST_OUTCOME}). Blocking merge."
+            exit 1
+          fi
       - name: Assert Omar LLM contract is active
         env:
+          GATE_STATUS: ${{ steps.result.outputs.gate_status || '' }}
           REQUESTED_LLM_PROVIDER: openai
           REQUESTED_ROUTING: legacy
           REQUESTED_MODEL: gpt-6.1-sol
@@ -544,6 +685,8 @@ jobs:
         )
     )
 
+    _run_retry_self_tests(valid)
+
     # Supplying an alternate-provider credential can bypass the intended
     # single-provider behavior, regardless of the selected model.
     _assert_fails(
@@ -554,6 +697,72 @@ jobs:
             1,
         )
     )
+
+
+def _replace_last(text: str, old: str, new: str) -> str:
+    head, sep, tail = text.rpartition(old)
+    assert sep, old
+    return head + new + tail
+
+
+def _run_retry_self_tests(valid: str) -> None:
+    retry_step = valid[valid.index("      - name: Omar Gate (quota retry)") : valid.index(
+        "      - name: Resolve the Omar result that counts"
+    )]
+    breaks = {
+        "the retry key on the first attempt": valid.replace(
+            ALLOWED_OPENAI_API_KEY_LINE, ALLOWED_RETRY_API_KEY_LINE, 1
+        ),
+        "the primary key on the retry": _replace_last(valid, ALLOWED_RETRY_API_KEY_LINE, ALLOWED_OPENAI_API_KEY_LINE),
+        "a retry not gated on the classifier": _replace_last(valid, "        " + RETRY_IF_LINE + "\n", ""),
+        "a retry that may fail without failing the job": _replace_last(
+            valid, "        id: omar_retry\n", "        id: omar_retry\n        continue-on-error: true\n"
+        ),
+        "the endpoint from a variable": valid.replace(
+            ALLOWED_RETRY_BASE_URL_LINE, "OPENAI_BASE_URL: ${{ vars.AZURE_SOL61_BASE_URL }}", 1
+        ),
+        "an endpoint on the first attempt": valid.replace(
+            "        continue-on-error: true\n        uses:",
+            "        continue-on-error: true\n        env:\n          " + ALLOWED_RETRY_BASE_URL_LINE + "\n        uses:",
+            1,
+        ),
+        "a third action step": valid.replace(retry_step, retry_step + retry_step.replace("id: omar_retry", "id: omar_retry_two"), 1),
+        "no retry step at all": valid.replace(retry_step, "", 1),
+        "a first attempt that fails the job by itself": valid.replace("        continue-on-error: true\n", "", 1),
+        "a drill switch any event can set": valid.replace(
+            FIRST_ATTEMPT_IF_LINE, "if: ${{ !inputs.quota_retry_drill }}", 1
+        ),
+        "a later step that ignores its own failure": valid.replace(
+            "      - name: Assert Omar LLM contract is active\n",
+            "      - name: Assert Omar LLM contract is active\n        continue-on-error: true\n",
+            1,
+        ),
+        "an unretried first-attempt failure that can pass on gate_status": valid.replace(
+            '          if [ "${RETRIED}" != "true" ] && [ "${FIRST_OUTCOME}" != "success" ]; then\n'
+            '            echo "::error::The first Omar attempt did not succeed and was not retried (outcome: ${FIRST_OUTCOME}). Blocking merge."\n'
+            "            exit 1\n"
+            "          fi\n",
+            "",
+            1,
+        ),
+        "the resolve step not reading the first attempt's outcome": valid.replace(
+            "          FIRST_OUTCOME: ${{ steps.omar.outcome }}\n          FIRST_GATE_STATUS", "          FIRST_GATE_STATUS", 1
+        ),
+        "the assertion reading the first attempt": valid.replace(
+            "GATE_STATUS: ${{ steps.result.outputs.gate_status || '' }}",
+            "GATE_STATUS: ${{ steps.omar.outputs.gate_status || '' }}",
+            1,
+        ),
+    }
+    for name, broken in breaks.items():
+        assert broken != valid, name
+        try:
+            _assert_fails(broken)
+        except AssertionError as exc:
+            raise AssertionError(f"{name}: {exc}") from exc
+    # The retry runs the same model and contract as the first attempt.
+    for line in COMMON_ACTION_INPUT_LINES:
+        _assert_fails(_replace_last(valid, line, line.split(":", 1)[0] + ": changed"))
 
 
 def main(argv: list[str] | None = None) -> int:
