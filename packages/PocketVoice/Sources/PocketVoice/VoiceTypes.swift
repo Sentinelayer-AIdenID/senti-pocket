@@ -235,6 +235,8 @@ public enum VoiceError: Error, Equatable, Sendable {
     case transcriptionFailed(Int32)
     case microphonePermissionDenied
     case audioSessionFailed(String)
+    /// A call or briefing holds the audio session, so reading aloud does not start.
+    case audioSessionBusy
     case synthesisFailed(String)
     case insecureGateway
     case gatewayRejected(Int)
@@ -255,6 +257,7 @@ extension VoiceError: LocalizedError {
         case .transcriptionFailed(let code): return "whisper.cpp transcription failed with code \(code)"
         case .microphonePermissionDenied: return "Microphone permission was denied"
         case .audioSessionFailed(let reason): return "Audio session failed: \(reason)"
+        case .audioSessionBusy: return "A call or briefing is using the audio"
         case .synthesisFailed(let reason): return "Speech synthesis failed: \(reason)"
         case .insecureGateway: return "Premium speech requires an approved HTTPS gateway"
         case .gatewayRejected(let status): return "Premium speech gateway rejected the request with HTTP \(status)"
