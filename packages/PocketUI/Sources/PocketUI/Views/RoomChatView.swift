@@ -26,6 +26,11 @@ public struct RoomChatView: View {
                 timeline
             }
         }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            RoomComposerBar(composer: state.composer) { text in
+                send(.sendMessage(text: text))
+            }
+        }
         .navigationTitle(state.title)
         .navigationBarTitleDisplayModeInlineIfAvailable()
         .toolbar {
@@ -45,6 +50,14 @@ public struct RoomChatView: View {
                     ForEach(state.rows) { row in
                         rowView(row, proxy: proxy)
                             .id(row.id)
+                    }
+                    ForEach(state.pending) { pending in
+                        RoomPendingRowView(
+                            row: pending,
+                            onRetry: { send(.retrySend(clientId: pending.clientId)) },
+                            onDiscard: { send(.discardSend(clientId: pending.clientId)) }
+                        )
+                        .id("pending:\(pending.clientId)")
                     }
                     if !state.composingAgents.isEmpty {
                         RoomComposingLine(agents: state.composingAgents)
@@ -74,6 +87,14 @@ public struct RoomChatView: View {
                 if !didInitialScroll {
                     scrollToInitialPosition(proxy)
                 } else if readerAtBottom {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        proxy.scrollTo(Self.bottomId, anchor: .bottom)
+                    }
+                }
+            }
+            .onChange(of: state.pending.count) { count in
+                // Sending always brings you to the bottom, where your message appears.
+                if count > 0 {
                     withAnimation(.easeOut(duration: 0.2)) {
                         proxy.scrollTo(Self.bottomId, anchor: .bottom)
                     }
@@ -319,6 +340,126 @@ private struct RoomMessageRowView: View {
         )
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("pocket.room.message.\(row.sequenceId)")
+    }
+}
+
+private struct RoomPendingRowView: View {
+    let row: RoomChatPendingRow
+    let onRetry: () -> Void
+    let onDiscard: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ChatMarkdownView(text: row.displayText)
+                .font(.body)
+                .foregroundStyle(PocketPalette.textPrimary.opacity(row.isFailed ? 0.7 : 1))
+            switch row.status {
+            case .sending:
+                Label("Sending…", systemImage: "clock")
+                    .font(.caption)
+                    .foregroundStyle(PocketPalette.textSecondary)
+            case .sent:
+                Label("Sent", systemImage: "checkmark")
+                    .font(.caption)
+                    .foregroundStyle(PocketPalette.textSecondary)
+            case .failed(let reason, let canRetry):
+                HStack(spacing: 12) {
+                    Label(reason, systemImage: "exclamationmark.circle")
+                        .font(.caption)
+                        .foregroundStyle(PocketPalette.danger)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if canRetry {
+                        Button("Retry", action: onRetry)
+                            .font(.caption.weight(.semibold))
+                            .accessibilityIdentifier("pocket.room.pending.retry")
+                    }
+                    Button("Discard", role: .destructive, action: onDiscard)
+                        .font(.caption.weight(.semibold))
+                        .accessibilityIdentifier("pocket.room.pending.discard")
+                }
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(PocketPalette.listening.opacity(0.08))
+        )
+        .padding(.top, 6)
+        .accessibilityIdentifier("pocket.room.pending")
+    }
+}
+
+private extension RoomChatPendingRow {
+    var isFailed: Bool {
+        if case .failed = status { return true }
+        return false
+    }
+}
+
+/// The composer: multi-line, grows to six lines, sends the trimmed text. Hidden when the room cannot take posts,
+/// with the reason shown instead (for example a viewer membership).
+private struct RoomComposerBar: View {
+    let composer: RoomComposerState
+    let send: (String) -> Void
+    @State private var draft = ""
+
+    var body: some View {
+        if composer.canPost {
+            VStack(alignment: .leading, spacing: 4) {
+            if let problem = composer.lengthProblem(for: draft) {
+                Text(problem)
+                    .font(.caption)
+                    .foregroundStyle(PocketPalette.danger)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 6)
+                    .accessibilityIdentifier("pocket.room.composer.tooLong")
+            }
+            HStack(alignment: .bottom, spacing: 8) {
+                TextField("Message", text: $draft, axis: .vertical)
+                    .lineLimit(1...6)
+                    .textFieldStyle(.plain)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .stroke(PocketPalette.separator.opacity(0.6), lineWidth: 0.5)
+                    )
+                    .accessibilityIdentifier("pocket.room.composer")
+                Button {
+                    let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !text.isEmpty else { return }
+                    send(text)
+                    draft = ""
+                } label: {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.system(size: 32))
+                        .foregroundStyle(canSend ? PocketPalette.accent : PocketPalette.textSecondary.opacity(0.5))
+                }
+                .buttonStyle(.plain)
+                .disabled(!canSend)
+                .accessibilityLabel("Send")
+                .accessibilityIdentifier("pocket.room.send")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            }
+            .background(.bar)
+        } else if let reason = composer.disabledReason {
+            Text(reason)
+                .font(.footnote)
+                .foregroundStyle(PocketPalette.textSecondary)
+                .frame(maxWidth: .infinity)
+                .padding(12)
+                .background(.bar)
+                .accessibilityIdentifier("pocket.room.composerDisabled")
+        }
+    }
+
+    private var canSend: Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && composer.lengthProblem(for: draft) == nil
     }
 }
 

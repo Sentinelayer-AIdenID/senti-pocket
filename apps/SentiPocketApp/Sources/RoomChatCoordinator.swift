@@ -14,10 +14,28 @@ final class RoomChatCoordinator: ObservableObject {
     let sessionId: String
     private let title: String
     private let transport: any RoomTransport
-    private let ownAuthorIds: Set<String>
+    private let sender: (any RoomMessageSending)?
+    private let identity: (any AccountIdentityProviding)?
+    private var ownAuthorIds: Set<String>
+    private var postingRefusedReason: String?
     private let sleep: @Sendable (TimeInterval) async -> Void
     private let now: @Sendable () -> Date
     private let onReauthenticationRequired: @MainActor () -> Void
+
+    /// A message you sent that the room has not shown yet. Keyed by its client id, which the API echoes back as
+    /// `payload.clientMessageId` and uses to de-duplicate retries.
+    private struct PendingSend {
+        let clientId: String
+        let text: String
+        var status: RoomChatPendingRow.Status
+        var sentAt: Date?
+    }
+    private var pending: [PendingSend] = []
+    private var identityRequested = false
+    static let viewerReason = "You're a viewer in this room: you can read it, but not post."
+    /// How long an accepted message waits for its echo before the pending row is dropped (the next poll still
+    /// brings it in).
+    static let sentEchoGrace: TimeInterval = 20
 
     private var timeline = RoomTimeline()
     private var unread = RoomUnreadState()
@@ -43,6 +61,9 @@ final class RoomChatCoordinator: ObservableObject {
         sessionId: String,
         title: String,
         transport: any RoomTransport,
+        sender: (any RoomMessageSending)? = nil,
+        identity: (any AccountIdentityProviding)? = nil,
+        membershipRole: String? = nil,
         ownAuthorIds: Set<String> = [],
         sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
             guard seconds > 0 else { return }
@@ -54,15 +75,30 @@ final class RoomChatCoordinator: ObservableObject {
         self.sessionId = sessionId
         self.title = title
         self.transport = transport
+        self.sender = sender
+        self.identity = identity
+        // The web lets a viewer react but never post; the API refuses the post anyway.
+        let refusedReason = membershipRole?.lowercased() == "viewer" ? Self.viewerReason : nil
+        self.postingRefusedReason = refusedReason
         self.ownAuthorIds = Set(ownAuthorIds.map { $0.lowercased() })
         self.sleep = sleep
         self.now = now
         self.onReauthenticationRequired = onReauthenticationRequired
+        // The very first frame already shows the right composer (or the viewer's reason), before any load.
+        let initialComposer: RoomComposerState
+        if sender == nil {
+            initialComposer = .hidden
+        } else if let reason = refusedReason {
+            initialComposer = RoomComposerState(canPost: false, disabledReason: reason)
+        } else {
+            initialComposer = RoomComposerState(canPost: true, disabledReason: nil, maximumLength: HTTPRoomMessageSender.maximumLength)
+        }
         self.state = RoomChatPresentationState(
             sessionId: sessionId,
             title: title,
             messages: [],
-            isLoadingInitial: true
+            isLoadingInitial: true,
+            composer: initialComposer
         )
     }
 
@@ -71,6 +107,7 @@ final class RoomChatCoordinator: ObservableObject {
     /// Opens the room (first time) or resumes it after `pause()`: catch up, then go live.
     func resume() {
         guard liveTasks.isEmpty, !failureIsTerminal else { return }
+        learnOwnIdentityIfNeeded()
         generation &+= 1
         let current = generation
         liveTasks.append(Task { [weak self] in
@@ -112,7 +149,115 @@ final class RoomChatCoordinator: ObservableObject {
             resume()
         case .jumpToMessage(let sequenceId):
             loadOlder(until: sequenceId)
+        case .sendMessage(let text):
+            enqueueSend(text)
+        case .retrySend(let clientId):
+            guard let index = pending.firstIndex(where: { $0.clientId == clientId }),
+                  case .failed(_, true) = pending[index].status else { return }
+            pending[index].status = .sending
+            publish()
+            deliver(clientId)
+        case .discardSend(let clientId):
+            pending.removeAll { $0.clientId == clientId }
+            publish()
         }
+    }
+
+    // MARK: - Sending
+
+    private var composerState: RoomComposerState {
+        guard sender != nil else { return .hidden }
+        if let postingRefusedReason { return RoomComposerState(canPost: false, disabledReason: postingRefusedReason) }
+        return RoomComposerState(canPost: true, disabledReason: nil, maximumLength: HTTPRoomMessageSender.maximumLength)
+    }
+
+    private func enqueueSend(_ raw: String) {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard sender != nil, postingRefusedReason == nil, !text.isEmpty else { return }
+        guard text.count <= HTTPRoomMessageSender.maximumLength else {
+            // The composer refuses this before sending; this is the backstop. The full text is kept (only the row's
+            // display is cut), so nothing typed is lost.
+            pending.append(PendingSend(
+                clientId: Self.makeClientId(),
+                text: text,
+                status: .failed(reason: "Too long to send (the limit is 64,000 characters).", canRetry: false)
+            ))
+            publish()
+            return
+        }
+        let clientId = Self.makeClientId()
+        pending.append(PendingSend(clientId: clientId, text: text, status: .sending))
+        readerAtBottom = true
+        unread.readerReachedBottom()
+        publish()
+        deliver(clientId)
+    }
+
+    /// Posts (or re-posts, with the same client id) one pending message.
+    private func deliver(_ clientId: String) {
+        guard let sender, let item = pending.first(where: { $0.clientId == clientId }) else { return }
+        let sessionId = self.sessionId
+        Task { [weak self] in
+            do {
+                try await sender.sendHumanMessage(sessionId: sessionId, text: item.text, clientId: clientId)
+                guard let self else { return }
+                self.updatePending(clientId) { $0.status = .sent; $0.sentAt = self.now() }
+                // Pull the echo now instead of waiting for the stream or the next poll.
+                await self.catchUp(self.generation)
+                await self.sleep(Self.sentEchoGrace)
+                self.pending.removeAll { $0.clientId == clientId && $0.status == .sent }
+                self.publish()
+            } catch let error as RoomSendError {
+                guard let self else { return }
+                switch error {
+                case .reauthenticationRequired:
+                    self.updatePending(clientId) { $0.status = .failed(reason: error.userMessage, canRetry: true) }
+                    self.onReauthenticationRequired()
+                case .notAllowed:
+                    self.postingRefusedReason = Self.viewerReason
+                    self.updatePending(clientId) { $0.status = .failed(reason: error.userMessage, canRetry: false) }
+                case .retryable:
+                    self.updatePending(clientId) { $0.status = .failed(reason: error.userMessage, canRetry: true) }
+                case .rejected, .notConfigured:
+                    self.updatePending(clientId) { $0.status = .failed(reason: error.userMessage, canRetry: false) }
+                }
+            } catch {
+                self?.updatePending(clientId) {
+                    $0.status = .failed(reason: RoomSendError.retryable(retryAfterSeconds: nil).userMessage, canRetry: true)
+                }
+            }
+        }
+    }
+
+    private func updatePending(_ clientId: String, _ change: (inout PendingSend) -> Void) {
+        guard let index = pending.firstIndex(where: { $0.clientId == clientId }) else { return }
+        change(&pending[index])
+        publish()
+    }
+
+    /// Drops pending rows the room has now shown, and learns your author id from your own echoed message.
+    private func reconcilePending(with messages: [RoomMessage]) {
+        guard !pending.isEmpty else { return }
+        for message in messages {
+            guard let clientId = message.clientMessageId,
+                  pending.contains(where: { $0.clientId == clientId }) else { continue }
+            pending.removeAll { $0.clientId == clientId }
+            if !message.authorId.isEmpty { ownAuthorIds.insert(message.authorId.lowercased()) }
+        }
+    }
+
+    private func learnOwnIdentityIfNeeded() {
+        guard !identityRequested, let identity else { return }
+        identityRequested = true
+        Task { [weak self] in
+            guard let authorId = await identity.currentAuthorId(), let self else { return }
+            self.ownAuthorIds.insert(authorId.lowercased())
+            self.publish()
+        }
+    }
+
+    static func makeClientId() -> String {
+        "hm_" + UUID().uuidString.lowercased()
     }
 
     // MARK: - Loading
@@ -275,6 +420,7 @@ final class RoomChatCoordinator: ObservableObject {
             let result = timeline.merge([message])
             lastAppliedSequence = max(lastAppliedSequence, message.sequenceId)
             composing[message.authorId] = nil
+            reconcilePending(with: [message])
             unread.noteArrivals(result.inserted, readerIsAtBottom: readerAtBottom, selfAuthorIds: ownAuthorIds)
             publish()
             return true
@@ -302,6 +448,7 @@ final class RoomChatCoordinator: ObservableObject {
 
     private func apply(_ page: RoomEventPage, older: Bool) {
         let result = timeline.merge(page.messages)
+        reconcilePending(with: page.messages)
         if older {
             nextBeforeSequence = page.nextBeforeSequence ?? page.minSequence
             timeline.hasMoreOlder = page.hasMore && nextBeforeSequence != nil
@@ -390,7 +537,9 @@ final class RoomChatCoordinator: ObservableObject {
                 .filter { $0.value > now().addingTimeInterval(-Self.composingLifetime) }
                 .keys
                 .sorted(),
-            failure: failure
+            failure: failure,
+            pending: pending.map { RoomChatPendingRow(clientId: $0.clientId, text: $0.text, status: $0.status) },
+            composer: composerState
         )
     }
 
