@@ -20,6 +20,7 @@ struct RoomChatScreen: View {
         route: RoomRoute,
         transport: any RoomTransport,
         sender: (any RoomMessageSending)? = nil,
+        actionSender: (any RoomActionSending)? = nil,
         identity: (any AccountIdentityProviding)? = nil,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
@@ -28,6 +29,7 @@ struct RoomChatScreen: View {
             title: route.title,
             transport: transport,
             sender: sender,
+            actionSender: actionSender,
             identity: identity,
             membershipRole: route.membershipRole,
             onReauthenticationRequired: onReauthenticationRequired

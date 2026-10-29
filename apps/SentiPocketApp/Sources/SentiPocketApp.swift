@@ -167,6 +167,7 @@ private struct AuthenticatedRootView: View {
     @State private var roomPath: [RoomRoute] = []
     private let roomTransport: any RoomTransport
     private let roomSender: any RoomMessageSending
+    private let roomActionSender: any RoomActionSending
     private let accountIdentity: any AccountIdentityProviding
     private let authenticationRevision: UInt64
     private let onSignOut: @MainActor () -> Void
@@ -252,6 +253,7 @@ private struct AuthenticatedRootView: View {
         // Typed room messages go straight to the Senti API as you, like the web; the gateway's confirm-and-receipt
         // flow stays for AI-drafted writes (the Pocket tab and voice replies).
         self.roomSender = HTTPRoomMessageSender(apiBaseURL: apiURL)
+        self.roomActionSender = HTTPRoomActionSender(apiBaseURL: apiURL)
         self.accountIdentity = HTTPAccountIdentity(apiBaseURL: apiURL)
         self.authenticationRevision = authenticationEpoch
         self.onSignOut = onSignOut
@@ -282,6 +284,7 @@ private struct AuthenticatedRootView: View {
                             route: route,
                             transport: roomTransport,
                             sender: roomSender,
+                            actionSender: roomActionSender,
                             identity: accountIdentity,
                             onReauthenticationRequired: invalidateProtectedAuthentication
                         )

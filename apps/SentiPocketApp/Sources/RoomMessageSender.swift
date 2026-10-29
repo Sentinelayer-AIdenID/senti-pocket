@@ -99,10 +99,36 @@ final class HTTPRoomMessageSender: RoomMessageSending, @unchecked Sendable {
     }
 }
 
-/// Who is signed in, for "is this my message" and "am I mentioned". `GET /api/v1/auth/me` returns the GitHub
-/// username the API authors human messages under (`human-<username>`).
+/// Who is signed in, from `GET /api/v1/auth/me`: the GitHub username the API authors your messages under
+/// (`human-<username>`), for "is this my message" and "am I mentioned", and who you are in action keys.
+struct SignedInAccount: Equatable, Sendable {
+    /// The author id the API writes your messages under: `human-<GitHub username, else account id>`, normalized
+    /// as the API does (`_normalize_human_sender`).
+    let authorId: String
+    /// You in action idempotency keys, written as the web writes it (`createMessageActionIdempotencyKey`): the
+    /// GitHub username, else the account id. Never a shared placeholder, so the API never takes one person's ack
+    /// for another person's duplicate.
+    let actorRef: String
+
+    init?(githubUsername: String?, accountId: String?) {
+        let username = (githubUsername ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let id = (accountId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let source = username.isEmpty ? id : username
+        let ref = String(source
+            .replacingOccurrences(of: #"[^A-Za-z0-9._:-]+"#, with: "-", options: .regularExpression)
+            .prefix(48))
+        let sender = source
+            .replacingOccurrences(of: #"[^A-Za-z0-9._-]+"#, with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+            .lowercased()
+        guard !ref.isEmpty, !sender.isEmpty else { return nil }
+        authorId = "human-" + sender
+        actorRef = ref
+    }
+}
+
 protocol AccountIdentityProviding: Sendable {
-    func currentAuthorId() async -> String?
+    func currentAccount() async -> SignedInAccount?
 }
 
 final class HTTPAccountIdentity: AccountIdentityProviding, @unchecked Sendable {
@@ -120,7 +146,7 @@ final class HTTPAccountIdentity: AccountIdentityProviding, @unchecked Sendable {
         self.tokenProvider = tokenProvider
     }
 
-    func currentAuthorId() async -> String? {
+    func currentAccount() async -> SignedInAccount? {
         guard let apiBaseURL,
               var components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false),
               let token = tokenProvider(), !token.isEmpty else { return nil }
@@ -133,11 +159,134 @@ final class HTTPAccountIdentity: AccountIdentityProviding, @unchecked Sendable {
         guard let (data, response) = try? await urlSession.data(for: request),
               (response as? HTTPURLResponse)?.statusCode == 200,
               tokenProvider() == token,
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let username = object["github_username"] as? String,
-              username.range(of: #"^[A-Za-z0-9-]{1,39}$"#, options: .regularExpression) != nil else {
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }
-        return "human-\(username.lowercased())"
+        return SignedInAccount(githubUsername: object["github_username"] as? String, accountId: object["id"] as? String)
+    }
+}
+
+/// Message actions you take as yourself: replies and reactions, via `POST /api/v1/sessions/{id}/actions` with the
+/// user's bearer, like the web. The API records the actor from the token (a human), checks the room role (a viewer
+/// may ack, like and dislike; replying needs contributor) and de-duplicates on the idempotency key.
+protocol RoomActionSending: Sendable {
+    func sendAction(_ action: RoomActionRequest) async throws
+}
+
+struct RoomActionRequest: Equatable, Sendable {
+    let sessionId: String
+    let actionType: String
+    let targetSequenceId: Int64
+    let targetActionId: String?
+    let note: String?
+    let idempotencyKey: String
+
+    static let replyLimit = 4_000
+    static let reactionTypes: Set<String> = ["ack", "like", "dislike", "unlike", "undislike"]
+
+    /// A reply to a message (or, with `targetActionId`, to a reply). `nonce` is minted once per reply, so a retry
+    /// sends the same key and the API de-duplicates it.
+    static func reply(
+        sessionId: String,
+        sequenceId: Int64,
+        toReply: String? = nil,
+        text: String,
+        actor: String,
+        nonce: String = UUID().uuidString.lowercased()
+    ) -> RoomActionRequest {
+        RoomActionRequest(
+            sessionId: sessionId,
+            actionType: "reply",
+            targetSequenceId: sequenceId,
+            targetActionId: toReply,
+            note: text,
+            idempotencyKey: boundedKey("reply:\(sessionId):\(sequenceId):\(actor):\(nonce)")
+        )
+    }
+
+    /// A reaction. `ack` is not retractable, so its key is stable per person and message (a second tap is a
+    /// duplicate, as on the web). Like and dislike can be undone and redone, so each tap gets its own key.
+    static func reaction(_ type: String, sessionId: String, sequenceId: Int64, actor: String) -> RoomActionRequest {
+        let base = "\(type):\(sessionId):\(sequenceId):\(actor)"
+        return RoomActionRequest(
+            sessionId: sessionId,
+            actionType: type,
+            targetSequenceId: sequenceId,
+            targetActionId: nil,
+            note: nil,
+            idempotencyKey: boundedKey(type == "ack" ? base : "\(base):\(UUID().uuidString.lowercased())")
+        )
+    }
+
+    private static func boundedKey(_ key: String) -> String {
+        String(key.prefix(180))
+    }
+}
+
+final class HTTPRoomActionSender: RoomActionSending, @unchecked Sendable {
+    private let apiBaseURL: URL?
+    private let urlSession: URLSession
+    private let tokenProvider: @Sendable () -> String?
+
+    init(
+        apiBaseURL: URL?,
+        urlSession: URLSession = SentiHTTPTransportPolicy.liveSession,
+        tokenProvider: @escaping @Sendable () -> String? = { SessionTokenStore.load() }
+    ) {
+        self.apiBaseURL = apiBaseURL
+        self.urlSession = urlSession
+        self.tokenProvider = tokenProvider
+    }
+
+    func sendAction(_ action: RoomActionRequest) async throws {
+        guard let apiBaseURL,
+              var components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false) else {
+            throw RoomSendError.notConfigured
+        }
+        guard let token = tokenProvider(), !token.isEmpty else { throw RoomSendError.reauthenticationRequired }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        guard !action.sessionId.isEmpty, action.sessionId.utf8.count <= 256,
+              let encodedSession = action.sessionId.addingPercentEncoding(withAllowedCharacters: allowed),
+              action.targetSequenceId > 0,
+              action.actionType == "reply" || RoomActionRequest.reactionTypes.contains(action.actionType),
+              (action.note?.count ?? 0) <= RoomActionRequest.replyLimit,
+              action.actionType != "reply" || !(action.note ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw RoomSendError.rejected
+        }
+        components.percentEncodedPath = "/api/v1/sessions/\(encodedSession)/actions"
+        components.query = nil
+        guard let url = components.url else { throw RoomSendError.notConfigured }
+
+        var body: [String: Any] = [
+            "actionType": action.actionType,
+            "targetSequenceId": action.targetSequenceId,
+            "idempotencyKey": action.idempotencyKey
+        ]
+        if let target = action.targetActionId { body["targetActionId"] = target }
+        if let note = action.note { body["note"] = note }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue(action.idempotencyKey, forHTTPHeaderField: "Idempotency-Key")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let response: URLResponse
+        do {
+            (_, response) = try await urlSession.data(for: request)
+        } catch {
+            throw RoomSendError.retryable(retryAfterSeconds: nil)
+        }
+        guard let http = response as? HTTPURLResponse else { throw RoomSendError.retryable(retryAfterSeconds: nil) }
+        switch http.statusCode {
+        case 200..<300: return
+        case 401: throw RoomSendError.reauthenticationRequired
+        case 403, 404: throw RoomSendError.notAllowed
+        case 409, 425, 429, 500..<600:
+            throw RoomSendError.retryable(retryAfterSeconds: http.value(forHTTPHeaderField: "Retry-After").flatMap(Int.init))
+        default: throw RoomSendError.rejected
+        }
     }
 }

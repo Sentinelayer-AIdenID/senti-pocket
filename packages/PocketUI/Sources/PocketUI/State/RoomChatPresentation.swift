@@ -22,6 +22,7 @@ public struct RoomChatMessageInput: Equatable, Sendable {
     public let isEdited: Bool
     /// Parsed `timestamp`. Callers that render many rows pass a cached value; otherwise it is parsed here.
     public let date: Date?
+    public let reactions: RoomChatReactions?
 
     public init(
         id: String,
@@ -34,7 +35,8 @@ public struct RoomChatMessageInput: Equatable, Sendable {
         timestamp: String,
         replyToSequenceId: Int64? = nil,
         isEdited: Bool = false,
-        date: Date? = nil
+        date: Date? = nil,
+        reactions: RoomChatReactions? = nil
     ) {
         self.id = id
         self.sequenceId = sequenceId
@@ -47,6 +49,96 @@ public struct RoomChatMessageInput: Equatable, Sendable {
         self.replyToSequenceId = replyToSequenceId
         self.isEdited = isEdited
         self.date = date ?? ParsedSessionTimestamp(timestamp).date
+        self.reactions = reactions
+    }
+}
+
+/// What shows under a message: reaction chips, who acknowledged it, who is working on it, and its reply count.
+public struct RoomChatReactions: Equatable, Sendable {
+    public struct Chip: Equatable, Identifiable, Sendable {
+        public var id: String { type }
+        public let type: String
+        public let count: Int
+        /// You placed this reaction (like and dislike only; the API reports it per viewer).
+        public let isMine: Bool
+
+        public init(type: String, count: Int, isMine: Bool) {
+            self.type = type
+            self.count = count
+            self.isMine = isMine
+        }
+
+        public var symbol: String {
+            switch type {
+            case "ack": return "checkmark.circle"
+            case "like": return "hand.thumbsup"
+            case "dislike": return "hand.thumbsdown"
+            case "disregard": return "eye.slash"
+            case "pin": return "pin"
+            default: return "circle"
+            }
+        }
+
+        public var label: String {
+            switch type {
+            case "ack": return "Ack"
+            case "like": return "Like"
+            case "dislike": return "Dislike"
+            case "disregard": return "Disregard"
+            default: return type.capitalized
+            }
+        }
+    }
+
+    public let chips: [Chip]
+    /// "Acked by a, b, c +N" (web parity: three names, sorted).
+    public let ackedBy: String?
+    /// "Working: a, b".
+    public let working: String?
+    public let replyCount: Int
+    public let isPinned: Bool
+
+    public init(chips: [Chip] = [], ackedBy: String? = nil, working: String? = nil, replyCount: Int = 0, isPinned: Bool = false) {
+        self.chips = chips
+        self.ackedBy = ackedBy
+        self.working = working
+        self.replyCount = replyCount
+        self.isPinned = isPinned
+    }
+
+    public var isEmpty: Bool { chips.isEmpty && ackedBy == nil && working == nil && replyCount == 0 && !isPinned }
+
+    /// Builds the line from raw counts and actors, in the web order and wording.
+    public static func make(
+        counts: [String: Int],
+        actorsByType: [String: [String]],
+        activeOwners: [String],
+        likedByViewer: Bool,
+        dislikedByViewer: Bool,
+        replyCount: Int,
+        isPinned: Bool
+    ) -> RoomChatReactions {
+        let order = ["ack", "like", "dislike", "disregard"]
+        let chips = order.compactMap { type -> Chip? in
+            guard let count = counts[type], count > 0 else { return nil }
+            let mine = (type == "like" && likedByViewer) || (type == "dislike" && dislikedByViewer)
+            return Chip(type: type, count: count, isMine: mine)
+        }
+        return RoomChatReactions(
+            chips: chips,
+            ackedBy: names(actorsByType["ack"] ?? [], prefix: "Acked by"),
+            working: names(activeOwners, prefix: "Working:"),
+            replyCount: replyCount,
+            isPinned: isPinned
+        )
+    }
+
+    static func names(_ ids: [String], prefix: String) -> String? {
+        let unique = Array(Set(ids)).sorted()
+        guard !unique.isEmpty else { return nil }
+        let shown = unique.prefix(3).map { $0.hasPrefix("human-") ? String($0.dropFirst(6)) : $0 }
+        let rest = unique.count - shown.count
+        return "\(prefix) \(shown.joined(separator: ", "))" + (rest > 0 ? " +\(rest)" : "")
     }
 }
 
@@ -80,6 +172,7 @@ public struct RoomChatMessageRow: Equatable, Identifiable, Sendable {
     public let isEdited: Bool
     /// False when this row continues a run by the same author within a few minutes, so the name is not repeated.
     public let showsHeader: Bool
+    public let reactions: RoomChatReactions?
 }
 
 public enum RoomChatRow: Equatable, Identifiable, Sendable {
@@ -120,6 +213,91 @@ public struct RoomChatPendingRow: Equatable, Identifiable, Sendable {
         self.clientId = clientId
         self.text = text
         self.status = status
+    }
+}
+
+/// One reply in an open thread.
+public struct RoomChatReplyRow: Equatable, Identifiable, Sendable {
+    public let id: String
+    public let authorName: String
+    public let isHuman: Bool
+    public let isOwn: Bool
+    public let text: String
+    public let date: Date?
+    public let isEdited: Bool
+
+    public init(id: String, authorName: String, isHuman: Bool, isOwn: Bool, text: String, date: Date?, isEdited: Bool) {
+        self.id = id
+        self.authorName = authorName
+        self.isHuman = isHuman
+        self.isOwn = isOwn
+        self.text = text
+        self.date = date
+        self.isEdited = isEdited
+    }
+}
+
+/// The open thread sheet: the parent message, its replies (oldest first), and your replies still being sent.
+public struct RoomChatThreadState: Equatable, Sendable {
+    public let parent: RoomChatMessageRow
+    public let replies: [RoomChatReplyRow]
+    public let pending: [RoomChatPendingRow]
+    public let isLoading: Bool
+    public let failureText: String?
+    public let canReply: Bool
+    /// The longest reply the API accepts, in characters; nil when there is no known limit.
+    public let maximumReplyLength: Int?
+
+    public init(
+        parent: RoomChatMessageRow,
+        replies: [RoomChatReplyRow],
+        pending: [RoomChatPendingRow] = [],
+        isLoading: Bool = false,
+        failureText: String? = nil,
+        canReply: Bool = false,
+        maximumReplyLength: Int? = nil
+    ) {
+        self.parent = parent
+        self.replies = replies
+        self.pending = pending
+        self.isLoading = isLoading
+        self.failureText = failureText
+        self.canReply = canReply
+        self.maximumReplyLength = maximumReplyLength
+    }
+
+    /// Why this reply cannot be sent as it is, or nil. A reply over the limit stays in the reply box.
+    public func replyLengthProblem(for draft: String) -> String? {
+        RoomComposerState(canPost: canReply, disabledReason: nil, maximumLength: maximumReplyLength).lengthProblem(for: draft)
+    }
+}
+
+/// What the coordinator knows about the open thread; the state builder attaches the parent row it rendered.
+public struct RoomChatThreadInput: Equatable, Sendable {
+    public let sequenceId: Int64
+    public let replies: [RoomChatReplyRow]
+    public let pending: [RoomChatPendingRow]
+    public let isLoading: Bool
+    public let failureText: String?
+    public let canReply: Bool
+    public let maximumReplyLength: Int?
+
+    public init(
+        sequenceId: Int64,
+        replies: [RoomChatReplyRow],
+        pending: [RoomChatPendingRow] = [],
+        isLoading: Bool = false,
+        failureText: String? = nil,
+        canReply: Bool = false,
+        maximumReplyLength: Int? = nil
+    ) {
+        self.sequenceId = sequenceId
+        self.replies = replies
+        self.pending = pending
+        self.isLoading = isLoading
+        self.failureText = failureText
+        self.canReply = canReply
+        self.maximumReplyLength = maximumReplyLength
     }
 }
 
@@ -171,6 +349,9 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     /// Your sent messages the room has not echoed yet, shown after the timeline.
     public let pending: [RoomChatPendingRow]
     public let composer: RoomComposerState
+    /// Whether you can react (ack, like, dislike): any member, including a viewer, when actions are wired.
+    public let canReact: Bool
+    public let thread: RoomChatThreadState?
 
     /// Same-author rows closer together than this share one header.
     public static let groupingWindow: TimeInterval = 5 * 60
@@ -190,6 +371,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         failure: SessionLoadFailure? = nil,
         pending: [RoomChatPendingRow] = [],
         composer: RoomComposerState = .hidden,
+        canReact: Bool = false,
+        thread threadInput: RoomChatThreadInput? = nil,
         calendar: Calendar = .current
     ) {
         self.sessionId = sessionId
@@ -205,10 +388,12 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         let protectedFailure = failure?.suppressesProtectedContent == true
         self.pending = protectedFailure ? [] : pending
         self.composer = protectedFailure ? .hidden : composer
+        self.canReact = protectedFailure ? false : canReact
 
         // Protected content never renders beside an auth or access failure.
         guard failure?.suppressesProtectedContent != true else {
             self.rows = []
+            self.thread = nil
             return
         }
 
@@ -257,7 +442,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 date: input.date,
                 replyToSequenceId: input.replyToSequenceId,
                 isEdited: input.isEdited,
-                showsHeader: !continuesRun
+                showsHeader: !continuesRun,
+                reactions: input.reactions.flatMap { $0.isEmpty ? nil : $0 }
             )))
             if input.kind == .message, let date = input.date {
                 run = (input.authorId, date)
@@ -266,6 +452,23 @@ public struct RoomChatPresentationState: Equatable, Sendable {
             }
         }
         self.rows = rows
+        if let threadInput, !protectedFailure,
+           let parent = rows.lazy.compactMap({ row -> RoomChatMessageRow? in
+               if case .message(let message) = row, message.sequenceId == threadInput.sequenceId { return message }
+               return nil
+           }).first {
+            self.thread = RoomChatThreadState(
+                parent: parent,
+                replies: threadInput.replies,
+                pending: threadInput.pending,
+                isLoading: threadInput.isLoading,
+                failureText: threadInput.failureText,
+                canReply: threadInput.canReply,
+                maximumReplyLength: threadInput.maximumReplyLength
+            )
+        } else {
+            self.thread = nil
+        }
     }
 
     public var lastMessageId: String? {
@@ -316,6 +519,10 @@ public enum RoomChatIntent: Equatable, Sendable {
     case sendMessage(text: String)
     case retrySend(clientId: String)
     case discardSend(clientId: String)
+    case react(sequenceId: Int64, type: String)
+    case openThread(sequenceId: Int64)
+    case closeThread
+    case sendReply(sequenceId: Int64, text: String)
 }
 
 /// Link policy for chat text, matching the web (`safeLinkUrl.ts`): only http(s) links and in-app paths are
