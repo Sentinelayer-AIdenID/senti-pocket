@@ -20,6 +20,11 @@ public struct RoomChatView: View {
     @State private var readerAtBottom = true
     @State private var didInitialScroll = false
     @State private var anchorBeforeOlderLoad: String?
+    /// A message the reader was taken to (a link, notification, search result or pin). It stays in place through
+    /// pages loading above or below it and messages arriving, until the reader scrolls.
+    @State private var heldAnchor: String?
+    /// "Jump to latest" from a window further back: scroll to the bottom once the live room has loaded.
+    @State private var scrollsToLatestWhenLoaded = false
     @State private var highlightedRowId: String?
     @State private var showsPresence = false
     /// A failed message the reader chose to edit: its text goes back into the composer.
@@ -96,6 +101,9 @@ public struct RoomChatView: View {
         .sheet(isPresented: $showsPresence) {
             RoomPresenceSheet(presence: state.presence, connection: state.connection)
         }
+        // A container, so the composer, the send button and every row keep their own identifiers and labels
+        // (without it the screen's identifier replaced theirs).
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("pocket.room.screen")
         .pocketCanvas()
     }
@@ -122,20 +130,26 @@ public struct RoomChatView: View {
                         )
                         .id("pending:\(pending.clientId)")
                     }
-                    if !state.composingAgents.isEmpty {
+                    newerHistoryFooter
+                    if !state.composingAgents.isEmpty, !state.canLoadNewer {
                         RoomComposingLine(agents: state.composingAgents)
                     }
                     Color.clear
                         .frame(height: 1)
                         .id(Self.bottomId)
-                        .onAppear { setReaderAtBottom(true) }
+                        // The bottom of a window further back is not the live room's bottom.
+                        .onAppear { if !state.canLoadNewer, heldAnchor == nil { setReaderAtBottom(true) } }
                         .onDisappear { setReaderAtBottom(false) }
                 }
                 .padding(.horizontal, 12)
                 .padding(.bottom, 8)
             }
+            // The reader scrolling lets go of a message they were taken to.
+            .simultaneousGesture(DragGesture(minimumDistance: 8).onChanged { _ in
+                if heldAnchor != nil { heldAnchor = nil }
+            })
             .overlay(alignment: .bottomTrailing) {
-                if !readerAtBottom {
+                if !readerAtBottom || state.canLoadNewer {
                     jumpToLatestButton(proxy: proxy)
                 }
             }
@@ -157,15 +171,27 @@ public struct RoomChatView: View {
             // The new value carries what the action needs: an `onChange(of:perform:)` action can still see the
             // view's previous `state`, where a focus set while the room is open is not there yet.
             .onChange(of: focusRowId) { rowId in focus(onRow: rowId, proxy: proxy) }
-            .onChange(of: state.focusFallbackCount) { _ in showLatest(proxy) }
-            // At the bottom, stay at the bottom when rows above change size: an image preview loading, reactions
-            // or a reply count arriving. A reader scrolled up is never moved.
-            .onChange(of: state.rows) { _ in keepAtBottomIfThere(proxy) }
-            .onChange(of: state.attachmentPreviews.count) { _ in keepAtBottomIfThere(proxy) }
+            .onChange(of: state.focusFallbackCount) { _ in
+                heldAnchor = nil
+                showLatest(proxy)
+            }
+            // A message the reader was taken to stays put while rows change around it. Otherwise, at the bottom,
+            // stay at the bottom when rows above change size: an image preview loading, reactions or a reply count
+            // arriving. A reader scrolled up is never moved.
+            .onChange(of: state.rows) { _ in
+                if let heldAnchor {
+                    proxy.scrollTo(heldAnchor, anchor: .center)
+                } else {
+                    keepAtBottomIfThere(proxy)
+                }
+            }
+            .onChange(of: state.attachmentPreviews.count) { _ in
+                if let heldAnchor { proxy.scrollTo(heldAnchor, anchor: .center) } else { keepAtBottomIfThere(proxy) }
+            }
             .onChange(of: state.lastMessageId) { _ in
                 if !didInitialScroll {
                     scrollToInitialPosition(proxy)
-                } else if readerAtBottom {
+                } else if readerAtBottom, heldAnchor == nil {
                     withAnimation(.easeOut(duration: 0.2)) {
                         proxy.scrollTo(Self.bottomId, anchor: .bottom)
                     }
@@ -174,6 +200,7 @@ public struct RoomChatView: View {
             .onChange(of: state.pending.count) { count in
                 // Sending always brings you to the bottom, where your message appears.
                 if count > 0 {
+                    heldAnchor = nil
                     withAnimation(.easeOut(duration: 0.2)) {
                         proxy.scrollTo(Self.bottomId, anchor: .bottom)
                     }
@@ -181,10 +208,20 @@ public struct RoomChatView: View {
             }
             .onChange(of: state.firstMessageId) { _ in
                 // Older rows were prepended: keep the row the reader was looking at in place.
-                if let anchor = anchorBeforeOlderLoad {
+                if let heldAnchor {
+                    proxy.scrollTo(heldAnchor, anchor: .center)
+                    anchorBeforeOlderLoad = nil
+                } else if let anchor = anchorBeforeOlderLoad {
                     proxy.scrollTo(anchor, anchor: .top)
                     anchorBeforeOlderLoad = nil
                 }
+            }
+            .onChange(of: state.canLoadNewer) { canLoadNewer in
+                // Back in the live room after "Jump to latest": go to its newest message.
+                guard !canLoadNewer, scrollsToLatestWhenLoaded else { return }
+                scrollsToLatestWhenLoaded = false
+                setReaderAtBottom(true)
+                DispatchQueue.main.async { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
             }
         }
     }
@@ -254,8 +291,35 @@ public struct RoomChatView: View {
         }
     }
 
+    /// Below a window further back: the next newer page loads when this comes into view (its identity follows the
+    /// newest row, so it asks again after each page while it stays in view).
+    @ViewBuilder
+    private var newerHistoryFooter: some View {
+        if state.canLoadNewer {
+            Group {
+                if state.isLoadingNewer {
+                    ProgressView("Loading newer messages")
+                } else {
+                    Button("Load newer messages") { send(.loadNewer) }
+                        .font(.footnote.weight(.semibold))
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .id("newer-history:\(state.lastMessageId ?? "")")
+            .onAppear { send(.loadNewer) }
+        }
+    }
+
     private func jumpToLatestButton(proxy: ScrollViewProxy) -> some View {
         Button {
+            heldAnchor = nil
+            if state.canLoadNewer {
+                // A window further back: load the live room first, then go to its newest message.
+                scrollsToLatestWhenLoaded = true
+                send(.jumpToLatest)
+                return
+            }
             withAnimation(.easeOut(duration: 0.25)) {
                 proxy.scrollTo(Self.bottomId, anchor: .bottom)
             }
@@ -362,9 +426,10 @@ public struct RoomChatView: View {
     private func focus(onRow rowId: String?, proxy: ScrollViewProxy) {
         guard let rowId else { return }
         didInitialScroll = true
-        // Reading a message elsewhere in the room: new messages must not pull the view down. If the bottom is in
-        // view after the scroll, the bottom marker says so.
+        // Reading a message elsewhere in the room: new messages must not pull the view down, and pages loading
+        // around it must not move it, until the reader scrolls.
         setReaderAtBottom(false)
+        heldAnchor = rowId
         DispatchQueue.main.async {
             withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(rowId, anchor: .center) }
             highlightedRowId = rowId
@@ -381,10 +446,12 @@ public struct RoomChatView: View {
             return false
         }
         guard let target else {
+            // Not loaded: the room loads the window around it and the focus brings it into view.
             send(.jumpToMessage(sequenceId: sequenceId))
             return
         }
         setReaderAtBottom(false)
+        heldAnchor = target.id
         withAnimation(.easeInOut(duration: 0.25)) {
             proxy.scrollTo(target.id, anchor: .center)
         }
@@ -396,7 +463,8 @@ public struct RoomChatView: View {
 
     /// Decided now, before layout can scroll the bottom marker out of view; scrolled after layout settles.
     private func keepAtBottomIfThere(_ proxy: ScrollViewProxy) {
-        guard didInitialScroll, readerAtBottom, state.focusSequenceId == nil else { return }
+        guard didInitialScroll, readerAtBottom, heldAnchor == nil, !state.canLoadNewer,
+              state.focusSequenceId == nil else { return }
         DispatchQueue.main.async {
             proxy.scrollTo(Self.bottomId, anchor: .bottom)
         }

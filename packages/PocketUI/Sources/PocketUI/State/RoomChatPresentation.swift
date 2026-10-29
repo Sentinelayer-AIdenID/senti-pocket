@@ -365,6 +365,10 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     public let isLoadingInitial: Bool
     public let canLoadOlder: Bool
     public let isLoadingOlder: Bool
+    /// The rows are a window further back (a jump to an old message): newer messages load as the reader scrolls
+    /// down, and "Jump to latest" returns to the live room.
+    public let canLoadNewer: Bool
+    public let isLoadingNewer: Bool
     public let unreadCount: Int
     public let connection: RoomConnectionState
     /// Agent ids currently preparing a reply (from the stream's `agent_composing` controls).
@@ -378,8 +382,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     /// Whether you can react (ack, like, dislike): any member, including a viewer, when actions are wired.
     public let canReact: Bool
     public let thread: RoomChatThreadState?
-    /// Counts links whose message could not be loaded (more than ten pages back, not a chat row, or gone). Each
-    /// increase takes the reader to the latest messages.
+    /// Counts links whose message could not be loaded (before the start of the room, or the room could not be
+    /// read). Each increase takes the reader to the latest messages.
     public let focusFallbackCount: Int
     /// A message to bring into view and highlight once (opened from a notification or link).
     public let focusSequenceId: Int64?
@@ -411,6 +415,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         isLoadingInitial: Bool = false,
         canLoadOlder: Bool = false,
         isLoadingOlder: Bool = false,
+        canLoadNewer: Bool = false,
+        isLoadingNewer: Bool = false,
         connection: RoomConnectionState = .connecting,
         composingAgents: [String] = [],
         failure: SessionLoadFailure? = nil,
@@ -434,6 +440,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         self.isLoadingInitial = isLoadingInitial
         self.canLoadOlder = canLoadOlder
         self.isLoadingOlder = isLoadingOlder
+        self.canLoadNewer = canLoadNewer
+        self.isLoadingNewer = isLoadingNewer
         self.unreadCount = max(unreadCount, 0)
         self.connection = connection
         self.composingAgents = composingAgents
@@ -584,6 +592,10 @@ public enum RoomReadAloud {
 /// What the room screen can ask for.
 public enum RoomChatIntent: Equatable, Sendable {
     case loadOlder
+    /// The reader reached the bottom of a window further back: load the next newer page.
+    case loadNewer
+    /// Leave a window further back for the live room (the newest messages).
+    case jumpToLatest
     case readerAtBottom(Bool)
     case retry
     case jumpToMessage(sequenceId: Int64)

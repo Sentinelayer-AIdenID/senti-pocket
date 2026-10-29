@@ -85,6 +85,11 @@ final class RoomChatCoordinator: ObservableObject {
     private var failure: SessionLoadFailure?
     private var isLoadingInitial = false
     private var isLoadingOlder = false
+    private var isLoadingNewer = false
+    private var isLoadingWindow = false
+    /// While the rows are a window further back: the highest sequence the newer pages have read (it may be a
+    /// non-chat event), where the next newer page starts.
+    private var nextAfterSequence: Int64?
     private var hasLoadedInitial = false
     private var dateCache: [String: Date] = [:]
     /// Breakouts started from this room, by child room id, as this viewer may see them (GET .../breakouts).
@@ -104,6 +109,8 @@ final class RoomChatCoordinator: ObservableObject {
     private var liveTasks: [Task<Void, Never>] = []
 
     static let pageSize = 100
+    /// Each side of a jump to an older message: this many messages up to it and this many events after it.
+    static let windowPageSize = 50
     static let composingLifetime: TimeInterval = 20
     static let pollWhileLive: TimeInterval = 60
     static let pollWhileDown: TimeInterval = 15
@@ -209,6 +216,10 @@ final class RoomChatCoordinator: ObservableObject {
         switch intent {
         case .loadOlder:
             loadOlder()
+        case .loadNewer:
+            loadNewer()
+        case .jumpToLatest:
+            jumpToLatest()
         case .readerAtBottom(let atBottom):
             readerAtBottom = atBottom
             if atBottom, unread.unreadCount > 0 || unread.dividerSequence != nil {
@@ -222,7 +233,8 @@ final class RoomChatCoordinator: ObservableObject {
             pause()
             resume()
         case .jumpToMessage(let sequenceId):
-            loadOlder(until: sequenceId)
+            // A pinned message or a reply's parent: loaded like a link, then brought into view.
+            focus(on: sequenceId)
         case .sendMessage(let text):
             enqueueSend(text)
         case .retrySend(let clientId):
@@ -276,29 +288,186 @@ final class RoomChatCoordinator: ObservableObject {
         }
     }
 
-    /// Brings a message into view and highlights it (a link to this room), paging back until it is loaded. A message
-    /// newer than the loaded rows arrives through the live stream and is focused when it lands.
+    /// Brings a message into view and highlights it: a link, a notification, a search result, a pinned message or a
+    /// reply's parent. One further back than the loaded rows is loaded as a window around it in one step, however far
+    /// back it is. One newer than the loaded rows arrives through the live stream and is focused when it lands.
     func focus(on sequenceId: Int64) {
         focusTarget = sequenceId
         publish()
         pursueFocus()
     }
 
-    /// Loads what the focused message needs: older pages when it is further back than the loaded rows. A newer one
-    /// arrives through the live stream. Anything else cannot be shown and is let go.
+    /// Loads what the focused message needs: the window around it when it is outside the loaded rows. A message
+    /// newer than anything the room has seen arrives live. Anything else cannot be shown and is let go.
     private func pursueFocus() {
-        guard let target = focusTarget, hasLoadedInitial, timeline.index(ofSequence: target) == nil else { return }
-        if let oldest = timeline.oldestSequence, target < oldest {
-            loadOlder(until: target)
+        guard let target = focusTarget, hasLoadedInitial, !isLoadingWindow,
+              timeline.index(ofSequence: target) == nil else { return }
+        let isOlder = timeline.oldestSequence.map { target < $0 } ?? (target <= lastAppliedSequence)
+        if isOlder, timeline.hasMoreOlder {
+            loadWindow(endingAt: target)
+        } else if timeline.hasMoreNewer, target > (timeline.newestSequence ?? 0) {
+            // The rows are a window further back: a later message is loaded the same way, or reached in the live
+            // room when it is newer than anything the room has shown.
+            if target <= lastAppliedSequence { loadWindow(endingAt: target) } else { jumpToLatest() }
         } else {
             dropFocusIfUnreachable(target)
         }
     }
 
-    /// A linked message still not loaded although the room has reached its sequence (more than ten pages back,
-    /// before the start of the room, not a chat row, or gone) is let go, and the view takes the reader to the latest
-    /// messages instead of leaving them wherever loading older pages put them. Newer than anything seen, it may
-    /// still arrive live.
+    /// Loads the room around a message outside the loaded rows: the page of messages up to it and the page of events
+    /// after it, two requests whatever the distance, so a link lands in one step in a room of any size. A window that
+    /// reaches the loaded rows joins them; otherwise it replaces them, newer messages load as the reader scrolls down,
+    /// and "Jump to latest" returns to the live room. A target that is not a chat row lands on its nearest message.
+    private func loadWindow(endingAt target: Int64) {
+        guard !isLoadingWindow else { return }
+        isLoadingWindow = true
+        publish()
+        let current = generation
+        Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.isLoadingWindow = false
+                self.publish()
+            }
+            do {
+                let before = try await self.transport.roomEventsBefore(
+                    sessionId: self.sessionId,
+                    beforeSequence: target + 1,
+                    limit: Self.windowPageSize
+                )
+                let after = try await self.transport.roomEventsAfter(
+                    sessionId: self.sessionId,
+                    fromSequence: target,
+                    limit: Self.windowPageSize
+                )
+                guard current == self.generation, self.focusTarget == target, !self.failureIsTerminal else { return }
+                let window = before.messages + after.messages
+                guard !window.isEmpty else {
+                    self.letFocusGo(target)
+                    return
+                }
+                let readThrough = max(target, after.maxSequence ?? target)
+                let joinsLoadedRows = after.rawCount < Self.windowPageSize
+                    || readThrough >= (self.timeline.oldestSequence ?? readThrough)
+                if joinsLoadedRows {
+                    self.timeline.merge(window, trimming: .newest)
+                    self.noteNewestTrimmed()
+                } else {
+                    self.timeline.replace(with: window, hasMoreOlder: before.hasMore, hasMoreNewer: true)
+                    self.nextAfterSequence = readThrough
+                    self.readerAtBottom = false
+                }
+                self.nextBeforeSequence = before.nextBeforeSequence ?? before.minSequence
+                self.timeline.hasMoreOlder = before.hasMore && self.nextBeforeSequence != nil
+                self.reconcilePending(with: window)
+                if self.timeline.index(ofSequence: target) == nil {
+                    let nearest = self.timeline.messages.last { $0.sequenceId < target }
+                        ?? self.timeline.messages.first { $0.sequenceId > target }
+                    self.focusTarget = nearest?.sequenceId
+                }
+            } catch {
+                guard current == self.generation else { return }
+                self.record(error)
+                if self.focusTarget == target { self.letFocusGo(target) }
+            }
+        }
+    }
+
+    /// The next newer page below a window further back. Once it reaches what the live room has shown, the window has
+    /// joined the live room again.
+    private func loadNewer() {
+        guard hasLoadedInitial, timeline.hasMoreNewer, !isLoadingNewer, !isLoadingWindow else { return }
+        let from = nextAfterSequence ?? timeline.newestSequence ?? lastAppliedSequence
+        isLoadingNewer = true
+        publish()
+        let current = generation
+        Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.isLoadingNewer = false
+                self.publish()
+            }
+            do {
+                let page = try await self.transport.roomEventsAfter(
+                    sessionId: self.sessionId,
+                    fromSequence: from,
+                    limit: Self.pageSize
+                )
+                guard current == self.generation, self.timeline.hasMoreNewer else { return }
+                let oldest = self.timeline.oldestSequence
+                self.timeline.merge(page.messages, trimming: .oldest)
+                self.noteOldestTrimmed(was: oldest)
+                self.reconcilePending(with: page.messages)
+                let readThrough = max(from, page.maxSequence ?? from)
+                if page.rawCount < Self.pageSize || readThrough >= self.lastAppliedSequence {
+                    self.timeline.hasMoreNewer = false
+                    self.nextAfterSequence = nil
+                } else {
+                    self.nextAfterSequence = readThrough
+                }
+            } catch {
+                guard current == self.generation else { return }
+                self.record(error)
+            }
+        }
+    }
+
+    /// Leaves a window further back for the live room: its newest page, as the room opens.
+    private func jumpToLatest() {
+        guard timeline.hasMoreNewer, !isLoadingWindow else { return }
+        isLoadingWindow = true
+        publish()
+        let current = generation
+        Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.isLoadingWindow = false
+                self.publish()
+            }
+            do {
+                let page = try await self.transport.roomEventsBefore(
+                    sessionId: self.sessionId,
+                    beforeSequence: nil,
+                    limit: Self.pageSize
+                )
+                guard current == self.generation, !self.failureIsTerminal else { return }
+                self.timeline.replace(with: page.messages, hasMoreOlder: page.hasMore, hasMoreNewer: false)
+                self.nextBeforeSequence = page.nextBeforeSequence ?? page.minSequence
+                self.timeline.hasMoreOlder = page.hasMore && self.nextBeforeSequence != nil
+                self.nextAfterSequence = nil
+                if let newest = page.maxSequence { self.lastAppliedSequence = max(self.lastAppliedSequence, newest) }
+                self.reconcilePending(with: page.messages)
+                self.readerAtBottom = true
+                self.unread.readerReachedBottom()
+                self.pursueFocus()
+            } catch {
+                guard current == self.generation else { return }
+                self.record(error)
+            }
+        }
+    }
+
+    /// Loading older history over the capacity let go of the newest rows: they load again below the window.
+    private func noteNewestTrimmed() {
+        guard timeline.hasMoreNewer, let newest = timeline.newestSequence else { return }
+        nextAfterSequence = min(nextAfterSequence ?? newest, newest)
+    }
+
+    /// Newer rows over the capacity let go of the oldest: older pages start again from the oldest row kept.
+    private func noteOldestTrimmed(was oldest: Int64?) {
+        if let oldest, timeline.oldestSequence != oldest { nextBeforeSequence = nil }
+    }
+
+    private func letFocusGo(_ target: Int64) {
+        guard focusTarget == target else { return }
+        focusTarget = nil
+        focusFallbackCount += 1
+        publish()
+    }
+
+    /// A linked message still not loaded although the room has reached its sequence (before the start of the room,
+    /// not a chat row, or gone) is let go, and the view takes the reader to the latest messages. Newer than anything
+    /// seen, it may still arrive live.
     private func dropFocusIfUnreachable(_ target: Int64) {
         let seenThrough = max(timeline.newestSequence ?? 0, lastAppliedSequence)
         guard focusTarget == target, timeline.index(ofSequence: target) == nil, target <= seenThrough else { return }
@@ -646,6 +815,8 @@ final class RoomChatCoordinator: ObservableObject {
             return
         }
         let clientId = Self.makeClientId()
+        // Sending from a window further back returns to the live room, where the message appears.
+        jumpToLatest()
         pending.append(PendingSend(clientId: clientId, text: text, status: .sending))
         readerAtBottom = true
         unread.readerReachedBottom()
@@ -761,40 +932,25 @@ final class RoomChatCoordinator: ObservableObject {
         publish()
     }
 
-    private func loadOlder(until targetSequence: Int64? = nil) {
-        guard hasLoadedInitial, !isLoadingOlder else { return }
-        guard timeline.hasMoreOlder, nextBeforeSequence ?? timeline.oldestSequence != nil else {
-            // Nothing older to load: a message being sought there cannot be shown.
-            if let targetSequence { dropFocusIfUnreachable(targetSequence) }
-            return
-        }
+    /// One page further back, when the reader scrolls to the top. (A message being sought loads as a window.)
+    private func loadOlder() {
+        guard hasLoadedInitial, !isLoadingOlder, !isLoadingWindow, timeline.hasMoreOlder,
+              let before = nextBeforeSequence ?? timeline.oldestSequence else { return }
         isLoadingOlder = true
         publish()
         Task { [weak self] in
             guard let self else { return }
-            var pages = 0
-            repeat {
-                guard let before = self.nextBeforeSequence ?? self.timeline.oldestSequence else { break }
-                do {
-                    let page = try await self.transport.roomEventsBefore(
-                        sessionId: self.sessionId,
-                        beforeSequence: before,
-                        limit: Self.pageSize
-                    )
-                    guard !self.failureIsTerminal else { break }
-                    self.apply(page, older: true)
-                } catch {
-                    self.record(error)
-                    break
-                }
-                pages += 1
-            } while targetSequence.map { target in
-                self.timeline.index(ofSequence: target) == nil
-                    && (self.timeline.oldestSequence ?? 0) > target
-                    && self.timeline.hasMoreOlder
-            } ?? false && pages < 10
+            do {
+                let page = try await self.transport.roomEventsBefore(
+                    sessionId: self.sessionId,
+                    beforeSequence: before,
+                    limit: Self.pageSize
+                )
+                if !self.failureIsTerminal { self.apply(page, older: true) }
+            } catch {
+                self.record(error)
+            }
             self.isLoadingOlder = false
-            if let targetSequence { self.dropFocusIfUnreachable(targetSequence) }
             self.publish()
             // A link that arrived while this page was loading is pursued now.
             self.pursueFocus()
@@ -893,11 +1049,10 @@ final class RoomChatCoordinator: ObservableObject {
         switch frame {
         case .message(let message):
             connection = .live
-            let result = timeline.merge([message])
+            noteLiveArrivals([message])
             lastAppliedSequence = max(lastAppliedSequence, message.sequenceId)
             composing[message.authorId] = nil
             reconcilePending(with: [message])
-            unread.noteArrivals(result.inserted, readerIsAtBottom: readerAtBottom, selfAuthorIds: ownAuthorIds)
             publish()
             pursueFocus()
             Task { [weak self] in await self?.refreshActions() }
@@ -928,16 +1083,32 @@ final class RoomChatCoordinator: ObservableObject {
     // MARK: - State
 
     private func apply(_ page: RoomEventPage, older: Bool) {
-        let result = timeline.merge(page.messages)
         reconcilePending(with: page.messages)
         if older {
+            // Over the capacity, an older page lets go of the newest rows, never of the page just loaded.
+            timeline.merge(page.messages, trimming: .newest)
+            noteNewestTrimmed()
             nextBeforeSequence = page.nextBeforeSequence ?? page.minSequence
             timeline.hasMoreOlder = page.hasMore && nextBeforeSequence != nil
         } else {
-            unread.noteArrivals(result.inserted, readerIsAtBottom: readerAtBottom, selfAuthorIds: ownAuthorIds)
+            noteLiveArrivals(page.messages)
         }
         if let maxSequence = page.maxSequence {
             lastAppliedSequence = max(lastAppliedSequence, maxSequence)
+        }
+    }
+
+    /// Live messages join the rows when the rows are the live tail. Below a window further back they wait, counted
+    /// as unread, until the reader pages down to them or jumps to the latest.
+    private func noteLiveArrivals(_ messages: [RoomMessage]) {
+        if timeline.hasMoreNewer {
+            let fresh = messages.filter { $0.sequenceId > lastAppliedSequence }
+            unread.noteArrivals(fresh, readerIsAtBottom: false, selfAuthorIds: ownAuthorIds)
+        } else {
+            let oldest = timeline.oldestSequence
+            let result = timeline.merge(messages)
+            noteOldestTrimmed(was: oldest)
+            unread.noteArrivals(result.inserted, readerIsAtBottom: readerAtBottom, selfAuthorIds: ownAuthorIds)
         }
     }
 
@@ -1052,7 +1223,9 @@ final class RoomChatCoordinator: ObservableObject {
             unreadCount: unread.unreadCount,
             isLoadingInitial: isLoadingInitial,
             canLoadOlder: hasLoadedInitial && timeline.hasMoreOlder,
-            isLoadingOlder: isLoadingOlder,
+            isLoadingOlder: isLoadingOlder || isLoadingWindow,
+            canLoadNewer: hasLoadedInitial && timeline.hasMoreNewer,
+            isLoadingNewer: isLoadingNewer,
             connection: connection,
             composingAgents: composing
                 .filter { $0.value > now().addingTimeInterval(-Self.composingLifetime) }
