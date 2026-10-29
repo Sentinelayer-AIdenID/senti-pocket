@@ -172,9 +172,18 @@ private struct AuthenticatedRootView: View {
     @Environment(\.scenePhase) private var rootScenePhase
     @ObservedObject private var whisperModelCoordinator: WhisperModelProvisioningCoordinator
     @ObservedObject private var incomingLinks: IncomingLinkInbox
-    @State private var selectedTab: PocketTab = .sessions
     @State private var presentsSettings = false
+    /// The room on screen, the root of the stack; nil shows your rooms. Breakouts push onto `roomPath`.
+    @State private var currentRoom: RoomRoute?
     @State private var roomPath: [RoomRoute] = []
+    @State private var drawerOpen = false
+    @State private var presentsPocket = false
+    @State private var presentsActivity = false
+    @State private var accountName: String?
+    /// The room opened last, reopened when the app starts (as the big assistant apps reopen your last chat).
+    @AppStorage("pocket.lastRoomId") private var lastRoomId = ""
+    @State private var restoredLastRoom = false
+    @AppStorage("pocket.theme") private var themeRaw = PocketThemePreference.system.rawValue
     @StateObject private var messageReader = MessageReader()
     private let roomTransport: any RoomTransport
     private let ticketsTransport: any RoomTicketsTransport
@@ -298,106 +307,81 @@ private struct AuthenticatedRootView: View {
         self.onSignOut = onSignOut
     }
 
+    private var theme: Binding<PocketThemePreference> {
+        Binding(
+            get: { PocketThemePreference(rawValue: themeRaw) ?? .system },
+            set: { themeRaw = $0.rawValue }
+        )
+    }
+
     var body: some View {
-        AppShell(
-            selection: $selectedTab,
-            sessions: {
-                NavigationStack(path: $roomPath) {
-                    SessionListView(state: sessions.state) { intent in
-                        sessions.send(intent)
-                        if case .selectSession(let sessionId) = intent,
-                           UTF8ExactIdentity.matches(sessions.selectedSessionId, sessionId) {
-                            // Tapping a room opens its live chat; the Pocket and Activity tabs follow the selection.
-                            let row = sessions.state.rows.first {
-                                UTF8ExactIdentity.matches($0.sessionId, sessionId)
+        ZStack(alignment: .leading) {
+            NavigationStack(path: $roomPath) {
+                Group {
+                    if let currentRoom {
+                        roomScreen(currentRoom)
+                            .id(currentRoom)
+                    } else {
+                        SessionListView(state: sessions.state) { intent in
+                            sessions.send(intent)
+                            if case .selectSession(let sessionId) = intent,
+                               UTF8ExactIdentity.matches(sessions.selectedSessionId, sessionId) {
+                                show(roomRoute(for: sessionId))
                             }
-                            roomPath = [RoomRoute(
-                                sessionId: sessionId,
-                                title: row?.title ?? "Room",
-                                membershipRole: row?.membershipRole ?? ""
-                            )]
-                        }
-                    }
-                    .navigationDestination(for: RoomRoute.self) { route in
-                        RoomChatScreen(
-                            route: route,
-                            transport: roomTransport,
-                            sender: roomSender,
-                            actionSender: roomActionSender,
-                            identity: accountIdentity,
-                            ticketsTransport: ticketsTransport,
-                            ticketWriter: ticketWriter,
-                            ticketLeases: ticketLeases,
-                            ticketExtras: ticketExtras,
-                            admissionsTransport: admissionsTransport,
-                            admissionDecider: admissionDecider,
-                            openRoom: { link in open(link) },
-                            openChildRoom: { child in roomPath.append(child) },
-                            receipts: roomReceipts,
-                            search: roomSearch,
-                            reader: messageReader,
-                            onReauthenticationRequired: invalidateProtectedAuthentication
-                        )
-                    }
-                    .toolbar {
-                        ToolbarItem(placement: .navigationBarLeading) {
-                            Button {
-                                presentsNotifications = true
-                                Task { await notifications.refresh() }
-                            } label: {
-                                Image(systemName: notifications.unreadCount > 0 ? "bell.badge" : "bell")
-                                    .overlay(alignment: .topTrailing) {
-                                        if notifications.unreadCount > 0 {
-                                            Text(notifications.unreadCount > 99 ? "99+" : "\(notifications.unreadCount)")
-                                                .font(.caption2.weight(.bold))
-                                                .foregroundStyle(.white)
-                                                .padding(.horizontal, 4)
-                                                .background(Capsule().fill(Color.red))
-                                                .offset(x: 10, y: -8)
-                                        }
-                                    }
-                            }
-                            .accessibilityLabel(notifications.unreadCount > 0
-                                ? "Notifications, \(notifications.unreadCount) unread"
-                                : "Notifications")
-                            .accessibilityIdentifier("sessions.notifications")
-                        }
-                        ToolbarItem(placement: .navigationBarTrailing) {
-                            Button {
-                                presentsSettings = true
-                            } label: {
-                                Label("Settings", systemImage: "gearshape")
-                                    .labelStyle(.iconOnly)
-                            }
-                            .accessibilityLabel("Settings")
-                            .accessibilityIdentifier("sessions.settings")
                         }
                     }
                 }
-            },
-            pocket: {
-                SelectedSessionPocketView(
-                    sessions: sessions,
-                    checkpointPocket: checkpointPocket,
-                    checkpointNarrationRevocation: checkpointNarrationRevocation,
-                    onCheckpointDone: {
-                        checkpointPocket.clear()
-                        selectedTab = .activity
-                    },
-                    onReauthenticationRequired: invalidateProtectedAuthentication
-                )
-            },
-            activity: {
-                SelectedSessionActivityBoundary(
-                    sessions: sessions,
-                    details: details
-                )
+                .toolbar {
+                    ToolbarItem(placement: .navigationBarLeading) { drawerButton }
+                }
+                .navigationDestination(for: RoomRoute.self) { route in
+                    roomScreen(route)
+                }
             }
-        )
+            if drawerOpen {
+                Color.black.opacity(0.32)
+                    .ignoresSafeArea()
+                    .onTapGesture { closeDrawer() }
+                    .accessibilityLabel("Close the side panel")
+                    .accessibilityAddTraits(.isButton)
+                    .transition(.opacity)
+                sidePanel
+                    .frame(maxWidth: 330)
+                    .padding(.trailing, 48)
+                    .gesture(DragGesture(minimumDistance: 20).onEnded { value in
+                        if value.translation.width < -60 { closeDrawer() }
+                    })
+                    .transition(.move(edge: .leading))
+            }
+        }
+        .animation(.spring(response: 0.32, dampingFraction: 0.9), value: drawerOpen)
+        .preferredColorScheme(theme.wrappedValue.colorScheme)
+        .sheet(isPresented: $presentsPocket) {
+            SelectedSessionPocketView(
+                sessions: sessions,
+                checkpointPocket: checkpointPocket,
+                checkpointNarrationRevocation: checkpointNarrationRevocation,
+                onCheckpointDone: {
+                    checkpointPocket.clear()
+                    presentsPocket = false
+                    presentsActivity = true
+                },
+                onReauthenticationRequired: invalidateProtectedAuthentication
+            )
+        }
+        .sheet(isPresented: $presentsActivity) {
+            SelectedSessionActivityBoundary(
+                sessions: sessions,
+                details: details
+            )
+        }
         .onChange(of: checkpointPocket.isActive) { isActive in
             if isActive {
-                selectedTab = .pocket
+                presentsPocket = true
             }
+        }
+        .task {
+            accountName = await accountIdentity.currentAccount()?.login
         }
         .sheet(isPresented: $presentsNotifications) {
             NotificationsView(state: notifications.state) { intent in
@@ -463,15 +447,136 @@ private struct AuthenticatedRootView: View {
         let row = sessions.state.rows.first { UTF8ExactIdentity.matches($0.sessionId, link.sessionId) }
         presentsNotifications = false
         presentsSettings = false
-        selectedTab = .sessions
-        roomPath = [RoomRoute(
+        presentsPocket = false
+        presentsActivity = false
+        show(RoomRoute(
             sessionId: link.sessionId,
             title: row?.title ?? "Room",
             membershipRole: row?.membershipRole ?? "",
             focusSequenceId: link.messageSequence,
             focusTicketId: link.ticketId,
             opensAdmissions: link.admissionId != nil
-        )]
+        ))
+    }
+
+    /// Puts a room on screen as the root (no back button: the side panel is the way between rooms), keeps the
+    /// selection Pocket and Activity follow in step, and remembers it for the next launch.
+    @MainActor
+    private func show(_ route: RoomRoute) {
+        if !UTF8ExactIdentity.matches(sessions.selectedSessionId, route.sessionId) {
+            sessions.send(.selectSession(sessionId: route.sessionId))
+        }
+        roomPath = []
+        currentRoom = route
+        lastRoomId = route.sessionId
+        closeDrawer()
+    }
+
+    private func roomRoute(for sessionId: String) -> RoomRoute {
+        let row = sessions.state.rows.first { UTF8ExactIdentity.matches($0.sessionId, sessionId) }
+        return RoomRoute(
+            sessionId: sessionId,
+            title: row?.title ?? "Room",
+            membershipRole: row?.membershipRole ?? ""
+        )
+    }
+
+    /// Reopens the last room once the room list has settled and still lists it. A link that arrived first wins.
+    @MainActor
+    private func restoreLastRoomIfReady() {
+        guard !restoredLastRoom, roomListSettled else { return }
+        restoredLastRoom = true
+        guard currentRoom == nil, !lastRoomId.isEmpty,
+              sessions.state.rows.contains(where: { UTF8ExactIdentity.matches($0.sessionId, lastRoomId) }) else { return }
+        show(roomRoute(for: lastRoomId))
+    }
+
+    @MainActor
+    private func closeDrawer() {
+        if drawerOpen { drawerOpen = false }
+    }
+
+    private var drawerButton: some View {
+        Button {
+            drawerOpen = true
+        } label: {
+            Image(systemName: "line.3.horizontal")
+                .overlay(alignment: .topTrailing) {
+                    if notifications.unreadCount > 0 {
+                        Circle()
+                            .fill(Color.orange)
+                            .frame(width: 9, height: 9)
+                            .offset(x: 5, y: -4)
+                    }
+                }
+        }
+        .accessibilityLabel(notifications.unreadCount > 0
+            ? "Rooms and settings, \(notifications.unreadCount) unread notifications"
+            : "Rooms and settings")
+        .accessibilityIdentifier("pocket.drawer.open")
+    }
+
+    private var sidePanel: some View {
+        PocketSidePanel(
+            rooms: sessions.state.rows.map { row in
+                PocketSidePanel.Room(
+                    id: row.sessionId,
+                    title: row.title,
+                    subtitle: row.summary,
+                    lastActivity: row.lastActivity?.date
+                )
+            },
+            currentRoomId: currentRoom?.sessionId,
+            unreadNotifications: notifications.unreadCount,
+            accountName: accountName,
+            theme: theme,
+            onSelectRoom: { sessionId in show(roomRoute(for: sessionId)) },
+            onAllRooms: {
+                roomPath = []
+                currentRoom = nil
+                closeDrawer()
+            },
+            onNotifications: {
+                closeDrawer()
+                presentsNotifications = true
+                Task { await notifications.refresh() }
+            },
+            onCalls: {
+                closeDrawer()
+                presentsPocket = true
+            },
+            onActivity: {
+                closeDrawer()
+                presentsActivity = true
+            },
+            onSettings: {
+                closeDrawer()
+                presentsSettings = true
+            }
+        )
+    }
+
+    @ViewBuilder
+    private func roomScreen(_ route: RoomRoute) -> some View {
+        RoomChatScreen(
+            route: route,
+            transport: roomTransport,
+            sender: roomSender,
+            actionSender: roomActionSender,
+            identity: accountIdentity,
+            ticketsTransport: ticketsTransport,
+            ticketWriter: ticketWriter,
+            ticketLeases: ticketLeases,
+            ticketExtras: ticketExtras,
+            admissionsTransport: admissionsTransport,
+            admissionDecider: admissionDecider,
+            openRoom: { link in open(link) },
+            openChildRoom: { child in roomPath.append(child) },
+            receipts: roomReceipts,
+            search: roomSearch,
+            reader: messageReader,
+            onReauthenticationRequired: invalidateProtectedAuthentication
+        )
     }
 
     /// The room list has loaded or failed, so a room opened from a link knows its title and your role in it.
@@ -482,8 +587,14 @@ private struct AuthenticatedRootView: View {
     /// Opens the link iOS handed the app (a universal link) once the room list has settled. Each link opens once.
     @MainActor
     private func openPendingLinkIfReady() {
-        guard roomListSettled, let link = incomingLinks.take() else { return }
-        open(link)
+        guard roomListSettled else { return }
+        if let link = incomingLinks.take() {
+            // A link decides the room; the last room is not reopened over it.
+            restoredLastRoom = true
+            open(link)
+        } else {
+            restoreLastRoomIfReady()
+        }
     }
 }
 
