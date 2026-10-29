@@ -16,6 +16,11 @@ public enum RoomTicketsIntent: Equatable, Sendable {
     /// nil unassigns.
     case assign(ticketId: String, assignee: String?)
     case edit(ticketId: String, title: String, body: String)
+    /// Loads (or tops up) a ticket's comments when it is opened.
+    case loadComments(ticketId: String)
+    case comment(ticketId: String, body: String)
+    /// Posts the ticket's last comment again, with the same key.
+    case retryComment(ticketId: String)
 }
 
 /// The room's Tickets tab: Active / Archived (N), search across all tickets, ranked by impact. Tapping a ticket
@@ -75,6 +80,11 @@ public struct RoomTicketsView: View {
                         writeStatus: state.ticketWriteStatus[row.id],
                         assignChoices: state.assignChoices,
                         viewerId: state.viewerId,
+                        names: state.personNames,
+                        comments: state.comments[row.id],
+                        canComment: state.canFileTickets,
+                        commentStatus: state.commentStatus[row.id],
+                        canRetryComment: state.retryableComments.contains(row.id),
                         send: send
                     )
                 } label: {
@@ -172,10 +182,16 @@ public struct RoomTicketDetailView: View {
     var writeStatus: String?
     var assignChoices: [RoomTicketAssignChoice] = []
     var viewerId: String?
+    var names: [String: String] = [:]
+    var comments: [RoomTicketCommentRow]?
+    var canComment = false
+    var commentStatus: String?
+    var canRetryComment = false
     let send: (RoomTicketsIntent) -> Void
     @State private var customAnswer = ""
     @State private var assigning = false
     @State private var editing = false
+    @State private var draftComment = ""
 
     public init(
         row: RoomTicketRow,
@@ -186,6 +202,11 @@ public struct RoomTicketDetailView: View {
         writeStatus: String? = nil,
         assignChoices: [RoomTicketAssignChoice] = [],
         viewerId: String? = nil,
+        names: [String: String] = [:],
+        comments: [RoomTicketCommentRow]? = nil,
+        canComment: Bool = false,
+        commentStatus: String? = nil,
+        canRetryComment: Bool = false,
         send: @escaping (RoomTicketsIntent) -> Void
     ) {
         self.row = row
@@ -196,13 +217,83 @@ public struct RoomTicketDetailView: View {
         self.writeStatus = writeStatus
         self.assignChoices = assignChoices
         self.viewerId = viewerId
+        self.names = names
+        self.comments = comments
+        self.canComment = canComment
+        self.commentStatus = commentStatus
+        self.canRetryComment = canRetryComment
         self.send = send
+    }
+
+    /// Comments, oldest first, then a box to add one (web `TicketComments`). Comments cannot be edited or deleted.
+    @ViewBuilder
+    private var commentsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Comments").font(.headline)
+            if let comments {
+                if comments.isEmpty {
+                    Text("No comments yet.").font(.footnote).foregroundStyle(PocketPalette.textSecondary)
+                }
+                ForEach(comments) { comment in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
+                            Text(RoomTicketRow.actorLabel(comment.authorId, viewerId: viewerId, names: names))
+                                .font(.caption.weight(.semibold))
+                            if let date = comment.date {
+                                Text(date, format: .relative(presentation: .named, unitsStyle: .abbreviated))
+                                    .font(.caption)
+                                    .foregroundStyle(PocketPalette.textSecondary)
+                            }
+                        }
+                        ChatMarkdownView(text: comment.body).font(.subheadline)
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(PocketPalette.textSecondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .accessibilityIdentifier("pocket.ticket.comment")
+                }
+            } else {
+                ProgressView().accessibilityLabel("Loading comments")
+            }
+            if canComment {
+                HStack(alignment: .bottom, spacing: 8) {
+                    TextField("Add a comment", text: $draftComment, axis: .vertical)
+                        .lineLimit(1...6)
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("pocket.ticket.comment.field")
+                    Button("Post") {
+                        let text = draftComment.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !text.isEmpty, text.count <= 4_000 else { return }
+                        send(.comment(ticketId: row.id, body: text))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(PocketPalette.accent)
+                    .disabled(draftComment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draftComment.count > 4_000)
+                    .accessibilityIdentifier("pocket.ticket.comment.post")
+                }
+            }
+            if let commentStatus {
+                HStack(spacing: 12) {
+                    Text(commentStatus).font(.footnote.weight(.semibold)).foregroundStyle(PocketPalette.accent)
+                    if canRetryComment {
+                        Button("Retry") { send(.retryComment(ticketId: row.id)) }
+                            .font(.footnote.weight(.semibold))
+                            .accessibilityIdentifier("pocket.ticket.comment.retry")
+                    }
+                }
+            }
+        }
+        .onChange(of: commentStatus) { status in
+            // Cleared only once the ticket has it: a failed post keeps what was typed.
+            if status == RoomTicketsPresentationState.commentPostedStatus { draftComment = "" }
+        }
+        .task(id: row.id) { send(.loadComments(ticketId: row.id)) }
     }
 
     /// The lease, in words that cannot be misread: who holds it and until when, or that it lapsed.
     private var leaseLine: String? {
         guard let lease = row.lease else { return nil }
-        let who = RoomTicketRow.actorLabel(lease.holder, viewerId: viewerId)
+        let who = RoomTicketRow.actorLabel(lease.holder, viewerId: viewerId, names: names)
         guard lease.isLive else { return "Lease expired · was \(who)" }
         guard let until = lease.expiresAt else { return "Held by \(who)" }
         return "Held by \(who) until \(until.formatted(date: .omitted, time: .shortened))"
@@ -338,7 +429,7 @@ public struct RoomTicketDetailView: View {
                 }
                 VStack(alignment: .leading, spacing: 4) {
                     if let assignee = row.assignee {
-                        Label("Assigned to \(RoomTicketRow.actorLabel(assignee, viewerId: viewerId))", systemImage: "person")
+                        Label("Assigned to \(RoomTicketRow.actorLabel(assignee, viewerId: viewerId, names: names))", systemImage: "person")
                     }
                     if let leaseLine {
                         Label(leaseLine, systemImage: row.lease?.isLive == true ? "lock" : "lock.open")
@@ -374,6 +465,8 @@ public struct RoomTicketDetailView: View {
                 Divider()
                 ChatMarkdownView(text: row.body.isEmpty ? "_No description._" : row.body)
                     .font(.body)
+                Divider()
+                commentsSection
                 Text("Ticket \(row.id)")
                     .font(.caption2.monospaced())
                     .foregroundStyle(PocketPalette.textSecondary)

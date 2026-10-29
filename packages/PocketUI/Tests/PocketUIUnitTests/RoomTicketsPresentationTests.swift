@@ -155,6 +155,26 @@ final class RoomTicketsPresentationTests: XCTestCase {
         XCTAssertTrue(denied.ticketWriteStatus.isEmpty)
     }
 
+    func test_people_are_named_from_the_directory_never_by_user_id() {
+        let priya = "1d2e3f40-0000-4000-8000-00000000000b"
+        let names = [priya: "Priya"]
+        XCTAssertEqual(RoomTicketRow.actorLabel(priya.uppercased(), viewerId: viewer, names: names), "Priya")
+        XCTAssertEqual(RoomTicketRow.actorLabel(viewer, viewerId: viewer, names: [viewer: "Carter"]), "you")
+        XCTAssertEqual(RoomTicketRow.actorLabel("5d2c8a1e-7b3f-4c9d-8e6a-0f1b2c3d4e5f", viewerId: viewer, names: names), "a person")
+        XCTAssertEqual(RoomTicketRow.actorLabel("build-agent", viewerId: viewer, names: names), "build-agent")
+
+        let choices = RoomTicketAssignChoice.choices(
+            viewerId: viewer,
+            viewerLogin: "mrrcarter",
+            people: [RoomTicketAssignChoice(id: viewer, label: "Carter (@mrrcarter)"),
+                     RoomTicketAssignChoice(id: priya, label: "Priya (@priya-dev)")],
+            roster: ["build-agent"],
+            tickets: []
+        )
+        XCTAssertEqual(choices.map(\.label), ["Me (mrrcarter)", "Priya (@priya-dev)", "@build-agent"],
+                       "you once, then people, then agents")
+    }
+
     func test_a_linked_ticket_is_found_whatever_the_list_shows() {
         let tickets = [input("a"), input("old", status: "done")]
         let state = RoomTicketsPresentationState(tickets: tickets, query: "zzz", focusTicketId: "old")

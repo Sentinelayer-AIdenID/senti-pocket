@@ -122,10 +122,11 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
         id.hasPrefix("human-") ? String(id.dropFirst("human-".count)) : id
     }
 
-    /// Someone on a ticket the way the room names them: "you", an agent by its id, and anyone else as "a person",
-    /// never by user id (a ticket names a person by user id, which only the web's presence list can label).
-    public static func actorLabel(_ id: String, viewerId: String?) -> String {
+    /// Someone on a ticket the way the room names them: "you", a person by the name the room's member directory gives
+    /// their user id, an agent by its id, and a person the directory does not know as "a person", never by user id.
+    public static func actorLabel(_ id: String, viewerId: String?, names: [String: String] = [:]) -> String {
         if let viewerId, !viewerId.isEmpty, id.lowercased() == viewerId.lowercased() { return "you" }
+        if let name = names[id.lowercased()], !name.isEmpty { return name }
         if UUID(uuidString: id) != nil { return "a person" }
         return displayName(id)
     }
@@ -163,8 +164,18 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
     public let filedCount: Int
     /// The viewer, for "you" in ticket lines.
     public let viewerId: String?
+    /// Names for people's user ids, from the room's member directory.
+    public let personNames: [String: String]
+    /// Per ticket: its comments, oldest first, once loaded.
+    public let comments: [String: [RoomTicketCommentRow]]
+    /// Per ticket: a comment being posted, or why it did not post.
+    public let commentStatus: [String: String]
+    /// Tickets whose comment failed in a way posting it again may fix (Retry reuses its key, so it never posts twice).
+    public let retryableComments: Set<String>
 
     public static let fileStatusKey = "__file__"
+    /// The status a comment reaches once the ticket has it.
+    public static let commentPostedStatus = "Comment posted."
 
     public init(
         tickets: [RoomTicketInput],
@@ -183,7 +194,12 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
         ticketWriteStatus: [String: String] = [:],
         filedCount: Int = 0,
         viewerLogin: String? = nil,
-        rosterAgentIds: [String] = []
+        rosterAgentIds: [String] = [],
+        people: [RoomTicketAssignChoice] = [],
+        personNames: [String: String] = [:],
+        comments: [String: [RoomTicketCommentRow]] = [:],
+        commentStatus: [String: String] = [:],
+        retryableComments: Set<String> = []
     ) {
         let all = tickets.map { input in
             let body = input.body
@@ -219,8 +235,14 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
         self.ticketWriteStatus = protected ? [:] : ticketWriteStatus
         self.filedCount = filedCount
         self.viewerId = viewerId
+        self.personNames = personNames
+        self.comments = protected ? [:] : comments
+        self.commentStatus = protected ? [:] : commentStatus
+        self.retryableComments = protected ? [] : retryableComments
         self.assignChoices = canWrite
-            ? RoomTicketAssignChoice.choices(viewerId: viewerId, viewerLogin: viewerLogin, roster: rosterAgentIds, tickets: all)
+            ? RoomTicketAssignChoice.choices(
+                viewerId: viewerId, viewerLogin: viewerLogin, people: people, roster: rosterAgentIds, tickets: all
+            )
             : []
         self.archivedCount = protected ? 0 : all.filter(\.isArchived).count
         self.activeCount = protected ? 0 : all.count - archivedCount
@@ -274,12 +296,14 @@ public struct RoomTicketAssignChoice: Equatable, Identifiable, Sendable {
         self.label = label
     }
 
-    /// You first, then the room's agents (web `ticketAssignCandidates`): the roster the room shows, in its order,
-    /// then any other agent already on this room's tickets. People other than you are not offered: a ticket names a
-    /// person by user id, and the member directory that would map them is not served yet. Any id can still be typed.
+    /// You first, then the room's people from its member directory (by user id, which is what a ticket names a person
+    /// by), then the room's agents (web `ticketAssignCandidates`): the roster the room shows, in its order, then any
+    /// other agent already on this room's tickets. When the directory cannot be read, people other than you are not
+    /// offered. Any id can still be typed.
     static func choices(
         viewerId: String?,
         viewerLogin: String? = nil,
+        people: [RoomTicketAssignChoice] = [],
         roster: [String] = [],
         tickets: [RoomTicketRow]
     ) -> [RoomTicketAssignChoice] {
@@ -288,6 +312,9 @@ public struct RoomTicketAssignChoice: Equatable, Identifiable, Sendable {
         if let viewerId, !viewerId.isEmpty {
             seen.insert(viewerId.lowercased())
             out.append(RoomTicketAssignChoice(id: viewerId, label: viewerLogin.map { "Me (\($0))" } ?? "Me"))
+        }
+        for person in people where UUID(uuidString: person.id) != nil && seen.insert(person.id.lowercased()).inserted {
+            out.append(person)
         }
         func add(_ id: String) {
             let key = id.trimmingCharacters(in: .whitespaces).lowercased()
@@ -311,5 +338,21 @@ public struct RoomTicketAssignChoice: Equatable, Identifiable, Sendable {
             return false
         }
         return trimmed.range(of: #"^[A-Za-z0-9][A-Za-z0-9._:-]*$"#, options: .regularExpression) != nil
+    }
+}
+
+/// One comment under a ticket.
+public struct RoomTicketCommentRow: Equatable, Identifiable, Sendable {
+    public let id: String
+    /// The author's id: a person's user id, or an agent id.
+    public let authorId: String
+    public let body: String
+    public let date: Date?
+
+    public init(id: String, authorId: String, body: String, createdAt: String) {
+        self.id = id
+        self.authorId = authorId
+        self.body = body
+        self.date = ParsedSessionTimestamp(createdAt).date
     }
 }

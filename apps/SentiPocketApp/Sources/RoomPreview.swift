@@ -49,6 +49,7 @@ enum RoomPreview {
                     leases: RoomPreviewTickets.leases,
                     identity: RoomPreviewIdentity(),
                     assignRoster: ["review-agent", "build-agent"],
+                    extras: RoomPreviewExtras(),
                     onReauthenticationRequired: {}
                 )
             }
@@ -80,6 +81,7 @@ enum RoomPreview {
                 ticketsTransport: RoomPreviewTickets(),
                 ticketWriter: RoomPreviewTicketWriter(),
                 ticketLeases: RoomPreviewTickets.leases,
+                ticketExtras: RoomPreviewExtras(),
                 attachmentFetcher: RoomPreviewFiles(),
                 receipts: RoomPreviewReceipts(),
                 search: RoomPreviewSearch(),
@@ -170,6 +172,28 @@ private struct RoomPreviewFiles: AttachmentFileFetching {
 }
 
 /// Sample tickets for the Tickets tab preview.
+/// Comments on t1 and the room's people, for the preview.
+private struct RoomPreviewExtras: RoomTicketExtrasReading {
+    static let priya = "1d2e3f40-0000-4000-8000-00000000000b"
+
+    func comments(sessionId: String, ticketId: String, after: Int64) async throws -> RoomTicketCommentsPage {
+        guard ticketId == "t1", after == 0 else { return RoomTicketCommentsPage(comments: [], cursor: after) }
+        return RoomTicketCommentsPage(comments: [
+            RoomTicketComment(id: "c1", body: "Repro: paste a code with a trailing space and the step accepts it.",
+                              actorId: Self.priya, createdAt: "2026-10-28T14:10:00Z", cursor: 5),
+            RoomTicketComment(id: "c2", body: "Fix is in review. I added a test for the **trailing space** case.",
+                              actorId: "review-agent", actorKind: "agent", createdAt: "2026-10-28T18:30:00Z", cursor: 9)
+        ], cursor: 9)
+    }
+
+    func memberDirectory(sessionId: String, cursor: String?) async throws -> RoomDirectoryPage {
+        RoomDirectoryPage(members: [
+            RoomDirectoryMember(userId: RoomPreviewIdentity.accountId, displayName: "Alex", githubLogin: "alex"),
+            RoomDirectoryMember(userId: Self.priya, displayName: "Priya", githubLogin: "priya-dev")
+        ])
+    }
+}
+
 /// The preview's signed-in person.
 private struct RoomPreviewIdentity: AccountIdentityProviding {
     static let accountId = "6f1c2b9e-0000-4000-8000-00000000000a"
@@ -211,6 +235,12 @@ private struct RoomPreviewTicketWriter: RoomTicketWriting {
             return RoomTicketWriteResult(ticket: RoomTicket(
                 id: id, title: title ?? RoomPreviewTickets.title(id), body: body ?? "", updatedAt: now, version: version + 1
             ))
+        case .comment(let id, let body):
+            return RoomTicketWriteResult(
+                ticket: nil,
+                comment: RoomTicketComment(id: UUID().uuidString.lowercased(), body: body, actorId: RoomPreviewIdentity.accountId,
+                                           createdAt: now, cursor: Int64(Date().timeIntervalSince1970))
+            )
         }
     }
 }

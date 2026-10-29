@@ -54,15 +54,18 @@ enum RoomTicketWrite: Equatable, Sendable {
     case assign(ticketId: String, assignee: String, expectedVersion: Int64)
     /// The changed fields only; the API refuses a title or body edit without `expectedVersion`.
     case edit(ticketId: String, title: String?, body: String?, expectedVersion: Int64)
+    /// A comment (1–4000 characters). Comments are immutable and post no chat message.
+    case comment(ticketId: String, body: String)
 
     static let titleLimit = 200
     static let bodyLimit = 8_000
     static let assigneeLimit = 64
+    static let commentLimit = 4_000
     static let keyLimit = 128
 
     var method: String {
         switch self {
-        case .file, .claim, .release: return "POST"
+        case .file, .claim, .release, .comment: return "POST"
         case .assign, .edit: return "PATCH"
         }
     }
@@ -74,6 +77,7 @@ enum RoomTicketWrite: Equatable, Sendable {
         case .claim(let id, _): return base + [id, "claim"]
         case .release(let id, _, _): return base + [id, "lease", "release"]
         case .assign(let id, _, _), .edit(let id, _, _, _): return base + [id]
+        case .comment(let id, _): return base + [id, "comments"]
         }
     }
 
@@ -110,13 +114,19 @@ enum RoomTicketWrite: Equatable, Sendable {
                 out["body"] = body
             }
             return out
+        case .comment(_, let body):
+            guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, body.count <= Self.commentLimit else {
+                return nil
+            }
+            return ["body": body, "kind": "comment"]
         }
     }
 
     var ticketId: String? {
         switch self {
         case .file: return nil
-        case .claim(let id, _), .release(let id, _, _), .assign(let id, _, _), .edit(let id, _, _, _): return id
+        case .claim(let id, _), .release(let id, _, _), .assign(let id, _, _), .edit(let id, _, _, _), .comment(let id, _):
+            return id
         }
     }
 }
@@ -128,6 +138,8 @@ struct RoomTicketWriteResult: Equatable, Sendable {
     let lease: RoomTicketLeaseCredential?
     /// The API answered a repeated key with the stored reply: nothing changed now.
     let replayed: Bool
+    /// Returned by a comment only.
+    let comment: RoomTicketComment?
 
     /// File and edit answer with the ticket itself; claim and release wrap it with `version`, `cursor` and the lease.
     init(json: JSONValue) {
@@ -136,6 +148,7 @@ struct RoomTicketWriteResult: Equatable, Sendable {
         let ticket = ticketJSON.flatMap(RoomTicket.init(json:))
         self.ticket = ticket
         self.replayed = json["replayed"]?.boolValue ?? false
+        self.comment = json["comment"].flatMap { RoomTicketComment(json: $0, cursor: json["cursor"]?.intValue) }
         if let lease = json["lease"], let leaseId = lease["leaseId"]?.stringValue, !leaseId.isEmpty,
            let fence = lease["fence"]?.intValue, fence >= 1 {
             self.lease = RoomTicketLeaseCredential(
@@ -149,10 +162,11 @@ struct RoomTicketWriteResult: Equatable, Sendable {
         }
     }
 
-    init(ticket: RoomTicket?, lease: RoomTicketLeaseCredential? = nil, replayed: Bool = false) {
+    init(ticket: RoomTicket?, lease: RoomTicketLeaseCredential? = nil, replayed: Bool = false, comment: RoomTicketComment? = nil) {
         self.ticket = ticket
         self.lease = lease
         self.replayed = replayed
+        self.comment = comment
     }
 }
 

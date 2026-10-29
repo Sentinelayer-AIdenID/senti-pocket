@@ -184,6 +184,7 @@ private struct AuthenticatedRootView: View {
     private let roomActionSender: any RoomActionSending
     private let ticketWriter: any RoomTicketWriting
     private let ticketLeases: any TicketLeaseStoring
+    private let ticketExtras: any RoomTicketExtrasReading
     private let accountIdentity: any AccountIdentityProviding
     private let roomReceipts: any RoomReceiptsClient
     private let roomSearch: any RoomSearching
@@ -288,6 +289,7 @@ private struct AuthenticatedRootView: View {
         // Ticket writes as you, like the web; the lease a claim returns is kept in the Keychain to release it later.
         self.ticketWriter = HTTPRoomTicketWriter(apiBaseURL: apiURL)
         self.ticketLeases = KeychainTicketLeaseStore()
+        self.ticketExtras = HTTPRoomTicketExtras(apiBaseURL: apiURL)
         self.accountIdentity = HTTPAccountIdentity(apiBaseURL: apiURL)
         // Read receipts and presence, as yourself, like the web.
         self.roomReceipts = HTTPRoomReceipts(apiBaseURL: apiURL)
@@ -326,6 +328,7 @@ private struct AuthenticatedRootView: View {
                             ticketsTransport: ticketsTransport,
                             ticketWriter: ticketWriter,
                             ticketLeases: ticketLeases,
+                            ticketExtras: ticketExtras,
                             admissionsTransport: admissionsTransport,
                             admissionDecider: admissionDecider,
                             openRoom: { link in open(link) },

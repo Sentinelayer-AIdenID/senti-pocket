@@ -64,6 +64,34 @@ private final class CapturingLines: RoomMessageSending, @unchecked Sendable {
     var lines: [String] { lock.withLock { sent } }
 }
 
+private final class ScriptedExtras: RoomTicketExtrasReading, @unchecked Sendable {
+    private let lock = NSLock()
+    private var pages: [RoomTicketCommentsPage]
+    private var directory: [Result<RoomDirectoryPage, RoomTicketExtrasError>]
+    private var commentAfters: [Int64] = []
+
+    init(pages: [RoomTicketCommentsPage] = [], directory: [Result<RoomDirectoryPage, RoomTicketExtrasError>] = []) {
+        self.pages = pages
+        self.directory = directory
+    }
+
+    func comments(sessionId: String, ticketId: String, after: Int64) async throws -> RoomTicketCommentsPage {
+        lock.withLock {
+            commentAfters.append(after)
+            return pages.isEmpty ? RoomTicketCommentsPage(comments: [], cursor: after) : pages.removeFirst()
+        }
+    }
+
+    func memberDirectory(sessionId: String, cursor: String?) async throws -> RoomDirectoryPage {
+        let next: Result<RoomDirectoryPage, RoomTicketExtrasError> = lock.withLock {
+            directory.isEmpty ? .failure(.unavailable) : directory.removeFirst()
+        }
+        return try next.get()
+    }
+
+    var afters: [Int64] { lock.withLock { commentAfters } }
+}
+
 private struct SignedInAsViewer: AccountIdentityProviding {
     func currentAccount() async -> SignedInAccount? { SignedInAccount(githubUsername: "mrrcarter", accountId: viewer) }
 }
@@ -93,7 +121,8 @@ final class RoomTicketWritesTests: XCTestCase {
         writer: ScriptedTicketWriter,
         leases: TicketLeaseStoring = InMemoryTicketLeaseStore(),
         sender: (any RoomMessageSending)? = nil,
-        roster: [String] = []
+        roster: [String] = [],
+        extras: (any RoomTicketExtrasReading)? = nil
     ) -> RoomTicketsCoordinator {
         RoomTicketsCoordinator(
             sessionId: "room_1",
@@ -104,6 +133,7 @@ final class RoomTicketWritesTests: XCTestCase {
             identity: SignedInAsViewer(),
             canWriteTickets: true,
             assignRoster: roster,
+            extras: extras,
             now: { nineAM },
             sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) },
             onReauthenticationRequired: {}
@@ -341,5 +371,80 @@ final class RoomTicketWritesTests: XCTestCase {
         XCTAssertEqual(replay.ticket?.id, "n1")
         XCTAssertTrue(replay.replayed)
         XCTAssertNil(replay.lease)
+    }
+
+    // MARK: - Comments and people
+
+    private let priya = "1d2e3f40-0000-4000-8000-00000000000b"
+
+    func test_comments_page_in_order_and_a_retried_comment_reuses_its_key_and_lands_once() async {
+        let extras = ScriptedExtras(pages: [
+            RoomTicketCommentsPage(comments: [RoomTicketComment(id: "c1", body: "First", actorId: priya, cursor: 5)], cursor: 5, hasMore: true),
+            RoomTicketCommentsPage(comments: [RoomTicketComment(id: "c2", body: "Second", actorId: otherAgent, actorKind: "agent", cursor: 9)], cursor: 9)
+        ])
+        let posted = RoomTicketWriteResult(
+            ticket: ticket("a", version: 2),
+            comment: RoomTicketComment(id: "c3", body: "Looks good", actorId: viewer, cursor: 12)
+        )
+        let writer = ScriptedTicketWriter([.failure(.retryable(retryAfterSeconds: nil)), .success(posted)])
+        let coordinator = makeCoordinator(TicketsFeed([ticket("a")]), writer: writer, extras: extras)
+        await coordinator.refresh()
+
+        await coordinator.loadComments("a")
+        XCTAssertEqual(coordinator.state.comments["a"]?.map(\.id), ["c1", "c2"])
+        XCTAssertEqual(extras.afters, [0, 5], "the second page reads on from the first page's cursor")
+
+        coordinator.send(.comment(ticketId: "a", body: "Looks good"))
+        await coordinator.lastComment?.value
+        XCTAssertTrue(coordinator.state.retryableComments.contains("a"))
+        XCTAssertEqual(coordinator.state.comments["a"]?.count, 2, "nothing is shown until the ticket has it")
+
+        coordinator.send(.retryComment(ticketId: "a"))
+        await coordinator.lastComment?.value
+        XCTAssertEqual(coordinator.state.commentStatus["a"], RoomTicketsPresentationState.commentPostedStatus)
+        XCTAssertEqual(coordinator.state.comments["a"]?.map(\.id), ["c1", "c2", "c3"])
+        let calls = writer.calls
+        XCTAssertEqual(calls.map(\.write), [.comment(ticketId: "a", body: "Looks good"), .comment(ticketId: "a", body: "Looks good")])
+        XCTAssertEqual(calls[0].key, calls[1].key, "a comment that did land the first time is replayed, never posted twice")
+    }
+
+    func test_the_directory_names_people_and_offers_them_to_assign_after_a_membership_change() async {
+        let extras = ScriptedExtras(directory: [
+            .failure(.directoryChanged),
+            .success(RoomDirectoryPage(members: [
+                RoomDirectoryMember(userId: viewer, displayName: "Carter", githubLogin: "mrrcarter"),
+                RoomDirectoryMember(userId: priya, displayName: "Priya", githubLogin: "priya-dev")
+            ]))
+        ])
+        let feed = TicketsFeed([ticket("a", status: "assigned", assignee: priya)])
+        let coordinator = makeCoordinator(feed, writer: ScriptedTicketWriter([]), roster: ["build-agent"], extras: extras)
+        await coordinator.refresh()
+        XCTAssertEqual(coordinator.state.assignChoices.map(\.label), ["Me (mrrcarter)", "Priya (@priya-dev)", "@build-agent"],
+                       "you, then people by user id, then the room's agents")
+        XCTAssertEqual(coordinator.state.assignChoices[1].id, priya)
+        XCTAssertEqual(coordinator.state.personNames[priya], "Priya")
+    }
+
+    func test_without_the_directory_assign_offers_you_and_the_agents_only() async {
+        let extras = ScriptedExtras(directory: [.failure(.unavailable)])
+        let coordinator = makeCoordinator(TicketsFeed([ticket("a")]), writer: ScriptedTicketWriter([]), roster: ["build-agent"], extras: extras)
+        await coordinator.refresh()
+        XCTAssertEqual(coordinator.state.assignChoices.map(\.label), ["Me (mrrcarter)", "@build-agent"])
+        XCTAssertTrue(coordinator.state.personNames.isEmpty)
+    }
+
+    func test_a_comment_request_carries_only_its_body_and_kind() throws {
+        let request = try HTTPRoomTicketWriter.request(
+            for: .comment(ticketId: "a", body: "Looks good"), sessionId: "room_1", idempotencyKey: "tk_5",
+            apiBaseURL: base, token: "t"
+        )
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.url?.path, "/api/v1/sessions/room_1/tickets/a/comments")
+        XCTAssertEqual(String(data: request.httpBody ?? Data(), encoding: .utf8), #"{"body":"Looks good","kind":"comment"}"#)
+        for body in ["   ", String(repeating: "x", count: 4_001)] {
+            XCTAssertThrowsError(try HTTPRoomTicketWriter.request(
+                for: .comment(ticketId: "a", body: body), sessionId: "room_1", idempotencyKey: "tk", apiBaseURL: base, token: "t"
+            ))
+        }
     }
 }

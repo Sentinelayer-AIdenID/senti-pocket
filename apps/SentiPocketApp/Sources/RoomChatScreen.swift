@@ -50,6 +50,7 @@ struct RoomChatScreen: View {
     private let ticketAnswerSender: (any RoomMessageSending)?
     private let ticketWriter: (any RoomTicketWriting)?
     private let ticketLeases: any TicketLeaseStoring
+    private let ticketExtras: (any RoomTicketExtrasReading)?
     private let identity: (any AccountIdentityProviding)?
     private let search: (any RoomSearching)?
     private let openRoom: @MainActor (SentiLink) -> Void
@@ -65,6 +66,7 @@ struct RoomChatScreen: View {
         ticketsTransport: (any RoomTicketsTransport)? = nil,
         ticketWriter: (any RoomTicketWriting)? = nil,
         ticketLeases: any TicketLeaseStoring = InMemoryTicketLeaseStore(),
+        ticketExtras: (any RoomTicketExtrasReading)? = nil,
         admissionsTransport: (any RoomAdmissionsTransport)? = nil,
         admissionDecider: (any AdmissionDeciding)? = nil,
         openRoom: @escaping @MainActor (SentiLink) -> Void = { _ in },
@@ -85,6 +87,7 @@ struct RoomChatScreen: View {
         self.ticketAnswerSender = route.membershipRole.lowercased() == "viewer" ? nil : sender
         self.ticketWriter = ticketWriter
         self.ticketLeases = ticketLeases
+        self.ticketExtras = ticketExtras
         self.identity = identity
         self.openRoom = openRoom
         self.openChildRoom = openChildRoom
@@ -218,6 +221,7 @@ struct RoomChatScreen: View {
                     leases: ticketLeases,
                     identity: identity,
                     assignRoster: ticketAssignRoster,
+                    extras: ticketExtras,
                     onOpenMessage: { sequence in focus(on: sequence) },
                     onReauthenticationRequired: onReauthenticationRequired
                 )
@@ -282,6 +286,7 @@ struct RoomChatScreen: View {
                     leases: ticketLeases,
                     identity: identity,
                     assignRoster: ticketAssignRoster,
+                    extras: ticketExtras,
                     onOpenMessage: { sequence in focus(on: sequence) },
                     onReauthenticationRequired: onReauthenticationRequired
                 )
