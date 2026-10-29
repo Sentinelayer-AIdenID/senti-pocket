@@ -1,4 +1,5 @@
 import Foundation
+import PocketContracts
 import XCTest
 @testable import PocketSyncClient
 
@@ -40,6 +41,36 @@ final class RoomTicketsTests: XCTestCase {
         XCTAssertEqual(events.tickets.map(\.status), ["done"])
         XCTAssertEqual(events.eventCount, 2)
         XCTAssertEqual(events.cursor, 10295)
+    }
+
+    func test_a_lease_decodes_holder_only_and_reads_live_by_its_expiry() throws {
+        let page = try JSONDecoder().decode(RoomTicketSnapshotPage.self, from: Data("""
+        {"items":[{"id":"a1","title":"Leased","status":"working","version":5,
+          "lease":{"holderKind":"human","holder":"6f1c2b9e-0000-4000-8000-00000000000a","fence":3,
+                   "expiresAt":"2026-10-29T09:15:00.123456+00:00","live":true}},
+          {"id":"b2","title":"Free","status":"open","version":1,"lease":null}],
+         "hasMore":false,"cursor":7}
+        """.utf8))
+        let leased = try XCTUnwrap(page.items.first { $0.id == "a1" }?.lease)
+        XCTAssertEqual(leased.holder, "6f1c2b9e-0000-4000-8000-00000000000a")
+        XCTAssertEqual(leased.holderKind, "human")
+        XCTAssertEqual(leased.fence, 3)
+        XCTAssertNil(page.items.first { $0.id == "b2" }?.lease)
+
+        let expiry = try XCTUnwrap(ParsedSessionTimestamp("2026-10-29T09:15:00.123456+00:00").date)
+        XCTAssertTrue(leased.isLive(at: expiry.addingTimeInterval(-1)))
+        XCTAssertFalse(leased.isLive(at: expiry.addingTimeInterval(1)), "the expiry decides, not the stale read-time flag")
+        // A ticket carried by a stored event has no read-time flag; without a parsable expiry it is not live.
+        XCTAssertFalse(RoomTicketLease(holder: "x", expiresAt: nil).isLive(at: Date()))
+        XCTAssertTrue(RoomTicketLease(holder: "x", expiresAt: "not a time", liveWhenRead: true).isLive(at: Date()))
+    }
+
+    func test_killed_is_archived_like_done() {
+        XCTAssertTrue(ticket("a", status: "done").isArchived)
+        XCTAssertTrue(ticket("b", status: "killed").isArchived, "the API's other final status")
+        for status in ["open", "assigned", "accepted", "working", "in_review", "blocked"] {
+            XCTAssertFalse(ticket("c", status: status).isArchived, status)
+        }
     }
 
     func test_baseline_pages_to_the_end_and_keeps_the_first_cursor() async throws {
