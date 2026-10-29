@@ -36,6 +36,9 @@ final class RoomChatCoordinator: ObservableObject {
     // Replies and reactions (GET /actions projection), and the open thread.
     private let actionSender: (any RoomActionSending)?
     private var summaries: [Int64: RoomReactionSummary] = [:]
+    /// Who answered in threads, as of each one's newest reply: most agent and box output is replies, so they are
+    /// offered for @ like anyone who posted.
+    private var replyAuthors: [String: (name: String, isHuman: Bool, date: Date?)] = [:]
     private var lastActionsRefresh: Date?
     private var actionsRefreshInFlight = false
     private var openThreadSequence: Int64?
@@ -684,6 +687,7 @@ final class RoomChatCoordinator: ObservableObject {
         }
         // The projection covers the newest actions; keep older summaries it no longer includes.
         for (sequence, summary) in page.byTarget { summaries[sequence] = summary }
+        noteReplyAuthors(page.replies)
         // The pinned list is the room's whole current list.
         pinned = page.pinned
         pinLimit = page.pinLimit
@@ -759,12 +763,23 @@ final class RoomChatCoordinator: ObservableObject {
         Task { [weak self] in await self?.loadThread(sequenceId) }
     }
 
+    private func noteReplyAuthors(_ replies: [RoomReply]) {
+        for reply in replies where !reply.authorId.isEmpty {
+            let id = reply.authorId.lowercased()
+            let date = ParsedSessionTimestamp(reply.createdAt).date
+            if let known = replyAuthors[id]?.date, let date, known >= date { continue }
+            let name = reply.isHuman ? String(reply.authorId.dropFirst("human-".count)) : reply.authorId
+            replyAuthors[id] = (name, reply.isHuman, date)
+        }
+    }
+
     private func loadThread(_ sequenceId: Int64) async {
         do {
             let page = try await transport.roomActions(sessionId: sessionId, targetSequenceId: sequenceId, limit: 500)
             guard openThreadSequence == sequenceId else { return }
             threadReplies = page.replies.filter { $0.targetSequenceId == sequenceId }
             threadFailure = nil
+            noteReplyAuthors(threadReplies)
         } catch {
             guard openThreadSequence == sequenceId else { return }
             threadFailure = "Replies could not be loaded. Pull to try again later."
@@ -1391,6 +1406,12 @@ final class RoomChatCoordinator: ObservableObject {
         where message.kind == .message && !message.authorId.isEmpty && !ownAuthorIds.contains(message.authorId.lowercased()) {
             let date = dateCache[message.id]
             latest[message.authorId.lowercased()] = (message.authorName, message.isHuman, date)
+        }
+        // Who answered in threads, as of their newest reply or post, whichever is later.
+        for (id, author) in replyAuthors where !ownAuthorIds.contains(id) {
+            let known = latest[id]
+            if let knownDate = known?.date, let date = author.date, knownDate >= date { continue }
+            latest[id] = (known?.name ?? author.name, author.isHuman, author.date ?? known?.date)
         }
         let ownHandles = Set(ownAuthorIds.map { $0.hasPrefix("human-") ? String($0.dropFirst("human-".count)) : $0 })
         return MentionSuggester.candidates(
