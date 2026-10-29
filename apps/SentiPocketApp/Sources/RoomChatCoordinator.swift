@@ -61,6 +61,9 @@ final class RoomChatCoordinator: ObservableObject {
     private var ownLogin: String?
     /// Read receipts and presence, when the room is wired for them.
     private var receiptsTracker: RoomReceiptsTracker?
+    /// The room's pinned messages (newest first) and how many it may hold.
+    private var pinned: [RoomPinnedMessage] = []
+    private var pinLimit = 10
     /// A message to bring into view once (opened from a notification or link); cleared when the view shows it.
     private var focusTarget: Int64?
     /// Links whose message could not be loaded; each one sends the reader to the latest messages.
@@ -257,6 +260,8 @@ final class RoomChatCoordinator: ObservableObject {
             publish()
         case .openBreakout, .openAttachment:
             break   // the room screen navigates or presents
+        case .setPinned(let sequenceId, let isPinned):
+            setPinned(isPinned, on: sequenceId)
         case .messageOnScreen(let id, let isOnScreen):
             guard let message = timeline.messages.first(where: { $0.id == id }),
                   message.kind == .message, message.eventType == "session_message",
@@ -305,6 +310,48 @@ final class RoomChatCoordinator: ObservableObject {
     // MARK: - Replies and reactions
 
     private var canReact: Bool { actionSender != nil && !failureIsTerminal }
+    /// Pinning is a contributor's action (the API refuses viewers).
+    private var canPin: Bool { actionSender != nil && postingRefusedReason == nil && !failureIsTerminal }
+
+    /// Pins or unpins a message for everyone in the room. Shown at once; the refresh then brings the room's list.
+    private func setPinned(_ isPinned: Bool, on sequenceId: Int64) {
+        guard let actionSender, canPin else { return }
+        let alreadyPinned = pinned.contains { $0.targetSequenceId == sequenceId }
+        guard isPinned != alreadyPinned else { return }
+        // The room holds a limited number of pins; the API refuses one more.
+        if isPinned, pinned.count >= pinLimit { return }
+        if isPinned {
+            pinned.insert(RoomPinnedMessage(
+                id: "pending-pin-\(sequenceId)",
+                targetSequenceId: sequenceId,
+                pinnedBy: ownAuthorIds.sorted().first ?? "you"
+            ), at: 0)
+        } else {
+            pinned.removeAll { $0.targetSequenceId == sequenceId }
+        }
+        publish()
+        let sessionId = self.sessionId
+        Task { [weak self] in
+            // Never sent under a placeholder name; the refresh then restores the room's list.
+            if let actor = await self?.resolvedActorRef() {
+                do {
+                    try await actionSender.sendAction(.pin(isPinned, sessionId: sessionId, sequenceId: sequenceId, actor: actor))
+                } catch RoomSendError.reauthenticationRequired {
+                    self?.onReauthenticationRequired()
+                } catch {
+                    // Fall through: the refresh below restores the room's list.
+                }
+            }
+            await self?.refreshActions(force: true)
+        }
+    }
+
+    /// One line for a pinned message: its first line, spaces collapsed, cut at 120 characters.
+    private static func pinSnippet(_ text: String) -> String {
+        let line = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+        let collapsed = line.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return collapsed.count > 120 ? String(collapsed.prefix(120)) + "…" : collapsed
+    }
 
     /// Re-reads the room's reply and reaction projection. Unforced calls (after arrivals) are throttled.
     // MARK: - Attachments
@@ -400,6 +447,9 @@ final class RoomChatCoordinator: ObservableObject {
         }
         // The projection covers the newest actions; keep older summaries it no longer includes.
         for (sequence, summary) in page.byTarget { summaries[sequence] = summary }
+        // The pinned list is the room's whole current list.
+        pinned = page.pinned
+        pinLimit = page.pinLimit
         publish()
     }
 
@@ -1018,7 +1068,18 @@ final class RoomChatCoordinator: ObservableObject {
             mentionCandidates: mentionCandidates(),
             breakouts: breakouts.mapValues(Self.card),
             attachmentPreviews: previews,
-            presence: presenceState
+            presence: presenceState,
+            pinned: pinned.map { pin in
+                let message = timeline.messages.first { $0.sequenceId == pin.targetSequenceId }
+                let by = pin.pinnedBy.lowercased().hasPrefix("human-") ? String(pin.pinnedBy.dropFirst("human-".count)) : pin.pinnedBy
+                return RoomChatPinned(
+                    sequenceId: pin.targetSequenceId,
+                    snippet: message.map { Self.pinSnippet($0.text) } ?? "Message #\(pin.targetSequenceId)",
+                    pinnedBy: by
+                )
+            },
+            canPin: canPin,
+            pinLimit: pinLimit
         )
     }
 

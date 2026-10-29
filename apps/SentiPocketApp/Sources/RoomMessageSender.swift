@@ -190,6 +190,7 @@ struct RoomActionRequest: Equatable, Sendable {
 
     static let replyLimit = 4_000
     static let reactionTypes: Set<String> = ["ack", "like", "dislike", "unlike", "undislike"]
+    static let pinTypes: Set<String> = ["pin", "unpin"]
 
     /// A reply to a message (or, with `targetActionId`, to a reply). `nonce` is minted once per reply, so a retry
     /// sends the same key and the API de-duplicates it.
@@ -225,6 +226,20 @@ struct RoomActionRequest: Equatable, Sendable {
         )
     }
 
+    /// Pin a message for the room, or unpin it. Each tap gets its own key, as on the web, so pin, unpin, pin again do
+    /// not collapse.
+    static func pin(_ isPinned: Bool, sessionId: String, sequenceId: Int64, actor: String) -> RoomActionRequest {
+        let type = isPinned ? "pin" : "unpin"
+        return RoomActionRequest(
+            sessionId: sessionId,
+            actionType: type,
+            targetSequenceId: sequenceId,
+            targetActionId: nil,
+            note: nil,
+            idempotencyKey: boundedKey("\(type):\(sessionId):\(sequenceId):\(actor):\(UUID().uuidString.lowercased())")
+        )
+    }
+
     private static func boundedKey(_ key: String) -> String {
         String(key.prefix(180))
     }
@@ -255,7 +270,8 @@ final class HTTPRoomActionSender: RoomActionSending, @unchecked Sendable {
         guard !action.sessionId.isEmpty, action.sessionId.utf8.count <= 256,
               let encodedSession = action.sessionId.addingPercentEncoding(withAllowedCharacters: allowed),
               action.targetSequenceId > 0,
-              action.actionType == "reply" || RoomActionRequest.reactionTypes.contains(action.actionType),
+              action.actionType == "reply" || RoomActionRequest.reactionTypes.contains(action.actionType)
+                || RoomActionRequest.pinTypes.contains(action.actionType),
               (action.note?.unicodeScalars.count ?? 0) <= RoomActionRequest.replyLimit,
               action.actionType != "reply" || !(action.note ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw RoomSendError.rejected

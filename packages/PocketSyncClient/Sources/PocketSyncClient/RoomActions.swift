@@ -137,15 +137,54 @@ public struct RoomReactionSummary: Equatable, Sendable {
     }
 }
 
-/// `GET /actions` decoded for a room: per-message summaries plus the reply rows in the page (a thread fetch,
-/// `?targetSequenceId=`, returns that thread's replies here).
+/// A message pinned for the room (`projection.pinnedMessages`): newest pin first, at most the room's pin limit.
+public struct RoomPinnedMessage: Equatable, Identifiable, Sendable {
+    /// The pin action's id.
+    public let id: String
+    public let targetSequenceId: Int64
+    /// Who pinned it: `human-<login>` or an agent id.
+    public let pinnedBy: String
+    public let createdAt: String
+
+    public init(id: String, targetSequenceId: Int64, pinnedBy: String, createdAt: String = "") {
+        self.id = id
+        self.targetSequenceId = targetSequenceId
+        self.pinnedBy = pinnedBy
+        self.createdAt = createdAt
+    }
+
+    init?(json: JSONValue) {
+        guard let id = json["id"]?.stringValue, !id.isEmpty,
+              let target = json["targetSequenceId"]?.intValue, target > 0 else { return nil }
+        self.init(
+            id: id,
+            targetSequenceId: target,
+            pinnedBy: json["actorId"]?.stringValue ?? "",
+            createdAt: json["createdAt"]?.stringValue ?? ""
+        )
+    }
+}
+
+/// `GET /actions` decoded for a room: per-message summaries, the room's pinned messages, plus the reply rows in the
+/// page (a thread fetch, `?targetSequenceId=`, returns that thread's replies here).
 public struct RoomActionsPage: Decodable, Equatable, Sendable {
     public let byTarget: [Int64: RoomReactionSummary]
     public let replies: [RoomReply]
+    /// The room's pinned messages, newest pin first.
+    public let pinned: [RoomPinnedMessage]
+    /// How many messages the room can pin at once (the API's limit).
+    public let pinLimit: Int
 
-    public init(byTarget: [Int64: RoomReactionSummary] = [:], replies: [RoomReply] = []) {
+    public init(
+        byTarget: [Int64: RoomReactionSummary] = [:],
+        replies: [RoomReply] = [],
+        pinned: [RoomPinnedMessage] = [],
+        pinLimit: Int = 10
+    ) {
         self.byTarget = byTarget
         self.replies = replies
+        self.pinned = pinned
+        self.pinLimit = pinLimit
     }
 
     enum CodingKeys: String, CodingKey { case actions, projection }
@@ -159,6 +198,11 @@ public struct RoomActionsPage: Decodable, Equatable, Sendable {
             if let summary = RoomReactionSummary(json: row) { byTarget[summary.targetSequenceId] = summary }
         }
         self.byTarget = byTarget
+        var pinnedTargets = Set<Int64>()
+        self.pinned = (projection["pinnedMessages"]?.arrayValue ?? [])
+            .compactMap(RoomPinnedMessage.init(json:))
+            .filter { pinnedTargets.insert($0.targetSequenceId).inserted }
+        self.pinLimit = Int(clamping: max(1, projection["pinLimit"]?.intValue ?? 10))
         // Newest revision wins per reply id; ordered oldest first, like the web's thread.
         var latest: [String: RoomReply] = [:]
         for reply in actions.compactMap(RoomReply.init(json:)) {

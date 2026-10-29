@@ -133,7 +133,7 @@ final class RoomActionSenderTests: XCTestCase {
     func test_invalid_actions_are_refused_before_the_network() async {
         let sender = makeSender()
         let invalid = [
-            RoomActionRequest(sessionId: "room_1", actionType: "pin", targetSequenceId: 1, targetActionId: nil, note: nil, idempotencyKey: "k"),
+            RoomActionRequest(sessionId: "room_1", actionType: "working_on", targetSequenceId: 1, targetActionId: nil, note: nil, idempotencyKey: "k"),
             RoomActionRequest(sessionId: "room_1", actionType: "reply", targetSequenceId: 1, targetActionId: nil, note: "  ", idempotencyKey: "k"),
             RoomActionRequest(sessionId: "room_1", actionType: "reply", targetSequenceId: 1, targetActionId: nil,
                               note: String(repeating: "a", count: RoomActionRequest.replyLimit + 1), idempotencyKey: "k"),

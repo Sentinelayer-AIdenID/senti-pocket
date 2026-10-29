@@ -130,6 +130,17 @@ public struct RoomChatView: View {
                     jumpToLatestButton(proxy: proxy)
                 }
             }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if !state.pinned.isEmpty {
+                    RoomPinnedStrip(
+                        pinned: state.pinned,
+                        limit: state.pinLimit,
+                        canUnpin: state.canPin,
+                        onOpen: { jump(to: $0, proxy: proxy) },
+                        onUnpin: { send(.setPinned(sequenceId: $0, isPinned: false)) }
+                    )
+                }
+            }
             .onAppear {
                 scrollToInitialPosition(proxy)
                 focusIfNeeded(proxy)
@@ -219,6 +230,9 @@ public struct RoomChatView: View {
                 isHighlighted: highlightedRowId == row.id,
                 canReact: state.canReact,
                 canReply: state.composer.canPost,
+                canPin: state.canPin,
+                isPinned: state.pinned.contains { $0.sequenceId == message.sequenceId },
+                pinsFull: state.pinned.count >= state.pinLimit,
                 breakouts: state.breakouts,
                 attachmentPreviews: state.attachmentPreviews,
                 onOpenReplyTarget: { jump(to: $0, proxy: proxy) },
@@ -382,6 +396,10 @@ private struct RoomMessageRowView: View {
     let isHighlighted: Bool
     var canReact = false
     var canReply = false
+    var canPin = false
+    var isPinned = false
+    /// The room holds as many pins as it can: Pin waits until one is unpinned.
+    var pinsFull = false
     var breakouts: [String: RoomBreakoutCard] = [:]
     var attachmentPreviews: [String: Data] = [:]
     let onOpenReplyTarget: (Int64) -> Void
@@ -526,6 +544,15 @@ private struct RoomMessageRowView: View {
             } label: {
                 Label("Acknowledge", systemImage: "checkmark.circle")
             }
+        }
+        if canPin {
+            Button {
+                send(.setPinned(sequenceId: row.sequenceId, isPinned: !isPinned))
+            } label: {
+                Label(isPinned ? "Unpin" : (pinsFull ? "Pinned messages are full" : "Pin"),
+                      systemImage: isPinned ? "pin.slash" : "pin")
+            }
+            .disabled(!isPinned && pinsFull)
         }
         Button {
             copyToPasteboard(row.text)
@@ -1038,6 +1065,75 @@ private struct RoomPresenceSheet: View {
                 }
             }
         }
+    }
+}
+
+
+/// The room's pinned messages above the chat, like the web's strip: newest pin first, tap to jump to one.
+private struct RoomPinnedStrip: View {
+    let pinned: [RoomChatPinned]
+    let limit: Int
+    let canUnpin: Bool
+    let onOpen: (Int64) -> Void
+    let onUnpin: (Int64) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Label("Pinned", systemImage: "pin.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(PocketPalette.warning)
+                Text("\(min(pinned.count, limit))/\(limit)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(PocketPalette.textSecondary)
+            }
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(pinned) { pin in
+                        Button {
+                            onOpen(pin.sequenceId)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                // One line each, as in a chat app's pinned bar: the chat keeps its room.
+                                Text(pin.snippet)
+                                    .font(.footnote)
+                                    .foregroundStyle(PocketPalette.textPrimary)
+                                    .lineLimit(1)
+                                Text("Pinned by \(pin.pinnedBy)")
+                                    .font(.caption2)
+                                    .foregroundStyle(PocketPalette.textSecondary)
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .frame(width: 220, alignment: .leading)
+                            .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .contextMenu {
+                            if canUnpin {
+                                Button {
+                                    onUnpin(pin.sequenceId)
+                                } label: {
+                                    Label("Unpin", systemImage: "pin.slash")
+                                }
+                            }
+                        }
+                        .accessibilityLabel("Pinned: \(pin.snippet)")
+                        .accessibilityHint("Jumps to the message")
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        // The chat scrolls under the strip, so it needs an opaque bar beneath its tint.
+        .background {
+            ZStack {
+                Rectangle().fill(.bar)
+                PocketPalette.warning.opacity(0.08)
+            }
+        }
+        .accessibilityIdentifier("pocket.room.pinned")
     }
 }
 

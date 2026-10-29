@@ -391,6 +391,12 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     public let attachmentPreviews: [String: Data]
     /// Who is here now; nil until the room has asked.
     public let presence: RoomChatPresence?
+    /// The room's pinned messages, newest pin first.
+    public let pinned: [RoomChatPinned]
+    /// You may pin and unpin (contributors and up).
+    public let canPin: Bool
+    /// How many messages the room can pin at once.
+    public let pinLimit: Int
 
     /// Same-author rows closer together than this share one header.
     public static let groupingWindow: TimeInterval = 5 * 60
@@ -418,6 +424,9 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         breakouts: [String: RoomBreakoutCard] = [:],
         attachmentPreviews: [String: Data] = [:],
         presence: RoomChatPresence? = nil,
+        pinned: [RoomChatPinned] = [],
+        canPin: Bool = false,
+        pinLimit: Int = 10,
         calendar: Calendar = .current
     ) {
         self.sessionId = sessionId
@@ -440,6 +449,9 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         self.breakouts = protectedFailure ? [:] : breakouts
         self.attachmentPreviews = protectedFailure ? [:] : attachmentPreviews
         self.presence = protectedFailure ? nil : presence
+        self.pinned = protectedFailure ? [] : pinned
+        self.canPin = protectedFailure ? false : canPin
+        self.pinLimit = max(1, pinLimit)
 
         // Protected content never renders beside an auth or access failure.
         guard failure?.suppressesProtectedContent != true else {
@@ -586,7 +598,24 @@ public enum RoomChatIntent: Equatable, Sendable {
     case attachmentAppeared(attachmentId: String)
     /// A message (by event id) or a reply (by action id) came on screen or left it, for read receipts.
     case messageOnScreen(id: String, isOnScreen: Bool)
+    /// Pin a message for the whole room, or unpin it.
+    case setPinned(sequenceId: Int64, isPinned: Bool)
     case replyOnScreen(id: String, isOnScreen: Bool)
+}
+
+/// A pinned message in the room's strip.
+public struct RoomChatPinned: Equatable, Identifiable, Sendable {
+    public var id: Int64 { sequenceId }
+    public let sequenceId: Int64
+    /// The message's first line, or "Message #N" when it is not loaded.
+    public let snippet: String
+    public let pinnedBy: String
+
+    public init(sequenceId: Int64, snippet: String, pinnedBy: String) {
+        self.sequenceId = sequenceId
+        self.snippet = snippet
+        self.pinnedBy = pinnedBy
+    }
 }
 
 /// A request to put a failed message's text back into the composer. Each request is distinct, so editing the same

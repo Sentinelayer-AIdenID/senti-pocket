@@ -293,6 +293,9 @@ private struct RoomPreviewTransport: RoomTransport {
                 actorsByType: ["ack": ["review-agent"]],
                 activeOwners: ["review-agent"]
             )
+        ], pinned: [
+            RoomPinnedMessage(id: "preview-pin-2", targetSequenceId: 120, pinnedBy: "human-alex"),
+            RoomPinnedMessage(id: "preview-pin-1", targetSequenceId: 111, pinnedBy: "review-agent")
         ])
     }
 
