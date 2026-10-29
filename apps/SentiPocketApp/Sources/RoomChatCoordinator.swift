@@ -347,18 +347,34 @@ final class RoomChatCoordinator: ObservableObject {
                     return
                 }
                 let readThrough = max(target, after.maxSequence ?? target)
-                let joinsLoadedRows = after.rawCount < Self.windowPageSize
-                    || readThrough >= (self.timeline.oldestSequence ?? readThrough)
-                if joinsLoadedRows {
+                // The window joins the loaded rows only when it touches them on the side it comes from; otherwise
+                // it stands alone, never stitched to them over a hole.
+                let comesFromNewer = self.timeline.hasMoreNewer && target > (self.timeline.newestSequence ?? .max)
+                if comesFromNewer, let newest = self.timeline.newestSequence,
+                   !before.hasMore || (before.minSequence ?? .max) <= newest {
+                    // Just below a window further back: it extends that window downwards.
+                    let oldest = self.timeline.oldestSequence
+                    self.timeline.merge(window, trimming: .oldest)
+                    self.noteOldestTrimmed(was: oldest)
+                    self.noteNewerRead(through: readThrough)
+                } else if !comesFromNewer, let oldest = self.timeline.oldestSequence,
+                          after.rawCount < Self.windowPageSize || readThrough >= oldest {
+                    // Just above the loaded rows (the page after it reaches them, or reaches the end of the room):
+                    // it extends them upwards.
                     self.timeline.merge(window, trimming: .newest)
                     self.noteNewestTrimmed()
+                    self.nextBeforeSequence = before.nextBeforeSequence ?? before.minSequence
+                    self.timeline.hasMoreOlder = before.hasMore && self.nextBeforeSequence != nil
+                    if self.timeline.hasMoreNewer, readThrough > (self.nextAfterSequence ?? .max) {
+                        self.noteNewerRead(through: readThrough)
+                    }
                 } else {
                     self.timeline.replace(with: window, hasMoreOlder: before.hasMore, hasMoreNewer: true)
-                    self.nextAfterSequence = readThrough
+                    self.nextBeforeSequence = before.nextBeforeSequence ?? before.minSequence
+                    self.timeline.hasMoreOlder = before.hasMore && self.nextBeforeSequence != nil
+                    self.noteNewerRead(through: readThrough)
                     self.readerAtBottom = false
                 }
-                self.nextBeforeSequence = before.nextBeforeSequence ?? before.minSequence
-                self.timeline.hasMoreOlder = before.hasMore && self.nextBeforeSequence != nil
                 self.reconcilePending(with: window)
                 if self.timeline.index(ofSequence: target) == nil {
                     let nearest = self.timeline.messages.last { $0.sequenceId < target }
@@ -388,22 +404,23 @@ final class RoomChatCoordinator: ObservableObject {
                 self.publish()
             }
             do {
-                let page = try await self.transport.roomEventsAfter(
-                    sessionId: self.sessionId,
-                    fromSequence: from,
-                    limit: Self.pageSize
-                )
-                guard current == self.generation, self.timeline.hasMoreNewer else { return }
-                let oldest = self.timeline.oldestSequence
-                self.timeline.merge(page.messages, trimming: .oldest)
-                self.noteOldestTrimmed(was: oldest)
-                self.reconcilePending(with: page.messages)
-                let readThrough = max(from, page.maxSequence ?? from)
-                if page.rawCount < Self.pageSize || readThrough >= self.lastAppliedSequence {
-                    self.timeline.hasMoreNewer = false
-                    self.nextAfterSequence = nil
-                } else {
-                    self.nextAfterSequence = readThrough
+                var from = from
+                // A short page that still stops before what the stream has shown was answered before those
+                // messages existed: read on at once (a few times) rather than go live without them.
+                for _ in 0..<3 {
+                    let page = try await self.transport.roomEventsAfter(
+                        sessionId: self.sessionId,
+                        fromSequence: from,
+                        limit: Self.pageSize
+                    )
+                    guard current == self.generation, self.timeline.hasMoreNewer else { return }
+                    let oldest = self.timeline.oldestSequence
+                    self.timeline.merge(page.messages, trimming: .oldest)
+                    self.noteOldestTrimmed(was: oldest)
+                    self.reconcilePending(with: page.messages)
+                    from = max(from, page.maxSequence ?? from)
+                    self.noteNewerRead(through: from)
+                    if !self.timeline.hasMoreNewer || page.rawCount >= Self.pageSize { break }
                 }
             } catch {
                 guard current == self.generation else { return }
@@ -435,15 +452,33 @@ final class RoomChatCoordinator: ObservableObject {
                 self.nextBeforeSequence = page.nextBeforeSequence ?? page.minSequence
                 self.timeline.hasMoreOlder = page.hasMore && self.nextBeforeSequence != nil
                 self.nextAfterSequence = nil
-                if let newest = page.maxSequence { self.lastAppliedSequence = max(self.lastAppliedSequence, newest) }
                 self.reconcilePending(with: page.messages)
                 self.readerAtBottom = true
                 self.unread.readerReachedBottom()
+                // The newest page may have been answered before messages the stream has since shown (counted while
+                // the window was further back, never inserted): read on from where the page stops.
+                if let readThrough = page.maxSequence, readThrough < self.lastAppliedSequence {
+                    self.lastAppliedSequence = readThrough
+                    await self.catchUp(current)
+                }
                 self.pursueFocus()
             } catch {
                 guard current == self.generation else { return }
                 self.record(error)
             }
+        }
+    }
+
+    /// Rows below a window further back have been read through `readThrough`. The window joins the live room only
+    /// once that reaches everything the stream has shown; anything sooner would leave out messages that arrived
+    /// while the page was on its way.
+    private func noteNewerRead(through readThrough: Int64) {
+        if readThrough >= lastAppliedSequence {
+            timeline.hasMoreNewer = false
+            nextAfterSequence = nil
+        } else {
+            timeline.hasMoreNewer = true
+            nextAfterSequence = readThrough
         }
     }
 
