@@ -192,6 +192,7 @@ public struct RoomChatView: View {
                 isHighlighted: highlightedRowId == row.id,
                 canReact: state.canReact,
                 canReply: state.composer.canPost,
+                breakouts: state.breakouts,
                 onOpenReplyTarget: { jump(to: $0, proxy: proxy) },
                 send: send
             )
@@ -343,11 +344,26 @@ private struct RoomMessageRowView: View {
     let isHighlighted: Bool
     var canReact = false
     var canReply = false
+    var breakouts: [String: RoomBreakoutCard] = [:]
     let onOpenReplyTarget: (Int64) -> Void
     var send: (RoomChatIntent) -> Void = { _ in }
 
     var body: some View {
         switch row.kind {
+        case .breakoutOpened(let childSessionId):
+            RoomBreakoutCardView(card: breakouts[childSessionId], startedBy: row.authorName) {
+                send(.openBreakout(childSessionId: childSessionId))
+            }
+            .padding(.vertical, 6)
+        case .breakoutOutcome(let outcome):
+            RoomBreakoutOutcomeView(
+                outcome: outcome,
+                breakoutTitle: breakouts[outcome.childSessionId]?.title,
+                ownHandles: ownHandles
+            ) {
+                send(.openBreakout(childSessionId: outcome.childSessionId))
+            }
+            .padding(.vertical, 6)
         case .memberJoined:
             Text("\(row.authorName) joined the room")
                 .font(.footnote)

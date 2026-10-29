@@ -8,12 +8,19 @@ public protocol RoomTransport: Sendable {
     func roomStream(sessionId: String, fromSequence: Int64?) -> AsyncStream<RoomStreamEvent>
     /// Replies and reaction summaries: the room's newest actions, or one thread when `targetSequenceId` is set.
     func roomActions(sessionId: String, targetSequenceId: Int64?, limit: Int) async throws -> RoomActionsPage
+    /// The breakouts started from this room that the viewer may see (metadata only).
+    func roomBreakouts(parentSessionId: String, cursor: String?, limit: Int) async throws -> RoomBreakoutsPage
 }
 
 extension RoomTransport {
     /// Transports without reply and reaction support show none.
     public func roomActions(sessionId: String, targetSequenceId: Int64?, limit: Int) async throws -> RoomActionsPage {
         RoomActionsPage()
+    }
+
+    /// Transports without breakout support show none.
+    public func roomBreakouts(parentSessionId: String, cursor: String?, limit: Int) async throws -> RoomBreakoutsPage {
+        RoomBreakoutsPage()
     }
 }
 

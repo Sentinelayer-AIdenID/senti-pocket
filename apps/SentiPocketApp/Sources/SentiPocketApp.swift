@@ -315,6 +315,7 @@ private struct AuthenticatedRootView: View {
                             admissionsTransport: admissionsTransport,
                             admissionDecider: admissionDecider,
                             openRoom: { link in open(link) },
+                            openChildRoom: { child in roomPath.append(child) },
                             onReauthenticationRequired: invalidateProtectedAuthentication
                         )
                     }
