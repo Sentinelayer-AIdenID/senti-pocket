@@ -59,5 +59,22 @@ final class RoomActionsTests: XCTestCase {
         let page = try decode(#"{"projection":{"byTarget":"nope"}}"#)
         XCTAssertTrue(page.byTarget.isEmpty)
         XCTAssertTrue(page.replies.isEmpty)
+        XCTAssertTrue(page.pinned.isEmpty)
+        XCTAssertEqual(page.pinLimit, 10)
+    }
+
+    func test_the_rooms_pinned_messages_come_newest_first_once_each() throws {
+        let page = try decode(#"""
+        {"projection":{"byTarget":[],"pinLimit":10,"pinnedMessages":[
+          {"id":"p2","actionType":"pin","targetSequenceId":7,"actorId":"human-mrrcarter","createdAt":"2026-10-29T01:00:00Z"},
+          {"id":"p1","actionType":"pin","targetSequenceId":3,"actorId":"cobalt-warden","createdAt":"2026-10-28T23:00:00Z"},
+          {"id":"p0","actionType":"pin","targetSequenceId":7,"actorId":"human-griff"},
+          {"id":"","actionType":"pin","targetSequenceId":9},
+          {"id":"p9","actionType":"pin","targetSequenceId":0}
+        ]}}
+        """#)
+        XCTAssertEqual(page.pinned.map(\.targetSequenceId), [7, 3], "one pin per message; rows without an id or target are dropped")
+        XCTAssertEqual(page.pinned.first?.pinnedBy, "human-mrrcarter")
+        XCTAssertEqual(page.pinLimit, 10)
     }
 }
