@@ -775,6 +775,9 @@ final class RoomChatCoordinator: ObservableObject {
         threadLoading = true
         publish()
         Task { [weak self] in await self?.loadThread(sequenceId) }
+        // A reply shown in the room can answer a message further back than the loaded rows: load the room around
+        // that message, and the thread opens on it once it is there.
+        if timeline.index(ofSequence: sequenceId) == nil { focus(on: sequenceId) }
     }
 
     private func noteReplyAuthors(_ replies: [RoomReply]) {
@@ -1390,7 +1393,7 @@ final class RoomChatCoordinator: ObservableObject {
                 replyToSequenceId: reply.targetSequenceId,
                 isEdited: reply.isEdited,
                 date: date,
-                isInlineReply: true
+                inlineReplyId: reply.id
             )
         }
     }

@@ -30,8 +30,10 @@ public struct RoomChatMessageInput: Equatable, Sendable {
     public let attachments: [RoomAttachmentChip]
     /// Who has viewed this revision, once the room has read it.
     public let views: RoomChatViews?
-    /// A threaded reply shown in the room at its own time (its `sequenceId` is the message it answers).
-    public let isInlineReply: Bool
+    /// For a threaded reply shown in the room at its own time: the reply's own action id. Its `sequenceId` is the
+    /// message it answers, so everything the row does to itself keys on this id instead.
+    public let inlineReplyId: String?
+    public var isInlineReply: Bool { inlineReplyId != nil }
 
     public init(
         id: String,
@@ -48,7 +50,7 @@ public struct RoomChatMessageInput: Equatable, Sendable {
         reactions: RoomChatReactions? = nil,
         attachments: [RoomAttachmentChip] = [],
         views: RoomChatViews? = nil,
-        isInlineReply: Bool = false
+        inlineReplyId: String? = nil
     ) {
         self.id = id
         self.sequenceId = sequenceId
@@ -64,7 +66,7 @@ public struct RoomChatMessageInput: Equatable, Sendable {
         self.reactions = reactions
         self.attachments = attachments
         self.views = views
-        self.isInlineReply = isInlineReply
+        self.inlineReplyId = inlineReplyId
     }
 }
 
@@ -190,8 +192,9 @@ public struct RoomChatMessageRow: Equatable, Identifiable, Sendable {
     public let reactions: RoomChatReactions?
     public let attachments: [RoomAttachmentChip]
     public let views: RoomChatViews?
-    /// A threaded reply shown at its own time; tapping it opens its thread.
-    public var isInlineReply: Bool = false
+    /// A threaded reply shown at its own time: its own action id. Tapping it opens its thread.
+    public var inlineReplyId: String?
+    public var isInlineReply: Bool { inlineReplyId != nil }
     /// What a reply answers, when that message is loaded: "author: its first line".
     public var replyContext: String?
 }
@@ -533,7 +536,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 reactions: input.reactions.flatMap { $0.isEmpty ? nil : $0 },
                 attachments: input.attachments,
                 views: input.views,
-                isInlineReply: input.isInlineReply,
+                inlineReplyId: input.inlineReplyId,
                 replyContext: input.replyToSequenceId.flatMap { parents[$0] }.map(Self.replyContext(for:))
             )))
             if input.kind == .message, let date = input.date {
@@ -544,10 +547,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         }
         self.rows = rows
         if let threadInput, !protectedFailure,
-           let parent = rows.lazy.compactMap({ row -> RoomChatMessageRow? in
-               if case .message(let message) = row, message.sequenceId == threadInput.sequenceId { return message }
-               return nil
-           }).first {
+           case .message(let parent)? = Self.messageRow(in: rows, for: threadInput.sequenceId) {
             self.thread = RoomChatThreadState(
                 parent: parent,
                 replies: threadInput.replies,
@@ -589,6 +589,21 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         let snippet = trimmed.count > 70 ? String(trimmed.prefix(70)) + "…" : trimmed
         return "\(parent.authorName): \(snippet)"
+    }
+
+    /// The row of the message with this sequence: never a reply shown in the room under the same sequence.
+    public func messageRow(for sequenceId: Int64) -> RoomChatRow? { Self.messageRow(in: rows, for: sequenceId) }
+
+    static func messageRow(in rows: [RoomChatRow], for sequenceId: Int64) -> RoomChatRow? {
+        rows.first { row in
+            if case .message(let message) = row { return !message.isInlineReply && message.sequenceId == sequenceId }
+            return false
+        }
+    }
+
+    /// A pin belongs to its message: a reply shown in the room is never marked by its message's pin.
+    public func isPinned(_ row: RoomChatMessageRow) -> Bool {
+        !row.isInlineReply && pinned.contains { $0.sequenceId == row.sequenceId }
     }
 
     public var lastMessageId: String? {
@@ -634,6 +649,79 @@ public struct RoomChatPresentationState: Equatable, Sendable {
 public enum RoomReadAloud {
     public static func message(_ sequenceId: Int64) -> String { "msg:\(sequenceId)" }
     public static func reply(_ id: String) -> String { "reply:\(id)" }
+}
+
+/// One option in a row's long-press menu, and what it asks the room for.
+public struct RoomRowOption: Equatable, Identifiable, Sendable {
+    public enum Kind: String, Sendable {
+        case thread, listen, like, dislike, acknowledge, pin, copy
+    }
+
+    public let kind: Kind
+    public let title: String
+    public let symbol: String
+    /// What it asks the room for; nil for Copy, which the view does itself.
+    public let intent: RoomChatIntent?
+    public var isEnabled = true
+
+    public var id: Kind { kind }
+}
+
+extension RoomChatMessageRow {
+    /// What reads this row aloud. A reply shown in the room is read as itself, never as the message it answers.
+    public var readAloudId: String {
+        inlineReplyId.map(RoomReadAloud.reply) ?? RoomReadAloud.message(sequenceId)
+    }
+
+    /// Its identifier for VoiceOver and UI tests: a reply shown in the room has its own.
+    public var accessibilityId: String {
+        inlineReplyId.map { "pocket.room.reply.\($0)" } ?? "pocket.room.message.\(sequenceId)"
+    }
+
+    /// What a reaction on this row sends. A reply shown in the room shares its message's sequence, so it sends none
+    /// from here: a like on a reply must never land on the message it answers.
+    public func reaction(_ type: String) -> RoomChatIntent? {
+        isInlineReply ? nil : .react(sequenceId: sequenceId, type: type)
+    }
+
+    /// The long-press menu, in order. A message's options act on the message. A reply shown in the room opens its
+    /// thread, reads itself aloud and copies itself; it has no pin, and no reactions from the room.
+    public func options(canReply: Bool, canReact: Bool, canPin: Bool, isPinned: Bool, pinsFull: Bool) -> [RoomRowOption] {
+        var options = [
+            RoomRowOption(kind: .thread, title: canReply ? "Reply in thread" : "Open thread",
+                          symbol: "bubble.left.and.bubble.right", intent: .openThread(sequenceId: sequenceId)),
+            // Always "Listen": a context menu can show content from before the reading started, so Stop is the
+            // speaker button on the row being read.
+            RoomRowOption(kind: .listen, title: "Listen", symbol: "speaker.wave.2",
+                          intent: .readAloud(id: readAloudId, text: text))
+        ]
+        if canReact {
+            let liked = reactions?.chips.contains { $0.type == "like" && $0.isMine } == true
+            let disliked = reactions?.chips.contains { $0.type == "dislike" && $0.isMine } == true
+            if let like = reaction(liked ? "unlike" : "like") {
+                options.append(RoomRowOption(kind: .like, title: liked ? "Remove like" : "Like",
+                                             symbol: liked ? "hand.thumbsup.fill" : "hand.thumbsup", intent: like))
+            }
+            if let dislike = reaction(disliked ? "undislike" : "dislike") {
+                options.append(RoomRowOption(kind: .dislike, title: disliked ? "Remove dislike" : "Dislike",
+                                             symbol: disliked ? "hand.thumbsdown.fill" : "hand.thumbsdown", intent: dislike))
+            }
+            if let ack = reaction("ack") {
+                options.append(RoomRowOption(kind: .acknowledge, title: "Acknowledge", symbol: "checkmark.circle", intent: ack))
+            }
+        }
+        if canPin, !isInlineReply {
+            options.append(RoomRowOption(
+                kind: .pin,
+                title: isPinned ? "Unpin" : (pinsFull ? "Pinned messages are full" : "Pin"),
+                symbol: isPinned ? "pin.slash" : "pin",
+                intent: .setPinned(sequenceId: sequenceId, isPinned: !isPinned),
+                isEnabled: isPinned || !pinsFull
+            ))
+        }
+        options.append(RoomRowOption(kind: .copy, title: "Copy text", symbol: "doc.on.doc", intent: nil))
+        return options
+    }
 }
 
 /// What the room screen can ask for.
