@@ -305,7 +305,8 @@ public struct RoomChatThreadInput: Equatable, Sendable {
 public struct RoomComposerState: Equatable, Sendable {
     public let canPost: Bool
     public let disabledReason: String?
-    /// The longest message the API accepts, in characters; nil when there is no known limit.
+    /// The longest message the API accepts, in Unicode code points (the API counts them); nil when there is no
+    /// known limit.
     public let maximumLength: Int?
 
     public static let enabled = RoomComposerState(canPost: true, disabledReason: nil)
@@ -321,7 +322,7 @@ public struct RoomComposerState: Equatable, Sendable {
     /// cleared and no failed row appears), so the writer can shorten it.
     public func lengthProblem(for draft: String) -> String? {
         guard let maximumLength else { return nil }
-        let count = draft.trimmingCharacters(in: .whitespacesAndNewlines).count
+        let count = draft.trimmingCharacters(in: .whitespacesAndNewlines).unicodeScalars.count
         guard count > maximumLength else { return nil }
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal

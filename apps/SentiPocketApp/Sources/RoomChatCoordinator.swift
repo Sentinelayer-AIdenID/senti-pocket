@@ -49,6 +49,8 @@ final class RoomChatCoordinator: ObservableObject {
         let targetSequenceId: Int64
         let text: String
         var status: RoomChatPendingRow.Status
+        /// You in its key, pinned at the first attempt, so a retry is byte-for-byte the same request.
+        var actor: String?
         var clientId: String { "rp_" + nonce }
     }
     private var pendingReplies: [PendingReply] = []
@@ -316,7 +318,7 @@ final class RoomChatCoordinator: ObservableObject {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard actionSender != nil, postingRefusedReason == nil, !text.isEmpty else { return }
         let nonce = UUID().uuidString.lowercased()
-        guard text.count <= RoomActionRequest.replyLimit else {
+        guard text.unicodeScalars.count <= RoomActionRequest.replyLimit else {
             // The reply box holds this before sending; this is the backstop. The full text is kept (only the row's
             // display is cut), so nothing typed is lost.
             pendingReplies.append(PendingReply(
@@ -337,13 +339,23 @@ final class RoomChatCoordinator: ObservableObject {
     private func deliverReply(_ clientId: String) {
         guard let actionSender, let item = pendingReplies.first(where: { $0.clientId == clientId }) else { return }
         let sessionId = self.sessionId
+        let pinned = item.actor
         Task { [weak self] in
-            guard let actor = await self?.resolvedActorRef() else {
+            let resolved: String?
+            if let pinned {
+                resolved = pinned
+            } else {
+                resolved = await self?.resolvedActorRef()
+            }
+            guard let actor = resolved else {
                 // Never sent under a placeholder name; the row offers Retry.
                 self?.updateReply(clientId) {
                     $0.status = .failed(reason: RoomSendError.retryable(retryAfterSeconds: nil).userMessage, canRetry: true)
                 }
                 return
+            }
+            if pinned == nil, let index = self?.pendingReplies.firstIndex(where: { $0.clientId == clientId }) {
+                self?.pendingReplies[index].actor = actor
             }
             let request = RoomActionRequest.reply(
                 sessionId: sessionId, sequenceId: item.targetSequenceId, text: item.text, actor: actor, nonce: item.nonce
@@ -400,7 +412,7 @@ final class RoomChatCoordinator: ObservableObject {
     private func enqueueSend(_ raw: String) {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard sender != nil, postingRefusedReason == nil, !text.isEmpty else { return }
-        guard text.count <= HTTPRoomMessageSender.maximumLength else {
+        guard text.unicodeScalars.count <= HTTPRoomMessageSender.maximumLength else {
             // The composer refuses this before sending; this is the backstop. The full text is kept (only the row's
             // display is cut), so nothing typed is lost.
             pending.append(PendingSend(

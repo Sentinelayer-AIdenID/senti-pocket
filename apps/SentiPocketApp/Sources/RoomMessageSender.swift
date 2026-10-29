@@ -37,7 +37,8 @@ final class HTTPRoomMessageSender: RoomMessageSending, @unchecked Sendable {
     private let urlSession: URLSession
     private let tokenProvider: @Sendable () -> String?
 
-    /// The API's limit (`HUMAN_MESSAGE_MAX_LENGTH`), counted in characters as the web does.
+    /// The API's limit (`HUMAN_MESSAGE_MAX_LENGTH`), in Unicode code points: the API counts with Python's len, so an
+    /// emoji made of several code points counts as several.
     static let maximumLength = 64_000
 
     init(
@@ -59,7 +60,7 @@ final class HTTPRoomMessageSender: RoomMessageSending, @unchecked Sendable {
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
         guard !sessionId.isEmpty, sessionId.utf8.count <= 256,
               let encodedSession = sessionId.addingPercentEncoding(withAllowedCharacters: allowed),
-              !text.isEmpty, text.count <= Self.maximumLength,
+              !text.isEmpty, text.unicodeScalars.count <= Self.maximumLength,
               clientId.utf8.count <= 120 else {
             throw RoomSendError.rejected
         }
@@ -249,7 +250,7 @@ final class HTTPRoomActionSender: RoomActionSending, @unchecked Sendable {
               let encodedSession = action.sessionId.addingPercentEncoding(withAllowedCharacters: allowed),
               action.targetSequenceId > 0,
               action.actionType == "reply" || RoomActionRequest.reactionTypes.contains(action.actionType),
-              (action.note?.count ?? 0) <= RoomActionRequest.replyLimit,
+              (action.note?.unicodeScalars.count ?? 0) <= RoomActionRequest.replyLimit,
               action.actionType != "reply" || !(action.note ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw RoomSendError.rejected
         }

@@ -12,6 +12,14 @@ final class ComposerLengthTests: XCTestCase {
                      "no known limit, no problem")
     }
 
+    func test_the_limit_counts_code_points_as_the_api_does() {
+        let composer = RoomComposerState(canPost: true, disabledReason: nil, maximumLength: 10)
+        // Six waving hands with a skin tone: six characters on screen, twelve code points to the API.
+        let waves = String(repeating: "\u{1F44B}\u{1F3FD}", count: 6)
+        XCTAssertEqual(waves.count, 6)
+        XCTAssertEqual(composer.lengthProblem(for: waves), "Too long to send: 12 of 10 characters.")
+    }
+
     func test_a_pending_row_keeps_its_full_text_and_only_the_display_is_cut() {
         let long = String(repeating: "b", count: 70_000)
         let row = RoomChatPendingRow(clientId: "hm_1", text: long, status: .failed(reason: "Too long", canRetry: false))

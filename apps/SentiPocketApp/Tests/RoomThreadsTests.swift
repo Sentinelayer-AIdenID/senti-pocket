@@ -258,6 +258,24 @@ private struct AccountStub: AccountIdentityProviding {
     func currentAccount() async -> SignedInAccount? { account }
 }
 
+/// An account that becomes known only later (the first look fails).
+private final class LateAccount: AccountIdentityProviding, @unchecked Sendable {
+    private let lock = NSLock()
+    private var account: SignedInAccount?
+
+    func arrive(_ account: SignedInAccount?) {
+        lock.lock()
+        self.account = account
+        lock.unlock()
+    }
+
+    func currentAccount() async -> SignedInAccount? {
+        lock.lock()
+        defer { lock.unlock() }
+        return account
+    }
+}
+
 @MainActor
 final class RoomThreadsCoordinatorTests: XCTestCase {
     private func message(_ seq: Int64) -> RoomMessage {
@@ -450,6 +468,26 @@ final class RoomThreadsCoordinatorTests: XCTestCase {
         await waitUntil("sent") { sender.requests().count == 2 && coordinator.state.thread?.pending.isEmpty == true }
         XCTAssertEqual(sender.requests()[0].idempotencyKey, sender.requests()[1].idempotencyKey,
                        "a retry is the same reply to the API")
+        coordinator.pause()
+    }
+
+    func test_a_retry_keeps_the_name_its_first_attempt_used_even_if_your_account_loads_in_between() async {
+        let transport = ActionsRoomTransport(history: [message(9)], projections: [RoomActionsPage()])
+        let sender = RecordingActionSender(failFirst: [.retryable(retryAfterSeconds: nil)])
+        let account = LateAccount()
+        let coordinator = makeCoordinator(transport, actions: sender, identity: account)
+        coordinator.resume()
+        await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
+
+        coordinator.send(.openThread(sequenceId: 9))
+        coordinator.send(.sendReply(sequenceId: 9, text: "on it"))
+        await waitUntil("failed") { self.failedRetryably(coordinator) }
+        account.arrive(SignedInAccount(githubUsername: "mrrCarter", accountId: "6f1c2d3e-0000-4000-8000-000000000001"))
+        coordinator.send(.retrySend(clientId: coordinator.state.thread?.pending.first?.clientId ?? ""))
+        await waitUntil("sent") { sender.requests().count == 2 }
+        XCTAssertEqual(sender.requests()[0].idempotencyKey, sender.requests()[1].idempotencyKey,
+                       "the first attempt went out as mrrcarter; the retry must be the same request")
+        XCTAssertTrue(sender.requests()[0].idempotencyKey.contains(":mrrcarter:"))
         coordinator.pause()
     }
 
