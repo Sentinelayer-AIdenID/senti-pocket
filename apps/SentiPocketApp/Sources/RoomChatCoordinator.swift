@@ -103,6 +103,10 @@ final class RoomChatCoordinator: ObservableObject {
     /// Owners and admins can read the member list, so they can mention people who have not posted yet.
     private let readsMembers: Bool
     private var members: [RoomMember] = []
+    /// The room's member directory (every member may read it), read once per open, for @-mentions.
+    private let directory: (any RoomTicketExtrasReading)?
+    private var directoryPeople: [RoomDirectoryMember] = []
+    private var readDirectory = false
     static let previewLimitBytes = 10 * 1024 * 1024
     static let previewCacheSize = 40
     private var generation: UInt64 = 0
@@ -132,9 +136,11 @@ final class RoomChatCoordinator: ObservableObject {
         now: @escaping @Sendable () -> Date = { Date() },
         attachmentFetcher: any AttachmentFileFetching = URLSessionAttachmentFetcher(),
         receipts: (any RoomReceiptsClient)? = nil,
+        directory: (any RoomTicketExtrasReading)? = nil,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.attachmentFetcher = attachmentFetcher
+        self.directory = directory
         self.sessionId = sessionId
         self.title = title
         self.transport = transport
@@ -199,6 +205,7 @@ final class RoomChatCoordinator: ObservableObject {
             await self.refreshActions(force: true)
             await self.refreshBreakouts()
             await self.refreshMembers()
+            await self.readMemberDirectory()
         })
     }
 
@@ -270,7 +277,7 @@ final class RoomChatCoordinator: ObservableObject {
             guard focusTarget != nil else { return }
             focusTarget = nil
             publish()
-        case .openBreakout, .openAttachment, .readAloud, .stopReadingAloud:
+        case .openBreakout, .openAttachment, .readAloud, .stopReadingAloud, .openTickets, .openSearch:
             break   // the room screen navigates or presents
         case .setPinned(let sequenceId, let isPinned):
             setPinned(isPinned, on: sequenceId)
@@ -616,6 +623,32 @@ final class RoomChatCoordinator: ObservableObject {
         guard page.members != members else { return }
         members = page.members
         publish()
+    }
+
+    /// The member directory, read once per open: three restarts when membership changes mid-read, then nothing on
+    /// any failure (the suggestions keep the people seen in the room).
+    func readMemberDirectory() async {
+        guard let directory, sender != nil, !readDirectory, !failureIsTerminal else { return }
+        readDirectory = true
+        for _ in 0..<4 {
+            var people: [RoomDirectoryMember] = []
+            var cursor: String?
+            do {
+                for _ in 0..<10 {
+                    let page = try await directory.memberDirectory(sessionId: sessionId, cursor: cursor)
+                    people += page.members
+                    guard page.hasMore, let next = page.nextCursor else { break }
+                    cursor = next
+                }
+                directoryPeople = people
+                publish()
+                return
+            } catch RoomTicketExtrasError.directoryChanged {
+                continue
+            } catch {
+                return
+            }
+        }
     }
 
     /// Re-reads the breakouts started from this room. A failed read keeps the cards already shown.
@@ -1334,10 +1367,22 @@ final class RoomChatCoordinator: ObservableObject {
         )
     }
 
-    /// Everyone who has posted in the loaded history, newest activity per person, for @-mention suggestions.
+    /// Everyone in the room for @-mention suggestions: the people in its member directory, the agents here now, and
+    /// everyone who posted in the loaded history, newest activity per person.
     private func mentionCandidates() -> [MentionCandidate] {
         guard sender != nil else { return [] }
         var latest: [String: (name: String, isHuman: Bool, date: Date?)] = [:]
+        // People in the room's directory (every member can read it), under their login: the handle that notifies.
+        for person in directoryPeople {
+            guard let login = person.githubLogin?.lowercased(), !login.isEmpty,
+                  !ownAuthorIds.contains("human-\(login)") else { continue }
+            latest["human-\(login)"] = (person.name, true, nil)
+        }
+        // Agents here now, whether or not they posted in what is loaded.
+        for person in receiptsTracker?.presence?.participants ?? [] where !person.isHuman && !person.id.isEmpty {
+            let id = person.id.lowercased()
+            if latest[id] == nil, !ownAuthorIds.contains(id) { latest[id] = (person.id, false, nil) }
+        }
         // People in the room who have not posted yet (owners and admins see the member list), under their login.
         for member in members where !ownAuthorIds.contains("human-\(member.login)") {
             latest["human-\(member.login)"] = (member.displayName, true, member.lastActiveAt.flatMap { ParsedSessionTimestamp($0).date })

@@ -32,6 +32,8 @@ struct RoomChatScreen: View {
     @StateObject private var coordinator: RoomChatCoordinator
     @Environment(\.scenePhase) private var scenePhase
     @State private var showsTickets = false
+    /// The tickets screen opens straight into a new ticket (the composer's "File a ticket").
+    @State private var ticketsStartFiling = false
     @State private var showsAdmissions = false
     @State private var showsBreakouts = false
     @State private var showsSearch = false
@@ -103,6 +105,7 @@ struct RoomChatScreen: View {
             focusSequenceId: route.focusSequenceId,
             attachmentFetcher: attachmentFetcher,
             receipts: receipts,
+            directory: ticketExtras,
             onReauthenticationRequired: onReauthenticationRequired
         ))
     }
@@ -153,9 +156,21 @@ struct RoomChatScreen: View {
     }
 
     var body: some View {
-        RoomChatView(state: coordinator.state, readingAloudId: reader.readingId) { intent in
+        RoomChatView(
+            state: coordinator.state,
+            readingAloudId: reader.readingId,
+            composerActions: RoomComposerActions(
+                canFileTicket: ticketsTransport != nil && writesTickets && !route.isBreakout,
+                canSearch: search != nil
+            )
+        ) { intent in
             if case .openBreakout(let childSessionId) = intent {
                 openBreakout(childSessionId)
+            } else if case .openTickets(let filing) = intent {
+                ticketsStartFiling = filing
+                showsTickets = true
+            } else if intent == .openSearch {
+                showsSearch = true
             } else if case .openAttachment(let attachmentId) = intent {
                 openAttachment(attachmentId)
             } else if case .readAloud(let id, let text) = intent {
@@ -211,6 +226,9 @@ struct RoomChatScreen: View {
                 .environment(\.openURL, linkAction)
             }
         }
+        .onChange(of: showsTickets) { shown in
+            if !shown { ticketsStartFiling = false }
+        }
         .navigationDestination(isPresented: $showsTickets) {
             if let ticketsTransport {
                 RoomTicketsScreen(
@@ -222,6 +240,7 @@ struct RoomChatScreen: View {
                     identity: identity,
                     assignRoster: ticketAssignRoster,
                     extras: ticketExtras,
+                    startsFiling: ticketsStartFiling,
                     onOpenMessage: { sequence in focus(on: sequence) },
                     onReauthenticationRequired: onReauthenticationRequired
                 )
