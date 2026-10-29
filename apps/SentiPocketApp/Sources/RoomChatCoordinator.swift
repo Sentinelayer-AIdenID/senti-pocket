@@ -41,6 +41,9 @@ final class RoomChatCoordinator: ObservableObject {
     private var replyAuthors: [String: (name: String, isHuman: Bool, date: Date?)] = [:]
     /// Threaded replies by action id (newest revision), shown in the room at their own time. Bounded to the newest.
     private var inlineReplies: [String: RoomReply] = [:]
+    /// Agents' "working on" updates by action id, and how long one stays current.
+    private var workingOn: [String: RoomWorkingOn] = [:]
+    private var workingOnStaleAfter: TimeInterval = 900
     static let inlineReplyLimit = 1_500
     private var lastActionsRefresh: Date?
     private var actionsRefreshInFlight = false
@@ -704,6 +707,12 @@ final class RoomChatCoordinator: ObservableObject {
             if let known = inlineReplies[reply.id], known.revision >= reply.revision { continue }
             inlineReplies[reply.id] = reply
         }
+        for update in page.workingOn { workingOn[update.id] = update }
+        workingOnStaleAfter = page.workingOnStaleAfter
+        if workingOn.count > Self.inlineReplyLimit {
+            let keep = workingOn.values.sorted { $0.createdAt > $1.createdAt }.prefix(Self.inlineReplyLimit)
+            workingOn = Dictionary(keep.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        }
         if inlineReplies.count > Self.inlineReplyLimit {
             let keep = inlineReplies.values.sorted { $0.createdAt > $1.createdAt }.prefix(Self.inlineReplyLimit)
             inlineReplies = Dictionary(keep.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
@@ -1292,6 +1301,7 @@ final class RoomChatCoordinator: ObservableObject {
     }
 
     private func publish() {
+        let work = workLines()
         let inputs = timeline.messages.map { message -> RoomChatMessageInput in
             let date: Date?
             if let cached = dateCache[message.id] {
@@ -1327,7 +1337,8 @@ final class RoomChatCoordinator: ObservableObject {
                 attachments: message.attachments.map(Self.chip),
                 views: message.eventType == "session_message"
                     ? views(of: message.id, at: message.revision, author: viewAuthor(message.authorId, isHuman: message.isHuman))
-                    : nil
+                    : nil,
+                work: work[message.sequenceId] ?? []
             )
         }
         let threadInput = openThreadSequence.map { sequence in
@@ -1397,6 +1408,40 @@ final class RoomChatCoordinator: ObservableObject {
             pinLimit: pinLimit,
             replies: inlineReplyInputs()
         )
+    }
+
+    /// Each message's "working on" lines, oldest first, with whether each is still live (not done, and newer than
+    /// the room's staleness window). Only an agent's newest line per message is live.
+    private func workLines() -> [Int64: [RoomChatWorkLine]] {
+        let cutoff = now().addingTimeInterval(-workingOnStaleAfter)
+        var byMessage: [Int64: [RoomWorkingOn]] = [:]
+        for update in workingOn.values { byMessage[update.targetSequenceId, default: []].append(update) }
+        return byMessage.mapValues { updates in
+            let ordered = updates.sorted { ($0.createdAt, $0.id) < ($1.createdAt, $1.id) }
+            let newestByActor = Dictionary(ordered.map { ($0.actorId, $0.id) }, uniquingKeysWith: { _, last in last })
+            return ordered.map { update in
+                let at = ParsedSessionTimestamp(update.createdAt).date
+                return RoomChatWorkLine(
+                    id: update.id,
+                    actorId: update.actorId,
+                    text: update.note,
+                    at: at,
+                    isLive: !update.isDone && newestByActor[update.actorId] == update.id && (at.map { $0 > cutoff } ?? false)
+                )
+            }
+        }
+    }
+
+    /// Each agent's newest "working on" line in the room, for the Flight record.
+    func latestWork() -> [String: RoomChatWorkLine] {
+        var latest: [String: RoomWorkingOn] = [:]
+        for update in workingOn.values where (latest[update.actorId]?.createdAt ?? "") < update.createdAt {
+            latest[update.actorId] = update
+        }
+        return latest.mapValues { update in
+            RoomChatWorkLine(id: update.id, actorId: update.actorId, text: update.note,
+                             at: ParsedSessionTimestamp(update.createdAt).date, isLive: !update.isDone)
+        }
     }
 
     /// Threaded replies shown in the room at their own time, as the web shows them (most agent and box output is

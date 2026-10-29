@@ -623,6 +623,9 @@ private struct RoomMessageRowView: View {
     /// Edited mark, attachments, who viewed it and the reactions: the same under every kind of message.
     @ViewBuilder
     private var messageFooter: some View {
+        if !row.work.isEmpty {
+            RoomWorkLines(lines: row.work)
+        }
         if !row.attachments.isEmpty {
             RoomAttachmentsView(chips: row.attachments, previews: attachmentPreviews, send: send)
         }
@@ -808,6 +811,54 @@ private struct RoomMessageRowView: View {
             }
             .disabled(!option.isEnabled)
         }
+    }
+}
+
+/// Who is working on a message, under it: live lines shimmer, finished ones fold into one line that opens to show
+/// every step (as the assistant apps show their steps).
+struct RoomWorkLines: View {
+    let lines: [RoomChatWorkLine]
+    @State private var showsAll = false
+
+    var body: some View {
+        let live = lines.filter(\.isLive)
+        let finished = lines.filter { !$0.isLive }
+        VStack(alignment: .leading, spacing: 3) {
+            ForEach(live) { line in
+                LiveLine(text: "\(line.actorId) · \(line.text)", isLive: true)
+            }
+            if let newest = finished.last {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) { showsAll.toggle() }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "checkmark.circle")
+                            .font(.caption2)
+                        Text("\(newest.actorId) · \(newest.text)")
+                            .font(.caption)
+                            .lineLimit(1)
+                        if finished.count > 1 {
+                            Image(systemName: showsAll ? "chevron.down" : "chevron.right")
+                                .font(.caption2.weight(.semibold))
+                        }
+                    }
+                    .foregroundStyle(PocketPalette.textSecondary)
+                }
+                .buttonStyle(.plain)
+                .disabled(finished.count < 2)
+                .accessibilityLabel("\(newest.actorId): \(newest.text)")
+                .accessibilityHint(finished.count > 1 ? (showsAll ? "Hides the earlier steps" : "Shows \(finished.count - 1) earlier steps") : "")
+                if showsAll {
+                    ForEach(finished.dropLast()) { line in
+                        Text("\(line.actorId) · \(line.text)")
+                            .font(.caption)
+                            .foregroundStyle(PocketPalette.textSecondary)
+                            .padding(.leading, 16)
+                    }
+                }
+            }
+        }
+        .padding(.top, 2)
     }
 }
 
