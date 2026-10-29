@@ -170,6 +170,8 @@ private struct AuthenticatedRootView: View {
     @State private var roomPath: [RoomRoute] = []
     private let roomTransport: any RoomTransport
     private let ticketsTransport: any RoomTicketsTransport
+    private let admissionsTransport: any RoomAdmissionsTransport
+    private let admissionDecider: any AdmissionDeciding
     private let roomSender: any RoomMessageSending
     private let roomActionSender: any RoomActionSending
     private let accountIdentity: any AccountIdentityProviding
@@ -263,6 +265,8 @@ private struct AuthenticatedRootView: View {
         _whisperModelCoordinator = ObservedObject(wrappedValue: whisperModelCoordinator)
         self.roomTransport = transport
         self.ticketsTransport = transport
+        self.admissionsTransport = transport
+        self.admissionDecider = HTTPAdmissionDecider(apiBaseURL: apiURL)
         // Typed room messages go straight to the Senti API as you, like the web; the gateway's confirm-and-receipt
         // flow stays for AI-drafted writes (the Pocket tab and voice replies).
         self.roomSender = HTTPRoomMessageSender(apiBaseURL: apiURL)
@@ -300,6 +304,8 @@ private struct AuthenticatedRootView: View {
                             actionSender: roomActionSender,
                             identity: accountIdentity,
                             ticketsTransport: ticketsTransport,
+                            admissionsTransport: admissionsTransport,
+                            admissionDecider: admissionDecider,
                             onReauthenticationRequired: invalidateProtectedAuthentication
                         )
                     }
