@@ -571,13 +571,25 @@ private struct RoomMessageRowView: View {
             }
             if let reply = row.replyToSequenceId {
                 Button {
-                    onOpenReplyTarget(reply)
+                    if row.isInlineReply {
+                        send(.openThread(sequenceId: reply))
+                    } else {
+                        onOpenReplyTarget(reply)
+                    }
                 } label: {
-                    Label("Replying to #\(reply)", systemImage: "arrowshape.turn.up.left")
+                    Label(row.replyContext ?? "Replying to #\(reply)", systemImage: "arrowshape.turn.up.left")
                         .font(.caption)
                         .foregroundStyle(PocketPalette.textSecondary)
+                        .lineLimit(1)
+                        .padding(.leading, 8)
+                        .overlay(alignment: .leading) {
+                            RoundedRectangle(cornerRadius: 1)
+                                .fill(PocketPalette.separator)
+                                .frame(width: 2)
+                        }
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(row.isInlineReply ? "In reply to \(row.replyContext ?? "message \(reply)"). Opens the thread." : "Replying to message \(reply)")
             }
             ChatMarkdownView(text: row.text, ownHandles: ownHandles)
                 .font(.body)

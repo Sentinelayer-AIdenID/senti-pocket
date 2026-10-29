@@ -30,6 +30,8 @@ public struct RoomChatMessageInput: Equatable, Sendable {
     public let attachments: [RoomAttachmentChip]
     /// Who has viewed this revision, once the room has read it.
     public let views: RoomChatViews?
+    /// A threaded reply shown in the room at its own time (its `sequenceId` is the message it answers).
+    public let isInlineReply: Bool
 
     public init(
         id: String,
@@ -45,7 +47,8 @@ public struct RoomChatMessageInput: Equatable, Sendable {
         date: Date? = nil,
         reactions: RoomChatReactions? = nil,
         attachments: [RoomAttachmentChip] = [],
-        views: RoomChatViews? = nil
+        views: RoomChatViews? = nil,
+        isInlineReply: Bool = false
     ) {
         self.id = id
         self.sequenceId = sequenceId
@@ -61,6 +64,7 @@ public struct RoomChatMessageInput: Equatable, Sendable {
         self.reactions = reactions
         self.attachments = attachments
         self.views = views
+        self.isInlineReply = isInlineReply
     }
 }
 
@@ -186,6 +190,10 @@ public struct RoomChatMessageRow: Equatable, Identifiable, Sendable {
     public let reactions: RoomChatReactions?
     public let attachments: [RoomAttachmentChip]
     public let views: RoomChatViews?
+    /// A threaded reply shown at its own time; tapping it opens its thread.
+    public var isInlineReply: Bool = false
+    /// What a reply answers, when that message is loaded: "author: its first line".
+    public var replyContext: String?
 }
 
 public enum RoomChatRow: Equatable, Identifiable, Sendable {
@@ -433,6 +441,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         pinned: [RoomChatPinned] = [],
         canPin: Bool = false,
         pinLimit: Int = 10,
+        replies: [RoomChatMessageInput] = [],
         calendar: Calendar = .current
     ) {
         self.sessionId = sessionId
@@ -472,7 +481,14 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         var lastDay: DateComponents?
         var run: (authorId: String, date: Date)?
         var placedDivider = false
-        let ordered = messages.sorted { $0.sequenceId < $1.sequenceId }
+        let ordered = Self.interleave(
+            messages: messages.sorted { $0.sequenceId < $1.sequenceId },
+            replies: replies
+        )
+        let parents = Dictionary(
+            messages.map { ($0.sequenceId, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
         for input in ordered {
             if let date = input.date {
                 let day = calendar.dateComponents([.year, .month, .day], from: date)
@@ -516,7 +532,9 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 showsHeader: !continuesRun,
                 reactions: input.reactions.flatMap { $0.isEmpty ? nil : $0 },
                 attachments: input.attachments,
-                views: input.views
+                views: input.views,
+                isInlineReply: input.isInlineReply,
+                replyContext: input.replyToSequenceId.flatMap { parents[$0] }.map(Self.replyContext(for:))
             )))
             if input.kind == .message, let date = input.date {
                 run = (input.authorId, date)
@@ -542,6 +560,35 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         } else {
             self.thread = nil
         }
+    }
+
+    /// Messages in sequence order with replies placed at their own time: each reply goes after the messages that
+    /// came before it. A reply without a time goes after its message.
+    static func interleave(messages: [RoomChatMessageInput], replies: [RoomChatMessageInput]) -> [RoomChatMessageInput] {
+        guard !replies.isEmpty else { return messages }
+        let timed = replies.sorted { ($0.date ?? .distantFuture, $0.id) < ($1.date ?? .distantFuture, $1.id) }
+        var result: [RoomChatMessageInput] = []
+        result.reserveCapacity(messages.count + replies.count)
+        var next = 0
+        for message in messages {
+            if let at = message.date {
+                while next < timed.count, let replyAt = timed[next].date, replyAt < at {
+                    result.append(timed[next])
+                    next += 1
+                }
+            }
+            result.append(message)
+        }
+        result.append(contentsOf: timed[next...])
+        return result
+    }
+
+    /// "author: first line" of the message a reply answers, kept short.
+    static func replyContext(for parent: RoomChatMessageInput) -> String {
+        let line = parent.text.split(whereSeparator: \.isNewline).first.map(String.init) ?? parent.text
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        let snippet = trimmed.count > 70 ? String(trimmed.prefix(70)) + "…" : trimmed
+        return "\(parent.authorName): \(snippet)"
     }
 
     public var lastMessageId: String? {
