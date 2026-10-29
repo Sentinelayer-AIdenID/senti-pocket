@@ -124,7 +124,7 @@ jobs:
         id: classify
         shell: bash
         env:
-          ROUTE: ${{ vars.OMAR_ROUTE || '' }}
+          ROUTE: ${{ vars.OMAR_ROUTE == 'azure' && 'azure' || '' }}
           DRILL: ${{ github.event_name == 'workflow_dispatch' && inputs.quota_retry_drill && 'true' || 'false' }}
           FIRST_OUTCOME: ${{ steps.omar.outcome }}
           FIRST_FAILURE_CLASS: ${{ steps.omar.outputs.llm_failure_class || '' }}
@@ -134,6 +134,7 @@ jobs:
           # Review on the backup endpoint when the org routes Omar to Azure, or for the dispatch drill: both skip the
           # first attempt. Otherwise retry there once only when the first attempt failed with a billing or quota 429
           # on every LLM attempt. Any other failure stands.
+          # ROUTE is the same case-insensitive comparison as the first attempt's if:, so the two always agree.
           retry=false
           reason=none
           if [ "${ROUTE}" = "azure" ]; then
