@@ -53,6 +53,8 @@ final class RoomChatCoordinator: ObservableObject {
     private struct PendingReply {
         let nonce: String
         let targetSequenceId: Int64
+        /// The reply it answers, for a reply to a reply (it nests under it).
+        var toReply: String? = nil
         let text: String
         var status: RoomChatPendingRow.Status
         /// You in its key, pinned at the first attempt, so a retry is byte-for-byte the same request.
@@ -281,6 +283,10 @@ final class RoomChatCoordinator: ObservableObject {
             publish()
         case .sendReply(let sequenceId, let text):
             sendReply(text, to: sequenceId)
+        case .sendReplyToReply(let sequenceId, let replyId, let text):
+            sendReply(text, to: sequenceId, toReply: replyId)
+        case .reactToReply(let sequenceId, let replyId, let type):
+            reactToReply(type, on: replyId, in: sequenceId)
         case .focusHandled:
             guard focusTarget != nil else { return }
             focusTarget = nil
@@ -805,7 +811,7 @@ final class RoomChatCoordinator: ObservableObject {
         publish()
     }
 
-    private func sendReply(_ raw: String, to sequenceId: Int64) {
+    private func sendReply(_ raw: String, to sequenceId: Int64, toReply: String? = nil) {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard actionSender != nil, postingRefusedReason == nil, !text.isEmpty else { return }
         let nonce = UUID().uuidString.lowercased()
@@ -821,9 +827,31 @@ final class RoomChatCoordinator: ObservableObject {
             publish()
             return
         }
-        pendingReplies.append(PendingReply(nonce: nonce, targetSequenceId: sequenceId, text: text, status: .sending))
+        pendingReplies.append(PendingReply(
+            nonce: nonce, targetSequenceId: sequenceId, toReply: toReply, text: text, status: .sending
+        ))
         publish()
         deliverReply("rp_" + nonce)
+    }
+
+    /// A reaction on a reply in a thread (the API takes the reply as `targetActionId`); the thread then re-reads.
+    private func reactToReply(_ type: String, on replyId: String, in sequenceId: Int64) {
+        guard let actionSender, canReact, RoomActionRequest.reactionTypes.contains(type) else { return }
+        let sessionId = self.sessionId
+        Task { [weak self] in
+            guard let actor = await self?.resolvedActorRef() else { return }
+            do {
+                try await actionSender.sendAction(.reaction(
+                    type, sessionId: sessionId, sequenceId: sequenceId, actor: actor, toReply: replyId
+                ))
+            } catch RoomSendError.reauthenticationRequired {
+                self?.onReauthenticationRequired()
+            } catch {
+                // The re-read below shows the server's truth.
+            }
+            guard let self, self.openThreadSequence == sequenceId else { return }
+            await self.loadThread(sequenceId)
+        }
     }
 
     /// Posts (or re-posts, with the same key) one pending reply.
@@ -849,7 +877,8 @@ final class RoomChatCoordinator: ObservableObject {
                 self?.pendingReplies[index].actor = actor
             }
             let request = RoomActionRequest.reply(
-                sessionId: sessionId, sequenceId: item.targetSequenceId, text: item.text, actor: actor, nonce: item.nonce
+                sessionId: sessionId, sequenceId: item.targetSequenceId, toReply: item.toReply, text: item.text,
+                actor: actor, nonce: item.nonce
             )
             do {
                 try await actionSender.sendAction(request)
@@ -1313,7 +1342,9 @@ final class RoomChatCoordinator: ObservableObject {
                         text: reply.text,
                         date: ParsedSessionTimestamp(reply.createdAt).date,
                         isEdited: reply.isEdited,
-                        views: views(of: reply.id, at: reply.revision, author: viewAuthor(reply.authorId, isHuman: reply.isHuman))
+                        views: views(of: reply.id, at: reply.revision, author: viewAuthor(reply.authorId, isHuman: reply.isHuman)),
+                        authorHandle: reply.isHuman ? String(reply.authorId.dropFirst("human-".count)) : reply.authorId,
+                        parentReplyId: reply.targetActionId
                     )
                 },
                 pending: pendingReplies.filter { $0.targetSequenceId == sequence }.map {

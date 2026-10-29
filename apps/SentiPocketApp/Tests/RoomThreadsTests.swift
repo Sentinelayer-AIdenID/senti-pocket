@@ -130,6 +130,19 @@ final class RoomActionSenderTests: XCTestCase {
         XCTAssertLessThanOrEqual(long.idempotencyKey.count, 180, "the API caps the key at 180")
     }
 
+    func test_a_reaction_on_a_reply_targets_the_reply_inside_its_thread() {
+        let onReply = RoomActionRequest.reaction("ack", sessionId: "s", sequenceId: 9, actor: "human-a", toReply: "r-1")
+        XCTAssertEqual(onReply.targetSequenceId, 9, "the thread's message")
+        XCTAssertEqual(onReply.targetActionId, "r-1", "the reply itself")
+        XCTAssertEqual(onReply.idempotencyKey, "ack:s:9:r-1:human-a", "an ack on one reply is not an ack on another")
+        XCTAssertNotEqual(
+            onReply.idempotencyKey,
+            RoomActionRequest.reaction("ack", sessionId: "s", sequenceId: 9, actor: "human-a", toReply: "r-2").idempotencyKey
+        )
+        let answer = RoomActionRequest.reply(sessionId: "s", sequenceId: 9, toReply: "r-1", text: "yes", actor: "human-a")
+        XCTAssertEqual(answer.targetActionId, "r-1", "a reply to a reply nests under it")
+    }
+
     func test_invalid_actions_are_refused_before_the_network() async {
         let sender = makeSender()
         let invalid = [

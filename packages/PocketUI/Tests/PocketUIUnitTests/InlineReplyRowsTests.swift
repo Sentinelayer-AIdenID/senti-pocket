@@ -93,14 +93,17 @@ final class InlineReplyRowsTests: XCTestCase {
         let reply = try XCTUnwrap(messageRow(state, "reply-r1"))
 
         let options = reply.options(canReply: true, canReact: true, canPin: true, isPinned: state.isPinned(reply), pinsFull: false)
-        XCTAssertEqual(options.map(\.kind), [.thread, .listen, .copy], "no like, dislike, acknowledge or pin on a reply here")
+        XCTAssertEqual(options.map(\.kind), [.thread, .listen, .like, .dislike, .acknowledge, .copy], "no pin on a reply")
         for intent in options.compactMap(\.intent) {
             if case .react = intent { XCTFail("a reaction from a reply's menu lands on the message it answers") }
             if case .setPinned = intent { XCTFail("a reply's menu pins the message it answers") }
         }
+        XCTAssertEqual(options.first { $0.kind == .like }?.intent, .reactToReply(sequenceId: 100, replyId: "r1", type: "like"),
+                       "a like goes to the reply itself")
         XCTAssertEqual(options.first { $0.kind == .listen }?.intent, .readAloud(id: RoomReadAloud.reply("r1"), text: "on it"))
         XCTAssertEqual(options.first { $0.kind == .thread }?.intent, .openThread(sequenceId: 100), "it opens its thread")
-        XCTAssertNil(reply.reaction("like"), "the reaction chips under a reply send nothing to its message either")
+        XCTAssertEqual(reply.reaction("dislike"), .reactToReply(sequenceId: 100, replyId: "r1", type: "dislike"),
+                       "the reaction chips under a reply react to the reply too")
 
         XCTAssertTrue(state.isPinned(parent))
         XCTAssertFalse(state.isPinned(reply), "a pinned message does not mark its replies")

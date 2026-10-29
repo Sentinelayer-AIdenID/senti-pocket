@@ -214,13 +214,20 @@ struct RoomActionRequest: Equatable, Sendable {
 
     /// A reaction. `ack` is not retractable, so its key is stable per person and message (a second tap is a
     /// duplicate, as on the web). Like and dislike can be undone and redone, so each tap gets its own key.
-    static func reaction(_ type: String, sessionId: String, sequenceId: Int64, actor: String) -> RoomActionRequest {
-        let base = "\(type):\(sessionId):\(sequenceId):\(actor)"
+    static func reaction(
+        _ type: String,
+        sessionId: String,
+        sequenceId: Int64,
+        actor: String,
+        toReply: String? = nil
+    ) -> RoomActionRequest {
+        // A reaction on a reply targets the reply (`targetActionId`) inside its message's thread.
+        let base = "\(type):\(sessionId):\(sequenceId):\(toReply.map { "\($0):" } ?? "")\(actor)"
         return RoomActionRequest(
             sessionId: sessionId,
             actionType: type,
             targetSequenceId: sequenceId,
-            targetActionId: nil,
+            targetActionId: toReply,
             note: nil,
             idempotencyKey: boundedKey(type == "ack" ? base : "\(base):\(UUID().uuidString.lowercased())")
         )
