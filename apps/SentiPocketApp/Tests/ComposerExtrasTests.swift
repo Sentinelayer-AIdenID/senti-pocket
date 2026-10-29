@@ -78,6 +78,24 @@ private final class FlakySender: RoomMessageSending, @unchecked Sendable {
     }
 }
 
+private final class RefusingSender: RoomMessageSending, @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func sendHumanMessage(sessionId: String, text: String, clientId: String) async throws {
+        lock.lock()
+        count += 1
+        lock.unlock()
+        throw RoomSendError.rejected
+    }
+
+    func attempts() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+}
+
 private final class AuthorsTransport: RoomTransport, @unchecked Sendable {
     let history: [RoomMessage]
     init(_ history: [RoomMessage]) { self.history = history }
@@ -151,6 +169,25 @@ final class ComposerExtrasTests: XCTestCase {
         coordinator.send(.answerDecision(ticketId: "t1", answer: "No", detail: ""))
         await waitUntil("new answer sent") { sender.clientIds().count == 3 }
         XCTAssertNotEqual(sender.clientIds()[2], sender.clientIds()[0], "a different answer is a new message")
+    }
+
+    func test_a_refused_answer_says_why_and_can_be_sent_again() async {
+        let ticket = RoomTicket(id: "t1", title: "T", body: "## Decision\nQuestion: Go?\nOptions: Yes · No · Custom", version: 1)
+        let sender = RefusingSender()
+        let coordinator = RoomTicketsCoordinator(
+            sessionId: "room_1",
+            transport: OneTicketTransport(ticket),
+            sender: sender,
+            sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) },
+            onReauthenticationRequired: {}
+        )
+        await coordinator.refresh()
+        coordinator.send(.answerDecision(ticketId: "t1", answer: "Custom", detail: "On the Mac"))
+        await waitUntil("refused") { coordinator.state.decisionStatus["t1"] == RoomSendError.rejected.userMessage }
+        XCTAssertNotEqual(coordinator.state.decisionStatus["t1"], RoomTicketsPresentationState.decisionSentStatus,
+                          "the card keeps the typed answer until the room has it")
+        coordinator.send(.answerDecision(ticketId: "t1", answer: "Custom", detail: "On the Mac"))
+        await waitUntil("second attempt sent") { sender.attempts() == 2 }
     }
 
     func test_without_a_sender_decisions_are_read_only() async {

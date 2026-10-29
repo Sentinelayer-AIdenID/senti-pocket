@@ -89,6 +89,8 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
     public let decisionStatus: [String: String]
     /// Tickets whose answer failed in a way the same message may fix (Retry sends it again, same client id).
     public let retryableDecisions: Set<String>
+    /// The status a decision answer reaches once the room has it.
+    public static let decisionSentStatus = "Answer sent to the room."
     /// The ticket a link opened, found among all tickets whatever the archive toggle or search shows.
     public let focusedTicket: RoomTicketRow?
 

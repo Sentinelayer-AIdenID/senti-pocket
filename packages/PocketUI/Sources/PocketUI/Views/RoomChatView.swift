@@ -19,6 +19,8 @@ public struct RoomChatView: View {
     @State private var didInitialScroll = false
     @State private var anchorBeforeOlderLoad: String?
     @State private var highlightedRowId: String?
+    /// A failed message the reader chose to edit: its text goes back into the composer.
+    @State private var restoredDraft: RoomComposerRestore?
 
     public init(state: RoomChatPresentationState, send: @escaping (RoomChatIntent) -> Void) {
         self.state = state
@@ -38,7 +40,7 @@ public struct RoomChatView: View {
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            RoomComposerBar(composer: state.composer, mentionCandidates: state.mentionCandidates) { text in
+            RoomComposerBar(composer: state.composer, mentionCandidates: state.mentionCandidates, restored: restoredDraft) { text in
                 send(.sendMessage(text: text))
             }
         }
@@ -78,8 +80,13 @@ public struct RoomChatView: View {
                     ForEach(state.pending) { pending in
                         RoomPendingRowView(
                             row: pending,
+                            recovery: RoomPendingRecovery(canPost: state.composer.canPost),
                             onRetry: { send(.retrySend(clientId: pending.clientId)) },
-                            onDiscard: { send(.discardSend(clientId: pending.clientId)) }
+                            onDiscard: { send(.discardSend(clientId: pending.clientId)) },
+                            onEdit: {
+                                restoredDraft = RoomComposerRestore(text: pending.text)
+                                send(.discardSend(clientId: pending.clientId))
+                            }
                         )
                         .id("pending:\(pending.clientId)")
                     }
@@ -584,8 +591,13 @@ private struct RoomThreadSheet: View {
                     ForEach(thread.pending) { pending in
                         RoomPendingRowView(
                             row: pending,
+                            recovery: RoomPendingRecovery(canPost: thread.canReply),
                             onRetry: { send(.retrySend(clientId: pending.clientId)) },
-                            onDiscard: { send(.discardSend(clientId: pending.clientId)) }
+                            onDiscard: { send(.discardSend(clientId: pending.clientId)) },
+                            onEdit: {
+                                draft = RoomComposerDraft.restoring(pending.text, into: draft)
+                                send(.discardSend(clientId: pending.clientId))
+                            }
                         )
                     }
                 }
@@ -645,8 +657,11 @@ private struct RoomThreadSheet: View {
 
 private struct RoomPendingRowView: View {
     let row: RoomChatPendingRow
+    let recovery: RoomPendingRecovery
     let onRetry: () -> Void
     let onDiscard: () -> Void
+    /// Puts the text back where it was typed, so a refused message can be changed and sent again.
+    let onEdit: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -672,6 +687,17 @@ private struct RoomPendingRowView: View {
                         Button("Retry", action: onRetry)
                             .font(.caption.weight(.semibold))
                             .accessibilityIdentifier("pocket.room.pending.retry")
+                    }
+                    switch recovery {
+                    case .edit:
+                        Button("Edit", action: onEdit)
+                            .font(.caption.weight(.semibold))
+                            .accessibilityIdentifier("pocket.room.pending.edit")
+                    case .copy:
+                        // Copies the full text, not the shortened display; the row stays until discarded.
+                        Button("Copy") { copyToPasteboard(row.text) }
+                            .font(.caption.weight(.semibold))
+                            .accessibilityIdentifier("pocket.room.pending.copy")
                     }
                     Button("Discard", role: .destructive, action: onDiscard)
                         .font(.caption.weight(.semibold))
@@ -703,6 +729,7 @@ private extension RoomChatPendingRow {
 private struct RoomComposerBar: View {
     let composer: RoomComposerState
     var mentionCandidates: [MentionCandidate] = []
+    var restored: RoomComposerRestore?
     let send: (String) -> Void
     @State private var draft = ""
 
@@ -778,6 +805,10 @@ private struct RoomComposerBar: View {
             .padding(.vertical, 8)
             }
             .background(.bar)
+            .onChange(of: restored) { request in
+                guard let request else { return }
+                draft = RoomComposerDraft.restoring(request.text, into: draft)
+            }
         } else if let reason = composer.disabledReason {
             Text(reason)
                 .font(.footnote)
