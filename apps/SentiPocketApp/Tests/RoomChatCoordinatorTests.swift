@@ -306,6 +306,65 @@ final class RoomChatCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.state.focusSequenceId, 60, "the focus stays until the view has shown it")
         coordinator.send(.focusHandled)
         XCTAssertNil(coordinator.state.focusSequenceId)
+        XCTAssertEqual(coordinator.state.focusFallbackCount, 0, "a message that was shown is no fallback")
+        coordinator.pause()
+    }
+
+    func test_a_link_more_than_ten_pages_back_falls_back_to_the_latest_messages() async {
+        // Pages of two rows, newest first: [990, 1000], [970, 980], ... The linked 770 is on the twelfth page.
+        let transport = ScriptedRoomTransport(before: (0..<13).map { index in
+            let top = Int64(1_000 - index * 20)
+            return .success(page([top - 10, top], hasMore: true))
+        })
+        let coordinator = makeCoordinator(transport)
+        coordinator.resume()
+        await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
+
+        coordinator.focus(on: 770)
+        await waitUntil("let go") { coordinator.state.focusSequenceId == nil && !coordinator.state.isLoadingOlder }
+        XCTAssertEqual(transport.snapshot().before.count, 11, "the first page, then at most ten pages back")
+        XCTAssertFalse(messageSequences(coordinator).contains(770))
+        XCTAssertEqual(coordinator.state.focusFallbackCount, 1, "the view takes the reader to the latest messages")
+        coordinator.pause()
+    }
+
+    func test_a_link_that_can_never_load_falls_back_at_once() async {
+        let transport = ScriptedRoomTransport(before: [.success(page([90, 100], hasMore: false))])
+        let coordinator = makeCoordinator(transport)
+        coordinator.resume()
+        await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
+
+        coordinator.focus(on: 95)
+        XCTAssertNil(coordinator.state.focusSequenceId, "inside the loaded rows but not a chat row")
+        coordinator.focus(on: 50)
+        XCTAssertNil(coordinator.state.focusSequenceId, "before the start of the room")
+        XCTAssertEqual(coordinator.state.focusFallbackCount, 2)
+        XCTAssertEqual(transport.snapshot().before, [nil], "nothing more is loaded for either")
+
+        coordinator.focus(on: 500)
+        XCTAssertEqual(coordinator.state.focusSequenceId, 500, "a newer message is still on its way")
+        XCTAssertEqual(coordinator.state.focusFallbackCount, 2)
+        coordinator.pause()
+    }
+
+    func test_a_link_to_a_newer_event_that_is_not_a_chat_row_is_let_go_once_the_room_passes_it() async {
+        let transport = ScriptedRoomTransport(before: [.success(page([90, 100], hasMore: false))])
+        let coordinator = makeCoordinator(transport)
+        coordinator.resume()
+        await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
+
+        coordinator.focus(on: 105)
+        XCTAssertEqual(coordinator.state.focusSequenceId, 105, "newer than the loaded rows: it may still arrive")
+        coordinator.handle(.nonDisplayable(sequenceId: 104))
+        XCTAssertEqual(coordinator.state.focusSequenceId, 105, "the room has not reached it yet")
+        coordinator.handle(.nonDisplayable(sequenceId: 105))
+        XCTAssertNil(coordinator.state.focusSequenceId, "the room passed it without a chat row")
+        XCTAssertEqual(coordinator.state.focusFallbackCount, 1)
+
+        coordinator.focus(on: 110)
+        coordinator.handle(.message(message(110)))
+        XCTAssertEqual(coordinator.state.focusSequenceId, 110, "a linked message that arrives is focused by the view")
+        XCTAssertEqual(coordinator.state.focusFallbackCount, 1)
         coordinator.pause()
     }
 }

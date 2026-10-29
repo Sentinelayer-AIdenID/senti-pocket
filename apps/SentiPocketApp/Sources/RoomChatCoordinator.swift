@@ -58,6 +58,8 @@ final class RoomChatCoordinator: ObservableObject {
     private var actorRef: String?
     /// A message to bring into view once (opened from a notification or link); cleared when the view shows it.
     private var focusTarget: Int64?
+    /// Links whose message could not be loaded; each one sends the reader to the latest messages.
+    private var focusFallbackCount = 0
     /// Arrivals refresh reactions at most this often (the web polls about every 15s).
     static let actionsRefreshInterval: TimeInterval = 10
     static let viewerReason = "You're a viewer in this room: you can read it, but not post."
@@ -150,9 +152,7 @@ final class RoomChatCoordinator: ObservableObject {
                 await self.catchUp(current)
             }
             guard current == self.generation, !self.failureIsTerminal else { return }
-            if let target = self.focusTarget, self.timeline.index(ofSequence: target) == nil {
-                self.loadOlder(until: target)
-            }
+            self.pursueFocus()
             self.startLive(current)
             await self.refreshActions(force: true)
         })
@@ -228,10 +228,30 @@ final class RoomChatCoordinator: ObservableObject {
     func focus(on sequenceId: Int64) {
         focusTarget = sequenceId
         publish()
-        if hasLoadedInitial, timeline.index(ofSequence: sequenceId) == nil,
-           let oldest = timeline.oldestSequence, sequenceId < oldest {
-            loadOlder(until: sequenceId)
+        pursueFocus()
+    }
+
+    /// Loads what the focused message needs: older pages when it is further back than the loaded rows. A newer one
+    /// arrives through the live stream. Anything else cannot be shown and is let go.
+    private func pursueFocus() {
+        guard let target = focusTarget, hasLoadedInitial, timeline.index(ofSequence: target) == nil else { return }
+        if let oldest = timeline.oldestSequence, target < oldest {
+            loadOlder(until: target)
+        } else {
+            dropFocusIfUnreachable(target)
         }
+    }
+
+    /// A linked message still not loaded although the room has reached its sequence (more than ten pages back,
+    /// before the start of the room, not a chat row, or gone) is let go, and the view takes the reader to the latest
+    /// messages instead of leaving them wherever loading older pages put them. Newer than anything seen, it may
+    /// still arrive live.
+    private func dropFocusIfUnreachable(_ target: Int64) {
+        let seenThrough = max(timeline.newestSequence ?? 0, lastAppliedSequence)
+        guard focusTarget == target, timeline.index(ofSequence: target) == nil, target <= seenThrough else { return }
+        focusTarget = nil
+        focusFallbackCount += 1
+        publish()
     }
 
     // MARK: - Replies and reactions
@@ -560,8 +580,12 @@ final class RoomChatCoordinator: ObservableObject {
     }
 
     private func loadOlder(until targetSequence: Int64? = nil) {
-        guard hasLoadedInitial, !isLoadingOlder, timeline.hasMoreOlder,
-              nextBeforeSequence ?? timeline.oldestSequence != nil else { return }
+        guard hasLoadedInitial, !isLoadingOlder else { return }
+        guard timeline.hasMoreOlder, nextBeforeSequence ?? timeline.oldestSequence != nil else {
+            // Nothing older to load: a message being sought there cannot be shown.
+            if let targetSequence { dropFocusIfUnreachable(targetSequence) }
+            return
+        }
         isLoadingOlder = true
         publish()
         Task { [weak self] in
@@ -588,7 +612,10 @@ final class RoomChatCoordinator: ObservableObject {
                     && self.timeline.hasMoreOlder
             } ?? false && pages < 10
             self.isLoadingOlder = false
+            if let targetSequence { self.dropFocusIfUnreachable(targetSequence) }
             self.publish()
+            // A link that arrived while this page was loading is pursued now.
+            self.pursueFocus()
         }
     }
 
@@ -604,6 +631,7 @@ final class RoomChatCoordinator: ObservableObject {
                 guard current == generation else { return }
                 apply(page, older: false)
                 publish()
+                pursueFocus()
                 if page.rawCount < 200 { return }
             } catch {
                 guard current == generation else { return }
@@ -687,11 +715,14 @@ final class RoomChatCoordinator: ObservableObject {
             reconcilePending(with: [message])
             unread.noteArrivals(result.inserted, readerIsAtBottom: readerAtBottom, selfAuthorIds: ownAuthorIds)
             publish()
+            pursueFocus()
             Task { [weak self] in await self?.refreshActions() }
             return true
         case .nonDisplayable(let sequenceId):
             connection = .live
             lastAppliedSequence = max(lastAppliedSequence, sequenceId)
+            // A linked event that is not a chat row has now passed.
+            pursueFocus()
             return true
         case .composing(let agentId, _):
             connection = .live
@@ -842,6 +873,7 @@ final class RoomChatCoordinator: ObservableObject {
             composer: composerState,
             canReact: canReact,
             thread: threadInput,
+            focusFallbackCount: focusFallbackCount,
             focusSequenceId: focusTarget,
             mentionCandidates: mentionCandidates()
         )

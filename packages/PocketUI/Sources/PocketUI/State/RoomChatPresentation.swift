@@ -353,6 +353,9 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     /// Whether you can react (ack, like, dislike): any member, including a viewer, when actions are wired.
     public let canReact: Bool
     public let thread: RoomChatThreadState?
+    /// Counts links whose message could not be loaded (more than ten pages back, not a chat row, or gone). Each
+    /// increase takes the reader to the latest messages.
+    public let focusFallbackCount: Int
     /// A message to bring into view and highlight once (opened from a notification or link).
     public let focusSequenceId: Int64?
     /// Who the composer can @-mention, in suggestion order.
@@ -378,6 +381,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         composer: RoomComposerState = .hidden,
         canReact: Bool = false,
         thread threadInput: RoomChatThreadInput? = nil,
+        focusFallbackCount: Int = 0,
         focusSequenceId: Int64? = nil,
         mentionCandidates: [MentionCandidate] = [],
         calendar: Calendar = .current
@@ -396,6 +400,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         self.pending = protectedFailure ? [] : pending
         self.composer = protectedFailure ? .hidden : composer
         self.canReact = protectedFailure ? false : canReact
+        self.focusFallbackCount = focusFallbackCount
         self.focusSequenceId = protectedFailure ? nil : focusSequenceId
         self.mentionCandidates = protectedFailure ? [] : mentionCandidates
 
