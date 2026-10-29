@@ -82,6 +82,13 @@ final class RoomChatCoordinator: ObservableObject {
     /// Breakouts started from this room, by child room id, as this viewer may see them (GET .../breakouts).
     private var breakouts: [String: RoomBreakout] = [:]
     private var breakoutsRefreshInFlight = false
+    /// Small image previews by attachment id, newest last (bounded; memory only, never written to disk).
+    private var previews: [String: Data] = [:]
+    private var previewOrder: [String] = []
+    private var previewsInFlight: Set<String> = []
+    private let attachmentFetcher: any AttachmentFileFetching
+    static let previewLimitBytes = 10 * 1024 * 1024
+    static let previewCacheSize = 40
     private var generation: UInt64 = 0
     private var liveTasks: [Task<Void, Never>] = []
 
@@ -105,8 +112,10 @@ final class RoomChatCoordinator: ObservableObject {
             try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
         },
         now: @escaping @Sendable () -> Date = { Date() },
+        attachmentFetcher: any AttachmentFileFetching = URLSessionAttachmentFetcher(),
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
+        self.attachmentFetcher = attachmentFetcher
         self.sessionId = sessionId
         self.title = title
         self.transport = transport
@@ -224,8 +233,10 @@ final class RoomChatCoordinator: ObservableObject {
             guard focusTarget != nil else { return }
             focusTarget = nil
             publish()
-        case .openBreakout:
-            break   // the room screen opens the breakout's own room
+        case .openBreakout, .openAttachment:
+            break   // the room screen navigates or presents
+        case .attachmentAppeared(let attachmentId):
+            loadPreview(attachmentId)
         }
     }
 
@@ -265,6 +276,57 @@ final class RoomChatCoordinator: ObservableObject {
     private var canReact: Bool { actionSender != nil && !failureIsTerminal }
 
     /// Re-reads the room's reply and reaction projection. Unforced calls (after arrivals) are throttled.
+    // MARK: - Attachments
+
+    private func attachment(_ attachmentId: String) -> RoomAttachment? {
+        for message in timeline.messages.reversed() {
+            if let match = message.attachments.first(where: { $0.attachmentId == attachmentId }) { return match }
+        }
+        return nil
+    }
+
+    /// Loads a small preview for an image that came into view: images up to 10 MB with a known size only.
+    private func loadPreview(_ attachmentId: String) {
+        guard previews[attachmentId] == nil, !previewsInFlight.contains(attachmentId), !failureIsTerminal,
+              let attachment = attachment(attachmentId), attachment.kind == .image,
+              let size = attachment.sizeBytes, size <= Int64(Self.previewLimitBytes) else { return }
+        previewsInFlight.insert(attachmentId)
+        let sessionId = self.sessionId
+        let transport = self.transport
+        let fetcher = self.attachmentFetcher
+        Task { [weak self] in
+            defer { self?.previewsInFlight.remove(attachmentId) }
+            guard let link = try? await transport.attachmentDownload(sessionId: sessionId, attachmentId: attachmentId),
+                  let data = try? await fetcher.data(from: link.url, maximumBytes: Self.previewLimitBytes),
+                  let preview = AttachmentFiles.preview(from: data),
+                  let self else { return }
+            self.storePreview(preview, for: attachmentId)
+        }
+    }
+
+    private func storePreview(_ data: Data, for attachmentId: String) {
+        previews[attachmentId] = data
+        previewOrder.removeAll { $0 == attachmentId }
+        previewOrder.append(attachmentId)
+        while previewOrder.count > Self.previewCacheSize {
+            previews[previewOrder.removeFirst()] = nil
+        }
+        publish()
+    }
+
+    /// Downloads an attachment for full-size viewing. Each open asks the API for a fresh link (links expire in
+    /// minutes and must not be reused), built from this room and the attachment id.
+    func prepareAttachment(_ attachmentId: String) async throws -> URL {
+        guard let attachment = attachment(attachmentId) else { throw AttachmentFetchError.failed }
+        do {
+            let link = try await transport.attachmentDownload(sessionId: sessionId, attachmentId: attachmentId)
+            return try await attachmentFetcher.file(from: link.url, filename: attachment.filename)
+        } catch let error as SessionTransportError {
+            if error == .reauthenticationRequired || error == .notLoggedIn { onReauthenticationRequired() }
+            throw error
+        }
+    }
+
     /// Re-reads the breakouts started from this room. A failed read keeps the cards already shown.
     func refreshBreakouts() async {
         guard !breakoutsRefreshInFlight, !failureIsTerminal else { return }
@@ -857,7 +919,8 @@ final class RoomChatCoordinator: ObservableObject {
                         replyCount: $0.replyTotal,
                         isPinned: $0.isPinned
                     )
-                }
+                },
+                attachments: message.attachments.map(Self.chip)
             )
         }
         let threadInput = openThreadSequence.map { sequence in
@@ -906,7 +969,8 @@ final class RoomChatCoordinator: ObservableObject {
             focusFallbackCount: focusFallbackCount,
             focusSequenceId: focusTarget,
             mentionCandidates: mentionCandidates(),
-            breakouts: breakouts.mapValues(Self.card)
+            breakouts: breakouts.mapValues(Self.card),
+            attachmentPreviews: previews
         )
     }
 
@@ -959,6 +1023,25 @@ final class RoomChatCoordinator: ObservableObject {
     /// People are shown by login without the server's `human-` prefix; agents by their id.
     private static func principalName(_ principalId: String) -> String {
         principalId.hasPrefix("human-") ? String(principalId.dropFirst("human-".count)) : principalId
+    }
+
+    private static func chip(_ attachment: RoomAttachment) -> RoomAttachmentChip {
+        let kind: RoomAttachmentChip.Kind
+        switch attachment.kind {
+        case .markdown: kind = .markdown
+        case .json: kind = .json
+        case .image: kind = .image
+        case .pdf: kind = .pdf
+        case .other: kind = .other
+        }
+        return RoomAttachmentChip(
+            attachmentId: attachment.attachmentId,
+            filename: attachment.filename,
+            kind: kind,
+            sizeBytes: attachment.sizeBytes,
+            summary: attachment.summary,
+            processingStatus: attachment.summaryStatus
+        )
     }
 
     private static func card(_ breakout: RoomBreakout) -> RoomBreakoutCard {

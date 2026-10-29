@@ -36,6 +36,8 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
     public let isEdited: Bool
     /// The breakout a `.breakoutOpened` or `.breakoutOutcome` row refers to.
     public let breakout: RoomBreakoutEvent?
+    /// Files attached to this message, in order.
+    public let attachments: [RoomAttachment]
 
     public init(
         id: String,
@@ -50,7 +52,8 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         clientMessageId: String? = nil,
         revision: Int64 = 1,
         isEdited: Bool = false,
-        breakout: RoomBreakoutEvent? = nil
+        breakout: RoomBreakoutEvent? = nil,
+        attachments: [RoomAttachment] = []
     ) {
         self.id = id
         self.sequenceId = sequenceId
@@ -65,6 +68,7 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         self.revision = revision
         self.isEdited = isEdited
         self.breakout = breakout
+        self.attachments = attachments
     }
 
     /// Projects one wire event. Returns nil for events a room does not display (control, presence, edit
@@ -78,7 +82,7 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         }
         let kind: RoomMessageKind
         switch event {
-        case "session_message", "human_relay": kind = .message
+        case "session_message", "human_relay", "session_attachment": kind = .message
         case "session_checkpoint": kind = .checkpoint
         case "session_member_joined": kind = .memberJoined
         case "session_breakout_opened": kind = .breakoutOpened
@@ -131,6 +135,7 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         self.revision = json["messageRevision"]?.intValue ?? 1
         self.isEdited = json["editedAt"]?.stringValue.map { !$0.isEmpty } ?? false
         self.breakout = breakout
+        self.attachments = kind == .message ? RoomAttachment.list(from: payload) : []
     }
 
     /// Human identities are server-authored as `human-<user>`; agents can never claim that prefix.

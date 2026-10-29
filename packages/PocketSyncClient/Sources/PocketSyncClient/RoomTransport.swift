@@ -10,6 +10,8 @@ public protocol RoomTransport: Sendable {
     func roomActions(sessionId: String, targetSequenceId: Int64?, limit: Int) async throws -> RoomActionsPage
     /// The breakouts started from this room that the viewer may see (metadata only).
     func roomBreakouts(parentSessionId: String, cursor: String?, limit: Int) async throws -> RoomBreakoutsPage
+    /// A short-lived link to one attachment's bytes.
+    func attachmentDownload(sessionId: String, attachmentId: String) async throws -> RoomAttachmentDownload
 }
 
 extension RoomTransport {
@@ -21,6 +23,11 @@ extension RoomTransport {
     /// Transports without breakout support show none.
     public func roomBreakouts(parentSessionId: String, cursor: String?, limit: Int) async throws -> RoomBreakoutsPage {
         RoomBreakoutsPage()
+    }
+
+    /// Transports without attachment support cannot open files.
+    public func attachmentDownload(sessionId: String, attachmentId: String) async throws -> RoomAttachmentDownload {
+        throw SessionTransportError.invalidRequest
     }
 }
 

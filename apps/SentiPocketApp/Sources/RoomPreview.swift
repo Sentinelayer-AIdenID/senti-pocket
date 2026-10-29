@@ -1,6 +1,7 @@
 #if DEBUG
 import Foundation
 import SwiftUI
+import UIKit
 import PocketSyncClient
 
 /// DEBUG-only room preview: `-PocketRoomPreview` opens the real room screen and coordinator on scripted sample
@@ -55,9 +56,30 @@ enum RoomPreview {
                 sender: RoomPreviewSender(),
                 actionSender: RoomPreviewSender(),
                 ticketsTransport: RoomPreviewTickets(),
+                attachmentFetcher: RoomPreviewFiles(),
                 onReauthenticationRequired: {}
             )
         }
+    }
+}
+
+/// Renders the preview screenshot locally instead of downloading it.
+private struct RoomPreviewFiles: AttachmentFileFetching {
+    func data(from url: URL, maximumBytes: Int) async throws -> Data {
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 1170, height: 900))
+        return renderer.pngData { context in
+            UIColor.systemIndigo.withAlphaComponent(0.18).setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 1170, height: 900))
+            UIColor.systemIndigo.setFill()
+            context.fill(CGRect(x: 90, y: 140, width: 990, height: 120))
+            UIColor.white.setFill()
+            context.fill(CGRect(x: 90, y: 360, width: 990, height: 110))
+            context.fill(CGRect(x: 90, y: 520, width: 990, height: 110))
+        }
+    }
+
+    func file(from url: URL, filename: String) async throws -> URL {
+        throw AttachmentFetchError.failed
     }
 }
 
@@ -125,7 +147,7 @@ private struct RoomPreviewTransport: RoomTransport {
         row(111, "review-agent", minutesAgo: 93, "Two findings so far:\n1. The **email step** skips validation on paste.\n2. `retryCount` resets after a failed submit.", replyTo: 110),
         row(112, "review-agent", minutesAgo: 92, "Details are in [the PR](https://github.com/example/app/pull/42)."),
         row(113, "build-agent", minutesAgo: 80, "Build 318 is green on iOS 16 and 26.", edited: true),
-        row(114, "build-agent", minutesAgo: 79, "Simulator screenshots attached to https://github.com/example/app/pull/42"),
+        withFiles(row(114, "build-agent", minutesAgo: 79, "Simulator screenshots attached to https://github.com/example/app/pull/42")),
         row(116, "build-agent", minutesAgo: 78, "Repro:\n```\nxcodebuild test -scheme App -only-testing:OnboardingTests\n```"),
         row(115, "senti", minutesAgo: 70, "Onboarding review: 2 findings, 1 fixed", kind: .checkpoint),
         row(120, "human-alex", minutesAgo: 12, "Thanks. Ship the fix for finding 1 first, then the retry counter."),
@@ -136,6 +158,23 @@ private struct RoomPreviewTransport: RoomTransport {
     ].sorted { $0.sequenceId < $1.sequenceId }
 
     private static let breakoutRoom = "preview-breakout"
+
+    /// A screenshot and a PDF on one message, for the attachment cards.
+    private static func withFiles(_ message: RoomMessage) -> RoomMessage {
+        RoomMessage(id: message.id, sequenceId: message.sequenceId, kind: message.kind, authorId: message.authorId,
+                    authorName: message.authorName, isHuman: message.isHuman, text: message.text,
+                    timestamp: message.timestamp, attachments: [
+                        RoomAttachment(attachmentId: "preview-screen", filename: "onboarding-email-step.png", kind: .image,
+                                       contentType: "image/png", sizeBytes: 482_000, summaryStatus: "ready"),
+                        RoomAttachment(attachmentId: "preview-report", filename: "review-findings.pdf", kind: .pdf,
+                                       contentType: "application/pdf", sizeBytes: 1_250_000, summaryStatus: "processing")
+                    ])
+    }
+
+    func attachmentDownload(sessionId: String, attachmentId: String) async throws -> RoomAttachmentDownload {
+        guard let url = URL(string: "https://preview.invalid/\(attachmentId)") else { throw SessionTransportError.invalidRequest }
+        return RoomAttachmentDownload(url: url, expiresIn: 300)
+    }
 
     private static func breakoutOpened(_ seq: Int64, minutesAgo: Double) -> RoomMessage {
         let base = row(seq, "review-agent", minutesAgo: minutesAgo, "")
