@@ -23,6 +23,19 @@ POLICY_ENTERPRISE='export_method=enterprise; aps_environment=production; profile
 [[ ! -e "$VALIDATION_OUTPUT_ROOT" ]] \
   || { printf 'FAIL validation output sentinel already exists: %s\n' "$VALIDATION_OUTPUT_ROOT" >&2; exit 1; }
 
+# App Store Connect key fixtures, outside the repository. The file only has to exist: validation never reads it.
+ASC_FIXTURE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/senti-pocket-asc-key.XXXXXX")"
+trap 'rm -rf "$ASC_FIXTURE_ROOT"' EXIT
+ASC_KEY_ID="ABCDE12345"
+ASC_ISSUER_ID="00000000-0000-4000-8000-000000000000"
+ASC_KEY_FILE="$ASC_FIXTURE_ROOT/AuthKey_$ASC_KEY_ID.p8"
+printf 'fixture: not an App Store Connect key\n' >"$ASC_KEY_FILE"
+chmod 600 "$ASC_KEY_FILE"
+mkdir "$ASC_FIXTURE_ROOT/empty" "$ASC_FIXTURE_ROOT/link" "$ASC_FIXTURE_ROOT/open"
+ln -s "$ASC_KEY_FILE" "$ASC_FIXTURE_ROOT/link/AuthKey_$ASC_KEY_ID.p8"
+printf 'fixture: not an App Store Connect key\n' >"$ASC_FIXTURE_ROOT/open/AuthKey_$ASC_KEY_ID.p8"
+chmod 640 "$ASC_FIXTURE_ROOT/open/AuthKey_$ASC_KEY_ID.p8"
+
 invoke_validation() {
   local variable
   local value
@@ -271,6 +284,52 @@ run_acceptance private-diagnostics-flag \
   "$POLICY_DEBUGGING" \
   SENTI_RETAIN_PRIVATE_DIAGNOSTICS "1"
 
+run_rejection asc-key-partial "must be given together" \
+  SENTI_ASC_KEY_ID "$ASC_KEY_ID"
+run_rejection asc-key-id "10-character App Store Connect key ID" \
+  SENTI_ASC_KEY_ID "abc" \
+  SENTI_ASC_ISSUER_ID "$ASC_ISSUER_ID" \
+  SENTI_ASC_KEY_PATH "$ASC_KEY_FILE"
+run_rejection asc-issuer-id "App Store Connect issuer ID" \
+  SENTI_ASC_KEY_ID "$ASC_KEY_ID" \
+  SENTI_ASC_ISSUER_ID "00000000-0000-4000-8000-00000000000G" \
+  SENTI_ASC_KEY_PATH "$ASC_KEY_FILE"
+run_rejection asc-key-relative-path "absolute path to AuthKey_<key ID>.p8" \
+  SENTI_ASC_KEY_ID "$ASC_KEY_ID" \
+  SENTI_ASC_ISSUER_ID "$ASC_ISSUER_ID" \
+  SENTI_ASC_KEY_PATH "private_keys/AuthKey_$ASC_KEY_ID.p8"
+run_rejection asc-key-other-key-name "absolute path to AuthKey_<key ID>.p8" \
+  SENTI_ASC_KEY_ID "ZZZZZ99999" \
+  SENTI_ASC_ISSUER_ID "$ASC_ISSUER_ID" \
+  SENTI_ASC_KEY_PATH "$ASC_KEY_FILE"
+run_rejection asc-key-missing-directory "in an existing directory" \
+  SENTI_ASC_KEY_ID "$ASC_KEY_ID" \
+  SENTI_ASC_ISSUER_ID "$ASC_ISSUER_ID" \
+  SENTI_ASC_KEY_PATH "$ASC_FIXTURE_ROOT/missing/AuthKey_$ASC_KEY_ID.p8"
+run_rejection asc-key-inside-repository "outside the repository" \
+  SENTI_ASC_KEY_ID "$ASC_KEY_ID" \
+  SENTI_ASC_ISSUER_ID "$ASC_ISSUER_ID" \
+  SENTI_ASC_KEY_PATH "$REPO_ROOT/scripts/ios/AuthKey_$ASC_KEY_ID.p8"
+run_rejection asc-key-missing-file "regular file, not a link" \
+  SENTI_ASC_KEY_ID "$ASC_KEY_ID" \
+  SENTI_ASC_ISSUER_ID "$ASC_ISSUER_ID" \
+  SENTI_ASC_KEY_PATH "$ASC_FIXTURE_ROOT/empty/AuthKey_$ASC_KEY_ID.p8"
+run_rejection asc-key-link "regular file, not a link" \
+  SENTI_ASC_KEY_ID "$ASC_KEY_ID" \
+  SENTI_ASC_ISSUER_ID "$ASC_ISSUER_ID" \
+  SENTI_ASC_KEY_PATH "$ASC_FIXTURE_ROOT/link/AuthKey_$ASC_KEY_ID.p8"
+run_rejection asc-key-group-readable "readable only by its owner" \
+  SENTI_ASC_KEY_ID "$ASC_KEY_ID" \
+  SENTI_ASC_ISSUER_ID "$ASC_ISSUER_ID" \
+  SENTI_ASC_KEY_PATH "$ASC_FIXTURE_ROOT/open/AuthKey_$ASC_KEY_ID.p8"
+run_acceptance app-store-connect-asc-key \
+  "$POLICY_APP_STORE_CONNECT" \
+  SENTI_EXPORT_METHOD "app-store-connect" \
+  SENTI_DEVICE_UDID "" \
+  SENTI_ASC_KEY_ID "$ASC_KEY_ID" \
+  SENTI_ASC_ISSUER_ID "$ASC_ISSUER_ID" \
+  SENTI_ASC_KEY_PATH "$ASC_KEY_FILE"
+
 [[ ! -e "$VALIDATION_OUTPUT_ROOT" ]] \
   || { printf 'FAIL validation-only mode created its output directory: %s\n' "$VALIDATION_OUTPUT_ROOT" >&2; exit 1; }
 if [[ "$WORKTREE_STATE_CHECK_AVAILABLE" == "true" ]]; then
@@ -284,6 +343,16 @@ grep -Fq "'$CANONICAL_SWIFT_RESPONSE_SETTING'" "$ARCHIVE_SCRIPT" \
   || { printf 'FAIL archive does not pin the canonical Swift response-file expansion\n' >&2; exit 1; }
 if grep -Fq '"SWIFT_RESPONSE_FILE_PATH="' "$ARCHIVE_SCRIPT"; then
   printf 'FAIL archive suppresses Xcode Swift response-file expansion\n' >&2
+  exit 1
+fi
+PASS_COUNT=$((PASS_COUNT + 1))
+
+PROVISIONING_UPDATES="$(grep -c -e '-allowProvisioningUpdates' "$ARCHIVE_SCRIPT" || true)"
+ASC_AUTH_FOLLOWS="$(grep -A1 -e '-allowProvisioningUpdates \\$' "$ARCHIVE_SCRIPT" \
+  | grep -cF '${ASC_AUTH_ARGS[@]+"${ASC_AUTH_ARGS[@]}"} \' || true)"
+if [[ "$PROVISIONING_UPDATES" != "3" || "$ASC_AUTH_FOLLOWS" != "3" ]]; then
+  printf 'FAIL every provisioning step must carry the App Store Connect key arguments (%s steps, %s carry them)\n' \
+    "$PROVISIONING_UPDATES" "$ASC_AUTH_FOLLOWS" >&2
   exit 1
 fi
 PASS_COUNT=$((PASS_COUNT + 1))
