@@ -981,7 +981,8 @@ enum RoomChatText {
     }
 }
 
-private extension View {
+extension View {
+    /// An inline navigation title on iOS; other platforms keep their default.
     @ViewBuilder
     func navigationBarTitleDisplayModeInlineIfAvailable() -> some View {
         #if os(iOS)
