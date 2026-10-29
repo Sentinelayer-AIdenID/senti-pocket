@@ -202,6 +202,7 @@ jobs:
         env:
           RETRIED: ${{ steps.classify.outputs.retry || 'false' }}
           REASON: ${{ steps.classify.outputs.reason || 'none' }}
+          FIRST_OUTCOME: ${{ steps.omar.outcome }}
           FIRST_GATE_STATUS: ${{ steps.omar.outputs.gate_status || '' }}
           FIRST_RUN_ID: ${{ steps.omar.outputs.run_id || '' }}
           FIRST_P0_COUNT: ${{ steps.omar.outputs.p0_count || '' }}
@@ -231,6 +232,13 @@ jobs:
           done
           echo "route=${route}" >> "${GITHUB_OUTPUT}"
           echo "Omar result from: ${route}"
+          # Only a billing or quota 429 is retried. Any other failure of the first attempt stays a failure, even if it
+          # wrote gate_status=passed before failing (for example while posting its comment). The outputs above are
+          # written first, so the attempt's artifacts still upload.
+          if [ "${RETRIED}" != "true" ] && [ "${FIRST_OUTCOME}" != "success" ]; then
+            echo "::error::The first Omar attempt did not succeed and was not retried (outcome: ${FIRST_OUTCOME}). Blocking merge."
+            exit 1
+          fi
 
       - name: Assert Omar LLM contract is active
         shell: bash

@@ -43,6 +43,12 @@ FIRST_ATTEMPT_IF_LINE = (
 )
 RETRY_IF_LINE = "if: ${{ steps.classify.outputs.retry == 'true' }}"
 CONTINUE_ON_ERROR_LINE = "continue-on-error: true"
+RESOLVE_FAIL_CLOSED_LINES = (
+    "FIRST_OUTCOME: ${{ steps.omar.outcome }}",
+    'if [ "${RETRIED}" != "true" ] && [ "${FIRST_OUTCOME}" != "success" ]; then',
+    'echo "::error::The first Omar attempt did not succeed and was not retried (outcome: ${FIRST_OUTCOME}). Blocking merge."',
+    "exit 1",
+)
 FIRST_ATTEMPT_READERS = (
     "name: Classify Omar provider failure",
     "name: Resolve the Omar result that counts",
@@ -306,6 +312,19 @@ def validate_omar_workflow_text(workflow_text: str) -> None:
         raise OmarWorkflowContractError(
             "only the first Omar attempt may continue on error; every other Omar step must fail closed"
         )
+    resolve_steps = [
+        step
+        for step in _step_blocks(omar_job_lines)
+        if "name: Resolve the Omar result that counts" in _step_keys(step)
+    ]
+    _require(
+        len(resolve_steps) == 1
+        and all(
+            fragment in {line.strip() for line in resolve_steps[0]}
+            for fragment in RESOLVE_FAIL_CLOSED_LINES
+        ),
+        "a first Omar attempt that failed and was not retried must fail the job, whatever gate_status it wrote",
+    )
     for step in _step_blocks(omar_job_lines):
         if any("steps.omar.outputs." in line for line in step) and not (
             _step_keys(step) & set(FIRST_ATTEMPT_READERS)
@@ -527,9 +546,15 @@ jobs:
       - name: Resolve the Omar result that counts
         id: result
         env:
+          FIRST_OUTCOME: ${{ steps.omar.outcome }}
           FIRST_GATE_STATUS: ${{ steps.omar.outputs.gate_status || '' }}
           RETRY_GATE_STATUS: ${{ steps.omar_retry.outputs.gate_status || '' }}
-        run: echo "resolved"
+        run: |
+          echo "resolved"
+          if [ "${RETRIED}" != "true" ] && [ "${FIRST_OUTCOME}" != "success" ]; then
+            echo "::error::The first Omar attempt did not succeed and was not retried (outcome: ${FIRST_OUTCOME}). Blocking merge."
+            exit 1
+          fi
       - name: Assert Omar LLM contract is active
         env:
           GATE_STATUS: ${{ steps.result.outputs.gate_status || '' }}
@@ -711,6 +736,17 @@ def _run_retry_self_tests(valid: str) -> None:
             "      - name: Assert Omar LLM contract is active\n",
             "      - name: Assert Omar LLM contract is active\n        continue-on-error: true\n",
             1,
+        ),
+        "an unretried first-attempt failure that can pass on gate_status": valid.replace(
+            '          if [ "${RETRIED}" != "true" ] && [ "${FIRST_OUTCOME}" != "success" ]; then\n'
+            '            echo "::error::The first Omar attempt did not succeed and was not retried (outcome: ${FIRST_OUTCOME}). Blocking merge."\n'
+            "            exit 1\n"
+            "          fi\n",
+            "",
+            1,
+        ),
+        "the resolve step not reading the first attempt's outcome": valid.replace(
+            "          FIRST_OUTCOME: ${{ steps.omar.outcome }}\n          FIRST_GATE_STATUS", "          FIRST_GATE_STATUS", 1
         ),
         "the assertion reading the first attempt": valid.replace(
             "GATE_STATUS: ${{ steps.result.outputs.gate_status || '' }}",
