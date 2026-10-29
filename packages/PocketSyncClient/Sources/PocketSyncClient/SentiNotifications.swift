@@ -86,18 +86,27 @@ public struct SentiLink: Equatable, Hashable, Sendable {
     public let messageSequence: Int64?
     public let replyId: String?
     public let ticketId: String?
+    /// An agent's request to join the room (`?admission=<id>`), which owners and admins decide.
+    public let admissionId: String?
 
     public static let webHosts: Set<String> = ["sentinelayer.com", "www.sentinelayer.com"]
 
-    public init(sessionId: String, messageSequence: Int64? = nil, replyId: String? = nil, ticketId: String? = nil) {
+    public init(
+        sessionId: String,
+        messageSequence: Int64? = nil,
+        replyId: String? = nil,
+        ticketId: String? = nil,
+        admissionId: String? = nil
+    ) {
         self.sessionId = sessionId
         self.messageSequence = messageSequence
         self.replyId = replyId
         self.ticketId = ticketId
+        self.admissionId = admissionId
     }
 
-    /// Accepts `https://sentinelayer.com/dashboard/sessions/<id>[?message=<seq>[&reply=<uuid>]][&ticket=<id>]`, the
-    /// `/app/sessions/<id>` alias, and the same paths without a host (in-app relative links).
+    /// Accepts `https://sentinelayer.com/dashboard/sessions/<id>[?message=<seq>[&reply=<uuid>]][&ticket=<id>]`
+    /// `[&admission=<id>]`, the `/app/sessions/<id>` alias, and the same paths without a host (in-app relative links).
     public init?(string: String) {
         guard let components = URLComponents(string: string) else { return nil }
         if let scheme = components.scheme?.lowercased() {
@@ -116,10 +125,16 @@ public struct SentiLink: Equatable, Hashable, Sendable {
             return Int64(text)
         }
         let reply = value("reply").flatMap { UUID(uuidString: $0) != nil ? $0.lowercased() : nil }
-        let ticket = value("ticket").flatMap {
-            $0.range(of: #"^[A-Za-z0-9._:-]{1,128}$"#, options: .regularExpression) != nil ? $0 : nil
+        func identifier(_ name: String) -> String? {
+            value(name).flatMap { $0.range(of: #"^[A-Za-z0-9._:-]{1,128}$"#, options: .regularExpression) != nil ? $0 : nil }
         }
-        self.init(sessionId: parts[2], messageSequence: message, replyId: reply, ticketId: ticket)
+        self.init(
+            sessionId: parts[2],
+            messageSequence: message,
+            replyId: reply,
+            ticketId: identifier("ticket"),
+            admissionId: identifier("admission")
+        )
     }
 }
 

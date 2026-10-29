@@ -13,6 +13,8 @@ struct SentiPocketApp: App {
     @Environment(\.scenePhase) private var scenePhase
     /// Device-local model ownership is app-lifetime and deliberately independent of authentication.
     @StateObject private var whisperModel = WhisperModelProvisioningCoordinator()
+    /// Room links iOS hands the app (universal links), held until a signed-in root opens them.
+    @StateObject private var incomingLinks = IncomingLinkInbox()
     #if DEBUG
     @StateObject private var model = PocketAppModel()
     #endif
@@ -33,6 +35,7 @@ struct SentiPocketApp: App {
         WindowGroup {
             rootView
                 .onAppear { whisperModel.start() }
+                .onOpenURL { url in _ = incomingLinks.receive(url) }
             #if canImport(CallKit) && canImport(PushKit)
                 // The host is app-lifetime, but it constructs PushKit/CallKit only with a valid trusted gateway config.
                 .environmentObject(dialHost)
@@ -109,6 +112,7 @@ struct SentiPocketApp: App {
             AuthenticatedRootView(
                 authenticationEpoch: signIn.authenticationEpoch,
                 whisperModelCoordinator: whisperModel,
+                incomingLinks: incomingLinks,
                 onSignOut: { signIn.send(.signOut) },
                 onReauthenticationRequired: { expectedEpoch in
                     guard signIn.isCurrentAuthentication(expectedEpoch) else { return }
@@ -124,6 +128,7 @@ struct SentiPocketApp: App {
             AuthenticatedRootView(
                 authenticationEpoch: signIn.authenticationEpoch,
                 whisperModelCoordinator: whisperModel,
+                incomingLinks: incomingLinks,
                 onSignOut: { signIn.send(.signOut) },
                 onReauthenticationRequired: { expectedEpoch in
                     signIn.invalidateAuthentication(expectedEpoch: expectedEpoch)
@@ -165,6 +170,7 @@ private struct AuthenticatedRootView: View {
     @State private var presentsNotifications = false
     @Environment(\.scenePhase) private var rootScenePhase
     @ObservedObject private var whisperModelCoordinator: WhisperModelProvisioningCoordinator
+    @ObservedObject private var incomingLinks: IncomingLinkInbox
     @State private var selectedTab: PocketTab = .sessions
     @State private var presentsSettings = false
     @State private var roomPath: [RoomRoute] = []
@@ -181,6 +187,7 @@ private struct AuthenticatedRootView: View {
     init(
         authenticationEpoch: UInt64,
         whisperModelCoordinator: WhisperModelProvisioningCoordinator,
+        incomingLinks: IncomingLinkInbox,
         onSignOut: @escaping @MainActor () -> Void,
         onReauthenticationRequired: @escaping @MainActor @Sendable (UInt64) -> Void,
         onSessionSelectionChanged: @escaping @MainActor (UInt64, String?) -> Void = { _, _ in }
@@ -263,6 +270,7 @@ private struct AuthenticatedRootView: View {
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
         ))
         _whisperModelCoordinator = ObservedObject(wrappedValue: whisperModelCoordinator)
+        _incomingLinks = ObservedObject(wrappedValue: incomingLinks)
         self.roomTransport = transport
         self.ticketsTransport = transport
         self.admissionsTransport = transport
@@ -306,6 +314,7 @@ private struct AuthenticatedRootView: View {
                             ticketsTransport: ticketsTransport,
                             admissionsTransport: admissionsTransport,
                             admissionDecider: admissionDecider,
+                            openRoom: { link in open(link) },
                             onReauthenticationRequired: invalidateProtectedAuthentication
                         )
                     }
@@ -390,6 +399,8 @@ private struct AuthenticatedRootView: View {
         .onChange(of: rootScenePhase) { phase in
             if phase == .active { notifications.startPolling() } else { notifications.stopPolling() }
         }
+        .onChange(of: incomingLinks.revision) { _ in openPendingLinkIfReady() }
+        .onChange(of: roomListSettled) { _ in openPendingLinkIfReady() }
         .sheet(isPresented: $presentsSettings) {
             WhisperModelSettingsView(
                 coordinator: whisperModelCoordinator,
@@ -410,6 +421,7 @@ private struct AuthenticatedRootView: View {
             )
             sessions.start()
             notifications.startPolling()
+            openPendingLinkIfReady()
         }
         .onDisappear {
             notifications.stopPolling()
@@ -424,17 +436,33 @@ private struct AuthenticatedRootView: View {
         revocationRelay.invalidateAuthentication()
     }
 
-    /// Opens a Senti link in the app: the room, scrolled to the message it names.
+    /// Opens a Senti link in the app: the room, at the message it names, with its ticket or agent requests on top.
     @MainActor
     private func open(_ link: SentiLink) {
         let row = sessions.state.rows.first { UTF8ExactIdentity.matches($0.sessionId, link.sessionId) }
+        presentsNotifications = false
+        presentsSettings = false
         selectedTab = .sessions
         roomPath = [RoomRoute(
             sessionId: link.sessionId,
             title: row?.title ?? "Room",
             membershipRole: row?.membershipRole ?? "",
-            focusSequenceId: link.messageSequence
+            focusSequenceId: link.messageSequence,
+            focusTicketId: link.ticketId,
+            opensAdmissions: link.admissionId != nil
         )]
+    }
+
+    /// The room list has loaded or failed, so a room opened from a link knows its title and your role in it.
+    private var roomListSettled: Bool {
+        sessions.state.provenance != .unavailable || sessions.state.failure != nil
+    }
+
+    /// Opens the link iOS handed the app (a universal link) once the room list has settled. Each link opens once.
+    @MainActor
+    private func openPendingLinkIfReady() {
+        guard roomListSettled, let link = incomingLinks.take() else { return }
+        open(link)
     }
 }
 

@@ -66,4 +66,14 @@ final class RoomTicketsPresentationTests: XCTestCase {
         let done = RoomTicketsPresentationState(tickets: [input("asks", status: "done", body: ask)], showsArchived: true)
         XCTAssertNil(done.rows.first?.decision, "a done ticket no longer asks")
     }
+
+    func test_a_linked_ticket_is_found_whatever_the_list_shows() {
+        let tickets = [input("a"), input("old", status: "done")]
+        let state = RoomTicketsPresentationState(tickets: tickets, query: "zzz", focusTicketId: "old")
+        XCTAssertTrue(state.rows.isEmpty, "the search hides everything")
+        XCTAssertEqual(state.focusedTicket?.id, "old")
+        XCTAssertNil(RoomTicketsPresentationState(tickets: tickets, focusTicketId: "missing").focusedTicket)
+        XCTAssertNil(RoomTicketsPresentationState(tickets: tickets, failure: .accessDenied, focusTicketId: "a").focusedTicket,
+                     "a protected failure shows no ticket")
+    }
 }

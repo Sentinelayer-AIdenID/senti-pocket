@@ -89,6 +89,8 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
     public let decisionStatus: [String: String]
     /// Tickets whose answer failed in a way the same message may fix (Retry sends it again, same client id).
     public let retryableDecisions: Set<String>
+    /// The ticket a link opened, found among all tickets whatever the archive toggle or search shows.
+    public let focusedTicket: RoomTicketRow?
 
     public init(
         tickets: [RoomTicketInput],
@@ -99,7 +101,8 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
         failure: SessionLoadFailure? = nil,
         canAnswerDecisions: Bool = false,
         decisionStatus: [String: String] = [:],
-        retryableDecisions: Set<String> = []
+        retryableDecisions: Set<String> = [],
+        focusTicketId: String? = nil
     ) {
         let all = tickets.map { input in
             let body = input.body
@@ -129,6 +132,7 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
         self.canAnswerDecisions = canAnswerDecisions && failure?.suppressesProtectedContent != true
         self.decisionStatus = decisionStatus
         self.retryableDecisions = retryableDecisions
+        self.focusedTicket = protected ? nil : focusTicketId.flatMap { id in all.first { $0.id == id } }
 
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let visible: [RoomTicketRow]

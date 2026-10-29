@@ -21,6 +21,10 @@ final class SentiNotificationsTests: XCTestCase {
         XCTAssertNil(SentiLink(string: "https://sentinelayer.com/dashboard/sessions/room_1?message=0")?.messageSequence,
                      "a non-positive message is ignored")
         XCTAssertNil(SentiLink(string: "https://sentinelayer.com/dashboard/sessions/room_1?reply=not-a-uuid")?.replyId)
+        XCTAssertEqual(SentiLink(string: "https://sentinelayer.com/dashboard/sessions/room_1?admission=adm_1.a-b:c")?.admissionId,
+                       "adm_1.a-b:c", "an agent's request to join opens from its link")
+        XCTAssertNil(SentiLink(string: "https://sentinelayer.com/dashboard/sessions/room_1?admission=a%2Fb")?.admissionId,
+                     "an admission id outside the id alphabet is dropped, the room still opens")
     }
 
     func test_the_page_decodes_notifications_and_names_the_actor_like_the_web() throws {
