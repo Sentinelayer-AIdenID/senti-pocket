@@ -96,7 +96,7 @@ final class RoomSearchModel: ObservableObject {
         }
     }
 
-    private static func row(_ result: RoomSearchResult) -> RoomSearchRow {
+    nonisolated static func row(_ result: RoomSearchResult) -> RoomSearchRow {
         RoomSearchRow(
             sequenceId: result.sequenceId,
             author: result.message?.authorName,

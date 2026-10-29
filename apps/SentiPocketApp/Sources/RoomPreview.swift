@@ -3,6 +3,7 @@ import Foundation
 import SwiftUI
 import UIKit
 import PocketSyncClient
+import PocketUI
 
 /// DEBUG-only room preview: `-PocketRoomPreview` opens the real room screen and coordinator on scripted sample
 /// rows, so the chat can be built, run and screenshotted on a simulator without signing in. Never compiled into
@@ -10,7 +11,12 @@ import PocketSyncClient
 enum RoomPreview {
     static var isRequested: Bool {
         ProcessInfo.processInfo.arguments.contains("-PocketRoomPreview") || isTicketsRequested || isTicketLinkRequested
-            || isAnchorRequested
+            || isAnchorRequested || isSearchRequested
+    }
+
+    /// `-PocketRoomSearchPreview` shows the room's search with sample matches.
+    static var isSearchRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-PocketRoomSearchPreview")
     }
 
     /// `-PocketTicketLinkPreview` opens the room as a link to ticket t1 would: the ticket over the chat.
@@ -36,6 +42,8 @@ enum RoomPreview {
             NavigationStack {
                 RoomTicketsScreen(sessionId: "preview-room", transport: RoomPreviewTickets(), onReauthenticationRequired: {})
             }
+        } else if isSearchRequested {
+            RoomSearchView(state: RoomPreviewSearch.sampleState) { _ in }
         } else {
             roomRoot
         }
@@ -58,9 +66,33 @@ enum RoomPreview {
                 ticketsTransport: RoomPreviewTickets(),
                 attachmentFetcher: RoomPreviewFiles(),
                 receipts: RoomPreviewReceipts(),
+                search: RoomPreviewSearch(),
                 onReauthenticationRequired: {}
             )
         }
+    }
+}
+
+/// Search over the preview room's own messages, so a match opens a real row. `-PocketRoomSearchPreview` shows the
+/// matches for "paste", with "Older matches" so that row can be seen too.
+private struct RoomPreviewSearch: RoomSearching {
+    static let sampleState = RoomSearchPresentationState(
+        query: "paste",
+        rows: matches(for: "paste", before: nil, limit: 10).map(RoomSearchModel.row),
+        hasMore: true
+    )
+
+    func searchRoom(sessionId: String, query: String, beforeSequence: Int64?, limit: Int) async throws -> RoomSearchPage {
+        RoomSearchPage(query: query, results: Self.matches(for: query, before: beforeSequence, limit: limit))
+    }
+
+    /// The preview room's messages that contain the query, newest first, like the server's search.
+    private static func matches(for query: String, before: Int64?, limit: Int) -> [RoomSearchResult] {
+        RoomPreviewTransport.history
+            .filter { $0.kind == .message && $0.sequenceId < (before ?? .max) && $0.text.localizedCaseInsensitiveContains(query) }
+            .sorted { $0.sequenceId > $1.sequenceId }
+            .prefix(limit)
+            .map { RoomSearchResult(sequenceId: $0.sequenceId, snippet: $0.text, message: $0) }
     }
 }
 
@@ -177,7 +209,7 @@ private struct RoomPreviewTransport: RoomTransport {
         )
     }
 
-    private static let history: [RoomMessage] = [
+    fileprivate static let history: [RoomMessage] = [
         row(101, "human-alex", minutesAgo: 26 * 60, "Morning all. Can we get the onboarding flow reviewed today?"),
         row(102, "review-agent", minutesAgo: 26 * 60 - 2, "On it. I'll post findings in this thread."),
         row(110, "human-alex", minutesAgo: 95, "Where are we on the onboarding review?"),
