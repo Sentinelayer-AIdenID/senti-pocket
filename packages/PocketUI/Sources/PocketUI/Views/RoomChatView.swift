@@ -38,7 +38,7 @@ public struct RoomChatView: View {
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            RoomComposerBar(composer: state.composer) { text in
+            RoomComposerBar(composer: state.composer, mentionCandidates: state.mentionCandidates) { text in
                 send(.sendMessage(text: text))
             }
         }
@@ -677,12 +677,18 @@ private extension RoomChatPendingRow {
 /// with the reason shown instead (for example a viewer membership).
 private struct RoomComposerBar: View {
     let composer: RoomComposerState
+    var mentionCandidates: [MentionCandidate] = []
     let send: (String) -> Void
     @State private var draft = ""
 
+    private var suggestions: [MentionCandidate] {
+        guard let active = MentionSuggester.activeQuery(in: draft) else { return [] }
+        return MentionSuggester.suggestions(for: active.query, among: mentionCandidates)
+    }
+
     var body: some View {
         if composer.canPost {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 0) {
             if let problem = composer.lengthProblem(for: draft) {
                 Text(problem)
                     .font(.caption)
@@ -690,6 +696,31 @@ private struct RoomComposerBar: View {
                     .padding(.horizontal, 16)
                     .padding(.top, 6)
                     .accessibilityIdentifier("pocket.room.composer.tooLong")
+            }
+            if !suggestions.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(suggestions) { candidate in
+                            Button {
+                                draft = MentionSuggester.apply(candidate, to: draft)
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: candidate.isAll ? "person.3" : (candidate.isHuman ? "person" : "cpu"))
+                                    Text(candidate.isAll ? "@all · Everyone" : "@\(candidate.handle)")
+                                }
+                                .font(.footnote.weight(.semibold))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(PocketPalette.raised, in: Capsule())
+                                .overlay(Capsule().stroke(PocketPalette.separator.opacity(0.6), lineWidth: 0.5))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("pocket.room.mention.\(candidate.handle)")
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
+                }
             }
             HStack(alignment: .bottom, spacing: 8) {
                 TextField("Message", text: $draft, axis: .vertical)

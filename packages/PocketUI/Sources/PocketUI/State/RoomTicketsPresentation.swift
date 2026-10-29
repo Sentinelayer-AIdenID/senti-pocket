@@ -54,6 +54,8 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
     public let updatedDate: Date?
     public let sourceSequenceId: Int64?
     public let isVerifiedDone: Bool
+    /// The question the ticket keeper is waiting on, while the ticket is not done.
+    public let decision: TicketDecision?
 
     public var statusLabel: String {
         switch status {
@@ -81,6 +83,12 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
     public let isLoading: Bool
     public let isStale: Bool
     public let failure: SessionLoadFailure?
+    /// Whether this phone can answer a ticket's decision (it can post to the room).
+    public let canAnswerDecisions: Bool
+    /// Per ticket: the answer being sent, sent, or why it failed.
+    public let decisionStatus: [String: String]
+    /// Tickets whose answer failed in a way the same message may fix (Retry sends it again, same client id).
+    public let retryableDecisions: Set<String>
 
     public init(
         tickets: [RoomTicketInput],
@@ -88,13 +96,17 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
         query: String = "",
         isLoading: Bool = false,
         isStale: Bool = false,
-        failure: SessionLoadFailure? = nil
+        failure: SessionLoadFailure? = nil,
+        canAnswerDecisions: Bool = false,
+        decisionStatus: [String: String] = [:],
+        retryableDecisions: Set<String> = []
     ) {
         let all = tickets.map { input in
-            RoomTicketRow(
+            let body = input.body
+            return RoomTicketRow(
                 id: input.id,
                 title: input.title,
-                body: input.body,
+                body: body,
                 status: input.status,
                 createdBy: input.createdBy,
                 assignee: input.assignee,
@@ -102,7 +114,8 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
                 createdDate: ParsedSessionTimestamp(input.createdAt).date,
                 updatedDate: ParsedSessionTimestamp(input.updatedAt).date,
                 sourceSequenceId: input.sourceSequenceId,
-                isVerifiedDone: input.isVerifiedDone
+                isVerifiedDone: input.isVerifiedDone,
+                decision: input.status == "done" ? nil : TicketDecision.parse(body)
             )
         }
         let protected = failure?.suppressesProtectedContent == true
@@ -113,6 +126,9 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
         self.isLoading = isLoading
         self.isStale = isStale
         self.failure = failure
+        self.canAnswerDecisions = canAnswerDecisions && failure?.suppressesProtectedContent != true
+        self.decisionStatus = decisionStatus
+        self.retryableDecisions = retryableDecisions
 
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let visible: [RoomTicketRow]

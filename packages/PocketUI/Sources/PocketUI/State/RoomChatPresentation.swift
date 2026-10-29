@@ -355,6 +355,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     public let thread: RoomChatThreadState?
     /// A message to bring into view and highlight once (opened from a notification or link).
     public let focusSequenceId: Int64?
+    /// Who the composer can @-mention, in suggestion order.
+    public let mentionCandidates: [MentionCandidate]
 
     /// Same-author rows closer together than this share one header.
     public static let groupingWindow: TimeInterval = 5 * 60
@@ -377,6 +379,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         canReact: Bool = false,
         thread threadInput: RoomChatThreadInput? = nil,
         focusSequenceId: Int64? = nil,
+        mentionCandidates: [MentionCandidate] = [],
         calendar: Calendar = .current
     ) {
         self.sessionId = sessionId
@@ -394,6 +397,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         self.composer = protectedFailure ? .hidden : composer
         self.canReact = protectedFailure ? false : canReact
         self.focusSequenceId = protectedFailure ? nil : focusSequenceId
+        self.mentionCandidates = protectedFailure ? [] : mentionCandidates
 
         // Protected content never renders beside an auth or access failure.
         guard failure?.suppressesProtectedContent != true else {

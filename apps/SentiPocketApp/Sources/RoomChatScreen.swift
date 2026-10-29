@@ -21,6 +21,7 @@ struct RoomChatScreen: View {
     private let ticketsTransport: (any RoomTicketsTransport)?
     private let admissionsTransport: (any RoomAdmissionsTransport)?
     private let admissionDecider: (any AdmissionDeciding)?
+    private let ticketAnswerSender: (any RoomMessageSending)?
     private let onReauthenticationRequired: @MainActor () -> Void
 
     init(
@@ -38,6 +39,8 @@ struct RoomChatScreen: View {
         self.ticketsTransport = ticketsTransport
         self.admissionsTransport = admissionsTransport
         self.admissionDecider = admissionDecider
+        // A viewer cannot post, so cannot answer a ticket's decision either.
+        self.ticketAnswerSender = route.membershipRole.lowercased() == "viewer" ? nil : sender
         self.onReauthenticationRequired = onReauthenticationRequired
         _coordinator = StateObject(wrappedValue: RoomChatCoordinator(
             sessionId: route.sessionId,
@@ -80,6 +83,7 @@ struct RoomChatScreen: View {
                         RoomTicketsScreen(
                             sessionId: route.sessionId,
                             transport: ticketsTransport,
+                            sender: ticketAnswerSender,
                             onReauthenticationRequired: onReauthenticationRequired
                         )
                     } label: {

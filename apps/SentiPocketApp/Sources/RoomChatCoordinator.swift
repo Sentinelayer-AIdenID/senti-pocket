@@ -831,7 +831,25 @@ final class RoomChatCoordinator: ObservableObject {
             composer: composerState,
             canReact: canReact,
             thread: threadInput,
-            focusSequenceId: focusTarget
+            focusSequenceId: focusTarget,
+            mentionCandidates: mentionCandidates()
+        )
+    }
+
+    /// Everyone who has posted in the loaded history, newest activity per person, for @-mention suggestions.
+    private func mentionCandidates() -> [MentionCandidate] {
+        guard sender != nil else { return [] }
+        var latest: [String: (name: String, isHuman: Bool, date: Date?)] = [:]
+        for message in timeline.messages
+        where message.kind == .message && !message.authorId.isEmpty && !ownAuthorIds.contains(message.authorId.lowercased()) {
+            let date = dateCache[message.id]
+            latest[message.authorId] = (message.authorName, message.isHuman, date)
+        }
+        let ownHandles = Set(ownAuthorIds.map { $0.hasPrefix("human-") ? String($0.dropFirst("human-".count)) : $0 })
+        return MentionSuggester.candidates(
+            authors: latest.map { (id: $0.key, name: $0.value.name, isHuman: $0.value.isHuman, lastActive: $0.value.date) },
+            ownHandles: ownHandles,
+            now: now()
         )
     }
 
