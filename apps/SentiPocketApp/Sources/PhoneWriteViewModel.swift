@@ -56,6 +56,11 @@ final class PhoneWriteViewModel: ObservableObject {
         // is an explicit user tap or an app-driven reconnect), NEVER shown as sent.
         if let persisted = OutboxStore.load() {
             switch persisted.binding(to: sessionId) {
+            case .matching where !receiptTrustAvailable:
+                // This build can never verify the gateway's receipt, so the queued write could only sit "pending"
+                // while holding the one outbox slot. Release it now and say where to look.
+                OutboxStore.clear(matching: persisted)
+                state = .refused("Not sent: this build can't verify the gateway's receipts yet. If you sent this message earlier, check the room to see whether it posted.")
             case .matching:
                 pendingIntent = (persisted.proposal, persisted.confirmation)
                 state = .pending(

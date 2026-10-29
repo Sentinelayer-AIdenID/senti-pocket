@@ -306,6 +306,35 @@ final class GatewayEndpointTests: XCTestCase {
                        "builds carry no receipt anchor until reviewed key material is activated")
     }
 
+    @MainActor
+    func test_a_queued_write_from_an_earlier_build_is_released_at_once_without_a_receipt_key() {
+        OutboxStore.clear()
+        defer { OutboxStore.clear() }
+        let proposal = PocketWriteClient.makeHumanMessageProposal(
+            sessionId: "session-A",
+            message: "Queued by an earlier build",
+            at: Date(timeIntervalSince1970: 1_784_000_000)
+        )
+        let confirmation = GovernedWriteConfirmation(
+            proposalId: proposal.id,
+            confirmedProposalHash: proposal.proposalHash,
+            confirmedAt: Date(timeIntervalSince1970: 1_784_000_001)
+        )
+        OutboxStore.save(PersistedWriteIntent(proposal: proposal, confirmation: confirmation))
+
+        let viewModel = PhoneWriteViewModel(
+            sessionId: "session-A",
+            receiptTrustAvailable: false,
+            client: PocketWriteClient(apiBaseURL: URL(string: "https://trusted-gateway.example"), tokenProvider: { nil })
+        )
+
+        guard case .refused(let message) = viewModel.state else {
+            return XCTFail("a write this build can never verify is released at once, got \(viewModel.state)")
+        }
+        XCTAssertTrue(message.contains("check the room"))
+        XCTAssertNil(OutboxStore.load(), "the one outbox slot is free again")
+    }
+
     #if canImport(CallKit) && canImport(PushKit)
     @MainActor
     func test_unconfigured_dial_host_does_not_start_callkit_or_pushkit() {
