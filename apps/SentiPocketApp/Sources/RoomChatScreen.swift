@@ -15,6 +15,9 @@ struct RoomRoute: Hashable {
 struct RoomChatScreen: View {
     @StateObject private var coordinator: RoomChatCoordinator
     @Environment(\.scenePhase) private var scenePhase
+    private let route: RoomRoute
+    private let ticketsTransport: (any RoomTicketsTransport)?
+    private let onReauthenticationRequired: @MainActor () -> Void
 
     init(
         route: RoomRoute,
@@ -22,8 +25,12 @@ struct RoomChatScreen: View {
         sender: (any RoomMessageSending)? = nil,
         actionSender: (any RoomActionSending)? = nil,
         identity: (any AccountIdentityProviding)? = nil,
+        ticketsTransport: (any RoomTicketsTransport)? = nil,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
+        self.route = route
+        self.ticketsTransport = ticketsTransport
+        self.onReauthenticationRequired = onReauthenticationRequired
         _coordinator = StateObject(wrappedValue: RoomChatCoordinator(
             sessionId: route.sessionId,
             title: route.title,
@@ -39,6 +46,22 @@ struct RoomChatScreen: View {
     var body: some View {
         RoomChatView(state: coordinator.state) { intent in
             coordinator.send(intent)
+        }
+        .toolbar {
+            if let ticketsTransport {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    NavigationLink {
+                        RoomTicketsScreen(
+                            sessionId: route.sessionId,
+                            transport: ticketsTransport,
+                            onReauthenticationRequired: onReauthenticationRequired
+                        )
+                    } label: {
+                        Label("Tickets", systemImage: "list.bullet.rectangle")
+                    }
+                    .accessibilityIdentifier("pocket.room.tickets")
+                }
+            }
         }
         .onAppear { coordinator.resume() }
         .onDisappear { coordinator.pause() }
