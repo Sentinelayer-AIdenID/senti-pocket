@@ -87,6 +87,9 @@ final class RoomChatCoordinator: ObservableObject {
     private var previewOrder: [String] = []
     private var previewsInFlight: Set<String> = []
     private let attachmentFetcher: any AttachmentFileFetching
+    /// Owners and admins can read the member list, so they can mention people who have not posted yet.
+    private let readsMembers: Bool
+    private var members: [RoomMember] = []
     static let previewLimitBytes = 10 * 1024 * 1024
     static let previewCacheSize = 40
     private var generation: UInt64 = 0
@@ -125,6 +128,7 @@ final class RoomChatCoordinator: ObservableObject {
         self.focusTarget = focusSequenceId
         // The web lets a viewer react but never post; the API refuses the post anyway.
         let refusedReason = membershipRole?.lowercased() == "viewer" ? Self.viewerReason : nil
+        self.readsMembers = ["owner", "admin"].contains(membershipRole?.lowercased() ?? "")
         self.postingRefusedReason = refusedReason
         self.ownAuthorIds = Set(ownAuthorIds.map { $0.lowercased() })
         self.sleep = sleep
@@ -168,6 +172,7 @@ final class RoomChatCoordinator: ObservableObject {
             self.startLive(current)
             await self.refreshActions(force: true)
             await self.refreshBreakouts()
+            await self.refreshMembers()
         })
     }
 
@@ -325,6 +330,15 @@ final class RoomChatCoordinator: ObservableObject {
             if error == .reauthenticationRequired || error == .notLoggedIn { onReauthenticationRequired() }
             throw error
         }
+    }
+
+    /// Re-reads the room's people (owners and admins only). A failed read keeps the list already loaded.
+    func refreshMembers() async {
+        guard readsMembers, sender != nil, !failureIsTerminal,
+              let page = try? await transport.roomMembers(sessionId: sessionId) else { return }
+        guard page.members != members else { return }
+        members = page.members
+        publish()
     }
 
     /// Re-reads the breakouts started from this room. A failed read keeps the cards already shown.
@@ -790,6 +804,7 @@ final class RoomChatCoordinator: ObservableObject {
             await catchUp(current)
             await refreshActions(force: true)
             await refreshBreakouts()
+            await refreshMembers()
             pruneComposing()
         }
     }
@@ -978,10 +993,14 @@ final class RoomChatCoordinator: ObservableObject {
     private func mentionCandidates() -> [MentionCandidate] {
         guard sender != nil else { return [] }
         var latest: [String: (name: String, isHuman: Bool, date: Date?)] = [:]
+        // People in the room who have not posted yet (owners and admins see the member list), under their login.
+        for member in members where !ownAuthorIds.contains("human-\(member.login)") {
+            latest["human-\(member.login)"] = (member.displayName, true, member.lastActiveAt.flatMap { ParsedSessionTimestamp($0).date })
+        }
         for message in timeline.messages
         where message.kind == .message && !message.authorId.isEmpty && !ownAuthorIds.contains(message.authorId.lowercased()) {
             let date = dateCache[message.id]
-            latest[message.authorId] = (message.authorName, message.isHuman, date)
+            latest[message.authorId.lowercased()] = (message.authorName, message.isHuman, date)
         }
         let ownHandles = Set(ownAuthorIds.map { $0.hasPrefix("human-") ? String($0.dropFirst("human-".count)) : $0 })
         return MentionSuggester.candidates(

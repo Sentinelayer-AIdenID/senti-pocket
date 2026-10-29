@@ -12,6 +12,8 @@ public protocol RoomTransport: Sendable {
     func roomBreakouts(parentSessionId: String, cursor: String?, limit: Int) async throws -> RoomBreakoutsPage
     /// A short-lived link to one attachment's bytes.
     func attachmentDownload(sessionId: String, attachmentId: String) async throws -> RoomAttachmentDownload
+    /// The room's people, for owners and admins (the API refuses everyone else).
+    func roomMembers(sessionId: String) async throws -> RoomMembersPage
 }
 
 extension RoomTransport {
@@ -28,6 +30,11 @@ extension RoomTransport {
     /// Transports without attachment support cannot open files.
     public func attachmentDownload(sessionId: String, attachmentId: String) async throws -> RoomAttachmentDownload {
         throw SessionTransportError.invalidRequest
+    }
+
+    /// Transports without a member list offer only the people seen in the room.
+    public func roomMembers(sessionId: String) async throws -> RoomMembersPage {
+        RoomMembersPage()
     }
 }
 
