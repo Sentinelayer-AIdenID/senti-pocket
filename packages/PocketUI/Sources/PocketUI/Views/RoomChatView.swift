@@ -12,6 +12,8 @@ import AppKit
 public struct RoomChatView: View {
     private let state: RoomChatPresentationState
     private let send: (RoomChatIntent) -> Void
+    /// What is being read aloud (a `RoomReadAloud` id): its row shows a Stop button.
+    private let readingAloudId: String?
 
     /// The reply being typed in each thread, kept while the room is open: closing the sheet does not lose it.
     @State private var threadDrafts: [Int64: String] = [:]
@@ -23,8 +25,13 @@ public struct RoomChatView: View {
     /// A failed message the reader chose to edit: its text goes back into the composer.
     @State private var restoredDraft: RoomComposerRestore?
 
-    public init(state: RoomChatPresentationState, send: @escaping (RoomChatIntent) -> Void) {
+    public init(
+        state: RoomChatPresentationState,
+        readingAloudId: String? = nil,
+        send: @escaping (RoomChatIntent) -> Void
+    ) {
         self.state = state
+        self.readingAloudId = readingAloudId
         self.send = send
     }
 
@@ -53,6 +60,7 @@ public struct RoomChatView: View {
                 RoomThreadSheet(
                     thread: thread,
                     ownHandles: state.ownMentionHandles,
+                    readingAloudId: readingAloudId,
                     send: send,
                     draft: threadDraft(thread.parent.sequenceId)
                 )
@@ -237,6 +245,7 @@ public struct RoomChatView: View {
                 pinsFull: state.pinned.count >= state.pinLimit,
                 breakouts: state.breakouts,
                 attachmentPreviews: state.attachmentPreviews,
+                isReadingAloud: readingAloudId == RoomReadAloud.message(message.sequenceId),
                 onOpenReplyTarget: { jump(to: $0, proxy: proxy) },
                 send: send
             )
@@ -408,6 +417,7 @@ private struct RoomMessageRowView: View {
     var pinsFull = false
     var breakouts: [String: RoomBreakoutCard] = [:]
     var attachmentPreviews: [String: Data] = [:]
+    var isReadingAloud = false
     let onOpenReplyTarget: (Int64) -> Void
     var send: (RoomChatIntent) -> Void = { _ in }
 
@@ -520,6 +530,9 @@ private struct RoomMessageRowView: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(isHighlighted ? PocketPalette.warning.opacity(0.18) : (row.isOwn ? PocketPalette.listening.opacity(0.08) : Color.clear))
         )
+        .overlay(alignment: .topTrailing) {
+            if isReadingAloud { RoomReadingAloudMark { send(.stopReadingAloud) } }
+        }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("pocket.room.message.\(row.sequenceId)")
         .contextMenu { messageMenu }
@@ -531,6 +544,13 @@ private struct RoomMessageRowView: View {
             send(.openThread(sequenceId: row.sequenceId))
         } label: {
             Label(canReply ? "Reply in thread" : "Open thread", systemImage: "bubble.left.and.bubble.right")
+        }
+        // Always "Listen": a context menu can show content from before the reading started, so Stop is the speaker
+        // button on the row being read.
+        Button {
+            send(.readAloud(id: RoomReadAloud.message(row.sequenceId), text: row.text))
+        } label: {
+            Label("Listen", systemImage: "speaker.wave.2")
         }
         if canReact {
             let liked = row.reactions?.chips.contains { $0.type == "like" && $0.isMine } == true
@@ -642,6 +662,7 @@ private struct RoomReactionBar: View {
 private struct RoomThreadSheet: View {
     let thread: RoomChatThreadState
     let ownHandles: Set<String>
+    var readingAloudId: String?
     let send: (RoomChatIntent) -> Void
     @Binding var draft: String
 
@@ -685,6 +706,20 @@ private struct RoomThreadSheet: View {
                         }
                         .onAppear { send(.replyOnScreen(id: reply.id, isOnScreen: true)) }
                         .onDisappear { send(.replyOnScreen(id: reply.id, isOnScreen: false)) }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .overlay(alignment: .topTrailing) {
+                            if readingAloudId == RoomReadAloud.reply(reply.id) {
+                                RoomReadingAloudMark { send(.stopReadingAloud) }
+                            }
+                        }
+                        .contentShape(Rectangle())
+                        .contextMenu {
+                            Button {
+                                send(.readAloud(id: RoomReadAloud.reply(reply.id), text: reply.text))
+                            } label: {
+                                Label("Listen", systemImage: "speaker.wave.2")
+                            }
+                        }
                         .padding(.leading, 12)
                         .overlay(alignment: .leading) {
                             Rectangle().fill(PocketPalette.separator).frame(width: 2)
@@ -1045,6 +1080,25 @@ private struct RoomViewedLine: View {
             .foregroundStyle(PocketPalette.textSecondary)
             .lineLimit(1)
             .accessibilityIdentifier("pocket.room.viewedBy")
+    }
+}
+
+/// On the message or reply being read aloud: it shows that, and a tap stops the reading.
+private struct RoomReadingAloudMark: View {
+    let onStop: () -> Void
+
+    var body: some View {
+        Button(action: onStop) {
+            Image(systemName: "speaker.wave.2.fill")
+                .font(.caption)
+                .foregroundStyle(PocketPalette.listening)
+                .frame(width: 44, height: 44, alignment: .topTrailing)
+                .padding(4)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Stop reading")
+        .accessibilityIdentifier("pocket.room.readingAloud")
     }
 }
 

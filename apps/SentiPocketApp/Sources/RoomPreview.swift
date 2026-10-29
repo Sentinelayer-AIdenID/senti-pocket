@@ -4,6 +4,7 @@ import SwiftUI
 import UIKit
 import PocketSyncClient
 import PocketUI
+import PocketVoice
 
 /// DEBUG-only room preview: `-PocketRoomPreview` opens the real room screen and coordinator on scripted sample
 /// rows, so the chat can be built, run and screenshotted on a simulator without signing in. Never compiled into
@@ -50,6 +51,9 @@ enum RoomPreview {
     }
 
     @MainActor
+    private static let reader = MessageReader()
+
+    @MainActor
     private static var roomRoot: some View {
         NavigationStack {
             RoomChatScreen(
@@ -67,6 +71,7 @@ enum RoomPreview {
                 attachmentFetcher: RoomPreviewFiles(),
                 receipts: RoomPreviewReceipts(),
                 search: RoomPreviewSearch(),
+                reader: reader,
                 onReauthenticationRequired: {}
             )
         }

@@ -115,6 +115,64 @@ final class DuplexAudioSessionLeaseTests: XCTestCase {
         XCTAssertEqual(system.activationCount, 1)
         XCTAssertEqual(manager.release(fresh), .deactivated)
     }
+
+    func testPlaybackIsRefusedWhileACallOrBriefingHoldsTheSession() throws {
+        let system = RecordingDuplexAudioSessionSystem()
+        let manager = DuplexAudioSessionLeaseManager(system: system)
+        let call = try manager.acquire()
+
+        XCTAssertThrowsError(try manager.acquirePlayback {}) { XCTAssertEqual($0 as? VoiceError, .audioSessionBusy) }
+        XCTAssertEqual(system.playbackActivationCount, 0)
+        manager.release(call)
+
+        manager.callKitDidActivate()
+        XCTAssertThrowsError(try manager.acquirePlayback {}) { XCTAssertEqual($0 as? VoiceError, .audioSessionBusy) }
+        XCTAssertEqual(system.playbackActivationCount, 0)
+    }
+
+    func testACallTakesTheSessionFromPlaybackAndThePlaybackReleaseIsStale() throws {
+        let system = RecordingDuplexAudioSessionSystem()
+        let manager = DuplexAudioSessionLeaseManager(system: system)
+        var preempted = 0
+        let reading = try manager.acquirePlayback { preempted += 1 }
+        XCTAssertEqual(system.playbackActivationCount, 1)
+        XCTAssertTrue(manager.holdsPlayback(reading))
+
+        let call = try manager.acquire()
+        XCTAssertEqual(preempted, 1, "the reading is told to stop before the call sets up its session")
+        XCTAssertFalse(manager.holdsPlayback(reading))
+        XCTAssertEqual(system.activationCount, 1)
+        XCTAssertEqual(manager.releasePlayback(reading), .stale)
+        XCTAssertEqual(system.deactivationCount, 0, "the call's session stays up")
+        XCTAssertEqual(manager.release(call), .deactivated)
+    }
+
+    func testCallKitTakesTheSessionFromPlayback() throws {
+        let system = RecordingDuplexAudioSessionSystem()
+        let manager = DuplexAudioSessionLeaseManager(system: system)
+        var preempted = 0
+        let reading = try manager.acquirePlayback { preempted += 1 }
+        manager.callKitDidActivate()
+        XCTAssertEqual(preempted, 1)
+        XCTAssertEqual(manager.releasePlayback(reading), .stale)
+        XCTAssertEqual(system.deactivationCount, 0)
+    }
+
+    func testPlaybackReleaseDeactivatesOnceAndOnlyOneReadingHoldsTheSession() throws {
+        let system = RecordingDuplexAudioSessionSystem()
+        let manager = DuplexAudioSessionLeaseManager(system: system)
+        let reading = try manager.acquirePlayback {}
+        XCTAssertThrowsError(try manager.acquirePlayback {})
+        XCTAssertEqual(system.playbackActivationCount, 1)
+
+        XCTAssertEqual(manager.releasePlayback(reading), .deactivated)
+        XCTAssertEqual(manager.releasePlayback(reading), .stale)
+        XCTAssertEqual(system.deactivationCount, 1)
+
+        let next = try manager.acquirePlayback {}
+        XCTAssertEqual(system.playbackActivationCount, 2)
+        XCTAssertEqual(manager.releasePlayback(next), .deactivated)
+    }
 }
 
 private final class RecordingDuplexAudioSessionSystem: DuplexAudioSessionSystem, @unchecked Sendable {
@@ -131,6 +189,7 @@ private final class RecordingDuplexAudioSessionSystem: DuplexAudioSessionSystem,
     }
 
     var activationCount = 0
+    var playbackActivationCount = 0
     var deactivationCount = 0
     var prepareForCallKitCount = 0
     var failNextActivation = false
@@ -146,6 +205,10 @@ private final class RecordingDuplexAudioSessionSystem: DuplexAudioSessionSystem,
             failNextActivation = false
             throw StubError.activationFailed
         }
+    }
+
+    func activatePlayback() throws {
+        playbackActivationCount += 1
     }
 
     func deactivate() throws {

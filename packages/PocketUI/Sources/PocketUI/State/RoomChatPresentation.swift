@@ -575,6 +575,12 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     }
 }
 
+/// The ids of what the room reads aloud, so the row being read can show it.
+public enum RoomReadAloud {
+    public static func message(_ sequenceId: Int64) -> String { "msg:\(sequenceId)" }
+    public static func reply(_ id: String) -> String { "reply:\(id)" }
+}
+
 /// What the room screen can ask for.
 public enum RoomChatIntent: Equatable, Sendable {
     case loadOlder
@@ -594,6 +600,10 @@ public enum RoomChatIntent: Equatable, Sendable {
     case openBreakout(childSessionId: String)
     /// Open a file attached to a message, full size.
     case openAttachment(attachmentId: String)
+    /// Read a message or reply aloud from the start, the text its row shows. The room screen reads.
+    case readAloud(id: String, text: String)
+    /// Stop reading aloud.
+    case stopReadingAloud
     /// An image attachment came into view: load its small preview if it has none.
     case attachmentAppeared(attachmentId: String)
     /// A message (by event id) or a reply (by action id) came on screen or left it, for read receipts.

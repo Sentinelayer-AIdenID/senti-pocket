@@ -4,6 +4,7 @@ import PocketCall   // VerifiedBundle — the ONLY trusted way to hold a bundle
 import PocketUI
 import PocketReasoning
 import PocketSyncClient
+import PocketVoice
 
 /// App shell (Atlas). The end-to-end state machine + lane feature views plug in here as they land.
 /// For Sunday watchability, every screen ships a #Preview wired to the canonical fixture so the Xcode
@@ -174,6 +175,7 @@ private struct AuthenticatedRootView: View {
     @State private var selectedTab: PocketTab = .sessions
     @State private var presentsSettings = false
     @State private var roomPath: [RoomRoute] = []
+    @StateObject private var messageReader = MessageReader()
     private let roomTransport: any RoomTransport
     private let ticketsTransport: any RoomTicketsTransport
     private let admissionsTransport: any RoomAdmissionsTransport
@@ -323,6 +325,7 @@ private struct AuthenticatedRootView: View {
                             openChildRoom: { child in roomPath.append(child) },
                             receipts: roomReceipts,
                             search: roomSearch,
+                            reader: messageReader,
                             onReauthenticationRequired: invalidateProtectedAuthentication
                         )
                     }

@@ -1,6 +1,7 @@
 import SwiftUI
 import PocketSyncClient
 import PocketUI
+import PocketVoice
 
 /// Navigation value for an open room.
 struct RoomRoute: Hashable {
@@ -36,6 +37,9 @@ struct RoomChatScreen: View {
     @State private var showsSearch = false
     @State private var attachmentPreview: AttachmentPreviewItem?
     @State private var attachmentProblem: String?
+    @State private var listenProblem: String?
+    /// The app's one reader: one message is read at a time, wherever it was started.
+    @ObservedObject private var reader: MessageReader
     @State private var openingAttachment = false
     @State private var linkedTicket: LinkedTicket?
     @State private var appliedRouteLinks = false
@@ -63,9 +67,11 @@ struct RoomChatScreen: View {
         attachmentFetcher: any AttachmentFileFetching = URLSessionAttachmentFetcher(),
         receipts: (any RoomReceiptsClient)? = nil,
         search: (any RoomSearching)? = nil,
+        reader: MessageReader,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.route = route
+        self.reader = reader
         self.search = search
         self.ticketsTransport = ticketsTransport
         self.admissionsTransport = admissionsTransport
@@ -114,11 +120,17 @@ struct RoomChatScreen: View {
     }
 
     var body: some View {
-        RoomChatView(state: coordinator.state) { intent in
+        RoomChatView(state: coordinator.state, readingAloudId: reader.readingId) { intent in
             if case .openBreakout(let childSessionId) = intent {
                 openBreakout(childSessionId)
             } else if case .openAttachment(let attachmentId) = intent {
                 openAttachment(attachmentId)
+            } else if case .readAloud(let id, let text) = intent {
+                if reader.read(id: id, markdown: text) == .unavailable {
+                    listenProblem = "A call or briefing is using the audio. Listen when it ends."
+                }
+            } else if intent == .stopReadingAloud {
+                reader.stop()
             } else {
                 coordinator.send(intent)
             }
@@ -217,6 +229,14 @@ struct RoomChatScreen: View {
         } message: {
             Text(attachmentProblem ?? "")
         }
+        .alert("Can't read aloud now", isPresented: Binding(
+            get: { listenProblem != nil },
+            set: { if !$0 { listenProblem = nil } }
+        )) {
+            Button("OK", role: .cancel) { listenProblem = nil }
+        } message: {
+            Text(listenProblem ?? "")
+        }
         .sheet(item: $linkedTicket) { linked in
             if let ticketsTransport {
                 RoomTicketLinkScreen(
@@ -235,7 +255,11 @@ struct RoomChatScreen: View {
             coordinator.resume()
             applyRouteLinksOnce()
         }
-        .onDisappear { coordinator.pause() }
+        .onDisappear {
+            coordinator.pause()
+            // Leaving the room stops what it was reading aloud.
+            reader.stop()
+        }
         .onChange(of: scenePhase) { phase in
             switch phase {
             case .active: coordinator.resume()
