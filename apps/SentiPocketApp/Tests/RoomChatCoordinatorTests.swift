@@ -242,12 +242,14 @@ final class RoomChatCoordinatorTests: XCTestCase {
         coordinator.pause()
     }
 
-    func test_a_room_opened_at_a_message_pages_back_to_it_and_clears_the_focus_once_shown() async {
-        let transport = ScriptedRoomTransport(before: [
-            .success(page([90, 100], hasMore: true)),
-            .success(page([70, 80], hasMore: true)),
-            .success(page([50, 60], hasMore: true))
-        ])
+    func test_a_room_opened_at_a_message_loads_the_window_around_it_and_clears_the_focus_once_shown() async {
+        let transport = ScriptedRoomTransport(
+            before: [
+                .success(page([90, 100], hasMore: true)),
+                .success(page([50, 60, 70], hasMore: true))
+            ],
+            after: [.success(page([80]))]
+        )
         let coordinator = RoomChatCoordinator(
             sessionId: "room_1",
             title: "Room",
@@ -261,36 +263,43 @@ final class RoomChatCoordinatorTests: XCTestCase {
         coordinator.resume()
         await waitUntil("focus target loaded") { messageSequences(coordinator).contains(70) && !coordinator.state.isLoadingOlder }
         XCTAssertEqual(coordinator.state.focusSequenceId, 70)
-        XCTAssertEqual(transport.snapshot().before, [nil, 90], "paging stops once the focused message is loaded")
+        XCTAssertEqual(transport.snapshot().before, [nil, 71], "the tail, then one page ending at the message")
+        XCTAssertEqual(transport.snapshot().after, [70], "then one page after it")
+        XCTAssertEqual(messageSequences(coordinator), [50, 60, 70, 80, 90, 100], "a window that reaches the rows joins them")
+        XCTAssertFalse(coordinator.state.canLoadNewer)
 
         coordinator.send(.focusHandled)
         XCTAssertNil(coordinator.state.focusSequenceId, "the focus is applied once")
         coordinator.pause()
     }
 
-    func test_jumping_to_an_unloaded_reply_target_pages_back_until_it_is_found() async {
-        let transport = ScriptedRoomTransport(before: [
-            .success(page([90, 100], hasMore: true)),
-            .success(page([70, 80], hasMore: true)),
-            .success(page([50, 60], hasMore: true)),
-            .success(page([30, 40], hasMore: true))
-        ])
+    func test_jumping_to_an_unloaded_reply_target_loads_its_window() async {
+        let transport = ScriptedRoomTransport(
+            before: [
+                .success(page([90, 100], hasMore: true)),
+                .success(page([40, 50, 60], hasMore: true))
+            ],
+            after: [.success(page([70, 80]))]
+        )
         let coordinator = makeCoordinator(transport)
         coordinator.resume()
         await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
 
         coordinator.send(.jumpToMessage(sequenceId: 60))
         await waitUntil("target loaded") { messageSequences(coordinator).contains(60) && !coordinator.state.isLoadingOlder }
-        XCTAssertEqual(transport.snapshot().before, [nil, 90, 70], "paging stops once the target is loaded")
+        XCTAssertEqual(transport.snapshot().before, [nil, 61], "one page ending at the target, not a page walk")
+        XCTAssertEqual(coordinator.state.focusSequenceId, 60, "the view brings it into view")
         coordinator.pause()
     }
 
-    func test_a_link_to_an_unloaded_message_pages_back_and_focuses_it() async {
-        let transport = ScriptedRoomTransport(before: [
-            .success(page([90, 100], hasMore: true)),
-            .success(page([70, 80], hasMore: true)),
-            .success(page([50, 60], hasMore: true))
-        ])
+    func test_a_link_to_an_unloaded_message_loads_its_window_and_focuses_it() async {
+        let transport = ScriptedRoomTransport(
+            before: [
+                .success(page([90, 100], hasMore: true)),
+                .success(page([50, 60], hasMore: true))
+            ],
+            after: [.success(page([70, 80]))]
+        )
         let coordinator = makeCoordinator(transport)
         coordinator.resume()
         await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
@@ -302,7 +311,7 @@ final class RoomChatCoordinatorTests: XCTestCase {
         coordinator.focus(on: 60)
         XCTAssertEqual(coordinator.state.focusSequenceId, 60)
         await waitUntil("target loaded") { messageSequences(coordinator).contains(60) && !coordinator.state.isLoadingOlder }
-        XCTAssertEqual(transport.snapshot().before, [nil, 90, 70])
+        XCTAssertEqual(transport.snapshot().before, [nil, 61])
         XCTAssertEqual(coordinator.state.focusSequenceId, 60, "the focus stays until the view has shown it")
         coordinator.send(.focusHandled)
         XCTAssertNil(coordinator.state.focusSequenceId)
@@ -310,22 +319,175 @@ final class RoomChatCoordinatorTests: XCTestCase {
         coordinator.pause()
     }
 
-    func test_a_link_more_than_ten_pages_back_falls_back_to_the_latest_messages() async {
-        // Pages of two rows, newest first: [990, 1000], [970, 980], ... The linked 770 is on the twelfth page.
-        let transport = ScriptedRoomTransport(before: (0..<13).map { index in
-            let top = Int64(1_000 - index * 20)
-            return .success(page([top - 10, top], hasMore: true))
-        })
+    /// The scale case: a link thousands of messages back is two requests, and the live room waits below the window.
+    func test_a_link_far_back_loads_one_window_and_the_live_room_waits_below_it() async {
+        let transport = ScriptedRoomTransport(
+            before: [
+                .success(page([990, 1_000], hasMore: true)),
+                .success(page([740, 750, 760, 770], hasMore: true))
+            ],
+            after: [
+                // A full page after the target that stops far short of the loaded rows: the window stands alone.
+                .success(RoomEventPage(messages: [message(780), message(790)], rawCount: 50, maxSequence: 800)),
+                // Paging down below the window reaches the live room.
+                .success(RoomEventPage(messages: [message(810), message(990), message(1_000), message(1_010)], rawCount: 30))
+            ]
+        )
         let coordinator = makeCoordinator(transport)
         coordinator.resume()
         await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
 
         coordinator.focus(on: 770)
-        await waitUntil("let go") { coordinator.state.focusSequenceId == nil && !coordinator.state.isLoadingOlder }
-        XCTAssertEqual(transport.snapshot().before.count, 11, "the first page, then at most ten pages back")
-        XCTAssertFalse(messageSequences(coordinator).contains(770))
-        XCTAssertEqual(coordinator.state.focusFallbackCount, 1, "the view takes the reader to the latest messages")
+        await waitUntil("window loaded") { messageSequences(coordinator).contains(770) && !coordinator.state.isLoadingOlder }
+        XCTAssertEqual(transport.snapshot().before, [nil, 771], "one page ending at the message, whatever the distance")
+        XCTAssertEqual(transport.snapshot().after, [770])
+        XCTAssertEqual(messageSequences(coordinator), [740, 750, 760, 770, 780, 790], "the window replaces the rows")
+        XCTAssertTrue(coordinator.state.canLoadNewer, "newer messages load below the window")
+        XCTAssertEqual(coordinator.state.focusSequenceId, 770)
+        XCTAssertEqual(coordinator.state.focusFallbackCount, 0)
+
+        coordinator.handle(.message(message(1_010)))
+        XCTAssertEqual(messageSequences(coordinator), [740, 750, 760, 770, 780, 790], "a live message never lands in the window")
+        XCTAssertEqual(coordinator.state.unreadCount, 1, "it is counted as new below")
+
+        coordinator.send(.loadNewer)
+        await waitUntil("joined the live room") { !coordinator.state.canLoadNewer && !coordinator.state.isLoadingNewer }
+        XCTAssertEqual(transport.snapshot().after, [770, 800], "the next page starts where the last one read to")
+        XCTAssertEqual(Array(messageSequences(coordinator).suffix(3)), [990, 1_000, 1_010])
         coordinator.pause()
+    }
+
+    func test_jump_to_latest_from_a_window_reloads_the_live_room() async {
+        let transport = ScriptedRoomTransport(
+            before: [
+                .success(page([990, 1_000], hasMore: true)),
+                .success(page([760, 770], hasMore: true)),
+                .success(page([1_000, 1_010], hasMore: true))
+            ],
+            after: [.success(RoomEventPage(messages: [message(780)], rawCount: 50, maxSequence: 820))]
+        )
+        let coordinator = makeCoordinator(transport)
+        coordinator.resume()
+        await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
+        coordinator.focus(on: 770)
+        await waitUntil("window") { coordinator.state.canLoadNewer && !coordinator.state.isLoadingOlder }
+
+        coordinator.send(.jumpToLatest)
+        await waitUntil("live again") { !coordinator.state.canLoadNewer && !coordinator.state.isLoadingOlder }
+        XCTAssertEqual(transport.snapshot().before, [nil, 771, nil], "the newest page of the room, as it opens")
+        XCTAssertEqual(messageSequences(coordinator), [1_000, 1_010])
+        coordinator.pause()
+    }
+
+    /// Review of b3f8252: a second link far from both the first window and the live room loads a window of its own,
+    /// never stitched to the first one over a hole.
+    func test_a_second_link_far_from_the_window_and_the_live_room_stands_alone() async {
+        let transport = ScriptedRoomTransport(
+            before: [
+                .success(page([8_990, 9_000], hasMore: true)),
+                .success(page([740, 750, 760, 770], hasMore: true)),
+                .success(RoomEventPage(
+                    messages: [message(4_960), message(4_980), message(5_000)],
+                    minSequence: 4_951,
+                    nextBeforeSequence: 4_951,
+                    hasMore: true
+                ))
+            ],
+            after: [
+                .success(RoomEventPage(messages: [message(780), message(790)], rawCount: 50, maxSequence: 800)),
+                .success(RoomEventPage(messages: [message(5_010), message(5_020)], rawCount: 50, maxSequence: 5_050)),
+                .success(RoomEventPage(messages: [message(5_060)], rawCount: 100, maxSequence: 5_150))
+            ]
+        )
+        let coordinator = makeCoordinator(transport)
+        coordinator.resume()
+        await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
+        coordinator.focus(on: 770)
+        await waitUntil("first window") { messageSequences(coordinator).contains(770) && !coordinator.state.isLoadingOlder }
+
+        coordinator.focus(on: 5_000)
+        await waitUntil("second window") { messageSequences(coordinator).contains(5_000) && !coordinator.state.isLoadingOlder }
+        XCTAssertEqual(messageSequences(coordinator), [4_960, 4_980, 5_000, 5_010, 5_020], "only the new window, no rows from the first")
+        XCTAssertTrue(coordinator.state.canLoadNewer)
+
+        coordinator.send(.loadNewer)
+        await waitUntil("next page") { transport.snapshot().after.count == 3 && !coordinator.state.isLoadingNewer }
+        XCTAssertEqual(transport.snapshot().after, [770, 5_000, 5_050], "newer pages continue from the new window's end")
+        coordinator.pause()
+    }
+
+    /// Review of b3f8252: a page answered before a message the stream has since shown does not take the window live
+    /// without it.
+    func test_rejoining_reads_on_to_messages_the_stream_showed_while_the_page_was_on_its_way() async {
+        let transport = ScriptedRoomTransport(
+            before: [
+                .success(page([990, 1_000], hasMore: true)),
+                .success(page([740, 750, 760, 770], hasMore: true))
+            ],
+            after: [
+                .success(RoomEventPage(messages: [message(780), message(790)], rawCount: 50, maxSequence: 800)),
+                // Answered before 1,010 existed: short, and it stops at 1,000.
+                .success(RoomEventPage(messages: [message(810), message(990), message(1_000)], rawCount: 30, maxSequence: 1_000)),
+                .success(RoomEventPage(messages: [message(1_010)], rawCount: 1, maxSequence: 1_010))
+            ]
+        )
+        let coordinator = makeCoordinator(transport)
+        coordinator.resume()
+        await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
+        coordinator.focus(on: 770)
+        await waitUntil("window") { coordinator.state.canLoadNewer && !coordinator.state.isLoadingOlder }
+
+        coordinator.handle(.message(message(1_010)))
+        coordinator.send(.loadNewer)
+        await waitUntil("live again") { !coordinator.state.canLoadNewer && !coordinator.state.isLoadingNewer }
+        XCTAssertEqual(transport.snapshot().after, [770, 800, 1_000], "a short page that stops before the stream's newest is read on")
+        XCTAssertEqual(Array(messageSequences(coordinator).suffix(3)), [990, 1_000, 1_010])
+        coordinator.pause()
+    }
+
+    /// Review of b3f8252: Jump to latest reads on from its page to messages the stream showed while it loaded.
+    func test_jump_to_latest_reads_on_to_messages_the_stream_showed_meanwhile() async {
+        let transport = ScriptedRoomTransport(
+            before: [
+                .success(page([990, 1_000], hasMore: true)),
+                .success(page([760, 770], hasMore: true)),
+                .success(page([990, 1_000], hasMore: true))
+            ],
+            after: [
+                .success(RoomEventPage(messages: [message(780)], rawCount: 50, maxSequence: 820)),
+                .success(RoomEventPage(messages: [message(1_010)], rawCount: 1, maxSequence: 1_010))
+            ]
+        )
+        let coordinator = makeCoordinator(transport)
+        coordinator.resume()
+        await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
+        coordinator.focus(on: 770)
+        await waitUntil("window") { coordinator.state.canLoadNewer && !coordinator.state.isLoadingOlder }
+
+        coordinator.handle(.message(message(1_010)))
+        coordinator.send(.jumpToLatest)
+        await waitUntil("live again") {
+            !coordinator.state.canLoadNewer && !coordinator.state.isLoadingOlder && messageSequences(coordinator).contains(1_010)
+        }
+        XCTAssertEqual(messageSequences(coordinator), [990, 1_000, 1_010])
+        XCTAssertEqual(transport.snapshot().after, [770, 1_000], "read on from where the newest page stopped")
+        coordinator.pause()
+    }
+
+    func test_older_pages_over_the_capacity_keep_the_page_just_loaded() {
+        var timeline = RoomTimeline(capacity: 50)
+        timeline.merge((101...150).map { message($0) })
+        timeline.merge((41...50).map { message($0) }, trimming: .newest)
+        XCTAssertEqual(timeline.messages.first?.sequenceId, 41, "the older page stays")
+        XCTAssertEqual(timeline.messages.count, 50)
+        XCTAssertEqual(timeline.messages.last?.sequenceId, 140, "the newest rows go instead")
+        XCTAssertTrue(timeline.hasMoreNewer, "and load again below")
+
+        var live = RoomTimeline(capacity: 50)
+        live.merge((101...150).map { message($0) })
+        live.merge([message(151)])
+        XCTAssertEqual(live.messages.first?.sequenceId, 102, "a live arrival lets the oldest row go")
+        XCTAssertFalse(live.hasMoreNewer)
     }
 
     func test_a_link_that_can_never_load_falls_back_at_once() async {

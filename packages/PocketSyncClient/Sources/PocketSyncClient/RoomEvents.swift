@@ -244,7 +244,18 @@ public struct RoomEventPage: Decodable, Equatable, Sendable {
 public struct RoomTimeline: Equatable, Sendable {
     public private(set) var messages: [RoomMessage] = []
     public var hasMoreOlder: Bool
+    /// Messages exist after the newest loaded one: the loaded rows are a window further back (a jump to an old
+    /// message), not the live tail.
+    public var hasMoreNewer = false
     public let capacity: Int
+
+    /// Which end a merge over capacity trims: the end away from where the reader is going.
+    public enum TrimSide: Sendable {
+        /// Live arrivals and newer pages: drop the oldest rows.
+        case oldest
+        /// Older pages: drop the newest rows, so the page just loaded stays.
+        case newest
+    }
 
     public init(capacity: Int = 3_000, hasMoreOlder: Bool = true) {
         self.capacity = max(capacity, 50)
@@ -261,7 +272,7 @@ public struct RoomTimeline: Equatable, Sendable {
     }
 
     @discardableResult
-    public mutating func merge(_ incoming: [RoomMessage]) -> MergeResult {
+    public mutating func merge(_ incoming: [RoomMessage], trimming side: TrimSide = .oldest) -> MergeResult {
         var result = MergeResult()
         for message in incoming {
             if let index = indexOfSameMessage(as: message) {
@@ -277,10 +288,26 @@ public struct RoomTimeline: Equatable, Sendable {
             result.inserted.append(message)
         }
         if messages.count > capacity {
-            messages.removeFirst(messages.count - capacity)
-            hasMoreOlder = true
+            let excess = messages.count - capacity
+            switch side {
+            case .oldest:
+                messages.removeFirst(excess)
+                hasMoreOlder = true
+            case .newest:
+                messages.removeLast(excess)
+                hasMoreNewer = true
+            }
         }
         return result
+    }
+
+    /// Replaces the loaded rows with a window around a message further back. Older and newer neighbours then load
+    /// on demand; `hasMoreNewer` says whether the window stops short of the live tail.
+    public mutating func replace(with window: [RoomMessage], hasMoreOlder: Bool, hasMoreNewer: Bool) {
+        messages = []
+        self.hasMoreOlder = hasMoreOlder
+        self.hasMoreNewer = hasMoreNewer
+        merge(window, trimming: .newest)
     }
 
     public func index(ofSequence sequenceId: Int64) -> Int? {
