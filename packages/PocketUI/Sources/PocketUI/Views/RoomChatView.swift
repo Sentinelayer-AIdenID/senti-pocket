@@ -1094,11 +1094,11 @@ private struct RoomPinnedStrip: View {
                             onOpen(pin.sequenceId)
                         } label: {
                             VStack(alignment: .leading, spacing: 2) {
+                                // One line each, as in a chat app's pinned bar: the chat keeps its room.
                                 Text(pin.snippet)
                                     .font(.footnote)
                                     .foregroundStyle(PocketPalette.textPrimary)
-                                    .lineLimit(2)
-                                    .multilineTextAlignment(.leading)
+                                    .lineLimit(1)
                                 Text("Pinned by \(pin.pinnedBy)")
                                     .font(.caption2)
                                     .foregroundStyle(PocketPalette.textSecondary)
@@ -1125,8 +1125,14 @@ private struct RoomPinnedStrip: View {
             }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(PocketPalette.warning.opacity(0.08))
+        .padding(.vertical, 6)
+        // The chat scrolls under the strip, so it needs an opaque bar beneath its tint.
+        .background {
+            ZStack {
+                Rectangle().fill(.bar)
+                PocketPalette.warning.opacity(0.08)
+            }
+        }
         .accessibilityIdentifier("pocket.room.pinned")
     }
 }
