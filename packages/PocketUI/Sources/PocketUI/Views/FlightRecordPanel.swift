@@ -153,6 +153,8 @@ public struct FlightRecordPanel: View {
                             Text(line.text)
                                 .font(line.isCommand ? .caption.monospaced() : .caption)
                                 .foregroundStyle(line.isCommand ? PocketPalette.textSecondary : PocketPalette.textPrimary)
+                                // Commands stay scannable; thoughts read in full up to a few lines.
+                                .lineLimit(line.isCommand ? 2 : 6)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
@@ -185,7 +187,10 @@ public struct FlightRecordPanel: View {
     private func meta(_ box: FlightRecordState.Box) -> some View {
         HStack(spacing: 8) {
             if !box.model.isEmpty { Text(box.model) }
-            if let last = box.lastActivity { Text("active \(PocketSidePanel.compactAge(of: last)) ago") }
+            if let last = box.lastActivity {
+                let age = PocketSidePanel.compactAge(of: last)
+                Text(age == "now" ? "active now" : "active \(age) ago")
+            }
             if let ends = box.expiresAt, ends > Date() { Text("ends in \(PocketSidePanel.compactAge(of: Date(), now: ends))") }
             if box.posts > 0 { Text("\(box.posts) posts") }
         }
