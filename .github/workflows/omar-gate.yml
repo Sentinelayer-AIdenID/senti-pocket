@@ -21,6 +21,11 @@ on:
         required: false
         default: "5"
         type: string
+      quota_retry_drill:
+        description: Review on the backup route that a billing or quota 429 is retried on (proves that route; pull_request and push runs cannot set it)
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -72,6 +77,7 @@ jobs:
           python3 scripts/ci/check_omar_workflow_contract.py
           python3 scripts/ci/check_forbidden_omar_surface.py --self-test
           python3 scripts/ci/check_forbidden_omar_surface.py
+          python3 .github/scripts/omar_quota_failure.py --self-test
 
       - name: Validate Omar provider secrets
         shell: bash
@@ -91,6 +97,10 @@ jobs:
 
       - name: Omar Gate
         id: omar
+        # Skipped only by the dispatch drill. A failure here does not end the job by itself: a billing or quota 429
+        # is retried once below, on the same model's backup endpoint, and any other failure fails at "Assert Omar LLM contract is active".
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.quota_retry_drill) }}
+        continue-on-error: true
         uses: mrrCarter/sentinelayer-v1-action@2d5a8edd485595148254926c9fb318e0adae416a # full Omar action; direct OpenAI legacy routing
         with:
           github_token: ${{ github.token }}
@@ -109,6 +119,119 @@ jobs:
           codex_only: "false"
           llm_failure_policy: block
 
+      - name: Classify Omar provider failure
+        id: classify
+        shell: bash
+        env:
+          DRILL: ${{ github.event_name == 'workflow_dispatch' && inputs.quota_retry_drill && 'true' || 'false' }}
+          FIRST_OUTCOME: ${{ steps.omar.outcome }}
+          FIRST_FAILURE_CLASS: ${{ steps.omar.outputs.llm_failure_class || '' }}
+          FIRST_RUN_ID: ${{ steps.omar.outputs.run_id || '' }}
+        run: |
+          set -euo pipefail
+          # Retry once on the backup endpoint only when the first attempt failed with a billing or quota 429 on every LLM
+          # attempt (or for the dispatch drill). Any other failure stands.
+          retry=false
+          reason=none
+          if [ "${DRILL}" = "true" ]; then
+            retry=true
+            reason=dispatch_drill
+          elif [ "${FIRST_OUTCOME}" = "failure" ] && [ "${FIRST_FAILURE_CLASS}" = "provider_failure" ]; then
+            run_id="$(echo "${FIRST_RUN_ID}" | tr -d '\r' | xargs)"
+            findings=".sentinelayer/runs/${run_id}/FINDINGS.jsonl"
+            if echo "${run_id}" | grep -Eq '^[A-Za-z0-9._-]+$' && [ -f "${findings}" ] \
+              && python3 .github/scripts/omar_quota_failure.py "${findings}"; then
+              retry=true
+              reason=billing_quota_429
+            fi
+          fi
+          echo "retry=${retry}" >> "${GITHUB_OUTPUT}"
+          echo "reason=${reason}" >> "${GITHUB_OUTPUT}"
+          echo "Omar quota retry: ${retry} (${reason})"
+
+      - name: Validate the quota retry route
+        if: ${{ steps.classify.outputs.retry == 'true' }}
+        shell: bash
+        env:
+          AZURE_SOL61_API_KEY: ${{ secrets.AZURE_SOL61_API_KEY }}
+          AZURE_SOL61_BASE_URL: ${{ secrets.AZURE_SOL61_BASE_URL }}
+        run: |
+          set -euo pipefail
+          # Both are secrets, so neither the key nor the endpoint is ever printed.
+          if [ -z "${AZURE_SOL61_API_KEY:-}" ] || [ -z "${AZURE_SOL61_BASE_URL:-}" ]; then
+            echo "::error::The quota retry route is not configured (AZURE_SOL61_API_KEY, AZURE_SOL61_BASE_URL). Blocking merge."
+            exit 1
+          fi
+          case "${AZURE_SOL61_BASE_URL}" in
+            https://*/openai/v1 | https://*/openai/v1/) ;;
+            *)
+              echo "::error::The quota retry endpoint is not an https .../openai/v1 URL. Blocking merge."
+              exit 1
+              ;;
+          esac
+
+      - name: Omar Gate (quota retry)
+        id: omar_retry
+        # The same action, model and contract as the first attempt; only the endpoint and key differ. A failure
+        # here fails the job: there is no second retry and no other route.
+        if: ${{ steps.classify.outputs.retry == 'true' }}
+        uses: mrrCarter/sentinelayer-v1-action@2d5a8edd485595148254926c9fb318e0adae416a # full Omar action; the same model on the backup endpoint after a billing or quota 429
+        env:
+          OPENAI_BASE_URL: ${{ secrets.AZURE_SOL61_BASE_URL }}
+        with:
+          github_token: ${{ github.token }}
+          review_routing: legacy
+          llm_provider: openai
+          openai_api_key: ${{ secrets.AZURE_SOL61_API_KEY }}
+          sentinelayer_token: ${{ secrets.SENTINELAYER_TOKEN }}
+          sentinelayer_managed_llm: "false"
+          sentinelayer_spec_id: ${{ vars.SENTINELAYER_SPEC_ID || '' }}
+          scan_mode: ${{ github.event_name == 'workflow_dispatch' && inputs.scan_mode || 'deep' }}
+          severity_gate: P1
+          model: gpt-6.1-sol
+          codex_model: gpt-6.1-sol
+          model_fallback: gpt-6.1-sol
+          use_codex: "false"
+          codex_only: "false"
+          llm_failure_policy: block
+
+      - name: Resolve the Omar result that counts
+        id: result
+        if: ${{ always() }}
+        shell: bash
+        env:
+          RETRIED: ${{ steps.classify.outputs.retry || 'false' }}
+          REASON: ${{ steps.classify.outputs.reason || 'none' }}
+          FIRST_GATE_STATUS: ${{ steps.omar.outputs.gate_status || '' }}
+          FIRST_RUN_ID: ${{ steps.omar.outputs.run_id || '' }}
+          FIRST_P0_COUNT: ${{ steps.omar.outputs.p0_count || '' }}
+          FIRST_P1_COUNT: ${{ steps.omar.outputs.p1_count || '' }}
+          FIRST_P2_COUNT: ${{ steps.omar.outputs.p2_count || '' }}
+          FIRST_P3_COUNT: ${{ steps.omar.outputs.p3_count || '' }}
+          RETRY_GATE_STATUS: ${{ steps.omar_retry.outputs.gate_status || '' }}
+          RETRY_RUN_ID: ${{ steps.omar_retry.outputs.run_id || '' }}
+          RETRY_P0_COUNT: ${{ steps.omar_retry.outputs.p0_count || '' }}
+          RETRY_P1_COUNT: ${{ steps.omar_retry.outputs.p1_count || '' }}
+          RETRY_P2_COUNT: ${{ steps.omar_retry.outputs.p2_count || '' }}
+          RETRY_P3_COUNT: ${{ steps.omar_retry.outputs.p3_count || '' }}
+        run: |
+          set -euo pipefail
+          # After a retry only the retry counts; the first attempt's failure is never mixed into its result.
+          if [ "${RETRIED}" = "true" ]; then
+            source_prefix=RETRY
+            route="quota-retry (${REASON})"
+          else
+            source_prefix=FIRST
+            route="primary"
+          fi
+          for key in GATE_STATUS RUN_ID P0_COUNT P1_COUNT P2_COUNT P3_COUNT; do
+            name="${source_prefix}_${key}"
+            value="$(echo "${!name}" | tr -d '\r\n' | xargs || true)"
+            echo "$(echo "${key}" | tr '[:upper:]' '[:lower:]')=${value}" >> "${GITHUB_OUTPUT}"
+          done
+          echo "route=${route}" >> "${GITHUB_OUTPUT}"
+          echo "Omar result from: ${route}"
+
       - name: Assert Omar LLM contract is active
         shell: bash
         env:
@@ -121,7 +244,7 @@ jobs:
           REQUESTED_CODEX_ONLY: "false"
           REQUESTED_MANAGED_LLM: "false"
           REQUESTED_FAILURE_POLICY: block
-          GATE_STATUS: ${{ steps.omar.outputs.gate_status || '' }}
+          GATE_STATUS: ${{ steps.result.outputs.gate_status || '' }}
         run: |
           set -euo pipefail
           provider="$(echo "${REQUESTED_LLM_PROVIDER}" | tr -d '\r' | xargs || true)"
@@ -167,10 +290,10 @@ jobs:
 
       - name: Resolve sanitized Omar artifact directory
         id: artifact_path
-        if: ${{ always() && steps.omar.outputs.run_id != '' }}
+        if: ${{ always() && steps.result.outputs.run_id != '' }}
         shell: bash
         env:
-          RUN_ID: ${{ steps.omar.outputs.run_id }}
+          RUN_ID: ${{ steps.result.outputs.run_id }}
         run: |
           set -euo pipefail
           normalized_run_id="$(echo "${RUN_ID}" | tr -d '\r' | xargs)"
@@ -200,7 +323,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          TOTAL_P2: ${{ steps.omar.outputs.p2_count || '0' }}
+          TOTAL_P2: ${{ steps.result.outputs.p2_count || '0' }}
           OMAR_ARTIFACT_DIR: ${{ steps.artifact_path.outputs.artifact_dir || '' }}
         run: |
           set -euo pipefail
@@ -231,10 +354,10 @@ jobs:
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
-          P0_COUNT: ${{ steps.omar.outputs.p0_count || '0' }}
-          P1_COUNT: ${{ steps.omar.outputs.p1_count || '0' }}
-          P2_TOTAL: ${{ steps.omar.outputs.p2_count || '0' }}
-          P2_COUNT: ${{ steps.scoped_p2.outputs.scoped_p2_count || steps.omar.outputs.p2_count || '0' }}
+          P0_COUNT: ${{ steps.result.outputs.p0_count || '0' }}
+          P1_COUNT: ${{ steps.result.outputs.p1_count || '0' }}
+          P2_TOTAL: ${{ steps.result.outputs.p2_count || '0' }}
+          P2_COUNT: ${{ steps.scoped_p2.outputs.scoped_p2_count || steps.result.outputs.p2_count || '0' }}
           P2_SCOPE: ${{ steps.scoped_p2.outputs.scope || 'total' }}
           DISPATCH_P2_MAX_ALLOWED: ${{ github.event_name == 'workflow_dispatch' && inputs.p2_max_allowed || '' }}
           # PRs stay strict via PR-scoped P2<=5; push-to-master uses a documented
@@ -278,9 +401,10 @@ jobs:
         run: |
           set -euo pipefail
           echo "## Omar Gate" >> "$GITHUB_STEP_SUMMARY"
-          echo "- run_id: \`${{ steps.omar.outputs.run_id }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- gate_status: \`${{ steps.omar.outputs.gate_status }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- findings: \`P0=${{ steps.omar.outputs.p0_count }} P1=${{ steps.omar.outputs.p1_count }} P2=${{ steps.omar.outputs.p2_count }} P3=${{ steps.omar.outputs.p3_count }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- run_id: \`${{ steps.result.outputs.run_id }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- route: \`${{ steps.result.outputs.route }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- gate_status: \`${{ steps.result.outputs.gate_status }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- findings: \`P0=${{ steps.result.outputs.p0_count }} P1=${{ steps.result.outputs.p1_count }} P2=${{ steps.result.outputs.p2_count }} P3=${{ steps.result.outputs.p3_count }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- merge_threshold: \`P0=0, P1=0, P2<=${OMAR_EFFECTIVE_P2_MAX_ALLOWED}\` (scope=${OMAR_EFFECTIVE_P2_SCOPE}, evaluated=${OMAR_EFFECTIVE_P2_COUNT}, total=${OMAR_EFFECTIVE_P2_TOTAL}, trigger=${{ github.event_name }})" >> "$GITHUB_STEP_SUMMARY"
 
   omar-fork-static:
