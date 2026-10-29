@@ -123,6 +123,7 @@ public struct PocketSidePanel: View {
                     #if os(iOS)
                     .textInputAutocapitalization(.never)
                     #endif
+                    .accessibilityLabel("Search rooms")
                     .accessibilityIdentifier("pocket.drawer.search")
             }
             .padding(.horizontal, 12)
