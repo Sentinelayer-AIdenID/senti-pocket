@@ -57,9 +57,46 @@ enum RoomPreview {
                 actionSender: RoomPreviewSender(),
                 ticketsTransport: RoomPreviewTickets(),
                 attachmentFetcher: RoomPreviewFiles(),
+                receipts: RoomPreviewReceipts(),
                 onReauthenticationRequired: {}
             )
         }
+    }
+}
+
+/// Who viewed the preview's messages, and who is here, so the read line, ticks and presence pill can be seen.
+private struct RoomPreviewReceipts: RoomReceiptsClient {
+    static let alex = "11111111-0000-4000-8000-000000000001"
+
+    func recordViews(sessionId: String, targets: [RoomViewTarget]) async throws {}
+
+    func views(sessionId: String, targets: [RoomViewTarget]) async throws -> [RoomViewSummary] {
+        let now = ISO8601DateFormatter().string(from: Date())
+        let alex = RoomViewer(isHuman: true, actorId: Self.alex, viewedAt: now)
+        let agent = RoomViewer(isHuman: false, actorId: "review-agent", viewedAt: now)
+        return targets.map { target in
+            // Some rows nobody has seen yet, some only an agent has, the rest both.
+            let seq = Int64(target.id.suffix(12)) ?? 0
+            let viewers = seq % 5 == 0 ? [] : (seq % 3 == 0 ? [agent] : [alex, agent])
+            return RoomViewSummary(kind: target.kind, id: target.id, revision: target.revision,
+                                   viewedCount: viewers.count, viewers: viewers)
+        }
+    }
+
+    func publishPresence(sessionId: String, active: Bool, clientInstanceId: String) async throws -> Int? { 90 }
+
+    func presence(sessionId: String) async throws -> RoomPresence {
+        RoomPresence(
+            isAvailable: true,
+            participants: [
+                RoomPresentParticipant(id: "human-\(Self.alex)", isHuman: true, displayName: "Alex"),
+                RoomPresentParticipant(id: "review-agent", isHuman: false),
+                RoomPresentParticipant(id: "build-agent", isHuman: false, isIdle: true)
+            ],
+            humansOnline: 1,
+            agentsOnline: 2,
+            ttlSeconds: 90
+        )
     }
 }
 
@@ -126,7 +163,7 @@ private struct RoomPreviewTransport: RoomTransport {
     ) -> RoomMessage {
         let stamp = ISO8601DateFormatter().string(from: base.addingTimeInterval(-minutesAgo * 60))
         return RoomMessage(
-            id: "preview-\(seq)",
+            id: String(format: "00000000-0000-4000-8000-%012lld", seq),
             sequenceId: seq,
             kind: kind,
             authorId: author,

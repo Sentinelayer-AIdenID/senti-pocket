@@ -110,6 +110,10 @@ struct SignedInAccount: Equatable, Sendable {
     /// GitHub username, else the account id. Never a shared placeholder, so the API never takes one person's ack
     /// for another person's duplicate.
     let actorRef: String
+    /// The account id, lowercased: what your read receipts carry.
+    let accountId: String?
+    /// The GitHub username as written, when the account has one.
+    let login: String?
 
     init?(githubUsername: String?, accountId: String?) {
         let username = (githubUsername ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -125,6 +129,8 @@ struct SignedInAccount: Equatable, Sendable {
         guard !ref.isEmpty, !sender.isEmpty else { return nil }
         authorId = "human-" + sender
         actorRef = ref
+        self.accountId = id.isEmpty ? nil : id.lowercased()
+        login = username.isEmpty ? nil : username
     }
 }
 

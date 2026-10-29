@@ -59,6 +59,7 @@ struct RoomChatScreen: View {
         openRoom: @escaping @MainActor (SentiLink) -> Void = { _ in },
         openChildRoom: @escaping @MainActor (RoomRoute) -> Void = { _ in },
         attachmentFetcher: any AttachmentFileFetching = URLSessionAttachmentFetcher(),
+        receipts: (any RoomReceiptsClient)? = nil,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.route = route
@@ -80,6 +81,7 @@ struct RoomChatScreen: View {
             membershipRole: route.membershipRole,
             focusSequenceId: route.focusSequenceId,
             attachmentFetcher: attachmentFetcher,
+            receipts: receipts,
             onReauthenticationRequired: onReauthenticationRequired
         ))
     }

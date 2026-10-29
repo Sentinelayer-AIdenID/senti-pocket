@@ -19,6 +19,7 @@ public struct RoomChatView: View {
     @State private var didInitialScroll = false
     @State private var anchorBeforeOlderLoad: String?
     @State private var highlightedRowId: String?
+    @State private var showsPresence = false
     /// A failed message the reader chose to edit: its text goes back into the composer.
     @State private var restoredDraft: RoomComposerRestore?
 
@@ -60,9 +61,31 @@ public struct RoomChatView: View {
         .navigationTitle(state.title)
         .navigationBarTitleDisplayModeInlineIfAvailable()
         .toolbar {
+            // One item for the connection and who is here, so the room's title keeps as much room as it can.
             ToolbarItem(placement: .primaryAction) {
-                RoomConnectionPill(connection: state.connection)
+                HStack(spacing: 10) {
+                    RoomConnectionPill(connection: state.connection)
+                    if let presence = state.presence {
+                        Button {
+                            showsPresence = true
+                        } label: {
+                            // A toolbar shows a label's icon only, so the count sits beside the icon itself.
+                            HStack(spacing: 3) {
+                                Image(systemName: "person.2")
+                                Text(presence.compactCount)
+                                    .font(.caption.weight(.semibold))
+                                    .monospacedDigit()
+                            }
+                        }
+                        .disabled(presence.people.isEmpty)
+                        .accessibilityLabel(presence.label)
+                        .accessibilityIdentifier("pocket.room.presence")
+                    }
+                }
             }
+        }
+        .sheet(isPresented: $showsPresence) {
+            RoomPresenceSheet(presence: state.presence)
         }
         .accessibilityIdentifier("pocket.room.screen")
         .pocketCanvas()
@@ -201,6 +224,8 @@ public struct RoomChatView: View {
                 onOpenReplyTarget: { jump(to: $0, proxy: proxy) },
                 send: send
             )
+            .onAppear { send(.messageOnScreen(id: message.id, isOnScreen: true)) }
+            .onDisappear { send(.messageOnScreen(id: message.id, isOnScreen: false)) }
         }
     }
 
@@ -424,6 +449,9 @@ private struct RoomMessageRowView: View {
                             .font(.caption)
                             .foregroundStyle(PocketPalette.textSecondary)
                     }
+                    if let views = row.views {
+                        RoomReadTicks(views: views)
+                    }
                     Spacer(minLength: 0)
                 }
                 .padding(.top, 10)
@@ -448,6 +476,9 @@ private struct RoomMessageRowView: View {
                 Text("edited")
                     .font(.caption2)
                     .foregroundStyle(PocketPalette.textSecondary)
+            }
+            if let views = row.views {
+                RoomViewedLine(views: views)
             }
             if let reactions = row.reactions {
                 RoomReactionBar(
@@ -615,7 +646,12 @@ private struct RoomThreadSheet: View {
                                 }
                             }
                             ChatMarkdownView(text: reply.text, ownHandles: ownHandles)
+                            if let views = reply.views {
+                                RoomViewedLine(views: views)
+                            }
                         }
+                        .onAppear { send(.replyOnScreen(id: reply.id, isOnScreen: true)) }
+                        .onDisappear { send(.replyOnScreen(id: reply.id, isOnScreen: false)) }
                         .padding(.leading, 12)
                         .overlay(alignment: .leading) {
                             Rectangle().fill(PocketPalette.separator).frame(width: 2)
@@ -923,4 +959,86 @@ private extension View {
         #endif
     }
 }
+
+/// ✓ or ✓✓ beside a message's time, like the web's read ticks: ✓✓ once someone other than the author has viewed
+/// it. Tapping says who.
+private struct RoomReadTicks: View {
+    let views: RoomChatViews
+    @State private var showsWho = false
+
+    var body: some View {
+        Button {
+            showsWho.toggle()
+        } label: {
+            Text(views.ticks == .seen ? "✓✓" : "✓")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(PocketPalette.textSecondary)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(views.seenBy)
+        .accessibilityIdentifier("pocket.room.ticks")
+        .overlay(alignment: .topLeading) {
+            if showsWho {
+                Text(views.seenBy)
+                    .font(.caption2)
+                    .foregroundStyle(PocketPalette.textPrimary)
+                    .padding(6)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .fixedSize()
+                    .offset(y: 18)
+                    .onTapGesture { showsWho = false }
+            }
+        }
+        .zIndex(showsWho ? 1 : 0)
+    }
+}
+
+/// "Viewed by A, B and 2 more" under a message or reply, as the web shows it.
+private struct RoomViewedLine: View {
+    let views: RoomChatViews
+
+    var body: some View {
+        Text(views.line)
+            .font(.caption2)
+            .foregroundStyle(PocketPalette.textSecondary)
+            .lineLimit(1)
+            .accessibilityIdentifier("pocket.room.viewedBy")
+    }
+}
+
+/// Who is here: people first, then agents, active or idle.
+private struct RoomPresenceSheet: View {
+    let presence: RoomChatPresence?
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List(presence?.people ?? []) { person in
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(person.isIdle ? PocketPalette.textSecondary.opacity(0.5) : PocketPalette.verified)
+                        .frame(width: 8, height: 8)
+                        .accessibilityHidden(true)
+                    Text(person.name)
+                    Spacer(minLength: 0)
+                    if !person.isHuman {
+                        Text("agent").font(.caption).foregroundStyle(PocketPalette.textSecondary)
+                    }
+                    if person.isIdle {
+                        Text("idle").font(.caption).foregroundStyle(PocketPalette.textSecondary)
+                    }
+                }
+                .accessibilityElement(children: .combine)
+            }
+            .navigationTitle(presence?.label ?? "Who is here")
+            .navigationBarTitleDisplayModeInlineIfAvailable()
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
 #endif
