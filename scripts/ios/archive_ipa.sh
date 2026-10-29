@@ -197,6 +197,39 @@ if [[ "$OUTPUT_ROOT" == *$'\n'* || "$OUTPUT_ROOT" == *$'\r'* ]] || \
     printf '%s' "$OUTPUT_ROOT" | LC_ALL=C grep -q '[[:cntrl:]]'; then
   fail "SENTI_IPA_OUTPUT_DIR must not contain control characters"
 fi
+
+# Optional App Store Connect API key, for a Mac with no Apple account signed in to Xcode (a build box or CI): automatic
+# signing then authenticates with the key. All three or none. The key must live outside this public repository and be
+# readable only by its owner.
+ASC_KEY_ID="${SENTI_ASC_KEY_ID:-}"
+ASC_ISSUER_ID="${SENTI_ASC_ISSUER_ID:-}"
+ASC_KEY_PATH="${SENTI_ASC_KEY_PATH:-}"
+ASC_AUTH_ARGS=()
+if [[ -n "$ASC_KEY_ID$ASC_ISSUER_ID$ASC_KEY_PATH" ]]; then
+  [[ -n "$ASC_KEY_ID" && -n "$ASC_ISSUER_ID" && -n "$ASC_KEY_PATH" ]] \
+    || fail "SENTI_ASC_KEY_ID, SENTI_ASC_ISSUER_ID and SENTI_ASC_KEY_PATH must be given together"
+  [[ "$ASC_KEY_ID" =~ ^[A-Z0-9]{10}$ ]] \
+    || fail "SENTI_ASC_KEY_ID must be the 10-character App Store Connect key ID"
+  [[ "$ASC_ISSUER_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] \
+    || fail "SENTI_ASC_ISSUER_ID must be the App Store Connect issuer ID (a lowercase UUID)"
+  [[ "$ASC_KEY_PATH" == /* && "${ASC_KEY_PATH##*/}" == "AuthKey_${ASC_KEY_ID}.p8" ]] \
+    || fail "SENTI_ASC_KEY_PATH must be an absolute path to AuthKey_<key ID>.p8"
+  ASC_KEY_DIR="$(cd "${ASC_KEY_PATH%/*}/" 2>/dev/null && pwd -P)" \
+    || fail "SENTI_ASC_KEY_PATH must be in an existing directory"
+  REPO_ROOT_PHYSICAL="$(cd "$REPO_ROOT" && pwd -P)"
+  [[ "$ASC_KEY_DIR/" != "$REPO_ROOT_PHYSICAL/"* ]] \
+    || fail "SENTI_ASC_KEY_PATH must be outside the repository"
+  [[ -f "$ASC_KEY_PATH" && ! -L "$ASC_KEY_PATH" ]] \
+    || fail "SENTI_ASC_KEY_PATH must be a regular file, not a link"
+  [[ -z "$(find "$ASC_KEY_PATH" -prune \( -perm -040 -o -perm -004 \) -print)" ]] \
+    || fail "SENTI_ASC_KEY_PATH must be readable only by its owner (chmod 600)"
+  ASC_AUTH_ARGS=(
+    -authenticationKeyPath "$ASC_KEY_DIR/${ASC_KEY_PATH##*/}"
+    -authenticationKeyID "$ASC_KEY_ID"
+    -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+  )
+fi
+
 if [[ "$VALIDATE_INPUTS_ONLY" == "true" ]]; then
   # Validation must stay hermetic on non-Mac hosts. The canonical modern development alias exercises the same policy as
   # legacy `development`; explicit methods exercise their exact distribution channel without probing Xcode.
@@ -488,6 +521,7 @@ if [[ "$REGISTER_CONNECTED_DEVICE" == "1" ]]; then
     -derivedDataPath "$PRIVATE_VERIFICATION_DIR/DeviceDerivedData" \
     -clonedSourcePackagesDirPath "$SOURCE_PACKAGES" \
     -allowProvisioningUpdates \
+    ${ASC_AUTH_ARGS[@]+"${ASC_AUTH_ARGS[@]}"} \
     -allowProvisioningDeviceRegistration \
     "CODE_SIGN_STYLE=Automatic" \
     "CURRENT_PROJECT_VERSION=$BUILD_NUMBER" \
@@ -515,6 +549,7 @@ if ! PATH="$SAFE_XCODE_PATH" "$XCODEBUILD_BIN" \
   -derivedDataPath "$DERIVED_DATA" \
   -clonedSourcePackagesDirPath "$SOURCE_PACKAGES" \
   -allowProvisioningUpdates \
+  ${ASC_AUTH_ARGS[@]+"${ASC_AUTH_ARGS[@]}"} \
   "${COMMON_BUILD_SETTINGS[@]}" \
   archive >"$PRIVATE_DIAGNOSTICS_DIR/archive.log" 2>&1; then
   fail_build_step "signed Release archive"
@@ -533,6 +568,7 @@ if ! PATH="$SAFE_XCODE_PATH" "$XCODEBUILD_BIN" \
   -exportPath "$EXPORT_DIR" \
   -exportOptionsPlist "$EXPORT_OPTIONS" \
   -allowProvisioningUpdates \
+  ${ASC_AUTH_ARGS[@]+"${ASC_AUTH_ARGS[@]}"} \
   >"$PRIVATE_DIAGNOSTICS_DIR/export.log" 2>&1; then
   fail_build_step "signed IPA export"
 fi
