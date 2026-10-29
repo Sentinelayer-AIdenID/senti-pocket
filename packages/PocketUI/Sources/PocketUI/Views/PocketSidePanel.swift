@@ -82,6 +82,18 @@ public struct PocketSidePanel: View {
         self.onSettings = onSettings
     }
 
+    /// How long ago, in the fewest characters: "now", "12m", "7h", "3d", "5w".
+    static func compactAge(of date: Date, now: Date = Date()) -> String {
+        let seconds = max(0, now.timeIntervalSince(date))
+        switch seconds {
+        case ..<60: return "now"
+        case ..<3_600: return "\(Int(seconds / 60))m"
+        case ..<86_400: return "\(Int(seconds / 3_600))h"
+        case ..<(7 * 86_400): return "\(Int(seconds / 86_400))d"
+        default: return "\(Int(seconds / (7 * 86_400)))w"
+        }
+    }
+
     /// Rooms whose title or summary contains the search, in the order given (most recent activity first).
     static func filter(_ rooms: [Room], by query: String) -> [Room] {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -219,7 +231,7 @@ public struct PocketSidePanel: View {
                 }
                 Spacer(minLength: 0)
                 if let date = room.lastActivity {
-                    Text(date, style: .relative)
+                    Text(Self.compactAge(of: date))
                         .font(.caption2)
                         .foregroundStyle(PocketPalette.textSecondary)
                         .lineLimit(1)
