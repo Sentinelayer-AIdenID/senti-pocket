@@ -60,7 +60,8 @@ final class PhoneWriteViewModel: ObservableObject {
                 // This build can never verify the gateway's receipt, so the queued write could only sit "pending"
                 // while holding the one outbox slot. Release it now and say where to look.
                 OutboxStore.clear(matching: persisted)
-                state = .refused("Not sent: this build can't verify the gateway's receipts yet. If you sent this message earlier, check the room to see whether it posted.")
+                // An earlier build may have posted it before it was queued again, so this never says "Not sent".
+                state = .refused("Released a message an earlier version of the app queued: this build can't verify the gateway's receipts yet, so check the room to see whether it posted.")
             case .matching:
                 pendingIntent = (persisted.proposal, persisted.confirmation)
                 state = .pending(

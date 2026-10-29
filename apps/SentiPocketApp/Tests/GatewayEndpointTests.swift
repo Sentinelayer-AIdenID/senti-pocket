@@ -332,6 +332,7 @@ final class GatewayEndpointTests: XCTestCase {
             return XCTFail("a write this build can never verify is released at once, got \(viewModel.state)")
         }
         XCTAssertTrue(message.contains("check the room"))
+        XCTAssertFalse(message.lowercased().contains("not sent"), "an earlier build may already have posted it")
         XCTAssertNil(OutboxStore.load(), "the one outbox slot is free again")
     }
 
