@@ -67,6 +67,94 @@ final class RoomTicketsPresentationTests: XCTestCase {
         XCTAssertNil(done.rows.first?.decision, "a done ticket no longer asks")
     }
 
+    func test_killed_is_archived_and_never_asks() {
+        let ask = "## Decision\nQuestion: Ship it?\nOptions: Yes · No"
+        let state = RoomTicketsPresentationState(tickets: [input("k", status: "killed", body: ask), input("a")])
+        XCTAssertEqual(state.archivedCount, 1)
+        XCTAssertEqual(state.rows.map(\.id), ["a"])
+        let archived = RoomTicketsPresentationState(tickets: [input("k", status: "killed", body: ask)], showsArchived: true)
+        XCTAssertEqual(archived.rows.map(\.id), ["k"])
+        XCTAssertNil(archived.rows.first?.decision)
+        XCTAssertEqual(archived.rows.first?.statusLabel, "Killed")
+    }
+
+    private let viewer = "6f1c2b9e-0000-4000-8000-00000000000a"
+
+    private func actions(
+        _ status: String,
+        assignee: String? = nil,
+        lease: RoomTicketInput.Lease? = nil,
+        holdsLease: Bool = false,
+        canWrite: Bool = true,
+        viewerId: String? = "6f1c2b9e-0000-4000-8000-00000000000a"
+    ) -> RoomTicketActions {
+        let row = RoomTicketRow(id: "t", title: "T", status: status, assignee: assignee, lease: lease)
+        return RoomTicketActions(row: row, viewerId: viewerId, canWrite: canWrite, holdsLease: holdsLease)
+    }
+
+    func test_actions_follow_the_web_rules_and_the_api_lease_rules() {
+        let other = "review-agent"
+        let live = { (holder: String) in RoomTicketInput.Lease(holder: holder, isLive: true) }
+        let expired = { (holder: String) in RoomTicketInput.Lease(holder: holder, isLive: false) }
+
+        // Claiming: open; assigned/accepted to you; working without a lease when unassigned or yours; an expired
+        // lease is a takeover; never while a lease is live.
+        XCTAssertEqual(actions("open").claim, .claim)
+        XCTAssertEqual(actions("assigned", assignee: viewer.uppercased()).claim, .claim, "ids compare case-insensitively")
+        XCTAssertEqual(actions("accepted", assignee: viewer).claim, .claim)
+        XCTAssertNil(actions("assigned", assignee: other).claim)
+        XCTAssertEqual(actions("working").claim, .claim)
+        XCTAssertNil(actions("working", assignee: other).claim)
+        XCTAssertEqual(actions("working", assignee: other, lease: expired(other)).claim, .takeOver)
+        XCTAssertNil(actions("working", assignee: other, lease: live(other)).claim)
+        XCTAssertNil(actions("in_review").claim)
+        XCTAssertNil(actions("blocked").claim)
+        XCTAssertNil(actions("done").claim)
+
+        // Assigning needs an unleased ticket, live or expired lease alike.
+        XCTAssertTrue(actions("open").canAssign)
+        XCTAssertTrue(actions("done").canAssign, "as on the web")
+        XCTAssertFalse(actions("working", lease: expired(other)).canAssign)
+
+        // Editing: unleased, or the live holder (the API allows it; the web does not offer it yet).
+        XCTAssertTrue(actions("open").canEdit)
+        XCTAssertTrue(actions("working", assignee: viewer, lease: live(viewer)).canEdit)
+        XCTAssertFalse(actions("working", assignee: viewer, lease: expired(viewer)).canEdit)
+        XCTAssertFalse(actions("working", assignee: other, lease: live(other)).canEdit)
+
+        // Releasing needs the credential this phone kept from its claim, on a lease that is still yours.
+        XCTAssertTrue(actions("working", assignee: viewer, lease: live(viewer), holdsLease: true).canRelease)
+        XCTAssertFalse(actions("working", assignee: viewer, lease: live(viewer)).canRelease, "no credential, no release")
+        XCTAssertFalse(actions("working", assignee: viewer, lease: expired(viewer), holdsLease: true).canRelease,
+                       "a lapsed lease is never released: there is no renew, as on the web")
+        XCTAssertFalse(actions("working", assignee: other, lease: live(other), holdsLease: true).canRelease,
+                       "taken over since: the kept credential is stale")
+
+        // Nothing for a viewer, without a known account, or on a killed ticket.
+        XCTAssertEqual(actions("open", canWrite: false), .none)
+        XCTAssertEqual(actions("open", viewerId: nil), .none)
+        XCTAssertEqual(actions("killed"), .none)
+    }
+
+    func test_the_state_offers_actions_only_to_writers_and_never_behind_a_protected_failure() {
+        let tickets = [input("a"), input("b", status: "in_review")]
+        let writer = RoomTicketsPresentationState(tickets: tickets, viewerId: viewer, canWriteTickets: true)
+        XCTAssertTrue(writer.canFileTickets)
+        XCTAssertEqual(writer.actions["a"]?.claim, .claim)
+        XCTAssertEqual(writer.actions["b"]?.canAssign, true)
+
+        let reader = RoomTicketsPresentationState(tickets: tickets, viewerId: viewer)
+        XCTAssertFalse(reader.canFileTickets)
+        XCTAssertTrue(reader.actions.isEmpty)
+
+        let denied = RoomTicketsPresentationState(
+            tickets: tickets, failure: .accessDenied, viewerId: viewer, canWriteTickets: true, ticketWriteStatus: ["a": "x"]
+        )
+        XCTAssertFalse(denied.canFileTickets)
+        XCTAssertTrue(denied.actions.isEmpty)
+        XCTAssertTrue(denied.ticketWriteStatus.isEmpty)
+    }
+
     func test_a_linked_ticket_is_found_whatever_the_list_shows() {
         let tickets = [input("a"), input("old", status: "done")]
         let state = RoomTicketsPresentationState(tickets: tickets, query: "zzz", focusTicketId: "old")

@@ -194,13 +194,7 @@ public struct TicketDecision: Equatable, Sendable {
         assignee: String?,
         personLabel: (String) -> String = { $0 }
     ) -> String {
-        let cleanTitle = title
-            .replacingOccurrences(of: "[", with: " ")
-            .replacingOccurrences(of: "]", with: " ")
-            .components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
-        let card = "[Ticket: \(cleanTitle.isEmpty ? "(untitled)" : cleanTitle)](/dashboard/sessions/\(sessionId)?ticket=\(ticketId))"
+        let card = Self.ticketCard(sessionId: sessionId, ticketId: ticketId, title: title)
         let trimmedDetail = detail.trimmingCharacters(in: .whitespacesAndNewlines)
         let what = trimmedDetail.isEmpty ? answer.trimmingCharacters(in: .whitespacesAndNewlines)
             : "\(answer.trimmingCharacters(in: .whitespacesAndNewlines)) — \(trimmedDetail)"
@@ -214,5 +208,31 @@ public struct TicketDecision: Equatable, Sendable {
             to = " @\(owner)"
         }
         return "Decision on \(card): \(what)\(to)"
+    }
+
+    /// The chat line the web posts after an assignment (`assignmentChatLine`), so everyone sees it and an agent
+    /// assignee's listener wakes: `Assigned <card> to @<agent>`, the person's name for a user id, or `Unassigned <card>`.
+    public static func assignmentLine(
+        sessionId: String,
+        ticketId: String,
+        title: String,
+        assignee: String?,
+        personLabel: (String) -> String = { $0 }
+    ) -> String {
+        let card = Self.ticketCard(sessionId: sessionId, ticketId: ticketId, title: title)
+        let who = assignee?.trimmingCharacters(in: .whitespaces) ?? ""
+        if who.isEmpty { return "Unassigned \(card)" }
+        return "Assigned \(card) to \(UUID(uuidString: who) != nil ? personLabel(who) : "@\(who)")"
+    }
+
+    /// `[Ticket: <title on one line, no brackets>](/dashboard/sessions/<room>?ticket=<id>)`, the web's bare card.
+    static func ticketCard(sessionId: String, ticketId: String, title: String) -> String {
+        let cleanTitle = title
+            .replacingOccurrences(of: "[", with: " ")
+            .replacingOccurrences(of: "]", with: " ")
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        return "[Ticket: \(cleanTitle.isEmpty ? "(untitled)" : cleanTitle)](/dashboard/sessions/\(sessionId)?ticket=\(ticketId))"
     }
 }

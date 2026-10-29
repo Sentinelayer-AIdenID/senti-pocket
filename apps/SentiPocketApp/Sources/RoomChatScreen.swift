@@ -48,6 +48,9 @@ struct RoomChatScreen: View {
     private let admissionsTransport: (any RoomAdmissionsTransport)?
     private let admissionDecider: (any AdmissionDeciding)?
     private let ticketAnswerSender: (any RoomMessageSending)?
+    private let ticketWriter: (any RoomTicketWriting)?
+    private let ticketLeases: any TicketLeaseStoring
+    private let identity: (any AccountIdentityProviding)?
     private let search: (any RoomSearching)?
     private let openRoom: @MainActor (SentiLink) -> Void
     private let openChildRoom: @MainActor (RoomRoute) -> Void
@@ -60,6 +63,8 @@ struct RoomChatScreen: View {
         actionSender: (any RoomActionSending)? = nil,
         identity: (any AccountIdentityProviding)? = nil,
         ticketsTransport: (any RoomTicketsTransport)? = nil,
+        ticketWriter: (any RoomTicketWriting)? = nil,
+        ticketLeases: any TicketLeaseStoring = InMemoryTicketLeaseStore(),
         admissionsTransport: (any RoomAdmissionsTransport)? = nil,
         admissionDecider: (any AdmissionDeciding)? = nil,
         openRoom: @escaping @MainActor (SentiLink) -> Void = { _ in },
@@ -78,6 +83,9 @@ struct RoomChatScreen: View {
         self.admissionDecider = admissionDecider
         // A viewer cannot post, so cannot answer a ticket's decision either.
         self.ticketAnswerSender = route.membershipRole.lowercased() == "viewer" ? nil : sender
+        self.ticketWriter = ticketWriter
+        self.ticketLeases = ticketLeases
+        self.identity = identity
         self.openRoom = openRoom
         self.openChildRoom = openChildRoom
         self.onReauthenticationRequired = onReauthenticationRequired
@@ -94,6 +102,28 @@ struct RoomChatScreen: View {
             receipts: receipts,
             onReauthenticationRequired: onReauthenticationRequired
         ))
+    }
+
+    /// The room's agents for ticket assignment, as the web builds them from the room (the member directory is not
+    /// served yet): the agents present, then the agents who posted in what is loaded.
+    private var ticketAssignRoster: [String] {
+        var ids: [String] = []
+        var seen = Set<String>()
+        let present = (coordinator.state.presence?.people ?? []).filter { !$0.isHuman }.map(\.id)
+        let authors = coordinator.state.rows.compactMap { row -> String? in
+            if case .message(let message) = row, !message.isHuman { return message.authorId }
+            return nil
+        }
+        for id in present + authors where !id.isEmpty && seen.insert(id.lowercased()).inserted {
+            ids.append(id)
+        }
+        return ids
+    }
+
+    /// Contributors and above file and change tickets (the API's `min_role="contributor"`). An unknown role offers
+    /// nothing: the API would decide, but a button it refuses is worse than none.
+    private var writesTickets: Bool {
+        ["owner", "admin", "contributor"].contains(route.membershipRole.lowercased())
     }
 
     /// Only owners and admins decide agent requests (the API enforces it; the screen follows it).
@@ -184,6 +214,10 @@ struct RoomChatScreen: View {
                     sessionId: route.sessionId,
                     transport: ticketsTransport,
                     sender: ticketAnswerSender,
+                    writer: writesTickets ? ticketWriter : nil,
+                    leases: ticketLeases,
+                    identity: identity,
+                    assignRoster: ticketAssignRoster,
                     onOpenMessage: { sequence in focus(on: sequence) },
                     onReauthenticationRequired: onReauthenticationRequired
                 )
@@ -244,6 +278,10 @@ struct RoomChatScreen: View {
                     ticketId: linked.id,
                     transport: ticketsTransport,
                     sender: ticketAnswerSender,
+                    writer: writesTickets ? ticketWriter : nil,
+                    leases: ticketLeases,
+                    identity: identity,
+                    assignRoster: ticketAssignRoster,
                     onOpenMessage: { sequence in focus(on: sequence) },
                     onReauthenticationRequired: onReauthenticationRequired
                 )

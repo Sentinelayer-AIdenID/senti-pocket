@@ -9,6 +9,13 @@ public enum RoomTicketsIntent: Equatable, Sendable {
     case answerDecision(ticketId: String, answer: String, detail: String)
     /// Sends the ticket's last answer again, as the same message.
     case retryDecision(ticketId: String)
+    case fileTicket(title: String, body: String, assignee: String?)
+    /// Claims the ticket, or takes over a lease that expired.
+    case claim(ticketId: String)
+    case release(ticketId: String)
+    /// nil unassigns.
+    case assign(ticketId: String, assignee: String?)
+    case edit(ticketId: String, title: String, body: String)
 }
 
 /// The room's Tickets tab: Active / Archived (N), search across all tickets, ranked by impact. Tapping a ticket
@@ -17,6 +24,7 @@ public struct RoomTicketsView: View {
     private let state: RoomTicketsPresentationState
     private let send: (RoomTicketsIntent) -> Void
     @State private var query = ""
+    @State private var filing = false
 
     public init(state: RoomTicketsPresentationState, send: @escaping (RoomTicketsIntent) -> Void) {
         self.state = state
@@ -63,6 +71,10 @@ public struct RoomTicketsView: View {
                         canAnswer: state.canAnswerDecisions,
                         decisionStatus: state.decisionStatus[row.id],
                         canRetryDecision: state.retryableDecisions.contains(row.id),
+                        actions: state.actions[row.id] ?? .none,
+                        writeStatus: state.ticketWriteStatus[row.id],
+                        assignChoices: state.assignChoices,
+                        viewerId: state.viewerId,
                         send: send
                     )
                 } label: {
@@ -80,6 +92,26 @@ public struct RoomTicketsView: View {
         .onChange(of: query) { send(.search($0)) }
         .refreshable { send(.refresh) }
         .navigationTitle("Tickets")
+        .toolbar {
+            if state.canFileTickets {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        filing = true
+                    } label: {
+                        Label("File a ticket", systemImage: "plus")
+                    }
+                    .accessibilityIdentifier("pocket.tickets.file")
+                }
+            }
+        }
+        .sheet(isPresented: $filing) {
+            RoomTicketFileSheet(
+                status: state.ticketWriteStatus[RoomTicketsPresentationState.fileStatusKey],
+                filedCount: state.filedCount,
+                assignChoices: state.assignChoices,
+                send: send
+            )
+        }
         .accessibilityIdentifier("pocket.tickets.screen")
     }
 }
@@ -136,21 +168,88 @@ public struct RoomTicketDetailView: View {
     var canAnswer = false
     var decisionStatus: String?
     var canRetryDecision = false
+    var actions: RoomTicketActions = .none
+    var writeStatus: String?
+    var assignChoices: [RoomTicketAssignChoice] = []
+    var viewerId: String?
     let send: (RoomTicketsIntent) -> Void
     @State private var customAnswer = ""
+    @State private var assigning = false
+    @State private var editing = false
 
     public init(
         row: RoomTicketRow,
         canAnswer: Bool = false,
         decisionStatus: String? = nil,
         canRetryDecision: Bool = false,
+        actions: RoomTicketActions = .none,
+        writeStatus: String? = nil,
+        assignChoices: [RoomTicketAssignChoice] = [],
+        viewerId: String? = nil,
         send: @escaping (RoomTicketsIntent) -> Void
     ) {
         self.row = row
         self.canAnswer = canAnswer
         self.decisionStatus = decisionStatus
         self.canRetryDecision = canRetryDecision
+        self.actions = actions
+        self.writeStatus = writeStatus
+        self.assignChoices = assignChoices
+        self.viewerId = viewerId
         self.send = send
+    }
+
+    /// The lease, in words that cannot be misread: who holds it and until when, or that it lapsed.
+    private var leaseLine: String? {
+        guard let lease = row.lease else { return nil }
+        let who = RoomTicketRow.actorLabel(lease.holder, viewerId: viewerId)
+        guard lease.isLive else { return "Lease expired · was \(who)" }
+        guard let until = lease.expiresAt else { return "Held by \(who)" }
+        return "Held by \(who) until \(until.formatted(date: .omitted, time: .shortened))"
+    }
+
+    @ViewBuilder
+    private var actionsCard: some View {
+        if !actions.isEmpty || writeStatus != nil {
+            VStack(alignment: .leading, spacing: 10) {
+                if !actions.isEmpty {
+                    HStack(spacing: 8) {
+                        if let claim = actions.claim {
+                            Button(claim == .takeOver ? "Take over" : "Claim") { send(.claim(ticketId: row.id)) }
+                                .buttonStyle(.borderedProminent)
+                                .tint(PocketPalette.accent)
+                                .accessibilityIdentifier("pocket.ticket.claim")
+                        }
+                        if actions.canRelease {
+                            Button("Release") { send(.release(ticketId: row.id)) }
+                                .buttonStyle(.bordered)
+                                .accessibilityIdentifier("pocket.ticket.release")
+                        }
+                        if actions.canAssign {
+                            Button(row.assignee == nil ? "Assign" : "Reassign") { assigning = true }
+                                .buttonStyle(.bordered)
+                                .accessibilityIdentifier("pocket.ticket.assign")
+                        }
+                        if actions.canEdit {
+                            Button("Edit") { editing = true }
+                                .buttonStyle(.bordered)
+                                .accessibilityIdentifier("pocket.ticket.edit")
+                        }
+                    }
+                    if actions.claim == .takeOver {
+                        Text("The lease lapsed without a release. Taking over makes the ticket yours.")
+                            .font(.caption)
+                            .foregroundStyle(PocketPalette.textSecondary)
+                    }
+                }
+                if let writeStatus {
+                    Text(writeStatus)
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(PocketPalette.accent)
+                        .accessibilityIdentifier("pocket.ticket.writeStatus")
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -239,7 +338,11 @@ public struct RoomTicketDetailView: View {
                 }
                 VStack(alignment: .leading, spacing: 4) {
                     if let assignee = row.assignee {
-                        Label("Assigned to \(RoomTicketRow.displayName(assignee))", systemImage: "person")
+                        Label("Assigned to \(RoomTicketRow.actorLabel(assignee, viewerId: viewerId))", systemImage: "person")
+                    }
+                    if let leaseLine {
+                        Label(leaseLine, systemImage: row.lease?.isLive == true ? "lock" : "lock.open")
+                            .accessibilityIdentifier("pocket.ticket.lease")
                     }
                     if !row.createdBy.isEmpty {
                         Label("Requested by \(RoomTicketRow.displayName(row.createdBy))", systemImage: "person.wave.2")
@@ -254,6 +357,8 @@ public struct RoomTicketDetailView: View {
                 }
                 .font(.footnote)
                 .foregroundStyle(PocketPalette.textSecondary)
+
+                actionsCard
 
                 decisionCard
 
@@ -278,6 +383,16 @@ public struct RoomTicketDetailView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .navigationTitle(row.priorityLabel ?? "Ticket")
+        .sheet(isPresented: $assigning) {
+            RoomTicketAssignSheet(row: row, choices: assignChoices, viewerId: viewerId) { assignee in
+                send(.assign(ticketId: row.id, assignee: assignee))
+            }
+        }
+        .sheet(isPresented: $editing) {
+            RoomTicketEditSheet(row: row) { title, body in
+                send(.edit(ticketId: row.id, title: title, body: body))
+            }
+        }
         .accessibilityIdentifier("pocket.tickets.detail")
     }
 }

@@ -9,6 +9,43 @@ import PocketContracts
 // 3. upsert by (id, highest version), so an old event never regresses a newer row.
 // A catch-up is atomic: it applies to a copy and publishes board and cursor together only when every page succeeded.
 
+/// Who holds a ticket's lease, as every read shows it (sentinelayer-api `_ticket_state` / `_ticket_lease_view`): the
+/// holder only, never the lease id, which is the holder's credential and is returned once, by the claim.
+public struct RoomTicketLease: Equatable, Sendable {
+    public let holder: String
+    public let holderKind: String?
+    public let fence: Int64
+    public let expiresAt: String?
+    /// The API's reading when it answered a read; absent on a ticket carried by a stored event.
+    public let liveWhenRead: Bool?
+
+    public init?(json: JSONValue?) {
+        guard let json, let holder = json["holder"]?.stringValue, !holder.isEmpty else { return nil }
+        self.init(
+            holder: holder,
+            holderKind: json["holderKind"]?.stringValue,
+            fence: json["fence"]?.intValue ?? 0,
+            expiresAt: json["expiresAt"]?.stringValue,
+            liveWhenRead: json["live"]?.boolValue
+        )
+    }
+
+    public init(holder: String, holderKind: String? = nil, fence: Int64 = 1, expiresAt: String? = nil, liveWhenRead: Bool? = nil) {
+        self.holder = holder
+        self.holderKind = holderKind
+        self.fence = fence
+        self.expiresAt = expiresAt
+        self.liveWhenRead = liveWhenRead
+    }
+
+    /// Live at `now`: by the expiry when it parses, else by the API's reading. For choosing what to offer only; the API
+    /// decides, and an expired lease still protects the ticket until a takeover, release or override.
+    public func isLive(at now: Date) -> Bool {
+        if let expiry = expiresAt.flatMap({ ParsedSessionTimestamp($0).date }) { return expiry > now }
+        return liveWhenRead ?? false
+    }
+}
+
 public struct RoomTicket: Equatable, Identifiable, Sendable {
     public let id: String
     public let title: String
@@ -26,6 +63,8 @@ public struct RoomTicket: Equatable, Identifiable, Sendable {
     public let isVerifiedDone: Bool
     public let unaccepted: Bool
     public let staleClaim: Bool
+    /// Present while a lease exists, live or expired.
+    public let lease: RoomTicketLease?
 
     public init?(json: JSONValue) {
         guard let id = json["id"]?.stringValue, !id.isEmpty,
@@ -45,6 +84,7 @@ public struct RoomTicket: Equatable, Identifiable, Sendable {
         self.isVerifiedDone = json["completion"]?["verified"]?.boolValue ?? false
         self.unaccepted = json["unaccepted"]?.boolValue ?? false
         self.staleClaim = json["staleClaim"]?.boolValue ?? false
+        self.lease = RoomTicketLease(json: json["lease"])
     }
 
     public init(
@@ -58,7 +98,8 @@ public struct RoomTicket: Equatable, Identifiable, Sendable {
         updatedAt: String = "",
         version: Int64 = 1,
         sourceSequenceId: Int64? = nil,
-        isVerifiedDone: Bool = false
+        isVerifiedDone: Bool = false,
+        lease: RoomTicketLease? = nil
     ) {
         self.id = id
         self.title = title
@@ -74,10 +115,12 @@ public struct RoomTicket: Equatable, Identifiable, Sendable {
         self.isVerifiedDone = isVerifiedDone
         self.unaccepted = false
         self.staleClaim = false
+        self.lease = lease
     }
 
-    /// The web counts `done` as archived.
-    public var isArchived: Bool { status == "done" }
+    /// Archived: `done`, or `killed`, the API's other final status (nothing transitions out of it). The web archives
+    /// only `done`, so a killed ticket there still reads as active.
+    public var isArchived: Bool { status == "done" || status == "killed" }
 
     /// Reads `## Priority` followed by `P0`-`P4` (the keeper's format), ignoring fenced code.
     public static func priority(inBody body: String) -> Int? {

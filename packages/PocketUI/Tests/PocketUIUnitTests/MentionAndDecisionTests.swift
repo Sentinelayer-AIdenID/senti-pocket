@@ -85,4 +85,22 @@ final class TicketDecisionTests: XCTestCase {
                                               assignee: "5d2c8a1e-7b3f-4c9d-8e6a-0f1b2c3d4e5f", personLabel: { _ in "Carter" })
             .hasSuffix(": No (for Carter)"), "a user id is never @-mentioned")
     }
+
+    func test_the_assignment_line_matches_the_web() {
+        XCTAssertEqual(
+            TicketDecision.assignmentLine(sessionId: "room_1", ticketId: "t1", title: "Ship [it]", assignee: "cobalt-warden"),
+            "Assigned [Ticket: Ship it](/dashboard/sessions/room_1?ticket=t1) to @cobalt-warden",
+            "an agent is @-mentioned so its listener wakes"
+        )
+        XCTAssertEqual(
+            TicketDecision.assignmentLine(sessionId: "room_1", ticketId: "t1", title: "Ship", assignee: "5d2c8a1e-7b3f-4c9d-8e6a-0f1b2c3d4e5f",
+                                          personLabel: { _ in "Carter" }),
+            "Assigned [Ticket: Ship](/dashboard/sessions/room_1?ticket=t1) to Carter",
+            "a person is named, never shown by user id"
+        )
+        XCTAssertEqual(
+            TicketDecision.assignmentLine(sessionId: "room_1", ticketId: "t1", title: "Ship", assignee: nil),
+            "Unassigned [Ticket: Ship](/dashboard/sessions/room_1?ticket=t1)"
+        )
+    }
 }

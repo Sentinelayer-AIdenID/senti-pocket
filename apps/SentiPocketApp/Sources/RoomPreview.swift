@@ -41,7 +41,16 @@ enum RoomPreview {
     static var rootView: some View {
         if isTicketsRequested {
             NavigationStack {
-                RoomTicketsScreen(sessionId: "preview-room", transport: RoomPreviewTickets(), onReauthenticationRequired: {})
+                RoomTicketsScreen(
+                    sessionId: "preview-room",
+                    transport: RoomPreviewTickets(),
+                    sender: RoomPreviewSender(),
+                    writer: RoomPreviewTicketWriter(),
+                    leases: RoomPreviewTickets.leases,
+                    identity: RoomPreviewIdentity(),
+                    assignRoster: ["review-agent", "build-agent"],
+                    onReauthenticationRequired: {}
+                )
             }
         } else if isSearchRequested {
             RoomSearchView(state: RoomPreviewSearch.sampleState) { _ in }
@@ -67,7 +76,10 @@ enum RoomPreview {
                 transport: RoomPreviewTransport(anchorScenario: isAnchorRequested),
                 sender: RoomPreviewSender(),
                 actionSender: RoomPreviewSender(),
+                identity: RoomPreviewIdentity(),
                 ticketsTransport: RoomPreviewTickets(),
+                ticketWriter: RoomPreviewTicketWriter(),
+                ticketLeases: RoomPreviewTickets.leases,
                 attachmentFetcher: RoomPreviewFiles(),
                 receipts: RoomPreviewReceipts(),
                 search: RoomPreviewSearch(),
@@ -158,14 +170,77 @@ private struct RoomPreviewFiles: AttachmentFileFetching {
 }
 
 /// Sample tickets for the Tickets tab preview.
+/// The preview's signed-in person.
+private struct RoomPreviewIdentity: AccountIdentityProviding {
+    static let accountId = "6f1c2b9e-0000-4000-8000-00000000000a"
+    func currentAccount() async -> SignedInAccount? { SignedInAccount(githubUsername: "alex", accountId: Self.accountId) }
+}
+
+/// Answers every ticket write after a short delay, as the API would, so the actions can be tried in the preview.
+private struct RoomPreviewTicketWriter: RoomTicketWriting {
+    func write(_ write: RoomTicketWrite, sessionId: String, idempotencyKey: String) async throws -> RoomTicketWriteResult {
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        let now = ISO8601DateFormatter().string(from: Date())
+        switch write {
+        case .file(let title, let body, let assignee):
+            return RoomTicketWriteResult(ticket: RoomTicket(
+                id: "t\(Int.random(in: 100...999))", title: title, body: body ?? "", status: assignee == nil ? "open" : "assigned",
+                createdBy: RoomPreviewIdentity.accountId, assignee: assignee, createdAt: now, updatedAt: now, version: 1
+            ))
+        case .claim(let id, let version):
+            let expiry = ISO8601DateFormatter().string(from: Date().addingTimeInterval(900))
+            let credential = RoomTicketLeaseCredential(
+                leaseId: UUID().uuidString.lowercased(), fence: 1, expiresAt: expiry, claimedVersion: version + 1
+            )
+            return RoomTicketWriteResult(
+                ticket: RoomTicket(
+                    id: id, title: RoomPreviewTickets.title(id), status: "working", assignee: RoomPreviewIdentity.accountId,
+                    updatedAt: now, version: version + 1,
+                    lease: RoomTicketLease(holder: RoomPreviewIdentity.accountId, holderKind: "human", fence: 1, expiresAt: expiry)
+                ),
+                lease: credential
+            )
+        case .release(let id, _, let version):
+            return RoomTicketWriteResult(ticket: RoomTicket(id: id, title: RoomPreviewTickets.title(id), updatedAt: now, version: version + 1))
+        case .assign(let id, let assignee, let version):
+            return RoomTicketWriteResult(ticket: RoomTicket(
+                id: id, title: RoomPreviewTickets.title(id), status: assignee.isEmpty ? "open" : "assigned",
+                assignee: assignee.isEmpty ? nil : assignee, updatedAt: now, version: version + 1
+            ))
+        case .edit(let id, let title, let body, let version):
+            return RoomTicketWriteResult(ticket: RoomTicket(
+                id: id, title: title ?? RoomPreviewTickets.title(id), body: body ?? "", updatedAt: now, version: version + 1
+            ))
+        }
+    }
+}
+
 private struct RoomPreviewTickets: RoomTicketsTransport {
+    /// t6 is yours, under a lease this phone claimed: it can be released.
+    static let leases: InMemoryTicketLeaseStore = {
+        let store = InMemoryTicketLeaseStore()
+        store.save(
+            RoomTicketLeaseCredential(leaseId: "0b5c6a52-1d3e-4f70-8a9b-1c2d3e4f5a6b", fence: 1, expiresAt: leaseExpiry, claimedVersion: 2),
+            sessionId: "preview-room",
+            ticketId: "t6"
+        )
+        return store
+    }()
+    static let leaseExpiry = ISO8601DateFormatter().string(from: Date().addingTimeInterval(900))
+
+    static func title(_ id: String) -> String {
+        ["t1": "Fix paste validation on the email step", "t4": "Draft release notes", "t6": "Check the Android fallback"][id] ?? "Ticket \(id)"
+    }
+
     func roomTicketSnapshot(sessionId: String, afterId: String?, limit: Int) async throws -> RoomTicketSnapshotPage {
+        // Ids strictly ascending, as the API pages them: the board refuses a snapshot out of order.
         RoomTicketSnapshotPage(items: [
             RoomTicket(id: "t1", title: "Fix paste validation on the email step", body: "## Priority\nP0\n\n## Decision\nQuestion: Ship the fix today?\nOptions: Yes · No · Custom\n\nPasting skips validation.", status: "working", createdBy: "human-alex", assignee: "review-agent", createdAt: "2026-10-28T13:00:00Z", updatedAt: "2026-10-28T18:40:00Z", version: 3),
             RoomTicket(id: "t2", title: "Reset retryCount only after success", body: "## Priority\nP1", status: "assigned", createdBy: "human-alex", assignee: "build-agent", createdAt: "2026-10-28T13:05:00Z", updatedAt: "2026-10-28T17:00:00Z", version: 2),
             RoomTicket(id: "t3", title: "Add onboarding screenshots to the PR", body: "## Priority\nP2", status: "in_review", createdBy: "review-agent", assignee: "build-agent", createdAt: "2026-10-28T12:00:00Z", updatedAt: "2026-10-28T16:00:00Z", version: 4),
             RoomTicket(id: "t4", title: "Draft release notes", status: "open", createdBy: "human-alex", createdAt: "2026-10-28T11:00:00Z", updatedAt: "2026-10-28T11:00:00Z", version: 1),
-            RoomTicket(id: "t5", title: "Rename onboarding flags", body: "## Priority\nP3", status: "done", createdBy: "human-alex", assignee: "build-agent", createdAt: "2026-10-27T11:00:00Z", updatedAt: "2026-10-27T15:00:00Z", version: 5)
+            RoomTicket(id: "t5", title: "Rename onboarding flags", body: "## Priority\nP3", status: "done", createdBy: "human-alex", assignee: "build-agent", createdAt: "2026-10-27T11:00:00Z", updatedAt: "2026-10-27T15:00:00Z", version: 5),
+            RoomTicket(id: "t6", title: Self.title("t6"), body: "## Priority\nP2\n\nConfirm the fallback screen on a small phone.", status: "working", createdBy: "human-alex", assignee: RoomPreviewIdentity.accountId, createdAt: "2026-10-28T14:00:00Z", updatedAt: "2026-10-28T19:00:00Z", version: 2, lease: RoomTicketLease(holder: RoomPreviewIdentity.accountId, holderKind: "human", fence: 1, expiresAt: Self.leaseExpiry))
         ], hasMore: false, cursor: 1)
     }
 
