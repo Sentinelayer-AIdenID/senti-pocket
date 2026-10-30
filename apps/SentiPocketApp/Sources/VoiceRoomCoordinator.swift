@@ -24,8 +24,11 @@ final class VoiceRoomCoordinator: ObservableObject {
 
     private let sessionId: String
     private let you: String
-    /// The agents the call rings: the one you talk with, or everyone here in a meeting.
-    private let invited: [String]
+    /// The agents the call rings: those you talk with (and any added since), or everyone here in a meeting.
+    private var invited: [String]
+    /// Agents added mid-call that have not answered yet, and the notice that says so.
+    private var adding: Set<String> = []
+    private var addingNotice: String?
     private let ownAuthorIds: Set<String>
     private let listener: any VoiceListening
     private let speaker: any VoiceSpeaking
@@ -149,7 +152,7 @@ final class VoiceRoomCoordinator: ObservableObject {
             state.notice = "The phone's audio is busy (a call or another app). End it and try again."
             return
         }
-        let ring = VoiceCallMarkers.start(caller: you, agents: invited, meeting: state.with.isEmpty)
+        let ring = VoiceCallMarkers.start(caller: you, agents: invited, meeting: state.sharesFloor)
         let clientId = "voice-start-" + callId
         let previous = Self.closing[sessionId]
         startPost = Task { [weak self] in
@@ -218,8 +221,48 @@ final class VoiceRoomCoordinator: ObservableObject {
         case .setHandsFree(let on):
             state.isHandsFree = on
             if on, state.phase == .ready, queue.isEmpty { startListening() }
+        case .add(let agent):
+            add(agent)
         case .hangUp:
             Task { await hangUp() }
+        }
+    }
+
+    /// Brings another agent into the call (Carter, 10-30: "add warden mid-call"): one message rings it by mention and
+    /// adds it to the call's card, and from then on its answers are read like the others'. With two or more agents the
+    /// first to answer a turn has the floor. A meeting already has everyone.
+    private func add(_ agent: String) {
+        let name = agent.trimmingCharacters(in: .whitespacesAndNewlines)
+        let key = name.lowercased()
+        guard state.canAdd, !name.isEmpty, !key.hasPrefix("human"),
+              !state.with.contains(where: { $0.lowercased() == key }) else { return }
+        let others = state.with
+        state.with.append(name)
+        invited.append(name)
+        adding.insert(key)
+        let notice = "\(name) was asked to join. Their hello is read when it comes."
+        state.notice = notice
+        addingNotice = notice
+        let text = VoiceCallMarkers.added(caller: you, agent: name, joining: others)
+        let clientId = "voice-add-\(callId)-\(UUID().uuidString.lowercased())"
+        Task { [weak self] in
+            guard let self else { return }
+            // After the message that opened the call, so the card exists before anyone is added to it; a call that
+            // never opened has no one to add.
+            var added = await self.startPost?.value == true
+            if added {
+                do {
+                    try await self.poster.postCallStarted(sessionId: self.sessionId, text: text, clientId: clientId)
+                } catch {
+                    added = false
+                }
+            }
+            guard !added, self.state.phase != .ending, self.state.phase != .ended else { return }
+            self.state.with.removeAll { $0.lowercased() == key }
+            self.invited.removeAll { $0.lowercased() == key }
+            self.adding.remove(key)
+            self.state.notice = "\(name) could not be added. Try again."
+            self.addingNotice = nil
         }
     }
 
@@ -271,8 +314,14 @@ final class VoiceRoomCoordinator: ObservableObject {
             state.notice = nil
         }
         if !state.joined.contains(where: { $0.lowercased() == lowered }) { state.joined.append(name) }
-        // In a meeting the first agent to answer a turn has the floor; the others are kept, not read (Carter, 10-30).
-        if state.with.isEmpty, !isHuman {
+        if adding.remove(lowered) != nil, adding.isEmpty, let addingNotice, state.notice == addingNotice {
+            // Everyone added has answered.
+            state.notice = nil
+            self.addingNotice = nil
+        }
+        // With more than one agent (a meeting, or several picked or added) the first to answer a turn has the floor;
+        // the others are kept, not read (Carter, 10-30).
+        if state.sharesFloor, !isHuman {
             if let holder = floorHolder, holder.id != lowered {
                 state.turns.append(VoiceRoomTurn(id: id, speaker: name, isYou: false, text: text, at: at, isHeld: true))
                 timings.noteHeld()
@@ -547,9 +596,11 @@ final class VoiceRoomCoordinator: ObservableObject {
         speakIfReady()
     }
 
-    /// Your turn in the room. With one agent it starts with that agent's mention, so its listener knows it is for it.
+    /// Your turn in the room. It starts with the mentions of the agents you called, so their listeners know it is for
+    /// them; a meeting is for everyone.
     private func post(_ text: String) async {
-        let addressed = state.with.count == 1 ? "@\(state.with[0]) \(text)" : text
+        let mentions = state.with.map { "@\($0)" }.joined(separator: " ")
+        let addressed = mentions.isEmpty ? text : "\(mentions) \(text)"
         let sending = now()
         do {
             try await poster.postVoiceTurn(sessionId: sessionId, text: addressed,

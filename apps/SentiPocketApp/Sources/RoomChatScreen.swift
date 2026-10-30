@@ -331,7 +331,8 @@ struct RoomChatScreen: View {
         // The call fills the screen, over the room and its bars, until you hang up (Carter, 10-30). Without its screen
         // there would be no way to hang up, so the call does not start, nothing of it is left wired, and you are told
         // (warden, #267).
-        guard VoiceCallWindow.shared.show(VoiceRoomHost(room: room, meter: meter, partnerLab: partnerLab(of: room))) else {
+        let host = VoiceRoomHost(room: room, meter: meter, partnerLab: partnerLab(of: room), addable: { voicePartners })
+        guard VoiceCallWindow.shared.show(host) else {
             CrashReporter.shared.note("voice call refused: no call screen")
             if let answeredCall {
                 RoomCallDesk.shared.voiceRoomEnded(answeredCall)
@@ -598,14 +599,15 @@ struct RoomChatScreen: View {
             }
         }
         .animation(.spring(response: 0.3, dampingFraction: 0.9), value: reader.playback == nil)
-        .confirmationDialog("Talk with", isPresented: $choosesVoicePartner, titleVisibility: .visible) {
-            ForEach(voicePartners, id: \.self) { agent in
-                Button(agent) { startVoiceRoom(with: [agent]) }
-            }
-            Button("Everyone (a meeting)") { startVoiceRoom(with: []) }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("You talk; they answer in the room and the phone reads each answer in that agent's voice. The whole conversation stays in the room as the call's card.")
+        // Tick one agent or several (Carter, 10-30), or call everyone as a meeting.
+        .sheet(isPresented: $choosesVoicePartner) {
+            VoiceCallPicker(partners: voicePartners, onCall: { agents in
+                choosesVoicePartner = false
+                startVoiceRoom(with: agents)
+            }, onCancel: {
+                choosesVoicePartner = false
+            })
+            .presentationDetents([.medium, .large])
         }
         .onDisappear {
             if let voiceRoom { Task { await voiceRoom.hangUp() } }
@@ -973,9 +975,11 @@ struct VoiceRoomHost: View {
     @ObservedObject var room: VoiceRoomCoordinator
     let meter: VoiceLevelMeter
     let partnerLab: AgentLab?
+    /// Who could be brought into the call now.
+    let addable: () -> [String]
 
     var body: some View {
-        VoiceRoomPanel(state: room.state, meter: meter, partnerLab: partnerLab, send: room.send)
+        VoiceRoomPanel(state: room.state, meter: meter, partnerLab: partnerLab, addable: addable, send: room.send)
     }
 }
 

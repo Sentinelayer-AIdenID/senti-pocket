@@ -125,7 +125,7 @@ public struct VoiceRoomState: Equatable, Sendable {
     }
 
     public var phase: Phase
-    /// Who you are talking with: one agent, or everyone in the room (a meeting) when empty.
+    /// Who you are talking with: one agent, several you picked or added, or everyone in the room (a meeting) when empty.
     public var with: [String]
     public var partial: String
     public var turns: [VoiceRoomTurn]
@@ -171,6 +171,15 @@ public struct VoiceRoomState: Equatable, Sendable {
 
     public var isListening: Bool { phase == .listening }
 
+    /// More than one agent can answer, so the first to answer a turn has the floor.
+    public var sharesFloor: Bool { with.count != 1 }
+
+    /// Someone can be brought in: a call with agents you picked, still going and not yet full. A meeting already has
+    /// everyone.
+    public var canAdd: Bool {
+        !with.isEmpty && with.count < VoiceCallRoster.limit && phase != .ending && phase != .ended
+    }
+
     public var isRinging: Bool { joined.isEmpty && !ringStopped && phase != .ending && phase != .ended }
 
     public var speaker: String? {
@@ -186,7 +195,39 @@ public enum VoiceRoomIntent: Equatable, Sendable {
     /// Stop reading the current answer (the next one, if any, follows).
     case skip
     case setHandsFree(Bool)
+    /// Bring another agent into the call.
+    case add(String)
     case hangUp
+}
+
+/// The agents ticked in the call picker (Carter, 10-30: call several at once). The call rings them in the list's
+/// order, so its title reads the way the list does; one that drops off the list is not rung.
+public struct VoiceCallPick: Equatable, Sendable {
+    public private(set) var picked: Set<String> = []
+
+    public init() {}
+
+    public mutating func toggle(_ agent: String) {
+        let key = agent.lowercased()
+        if picked.remove(key) == nil { picked.insert(key) }
+    }
+
+    public func isPicked(_ agent: String) -> Bool { picked.contains(agent.lowercased()) }
+
+    /// Whom the call rings, of those offered now.
+    public func agents(of partners: [String]) -> [String] {
+        partners.filter { picked.contains($0.lowercased()) }
+    }
+
+    /// "Call pocket-forge", "Call these 3", or a prompt while nobody is ticked.
+    public func callTitle(of partners: [String]) -> String {
+        let agents = agents(of: partners)
+        switch agents.count {
+        case 0: return "Tick who to call"
+        case 1: return "Call \(agents[0])"
+        default: return "Call these \(agents.count)"
+        }
+    }
 }
 
 /// Whom a call can ring (Carter, #55061): only agents that can answer now. A box (an agent minted for a job) while it
