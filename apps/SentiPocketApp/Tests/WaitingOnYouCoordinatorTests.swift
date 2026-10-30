@@ -112,11 +112,16 @@ final class WaitingOnYouCoordinatorTests: XCTestCase {
     /// Warden (#270): the shared fetch reads an older server's 404 as access denied, so that is what hides the row.
     func test_an_older_server_without_the_list_leaves_it_out_of_the_side_panel() async {
         let waiting = WaitingOnYouCoordinator(
-            transport: ScriptedWaiting([.failure(SessionTransportError.accessDenied)]),
+            transport: ScriptedWaiting([
+                .success(SentiWaitingPage(total: 1, items: [ask("t1")])),
+                .failure(SessionTransportError.accessDenied)
+            ]),
             sender: RecordingSender()
         )
         await waiting.refresh()
-        XCTAssertFalse(waiting.state.isAvailable)
+        XCTAssertTrue(waiting.state.isAvailable, "shown once the list loads")
+        await waiting.refresh()
+        XCTAssertFalse(waiting.state.isAvailable, "a list the server no longer gives hides the row")
 
         let shown = WaitingOnYouCoordinator(
             transport: ScriptedWaiting([.success(SentiWaitingPage(total: 0, items: []))]),
