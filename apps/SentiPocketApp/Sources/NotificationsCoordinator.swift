@@ -249,6 +249,7 @@ final class NotificationsCoordinator: ObservableObject {
     }
 
     private func publish() {
+        RenderTrace.tick("bell")
         state = NotificationsPresentationState(
             rows: notifications.map { notification in
                 let link = notification.link ?? (notification.sessionId.isEmpty ? nil : SentiLink(sessionId: notification.sessionId))
