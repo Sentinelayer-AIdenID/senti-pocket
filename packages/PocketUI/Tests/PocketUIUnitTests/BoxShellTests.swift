@@ -5,17 +5,17 @@ import XCTest
 /// terminal from its console's events stream (frame shapes as respawn-mint `console.ts` reads them).
 final class BoxShellTests: XCTestCase {
     func test_the_stream_comes_from_the_consoles_own_read_only_link() throws {
-        let console = try XCTUnwrap(URL(string: "https://sl-mint.eastus.cloudapp.azure.com/console?life=9ca3c8729565&view=Ozmn_Wy-n9L0"))
+        let console = try XCTUnwrap(URL(string: "https://mint.example.invalid/console?life=0000life0001&view=fake-view-token"))
         XCTAssertEqual(BoxShell.eventsURL(console: console)?.absoluteString,
-                       "https://sl-mint.eastus.cloudapp.azure.com/api/lives/9ca3c8729565/events?life=9ca3c8729565&view=Ozmn_Wy-n9L0")
+                       "https://mint.example.invalid/api/lives/0000life0001/events?life=0000life0001&view=fake-view-token")
     }
 
     func test_no_stream_without_a_view_token_or_from_another_kind_of_link() {
         let refused = [
-            "https://sl-mint.eastus.cloudapp.azure.com/console?life=9ca3c8729565",
-            "http://sl-mint.eastus.cloudapp.azure.com/console?life=9ca3c8729565&view=v",
-            "https://sl-mint.eastus.cloudapp.azure.com/other?life=9ca3c8729565&view=v",
-            "https://sl-mint.eastus.cloudapp.azure.com/console?life=../admin&view=v"
+            "https://mint.example.invalid/console?life=0000life0001",
+            "http://mint.example.invalid/console?life=0000life0001&view=v",
+            "https://mint.example.invalid/other?life=0000life0001&view=v",
+            "https://mint.example.invalid/console?life=../admin&view=v"
         ]
         for link in refused {
             XCTAssertNil(URL(string: link).flatMap(BoxShell.eventsURL(console:)), link)
