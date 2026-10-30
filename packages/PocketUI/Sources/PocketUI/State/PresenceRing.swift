@@ -2,9 +2,9 @@ import Foundation
 
 /// Where each logo sits in who is here (Carter, 10-30: "Make it start curving around 6 and allow it to for a full
 /// circumference from there that goes all the way to the back ... you can scroll that circle to see who's here or it
-/// scrolls by itself, it's endless and can add as many as possible"). Up to `arcLimit` logos sit on a gentle arc around
+/// scrolls by itself, it's endless and can add as many as possible"). Up to `arcLimit` logos sit on a gentle arc under
 /// the online count; past that they go round a full ring that turns, the front ones large and bright, the back ones
-/// small and dim.
+/// small and dim. The count sits above them all (Carter, 10-30: "the logos are hiding it").
 public enum PresenceRingLayout {
     /// Up to this many sit on the arc; more go round the ring.
     public static let arcLimit = 6
@@ -37,17 +37,15 @@ public enum PresenceRingLayout {
 
     public static func radius(_ count: Int) -> Double { isRing(count) ? 62 : 84 }
 
-    /// Where item `index` of `count` sits. On the arc the online count takes the middle slot, so the logos sit either
-    /// side of it; on the ring they go round it, turned by `rotation` (radians).
+    /// Where item `index` of `count` sits. On the arc the logos are centred under the online count; on the ring they go
+    /// round, turned by `rotation` (radians).
     public static func spot(index: Int, count: Int, rotation: Double) -> Spot {
         let angle: Double
         let radius = Self.radius(count)
         if isRing(count) {
             angle = rotation + 2 * Double.pi * Double(index) / Double(count)
         } else {
-            let middle = count / 2
-            let slot = index < middle ? index : index + 1
-            angle = (Double(slot) - Double(middle)) * arcStep
+            angle = (Double(index) - Double(count - 1) / 2) * arcStep
         }
         let depth = cos(angle)
         let nearness = (depth + 1) / 2

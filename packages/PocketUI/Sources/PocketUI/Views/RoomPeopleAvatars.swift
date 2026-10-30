@@ -107,16 +107,21 @@ struct RoomPeopleAvatars: View {
         // clock stops for an arc, with Reduce Motion, under a hand, or while the room is covered (warden, #265).
         TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !isRing || reduceMotion || dragFrom != nil || resting)) { context in
             let turned = turn(at: context.date, isRing: isRing)
-            ZStack {
-                ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                    ringItem(item)
-                        .modifier(RingPlacement(index: index, count: items.count, rotation: turned))
-                }
+            // The online count sits above the logos, where none of them covers it (Carter, 10-30: "move the number of
+            // online a bit higher to be visible because the logos are hiding it").
+            VStack(spacing: Self.countGap) {
                 onlineCount(online)
-                    .zIndex(isRing ? 0.2 : 2)
+                    .zIndex(1)
+                ZStack {
+                    ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                        ringItem(item)
+                            .modifier(RingPlacement(index: index, count: items.count, rotation: turned))
+                    }
+                }
+                .frame(height: isRing ? 56 : 44)
             }
         }
-        .frame(width: PresenceRingLayout.radius(items.count) * 2 + 32, height: isRing ? 56 : 44)
+        .frame(width: PresenceRingLayout.radius(items.count) * 2 + 32, height: (isRing ? 56 : 44) + 22 + Self.countGap)
         .contentShape(Rectangle())
         .gesture(DragGesture(minimumDistance: 4)
             .onChanged { value in
@@ -207,6 +212,9 @@ struct RoomPeopleAvatars: View {
         .shadow(color: .black.opacity(0.35), radius: 3, y: 2)
         .accessibilityHidden(true)
     }
+
+    /// Between the online count and the logos under it: the back of the ring tucks just under the count.
+    static let countGap: CGFloat = -2
 
     /// How long the ring holds on an agent that just did something before it turns by itself again.
     static let holdOnActivity: TimeInterval = 8
