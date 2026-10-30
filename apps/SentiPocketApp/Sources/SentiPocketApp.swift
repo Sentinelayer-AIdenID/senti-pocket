@@ -355,6 +355,10 @@ private struct AuthenticatedRootView: View {
             }
         }
         .animation(.spring(response: 0.32, dampingFraction: 0.9), value: drawerOpen)
+        // Opening the side panel reads the bell, so its count is never older than the panel.
+        .onChange(of: drawerOpen) { open in
+            if open { Task { await notifications.refresh(force: true) } }
+        }
         .preferredColorScheme(theme.wrappedValue.colorScheme)
         .sheet(isPresented: $presentsPocket) {
             SelectedSessionPocketView(
@@ -395,7 +399,7 @@ private struct AuthenticatedRootView: View {
                 case .markAllRead:
                     notifications.markAllRead()
                 case .refresh:
-                    Task { await notifications.refresh() }
+                    Task { await notifications.refresh(force: true) }
                 case .close:
                     presentsNotifications = false
                 }
@@ -539,7 +543,7 @@ private struct AuthenticatedRootView: View {
             onNotifications: {
                 closeDrawer()
                 presentsNotifications = true
-                Task { await notifications.refresh() }
+                Task { await notifications.refresh(force: true) }
             },
             onCalls: {
                 closeDrawer()

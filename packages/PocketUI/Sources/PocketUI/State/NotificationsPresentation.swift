@@ -39,14 +39,37 @@ public struct NotificationsPresentationState: Equatable, Sendable {
     public let earlier: [NotificationRow]
     public let isLoading: Bool
     public let failure: SessionLoadFailure?
+    /// When the list last came from the server, so a stale list never looks current.
+    public let updatedAt: Date?
+    /// The last read failed: the list shown is from `updatedAt`.
+    public let couldNotUpdate: Bool
 
-    public init(rows: [NotificationRow], isLoading: Bool = false, failure: SessionLoadFailure? = nil) {
+    public init(
+        rows: [NotificationRow],
+        isLoading: Bool = false,
+        failure: SessionLoadFailure? = nil,
+        updatedAt: Date? = nil,
+        couldNotUpdate: Bool = false
+    ) {
         let ordered = rows.sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
         let protected = failure?.suppressesProtectedContent == true
         self.unread = protected ? [] : ordered.filter { !$0.isRead }
         self.earlier = protected ? [] : ordered.filter(\.isRead)
         self.isLoading = isLoading
         self.failure = failure
+        self.updatedAt = updatedAt
+        self.couldNotUpdate = couldNotUpdate
+    }
+
+    /// "Updated just now", "Updated 4 min ago", or the time for anything older than an hour.
+    public static func freshness(updatedAt: Date, now: Date = Date()) -> String {
+        let seconds = max(0, Int(now.timeIntervalSince(updatedAt)))
+        if seconds < 60 { return "Updated just now" }
+        if seconds < 3_600 { return "Updated \(seconds / 60) min ago" }
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        formatter.dateStyle = .none
+        return "Updated at \(formatter.string(from: updatedAt))"
     }
 
     public var unreadCount: Int { unread.count }

@@ -498,6 +498,8 @@ private struct RoomMessageRowView: View {
     var send: (RoomChatIntent) -> Void = { _ in }
     /// How far the row follows a swipe to the right (swipe to reply, as in Messages).
     @State private var swipe: CGFloat = 0
+    /// A double tap opens the same options as a long press.
+    @State private var showsOptions = false
 
     var body: some View {
         switch row.kind {
@@ -591,6 +593,14 @@ private struct RoomMessageRowView: View {
             send(.openThread(sequenceId: row.sequenceId))
         }
         .contextMenu { messageMenu }
+        // Simultaneous, so a single tap on a link or a button inside the message is never held back.
+        .simultaneousGesture(TapGesture(count: 2).onEnded { showsOptions = true })
+        .confirmationDialog("Message options", isPresented: $showsOptions, titleVisibility: .hidden) {
+            ForEach(row.options(canReply: canReply, canReact: canReact, canPin: canPin, isPinned: isPinned, pinsFull: pinsFull)) { option in
+                Button(option.title) { perform(option) }
+                    .disabled(!option.isEnabled)
+            }
+        }
     }
 
     private static let swipeToReply: CGFloat = 64

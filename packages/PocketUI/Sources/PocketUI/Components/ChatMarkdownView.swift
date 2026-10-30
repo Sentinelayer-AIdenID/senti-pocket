@@ -12,6 +12,43 @@ struct ChatMarkdownView: View {
     }
 }
 
+/// One ticket link as its own row, like the web's ticket chip: one line, cut with "…", and it opens the ticket.
+private struct TicketLinkRow: View {
+    let ticket: ChatReferences.TicketLink
+
+    var body: some View {
+        Link(destination: ticket.url) {
+            HStack(spacing: 8) {
+                Image(systemName: "ticket")
+                    .foregroundStyle(PocketPalette.accentStrong)
+                    .accessibilityHidden(true)
+                Text(ticket.title)
+                    .foregroundStyle(PocketPalette.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(PocketPalette.textSecondary)
+                    .accessibilityHidden(true)
+            }
+            .font(.subheadline)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(PocketPalette.inset, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(PocketPalette.separator.opacity(0.6), lineWidth: 0.5)
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Ticket: \(ticket.title)")
+        .accessibilityHint("Opens the ticket")
+        .accessibilityIdentifier("pocket.ticketLink.\(ticket.ticketId)")
+    }
+}
+
 private struct ChatMarkdownBlocksView: View {
     let blocks: [ChatMarkdownBlock]
     let ownHandles: Set<String>
@@ -28,7 +65,17 @@ private struct ChatMarkdownBlocksView: View {
     private func blockView(_ block: ChatMarkdownBlock) -> some View {
         switch block {
         case .paragraph(let text):
-            inline(text)
+            let split = ChatReferences.ticketLinks(in: text)
+            if split.tickets.isEmpty {
+                inline(text)
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    if !split.prose.isEmpty { inline(split.prose) }
+                    ForEach(split.tickets, id: \.ticketId) { ticket in
+                        TicketLinkRow(ticket: ticket)
+                    }
+                }
+            }
         case .heading(let level, let text):
             inline(text)
                 .font(level <= 1 ? .title3.bold() : (level == 2 ? .headline : .subheadline.weight(.semibold)))

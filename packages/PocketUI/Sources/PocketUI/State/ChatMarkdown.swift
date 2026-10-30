@@ -194,6 +194,57 @@ public enum ChatReferences {
         return PullRequest(owner: owner, repo: repo, number: number)
     }
 
+    /// A ticket link in a message, shown as its own row (the web's ticket chip).
+    public struct TicketLink: Equatable, Sendable {
+        /// The link's text without a leading "Ticket: ".
+        public let title: String
+        public let ticketId: String
+        /// Absolute, so the room's link handling opens the ticket in the app.
+        public let url: URL
+    }
+
+    /// Pulls a paragraph's ticket links (`[Ticket: title](/dashboard/sessions/<room>?ticket=<id>)`, also with
+    /// `https://sentinelayer.com` in front) out of the text, with the "·" between them: the ticket keeper writes
+    /// several on one line, and they read better one per row. Returns the text that is left and the links, in order.
+    public static func ticketLinks(in paragraph: String) -> (prose: String, tickets: [TicketLink]) {
+        guard paragraph.contains("?ticket=") else { return (paragraph, []) }
+        let pattern = #"\[([^\]\n]{1,300})\]\(((?:https://(?:www\.)?sentinelayer\.com)?/dashboard/sessions/[^)\s]+)\)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return (paragraph, []) }
+        let whole = NSRange(paragraph.startIndex..., in: paragraph)
+        var tickets: [TicketLink] = []
+        var removed: [Range<String.Index>] = []
+        for match in regex.matches(in: paragraph, range: whole) {
+            guard let all = Range(match.range, in: paragraph),
+                  let labelRange = Range(match.range(at: 1), in: paragraph),
+                  let hrefRange = Range(match.range(at: 2), in: paragraph) else { continue }
+            var href = String(paragraph[hrefRange])
+            for prefix in ["https://sentinelayer.com", "https://www.sentinelayer.com"] where href.hasPrefix(prefix) {
+                href = String(href.dropFirst(prefix.count))
+            }
+            guard let found = ticket(href), let url = URL(string: "https://sentinelayer.com" + href) else { continue }
+            var title = String(paragraph[labelRange]).trimmingCharacters(in: .whitespaces)
+            if title.lowercased().hasPrefix("ticket:") {
+                title = String(title.dropFirst("ticket:".count)).trimmingCharacters(in: .whitespaces)
+            }
+            tickets.append(TicketLink(title: title.isEmpty ? "Ticket" : title, ticketId: found.ticketId, url: url))
+            removed.append(all)
+        }
+        guard !tickets.isEmpty else { return (paragraph, []) }
+        var prose = ""
+        var cursor = paragraph.startIndex
+        for range in removed {
+            prose += paragraph[cursor..<range.lowerBound]
+            cursor = range.upperBound
+        }
+        prose += paragraph[cursor...]
+        // The separators that stood between the links go with them.
+        let cleaned = prose
+            .replacingOccurrences(of: #"(\s*·\s*)+$"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"(\s*·\s*){2,}"#, with: " · ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (cleaned, tickets)
+    }
+
     /// The Senti ticket a link opens, for in-app links of the form `/dashboard/sessions/<room>?ticket=<id>`.
     public static func ticket(_ href: String) -> (sessionId: String, ticketId: String)? {
         guard href.range(of: #"^/dashboard/sessions/[^/?#]+\?ticket=[^&#]+$"#, options: .regularExpression) != nil,
