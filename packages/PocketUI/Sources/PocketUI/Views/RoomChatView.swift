@@ -274,7 +274,10 @@ public struct RoomChatView: View {
             .overlay(alignment: .top) {
                 if let presence = state.presence {
                     RoomPeopleAvatars(presence: presence, models: roster.modelsById,
-                                      working: state.workingAgentIds(now: Date())) { showsPresence = true }
+                                      signals: state.agentSignals(now: Date()),
+                                      boxes: roster.members.filter { $0.kind == .box && $0.status != .ended }.map(\.name)) {
+                        showsPresence = true
+                    }
                         .padding(.top, 4)
                 }
             }
