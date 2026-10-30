@@ -46,6 +46,16 @@ final class RoomCallsTests: XCTestCase {
         for _ in 0..<20 { await Task.yield() }
     }
 
+    /// Waits for what a detached task reports: a fixed number of yields was too few on a slow runner (#240's
+    /// run 41027524317 got [] for ["declined"]).
+    private func until(_ what: String, _ condition: () -> Bool) async {
+        for _ in 0..<500 {
+            if condition() { return }
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+        XCTFail("timed out waiting for: \(what)")
+    }
+
     func test_the_doorbell_is_the_call_the_room_and_the_caller_only() {
         XCTAssertEqual(RoomCallDoorbell.parse(["callId": "call_1", "sessionId": "room-1", "callerName": "  pocket-forge "]),
                        RoomCallDoorbell(callId: "call_1", sessionId: "room-1", callerName: "pocket-forge"))
@@ -103,10 +113,10 @@ final class RoomCallsTests: XCTestCase {
         let uuid = UUID()
 
         desk.received(doorbell, uuid: uuid)
-        await settle()
+        await until("read") { api.readCount == 1 }
         XCTAssertEqual(api.readCount, 1, "the details are read with your own session")
         desk.answered(uuid)
-        await settle()
+        await until("answered") { api.sent == ["answered"] }
         XCTAssertEqual(api.sent, ["answered"])
         XCTAssertEqual(opened, [doorbell.sessionId])
         XCTAssertNil(desk.takeWaiting(for: "another-room"))
@@ -116,10 +126,10 @@ final class RoomCallsTests: XCTestCase {
         XCTAssertNil(desk.waiting)
 
         desk.voiceRoomEnded(taken!)
-        await settle()
+        await until("ended") { api.sent == ["answered", "ended"] }
         XCTAssertEqual(api.sent, ["answered", "ended"])
         desk.ended(uuid)
-        await settle()
+        try? await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertEqual(api.sent, ["answered", "ended"], "an ended call is not ended twice")
     }
 
@@ -130,7 +140,7 @@ final class RoomCallsTests: XCTestCase {
         desk.received(doorbell, uuid: declined)
         await settle()
         desk.ended(declined)
-        await settle()
+        await until("declined") { api.sent == ["declined"] }
         XCTAssertEqual(api.sent, ["declined"])
 
         let other = RoomCallDoorbell(callId: "call_2", sessionId: doorbell.sessionId, callerName: "claude-warden")
@@ -138,7 +148,7 @@ final class RoomCallsTests: XCTestCase {
         desk.received(other, uuid: hungUp)
         desk.answered(hungUp)
         desk.ended(hungUp)
-        await settle()
+        await until("answered, then ended") { api.sent == ["declined", "answered", "ended"] }
         XCTAssertEqual(api.sent, ["declined", "answered", "ended"])
         XCTAssertNil(desk.waiting, "hung up before the room opened: nothing waits")
     }

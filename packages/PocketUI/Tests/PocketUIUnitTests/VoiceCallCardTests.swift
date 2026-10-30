@@ -115,4 +115,61 @@ final class VoiceCallCardTests: XCTestCase {
         XCTAssertEqual(folded.cards["a"]?.isLive, false, "past half an hour the call is over")
         XCTAssertEqual(VoiceCallCard.longestCall, 30 * 60)
     }
+
+    /// Carter (10-30): bring warden into a call that is already going.
+    func test_an_agent_added_mid_call_is_rung_by_mention_and_its_answers_fold_into_the_card() {
+        let add = VoiceCallMarkers.added(caller: "mrrcarter", agent: "claude-warden", joining: ["pocket-forge"])
+        XCTAssertTrue(add.hasPrefix("📞 Adding @claude-warden: mrrcarter added you to a voice room already going with pocket-forge."))
+        XCTAssertTrue(add.contains("The first agent to answer a turn has the floor"), "the added agent learns the floor rule")
+        XCTAssertEqual(VoiceCallMarkers.addedAgents(in: add), ["claude-warden"], "only the added agent is mentioned")
+        XCTAssertNil(VoiceCallMarkers.calledAgents(in: add), "an add never opens a call of its own")
+        XCTAssertNil(VoiceCallMarkers.addedAgents(in: VoiceCallMarkers.start(caller: "mrrcarter", agents: ["a"], meeting: false)))
+
+        let start = VoiceCallMarkers.start(caller: "mrrcarter", agents: ["pocket-forge"], meeting: false)
+        let inputs = [
+            input("m1", seq: 1, "human-mrrcarter", start, at: 0),
+            input("m2", seq: 2, "pocket-forge", "Hi Carter.", at: 0.1),
+            input("m3", seq: 3, "claude-warden", "Before I was added, not the call's.", at: 0.15),
+            input("m4", seq: 4, "human-mrrcarter", add, at: 0.2),
+            input("m5", seq: 5, "claude-warden", "Warden here.", at: 0.3),
+            input("m6", seq: 6, "human-mrrcarter", "📞 Voice room with pocket-forge and claude-warden ended · 30 s · 3 turns.", at: 0.5)
+        ]
+        let folded = VoiceCallCard.fold(inputs)
+        XCTAssertEqual(folded.kept.map(\.id), ["m1", "m3"], "the add and the added agent's answers leave with the call")
+        let card = folded.cards["m1"]
+        XCTAssertEqual(card?.agents, ["pocket-forge", "claude-warden"])
+        XCTAssertEqual(card?.turns.map(\.id), ["m2", "m5"])
+        XCTAssertEqual(card?.title, "Voice meeting with pocket-forge and claude-warden")
+
+        // A call that never closed hides nothing, the add included.
+        let unclosed = VoiceCallCard.fold(Array(inputs.dropLast()))
+        XCTAssertEqual(unclosed.kept.map(\.id), ["m1", "m2", "m3", "m4", "m5"])
+        XCTAssertEqual(unclosed.cards["m1"]?.turns.map(\.id), ["m2", "m5"])
+    }
+
+    /// Carter (10-30): tick several agents and call them together.
+    func test_the_picker_rings_the_ticked_agents_in_the_lists_order() {
+        let partners = ["pocket-forge", "claude-warden", "review-agent"]
+        var pick = VoiceCallPick()
+        XCTAssertEqual(pick.callTitle(of: partners), "Tick who to call")
+        pick.toggle("review-agent")
+        XCTAssertEqual(pick.callTitle(of: partners), "Call review-agent")
+        pick.toggle("Pocket-Forge")
+        XCTAssertTrue(pick.isPicked("pocket-forge"))
+        XCTAssertEqual(pick.agents(of: partners), ["pocket-forge", "review-agent"], "the list's order, not the taps'")
+        XCTAssertEqual(pick.callTitle(of: partners), "Call these 2")
+        pick.toggle("review-agent")
+        XCTAssertEqual(pick.agents(of: partners), ["pocket-forge"], "a second tap unticks")
+        XCTAssertEqual(pick.agents(of: ["claude-warden"]), [], "one that dropped off the list is not rung")
+    }
+
+    func test_only_a_call_with_agents_still_going_can_take_someone_more() {
+        XCTAssertFalse(VoiceRoomState(with: []).canAdd, "a meeting already has everyone")
+        XCTAssertTrue(VoiceRoomState(with: ["pocket-forge"]).canAdd)
+        XCTAssertFalse(VoiceRoomState(phase: .ending, with: ["pocket-forge"]).canAdd)
+        XCTAssertFalse(VoiceRoomState(with: (1...VoiceCallRoster.limit).map { "agent-\($0)" }).canAdd, "full")
+        XCTAssertFalse(VoiceRoomState(with: ["pocket-forge"]).sharesFloor)
+        XCTAssertTrue(VoiceRoomState(with: ["pocket-forge", "claude-warden"]).sharesFloor)
+        XCTAssertEqual(VoiceRoomState(with: ["a", "b", "c"]).title, "a, b and c")
+    }
 }

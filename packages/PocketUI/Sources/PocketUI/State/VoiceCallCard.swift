@@ -21,10 +21,32 @@ public enum VoiceCallMarkers {
             + "top-level post: 1–3 spoken sentences, no markdown. The phone reads it aloud in your own voice." + floor
     }
 
+    /// "📞 Adding @claude-warden: …", an agent brought into a call already going (Carter, 10-30). The others in the
+    /// call are named without a mention, so only the added agent is rung.
+    public static func added(caller: String, agent: String, joining others: [String]) -> String {
+        let with = others.isEmpty ? "" : " with " + others.joined(separator: ", ")
+        return "\(addPrefix)@\(agent): \(caller) added you to a voice room already going\(with). The phone is waiting: "
+            + "join now with a one-line hello, which is read before they speak. Then answer each of their spoken turns "
+            + "as a short top-level post: 1–3 spoken sentences, no markdown. The phone reads it aloud in your own voice. "
+            + "The first agent to answer a turn has the floor: if another agent already answered it, or the phone posts "
+            + "that someone has the floor, stay quiet until the next turn."
+    }
+
+    static let addPrefix = "📞 Adding "
+
     /// The agents an opening message calls, or nil when the text does not open a call.
     public static func calledAgents(in text: String) -> [String]? {
-        guard text.hasPrefix(startPrefix), let colon = text.firstIndex(of: ":") else { return nil }
-        let names = text[text.index(text.startIndex, offsetBy: startPrefix.count)..<colon]
+        mentions(after: startPrefix, in: text)
+    }
+
+    /// The agents a message adds to a call already going, or nil when the text does not add any.
+    public static func addedAgents(in text: String) -> [String]? {
+        mentions(after: addPrefix, in: text)
+    }
+
+    private static func mentions(after prefix: String, in text: String) -> [String]? {
+        guard text.hasPrefix(prefix), let colon = text.firstIndex(of: ":") else { return nil }
+        let names = text[text.index(text.startIndex, offsetBy: prefix.count)..<colon]
             .split(separator: " ")
             .compactMap { word -> String? in
                 guard word.hasPrefix("@"), word.count > 1 else { return nil }
@@ -81,7 +103,7 @@ public struct VoiceCallCard: Equatable, Sendable {
         while index < inputs.count {
             let input = inputs[index]
             guard input.isHuman, input.kind == .message, !input.isInlineReply,
-                  let agents = VoiceCallMarkers.calledAgents(in: input.text) else {
+                  var agents = VoiceCallMarkers.calledAgents(in: input.text) else {
                 kept.append(input)
                 index += 1
                 continue
@@ -106,6 +128,14 @@ public struct VoiceCallCard: Equatable, Sendable {
                     endedAt = candidate.date ?? input.date
                     next += 1
                     break
+                }
+                if fromCaller, candidate.kind == .message, let added = VoiceCallMarkers.addedAgents(in: candidate.text) {
+                    // Someone brought in mid-call: from here their answers are the call's too, and the message that
+                    // added them leaves the room with the call, like the answers.
+                    for agent in added where !agents.contains(agent) { agents.append(agent) }
+                    if !closed { others.append(candidate) }
+                    next += 1
+                    continue
                 }
                 let fromCalled = !candidate.isHuman && agents.contains(candidate.authorId.lowercased())
                 if candidate.kind == .message, (fromCaller && candidate.isVoiceTurn) || fromCalled {
