@@ -780,9 +780,10 @@ final class RealReasoningCoordinatorTests: XCTestCase {
         try await waitUntil { await delay.snapshot().waiters == 1 }
 
         coordinator = nil
-        for _ in 0..<1_000 {
-            if weakCoordinator == nil { break }
-            await Task.yield()
+        // A time budget, not a count of yields (hosted CI, 10-30: a busy runner can pass a thousand yields first).
+        let released = Date().addingTimeInterval(5)
+        while weakCoordinator != nil, Date() < released {
+            try await Task.sleep(nanoseconds: 2_000_000)
         }
         guard weakCoordinator == nil else {
             XCTFail("pending transition retained the coordinator")
@@ -1086,10 +1087,14 @@ final class RealReasoningCoordinatorTests: XCTestCase {
         line: UInt = #line,
         _ predicate: @escaping @MainActor @Sendable () async -> Bool
     ) async throws {
-        for _ in 0..<1_000 {
+        // A time budget, not a count of yields: on a busy runner a thousand yields could pass before the work they wait
+        // for had run (hosted CI, 10-30).
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
             if await predicate() { return }
-            await Task.yield()
+            try await Task.sleep(nanoseconds: 2_000_000)
         }
+        if await predicate() { return }
         XCTFail("condition did not become true", file: file, line: line)
         throw RealReasoningCoordinatorTestError.timeout
     }
