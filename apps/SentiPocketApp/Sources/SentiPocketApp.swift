@@ -393,9 +393,11 @@ private struct AuthenticatedRootView: View {
             }
             .clipShape(RoundedRectangle(cornerRadius: drawerOpen ? 28 : 0, style: .continuous))
             .shadow(color: .black.opacity(drawerOpen ? 0.28 : 0), radius: 20, x: -6)
+            // Only drawn differently, never laid out again: toggling the safe area here changed the room's height on
+            // every frame of the spring, and a room with a long history loaded re-measured all of its rows each time
+            // (Carter, 10-30 14:22: frozen after tapping the menu with 238 rows loaded).
             .scaleEffect(drawerOpen ? 0.9 : 1, anchor: .leading)
             .offset(x: drawerOpen ? Self.drawerWidth : 0)
-            .ignoresSafeArea(edges: drawerOpen ? .vertical : [])
         }
         .pocketCanvas()
         // The logo at launch, while your rooms load underneath (Carter, #55287).
@@ -578,6 +580,7 @@ private struct AuthenticatedRootView: View {
 
     private var drawerButton: some View {
         Button {
+            CrashReporter.shared.note("drawerOpened")
             drawerOpen = true
         } label: {
             Image(systemName: "line.3.horizontal")
