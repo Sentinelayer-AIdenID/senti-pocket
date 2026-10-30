@@ -38,6 +38,8 @@ public struct SessionSummary: Codable, Equatable, Sendable, Identifiable {
     public let templateName: String?
     public let codebasePath: String?
     public let s3ArchivePath: String?
+    /// What the room is for: general, study, research or conference (absent from older servers).
+    public let roomType: String?
 }
 
 /// GET /api/v1/sessions -> route wrapper (sessions.py:2512-2517).

@@ -89,6 +89,14 @@ final class RoomCreateTests: XCTestCase {
                        "signed over the new room's id and the create route")
     }
 
+    func test_a_general_room_leaves_the_type_to_the_api_default() async throws {
+        CreateURLProtocol.reset(status: 200, answer: #"{"ok":true}"#)
+        let id = try await sender().create(title: "Team", kind: .general)
+        let (_, body) = try XCTUnwrap(CreateURLProtocol.requests().first)
+        XCTAssertNil(json(body)["roomType"], "general is the default, so it isn't sent")
+        XCTAssertEqual(json(body)["sessionId"] as? String, id, "the id made here is the room's when the API echoes none")
+    }
+
     func test_a_refused_create_says_so() async {
         CreateURLProtocol.reset(status: 403)
         do {

@@ -126,6 +126,8 @@ public struct SessionRowPresentation: Equatable, Identifiable, Sendable {
     public let agentCount: Int
     public let eventCount: Int
     public let lastActivity: ParsedSessionTimestamp?
+    /// The room's kind when it isn't a general room: "Study together", "Research" or "Meetings".
+    public let roomTypeLabel: String?
 
     fileprivate init(_ session: SessionSummary) {
         self.id = OpaqueUTF8Identity(session.sessionId)
@@ -138,6 +140,17 @@ public struct SessionRowPresentation: Equatable, Identifiable, Sendable {
         self.agentCount = session.agentCount
         self.eventCount = session.eventCount
         self.lastActivity = ParsedSessionTimestamp(session.lastActivityAt)
+        self.roomTypeLabel = Self.roomTypeLabel(session.roomType)
+    }
+
+    /// The label a room kind shows, the phone's New room names; nil for general rooms and kinds this build doesn't know.
+    public static func roomTypeLabel(_ type: String?) -> String? {
+        switch type?.lowercased() {
+        case "study": return "Study together"
+        case "research": return "Research"
+        case "conference": return "Meetings"
+        default: return nil
+        }
     }
 
     public var statusLabel: String { status.pocketTokenLabel }

@@ -594,7 +594,8 @@ private struct AuthenticatedRootView: View {
                     id: row.sessionId,
                     title: row.title,
                     subtitle: row.summary,
-                    lastActivity: row.lastActivity?.date
+                    lastActivity: row.lastActivity?.date,
+                    kind: row.roomTypeLabel
                 )
             },
             currentRoomId: currentRoom?.sessionId,

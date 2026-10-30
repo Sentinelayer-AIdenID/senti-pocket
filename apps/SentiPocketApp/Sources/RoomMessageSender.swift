@@ -595,9 +595,10 @@ extension HTTPRoomMessageSender {
         request.setValue(key, forHTTPHeaderField: "Idempotency-Key")
         request.setValue("session-mutation", forHTTPHeaderField: "X-Sentinelayer-Session-Mutation")
         request.setValue(csrf, forHTTPHeaderField: "X-CSRF-Token")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "sessionId": sessionId, "title": title, "roomType": roomType, "visibility": "private", "maxMembers": maxMembers
-        ])
+        var body: [String: Any] = ["sessionId": sessionId, "title": title, "visibility": "private", "maxMembers": maxMembers]
+        // A general room is the API's default; only another kind is sent (warden).
+        if roomType != "general" { body["roomType"] = roomType }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let data: Data
         let response: URLResponse
         do {

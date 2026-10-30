@@ -178,6 +178,9 @@ private struct SessionRow: View {
 
             HStack {
                 Text(row.membershipRoleLabel)
+                if let kind = row.roomTypeLabel {
+                    Text("· \(kind)")
+                }
                 Spacer(minLength: 8)
                 timestamp(row.lastActivity)
             }

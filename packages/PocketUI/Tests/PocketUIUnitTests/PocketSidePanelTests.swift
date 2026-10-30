@@ -40,3 +40,15 @@ final class PocketSidePanelTests: XCTestCase {
         XCTAssertEqual(gray.green, 1, accuracy: 0.0001)
     }
 }
+
+/// Warden, on #55287's room types: show the type on the room row.
+final class RoomTypeLabelTests: XCTestCase {
+    func test_a_room_shows_its_kind_unless_it_is_general_or_unknown() {
+        XCTAssertEqual(SessionRowPresentation.roomTypeLabel("study"), "Study together")
+        XCTAssertEqual(SessionRowPresentation.roomTypeLabel("Research"), "Research")
+        XCTAssertEqual(SessionRowPresentation.roomTypeLabel("conference"), "Meetings")
+        XCTAssertNil(SessionRowPresentation.roomTypeLabel("general"))
+        XCTAssertNil(SessionRowPresentation.roomTypeLabel(nil))
+        XCTAssertNil(SessionRowPresentation.roomTypeLabel("hackathon"), "a kind this build doesn't know shows nothing")
+    }
+}

@@ -34,12 +34,15 @@ public struct PocketSidePanel: View {
         public let title: String
         public let subtitle: String?
         public let lastActivity: Date?
+        /// The room's kind when it isn't general ("Study together", "Research", "Meetings").
+        public let kind: String?
 
-        public init(id: String, title: String, subtitle: String?, lastActivity: Date?) {
+        public init(id: String, title: String, subtitle: String?, lastActivity: Date?, kind: String? = nil) {
             self.id = id
             self.title = title
             self.subtitle = subtitle
             self.lastActivity = lastActivity
+            self.kind = kind
         }
     }
 
@@ -230,6 +233,12 @@ public struct PocketSidePanel: View {
                         .font(.subheadline.weight(isCurrent ? .semibold : .regular))
                         .foregroundStyle(PocketPalette.textPrimary)
                         .lineLimit(1)
+                    if let kind = room.kind {
+                        Text(kind)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(PocketPalette.accentStrong)
+                            .lineLimit(1)
+                    }
                     if let subtitle = room.subtitle {
                         Text(subtitle)
                             .font(.caption)
