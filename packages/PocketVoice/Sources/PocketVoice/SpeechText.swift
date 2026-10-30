@@ -63,6 +63,8 @@ public enum SpeechText {
 
     /// In order, as the web applies them.
     private static let rules: [(String, String, NSRegularExpression.Options)] = [
+        // A signature line ("⟂ speech …" under a box's post, "⟂ quick voice" under a fast answer) is not said.
+        ("^[ \\t]*⟂.*$", "", [.anchorsMatchLines]),
         ("```[\\s\\S]*?```", " . code block . ", []),
         ("!\\[([^\\]]*)\\]\\([^)]*\\)", "$1", []),
         ("\\[([^\\]]+)\\]\\([^)]*\\)", "$1", []),

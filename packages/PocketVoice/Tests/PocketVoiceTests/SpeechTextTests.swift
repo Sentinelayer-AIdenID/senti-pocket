@@ -14,6 +14,16 @@ final class SpeechTextTests: XCTestCase {
         XCTAssertEqual(SpeechText.spoken(fromMarkdown: "> quoted\n| a | b |"), "quoted\n a b")
     }
 
+    /// A box's "⟂ speech …" line and a fast answer's "⟂ quick voice" line are labels for the eye, never said.
+    func test_a_signature_line_is_not_read_aloud() {
+        XCTAssertEqual(
+            SpeechText.spoken(fromMarkdown: "Build 21 is up.\n⟂ speech bcee41139aa6a1dd · model via codex · managed"),
+            "Build 21 is up."
+        )
+        XCTAssertEqual(SpeechText.spoken(fromMarkdown: "I heard you.\n  ⟂ quick voice · facts: last post"), "I heard you.")
+        XCTAssertEqual(SpeechText.spoken(fromMarkdown: "The ⟂ sign mid-line stays."), "The ⟂ sign mid-line stays.")
+    }
+
     func test_a_code_block_is_announced_instead_of_read_aloud() {
         let spoken = SpeechText.spoken(fromMarkdown: "before\n```\nrm -rf /\n```\nafter")
         XCTAssertTrue(spoken.contains("code block"))
