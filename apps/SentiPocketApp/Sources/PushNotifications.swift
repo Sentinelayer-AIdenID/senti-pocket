@@ -108,8 +108,17 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
     weak var inbox: IncomingLinkInbox?
     /// The room on screen, if any.
     var currentRoomId: () -> String? = { nil }
-    /// A tapped push's notification, to read it (the signed-in app sets it).
-    var onOpened: ((SentiLink, String?) -> Void)?
+    /// A tapped push's notification, to read it (the signed-in app sets it). A push tapped to launch the app arrives
+    /// before the app sets it; that one is kept and handed over then (warden, #275).
+    var onOpened: ((SentiLink, String?) -> Void)? {
+        didSet {
+            guard let onOpened else { return }
+            let early = openedEarly
+            openedEarly = []
+            for opened in early { onOpened(opened.link, opened.id) }
+        }
+    }
+    private var openedEarly: [(link: SentiLink, id: String?)] = []
     private var client = PushDeviceClient(apiBaseURL: GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_API_URL", "SENTI_GATEWAY_URL"]))
     private var isRegistered = false
 
@@ -291,7 +300,12 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
         Task { @MainActor in
             LaunchUrgency.shared.raise()
             if let link = PushRoute.link(from: userInfo) {
-                self.onOpened?(link, PushRoute.notificationId(from: userInfo))
+                let id = PushRoute.notificationId(from: userInfo)
+                if let onOpened = self.onOpened {
+                    onOpened(link, id)
+                } else {
+                    self.openedEarly = Array((self.openedEarly + [(link, id)]).suffix(5))
+                }
                 self.inbox?.receive(link)
             }
             completionHandler()

@@ -1,4 +1,5 @@
 import Foundation
+import PocketContracts
 import PocketSyncClient
 import PocketUI
 
@@ -205,21 +206,31 @@ final class NotificationsCoordinator: ObservableObject {
     static let pendingFor: TimeInterval = 600
 
     /// The notification a tapped push or banner was: by its id when the push carries one, else the one its link
-    /// names (a message, a reply, a ticket or an agent request), else the room's newest notice. One notification,
-    /// never the room's others. Not in the bell yet, it is read when it arrives.
+    /// names (a message, a reply, a ticket or an agent request), and only when exactly one unread notice made at or
+    /// before the tap matches: the fallback never guesses between two (warden, #275). Not in the bell yet, it waits.
     func markOpened(_ link: SentiLink, notificationId: String? = nil, at: Date? = nil) {
-        let target: SentiNotification?
+        let tappedAt = at ?? now()
         if let notificationId {
-            target = notifications.first { $0.id.lowercased() == notificationId }
-        } else {
-            target = notifications.first { !$0.isRead && !locallyRead.contains($0.id) && Self.opens($0, link) }
-        }
-        guard let target else {
-            pendingOpened = Array((pendingOpened + [(link, notificationId, at ?? now())]).suffix(10))
+            guard let target = notifications.first(where: { $0.id.lowercased() == notificationId }) else {
+                pendingOpened = Array((pendingOpened + [(link, notificationId, tappedAt)]).suffix(10))
+                return
+            }
+            markRead(target.id)
             return
         }
-        markRead(target.id)
+        let candidates = notifications.filter {
+            !$0.isRead && !locallyRead.contains($0.id) && Self.opens($0, link)
+                && (ParsedSessionTimestamp($0.createdAt).date.map { $0 <= tappedAt.addingTimeInterval(Self.clockSlack) } ?? true)
+        }
+        switch candidates.count {
+        case 1: markRead(candidates[0].id)
+        case 0: pendingOpened = Array((pendingOpened + [(link, nil, tappedAt)]).suffix(10))
+        default: break // two or more could be it: none is read rather than the wrong one
+        }
     }
+
+    /// Server and phone clocks differ a little: a notice made a few seconds "after" the tap may still be the one.
+    static let clockSlack: TimeInterval = 5
 
     static func opens(_ notification: SentiNotification, _ link: SentiLink) -> Bool {
         let target = notification.link ?? SentiLink(sessionId: notification.sessionId)

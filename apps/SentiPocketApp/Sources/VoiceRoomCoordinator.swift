@@ -44,6 +44,11 @@ final class VoiceRoomCoordinator: ObservableObject {
     private var endpointerOff = false
     /// The words already asked about in this pause, so one pause is asked about once.
     private var askedAbout: String?
+    /// When the microphone last heard speech-loud sound: the recognizer can lag the voice, so a turn never ends early
+    /// while the microphone still hears you (warden, #276).
+    private var lastLoud: Date?
+    /// A microphone level (0 to 1, as the waveform's) this loud is someone speaking.
+    static let speakingLevel = 0.35
     /// One id for the whole call, so the voice line meters and limits it as one.
     private let callId = UUID().uuidString.lowercased()
     private let now: @Sendable () -> Date
@@ -412,6 +417,7 @@ final class VoiceRoomCoordinator: ObservableObject {
             do {
                 let done = try await endpointer.finished(sessionId: self.sessionId, text: words, callId: self.callId)
                 guard done >= Self.finishedAt, generation == self.listenGeneration, self.state.isListening,
+                      !self.stillSpeaking(),
                       self.state.partial == words else { return }
                 self.timings.noteEarlyEnd()
                 self.endTurn()
@@ -421,6 +427,16 @@ final class VoiceRoomCoordinator: ObservableObject {
                 // Busy or failed: the normal pause ends the turn.
             }
         }
+    }
+
+    /// The microphone's level, as the phone hears it (the waveform's feed).
+    func hear(level: Double) {
+        if level >= Self.speakingLevel { lastLoud = now() }
+    }
+
+    /// Sound as loud as speech within the short pause: the words have not caught up with the voice yet.
+    private func stillSpeaking() -> Bool {
+        lastLoud.map { now().timeIntervalSince($0) < Self.askAfter } ?? false
     }
 
     /// How long a silence ends a hands-free turn: shorter once the words so far end a sentence.

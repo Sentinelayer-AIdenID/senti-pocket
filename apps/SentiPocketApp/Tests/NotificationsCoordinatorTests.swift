@@ -160,9 +160,36 @@ final class NotificationsCoordinatorTests: XCTestCase {
         XCTAssertFalse(coordinator.state.unread.map(\.id).contains("byid"), "by its id")
         coordinator.markOpened(SentiLink(sessionId: "room_1"))
         let unread = coordinator.state.unread.map(\.id)
-        XCTAssertFalse(unread.contains("join2"), "the room's newest notice")
-        XCTAssertTrue(unread.contains("join1"), "and only that one (warden, #275)")
-        XCTAssertTrue(unread.contains("old1"))
+        XCTAssertTrue(unread.contains("join2") && unread.contains("join1"),
+                      "two room notices could be it: neither is guessed (warden, #275)")
+    }
+
+    /// Warden (#275): without an id, one room notice is read only when it alone matches, and never one made after
+    /// the tap.
+    func test_a_room_link_reads_its_only_notice_and_never_a_later_one() async {
+        let marker = RecordingMarker()
+        let coordinator = NotificationsCoordinator(
+            transport: ScriptedNotifications([
+                .success(SentiNotificationsPage(notifications: [
+                    note("joined", at: "2026-10-30T18:00:00Z"), note("other", at: "2026-10-30T18:00:00Z", room: "room_2")
+                ])),
+                .success(SentiNotificationsPage(notifications: [
+                    note("later", at: "2026-10-30T20:00:00Z"),
+                    note("other", at: "2026-10-30T18:00:00Z", room: "room_2")
+                ]))
+            ]),
+            marker: marker,
+            now: { ISO8601DateFormatter().date(from: "2026-10-30T19:00:00Z")! },
+            onReauthenticationRequired: {}
+        )
+        await coordinator.refresh()
+        coordinator.markOpened(SentiLink(sessionId: "room_1"))
+        XCTAssertEqual(coordinator.state.unread.map(\.id), ["other"], "the only one is read")
+
+        coordinator.markOpened(SentiLink(sessionId: "room_3"))
+        await coordinator.refresh()
+        coordinator.markOpened(SentiLink(sessionId: "room_1"))
+        XCTAssertTrue(coordinator.state.unread.map(\.id).contains("later"), "made after the tap: not the one tapped")
     }
 
     /// Warden (#275): a mark the server refused is sent again on the next read of the bell.
