@@ -30,6 +30,8 @@ public struct RoomChatView: View {
     @State private var heldAnchor: String?
     /// A checkpoint opened from its row: read it, listen to it.
     @State private var openCheckpoint: RoomChatMessageRow?
+    /// A thread summary opened whole, and what reads it aloud.
+    @State private var openSummary: OpenThreadSummary?
     /// Your own message being edited.
     @State private var editingRow: RoomChatMessageRow?
     /// A long message opened in full.
@@ -119,6 +121,15 @@ public struct RoomChatView: View {
         }
         .sheet(item: $openCheckpoint) { row in
             CheckpointSheet(row: row, send: send)
+        }
+        .sheet(item: $openSummary) { open in
+            ThreadSummarySheet(summary: open.summary, isReading: readingAloudId == open.id) {
+                if readingAloudId == open.id {
+                    send(.stopReadingAloud)
+                } else {
+                    send(.readAloud(id: open.id, text: open.summary))
+                }
+            }
         }
         .sheet(item: $longRow) { row in
             LongMessageSheet(row: row, ownHandles: state.ownMentionHandles, send: send)
@@ -444,6 +455,7 @@ public struct RoomChatView: View {
                 isExpanded: expandedQuiet.contains(message.id),
                 threadSummary: message.summaryThreadId.flatMap { state.threadSummaries[$0] },
                 isReadingSummary: message.summaryReadAloudId.map { readingAloudId == $0 } ?? false,
+                onOpenSummary: { summary, id in openSummary = OpenThreadSummary(id: id, summary: summary) },
                 onOpenReplyTarget: { jump(to: $0, proxy: proxy) },
                 onOpenCheckpoint: { openCheckpoint = $0 },
                 onEdit: { editingRow = $0 },
@@ -646,6 +658,12 @@ public struct RoomChatView: View {
     private static let bottomId = "room-bottom"
 }
 
+/// A thread summary opened whole: its read-aloud id (so the sheet shows Stop while it is read) and its text.
+private struct OpenThreadSummary: Identifiable {
+    let id: String
+    let summary: String
+}
+
 /// A scroll view that starts at its bottom, where the iOS version can say so.
 private struct StartsAtBottom: ViewModifier {
     func body(content: Content) -> some View {
@@ -676,6 +694,8 @@ private struct RoomMessageRowView: View {
     var threadSummary: String?
     /// That summary is being read aloud.
     var isReadingSummary = false
+    /// Open the whole summary: its text and what reads it aloud.
+    var onOpenSummary: (String, String) -> Void = { _, _ in }
     let onOpenReplyTarget: (Int64) -> Void
     var onOpenCheckpoint: (RoomChatMessageRow) -> Void = { _ in }
     var onEdit: (RoomChatMessageRow) -> Void = { _ in }
@@ -762,7 +782,9 @@ private struct RoomMessageRowView: View {
                 )
             } else if let box = row.box {
                 RoomBoxLine(box: box, summary: threadSummary, isReadingSummary: isReadingSummary,
-                            onListen: { listenToSummary() }) { send(.openThread(sequenceId: row.sequenceId)) }
+                            onListen: { listenToSummary() }, onOpenSummary: { openWholeSummary() }) {
+                    send(.openThread(sequenceId: row.sequenceId))
+                }
                     .padding(.vertical, 3)
                     .accessibilityIdentifier("pocket.room.box.\(row.sequenceId)")
             } else if row.isQuiet {
@@ -922,13 +944,24 @@ private struct RoomMessageRowView: View {
             .accessibilityLabel(row.isInlineReply ? "\(quoteText(reply)). Opens the thread." : "Replying to message \(reply)")
             if let threadSummary, row.trail.map({ $0.count > 1 }) == true {
                 HStack(alignment: .top, spacing: 0) {
-                    ThreadSummaryText(text: threadSummary)
+                    Button { openWholeSummary() } label: {
+                        ThreadSummaryText(text: threadSummary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Opens the whole summary")
                     Spacer(minLength: 0)
                     ThreadSummaryListenButton(isReading: isReadingSummary) { listenToSummary() }
                 }
                 .padding(.leading, 10)
             }
         }
+    }
+
+    /// Opens this row's thread summary whole (Carter, 10-30: "clicking on the summary message can give you a pop up of
+    /// the rest").
+    private func openWholeSummary() {
+        guard let threadSummary, let id = row.summaryReadAloudId else { return }
+        onOpenSummary(threadSummary, id)
     }
 
     /// Reads this row's thread summary aloud, or stops it (Carter, on #55474: "a voice version of the summary").
@@ -1935,7 +1968,10 @@ private struct RoomComposerBar: View {
                             PastedChip(
                                 block: block,
                                 onOpen: { viewingPaste = PastedBlock(index: index, text: block) },
-                                onRemove: { pasted.remove(at: index) }
+                                onRemove: {
+                                    pasted.remove(at: index)
+                                    saveDraft()
+                                }
                             )
                         }
                     }
@@ -2089,9 +2125,31 @@ private struct RoomComposerBar: View {
                 if id != nil { isEditing = true }
             }
             .sheet(item: $viewingPaste) { item in
-                PastedBlockSheet(text: item.text) {
-                    if pasted.indices.contains(item.index) { pasted.remove(at: item.index) }
-                }
+                PastedBlockSheet(
+                    text: item.text,
+                    onSave: { edited in
+                        guard pasted.indices.contains(item.index) else { return }
+                        if edited.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            pasted.remove(at: item.index)
+                        } else {
+                            pasted[item.index] = edited
+                        }
+                        saveDraft()
+                    },
+                    onUnattach: { edited in
+                        guard pasted.indices.contains(item.index) else { return }
+                        pasted.remove(at: item.index)
+                        // Set as it is, not as a new paste: the text stays in the box.
+                        let joined = RoomComposerDraft.unattaching(edited, into: draft)
+                        lastDraft = joined
+                        draft = joined
+                        saveDraft()
+                    },
+                    onRemove: {
+                        if pasted.indices.contains(item.index) { pasted.remove(at: item.index) }
+                        saveDraft()
+                    }
+                )
             }
         } else if let reason = composer.disabledReason {
             Text(reason)
@@ -2158,36 +2216,56 @@ private struct PastedChip: View {
 }
 
 /// A held paste, read in full before it is sent.
+/// A held paste, open (Carter, 10-30: "I should be able to click on a text that became attachment to add to it or
+/// unattach it"): edit it in place, put it back into the message as text, or remove it.
 private struct PastedBlockSheet: View {
     let text: String
+    let onSave: (String) -> Void
+    let onUnattach: (String) -> Void
     let onRemove: () -> Void
+    @State private var edited = ""
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                Text(text)
+            VStack(spacing: 0) {
+                TextEditor(text: $edited)
                     .font(.callout)
                     .foregroundStyle(PocketPalette.textPrimary)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(16)
+                    .scrollContentBackground(.hidden)
+                    .padding(12)
+                Button {
+                    onUnattach(edited)
+                    dismiss()
+                } label: {
+                    Label("Put it in the message", systemImage: "text.insert")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .padding(12)
+                .accessibilityIdentifier("pocket.room.composer.paste.unattach")
             }
             .pocketCanvas()
             .navigationTitle("Pasted text")
             .navigationBarTitleDisplayModeInlineIfAvailable()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }
-                }
-                ToolbarItem(placement: .destructiveAction) {
                     Button("Remove", role: .destructive) {
                         onRemove()
                         dismiss()
                     }
+                    .accessibilityIdentifier("pocket.room.composer.paste.remove")
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") {
+                        onSave(edited)
+                        dismiss()
+                    }
+                    .accessibilityIdentifier("pocket.room.composer.paste.done")
                 }
             }
         }
+        .onAppear { edited = text }
     }
 }
 

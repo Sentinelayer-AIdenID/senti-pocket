@@ -841,6 +841,17 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     }
 }
 
+/// A thread's summary, as written on the phone: labeled lines, the objective first (Carter, 10-30: Objective, What
+/// changed, How, Checks, Record). A row shows the objective alone; the whole of it opens in a sheet.
+public enum ThreadSummaryFormat {
+    /// The line a row shows: the objective without its label (or, for a summary in one paragraph, all of it).
+    public static func headline(_ summary: String) -> String {
+        let first = summary.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? summary
+        let label = "**Objective:** "
+        return first.hasPrefix(label) ? String(first.dropFirst(label.count)) : first
+    }
+}
+
 /// The ids of what the room reads aloud, so the row being read can show it.
 public enum RoomReadAloud {
     public static func message(_ sequenceId: Int64) -> String { "msg:\(sequenceId)" }
@@ -1339,7 +1350,8 @@ public enum RoomComposerDraft {
     }
 
     /// A paste this long is held as an attachment above the field (Carter, #55006), not poured into it.
-    public static let pastedBlockLength = 1_000
+    /// Carter (10-30): "when I paste a long text it should be much longer before it becomes an attachment".
+    public static let pastedBlockLength = 4_000
 
     /// The block of text that went into the draft at once, when it is long enough to be a paste: what the draft
     /// becomes without it, and the block. Typing and dictation add a little at a time and never come here.
@@ -1395,6 +1407,12 @@ public enum RoomComposerDraft {
         for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(savedKeyPrefix) {
             defaults.removeObject(forKey: key)
         }
+    }
+
+    /// A held block put back into the message as text (Carter, 10-30: "click on a text that became attachment to add
+    /// to it or unattach it"): after what was typed, a blank line apart.
+    public static func unattaching(_ block: String, into draft: String) -> String {
+        draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? block : draft + "\n\n" + block
     }
 
     /// What is sent: the typed words, then each held block, a blank line apart.
