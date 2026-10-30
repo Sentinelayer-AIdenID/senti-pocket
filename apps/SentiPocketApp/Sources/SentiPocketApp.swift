@@ -464,11 +464,6 @@ private struct AuthenticatedRootView: View {
                 }
             )
         }
-        // A notification while Pocket is open slides in here (Carter, #55508).
-        .overlay(alignment: .top) {
-            InAppBannerView(banner: InAppBanner.shared) { link in open(link) }
-                .padding(.top, 4)
-        }
         .sheet(isPresented: $presentsNewRoom) {
             if let creator = roomSender as? any RoomCreating {
                 NewRoomSheet(
@@ -497,6 +492,8 @@ private struct AuthenticatedRootView: View {
             // Apple push: a tap opens its room at the message; the room on screen gets no banner.
             PushRegistrar.shared.inbox = incomingLinks
             PushRegistrar.shared.currentRoomId = { currentRoom?.sessionId }
+            // A notification while Pocket is open slides in over it, and a tap opens it here (Carter, #55508).
+            InAppBanner.shared.onOpen = { link in open(link) }
             InAppBanner.shared.isHosted = true
             // An answered agent's call opens its room, where its voice room starts.
             RoomCallDesk.shared.openRoom = { [weak incomingLinks] sessionId in
@@ -507,6 +504,8 @@ private struct AuthenticatedRootView: View {
         }
         .onDisappear {
             InAppBanner.shared.isHosted = false
+            InAppBanner.shared.onOpen = nil
+            InAppBanner.shared.dismiss()
             notifications.stopPolling()
             sessions.clearSelection()
             details.clearSelection()
