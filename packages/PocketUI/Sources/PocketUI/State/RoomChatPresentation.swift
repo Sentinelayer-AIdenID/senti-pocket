@@ -889,6 +889,13 @@ public enum RoomComposerDraft {
     public static func restoring(_ text: String, into draft: String) -> String {
         draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? text : draft + "\n" + text
     }
+
+    /// What "File as a ticket" posts: the words, marked as a ticket request so the room's ticket keeper files them
+    /// (it replies with the ticket's link). Already marked text is left as it is.
+    public static func ticketRequest(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.hasPrefix("🎫") ? trimmed : "🎫 Ticket: \(trimmed)"
+    }
 }
 
 /// How a failed row keeps its text. Edit puts it back into the composer, so it needs one; when posting is refused

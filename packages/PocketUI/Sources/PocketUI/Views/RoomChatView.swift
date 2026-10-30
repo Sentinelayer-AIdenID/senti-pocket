@@ -1336,6 +1336,8 @@ private struct RoomComposerBar: View {
     let send: (String) -> Void
     @State private var draft = ""
     @FocusState private var isEditing: Bool
+    /// "File as a ticket": what you type goes to the room as a ticket request, and the ticket keeper files it.
+    @State private var ticketMode = false
 
     private var suggestions: [MentionCandidate] {
         guard let active = MentionSuggester.activeQuery(in: draft) else { return [] }
@@ -1391,6 +1393,29 @@ private struct RoomComposerBar: View {
                 .background(PocketPalette.raised)
                 .overlay(alignment: .bottom) { Divider() }
             }
+            if ticketMode {
+                HStack(spacing: 6) {
+                    Image(systemName: "ticket")
+                        .foregroundStyle(PocketPalette.accentStrong)
+                        .accessibilityHidden(true)
+                    Text("Describe what you want; it becomes a ticket.")
+                        .font(.caption)
+                        .foregroundStyle(PocketPalette.textSecondary)
+                    Spacer(minLength: 4)
+                    Button {
+                        ticketMode = false
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(PocketPalette.textSecondary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Not a ticket")
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 6)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("pocket.room.composer.ticketMode")
+            }
             HStack(alignment: .bottom, spacing: 8) {
                 Menu {
                     Button {
@@ -1399,12 +1424,12 @@ private struct RoomComposerBar: View {
                     } label: {
                         Label("Mention someone", systemImage: "at")
                     }
-                    if actions.canFileTicket {
-                        Button {
-                            onIntent(.openTickets(filing: true))
-                        } label: {
-                            Label("File a ticket", systemImage: "ticket")
-                        }
+                    // Plain words become a ticket: the room's ticket keeper files it and replies with the link.
+                    Button {
+                        ticketMode = true
+                        isEditing = true
+                    } label: {
+                        Label("File as a ticket", systemImage: "ticket")
                     }
                     if actions.canSearch {
                         Button {
@@ -1424,7 +1449,7 @@ private struct RoomComposerBar: View {
                 .accessibilityLabel("More")
                 .accessibilityIdentifier("pocket.room.composer.plus")
                 .padding(.bottom, 1)
-                TextField("Message", text: $draft, axis: .vertical)
+                TextField(ticketMode ? "Describe the ticket" : "Message", text: $draft, axis: .vertical)
                     .lineLimit(1...6)
                     .textFieldStyle(.plain)
                     .focused($isEditing)
@@ -1439,7 +1464,8 @@ private struct RoomComposerBar: View {
                 Button {
                     let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !text.isEmpty else { return }
-                    send(text)
+                    send(ticketMode ? RoomComposerDraft.ticketRequest(text) : text)
+                    ticketMode = false
                     emptyComposer($draft, editing: $isEditing)
                 } label: {
                     Image(systemName: "arrow.up.circle.fill")
