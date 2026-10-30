@@ -162,6 +162,7 @@ final class RoomCallDesk: ObservableObject {
 
     /// CallKit showed the ring. The same call delivered again ends its second ring at once.
     func received(_ doorbell: RoomCallDoorbell, uuid: UUID) {
+        LaunchUrgency.shared.raise()
         if calls.values.contains(where: { $0.doorbell.callId == doorbell.callId && !$0.finished }) {
             endSystemCall(uuid)
             return
