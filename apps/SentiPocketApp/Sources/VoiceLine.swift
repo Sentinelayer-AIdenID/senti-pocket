@@ -65,3 +65,12 @@ struct VoiceLineEventReader {
         }
     }
 }
+
+/// Has the person finished their turn? Asked of the signal model through the server
+/// (`POST /sessions/{id}/voice/endpoint`) after a short pause; it answers in about 80 ms (measured 10-30), so a turn
+/// can end on a 0.3 s pause instead of 1.4 s. A protocol so the call is testable without a network.
+protocol VoiceEndpointing: Sendable {
+    /// How likely the words so far are a finished turn, 0 to 1. Throws `VoiceLineError.unavailable` when the server
+    /// has no endpointing.
+    func finished(sessionId: String, text: String, callId: String) async throws -> Double
+}

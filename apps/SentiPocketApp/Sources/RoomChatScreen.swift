@@ -305,7 +305,11 @@ struct RoomChatScreen: View {
         let meter = voiceMeter
         meter.reset()
         let listener = OnDeviceVoiceListener()
-        listener.onLevel = { level in meter.hear(level, from: .you) }
+        let heard = HeardLevel()
+        listener.onLevel = { level in
+            meter.hear(level, from: .you)
+            heard.room?.hear(level: level)
+        }
         let speaker = AgentVoiceSpeaker()
         speaker.onWord = { length in meter.hear(VoiceLevelMeter.level(wordLength: length), from: .agent) }
         let room = VoiceRoomCoordinator(
@@ -320,6 +324,7 @@ struct RoomChatScreen: View {
             ringer: RingbackTone(),
             poster: voicePoster,
             voiceLine: voicePoster as? any VoiceLining,
+            endpointer: voicePoster as? any VoiceEndpointing,
             onEnded: { endVoiceRoom() },
             onRecordFailed: { [weak coordinator] failure in coordinator?.show(notice: failure) }
         )
@@ -338,6 +343,7 @@ struct RoomChatScreen: View {
         coordinator.onLiveMessages = { [weak room] messages in room?.receive(messages) }
         coordinator.onNewReplies = { [weak room] replies in room?.receive(replies: replies) }
         coordinator.readsRepliesOften = true
+        heard.room = room
         voiceRoom = room
         CrashReporter.shared.note(agents.isEmpty ? "voice meeting began" : "voice call began")
         room.begin(rings: !answering)
@@ -971,4 +977,10 @@ struct VoiceRoomHost: View {
     var body: some View {
         VoiceRoomPanel(state: room.state, meter: meter, partnerLab: partnerLab, send: room.send)
     }
+}
+
+/// The call the microphone's level goes to, set once the call exists (the listener is made before it).
+@MainActor
+private final class HeardLevel {
+    weak var room: VoiceRoomCoordinator?
 }

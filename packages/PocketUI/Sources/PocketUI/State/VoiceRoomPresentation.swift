@@ -49,10 +49,17 @@ public struct VoiceCallTimings: Equatable, Sendable {
     public private(set) var samples: [Measure: [TimeInterval]] = [:]
     /// Answers held because another agent had the floor.
     public private(set) var held = 0
+    /// Turns ended early because the signal model said they were finished.
+    public private(set) var endedEarly = 0
 
     public init() {}
 
     public var isEmpty: Bool { samples.values.allSatisfy(\.isEmpty) && held == 0 }
+
+    /// A turn ended on a short pause, the signal model having said it was finished.
+    public mutating func noteEarlyEnd() {
+        endedEarly += 1
+    }
 
     public mutating func record(_ measure: Measure, _ seconds: TimeInterval) {
         guard seconds.isFinite, seconds >= 0 else { return }
@@ -80,6 +87,7 @@ public struct VoiceCallTimings: Equatable, Sendable {
         }
         var line = parts.joined(separator: " · ")
         if held > 0 { line += (line.isEmpty ? "" : " · ") + "\(held) held for the floor" }
+        if endedEarly > 0 { line += (line.isEmpty ? "" : " · ") + "\(endedEarly) ended on a short pause" }
         return line.isEmpty ? nil : "Timings: " + line + "."
     }
 
@@ -91,6 +99,7 @@ public struct VoiceCallTimings: Equatable, Sendable {
             lines.append("| \(measure.label) | \(Self.seconds(middle)) | \(Self.seconds(slow)) | \(samples[measure]?.count ?? 0) |")
         }
         if held > 0 { lines.append("| answers held for the floor | | | \(held) |") }
+        if endedEarly > 0 { lines.append("| turns ended on a short pause | | | \(endedEarly) |") }
         return lines.count > 2 ? lines : []
     }
 

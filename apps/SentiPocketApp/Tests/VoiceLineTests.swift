@@ -214,3 +214,106 @@ final class VoiceLineHangUpTests: XCTestCase {
         XCTAssertFalse(poster.endings.first?.contains("@room") == true, poster.endings.first ?? "")
     }
 }
+
+private final class FakeEndpointer: VoiceEndpointing, @unchecked Sendable {
+    private let lock = NSLock()
+    private let answer: Result<Double, VoiceLineError>
+    private var _asked: [String] = []
+    var asked: [String] { lock.withLock { _asked } }
+
+    init(_ answer: Result<Double, VoiceLineError>) { self.answer = answer }
+
+    func finished(sessionId: String, text: String, callId: String) async throws -> Double {
+        lock.withLock { _asked.append(text) }
+        return try answer.get()
+    }
+}
+
+private final class TurnPoster: VoiceRoomPosting, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _turns: [String] = []
+    var turns: [String] { lock.withLock { _turns } }
+    func postCallStarted(sessionId: String, text: String, clientId: String) async throws {}
+    func postVoiceTurn(sessionId: String, text: String, clientId: String) async throws { lock.withLock { _turns.append(text) } }
+    func uploadTranscript(sessionId: String, filename: String, markdown: String, clientId: String) async throws -> VoiceTranscriptAttachment {
+        VoiceTranscriptAttachment(attachmentId: "att-1", filename: filename, kind: "text", contentType: "text/markdown",
+                                  sizeBytes: markdown.utf8.count, status: "ready")
+    }
+    func postCallEnded(sessionId: String, text: String, transcript: VoiceTranscriptAttachment?, clientId: String) async throws {}
+}
+
+/// Carter (10-30): "I thought jev would help us finish everything by 600ms". A short pause asks whether the turn is
+/// over; a sure yes ends it at once, anything else leaves the normal pause in charge.
+@MainActor
+final class VoiceEndpointingTests: XCTestCase {
+    private func listening(_ endpointer: FakeEndpointer, _ listener: LineListener, _ poster: TurnPoster) async -> VoiceRoomCoordinator {
+        let room = VoiceRoomCoordinator(sessionId: "room_endpoint", with: ["pocket-forge"], you: "mrrcarter",
+                                        ownAuthorIds: ["human-mrrcarter"], listener: listener, speaker: LineSpeaker(),
+                                        audio: LineAudio(), poster: poster, endpointer: endpointer,
+                                        sleep: { seconds in try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) })
+        room.begin(rings: false)
+        for _ in 0..<200 where listener.partial == nil { try? await Task.sleep(nanoseconds: 2_000_000) }
+        return room
+    }
+
+    func test_a_finished_turn_ends_on_a_short_pause() async {
+        let endpointer = FakeEndpointer(.success(0.95)), listener = LineListener(), poster = TurnPoster()
+        let room = await listening(endpointer, listener, poster)
+        let said = Date()
+        listener.say("Ship it tonight")
+        for _ in 0..<400 where poster.turns.isEmpty { try? await Task.sleep(nanoseconds: 5_000_000) }
+        XCTAssertEqual(poster.turns, ["@pocket-forge Ship it tonight"])
+        XCTAssertLessThan(Date().timeIntervalSince(said), VoiceRoomCoordinator.pauseEndsTurn - 0.3,
+                          "well before the 1.4 s pause")
+        XCTAssertEqual(endpointer.asked, ["Ship it tonight"], "one pause is asked about once")
+        XCTAssertEqual(room.timings.endedEarly, 1)
+        await room.hangUp()
+    }
+
+    /// Warden (#276): the recognizer can lag the voice; a sure 'finished' never ends a turn while the microphone still
+    /// hears speech.
+    func test_a_finished_answer_waits_while_the_microphone_still_hears_speech() async {
+        let endpointer = FakeEndpointer(.success(0.95)), listener = LineListener(), poster = TurnPoster()
+        let room = await listening(endpointer, listener, poster)
+        listener.say("I want to")
+        let loud = Task { @MainActor in
+            for _ in 0..<8 {
+                room.hear(level: 0.8)
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        XCTAssertTrue(poster.turns.isEmpty, "still talking: not ended early")
+        await loud.value
+        for _ in 0..<400 where poster.turns.isEmpty { try? await Task.sleep(nanoseconds: 5_000_000) }
+        XCTAssertEqual(poster.turns.count, 1, "the normal pause ends it")
+        await room.hangUp()
+    }
+
+    func test_an_unsure_answer_leaves_the_normal_pause_in_charge() async {
+        let endpointer = FakeEndpointer(.success(0.4)), listener = LineListener(), poster = TurnPoster()
+        let room = await listening(endpointer, listener, poster)
+        listener.say("Can you add the new tester and then")
+        try? await Task.sleep(nanoseconds: 700_000_000)
+        XCTAssertTrue(poster.turns.isEmpty, "not ended on the short pause")
+        XCTAssertEqual(endpointer.asked.count, 1)
+        for _ in 0..<400 where poster.turns.isEmpty { try? await Task.sleep(nanoseconds: 5_000_000) }
+        XCTAssertEqual(poster.turns.count, 1, "the normal pause still ends it")
+        XCTAssertEqual(room.timings.endedEarly, 0)
+        await room.hangUp()
+    }
+
+    func test_without_endpointing_on_the_server_the_call_stops_asking() async {
+        let endpointer = FakeEndpointer(.failure(.unavailable)), listener = LineListener(), poster = TurnPoster()
+        let room = await listening(endpointer, listener, poster)
+        listener.say("Status please")
+        for _ in 0..<400 where poster.turns.isEmpty { try? await Task.sleep(nanoseconds: 5_000_000) }
+        XCTAssertEqual(endpointer.asked.count, 1)
+        room.send(.toggleTalk)
+        for _ in 0..<200 where listener.partial == nil { try? await Task.sleep(nanoseconds: 2_000_000) }
+        listener.say("And one more thing")
+        try? await Task.sleep(nanoseconds: 700_000_000)
+        XCTAssertEqual(endpointer.asked.count, 1, "asked once, then never again in this call")
+        await room.hangUp()
+    }
+}

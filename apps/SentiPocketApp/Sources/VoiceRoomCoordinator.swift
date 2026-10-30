@@ -39,6 +39,16 @@ final class VoiceRoomCoordinator: ObservableObject {
     private var voiceLineAsk: Task<Void, Never>?
     /// After a 429 the voice line rests until then (the server's Retry-After).
     private var voiceLineRestsUntil = Date.distantPast
+    /// Asks whether a pause ends the turn (the signal model, through the server); nil without it.
+    private let endpointer: (any VoiceEndpointing)?
+    private var endpointerOff = false
+    /// The words already asked about in this pause, so one pause is asked about once.
+    private var askedAbout: String?
+    /// When the microphone last heard speech-loud sound: the recognizer can lag the voice, so a turn never ends early
+    /// while the microphone still hears you (warden, #276).
+    private var lastLoud: Date?
+    /// A microphone level (0 to 1, as the waveform's) this loud is someone speaking.
+    static let speakingLevel = 0.35
     /// One id for the whole call, so the voice line meters and limits it as one.
     private let callId = UUID().uuidString.lowercased()
     private let now: @Sendable () -> Date
@@ -82,6 +92,11 @@ final class VoiceRoomCoordinator: ObservableObject {
     static let longestTurn: TimeInterval = 50
     /// Answers from just before the call started still count (clocks differ a little).
     static let clockSlack: TimeInterval = 5
+    /// After this much silence the phone asks whether the turn is over, and ends it at once when it is.
+    static let askAfter: TimeInterval = 0.3
+    /// How sure the answer must be to end a turn early (9 of 10 test phrases right at this line, 10-30).
+    static let finishedAt = 0.7
+
     /// How long the call rings before the line opens without an answer.
     static let ringsFor: TimeInterval = 30
 
@@ -97,6 +112,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         ringer: (any VoiceRoomRinging)? = nil,
         poster: any VoiceRoomPosting,
         voiceLine: (any VoiceLining)? = nil,
+        endpointer: (any VoiceEndpointing)? = nil,
         now: @escaping @Sendable () -> Date = { Date() },
         sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
             try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
@@ -114,6 +130,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         self.ringer = ringer
         self.poster = poster
         self.voiceLine = voiceLine
+        self.endpointer = endpointer
         self.now = now
         self.sleep = sleep
         self.onEnded = onEnded
@@ -366,22 +383,60 @@ final class VoiceRoomCoordinator: ObservableObject {
     private func watchForPause(_ generation: Int) {
         silenceWatch?.cancel()
         let started = now()
+        askedAbout = nil
         silenceWatch = Task { [weak self] in
             while let self, !Task.isCancelled, generation == self.listenGeneration, self.state.isListening {
-                await self.sleep(0.25)
+                await self.sleep(0.1)
                 guard generation == self.listenGeneration, self.state.isListening else { return }
                 let elapsed = self.now().timeIntervalSince(started)
                 if elapsed >= Self.longestTurn {
                     self.endTurn()
                     return
                 }
-                if self.state.isHandsFree, let heard = self.lastHeard,
-                   self.now().timeIntervalSince(heard) >= Self.pause(after: self.state.partial) {
+                guard self.state.isHandsFree, let heard = self.lastHeard else { continue }
+                let silence = self.now().timeIntervalSince(heard)
+                if silence >= Self.pause(after: self.state.partial) {
                     self.endTurn()
                     return
                 }
+                if silence >= Self.askAfter { self.askIfFinished(generation) }
             }
         }
+    }
+
+    /// A short pause: asks whether the words so far are a finished turn, and ends it at once if they are and nothing
+    /// has been said since (Carter, 10-30: "I thought jev would help us finish everything by 600ms"). Unsure, slow or
+    /// unavailable, the normal pause still ends it.
+    private func askIfFinished(_ generation: Int) {
+        let words = state.partial
+        guard let endpointer, !endpointerOff, askedAbout != words,
+              !words.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        askedAbout = words
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let done = try await endpointer.finished(sessionId: self.sessionId, text: words, callId: self.callId)
+                guard done >= Self.finishedAt, generation == self.listenGeneration, self.state.isListening,
+                      !self.stillSpeaking(),
+                      self.state.partial == words else { return }
+                self.timings.noteEarlyEnd()
+                self.endTurn()
+            } catch VoiceLineError.unavailable {
+                self.endpointerOff = true
+            } catch {
+                // Busy or failed: the normal pause ends the turn.
+            }
+        }
+    }
+
+    /// The microphone's level, as the phone hears it (the waveform's feed).
+    func hear(level: Double) {
+        if level >= Self.speakingLevel { lastLoud = now() }
+    }
+
+    /// Sound as loud as speech within the short pause: the words have not caught up with the voice yet.
+    private func stillSpeaking() -> Bool {
+        lastLoud.map { now().timeIntervalSince($0) < Self.askAfter } ?? false
     }
 
     /// How long a silence ends a hands-free turn: shorter once the words so far end a sentence.

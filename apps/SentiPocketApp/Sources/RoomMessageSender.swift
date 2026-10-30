@@ -697,3 +697,42 @@ extension HTTPRoomMessageSender: VoiceLining {
         }
     }
 }
+
+extension HTTPRoomMessageSender: VoiceEndpointing {
+    /// `POST /api/v1/sessions/{id}/voice/endpoint` with your own bearer: `{"done": 0..1}`.
+    func finished(sessionId: String, text: String, callId: String) async throws -> Double {
+        guard let apiBaseURL, var components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false) else {
+            throw VoiceLineError.unavailable
+        }
+        guard let token = tokenProvider(), !token.isEmpty else { throw VoiceLineError.notAllowed }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        guard !sessionId.isEmpty, sessionId.utf8.count <= 256,
+              let encodedSession = sessionId.addingPercentEncoding(withAllowedCharacters: allowed) else {
+            throw VoiceLineError.failed
+        }
+        components.percentEncodedPath = "/api/v1/sessions/\(encodedSession)/voice/endpoint"
+        components.query = nil
+        guard let url = components.url else { throw VoiceLineError.unavailable }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        // On the critical path of a conversation: an answer later than this is no faster than the plain pause.
+        request.timeoutInterval = 1.5
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["text": String(text.prefix(500)), "callId": callId])
+        let (data, response) = try await urlSession.data(for: request)
+        switch (response as? HTTPURLResponse)?.statusCode ?? 0 {
+        case 200: break
+        case 503, 404: throw VoiceLineError.unavailable
+        case 429: throw VoiceLineError.rateLimited(retryAfter: nil)
+        case 401, 403: throw VoiceLineError.notAllowed
+        default: throw VoiceLineError.failed
+        }
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let done = (json["done"] as? NSNumber)?.doubleValue, done >= 0, done <= 1 else {
+            throw VoiceLineError.failed
+        }
+        return done
+    }
+}
