@@ -1741,9 +1741,14 @@ private struct RoomComposerBar: View {
     private var outgoing: String { RoomComposerDraft.outgoing(draft, blocks: pasted) }
 
     var body: some View {
+        // Read once per redraw: each walks the whole draft, and a long draft made typing lag (ticket 7674d10b).
+        let outgoing = self.outgoing
+        let problem = composer.lengthProblem(for: outgoing)
+        let canSend = !outgoing.isEmpty && problem == nil
+        let suggestions = self.suggestions
         if composer.canPost {
             VStack(alignment: .leading, spacing: 0) {
-            if let problem = composer.lengthProblem(for: outgoing) {
+            if let problem {
                 Text(problem)
                     .font(.caption)
                     .foregroundStyle(PocketPalette.danger)
@@ -1968,10 +1973,6 @@ private struct RoomComposerBar: View {
                 .padding(.bottom, 6)
                 .accessibilityIdentifier("pocket.room.composerDisabled")
         }
-    }
-
-    private var canSend: Bool {
-        !outgoing.isEmpty && composer.lengthProblem(for: outgoing) == nil
     }
 }
 
