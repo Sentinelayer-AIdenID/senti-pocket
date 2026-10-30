@@ -11,13 +11,18 @@ final class ChatTableFitTests: XCTestCase {
     func test_a_narrow_table_with_long_cells_is_fitted_to_the_screen_and_wraps() {
         let long = String(repeating: "word ", count: 30)
         let two = table(["Step", "What happens"], [["1", long], ["2", long]])
-        let fit = two.fittedWidths(available: 330)
+        XCTAssertFalse(two.fittedWidths(available: 330).scrolls)
+        XCTAssertEqual(two.fittedWidths(available: 330).widths, two.columnWidths(), "a long column is capped: it fits")
+
+        let three = table(["#", "Before", "After"], [["1", long, long]])
+        let fit = three.fittedWidths(available: 330)
         XCTAssertFalse(fit.scrolls)
         XCTAssertEqual(fit.widths.reduce(0, +), 330, accuracy: 0.5, "it fills the screen and no more")
-        XCTAssertEqual(fit.widths[0], two.columnWidths()[0], accuracy: 0.5, "a short column keeps its width")
+        XCTAssertEqual(fit.widths[0], three.columnWidths()[0], accuracy: 0.5, "a short column keeps its width")
+        XCTAssertTrue(fit.widths.dropFirst().allSatisfy { $0 >= 90 }, "the long ones give way, staying readable")
 
-        let three = table(["A", "B", "C"], [[long, long, long]])
-        let fitThree = three.fittedWidths(available: 330)
+        let even = table(["A", "B", "C"], [[long, long, long]])
+        let fitThree = even.fittedWidths(available: 330)
         XCTAssertFalse(fitThree.scrolls)
         XCTAssertEqual(fitThree.widths.reduce(0, +), 330, accuracy: 0.5)
         XCTAssertTrue(fitThree.widths.allSatisfy { $0 >= 90 }, "every column stays readable")
