@@ -320,6 +320,7 @@ struct RoomChatScreen: View {
             ringer: RingbackTone(),
             poster: voicePoster,
             voiceLine: voicePoster as? any VoiceLining,
+            endpointer: voicePoster as? any VoiceEndpointing,
             onEnded: { endVoiceRoom() },
             onRecordFailed: { [weak coordinator] failure in coordinator?.show(notice: failure) }
         )
