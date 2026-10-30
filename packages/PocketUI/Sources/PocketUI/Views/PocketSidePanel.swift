@@ -49,11 +49,14 @@ public struct PocketSidePanel: View {
     private let rooms: [Room]
     private let currentRoomId: String?
     private let unreadNotifications: Int
+    /// How many asks wait on your decision; nil where the server has no such list yet.
+    private let waitingOnYou: Int?
     private let accountName: String?
     @Binding private var theme: PocketThemePreference
     private let onSelectRoom: (String) -> Void
     private let onAllRooms: () -> Void
     private let onNotifications: () -> Void
+    private let onWaitingOnYou: () -> Void
     private let onCalls: () -> Void
     private let onActivity: () -> Void
     private let onSettings: () -> Void
@@ -65,11 +68,13 @@ public struct PocketSidePanel: View {
         rooms: [Room],
         currentRoomId: String?,
         unreadNotifications: Int,
+        waitingOnYou: Int? = nil,
         accountName: String?,
         theme: Binding<PocketThemePreference>,
         onSelectRoom: @escaping (String) -> Void,
         onAllRooms: @escaping () -> Void,
         onNotifications: @escaping () -> Void,
+        onWaitingOnYou: @escaping () -> Void = {},
         onCalls: @escaping () -> Void,
         onActivity: @escaping () -> Void,
         onSettings: @escaping () -> Void,
@@ -78,11 +83,13 @@ public struct PocketSidePanel: View {
         self.rooms = rooms
         self.currentRoomId = currentRoomId
         self.unreadNotifications = unreadNotifications
+        self.waitingOnYou = waitingOnYou
         self.accountName = accountName
         _theme = theme
         self.onSelectRoom = onSelectRoom
         self.onAllRooms = onAllRooms
         self.onNotifications = onNotifications
+        self.onWaitingOnYou = onWaitingOnYou
         self.onCalls = onCalls
         self.onActivity = onActivity
         self.onSettings = onSettings
@@ -141,6 +148,10 @@ public struct PocketSidePanel: View {
             VStack(spacing: 2) {
                 if let onNewRoom {
                     shortcut("New room", icon: "plus.bubble", id: "newRoom", action: onNewRoom)
+                }
+                // Decisions first: what is waiting on you, across every room (Carter, 10-30).
+                if let waitingOnYou {
+                    shortcut("Waiting on you", icon: "hand.raised", badge: waitingOnYou, id: "waiting", action: onWaitingOnYou)
                 }
                 shortcut("Notifications", icon: "bell", badge: unreadNotifications, id: "notifications", action: onNotifications)
                 shortcut("Calls & briefings", icon: "phone", id: "calls", action: onCalls)

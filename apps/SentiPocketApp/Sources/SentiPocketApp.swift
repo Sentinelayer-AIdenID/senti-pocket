@@ -186,6 +186,9 @@ private struct AuthenticatedRootView: View {
     @StateObject private var revocationRelay: AuthenticatedSessionRevocationRelay
     @StateObject private var notifications: NotificationsCoordinator
     @State private var presentsNotifications = false
+    /// What waits on your decision across your rooms (ticket 931e1d2e).
+    @StateObject private var waiting: WaitingOnYouCoordinator
+    @State private var presentsWaiting = false
     /// Which room is shown and uncovered, so its notifications are read only while you can see it (warden, #267).
     @StateObject private var roomReads: RoomReadTracker
     @Environment(\.scenePhase) private var rootScenePhase
@@ -313,6 +316,11 @@ private struct AuthenticatedRootView: View {
         )
         _notifications = StateObject(wrappedValue: notifications)
         _roomReads = StateObject(wrappedValue: RoomReadTracker(notifications: notifications))
+        _waiting = StateObject(wrappedValue: WaitingOnYouCoordinator(
+            transport: transport,
+            sender: HTTPRoomMessageSender(apiBaseURL: apiURL),
+            onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
+        ))
         _whisperModelCoordinator = ObservedObject(wrappedValue: whisperModelCoordinator)
         _incomingLinks = ObservedObject(wrappedValue: incomingLinks)
         self.roomTransport = transport
@@ -417,6 +425,7 @@ private struct AuthenticatedRootView: View {
         // Opening the side panel reads the bell, so its count is never older than the panel.
         .onChange(of: drawerOpen) { open in
             if open { Task { await notifications.refresh(force: true) } }
+            if open { Task { await waiting.refresh() } }
         }
         .preferredColorScheme(theme.wrappedValue.colorScheme)
         .sheet(isPresented: $presentsPocket) {
@@ -465,8 +474,16 @@ private struct AuthenticatedRootView: View {
                 }
             }
         }
+        .sheet(isPresented: $presentsWaiting) {
+            WaitingOnYouView(state: waiting.state, send: { intent in
+                guard let link = waiting.send(intent) else { return }
+                presentsWaiting = false
+                open(link)
+            }, onDone: { presentsWaiting = false })
+        }
         .onChange(of: rootScenePhase) { phase in
             if phase == .active { notifications.startPolling() } else { notifications.stopPolling() }
+            if phase == .active { waiting.startPolling() } else { waiting.stopPolling() }
         }
         .onChange(of: incomingLinks.revision) { _ in openPendingLinkIfReady() }
         .onChange(of: roomListSettled) { _ in openPendingLinkIfReady() }
@@ -508,6 +525,8 @@ private struct AuthenticatedRootView: View {
             )
             sessions.start()
             notifications.startPolling()
+            // Waiting on you is read from sign-in on, not only once the app comes back to the front (warden, #270).
+            waiting.startPolling()
             // Apple push: a tap opens its room at the message; the room on screen gets no banner.
             PushRegistrar.shared.inbox = incomingLinks
             PushRegistrar.shared.currentRoomId = { (roomPath.last ?? currentRoom)?.sessionId }
@@ -526,6 +545,7 @@ private struct AuthenticatedRootView: View {
             InAppBanner.shared.onOpen = nil
             InAppBanner.shared.dismiss()
             notifications.stopPolling()
+            waiting.stopPolling()
             sessions.clearSelection()
             details.clearSelection()
             checkpointPocket.clearSelection()
@@ -626,6 +646,7 @@ private struct AuthenticatedRootView: View {
             },
             currentRoomId: currentRoom?.sessionId,
             unreadNotifications: notifications.unreadCount,
+            waitingOnYou: waiting.state.isAvailable ? waiting.state.total : nil,
             accountName: accountName,
             theme: theme,
             onSelectRoom: { sessionId in show(roomRoute(for: sessionId)) },
@@ -638,6 +659,11 @@ private struct AuthenticatedRootView: View {
                 closeDrawer()
                 presentsNotifications = true
                 Task { await notifications.refresh(force: true) }
+            },
+            onWaitingOnYou: {
+                closeDrawer()
+                presentsWaiting = true
+                Task { await waiting.refresh() }
             },
             onCalls: {
                 closeDrawer()
@@ -687,7 +713,7 @@ private struct AuthenticatedRootView: View {
 
     /// Something over the room: a sheet, or the side panel.
     private var roomCovered: Bool {
-        drawerOpen || presentsNotifications || presentsPocket || presentsActivity || presentsSettings
+        drawerOpen || presentsNotifications || presentsWaiting || presentsPocket || presentsActivity || presentsSettings
     }
 
     /// The room list has loaded or failed, so a room opened from a link knows its title and your role in it.
