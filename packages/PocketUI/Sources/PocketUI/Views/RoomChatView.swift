@@ -19,6 +19,8 @@ public struct RoomChatView: View {
     @State private var threadDrafts: [Int64: String] = [:]
     @State private var readerAtBottom = true
     @State private var didInitialScroll = false
+    /// A new list each time the room is put back at its newest rows (see `reopenAtLatest()`).
+    @State private var listEpoch = 0
     @State private var anchorBeforeOlderLoad: String?
     /// A message the reader was taken to (a link, notification, search result or pin). It stays in place through
     /// pages loading above or below it and messages arriving, until the reader scrolls.
@@ -327,12 +329,15 @@ public struct RoomChatView: View {
                 }
             }
             .onChange(of: state.pending.count) { count in
-                // Sending always brings you to the bottom, where your message appears. Not animated: an animated
-                // scroll from far up lays out every row on the way while the message and the keyboard move. And on the
-                // next turn of the run loop, like the room's other scrolls, not inside the update that adds the row.
-                if count > 0 {
+                // Sending always brings you to the bottom, where your message appears. At the bottom, a short scroll
+                // on the next turn of the run loop. From up the history, the room is put back at its newest rows as a
+                // new list, the way it opens, instead of scrolling or trimming under the reader.
+                guard count > 0 else { return }
+                if readerAtBottom {
                     heldAnchor = nil
                     DispatchQueue.main.async { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
+                } else {
+                    reopenAtLatest()
                 }
             }
             .onChange(of: state.firstMessageId) { _ in
@@ -352,7 +357,20 @@ public struct RoomChatView: View {
                 setReaderAtBottom(true)
                 DispatchQueue.main.async { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
             }
+            // The whole list, its handlers with it, so a new one opens as the room does.
+            .id(listEpoch)
         }
+    }
+
+    /// Puts the room back at its newest rows as a new list, the way a room opens (which has never frozen), rather than
+    /// scrolling down to them or trimming the rows under the reader. Carter's 10-30 freezes all began with the room
+    /// moving a long way at a send; the last (14:53) came right after the trim to the newest rows, with the scroll still
+    /// to come.
+    private func reopenAtLatest() {
+        heldAnchor = nil
+        anchorBeforeOlderLoad = nil
+        didInitialScroll = false
+        listEpoch += 1
     }
 
     @ViewBuilder
@@ -470,7 +488,7 @@ public struct RoomChatView: View {
             // only its newest rows, then the jump is at once.
             if state.jumpDownKeepsLatest {
                 send(.keepLatestForJumpDown)
-                DispatchQueue.main.async { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
+                reopenAtLatest()
                 return
             }
             withAnimation(.easeOut(duration: 0.25)) {
