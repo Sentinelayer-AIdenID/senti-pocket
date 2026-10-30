@@ -1289,8 +1289,7 @@ private func emptyComposer(_ draft: Binding<String>, sent: String) {
     DispatchQueue.main.async {
         draft.wrappedValue = ""
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            let back = draft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !back.isEmpty, sent.contains(back) { draft.wrappedValue = "" }
+            if RoomComposerDraft.isWrittenBack(draft.wrappedValue, sent: sent) { draft.wrappedValue = "" }
         }
     }
 }
@@ -1836,7 +1835,8 @@ private struct RoomComposerBar: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + RoomComposerDraft.savedAfterSend) {
             guard sends == sending else { return }
             keepsSavedDraft = false
-            saveDraft()
+            // Typing since is saved; the sent text itself goes when the room confirms it (`forgetSaved`).
+            if !outgoing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { saveDraft() }
         }
     }
 

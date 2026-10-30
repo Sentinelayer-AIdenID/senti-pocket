@@ -122,6 +122,8 @@ struct SentiPocketApp: App {
                 onSignOut: {
                     // This phone stops getting the person's notifications before the sign-in goes.
                     PushRegistrar.shared.signOut()
+                    // And nobody else signing in here sees what they were writing.
+                    RoomComposerDraft.forgetAllSaved()
                     signIn.send(.signOut)
                 },
                 onReauthenticationRequired: { expectedEpoch in
@@ -142,6 +144,8 @@ struct SentiPocketApp: App {
                 onSignOut: {
                     // This phone stops getting the person's notifications before the sign-in goes.
                     PushRegistrar.shared.signOut()
+                    // And nobody else signing in here sees what they were writing.
+                    RoomComposerDraft.forgetAllSaved()
                     signIn.send(.signOut)
                 },
                 onReauthenticationRequired: { expectedEpoch in

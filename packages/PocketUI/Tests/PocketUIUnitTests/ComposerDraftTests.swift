@@ -91,5 +91,27 @@ final class ComposerDraftTests: XCTestCase {
         XCTAssertTrue(RoomComposerDraft.isWrittenBack(" screen ", sent: sent), "its last word, committed late")
         XCTAssertFalse(RoomComposerDraft.isWrittenBack("Also the logo", sent: sent), "new words are new")
         XCTAssertFalse(RoomComposerDraft.isWrittenBack("  ", sent: sent))
+        XCTAssertFalse(RoomComposerDraft.isWrittenBack("I", sent: sent), "a first keystroke is new typing")
+        XCTAssertFalse(RoomComposerDraft.isWrittenBack("make sure", sent: sent), "the middle of it is not its end")
+    }
+
+    /// Warden, #262: a confirmed send's saved text goes, but not newer text saved since; sign-out clears them all.
+    func test_saved_text_goes_once_its_send_is_confirmed_and_all_of_it_on_sign_out() throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "ComposerDraftTests"))
+        defer { defaults.removePersistentDomain(forName: "ComposerDraftTests") }
+        let key = RoomComposerDraft.savedKey(sessionId: "room-a")
+        defaults.set("Ship it tonight", forKey: key)
+        RoomComposerDraft.forgetSaved(sessionId: "room-a", sent: "Something else", in: defaults)
+        XCTAssertEqual(defaults.string(forKey: key), "Ship it tonight", "newer text stays")
+        RoomComposerDraft.forgetSaved(sessionId: "room-a", sent: "Ship it tonight", in: defaults)
+        XCTAssertNil(defaults.string(forKey: key))
+
+        defaults.set("a", forKey: RoomComposerDraft.savedKey(sessionId: "room-a"))
+        defaults.set("b", forKey: RoomComposerDraft.savedKey(sessionId: "room-b"))
+        defaults.set(true, forKey: "pocket.inapp.sounds")
+        RoomComposerDraft.forgetAllSaved(in: defaults)
+        XCTAssertNil(defaults.string(forKey: RoomComposerDraft.savedKey(sessionId: "room-a")))
+        XCTAssertNil(defaults.string(forKey: RoomComposerDraft.savedKey(sessionId: "room-b")))
+        XCTAssertTrue(defaults.bool(forKey: "pocket.inapp.sounds"), "other settings stay")
     }
 }
