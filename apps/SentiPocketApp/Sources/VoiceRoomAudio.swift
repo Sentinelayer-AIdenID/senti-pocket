@@ -139,6 +139,18 @@ final class PhoneVoiceRoomAudioSession: VoiceRoomAudioSession {
     }
 }
 
+/// An answered agent's call: CallKit owns the audio session (it activates it after the answer and ends it with the
+/// call), so the voice room only sets how it sounds, as a call does (the dial's category, with echo cancellation).
+/// This is what lets the call talk with the phone locked.
+final class CallKitVoiceRoomAudioSession: VoiceRoomAudioSession {
+    func activate() throws {
+        try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .voiceChat,
+                                                        options: [.defaultToSpeaker, .allowBluetooth])
+    }
+
+    func deactivate() {}
+}
+
 /// Apple's on-device recognizer, as in push-to-talk, but it leaves the audio session to the voice room and reports
 /// partial results. It never falls back to server recognition.
 final class OnDeviceVoiceListener: VoiceListening {
