@@ -120,7 +120,7 @@ final class VoiceCallCardTests: XCTestCase {
     func test_an_agent_added_mid_call_is_rung_by_mention_and_its_answers_fold_into_the_card() {
         let add = VoiceCallMarkers.added(caller: "mrrcarter", agent: "claude-warden", joining: ["pocket-forge"])
         XCTAssertTrue(add.hasPrefix("📞 Adding @claude-warden: mrrcarter added you to a voice room already going with pocket-forge."))
-        XCTAssertTrue(add.contains("the first agent to answer a turn has the floor"))
+        XCTAssertTrue(add.contains("The first agent to answer a turn has the floor"), "the added agent learns the floor rule")
         XCTAssertEqual(VoiceCallMarkers.addedAgents(in: add), ["claude-warden"], "only the added agent is mentioned")
         XCTAssertNil(VoiceCallMarkers.calledAgents(in: add), "an add never opens a call of its own")
         XCTAssertNil(VoiceCallMarkers.addedAgents(in: VoiceCallMarkers.start(caller: "mrrcarter", agents: ["a"], meeting: false)))
