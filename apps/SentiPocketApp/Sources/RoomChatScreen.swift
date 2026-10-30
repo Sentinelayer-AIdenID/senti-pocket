@@ -223,6 +223,23 @@ struct RoomChatScreen: View {
         )
     }
 
+    /// The message being read, brought into view (Carter, #55229); a reply opens its thread.
+    private func showReadingMessage() {
+        guard let id = reader.readingId else { return }
+        if id.hasPrefix("msg:"), let sequence = Int64(id.dropFirst("msg:".count)) {
+            coordinator.send(.jumpToMessage(sequenceId: sequence))
+        } else if id.hasPrefix("reply:") {
+            let replyId = String(id.dropFirst("reply:".count))
+            let shown = coordinator.state.rows.lazy.compactMap { row -> Int64? in
+                if case .message(let message) = row, message.inlineReplyId == replyId { return message.sequenceId }
+                return nil
+            }.first
+            if let parent = shown ?? coordinator.state.thread?.parent.sequenceId {
+                coordinator.send(.openThread(sequenceId: parent))
+            }
+        }
+    }
+
     /// Whose message (or reply) is being read, for the player.
     private func readAloudTitle(for id: String) -> String? {
         if id.hasPrefix("msg:"), let sequence = Int64(id.dropFirst("msg:".count)),
@@ -492,6 +509,7 @@ struct RoomChatScreen: View {
                     case .togglePause: if playback.isPaused { reader.resume() } else { reader.pause() }
                     case .skip(let seconds): reader.skip(by: seconds)
                     case .close: reader.stop()
+                    case .showMessage: showReadingMessage()
                     }
                 }
                 .padding(.bottom, 72)

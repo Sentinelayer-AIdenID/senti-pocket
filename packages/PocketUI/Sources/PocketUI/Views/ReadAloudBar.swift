@@ -38,6 +38,8 @@ public enum ReadAloudBarIntent: Equatable, Sendable {
     case togglePause
     case skip(TimeInterval)
     case close
+    /// Take me to the message being read (Carter, #55229: "I can't remember what that message was").
+    case showMessage
 }
 
 /// The player for Listen, as in the assistant apps: who is being read, the time, back and forward 15 s, pause and
@@ -59,10 +61,17 @@ public struct ReadAloudBar: View {
                     Image(systemName: state.isPaused ? "speaker.wave.2" : "speaker.wave.2.fill")
                         .foregroundStyle(PocketPalette.listening)
                         .accessibilityHidden(true)
-                    Text(state.title.map { "Reading \($0)" } ?? "Reading aloud")
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(PocketPalette.textPrimary)
-                        .lineLimit(1)
+                    Button {
+                        send(.showMessage)
+                    } label: {
+                        Text(state.title.map { "Reading \($0)" } ?? "Reading aloud")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(PocketPalette.textPrimary)
+                            .lineLimit(1)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Shows the message being read")
+                    .accessibilityIdentifier("pocket.readAloud.title")
                     Spacer(minLength: 4)
                     Text("\(ReadAloudBarState.clock(elapsed)) / \(ReadAloudBarState.clock(state.total))")
                         .font(.caption.monospacedDigit())
