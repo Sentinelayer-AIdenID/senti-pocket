@@ -157,6 +157,21 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         self.eventType = event
     }
 
+    /// The message as it reads now, from a `session_message_edited` envelope (`session-message-edit:v1`). The
+    /// server alone writes these (it refuses one from any client) and carries the edited message whole in
+    /// `payload.event`, at the message's own sequence, revision and `editedAt`. Nil for a reply's edit, or when
+    /// the message inside is not the one the envelope names.
+    public static func edited(from json: JSONValue) -> RoomMessage? {
+        guard json["event"]?.stringValue == "session_message_edited",
+              let payload = json["payload"], payload["reply"]?.objectValue == nil,
+              let inner = payload["event"], let message = RoomMessage(json: inner), message.kind == .message,
+              message.sequenceId == payload["targetSequenceId"]?.intValue,
+              message.id == payload["targetMessageId"]?.stringValue else {
+            return nil
+        }
+        return message
+    }
+
     /// Human identities are server-authored as `human-<user>`; agents can never claim that prefix.
     public static func isHumanAuthor(_ authorId: String) -> Bool {
         authorId.lowercased().hasPrefix("human-") || authorId.lowercased() == "human"
@@ -179,6 +194,9 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
 /// One page of room events from `GET /events/before` or `GET /events`, decoded row by row.
 public struct RoomEventPage: Decodable, Equatable, Sendable {
     public let messages: [RoomMessage]
+    /// Messages edited in this page's span, as they read now (`RoomMessage.edited(from:)`). They replace rows
+    /// already shown and never add one.
+    public let edits: [RoomMessage]
     /// Rows present on the wire (displayable or not). Lets the caller tell "nothing displayable" from "empty".
     public let rawCount: Int
     /// Rows that carried an identity the app could not read. Never silently zero when rows were dropped.
@@ -203,6 +221,7 @@ public struct RoomEventPage: Decodable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let rows = try container.decode([JSONValue].self, forKey: .events)
         var messages: [RoomMessage] = []
+        var edits: [RoomMessage] = []
         var undecodable = 0
         var maxSequence: Int64?
         var minSequence: Int64?
@@ -214,9 +233,14 @@ public struct RoomEventPage: Decodable, Equatable, Sendable {
                 undecodable += 1
                 continue
             }
-            if let message = RoomMessage(json: row) { messages.append(message) }
+            if let message = RoomMessage(json: row) {
+                messages.append(message)
+            } else if let edited = RoomMessage.edited(from: row) {
+                edits.append(edited)
+            }
         }
         self.messages = messages
+        self.edits = edits
         self.rawCount = rows.count
         self.undecodableCount = undecodable
         self.maxSequence = maxSequence
@@ -230,6 +254,7 @@ public struct RoomEventPage: Decodable, Equatable, Sendable {
 
     public init(
         messages: [RoomMessage],
+        edits: [RoomMessage] = [],
         rawCount: Int? = nil,
         undecodableCount: Int = 0,
         maxSequence: Int64? = nil,
@@ -238,6 +263,7 @@ public struct RoomEventPage: Decodable, Equatable, Sendable {
         hasMore: Bool = false
     ) {
         self.messages = messages
+        self.edits = edits
         self.rawCount = rawCount ?? messages.count
         self.undecodableCount = undecodableCount
         self.maxSequence = maxSequence ?? messages.map(\.sequenceId).max()
@@ -313,6 +339,19 @@ public struct RoomTimeline: Equatable, Sendable {
             }
         }
         return result
+    }
+
+    /// Edited messages replace the rows they edit, at a higher revision only. A message not loaded is left alone:
+    /// it shows edited when its part of the room loads. Returns the ids replaced.
+    @discardableResult
+    public mutating func applyEdits(_ edits: [RoomMessage]) -> [String] {
+        var replaced: [String] = []
+        for message in edits {
+            guard let index = indexOfSameMessage(as: message), message.revision > messages[index].revision else { continue }
+            messages[index] = message
+            replaced.append(message.id)
+        }
+        return replaced
     }
 
     /// Replaces the loaded rows with a window around a message further back. Older and newer neighbours then load

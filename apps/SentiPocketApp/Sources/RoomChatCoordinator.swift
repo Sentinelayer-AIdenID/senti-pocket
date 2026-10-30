@@ -476,6 +476,7 @@ final class RoomChatCoordinator: ObservableObject {
                     guard current == self.generation, self.timeline.hasMoreNewer else { return }
                     let oldest = self.timeline.oldestSequence
                     self.timeline.merge(page.messages, trimming: .oldest)
+                    self.timeline.applyEdits(page.edits)
                     self.noteOldestTrimmed(was: oldest)
                     self.reconcilePending(with: page.messages)
                     from = max(from, page.maxSequence ?? from)
@@ -1261,6 +1262,11 @@ final class RoomChatCoordinator: ObservableObject {
             Task { [weak self] in await self?.refreshActions() }
             refreshBreakoutsIfNeeded(for: [message])
             return true
+        case .edited(let message, let sequenceId):
+            connection = .live
+            lastAppliedSequence = max(lastAppliedSequence, sequenceId)
+            if !timeline.applyEdits([message]).isEmpty { publish() }
+            return true
         case .nonDisplayable(let sequenceId):
             connection = .live
             lastAppliedSequence = max(lastAppliedSequence, sequenceId)
@@ -1296,6 +1302,9 @@ final class RoomChatCoordinator: ObservableObject {
         } else {
             noteLiveArrivals(page.messages)
         }
+        // After the page's own rows, so an edit of a message in the same page lands on it (Carter, #55371: an edit
+        // made elsewhere showed neither its text nor "edited" until the room was reopened).
+        timeline.applyEdits(page.edits)
         if let maxSequence = page.maxSequence {
             lastAppliedSequence = max(lastAppliedSequence, maxSequence)
         }

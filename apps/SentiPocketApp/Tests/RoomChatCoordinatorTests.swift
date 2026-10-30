@@ -194,6 +194,54 @@ final class RoomChatCoordinatorTests: XCTestCase {
         coordinator.pause()
     }
 
+    /// Carter, #55371: a message edited elsewhere showed neither its new text nor "edited" until the room reopened.
+    private func edit(of seq: Int64, text: String) -> RoomMessage {
+        RoomMessage(id: "evt-\(seq)", sequenceId: seq, kind: .message, authorId: "human-mrrcarter", authorName: "mrrCarter",
+                    isHuman: true, text: text, timestamp: "2026-10-28T18:00:00.000000+00:00", revision: 2, isEdited: true)
+    }
+
+    private func editedRow(_ coordinator: RoomChatCoordinator, _ seq: Int64) -> (text: String, isEdited: Bool)? {
+        for row in coordinator.state.rows {
+            if case .message(let message) = row, message.sequenceId == seq { return (message.text, message.isEdited) }
+        }
+        return nil
+    }
+
+    func test_an_edit_made_elsewhere_shows_live_with_edited_and_adds_no_row() async {
+        let transport = ScriptedRoomTransport(before: [.success(page([1, 2]))])
+        let coordinator = makeCoordinator(transport)
+        coordinator.resume()
+        await waitUntil("stream opened") { transport.snapshot().streams.count == 1 }
+
+        coordinator.handle(.edited(edit(of: 2, text: "Better words"), sequenceId: 7))
+        XCTAssertEqual(editedRow(coordinator, 2)?.text, "Better words")
+        XCTAssertEqual(editedRow(coordinator, 2)?.isEdited, true)
+        XCTAssertEqual(messageSequences(coordinator), [1, 2])
+
+        coordinator.handle(.edited(edit(of: 40, text: "Not loaded"), sequenceId: 41))
+        XCTAssertEqual(messageSequences(coordinator), [1, 2], "an edit of a message not loaded brings nothing in")
+        coordinator.pause()
+    }
+
+    func test_a_catch_up_page_applies_the_edits_in_it_after_its_rows() async {
+        let transport = ScriptedRoomTransport(
+            before: [.success(page([1, 2]))],
+            after: [.success(RoomEventPage(messages: [message(3)], edits: [edit(of: 3, text: "Edited at once"), edit(of: 1, text: "First, edited")],
+                                           maxSequence: 6))],
+            streams: [[.ended(.retryable(retryAfterSeconds: nil))]]
+        )
+        let coordinator = makeCoordinator(transport)
+        coordinator.resume()
+
+        await waitUntil("reconnected") { transport.snapshot().streams.count == 2 }
+        XCTAssertEqual(transport.snapshot().streams, [2, 6], "the next read starts after the edit")
+        XCTAssertEqual(messageSequences(coordinator), [1, 2, 3])
+        XCTAssertEqual(editedRow(coordinator, 1)?.text, "First, edited")
+        XCTAssertEqual(editedRow(coordinator, 3)?.text, "Edited at once")
+        XCTAssertEqual(editedRow(coordinator, 2)?.isEdited, false)
+        coordinator.pause()
+    }
+
     func test_access_denied_stops_the_room_and_shows_no_rows() async {
         let transport = ScriptedRoomTransport(
             before: [.success(page([1, 2]))],
