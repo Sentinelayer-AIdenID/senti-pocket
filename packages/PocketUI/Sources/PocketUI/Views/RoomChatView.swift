@@ -181,16 +181,13 @@ public struct RoomChatView: View {
                             .accessibilityIdentifier("pocket.room.invite")
                         }
                     } label: {
-                        HStack(spacing: 4) {
-                            Text(state.title)
-                                .font(.headline)
-                                .foregroundStyle(PocketPalette.textPrimary)
-                                .lineLimit(1)
-                            Image(systemName: "chevron.down.circle.fill")
-                                .font(.caption)
-                                .foregroundStyle(PocketPalette.textSecondary)
-                        }
+                        Text(state.title)
+                            .font(.headline)
+                            .foregroundStyle(PocketPalette.textPrimary)
+                            .lineLimit(1)
                     }
+                    // The system's own chevron marks the menu; a second one of ours doubled it on iOS 26.
+                    .menuIndicator(.visible)
                     .accessibilityLabel(state.title)
                     .accessibilityHint("Opens the room's menu")
                     .accessibilityIdentifier("pocket.room.title")
