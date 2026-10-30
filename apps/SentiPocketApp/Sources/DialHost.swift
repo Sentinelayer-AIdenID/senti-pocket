@@ -184,21 +184,39 @@ final class DialHost: ObservableObject {
         on callManager: SentiCallManager,
         coordinator: DialCoordinator
     ) {
+        // Agents' room calls (the API's doorbell) ring through the same CallKit provider. The desk owns their UUIDs,
+        // so none of them ever reaches the dial flow below, and no dial UUID reaches the desk.
+        let desk = RoomCallDesk.shared
+        desk.endSystemCall = { [weak callManager] uuid in callManager?.end(uuid) }
+        callManager.isRoomCallAuthorized = { SessionTokenStore.load()?.isEmpty == false }
+        callManager.onRoomCallReceived = { doorbell, uuid in desk.received(doorbell, uuid: uuid) }
         // Adapter 1 — admit one reported CallKit episode, then store its receive state under the exact UUID.
         callManager.onDialReceived = { [weak self] state, dialId, callUUID in
             self?.callReported(state: state, dialId: dialId, callUUID: callUUID)
         }
         // Adapter 2 — hydrate + run off the dialId + CallKit UUID ONLY; never off IncomingDecisionCall.message.
         callManager.onAnswered = { [weak self] call in
+            if desk.owns(call.id) {
+                // CallKit activates audio after the answer; set the call category first, as a dial does.
+                try? self?.prepareCallKitAudioSession()
+                desk.answered(call.id)
+                return
+            }
             self?.answer(dialId: call.dialId, callUUID: call.id)
         }
         callManager.onEnded = { [weak self] callUUID in
+            if desk.owns(callUUID) {
+                desk.ended(callUUID)
+                return
+            }
             self?.callEnded(callUUID)
         }
         callManager.onAudioSessionActivated = { [weak self] _, callUUID in
+            guard !desk.owns(callUUID) else { return }
             self?.callKitAudioActivated(callUUID)
         }
         callManager.onAudioSessionDeactivated = { [weak self] _, callUUID in
+            guard !desk.owns(callUUID) else { return }
             self?.callKitAudioDeactivated(callUUID)
         }
     }
@@ -305,6 +323,8 @@ final class DialHost: ObservableObject {
     private func voipTokenUpdated(_ token: String) {
         let replacedExistingRoute = observedVoipToken.map { $0 != token } ?? false
         observedVoipToken = token
+        // The API rings this phone for agents' room calls with the same token (`kind: voip`).
+        PushRegistrar.shared.voipTokenUpdated(token)
         // Mutate the registrar's token synchronously before CallKit teardown can re-enter receive authorization.
         _ = registrar?.tokenUpdated(token)
         if replacedExistingRoute {
@@ -314,6 +334,7 @@ final class DialHost: ObservableObject {
 
     private func voipTokenInvalidated() {
         observedVoipToken = nil
+        PushRegistrar.shared.voipTokenInvalidated()
         // Clear the binding gate and persist denial before CallKit teardown invokes any external callbacks.
         _ = registrar?.tokenInvalidated()
         closeCallAuthorityPreservingSelection()

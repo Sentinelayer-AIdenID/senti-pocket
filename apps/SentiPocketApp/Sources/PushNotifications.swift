@@ -13,10 +13,20 @@ struct PushDeviceClient: Sendable {
 
     enum Failure: Error, Equatable { case notConfigured, signedOut, refused(Int), unreachable }
 
-    func register(token: String, environment: String, bundleId: String, appVersion: String?) async throws {
+    /// `kind` is "voip" for the PushKit token agents' calls ring (sentinelayer-api #1046); an alert token sends none,
+    /// so a server without calls still accepts it.
+    func register(token: String, environment: String, bundleId: String, appVersion: String?, kind: String? = nil) async throws {
+        try await send("PUT", path: "/api/v1/me/push-devices",
+                       body: Self.registration(token: token, environment: environment, bundleId: bundleId,
+                                               appVersion: appVersion, kind: kind))
+    }
+
+    static func registration(token: String, environment: String, bundleId: String, appVersion: String?,
+                             kind: String?) -> [String: Any] {
         var body: [String: Any] = ["token": token, "environment": environment, "bundleId": bundleId]
         if let appVersion { body["appVersion"] = appVersion }
-        try await send("PUT", path: "/api/v1/me/push-devices", body: body)
+        if let kind { body["kind"] = kind }
+        return body
     }
 
     func unregister(token: String) async throws {
@@ -82,6 +92,8 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
     @AppStorage("pocket.push.vibrate") var vibrate = true
     @AppStorage("pocket.push.previews") var showPreviews = true
     @AppStorage("pocket.push.token") private var storedToken = ""
+    /// The PushKit token agents' calls ring, registered with the API while someone is signed in.
+    @AppStorage("pocket.push.voipToken") private var storedVoipToken = ""
 
     /// Where a tapped notification goes.
     weak var inbox: IncomingLinkInbox?
@@ -101,8 +113,38 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
         if settings.authorizationStatus == .notDetermined {
             allowed = (try? await center.requestAuthorization(options: [.alert, .badge, .sound])) ?? false
         }
+        // Calls ring whether or not banners are allowed: CallKit shows them.
+        if !storedVoipToken.isEmpty { Task { await self.registerVoip(storedVoipToken) } }
         guard allowed else { return }
         UIApplication.shared.registerForRemoteNotifications()
+    }
+
+    /// PushKit's token for agents' calls: kept, and registered at once when someone is signed in.
+    func voipTokenUpdated(_ token: String) {
+        guard token != storedVoipToken else { return }
+        storedVoipToken = token
+        guard SessionTokenStore.load()?.isEmpty == false else { return }
+        Task { await self.registerVoip(token) }
+    }
+
+    /// PushKit dropped the token: the API stops ringing it.
+    func voipTokenInvalidated() {
+        guard !storedVoipToken.isEmpty else { return }
+        let token = storedVoipToken
+        storedVoipToken = ""
+        Task { try? await self.client.unregister(token: token) }
+    }
+
+    private func registerVoip(_ token: String) async {
+        #if DEBUG
+        let environment = "sandbox"
+        #else
+        let environment = "production"
+        #endif
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        // A server without calls refuses the kind; the next sign-in or token tries again.
+        try? await client.register(token: token, environment: environment,
+                                   bundleId: Bundle.main.bundleIdentifier ?? "", appVersion: version, kind: "voip")
     }
 
     func didRegister(deviceToken: Data) {
@@ -136,8 +178,13 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
         Task { try? await self.client.setPreferences(token: token, sound: sound, vibrate: vibrate, showPreviews: previews) }
     }
 
-    /// Sign-out: this phone stops getting this person's notifications.
+    /// Sign-out: this phone stops getting this person's notifications and calls.
     func signOut() {
+        if !storedVoipToken.isEmpty {
+            // The PushKit token itself is kept (PushKit does not re-send it); only this person's registration goes.
+            let voip = storedVoipToken
+            Task { try? await self.client.unregister(token: voip) }
+        }
         guard !storedToken.isEmpty else { return }
         let token = storedToken
         storedToken = ""
