@@ -108,31 +108,31 @@ public enum AgentLab: String, CaseIterable, Comparable, Sendable {
         return nil
     }
 
-    /// One agent here: its lab, whether it runs in a box, and its newest sign of activity (which changes each time it
-    /// does something, so its logo can beat once).
+    /// One agent here: its lab, whether it runs in a box, whether it is working, and its newest sign of activity (a new
+    /// post or a reply being prepared: a new value, so its logo can beat once).
     public struct Present: Equatable, Identifiable, Sendable {
         public let id: String
         public let lab: AgentLab
         public let isBox: Bool
         public let signal: String?
+        public let isWorking: Bool
 
-        public init(id: String, lab: AgentLab, isBox: Bool = false, signal: String? = nil) {
+        public init(id: String, lab: AgentLab, isBox: Bool = false, signal: String? = nil, isWorking: Bool? = nil) {
             self.id = id
             self.lab = lab
             self.isBox = isBox
             self.signal = signal
+            self.isWorking = isWorking ?? (signal != nil)
         }
-
-        public var isWorking: Bool { signal != nil }
     }
 
     /// Each agent here once, working ones first, then by name (Carter, #55506: "just having all the logos in the
     /// room ... have a max number on the screen and if that exceeds it we just put a group number"): the agents
     /// present, and the room's running boxes, which post through the room and are not in presence (Carter, #55533:
     /// "Astra is codex ... two of them and since they're in a box ... one more small badge"). `signals` is
-    /// `RoomChatPresentationState.agentSignals`, `boxes` the running boxes' names.
+    /// `RoomChatPresentationState.agentSignals`, `working` its `agentsWorking`, `boxes` the running boxes' names.
     public static func present(_ people: [RoomChatPresence.Person], models: [String: String],
-                               signals: [String: String], boxes: [String] = []) -> [Present] {
+                               signals: [String: String], working: Set<String> = [], boxes: [String] = []) -> [Present] {
         let boxIds = Set(boxes.map { $0.lowercased() })
         let byId = Dictionary(people.map { ($0.id.lowercased(), $0) }, uniquingKeysWith: { first, _ in first })
         var seen = Set<String>()
@@ -142,7 +142,8 @@ public enum AgentLab: String, CaseIterable, Comparable, Sendable {
                 let key = id.lowercased()
                 let person = byId[key]
                 return Present(id: id, lab: of(id: id, model: models[key], reported: person?.lab),
-                               isBox: (person?.isBox ?? false) || boxIds.contains(key), signal: signals[key])
+                               isBox: (person?.isBox ?? false) || boxIds.contains(key), signal: signals[key],
+                               isWorking: signals[key] != nil || working.contains(key))
             }
             .sorted { ($0.isWorking ? 0 : 1, $0.id.lowercased()) < ($1.isWorking ? 0 : 1, $1.id.lowercased()) }
     }
@@ -157,31 +158,33 @@ public enum AgentLab: String, CaseIterable, Comparable, Sendable {
 }
 
 extension RoomChatPresentationState {
-    /// The agents working now, lowercased id to their newest sign of it. The server says who is working and until when
-    /// (API #1055: `working`, `workingUntilMs`, renewed by each thing the agent does); Carter, #55506: "If Claude is
-    /// actively sending signals from his terminal that's him working". An agent not in presence (a box posting through
-    /// the room) counts by its newest post in the last `window`, and one preparing a reply counts too. A new sign is a
-    /// new value, which is what makes a logo beat once (Carter, #55533: "palpitation movement when it senses something
-    /// and then stillness").
+    /// Each agent's newest sign of activity, lowercased id to it: its newest post in the last `window`, or a reply
+    /// being prepared. A new sign is a new value, which is what makes a logo beat once (Carter, #55533: "palpitation
+    /// movement when it senses something and then stillness"; #55506: "If Claude is actively sending signals from his
+    /// terminal that's him working").
     public func agentSignals(now: Date, window: TimeInterval = 120) -> [String: String] {
         var signals: [String: String] = [:]
-        let present = presence?.people.filter { !$0.isHuman } ?? []
-        let nowMs = Int64(now.timeIntervalSince1970 * 1000)
-        for person in present where person.isWorking && (person.workingUntilMs ?? .max) > nowMs {
-            signals[person.id.lowercased()] = "working:" + (person.workingUntilMs.map(String.init) ?? "")
-        }
-        let reported = Set(present.map { $0.id.lowercased() })
         let since = now.addingTimeInterval(-window)
         for row in rows.reversed() {
             guard case .message(let message) = row, let date = message.date else { continue }
             if date < since { break }
             let id = message.authorId.lowercased()
-            if !message.isHuman, !reported.contains(id), signals[id] == nil { signals[id] = message.id }
+            if !message.isHuman, signals[id] == nil { signals[id] = message.id }
         }
         for agent in composingAgents {
             let id = agent.lowercased()
             signals[id] = "typing:" + (signals[id] ?? "")
         }
         return signals
+    }
+
+    /// The agents the server says are working now (API #1055: `working`, `workingUntilMs`). Its renewals only keep an
+    /// agent working; turning on is what beats (warden, #263: a producer renewing every second or two would otherwise
+    /// pulse without end).
+    public func agentsWorking(now: Date) -> Set<String> {
+        let nowMs = Int64(now.timeIntervalSince1970 * 1000)
+        return Set((presence?.people ?? [])
+            .filter { !$0.isHuman && $0.isWorking && ($0.workingUntilMs ?? .max) > nowMs }
+            .map { $0.id.lowercased() })
     }
 }

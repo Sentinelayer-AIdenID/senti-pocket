@@ -9,8 +9,10 @@ struct RoomPeopleAvatars: View {
     let presence: RoomChatPresence
     /// Each agent's model where the room knows it (a box's), lowercased id to model, to tell its lab.
     var models: [String: String] = [:]
-    /// Each working agent's newest sign of activity, by lowercased id: its logo beats once per new sign.
+    /// Each agent's newest sign of activity, by lowercased id: its logo beats once per new sign.
     var signals: [String: String] = [:]
+    /// The agents the server says are working, by lowercased id: a logo beats once as its agent starts.
+    var working: Set<String> = []
     /// The room's running boxes, by name: shown even when not in presence, with a box badge.
     var boxes: [String] = []
     let onOpen: () -> Void
@@ -61,7 +63,7 @@ struct RoomPeopleAvatars: View {
     }
 
     private var agentsHere: [AgentLab.Present] {
-        AgentLab.present(presence.people, models: models, signals: signals, boxes: boxes)
+        AgentLab.present(presence.people, models: models, signals: signals, working: working, boxes: boxes)
     }
 
     private var shownAgents: [AgentLab.Present] { AgentLab.shown(agentsHere).shown }
@@ -164,8 +166,9 @@ private struct AgentLogo: View {
                         .offset(x: 5, y: 5)
                 }
             }
-            .onAppear { if agent.signal != nil { beat() } }
+            .onAppear { if agent.isWorking { beat() } }
             .onChange(of: agent.signal) { signal in if signal != nil { beat() } }
+            .onChange(of: agent.isWorking) { working in if working { beat() } }
             .accessibilityHidden(true)
     }
 

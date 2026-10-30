@@ -112,11 +112,22 @@ final class AgentLogoTests: XCTestCase {
             presence: presence
         )
         let signals = state.agentSignals(now: now)
-        XCTAssertEqual(Set(signals.keys), ["claude-warden", "ds-box-1", "astra-council"])
-        XCTAssertEqual(signals["claude-warden"], "working:\(nowMs + 30_000)", "renewed working is a new beat")
-        XCTAssertNil(signals["sol-max"], "working that has run out is not working")
-        XCTAssertNil(signals["pocket-forge"], "present and not working, whatever it posted")
+        XCTAssertEqual(Set(signals.keys), ["ds-box-1", "pocket-forge", "astra-council"])
+        XCTAssertEqual(signals["pocket-forge"], "b", "warden, #263: a present agent not marked working still beats on a post")
         XCTAssertEqual(signals["ds-box-1"], "a", "a box not in presence counts by its newest post")
         XCTAssertEqual(signals["astra-council"], "typing:", "preparing a reply is a sign too")
+
+        let working = state.agentsWorking(now: now)
+        XCTAssertEqual(working, ["claude-warden"], "the server's word, while it holds; run out is not working")
+        let renewed = RoomChatPresentationState(
+            sessionId: "room", title: "Room", presence: RoomChatPresence.make(isAvailable: true, humansOnline: 0, people: [
+                RoomChatPresence.Person(id: "claude-warden", name: "claude-warden", isHuman: false, isIdle: false,
+                                        isWorking: true, workingUntilMs: nowMs + 40_000)
+            ]))
+        XCTAssertEqual(renewed.agentsWorking(now: now), working, "a renewal keeps it working; it is not a new beat")
+        XCTAssertNil(renewed.agentSignals(now: now)["claude-warden"])
+
+        let agents = AgentLab.present(presence.people, models: [:], signals: signals, working: working)
+        XCTAssertEqual(agents.filter(\.isWorking).map(\.id).sorted(), ["claude-warden", "pocket-forge"])
     }
 }
