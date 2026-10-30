@@ -93,6 +93,27 @@ final class RoomEventsTests: XCTestCase {
         XCTAssertEqual(row?.text, "Checkpoint 12")
     }
 
+    /// Carter (10-30): the web said "Joel joined", the phone "senti joined". The server posts a join as itself; who
+    /// joined is the payload's displayName.
+    func test_a_join_is_named_by_who_joined_not_the_server_that_posted_it() {
+        let row = RoomMessage(json: json("""
+        {"id":"j1","event":"session_member_joined","sequenceId":55649,"agent":{"id":"senti","model":"system"},
+         "payload":{"schema":"sentinelayer.session-member-joined.v1","source":"join_link",
+                    "displayName":"  Joel\\nDietz ","joinedAt":"2026-10-30T19:30:28Z"}}
+        """))
+        XCTAssertEqual(row?.kind, .memberJoined)
+        XCTAssertEqual(row?.text, "Joel Dietz", "one line, trimmed")
+        XCTAssertEqual(row?.authorId, "senti")
+
+        let unnamed = RoomMessage(json: json("""
+        {"id":"j2","event":"session_member_joined","sequenceId":55650,"agentId":"senti","payload":{}}
+        """))
+        XCTAssertEqual(unnamed?.text, "", "the room then says someone joined")
+
+        let reordered = RoomMessage(json: json(#"{"id":"j3","event":"session_member_joined","sequenceId":55651,"agentId":"senti","payload":{"displayName":"Jo\u202Eel\u2066 D"}}"#))
+        XCTAssertEqual(reordered?.text, "Joel D", "direction controls are dropped")
+    }
+
     // MARK: - Pages
 
     func test_page_decodes_row_by_row_and_counts_what_it_could_not_read() throws {
