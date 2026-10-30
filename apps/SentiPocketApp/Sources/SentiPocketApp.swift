@@ -38,7 +38,10 @@ struct SentiPocketApp: App {
         WindowGroup {
             rootView
                 .onAppear { whisperModel.start() }
-                .onOpenURL { url in _ = incomingLinks.receive(url) }
+                .onOpenURL { url in
+                    LaunchUrgency.shared.raise()
+                    _ = incomingLinks.receive(url)
+                }
             #if canImport(CallKit) && canImport(PushKit)
                 // The host is app-lifetime, but it constructs PushKit/CallKit only with a valid trusted gateway config.
                 .environmentObject(dialHost)

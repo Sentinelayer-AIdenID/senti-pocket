@@ -277,6 +277,7 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
     ) {
         let userInfo = response.notification.request.content.userInfo
         Task { @MainActor in
+            LaunchUrgency.shared.raise()
             if let link = PushRoute.link(from: userInfo) { self.inbox?.receive(link) }
             completionHandler()
         }
