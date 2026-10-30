@@ -83,6 +83,21 @@ final class RoomChatCoordinator: ObservableObject {
     static let actionsRefreshInterval: TimeInterval = 10
     /// How often an open room reads replies (the web polls about every 15s).
     static let actionsPollInterval: TimeInterval = 15
+    /// How often replies are read while a voice room is open: an answer in a thread is read aloud soon after.
+    static let voiceActionsPollInterval: TimeInterval = 3
+
+    /// A voice room listening in: each live message as it arrives, and each reply the first time it is read.
+    var onLiveMessages: (@MainActor ([RoomMessage]) -> Void)?
+    var onNewReplies: (@MainActor ([RoomReply]) -> Void)?
+    /// While a voice room is open, replies are read every few seconds.
+    var readsRepliesOften = false {
+        didSet {
+            guard readsRepliesOften, !oldValue else { return }
+            Task { [weak self] in await self?.refreshActions(force: true) }
+        }
+    }
+    /// Replies seen before any were read are not news.
+    private var hasReadReplies = false
     static let viewerReason = "You're a viewer in this room: you can read it, but not post."
     /// How long an accepted message waits for its echo before the pending row is dropped (the next poll still
     /// brings it in).
@@ -702,6 +717,10 @@ final class RoomChatCoordinator: ObservableObject {
         // The projection covers the newest actions; keep older summaries it no longer includes.
         for (sequence, summary) in page.byTarget { summaries[sequence] = summary }
         noteReplyAuthors(page.replies)
+        // Replies not seen before go to a voice room listening in (none on the first read: those are history).
+        let unseen = page.replies.filter { inlineReplies[$0.id] == nil }
+        if hasReadReplies, !unseen.isEmpty { onNewReplies?(unseen) }
+        hasReadReplies = true
         // Replies stay as rows too (newest revision wins), the newest few thousand.
         for reply in page.replies {
             if let known = inlineReplies[reply.id], known.revision >= reply.revision { continue }
@@ -1131,9 +1150,9 @@ final class RoomChatCoordinator: ObservableObject {
     /// the web does, so a reply shows in the room without waiting for the next message.
     private func runActionsPoll(_ current: UInt64) async {
         while !Task.isCancelled, current == generation {
-            await sleep(Self.actionsPollInterval)
+            await sleep(readsRepliesOften ? Self.voiceActionsPollInterval : Self.actionsPollInterval)
             guard current == generation, !Task.isCancelled else { return }
-            await refreshActions()
+            await refreshActions(force: readsRepliesOften)
         }
     }
 
@@ -1253,11 +1272,13 @@ final class RoomChatCoordinator: ObservableObject {
         if timeline.hasMoreNewer {
             let fresh = messages.filter { $0.sequenceId > lastAppliedSequence }
             unread.noteArrivals(fresh, readerIsAtBottom: false, selfAuthorIds: ownAuthorIds)
+            if !fresh.isEmpty { onLiveMessages?(fresh) }
         } else {
             let oldest = timeline.oldestSequence
             let result = timeline.merge(messages)
             noteOldestTrimmed(was: oldest)
             unread.noteArrivals(result.inserted, readerIsAtBottom: readerAtBottom, selfAuthorIds: ownAuthorIds)
+            if !result.inserted.isEmpty { onLiveMessages?(result.inserted) }
         }
     }
 

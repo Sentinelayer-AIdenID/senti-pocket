@@ -33,6 +33,9 @@ struct RoomChatScreen: View {
     /// Who is working on what (the boxes' flight records), read only while the panel is open.
     @StateObject private var flight: FlightRecordCoordinator
     @State private var showsFlight = false
+    /// A voice conversation in this room, while one is open.
+    @State private var voiceRoom: VoiceRoomCoordinator?
+    @State private var choosesVoicePartner = false
     @Environment(\.openURL) private var openExternalURL
     @Environment(\.scenePhase) private var scenePhase
     @State private var showsTickets = false
@@ -54,6 +57,8 @@ struct RoomChatScreen: View {
     private let admissionsTransport: (any RoomAdmissionsTransport)?
     private let admissionDecider: (any AdmissionDeciding)?
     private let ticketAnswerSender: (any RoomMessageSending)?
+    /// Posting spoken turns and the transcript, as you; nil where you cannot post.
+    private let voicePoster: (any VoiceRoomPosting)?
     private let ticketWriter: (any RoomTicketWriting)?
     private let ticketLeases: any TicketLeaseStoring
     private let ticketExtras: (any RoomTicketExtrasReading)?
@@ -91,6 +96,7 @@ struct RoomChatScreen: View {
         self.admissionDecider = admissionDecider
         // A viewer cannot post, so cannot answer a ticket's decision either.
         self.ticketAnswerSender = route.membershipRole.lowercased() == "viewer" ? nil : sender
+        self.voicePoster = route.membershipRole.lowercased() == "viewer" ? nil : sender as? any VoiceRoomPosting
         self.ticketWriter = ticketWriter
         self.ticketLeases = ticketLeases
         self.ticketExtras = ticketExtras
@@ -162,6 +168,50 @@ struct RoomChatScreen: View {
         return ids
     }
 
+    /// Whom you can talk with: the agents here now, then the agents who answered most recently.
+    private var voicePartners: [String] {
+        var ids: [String] = []
+        var seen = Set<String>()
+        let present = (coordinator.state.presence?.people ?? []).filter { !$0.isHuman }.map(\.id)
+        let authors = coordinator.state.rows.reversed().compactMap { row -> String? in
+            if case .message(let message) = row, !message.isHuman { return message.authorId }
+            return nil
+        }
+        for id in present + authors where !id.isEmpty && seen.insert(id.lowercased()).inserted {
+            ids.append(id)
+        }
+        return Array(ids.prefix(8))
+    }
+
+    private func startVoiceRoom(with agents: [String]) {
+        guard voiceRoom == nil, let voicePoster else { return }
+        reader.stop()
+        let handles = coordinator.state.ownMentionHandles.filter { $0 != "all" }.sorted()
+        let room = VoiceRoomCoordinator(
+            sessionId: route.sessionId,
+            with: agents,
+            you: handles.first ?? "you",
+            ownAuthorIds: Set(handles.map { "human-\($0)" }),
+            listener: OnDeviceVoiceListener(),
+            speaker: AgentVoiceSpeaker(),
+            audio: PhoneVoiceRoomAudioSession(),
+            poster: voicePoster,
+            onEnded: { endVoiceRoom() }
+        )
+        coordinator.onLiveMessages = { [weak room] messages in room?.receive(messages) }
+        coordinator.onNewReplies = { [weak room] replies in room?.receive(replies: replies) }
+        coordinator.readsRepliesOften = true
+        voiceRoom = room
+        room.begin()
+    }
+
+    private func endVoiceRoom() {
+        coordinator.onLiveMessages = nil
+        coordinator.onNewReplies = nil
+        coordinator.readsRepliesOften = false
+        voiceRoom = nil
+    }
+
     /// Contributors and above file and change tickets (the API's `min_role="contributor"`). An unknown role offers
     /// nothing: the API would decide, but a button it refuses is worse than none.
     private var writesTickets: Bool {
@@ -220,6 +270,18 @@ struct RoomChatScreen: View {
             }
         }
         .toolbar {
+            if voicePoster != nil {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        choosesVoicePartner = true
+                    } label: {
+                        Label("Talk", systemImage: "waveform")
+                    }
+                    .disabled(voiceRoom != nil)
+                    .accessibilityLabel("Talk with the agents by voice")
+                    .accessibilityIdentifier("pocket.room.talk")
+                }
+            }
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button {
                     flight.setAgents(flightAgents)
@@ -287,6 +349,26 @@ struct RoomChatScreen: View {
             }
         }
         .animation(.spring(response: 0.32, dampingFraction: 0.9), value: showsFlight)
+        .overlay(alignment: .bottom) {
+            if let voiceRoom {
+                VoiceRoomHost(room: voiceRoom)
+                    .padding(.bottom, 6)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.spring(response: 0.32, dampingFraction: 0.9), value: voiceRoom != nil)
+        .confirmationDialog("Talk with", isPresented: $choosesVoicePartner, titleVisibility: .visible) {
+            ForEach(voicePartners, id: \.self) { agent in
+                Button(agent) { startVoiceRoom(with: [agent]) }
+            }
+            Button("Everyone (a meeting)") { startVoiceRoom(with: []) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("You talk; they answer in the room and the phone reads each answer in that agent's voice. Hanging up saves the transcript to the room.")
+        }
+        .onDisappear {
+            if let voiceRoom { Task { await voiceRoom.hangUp() } }
+        }
         .onChange(of: coordinator.state.presence) { _ in
             if showsFlight { flight.setAgents(flightAgents) }
         }
@@ -495,5 +577,14 @@ private struct RoomSearchSheet: View {
                 model.send(intent)
             }
         }
+    }
+}
+
+/// Watches the voice room so its panel follows every change.
+private struct VoiceRoomHost: View {
+    @ObservedObject var room: VoiceRoomCoordinator
+
+    var body: some View {
+        VoiceRoomPanel(state: room.state, send: room.send)
     }
 }

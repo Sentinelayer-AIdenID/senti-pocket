@@ -247,6 +247,11 @@ enum VoicePicker {
     /// The best installed voice for `language`: premium, then enhanced, then standard; among equals, the system's own
     /// choice for the language, then the phone's region. Nil when no voice speaks it.
     static func voice(for language: String, phoneLanguageTag: String, from options: [VoiceOption]) -> String? {
+        ranked(for: language, phoneLanguageTag: phoneLanguageTag, from: options).first?.identifier
+    }
+
+    /// Every installed voice for `language`, best first (the order `voice(for:)` picks from).
+    static func ranked(for language: String, phoneLanguageTag: String, from options: [VoiceOption]) -> [VoiceOption] {
         let wanted = code(language)
         let phoneTag = phoneLanguageTag.replacingOccurrences(of: "_", with: "-").lowercased()
         return options
@@ -256,8 +261,6 @@ enum VoicePicker {
                 let right = rank(rhs, phoneTag: phoneTag)
                 return left != right ? left > right : lhs.identifier < rhs.identifier
             }
-            .first?
-            .identifier
     }
 
     private static func rank(_ option: VoiceOption, phoneTag: String) -> (Int, Int, Int) {

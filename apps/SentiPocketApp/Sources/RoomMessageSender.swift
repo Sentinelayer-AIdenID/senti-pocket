@@ -320,3 +320,110 @@ final class HTTPRoomActionSender: RoomActionSending, @unchecked Sendable {
         }
     }
 }
+
+/// A saved transcript, as a message references it.
+struct VoiceTranscriptAttachment: Equatable, Sendable {
+    let attachmentId: String
+    let filename: String
+    let kind: String?
+    let contentType: String?
+    let sizeBytes: Int?
+    let status: String?
+
+    /// The attachment as the API's message payload takes it.
+    var reference: [String: Any] {
+        var json: [String: Any] = ["attachmentId": attachmentId, "filename": filename]
+        if let kind { json["kind"] = kind }
+        if let contentType { json["contentType"] = contentType }
+        if let sizeBytes { json["sizeBytes"] = sizeBytes }
+        if let status { json["status"] = status }
+        return json
+    }
+}
+
+/// What a voice room writes to the room, as you: your spoken turns (`channel: "voice"`, so the room shows them as
+/// transcript), the transcript as a Markdown file, and the message that closes the call with it attached.
+protocol VoiceRoomPosting: Sendable {
+    func postVoiceTurn(sessionId: String, text: String, clientId: String) async throws
+    func uploadTranscript(sessionId: String, filename: String, markdown: String, clientId: String) async throws -> VoiceTranscriptAttachment
+    func postCallEnded(sessionId: String, text: String, transcript: VoiceTranscriptAttachment?, clientId: String) async throws
+}
+
+extension HTTPRoomMessageSender: VoiceRoomPosting {
+    func postVoiceTurn(sessionId: String, text: String, clientId: String) async throws {
+        _ = try await post(sessionId: sessionId, path: "human-message", idempotencyKey: clientId, body: [
+            "text": text, "clientId": clientId, "channel": "voice"
+        ])
+    }
+
+    func uploadTranscript(sessionId: String, filename: String, markdown: String, clientId: String) async throws -> VoiceTranscriptAttachment {
+        let data = try await post(sessionId: sessionId, path: "attachments", idempotencyKey: clientId, body: [
+            "filename": filename, "content": markdown, "contentType": "text/markdown", "clientAttachmentId": clientId
+        ])
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let attachment = (root["attachment"] as? [String: Any]) ?? (root["attachmentId"] != nil ? root : nil),
+              let id = attachment["attachmentId"] as? String, !id.isEmpty else {
+            throw RoomSendError.rejected
+        }
+        return VoiceTranscriptAttachment(
+            attachmentId: id,
+            filename: (attachment["filename"] as? String) ?? filename,
+            kind: attachment["kind"] as? String,
+            contentType: attachment["contentType"] as? String,
+            sizeBytes: attachment["sizeBytes"] as? Int,
+            status: attachment["status"] as? String
+        )
+    }
+
+    func postCallEnded(sessionId: String, text: String, transcript: VoiceTranscriptAttachment?, clientId: String) async throws {
+        var body: [String: Any] = ["text": text, "clientId": clientId]
+        if let transcript { body["attachments"] = [transcript.reference] }
+        _ = try await post(sessionId: sessionId, path: "human-message", idempotencyKey: clientId, body: body)
+    }
+
+    /// One authenticated POST under the room, with the same rules and errors as a typed message.
+    private func post(sessionId: String, path: String, idempotencyKey: String, body: [String: Any]) async throws -> Data {
+        guard let apiBaseURL,
+              var components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false) else {
+            throw RoomSendError.notConfigured
+        }
+        guard let token = tokenProvider(), !token.isEmpty else { throw RoomSendError.reauthenticationRequired }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        guard !sessionId.isEmpty, sessionId.utf8.count <= 256,
+              let encodedSession = sessionId.addingPercentEncoding(withAllowedCharacters: allowed),
+              idempotencyKey.utf8.count <= 120 else {
+            throw RoomSendError.rejected
+        }
+        components.percentEncodedPath = "/api/v1/sessions/\(encodedSession)/\(path)"
+        components.query = nil
+        guard let url = components.url else { throw RoomSendError.notConfigured }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key")
+        request.setValue(UUID().uuidString.lowercased(), forHTTPHeaderField: "X-Request-Id")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await urlSession.data(for: request)
+        } catch {
+            throw RoomSendError.retryable(retryAfterSeconds: nil)
+        }
+        guard let http = response as? HTTPURLResponse else { throw RoomSendError.retryable(retryAfterSeconds: nil) }
+        switch http.statusCode {
+        case 200..<300:
+            return data
+        case 401:
+            throw RoomSendError.reauthenticationRequired
+        case 403, 404:
+            throw RoomSendError.notAllowed
+        case 409, 425, 429, 500..<600:
+            throw RoomSendError.retryable(retryAfterSeconds: http.value(forHTTPHeaderField: "Retry-After").flatMap(Int.init))
+        default:
+            throw RoomSendError.rejected
+        }
+    }
+}
