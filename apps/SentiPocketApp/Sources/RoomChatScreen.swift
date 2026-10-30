@@ -323,6 +323,7 @@ struct RoomChatScreen: View {
             audio: PhoneVoiceRoomAudioSession(),
             ringer: RingbackTone(),
             poster: voicePoster,
+            voiceLine: voicePoster as? any VoiceLining,
             onEnded: { endVoiceRoom() },
             onRecordFailed: { [weak coordinator] failure in coordinator?.show(notice: failure) }
         )
