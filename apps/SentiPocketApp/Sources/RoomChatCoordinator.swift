@@ -877,6 +877,7 @@ final class RoomChatCoordinator: ObservableObject {
                 status: .failed(reason: "Too long for a reply (the limit is 4,000 characters).", canRetry: false)
             ))
             publish()
+            noteReplyFailedOutOfSight(sequenceId)
             return
         }
         pendingReplies.append(PendingReply(
@@ -944,8 +945,16 @@ final class RoomChatCoordinator: ObservableObject {
                 guard let self else { return }
                 let status = self.failedStatus(for: error)
                 self.updateReply(clientId) { $0.status = status }
+                self.noteReplyFailedOutOfSight(item.targetSequenceId)
             }
         }
+    }
+
+    /// A reply written from the room's box fails where its thread is not open: the room says so once.
+    private func noteReplyFailedOutOfSight(_ sequenceId: Int64) {
+        guard openThreadSequence != sequenceId else { return }
+        notice = "Your reply did not send. Open its thread to try again."
+        publish()
     }
 
     private func updateReply(_ clientId: String, _ change: (inout PendingReply) -> Void) {

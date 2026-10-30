@@ -53,6 +53,9 @@ public struct RoomChatView: View {
         self.send = send
     }
 
+    /// The message the room's box is answering (swipe to reply), sent to its thread.
+    @State private var replyTarget: RoomChatMessageRow?
+
     private func threadDraft(_ sequenceId: Int64) -> Binding<String> {
         Binding(get: { threadDrafts[sequenceId] ?? "" }, set: { threadDrafts[sequenceId] = $0 })
     }
@@ -71,9 +74,16 @@ public struct RoomChatView: View {
                 mentionCandidates: state.mentionCandidates,
                 restored: restoredDraft,
                 actions: composerActions,
+                replying: replyTarget,
+                onCancelReply: { replyTarget = nil },
                 onIntent: send
             ) { text in
-                send(.sendMessage(text: text))
+                if let target = replyTarget {
+                    send(target.replyIntent(text))
+                    replyTarget = nil
+                } else {
+                    send(.sendMessage(text: text))
+                }
             }
         }
         .sheet(isPresented: Binding(
@@ -360,6 +370,7 @@ public struct RoomChatView: View {
                     }
                 },
                 onOpenLong: { longRow = $0 },
+                onReply: { replyTarget = $0 },
                 send: send
             )
             .onAppear { send(.messageOnScreen(id: message.id, isOnScreen: true)) }
@@ -561,6 +572,8 @@ private struct RoomMessageRowView: View {
     var onEdit: (RoomChatMessageRow) -> Void = { _ in }
     var onToggleQuiet: () -> Void = {}
     var onOpenLong: (RoomChatMessageRow) -> Void = { _ in }
+    /// Reply to this row from the room's box, without leaving the room (Carter, #55074).
+    var onReply: (RoomChatMessageRow) -> Void = { _ in }
     var send: (RoomChatIntent) -> Void = { _ in }
     /// How far the row follows a swipe to the right (swipe to reply, as in Messages).
     @State private var swipe: CGFloat = 0
@@ -715,15 +728,13 @@ private struct RoomMessageRowView: View {
                     swipe = min(value.translation.width, Self.swipeToReply + 24)
                 }
                 .onEnded { _ in
-                    if swipe > Self.swipeToReply { send(.openThread(sequenceId: row.sequenceId)) }
+                    if swipe > Self.swipeToReply { reply() }
                     withAnimation(.spring(response: 0.28, dampingFraction: 0.8)) { swipe = 0 }
                 }
         )
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(row.accessibilityId)
-        .accessibilityAction(named: canReply ? "Reply in thread" : "Open thread") {
-            send(.openThread(sequenceId: row.sequenceId))
-        }
+        .accessibilityAction(named: canReply ? "Reply" : "Open thread") { reply() }
         .contextMenu { messageMenu }
         // Simultaneous, so a single tap on a link or a button inside the message is never held back.
         .simultaneousGesture(TapGesture(count: 2).onEnded { showsOptions = true })
@@ -736,6 +747,15 @@ private struct RoomMessageRowView: View {
     }
 
     private static let swipeToReply: CGFloat = 64
+
+    /// Swipe or Reply: the room's box answers this row in place; someone who cannot post opens the thread to read.
+    private func reply() {
+        if canReply {
+            onReply(row)
+        } else {
+            send(.openThread(sequenceId: row.sequenceId))
+        }
+    }
 
     /// The message's words; a very long one shows its start and a card that opens all of it (Carter, #55006).
     @ViewBuilder
@@ -971,7 +991,9 @@ private struct RoomMessageRowView: View {
     /// reply shown in the room acts on itself here too.
     private var actionRow: some View {
         let options = row.options(canReply: canReply, canReact: canReact, canPin: canPin, isPinned: isPinned, pinsFull: pinsFull, canEdit: canReply)
+        // Reply when you can post, else the thread, never both.
         let shown = Self.actionRowKinds.compactMap { kind in options.first { $0.kind == kind } }
+            .filter { $0.kind != .thread || !options.contains { $0.kind == .reply } }
         return HStack(spacing: 18) {
             ForEach(shown) { option in
                 actionButton(option.kind == .thread ? "arrowshape.turn.up.left" : option.symbol, label: option.title) {
@@ -992,10 +1014,12 @@ private struct RoomMessageRowView: View {
         .padding(.top, 2)
     }
 
-    private static let actionRowKinds: [RoomRowOption.Kind] = [.copy, .listen, .like, .dislike, .thread]
+    private static let actionRowKinds: [RoomRowOption.Kind] = [.copy, .listen, .like, .dislike, .reply, .thread]
 
     private func perform(_ option: RoomRowOption) {
-        if option.kind == .edit {
+        if option.kind == .reply {
+            onReply(row)
+        } else if option.kind == .edit {
             onEdit(row)
         } else if option.kind == .copy {
             copyToPasteboard(row.text)
@@ -1557,6 +1581,9 @@ private struct RoomComposerBar: View {
     var mentionCandidates: [MentionCandidate] = []
     var restored: RoomComposerRestore?
     var actions = RoomComposerActions()
+    /// The message this box answers, in its thread; nil writes to the room.
+    var replying: RoomChatMessageRow?
+    var onCancelReply: () -> Void = {}
     var onIntent: (RoomChatIntent) -> Void = { _ in }
     let send: (String) -> Void
     @State private var draft = ""
@@ -1650,6 +1677,34 @@ private struct RoomComposerBar: View {
                 }
                 .accessibilityIdentifier("pocket.room.composer.pasted")
             }
+            if let replying {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrowshape.turn.up.left.fill")
+                        .foregroundStyle(PocketPalette.accent)
+                        .accessibilityHidden(true)
+                    (Text("Replying to \(replying.authorName)  ")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(PocketPalette.textPrimary)
+                     + Text(RoomChatQuiet.line(replying.text))
+                        .font(.caption)
+                        .foregroundColor(PocketPalette.textSecondary))
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    Button {
+                        onCancelReply()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(PocketPalette.textSecondary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Not a reply")
+                    .accessibilityIdentifier("pocket.room.composer.replying.cancel")
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 6)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("pocket.room.composer.replying")
+            }
             if ticketMode {
                 HStack(spacing: 6) {
                     Image(systemName: "ticket")
@@ -1706,7 +1761,7 @@ private struct RoomComposerBar: View {
                 .accessibilityLabel("More")
                 .accessibilityIdentifier("pocket.room.composer.plus")
                 .padding(.bottom, 1)
-                TextField(ticketMode ? "Describe the ticket" : "Message", text: $draft, axis: .vertical)
+                TextField(ticketMode ? "Describe the ticket" : (replying == nil ? "Message" : "Reply"), text: $draft, axis: .vertical)
                     .lineLimit(1...6)
                     .textFieldStyle(.plain)
                     .focused($isEditing)
@@ -1756,6 +1811,10 @@ private struct RoomComposerBar: View {
             .onChange(of: restored) { request in
                 guard let request else { return }
                 draft = RoomComposerDraft.restoring(request.text, into: draft)
+            }
+            // Swipe to reply and start typing at once: the keyboard comes up, and nothing in the room moves.
+            .onChange(of: replying?.id) { id in
+                if id != nil { isEditing = true }
             }
             .sheet(item: $viewingPaste) { item in
                 PastedBlockSheet(text: item.text) {

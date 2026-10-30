@@ -424,6 +424,22 @@ final class RoomThreadsCoordinatorTests: XCTestCase {
         coordinator.pause()
     }
 
+    /// Carter (#55074): a reply written from the room's box goes to its thread without opening it, and if it fails
+    /// the room says so, since the thread that shows the failure is closed.
+    func test_a_reply_from_the_room_box_that_fails_says_so_in_the_room() async {
+        let transport = ActionsRoomTransport(history: [message(9)], projections: [RoomActionsPage()])
+        let sender = RecordingActionSender(failFirst: [.retryable(retryAfterSeconds: nil)])
+        let coordinator = makeCoordinator(transport, actions: sender)
+        coordinator.resume()
+        await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
+
+        coordinator.send(.sendReply(sequenceId: 9, text: "on it"))
+        await waitUntil("said so") { coordinator.state.notice != nil }
+        XCTAssertEqual(coordinator.state.notice, "Your reply did not send. Open its thread to try again.")
+        XCTAssertNil(coordinator.state.thread, "the room stays where it was")
+        coordinator.pause()
+    }
+
     private func failedRetryably(_ coordinator: RoomChatCoordinator) -> Bool {
         if case .failed(_, true)? = coordinator.state.thread?.pending.first?.status { return true }
         return false

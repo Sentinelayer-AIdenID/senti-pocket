@@ -1069,7 +1069,7 @@ public enum CheckpointText {
 /// One option in a row's long-press menu, and what it asks the room for.
 public struct RoomRowOption: Equatable, Identifiable, Sendable {
     public enum Kind: String, Sendable {
-        case thread, listen, like, dislike, acknowledge, pin, edit, copy
+        case reply, thread, listen, like, dislike, acknowledge, pin, edit, copy
     }
 
     public let kind: Kind
@@ -1088,6 +1088,12 @@ extension RoomChatMessageRow {
         inlineReplyId.map(RoomReadAloud.reply) ?? RoomReadAloud.message(sequenceId)
     }
 
+    /// What a reply written to this row sends: into its thread, answering this reply when the row is one.
+    public func replyIntent(_ text: String) -> RoomChatIntent {
+        if let inlineReplyId { return .sendReplyToReply(sequenceId: sequenceId, replyId: inlineReplyId, text: text) }
+        return .sendReply(sequenceId: sequenceId, text: text)
+    }
+
     /// Its identifier for VoiceOver and UI tests: a reply shown in the room has its own.
     public var accessibilityId: String {
         inlineReplyId.map { "pocket.room.reply.\($0)" } ?? "pocket.room.message.\(sequenceId)"
@@ -1100,12 +1106,17 @@ extension RoomChatMessageRow {
         return .react(sequenceId: sequenceId, type: type)
     }
 
-    /// The long-press menu, in order. A message's options act on the message. A reply shown in the room opens its
-    /// thread, reads itself aloud, reacts to itself and copies itself; it has no pin.
+    /// The long-press menu, in order. A message's options act on the message. A reply shown in the room answers
+    /// itself, opens its thread, reads itself aloud, reacts to itself and copies itself; it has no pin.
     public func options(canReply: Bool, canReact: Bool, canPin: Bool, isPinned: Bool, pinsFull: Bool,
                         canEdit: Bool = false) -> [RoomRowOption] {
-        var options = [
-            RoomRowOption(kind: .thread, title: canReply ? "Reply in thread" : "Open thread",
+        var options: [RoomRowOption] = []
+        if canReply {
+            // Written right in the room's box, and it goes to the thread (Carter, #55074): the view starts it.
+            options.append(RoomRowOption(kind: .reply, title: "Reply", symbol: "arrowshape.turn.up.left", intent: nil))
+        }
+        options += [
+            RoomRowOption(kind: .thread, title: "Open thread",
                           symbol: "bubble.left.and.bubble.right", intent: .openThread(sequenceId: sequenceId)),
             // Always "Listen": a context menu can show content from before the reading started, so Stop is the
             // speaker button on the row being read.

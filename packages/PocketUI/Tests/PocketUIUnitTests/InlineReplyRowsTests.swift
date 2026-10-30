@@ -231,7 +231,12 @@ final class InlineReplyRowsTests: XCTestCase {
         let reply = try XCTUnwrap(messageRow(state, "reply-r1"))
 
         let options = reply.options(canReply: true, canReact: true, canPin: true, isPinned: state.isPinned(reply), pinsFull: false)
-        XCTAssertEqual(options.map(\.kind), [.thread, .listen, .like, .dislike, .acknowledge, .copy], "no pin on a reply")
+        XCTAssertEqual(options.map(\.kind), [.reply, .thread, .listen, .like, .dislike, .acknowledge, .copy], "no pin on a reply")
+        XCTAssertEqual(reply.replyIntent("same here"), .sendReplyToReply(sequenceId: 100, replyId: "r1", text: "same here"),
+                       "a reply written to a reply shown in the room answers it, in its thread")
+        XCTAssertEqual(parent.replyIntent("thanks"), .sendReply(sequenceId: 100, text: "thanks"))
+        let reader = reply.options(canReply: false, canReact: false, canPin: false, isPinned: false, pinsFull: false)
+        XCTAssertEqual(reader.map(\.kind), [.thread, .listen, .copy], "someone who cannot post opens the thread to read")
         for intent in options.compactMap(\.intent) {
             if case .react = intent { XCTFail("a reaction from a reply's menu lands on the message it answers") }
             if case .setPinned = intent { XCTFail("a reply's menu pins the message it answers") }
