@@ -93,6 +93,7 @@ struct RoomSummarySheet: View {
                                 if reader.readingId == readId {
                                     reader.stop()
                                 } else {
+                                    ReadAloudSource.shared.reading(in: sessionId)
                                     _ = reader.read(id: readId, markdown: summary.text, title: "Room summary")
                                 }
                             } label: {
