@@ -42,6 +42,8 @@ struct RoomChatScreen: View {
     @Environment(\.openURL) private var openExternalURL
     @Environment(\.scenePhase) private var scenePhase
     @State private var showsTickets = false
+    /// The room's summary, made on request (Carter, 10-30).
+    @State private var showsSummary = false
     /// The tickets screen opens straight into a new ticket (the composer's "File a ticket").
     @State private var ticketsStartFiling = false
     @State private var showsAdmissions = false
@@ -78,6 +80,7 @@ struct RoomChatScreen: View {
     private let ticketAnswerSender: (any RoomMessageSending)?
     /// Posting spoken turns and the transcript, as you; nil where you cannot post.
     private let voicePoster: (any VoiceRoomPosting)?
+    private let summaryGenerator: (any RoomSummaryGenerating)?
     private let ticketWriter: (any RoomTicketWriting)?
     private let ticketLeases: any TicketLeaseStoring
     private let ticketExtras: (any RoomTicketExtrasReading)?
@@ -116,6 +119,7 @@ struct RoomChatScreen: View {
         // A viewer cannot post, so cannot answer a ticket's decision either.
         self.ticketAnswerSender = route.membershipRole.lowercased() == "viewer" ? nil : sender
         self.voicePoster = route.membershipRole.lowercased() == "viewer" ? nil : sender as? any VoiceRoomPosting
+        self.summaryGenerator = sender as? any RoomSummaryGenerating
         self.ticketWriter = ticketWriter
         self.ticketLeases = ticketLeases
         self.ticketExtras = ticketExtras
@@ -406,6 +410,16 @@ struct RoomChatScreen: View {
                     .accessibilityIdentifier("pocket.room.breakouts.open")
                 }
             }
+            if summaryGenerator != nil {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        showsSummary = true
+                    } label: {
+                        Label("Summarize this room", systemImage: "text.badge.star")
+                    }
+                    .accessibilityIdentifier("pocket.room.summary.open")
+                }
+            }
             if ticketsTransport != nil, !route.isBreakout {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
@@ -568,6 +582,15 @@ struct RoomChatScreen: View {
         .onChange(of: showsAdmissions) { shown in if shown { CrashReporter.shared.note("agent requests opened") } }
         .onChange(of: showsBreakouts) { shown in if shown { CrashReporter.shared.note("breakouts opened") } }
         .onChange(of: choosesVoicePartner) { shown in if shown { CrashReporter.shared.note("talk opened") } }
+        .sheet(isPresented: $showsSummary) {
+            if let summaryGenerator {
+                RoomSummarySheet(sessionId: route.sessionId, roomTitle: route.title, generator: summaryGenerator,
+                                 reader: reader, onClose: { showsSummary = false })
+            }
+        }
+        .onChange(of: showsSummary) { open in
+            if open { CrashReporter.shared.note("summary opened") }
+        }
         .sheet(isPresented: $showsTickets) {
             if let ticketsTransport {
                 NavigationStack {

@@ -390,7 +390,9 @@ extension HTTPRoomMessageSender: VoiceRoomPosting {
     }
 
     /// One authenticated POST under the room, with the same rules and errors as a typed message.
-    private func post(sessionId: String, path: String, idempotencyKey: String, body: [String: Any]) async throws -> Data {
+    /// One room write. `session` replaces the live deadlines for a slow call (the room summary).
+    func post(sessionId: String, path: String, idempotencyKey: String, body: [String: Any],
+              session: URLSession? = nil) async throws -> Data {
         guard let apiBaseURL,
               var components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false) else {
             throw RoomSendError.notConfigured
@@ -416,7 +418,7 @@ extension HTTPRoomMessageSender: VoiceRoomPosting {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await urlSession.data(for: request)
+            (data, response) = try await (session ?? urlSession).data(for: request)
         } catch {
             throw RoomSendError.retryable(retryAfterSeconds: nil)
         }
