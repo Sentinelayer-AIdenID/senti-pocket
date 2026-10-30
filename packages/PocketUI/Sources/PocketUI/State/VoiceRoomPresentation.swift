@@ -95,3 +95,50 @@ public enum VoiceRoomIntent: Equatable, Sendable {
     case setHandsFree(Bool)
     case hangUp
 }
+
+/// Whom a call can ring (Carter, #55061): only agents that can answer now. A box (an agent minted for a job) while it
+/// runs, never once it ended; any other agent while it is here (active or idle) or has posted within the hour. The
+/// room's own services (costs, mints, ticket filing) never answer a call.
+public enum VoiceCallRoster {
+    /// An agent heard from within this long can still answer.
+    public static let recent: TimeInterval = 60 * 60
+    /// The most the picker offers.
+    public static let limit = 8
+
+    public struct Post: Equatable, Sendable {
+        public let authorId: String
+        public let at: Date?
+
+        public init(authorId: String, at: Date?) {
+            self.authorId = authorId
+            self.at = at
+        }
+    }
+
+    /// - Parameters:
+    ///   - present: the agents here now, active or idle, in the order the room shows them.
+    ///   - posts: agents' messages, newest first.
+    ///   - runningBoxes: the boxes the Flight record shows running, which answer even when quiet.
+    ///   - endedBoxes: boxes that ended, from the Flight record and the room's own lines.
+    public static func partners(present: [String], posts: [Post], runningBoxes: [String], endedBoxes: Set<String>,
+                                now: Date) -> [String] {
+        let running = Set(runningBoxes.map { $0.lowercased() })
+        let ended = Set(endedBoxes.map { $0.lowercased() })
+        var partners: [String] = []
+        var seen = Set<String>()
+        func offer(_ id: String) {
+            let key = id.lowercased()
+            guard !key.isEmpty, !key.hasPrefix("human"), !RoomChatQuiet.systemAuthors.contains(key),
+                  running.contains(key) || !ended.contains(key),
+                  seen.insert(key).inserted else { return }
+            partners.append(id)
+        }
+        present.forEach(offer)
+        for post in posts {
+            guard let at = post.at, now.timeIntervalSince(at) <= recent else { continue }
+            offer(post.authorId)
+        }
+        runningBoxes.forEach(offer)
+        return Array(partners.prefix(limit))
+    }
+}

@@ -152,15 +152,18 @@ public struct FlightRecordState: Equatable, Sendable {
     public let isLoading: Bool
     public let failure: String?
     public let totals: Totals?
+    /// The names of the room's boxes that ended (destroyed, killed or lost), lowercased: a call never rings them.
+    public let endedBoxNames: Set<String>
 
     public init(boxes: [Box] = [], agents: [Agent] = [], finishedBoxes: Int = 0, isLoading: Bool = false, failure: String? = nil,
-                totals: Totals? = nil) {
+                totals: Totals? = nil, endedBoxNames: Set<String> = []) {
         self.boxes = boxes
         self.agents = agents
         self.finishedBoxes = finishedBoxes
         self.isLoading = isLoading
         self.failure = failure
         self.totals = totals
+        self.endedBoxNames = endedBoxNames
     }
 
     /// Thoughts and commands merged newest first, at most `limit`.

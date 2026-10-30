@@ -26,6 +26,22 @@ final class AgentVoicesTests: XCTestCase {
         XCTAssertFalse(picked.contains("fr.standard"), "only voices of the language spoken")
     }
 
+    /// Carter (#55063): a better voice, once downloaded, is what agents speak with.
+    func test_with_two_better_voices_no_agent_speaks_with_a_basic_one() {
+        let agents = (1...24).map { "agent-\($0)" }
+        let picked = Set(agents.compactMap { AgentVoices.identifier(for: $0, language: "en", phoneLanguageTag: "en-US", from: voices) })
+        XCTAssertTrue(picked.allSatisfy { !$0.contains("standard") }, "picked \(picked)")
+        XCTAssertGreaterThanOrEqual(picked.count, 3, "agents still sound apart")
+
+        let oneBetter = [
+            VoiceOption(identifier: "en.premium.a", language: "en-US", quality: .premium),
+            VoiceOption(identifier: "en.standard.e", language: "en-US", quality: .standard, isLanguageDefault: true),
+            VoiceOption(identifier: "en.standard.f", language: "en-IE", quality: .standard)
+        ]
+        let spread = Set(agents.compactMap { AgentVoices.identifier(for: $0, language: "en", phoneLanguageTag: "en-US", from: oneBetter) })
+        XCTAssertGreaterThan(spread.count, 1, "one better voice alone is not everyone's voice")
+    }
+
     func test_no_voice_for_the_language_leaves_it_to_the_system() {
         XCTAssertNil(AgentVoices.identifier(for: "pocket-forge", language: "ja", phoneLanguageTag: "en-US", from: voices))
     }

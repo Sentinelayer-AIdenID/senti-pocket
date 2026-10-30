@@ -18,8 +18,12 @@ public enum AgentVoices {
         return identifier(for: speaker, language: language, phoneLanguageTag: phoneLanguageTag, from: VoiceOption.installed())
     }
 
+    /// Once two Enhanced or Premium voices are downloaded (Settings, Accessibility, Spoken Content), agents share
+    /// those only: no agent is left on a basic voice. With fewer, the basic ones join, so agents still sound apart.
     static func identifier(for speaker: String, language: String, phoneLanguageTag: String, from options: [VoiceOption]) -> String? {
-        let pool = VoicePicker.ranked(for: language, phoneLanguageTag: phoneLanguageTag, from: options).prefix(poolSize)
+        let ranked = VoicePicker.ranked(for: language, phoneLanguageTag: phoneLanguageTag, from: options)
+        let better = ranked.filter { $0.quality > .standard }
+        let pool = (better.count >= 2 ? better : ranked).prefix(poolSize)
         guard !pool.isEmpty else { return nil }
         let index = Int(stableHash(speaker.lowercased()) % UInt64(pool.count))
         return pool[pool.startIndex + index].identifier
