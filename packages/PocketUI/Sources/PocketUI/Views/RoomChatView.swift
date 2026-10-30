@@ -21,6 +21,9 @@ public struct RoomChatView: View {
     @State private var didInitialScroll = false
     /// A new list each time the room is put back at its newest rows (see `reopenAtLatest()`).
     @State private var listEpoch = 0
+    /// A new list starts at its top, where "Load earlier messages" shows: until its first scroll down has landed, that
+    /// is not the reader asking for older history.
+    @State private var holdsOlderLoads = false
     @State private var anchorBeforeOlderLoad: String?
     /// A message the reader was taken to (a link, notification, search result or pin). It stays in place through
     /// pages loading above or below it and messages arriving, until the reader scrolls.
@@ -370,6 +373,7 @@ public struct RoomChatView: View {
         heldAnchor = nil
         anchorBeforeOlderLoad = nil
         didInitialScroll = false
+        holdsOlderLoads = true
         listEpoch += 1
     }
 
@@ -384,7 +388,7 @@ public struct RoomChatView: View {
                 .font(.footnote.weight(.semibold))
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 12)
-                .onAppear { if didInitialScroll { loadOlder() } }
+                .onAppear { if didInitialScroll, !holdsOlderLoads { loadOlder() } }
                 .accessibilityIdentifier("pocket.room.loadOlder")
         } else {
             Text("Start of the room")
@@ -560,6 +564,8 @@ public struct RoomChatView: View {
             } else {
                 proxy.scrollTo(Self.bottomId, anchor: .bottom)
             }
+            // The list has left its top: from now on the header showing means the reader scrolled up to it.
+            DispatchQueue.main.async { holdsOlderLoads = false }
         }
     }
 
