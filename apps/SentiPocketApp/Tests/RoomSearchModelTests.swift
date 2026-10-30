@@ -135,6 +135,62 @@ final class RoomSearchModelTests: XCTestCase {
         XCTAssertEqual(model.state.query, "new")
     }
 
+    private func artifact(_ id: String, _ kind: RoomArtifact.Kind, _ title: String, sequence: Int64) -> RoomArtifact {
+        RoomArtifact(id: id, kind: kind, title: title, detail: nil, url: nil, sequenceId: sequence,
+                     author: "ticket-keeper", date: nil, mentions: 1)
+    }
+
+    /// Carter (#55006): one search across everything, narrowed by tabs.
+    func test_people_and_shared_things_match_at_once_and_tabs_narrow_them() {
+        let search = ScriptedSearch()
+        let model = RoomSearchModel(
+            sessionId: "room_1",
+            searcher: search,
+            people: {
+                [RoomSearchPerson(authorId: "claude-warden", name: "claude-warden", isHuman: false),
+                 RoomSearchPerson(authorId: "human-mrrcarter", name: "mrrcarter", isHuman: true)]
+            },
+            artifacts: {
+                ([self.artifact("t1", .ticket, "Make tickets clickable", sequence: 5),
+                  self.artifact("f1", .file, "crash report.txt", sequence: 6),
+                  self.artifact("c1", .checkpoint, "Voice room shipped", sequence: 7)], false)
+            },
+            sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) },
+            onReauthenticationRequired: {}
+        )
+        model.send(.typed("tickets"))
+        XCTAssertEqual(model.state.artifacts.map(\.id), ["t1"], "a ticket matches as you type, before any server search")
+        XCTAssertTrue(model.state.people.isEmpty)
+        model.send(.typed("warden"))
+        XCTAssertEqual(model.state.people.map(\.authorId), ["claude-warden"])
+        model.send(.typed("crash"))
+        model.send(.scope(.artifacts(.file)))
+        XCTAssertEqual(model.state.scope, .artifacts(.file))
+        XCTAssertEqual(model.state.artifacts.map(\.id), ["f1"])
+        XCTAssertTrue(model.state.rows.isEmpty, "the Files tab shows no messages")
+        model.send(.scope(.artifacts(.ticket)))
+        XCTAssertTrue(model.state.artifacts.isEmpty, "the Tickets tab holds no file")
+    }
+
+    /// Carter (#54900): search by person, "more from" them.
+    func test_more_from_a_person_keeps_only_what_they_wrote() async {
+        let warden = RoomSearchResult(sequenceId: 40, snippet: "deploy is green", message: RoomMessage(
+            id: "e40", sequenceId: 40, kind: .message, authorId: "claude-warden", authorName: "claude-warden",
+            isHuman: false, text: "deploy is green", timestamp: "2026-10-28T18:00:00Z"))
+        let search = ScriptedSearch(byQuery: [
+            "claude-warden": RoomSearchPage(query: "claude-warden", results: [result(41, "@claude-warden please look"), warden]),
+            "mrrcarter": RoomSearchPage(query: "mrrcarter", results: [])
+        ])
+        let model = RoomSearchModel(sessionId: "room_1", searcher: search, onReauthenticationRequired: {})
+        model.send(.from(RoomSearchPerson(authorId: "claude-warden", name: "claude-warden", isHuman: false)))
+        XCTAssertEqual(model.state.scope, .messages)
+        await waitUntil("their messages") { !model.state.isSearching && !model.state.rows.isEmpty }
+        XCTAssertEqual(model.state.rows.map(\.sequenceId), [40], "a message that only mentions them is left out")
+        XCTAssertEqual(model.state.from?.authorId, "claude-warden")
+        model.send(.from(RoomSearchPerson(authorId: "human-mrrcarter", name: "mrrcarter", isHuman: true)))
+        await waitUntil("a person's login") { search.recorded().last?.query == "mrrcarter" }
+    }
+
     func test_no_matches_and_a_failed_search_say_so() async {
         let search = ScriptedSearch([
             .success(RoomSearchPage(query: "zzz")),

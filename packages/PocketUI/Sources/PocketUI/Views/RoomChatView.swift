@@ -1587,6 +1587,14 @@ private struct RoomComposerBar: View {
                     .padding(.horizontal, 16)
                     .padding(.top, 6)
                     .accessibilityIdentifier("pocket.room.composer.tooLong")
+            } else if let note = composer.lengthNote(for: outgoing) {
+                Text(note)
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(PocketPalette.textSecondary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 6)
+                    .accessibilityIdentifier("pocket.room.composer.length")
             }
             if !suggestions.isEmpty {
                 // Everyone who matches, people first: a list that scrolls, not a handful of chips.

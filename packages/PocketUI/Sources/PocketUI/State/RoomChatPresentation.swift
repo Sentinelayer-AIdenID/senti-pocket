@@ -467,6 +467,18 @@ public struct RoomComposerState: Equatable, Sendable {
         let limit = formatter.string(from: NSNumber(value: maximumLength)) ?? String(maximumLength)
         return "Too long to send: \(have) of \(limit) characters."
     }
+
+    /// How long a long draft is, counted as the limit counts (Carter, #54900); nil while it is short.
+    public func lengthNote(for draft: String, from threshold: Int = 200) -> String? {
+        let count = draft.trimmingCharacters(in: .whitespacesAndNewlines).unicodeScalars.count
+        guard count >= threshold else { return nil }
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        let have = formatter.string(from: NSNumber(value: count)) ?? String(count)
+        guard let maximumLength else { return "\(have) characters" }
+        let limit = formatter.string(from: NSNumber(value: maximumLength)) ?? String(maximumLength)
+        return "\(have) of \(limit) characters"
+    }
 }
 
 /// Everything the room screen renders, built from the coordinator's timeline in one pure step.

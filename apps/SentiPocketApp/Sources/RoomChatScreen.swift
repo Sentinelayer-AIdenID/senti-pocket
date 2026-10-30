@@ -177,6 +177,22 @@ struct RoomChatScreen: View {
         return ids
     }
 
+    /// Everyone the search can find: who is here, then everyone who wrote in what is loaded, people and agents.
+    private var searchPeople: [RoomSearchPerson] {
+        var people: [RoomSearchPerson] = []
+        var seen = Set<String>()
+        for person in coordinator.state.presence?.people ?? [] where seen.insert(person.id.lowercased()).inserted {
+            people.append(RoomSearchPerson(authorId: person.id, name: person.isHuman ? String(person.id.dropFirst("human-".count)) : person.id,
+                                           isHuman: person.isHuman))
+        }
+        for row in coordinator.state.rows.reversed() {
+            guard case .message(let message) = row, !message.authorId.isEmpty,
+                  seen.insert(message.authorId.lowercased()).inserted else { continue }
+            people.append(RoomSearchPerson(authorId: message.authorId, name: message.authorName, isHuman: message.isHuman))
+        }
+        return people
+    }
+
     /// Whom you can talk with: the agents here now, then the agents who answered most recently.
     private var voicePartners: [String] {
         var ids: [String] = []
@@ -526,7 +542,7 @@ struct RoomChatScreen: View {
                 Button {
                     showsSearch = true
                 } label: {
-                    Label("Search messages", systemImage: "magnifyingglass")
+                    Label("Search", systemImage: "magnifyingglass")
                 }
             }
         }
@@ -535,10 +551,15 @@ struct RoomChatScreen: View {
                 RoomSearchSheet(
                     sessionId: route.sessionId,
                     searcher: search,
-                    onReauthenticationRequired: onReauthenticationRequired
-                ) { sequenceId in
-                    coordinator.focus(on: sequenceId)
-                }
+                    artifacts: artifacts,
+                    people: { searchPeople },
+                    onReauthenticationRequired: onReauthenticationRequired,
+                    onOpen: { sequenceId in coordinator.focus(on: sequenceId) },
+                    // A ticket opens over the room once the search has closed; other links follow the room's rules.
+                    onOpenURL: { url in
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { _ = handle(url) }
+                    }
+                )
             }
         }
         .sheet(item: $attachmentPreview) { item in
@@ -703,30 +724,51 @@ struct RoomChatScreen: View {
 /// The room's search in a sheet; choosing a match closes it and jumps there in the room.
 private struct RoomSearchSheet: View {
     @StateObject private var model: RoomSearchModel
+    /// The room's shared things, read when the search opens (and kept for a minute).
+    @ObservedObject private var artifacts: RoomArtifactsCoordinator
     private let onOpen: (Int64) -> Void
+    private let onOpenURL: (URL) -> Void
 
     init(
         sessionId: String,
         searcher: any RoomSearching,
+        artifacts: RoomArtifactsCoordinator,
+        people: @escaping @MainActor () -> [RoomSearchPerson],
         onReauthenticationRequired: @escaping @MainActor () -> Void,
-        onOpen: @escaping (Int64) -> Void
+        onOpen: @escaping (Int64) -> Void,
+        onOpenURL: @escaping (URL) -> Void
     ) {
         _model = StateObject(wrappedValue: RoomSearchModel(
             sessionId: sessionId,
             searcher: searcher,
+            people: people,
+            artifacts: { [weak artifacts] in (artifacts?.artifacts ?? [], artifacts?.isLoading ?? false) },
             onReauthenticationRequired: onReauthenticationRequired
         ))
+        _artifacts = ObservedObject(wrappedValue: artifacts)
         self.onOpen = onOpen
+        self.onOpenURL = onOpenURL
     }
 
     var body: some View {
         RoomSearchView(state: model.state) { intent in
-            if case .open(let sequenceId) = intent {
+            switch intent {
+            case .open(let sequenceId):
                 onOpen(sequenceId)
-            } else {
+            case .openArtifact(let artifact):
+                // A ticket opens over the room; anything else goes to the message that shared it.
+                if artifact.kind == .ticket, let url = artifact.url {
+                    onOpenURL(url)
+                } else {
+                    onOpen(artifact.sequenceId)
+                }
+            default:
                 model.send(intent)
             }
         }
+        .onAppear { artifacts.open() }
+        .onChange(of: artifacts.artifacts.count) { _ in model.sourcesChanged() }
+        .onChange(of: artifacts.isLoading) { _ in model.sourcesChanged() }
     }
 }
 
