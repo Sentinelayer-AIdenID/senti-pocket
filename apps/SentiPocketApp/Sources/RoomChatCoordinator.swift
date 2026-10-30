@@ -1770,7 +1770,12 @@ final class RoomChatCoordinator: ObservableObject {
                     id: $0.id,
                     name: $0.isHuman ? ($0.displayName ?? RoomChatViews.unnamedPerson) : $0.id,
                     isHuman: $0.isHuman,
-                    isIdle: $0.isIdle
+                    isIdle: $0.isIdle,
+                    lab: $0.lab,
+                    isWorking: $0.isWorking,
+                    workingUntilMs: $0.workingUntilMs,
+                    isBox: $0.isBox,
+                    login: $0.login
                 )
             }
         )

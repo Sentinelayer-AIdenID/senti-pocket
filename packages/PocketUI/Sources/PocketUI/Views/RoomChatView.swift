@@ -281,6 +281,7 @@ public struct RoomChatView: View {
                 if let presence = state.presence {
                     RoomPeopleAvatars(presence: presence, models: roster.modelsById,
                                       signals: state.agentSignals(now: Date()),
+                                      working: state.agentsWorking(now: Date()),
                                       boxes: roster.members.filter { $0.kind == .box && $0.status != .ended }.map(\.name)) {
                         showsPresence = true
                     }
