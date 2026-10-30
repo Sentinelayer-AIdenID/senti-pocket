@@ -192,8 +192,6 @@ private struct AuthenticatedRootView: View {
     /// What waits on your decision across your rooms (ticket 931e1d2e).
     @StateObject private var waiting: WaitingOnYouCoordinator
     @State private var presentsWaiting = false
-    /// Which room is shown and uncovered, so its notifications are read only while you can see it (warden, #267).
-    @StateObject private var roomReads: RoomReadTracker
     @Environment(\.scenePhase) private var rootScenePhase
     @ObservedObject private var whisperModelCoordinator: WhisperModelProvisioningCoordinator
     @ObservedObject private var incomingLinks: IncomingLinkInbox
@@ -318,7 +316,6 @@ private struct AuthenticatedRootView: View {
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
         )
         _notifications = StateObject(wrappedValue: notifications)
-        _roomReads = StateObject(wrappedValue: RoomReadTracker(notifications: notifications))
         _callLog = StateObject(wrappedValue: CallLogCoordinator(
             transport: transport,
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
@@ -521,8 +518,6 @@ private struct AuthenticatedRootView: View {
         .onChange(of: roomListSettled) { _ in openPendingLinkIfReady() }
         // The app icon shows the bell's unread count.
         .onChange(of: notifications.unreadCount) { count in PushRegistrar.shared.setBadge(count) }
-        // A room on screen reads its notifications once its messages show; anything over it pauses that.
-        .onChange(of: roomCovered) { covered in roomReads.isCovered = covered }
         .sheet(isPresented: $presentsSettings) {
             WhisperModelSettingsView(
                 coordinator: whisperModelCoordinator,
@@ -592,6 +587,8 @@ private struct AuthenticatedRootView: View {
     /// Opens a Senti link in the app: the room, at the message it names, with its ticket or agent requests on top.
     @MainActor
     private func open(_ link: SentiLink) {
+        // Opening what a push or a banner was about reads that notification, and only that one.
+        notifications.markOpened(link)
         let row = sessions.state.rows.first { UTF8ExactIdentity.matches($0.sessionId, link.sessionId) }
         presentsNotifications = false
         presentsSettings = false
@@ -611,10 +608,6 @@ private struct AuthenticatedRootView: View {
     /// selection Pocket and Activity follow in step, and remembers it for the next launch.
     @MainActor
     private func show(_ route: RoomRoute) {
-        // The room being left reads nothing more, even before its screen goes (warden, #267).
-        if let leaving = (roomPath.last ?? currentRoom)?.sessionId, leaving != route.sessionId {
-            roomReads.gone(leaving)
-        }
         if !UTF8ExactIdentity.matches(sessions.selectedSessionId, route.sessionId) {
             sessions.send(.selectSession(sessionId: route.sessionId))
         }
@@ -687,8 +680,6 @@ private struct AuthenticatedRootView: View {
             theme: theme,
             onSelectRoom: { sessionId in show(roomRoute(for: sessionId)) },
             onAllRooms: {
-                // The room being left reads nothing more as the drawer closes (warden, #271).
-                if let leaving = (roomPath.last ?? currentRoom)?.sessionId { roomReads.gone(leaving) }
                 roomPath = []
                 currentRoom = nil
                 closeDrawer()
@@ -743,9 +734,6 @@ private struct AuthenticatedRootView: View {
             search: roomSearch,
             reader: messageReader,
             onRenamed: { sessions.send(.refreshSessions) },
-            onShown: { [roomReads] sessionId, isShown in
-                if isShown { roomReads.shown(sessionId) } else { roomReads.gone(sessionId) }
-            },
             onReauthenticationRequired: invalidateProtectedAuthentication
         )
     }

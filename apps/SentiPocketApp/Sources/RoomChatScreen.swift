@@ -98,8 +98,6 @@ struct RoomChatScreen: View {
     private let onReauthenticationRequired: @MainActor () -> Void
     /// The room was renamed here: the room list reads the new name.
     private let onRenamed: @MainActor () -> Void
-    /// The room's messages are on screen (true) or it left the screen (false): its notifications are read only then.
-    private let onShown: @MainActor (String, Bool) -> Void
 
     init(
         route: RoomRoute,
@@ -120,7 +118,6 @@ struct RoomChatScreen: View {
         search: (any RoomSearching)? = nil,
         reader: MessageReader,
         onRenamed: @escaping @MainActor () -> Void = {},
-        onShown: @escaping @MainActor (String, Bool) -> Void = { _, _ in },
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.route = route
@@ -141,7 +138,6 @@ struct RoomChatScreen: View {
         self.openRoom = openRoom
         self.openChildRoom = openChildRoom
         self.onRenamed = onRenamed
-        self.onShown = onShown
         self.onReauthenticationRequired = onReauthenticationRequired
         _coordinator = StateObject(wrappedValue: RoomChatCoordinator(
             sessionId: route.sessionId,
@@ -349,11 +345,6 @@ struct RoomChatScreen: View {
 
     /// Something covers the room: a sheet or the side panel (from the app), or this room's call.
     private var isCovered: Bool { coveredFromOutside || voiceRoom != nil }
-
-    /// The room's messages have loaded and are on screen.
-    private var messagesShown: Bool {
-        !coordinator.state.isLoadingInitial && coordinator.state.failure == nil
-    }
 
     /// The called agent's lab as the room's presence reports it, for the call screen's logo; nil in a meeting.
     private func partnerLab(of room: VoiceRoomCoordinator) -> AgentLab? {
@@ -816,13 +807,9 @@ struct RoomChatScreen: View {
             coordinator.resume()
             applyRouteLinksOnce()
             takeAnsweredCall()
-            if messagesShown { onShown(route.sessionId, true) }
         }
-        // Read once its messages are actually here, not on the way in: a room that fails to load reads nothing.
-        .onChange(of: messagesShown) { shown in onShown(route.sessionId, shown) }
         .onDisappear {
             CrashReporter.shared.note("room closed")
-            onShown(route.sessionId, false)
             coordinator.pause()
             // Reading aloud goes on after you leave (Carter, 10-30); the app's player follows you to the next screen.
         }
