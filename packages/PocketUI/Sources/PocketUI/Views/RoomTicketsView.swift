@@ -174,6 +174,22 @@ private struct RoomTicketRowView: View {
                         .foregroundStyle(PocketPalette.textSecondary)
                 }
             }
+            // Being worked on: how far along, and who holds it (Carter, #55238).
+            if let progress = row.stageProgress {
+                VStack(alignment: .leading, spacing: 3) {
+                    ProgressView(value: progress)
+                        .progressViewStyle(.linear)
+                        .tint(RoomTicketPalette.status(row.status))
+                    if let holder = row.lease.flatMap({ $0.isLive ? $0.holder : nil }) {
+                        Text("\(RoomTicketRow.displayName(holder)) is on it")
+                            .font(.caption2)
+                            .foregroundStyle(PocketPalette.textSecondary)
+                    }
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("\(Int(progress * 100)) percent along")
+                .accessibilityIdentifier("pocket.tickets.row.progress")
+            }
         }
         .padding(.vertical, 4)
     }
