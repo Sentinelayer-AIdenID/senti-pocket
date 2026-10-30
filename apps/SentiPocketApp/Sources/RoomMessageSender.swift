@@ -624,3 +624,73 @@ extension HTTPRoomMessageSender {
         }
     }
 }
+
+extension HTTPRoomMessageSender: VoiceLining {
+    /// `POST /api/v1/sessions/{id}/voice/turn` (API #1062) with your own bearer; the answer streams back as events.
+    func voiceLine(sessionId: String, agentId: String?, text: String, callId: String,
+                   history: [VoiceLineHistory]) -> AsyncThrowingStream<VoiceLineEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    guard let apiBaseURL,
+                          var components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false) else {
+                        throw VoiceLineError.unavailable
+                    }
+                    guard let token = tokenProvider(), !token.isEmpty else { throw VoiceLineError.notAllowed }
+                    let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+                    guard !sessionId.isEmpty, sessionId.utf8.count <= 256,
+                          let encodedSession = sessionId.addingPercentEncoding(withAllowedCharacters: allowed) else {
+                        throw VoiceLineError.failed
+                    }
+                    components.percentEncodedPath = "/api/v1/sessions/\(encodedSession)/voice/turn"
+                    components.query = nil
+                    guard let url = components.url else { throw VoiceLineError.unavailable }
+                    var request = URLRequest(url: url)
+                    request.httpMethod = "POST"
+                    request.timeoutInterval = 25
+                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                    // The route's limits: 2,000 characters a turn, 12 earlier turns, 4,000 characters of them.
+                    var budget = 4_000
+                    var context: [[String: String]] = []
+                    for turn in history.suffix(12).reversed() {
+                        let piece = String(turn.text.prefix(2_000))
+                        guard budget - piece.count >= 0, !piece.isEmpty else { break }
+                        budget -= piece.count
+                        context.insert(["speaker": String(turn.speaker.prefix(80)), "text": piece], at: 0)
+                    }
+                    var body: [String: Any] = ["text": String(text.prefix(2_000)), "callId": callId, "history": context]
+                    body["agentId"] = agentId.map { $0.lowercased() } ?? NSNull()
+                    request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+                    let (bytes, response) = try await urlSession.bytes(for: request)
+                    switch (response as? HTTPURLResponse)?.statusCode ?? 0 {
+                    case 200: break
+                    case 503, 404: throw VoiceLineError.unavailable
+                    case 429: throw VoiceLineError.rateLimited
+                    case 401, 403: throw VoiceLineError.notAllowed
+                    default: throw VoiceLineError.failed
+                    }
+                    var reader = VoiceLineEventReader()
+                    for try await line in bytes.lines {
+                        switch reader.read(line) {
+                        case .none: continue
+                        case .failed: throw VoiceLineError.failed
+                        case .event(let event):
+                            continuation.yield(event)
+                            if case .done = event {
+                                continuation.finish()
+                                return
+                            }
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error is VoiceLineError ? error : VoiceLineError.failed)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+}
