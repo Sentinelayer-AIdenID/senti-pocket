@@ -2228,39 +2228,42 @@ private struct PastedBlockSheet: View {
 
     var body: some View {
         NavigationStack {
-            TextEditor(text: $edited)
-                .font(.callout)
-                .foregroundStyle(PocketPalette.textPrimary)
-                .scrollContentBackground(.hidden)
-                .padding(12)
-                .pocketCanvas()
-                .navigationTitle("Pasted text")
-                .navigationBarTitleDisplayModeInlineIfAvailable()
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Remove", role: .destructive) {
-                            onRemove()
-                            dismiss()
-                        }
-                        .accessibilityIdentifier("pocket.room.composer.paste.remove")
-                    }
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button("Done") {
-                            onSave(edited)
-                            dismiss()
-                        }
-                        .accessibilityIdentifier("pocket.room.composer.paste.done")
-                    }
-                    ToolbarItem(placement: .bottomBar) {
-                        Button {
-                            onUnattach(edited)
-                            dismiss()
-                        } label: {
-                            Label("Put it in the message", systemImage: "text.insert")
-                        }
-                        .accessibilityIdentifier("pocket.room.composer.paste.unattach")
-                    }
+            VStack(spacing: 0) {
+                TextEditor(text: $edited)
+                    .font(.callout)
+                    .foregroundStyle(PocketPalette.textPrimary)
+                    .scrollContentBackground(.hidden)
+                    .padding(12)
+                Button {
+                    onUnattach(edited)
+                    dismiss()
+                } label: {
+                    Label("Put it in the message", systemImage: "text.insert")
+                        .frame(maxWidth: .infinity)
                 }
+                .buttonStyle(.bordered)
+                .padding(12)
+                .accessibilityIdentifier("pocket.room.composer.paste.unattach")
+            }
+            .pocketCanvas()
+            .navigationTitle("Pasted text")
+            .navigationBarTitleDisplayModeInlineIfAvailable()
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Remove", role: .destructive) {
+                        onRemove()
+                        dismiss()
+                    }
+                    .accessibilityIdentifier("pocket.room.composer.paste.remove")
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") {
+                        onSave(edited)
+                        dismiss()
+                    }
+                    .accessibilityIdentifier("pocket.room.composer.paste.done")
+                }
+            }
         }
         .onAppear { edited = text }
     }
