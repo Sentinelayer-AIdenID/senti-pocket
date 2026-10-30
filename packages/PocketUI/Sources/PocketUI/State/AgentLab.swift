@@ -116,13 +116,18 @@ public enum AgentLab: String, CaseIterable, Comparable, Sendable {
         public let isBox: Bool
         public let signal: String?
         public let isWorking: Bool
+        /// Here but quiet (Carter, 10-30: "the people that aren't live but idle (not destroyed) are there still and
+        /// they're kinda greyed out"): idle in presence, or a running box not heard from, and not working.
+        public let isIdle: Bool
 
-        public init(id: String, lab: AgentLab, isBox: Bool = false, signal: String? = nil, isWorking: Bool? = nil) {
+        public init(id: String, lab: AgentLab, isBox: Bool = false, signal: String? = nil, isWorking: Bool? = nil,
+                    isIdle: Bool = false) {
             self.id = id
             self.lab = lab
             self.isBox = isBox
             self.signal = signal
             self.isWorking = isWorking ?? (signal != nil)
+            self.isIdle = isIdle && !(isWorking ?? (signal != nil))
         }
     }
 
@@ -143,7 +148,8 @@ public enum AgentLab: String, CaseIterable, Comparable, Sendable {
                 let person = byId[key]
                 return Present(id: id, lab: of(id: id, model: models[key], reported: person?.lab),
                                isBox: (person?.isBox ?? false) || boxIds.contains(key), signal: signals[key],
-                               isWorking: signals[key] != nil || working.contains(key))
+                               isWorking: signals[key] != nil || working.contains(key),
+                               isIdle: person?.isIdle ?? true)
             }
             .sorted { ($0.isWorking ? 0 : 1, $0.id.lowercased()) < ($1.isWorking ? 0 : 1, $1.id.lowercased()) }
     }
