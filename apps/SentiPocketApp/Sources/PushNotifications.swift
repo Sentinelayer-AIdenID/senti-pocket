@@ -259,11 +259,14 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
         Task { @MainActor in
             let presentation = ForegroundPush.presentation(sessionId: sessionId, roomOnScreen: self.currentRoomId(),
                                                            bannerHosted: InAppBanner.shared.isHosted)
-            if presentation == .inApp {
-                InAppBanner.shared.show(title: title, body: body, link: link)
-                RoomFeedback.shared.play(.received)
-            }
+            guard presentation == .inApp else { return completionHandler(presentation.options) }
+            InAppBanner.shared.show(title: title, body: body, link: link)
             completionHandler(presentation.options)
+            // It sounds and taps as the notification settings say, Pocket's and the phone's (warden, #255).
+            let systemSounds = await UNUserNotificationCenter.current().notificationSettings().soundSetting == .enabled
+            let feedback = ForegroundPush.feedback(soundSetting: self.sound, vibrateSetting: self.vibrate,
+                                                   systemSounds: systemSounds)
+            RoomFeedback.shared.play(.received, sound: feedback.sound, haptic: feedback.haptic)
         }
     }
 
@@ -274,6 +277,7 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
     ) {
         let userInfo = response.notification.request.content.userInfo
         Task { @MainActor in
+            LaunchUrgency.shared.raise()
             if let link = PushRoute.link(from: userInfo) { self.inbox?.receive(link) }
             completionHandler()
         }

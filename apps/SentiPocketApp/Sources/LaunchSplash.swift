@@ -1,11 +1,24 @@
 import SwiftUI
 
+/// Something the person is waiting on opened the app: a tapped notification, a link, or a call. The launch logo
+/// steps aside at once for it (warden, #256: a call must never be answered late behind it).
+@MainActor
+final class LaunchUrgency: ObservableObject {
+    static let shared = LaunchUrgency()
+    @Published private(set) var isUrgent = false
+
+    func raise() {
+        if !isUrgent { isUrgent = true }
+    }
+}
+
 /// The SentinelLayer logo grows in and bursts out at launch, over the app while it loads your rooms (Carter, #55287:
 /// "a nice growing and disappearing animation of sentinelayer logo at all start ... the loading room messages can
 /// be in the background"; #55513: "give it more time for someone to read it. Let it grow longer and just explode in
 /// the screen"). It grows in slowly, keeps growing while the motto is read, and leaves by flying out at you in a glow
 /// as the app shows through. It stays at least `shortest` so the motto can be read, never longer than `longest`, and
-/// leaves once the rooms are in. Reduce Motion gets a plain fade. Tests and previews skip it.
+/// leaves once the rooms are in. Opened by a notification, a link or a call, it leaves at once. Reduce Motion gets a
+/// plain fade. Tests and previews skip it.
 struct LaunchSplash: View {
     /// The room list has loaded (or failed): the app underneath is ready.
     let isReady: Bool
@@ -18,6 +31,7 @@ struct LaunchSplash: View {
     static let motto = "Every agent. One room. Proof of everything."
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ObservedObject private var urgency = LaunchUrgency.shared
     @State private var appeared = false
     @State private var growing = false
     @State private var leaving = false
@@ -66,13 +80,23 @@ struct LaunchSplash: View {
                 if !reduceMotion {
                     withAnimation(.easeInOut(duration: Self.longest).delay(Self.growIn)) { growing = true }
                 }
-                if isReady { leave(in: Self.shortest) }
+                if isReady || urgency.isUrgent {
+                    leave(in: Self.leaveDelay(urgent: urgency.isUrgent, shownFor: 0))
+                }
                 DispatchQueue.main.asyncAfter(deadline: .now() + Self.longest) { leave(in: 0) }
             }
             .onChange(of: isReady) { ready in
-                if ready { leave(in: max(0, Self.shortest - Date().timeIntervalSince(shownAt))) }
+                if ready { leave(in: Self.leaveDelay(urgent: urgency.isUrgent, shownFor: Date().timeIntervalSince(shownAt))) }
+            }
+            .onChange(of: urgency.isUrgent) { urgent in
+                if urgent { leave(in: 0) }
             }
         }
+    }
+
+    /// How long it still stays: until the motto has been up `shortest`, or not at all when something is waiting.
+    static func leaveDelay(urgent: Bool, shownFor: TimeInterval) -> TimeInterval {
+        urgent ? 0 : max(0, shortest - shownFor)
     }
 
     private func leave(in delay: TimeInterval) {

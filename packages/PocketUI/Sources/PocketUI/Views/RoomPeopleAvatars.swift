@@ -9,6 +9,8 @@ struct RoomPeopleAvatars: View {
     let presence: RoomChatPresence
     /// Each agent's model where the room knows it (a box's), lowercased id to model, to tell its lab.
     var models: [String: String] = [:]
+    /// The agents working now, lowercased ids: their logos pulse.
+    var working: Set<String> = []
     let onOpen: () -> Void
 
     /// How long a note stays before it fades.
@@ -56,15 +58,12 @@ struct RoomPeopleAvatars: View {
         .onChange(of: presence) { now in arrive(now) }
     }
 
-    /// How many agents' logos show before the rest become "+N".
-    static let maximumShown = 6
-
     private var agentsHere: [AgentLab.Present] {
-        AgentLab.present(presence.people, models: models)
+        AgentLab.present(presence.people, models: models, working: working)
     }
 
-    private var shownAgents: [AgentLab.Present] { Array(agentsHere.prefix(Self.maximumShown)) }
-    private var hiddenAgents: Int { max(0, agentsHere.count - Self.maximumShown) }
+    private var shownAgents: [AgentLab.Present] { AgentLab.shown(agentsHere).shown }
+    private var hiddenAgents: Int { AgentLab.shown(agentsHere).more }
 
     private var label: String {
         guard presence.isAvailable else { return "Who is here is not known right now" }

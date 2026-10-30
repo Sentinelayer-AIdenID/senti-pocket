@@ -409,6 +409,7 @@ final class DialHost: ObservableObject {
     }
 
     private func answer(dialId: String, callUUID: UUID) {
+        LaunchUrgency.shared.raise()
         guard selectedSessionId != nil, let coordinator else {
             self.coordinator?.discard(callUUID: callUUID)
             callManager?.end(callUUID)

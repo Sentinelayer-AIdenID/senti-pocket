@@ -489,6 +489,9 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     /// down, and "Jump to latest" returns to the live room.
     public let canLoadNewer: Bool
     public let isLoadingNewer: Bool
+    /// The live room holds more rows than a jump to the bottom should cross: Jump to latest keeps only the newest
+    /// rows first, then goes down at once (a long jump froze the app on 10-30).
+    public let jumpDownKeepsLatest: Bool
     public let unreadCount: Int
     public let connection: RoomConnectionState
     /// Agent ids currently preparing a reply (from the stream's `agent_composing` controls).
@@ -545,6 +548,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         isLoadingOlder: Bool = false,
         canLoadNewer: Bool = false,
         isLoadingNewer: Bool = false,
+        jumpDownKeepsLatest: Bool = false,
         connection: RoomConnectionState = .connecting,
         composingAgents: [String] = [],
         failure: SessionLoadFailure? = nil,
@@ -576,6 +580,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         self.isLoadingOlder = isLoadingOlder
         self.canLoadNewer = canLoadNewer
         self.isLoadingNewer = isLoadingNewer
+        self.jumpDownKeepsLatest = jumpDownKeepsLatest
         self.unreadCount = max(unreadCount, 0)
         self.connection = connection
         self.composingAgents = composingAgents
