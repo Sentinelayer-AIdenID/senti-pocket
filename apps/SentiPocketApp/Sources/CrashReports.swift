@@ -361,7 +361,7 @@ final class CrashReporter: NSObject, ObservableObject, MXMetricManagerSubscriber
     }
 
     /// Previews and tests start the app with "-Pocket…" scenario flags or inside XCTest, and end it at will.
-    static var isTestRun: Bool {
+    nonisolated static var isTestRun: Bool {
         ProcessInfo.processInfo.arguments.contains { $0.hasPrefix("-Pocket") } || NSClassFromString("XCTestCase") != nil
     }
 
