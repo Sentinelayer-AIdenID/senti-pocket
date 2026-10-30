@@ -461,6 +461,13 @@ public struct RoomChatView: View {
                 send(.jumpToLatest)
                 return
             }
+            // From up a long history, measuring every row on the way down froze the app (10-30): the room keeps
+            // only its newest rows, then the jump is at once.
+            if state.jumpDownKeepsLatest {
+                send(.keepLatestForJumpDown)
+                DispatchQueue.main.async { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
+                return
+            }
             withAnimation(.easeOut(duration: 0.25)) {
                 proxy.scrollTo(Self.bottomId, anchor: .bottom)
             }

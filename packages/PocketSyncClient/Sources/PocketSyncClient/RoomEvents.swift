@@ -341,6 +341,15 @@ public struct RoomTimeline: Equatable, Sendable {
         return result
     }
 
+    /// Keeps only the newest `count` rows (older ones load again on demand). Returns whether any were dropped.
+    @discardableResult
+    public mutating func keepNewest(_ count: Int) -> Bool {
+        guard messages.count > max(count, 0) else { return false }
+        messages.removeFirst(messages.count - max(count, 0))
+        hasMoreOlder = true
+        return true
+    }
+
     /// Edited messages replace the rows they edit, at a higher revision only. A message not loaded is left alone:
     /// it shows edited when its part of the room loads. Returns the ids replaced.
     @discardableResult

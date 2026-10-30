@@ -16,6 +16,10 @@ private final class ScriptedRoomTransport: RoomTransport, @unchecked Sendable {
     private(set) var beforeCalls: [Int64?] = []
     private(set) var afterCalls: [Int64] = []
     private(set) var streamCalls: [Int64?] = []
+    /// A before call (by its index) that waits for `releaseHeldPage()` before it answers.
+    private var heldBeforeCall: Int?
+    private var heldWaiter: CheckedContinuation<Void, Never>?
+    private var heldReleased = false
 
     init(
         before: [Result<RoomEventPage, Error>] = [],
@@ -28,10 +32,40 @@ private final class ScriptedRoomTransport: RoomTransport, @unchecked Sendable {
     }
 
     func roomEventsBefore(sessionId: String, beforeSequence: Int64?, limit: Int) async throws -> RoomEventPage {
-        try locked {
+        let (index, held) = locked { () -> (Int, Int?) in
             beforeCalls.append(beforeSequence)
-            return beforePages.isEmpty ? RoomEventPage(messages: []) : try beforePages.removeFirst().get()
+            return (beforeCalls.count - 1, heldBeforeCall)
         }
+        if index == held {
+            await withCheckedContinuation { (waiter: CheckedContinuation<Void, Never>) in
+                let now = locked { () -> Bool in
+                    if heldReleased { return true }
+                    heldWaiter = waiter
+                    return false
+                }
+                if now { waiter.resume() }
+            }
+        }
+        return try locked {
+            beforePages.isEmpty ? RoomEventPage(messages: []) : try beforePages.removeFirst().get()
+        }
+    }
+
+    func hold(beforeCall index: Int) {
+        locked { heldBeforeCall = index }
+    }
+
+    var isHoldingPage: Bool {
+        locked { heldWaiter != nil }
+    }
+
+    func releaseHeldPage() {
+        let waiter = locked { () -> CheckedContinuation<Void, Never>? in
+            heldReleased = true
+            defer { heldWaiter = nil }
+            return heldWaiter
+        }
+        waiter?.resume()
     }
 
     func roomEventsAfter(sessionId: String, fromSequence: Int64, limit: Int) async throws -> RoomEventPage {
@@ -65,6 +99,11 @@ private final class ScriptedRoomTransport: RoomTransport, @unchecked Sendable {
     }
 }
 
+/// Takes every message at once.
+private struct AcceptingSender: RoomMessageSending {
+    func sendHumanMessage(sessionId: String, text: String, clientId: String) async throws {}
+}
+
 @MainActor
 final class RoomChatCoordinatorTests: XCTestCase {
     private func message(_ seq: Int64, author: String = "cobalt-warden", text: String = "hi") -> RoomMessage {
@@ -91,12 +130,14 @@ final class RoomChatCoordinatorTests: XCTestCase {
 
     private func makeCoordinator(
         _ transport: ScriptedRoomTransport,
+        sender: (any RoomMessageSending)? = nil,
         onReauth: @escaping @MainActor () -> Void = {}
     ) -> RoomChatCoordinator {
         RoomChatCoordinator(
             sessionId: "room_1",
             title: "Room",
             transport: transport,
+            sender: sender,
             ownAuthorIds: ["human-mrrcarter"],
             // Short delays (reconnect backoff) return at once; the long safety-poll waits park until cancelled.
             sleep: { seconds in
@@ -239,6 +280,81 @@ final class RoomChatCoordinatorTests: XCTestCase {
         XCTAssertEqual(editedRow(coordinator, 1)?.text, "First, edited")
         XCTAssertEqual(editedRow(coordinator, 3)?.text, "Edited at once")
         XCTAssertEqual(editedRow(coordinator, 2)?.isEdited, false)
+        coordinator.pause()
+    }
+
+    /// Carter's freezes on 10-30: going to the bottom of a long loaded history measured every row in between. The
+    /// room keeps only its newest rows before the jump; older ones load again on demand.
+    func test_a_long_history_keeps_only_its_newest_rows_before_the_jump_down() async {
+        let transport = ScriptedRoomTransport(before: [.success(page(Array(1...130), hasMore: true))])
+        let coordinator = makeCoordinator(transport)
+        coordinator.resume()
+        await waitUntil("loaded") { messageSequences(coordinator).count == 130 }
+        XCTAssertTrue(coordinator.state.jumpDownKeepsLatest, "Jump to latest keeps the newest rows first")
+
+        coordinator.send(.keepLatestForJumpDown)
+        XCTAssertEqual(messageSequences(coordinator), Array(71...130), "the newest 60 stay")
+        XCTAssertTrue(coordinator.state.canLoadOlder, "and the rest can load again")
+        XCTAssertFalse(coordinator.state.jumpDownKeepsLatest, "the jump is now short enough to animate")
+
+        coordinator.send(.keepLatestForJumpDown)
+        XCTAssertEqual(messageSequences(coordinator).count, 60, "a short history is left alone")
+        coordinator.pause()
+    }
+
+    /// Carter's freezes came from sending far up a long history (10-30, "sendMessage (497 rows)").
+    func test_sending_from_up_a_long_history_keeps_only_the_newest_rows_first() async {
+        let transport = ScriptedRoomTransport(before: [.success(page(Array(1...497), hasMore: true))])
+        let coordinator = makeCoordinator(transport, sender: AcceptingSender())
+        coordinator.resume()
+        await waitUntil("loaded") { messageSequences(coordinator).count == 497 }
+
+        coordinator.send(.readerAtBottom(false))
+        coordinator.send(.sendMessage(text: "on my way down"))
+        XCTAssertEqual(messageSequences(coordinator), Array(438...497), "only the newest 60 are crossed on the way down")
+        XCTAssertTrue(coordinator.state.canLoadOlder)
+        XCTAssertEqual(coordinator.state.pending.map(\.text), ["on my way down"])
+        coordinator.pause()
+    }
+
+    func test_sending_at_the_bottom_leaves_the_history_loaded() async {
+        let transport = ScriptedRoomTransport(before: [.success(page(Array(1...130), hasMore: true))])
+        let coordinator = makeCoordinator(transport, sender: AcceptingSender())
+        coordinator.resume()
+        await waitUntil("loaded") { messageSequences(coordinator).count == 130 }
+
+        coordinator.send(.readerAtBottom(true))
+        coordinator.send(.sendMessage(text: "here"))
+        XCTAssertEqual(messageSequences(coordinator).count, 130, "already at the bottom: nothing to cross")
+        coordinator.pause()
+    }
+
+    /// Warden, #253: an older page in flight when the rows are trimmed must not land above the rows kept.
+    func test_an_older_page_requested_before_a_trim_is_dropped_and_asked_again_from_the_rows_kept() async {
+        let transport = ScriptedRoomTransport(before: [
+            .success(page(Array(101...230), hasMore: true)),
+            .success(page(Array(21...100), hasMore: true)),
+            .success(page(Array(111...170), hasMore: true))
+        ])
+        let coordinator = makeCoordinator(transport)
+        coordinator.resume()
+        await waitUntil("loaded") { messageSequences(coordinator).count == 130 }
+
+        transport.hold(beforeCall: 1)
+        coordinator.send(.loadOlder)
+        await waitUntil("older page in flight") { transport.isHoldingPage }
+        coordinator.send(.keepLatestForJumpDown)
+        XCTAssertEqual(messageSequences(coordinator), Array(171...230))
+
+        transport.releaseHeldPage()
+        await waitUntil("late page answered") { !coordinator.state.isLoadingOlder }
+        XCTAssertEqual(messageSequences(coordinator), Array(171...230), "the late page is dropped: no gap above the rows kept")
+        XCTAssertTrue(coordinator.state.canLoadOlder)
+
+        coordinator.send(.loadOlder)
+        await waitUntil("asked again") { transport.snapshot().before.count == 3 && !coordinator.state.isLoadingOlder }
+        XCTAssertEqual(transport.snapshot().before.last, 171, "from the oldest row kept")
+        XCTAssertEqual(messageSequences(coordinator), Array(111...230), "and history is whole again")
         coordinator.pause()
     }
 
