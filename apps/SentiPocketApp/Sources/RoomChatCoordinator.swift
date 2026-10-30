@@ -1381,7 +1381,8 @@ final class RoomChatCoordinator: ObservableObject {
                 views: message.eventType == "session_message"
                     ? views(of: message.id, at: message.revision, author: viewAuthor(message.authorId, isHuman: message.isHuman))
                     : nil,
-                work: work[message.sequenceId] ?? []
+                work: work[message.sequenceId] ?? [],
+                isVoiceTurn: message.channel == "voice"
             )
         }
         let threadInput = openThreadSequence.map { sequence in

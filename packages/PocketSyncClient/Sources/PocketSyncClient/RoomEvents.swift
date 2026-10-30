@@ -38,6 +38,8 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
     public let breakout: RoomBreakoutEvent?
     /// Files attached to this message, in order.
     public let attachments: [RoomAttachment]
+    /// "voice" for a turn spoken in a voice room (the room shows it as transcript); nil for a typed post.
+    public let channel: String?
     /// The wire event type. Only `session_message` rows take view receipts (the API refuses the others).
     public let eventType: String
 
@@ -56,7 +58,8 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         isEdited: Bool = false,
         breakout: RoomBreakoutEvent? = nil,
         attachments: [RoomAttachment] = [],
-        eventType: String = "session_message"
+        eventType: String = "session_message",
+        channel: String? = nil
     ) {
         self.id = id
         self.sequenceId = sequenceId
@@ -73,6 +76,7 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         self.breakout = breakout
         self.attachments = attachments
         self.eventType = eventType
+        self.channel = channel
     }
 
     /// Projects one wire event. Returns nil for events a room does not display (control, presence, edit
@@ -140,6 +144,9 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         self.isEdited = json["editedAt"]?.stringValue.map { !$0.isEmpty } ?? false
         self.breakout = breakout
         self.attachments = kind == .message ? RoomAttachment.list(from: payload) : []
+        self.channel = payload["channel"]?.stringValue.flatMap { value in
+            value.isEmpty || value.count > 16 ? nil : value.lowercased()
+        }
         self.eventType = event
     }
 

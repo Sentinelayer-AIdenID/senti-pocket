@@ -17,6 +17,8 @@ final class VoiceRoomCoordinator: ObservableObject {
 
     private let sessionId: String
     private let you: String
+    /// The agents the call rings: the one you talk with, or everyone here in a meeting.
+    private let invited: [String]
     private let ownAuthorIds: Set<String>
     private let listener: any VoiceListening
     private let speaker: any VoiceSpeaking
@@ -44,6 +46,7 @@ final class VoiceRoomCoordinator: ObservableObject {
     init(
         sessionId: String,
         with agents: [String],
+        invited: [String]? = nil,
         you: String,
         ownAuthorIds: Set<String>,
         listener: any VoiceListening,
@@ -58,6 +61,7 @@ final class VoiceRoomCoordinator: ObservableObject {
     ) {
         self.sessionId = sessionId
         self.you = you
+        self.invited = invited ?? agents
         self.ownAuthorIds = Set(ownAuthorIds.map { $0.lowercased() })
         self.listener = listener
         self.speaker = speaker
@@ -69,13 +73,24 @@ final class VoiceRoomCoordinator: ObservableObject {
         state = VoiceRoomState(with: agents, startedAt: now())
     }
 
-    /// Takes the phone's audio and, hands-free, starts listening.
+    /// Rings the agents (one message that mentions them and opens the call's card), takes the phone's audio and,
+    /// hands-free, starts listening.
     func begin() {
         do {
             try audio.activate()
         } catch {
             state.notice = "The phone's audio is busy (a call or another app). End it and try again."
             return
+        }
+        let ring = VoiceCallMarkers.start(caller: you, agents: invited, meeting: state.with.isEmpty)
+        let clientId = "voice-start-" + UUID().uuidString.lowercased()
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.poster.postCallStarted(sessionId: self.sessionId, text: ring, clientId: clientId)
+            } catch {
+                self.state.notice = "The agents could not be rung. Check the connection."
+            }
         }
         if state.isHandsFree { startListening() }
     }
@@ -128,6 +143,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         let name = isHuman ? String(author.dropFirst("human-".count)) : author
         if !state.with.isEmpty, !state.with.contains(where: { $0.lowercased() == lowered }) { return }
         taken.insert(id)
+        if !state.joined.contains(where: { $0.lowercased() == lowered }) { state.joined.append(name) }
         let turn = VoiceRoomTurn(id: id, speaker: name, isYou: false, text: text, at: at)
         queue.append(turn)
         state.turns.append(turn)
@@ -309,7 +325,8 @@ final class VoiceRoomCoordinator: ObservableObject {
         let speakers = Array(Set(state.turns.filter { !$0.isYou }.map(\.speaker))).sorted()
         let asked = (state.with.isEmpty ? speakers : state.with).map { "@\($0)" }.joined(separator: " ")
         var text = "📞 Voice room with \(state.title) ended · \(Self.duration(from: state.startedAt, to: ended)) · \(state.turns.count) turns."
-        text += hasTranscript ? " The full transcript is attached." : " The transcript could not be attached."
+        // Without the file, the conversation is the call's card in the room.
+        if hasTranscript { text += " The full transcript is attached." }
         if !asked.isEmpty { text += " \(asked) please post a 3–5 line summary of what we decided and what happens next." }
         return text
     }

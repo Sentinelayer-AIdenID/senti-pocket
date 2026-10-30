@@ -292,6 +292,8 @@ private struct RoomPreviewSender: RoomMessageSending, RoomActionSending {
 
 /// The voice room in the preview: turns and the transcript go nowhere.
 extension RoomPreviewSender: VoiceRoomPosting {
+    func postCallStarted(sessionId: String, text: String, clientId: String) async throws {}
+
     func postVoiceTurn(sessionId: String, text: String, clientId: String) async throws {}
 
     func uploadTranscript(sessionId: String, filename: String, markdown: String, clientId: String) async throws -> VoiceTranscriptAttachment {

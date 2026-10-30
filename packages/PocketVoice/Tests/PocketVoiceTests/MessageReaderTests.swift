@@ -13,6 +13,12 @@ private final class FakeSpeechEngine: MessageSpeechEngine {
 
     private(set) var spoken: [Spoken] = []
     private(set) var stopCount = 0
+    private(set) var pauses = 0
+    private(set) var resumes = 0
+    var segmentStarted: (@MainActor (Int) -> Void)?
+
+    func pause() { pauses += 1 }
+    func resume() { resumes += 1 }
 
     func speak(
         _ segments: [SpeechText.Segment],
@@ -52,6 +58,76 @@ final class MessageReaderTests: XCTestCase {
 
     private func reader(voices: [VoiceOption] = [], phone: String = "en-US") -> MessageReader {
         MessageReader(engine: engine, sessions: sessions, voices: { voices }, phoneLanguageTag: { phone })
+    }
+
+    /// A long message: forty sentences of about 70 characters, roughly 5 s each.
+    private var longMessage: String {
+        (1...40).map { "Sentence number \($0) talks about the plan for tonight and what ships next. " }.joined()
+    }
+
+    /// Carter (#54955): a player like ChatGPT's, with stop, pause, back and forward 15 s and the time, that can
+    /// read for 10-15 minutes.
+    func test_the_player_pauses_resumes_and_skips_by_sentence_with_an_estimated_time() throws {
+        let reader = reader()
+        XCTAssertEqual(reader.read(id: "msg:1", markdown: longMessage, title: "pocket-forge"), .started)
+        let start = try XCTUnwrap(reader.playback)
+        XCTAssertEqual(start.title, "pocket-forge")
+        XCTAssertFalse(start.isPaused)
+        XCTAssertGreaterThan(start.total, 150, "forty sentences take minutes")
+        XCTAssertEqual(start.elapsedBefore, 0)
+        XCTAssertEqual(engine.spoken.count, 1)
+        let all = engine.spoken[0].segments.count
+
+        engine.segmentStarted?(3)
+        let atFour = try XCTUnwrap(reader.playback)
+        XCTAssertGreaterThan(atFour.elapsedBefore, 10, "the fourth sentence starts some seconds in")
+
+        reader.pause()
+        XCTAssertEqual(engine.pauses, 1)
+        XCTAssertEqual(reader.playback?.isPaused, true)
+        XCTAssertNil(reader.playback?.sentenceStartedAt, "the clock stops while paused")
+        reader.resume()
+        XCTAssertEqual(engine.resumes, 1)
+        XCTAssertEqual(reader.playback?.isPaused, false)
+
+        reader.skip(by: 15)
+        XCTAssertEqual(engine.spoken.count, 2, "forward 15 s starts again at a later sentence")
+        let forward = engine.spoken[1].segments.count
+        XCTAssertLessThan(forward, all - 3, "past the sentence it was on")
+        XCTAssertGreaterThan(reader.playback?.elapsedBefore ?? 0, atFour.elapsedBefore + 5)
+
+        reader.skip(by: -600)
+        XCTAssertEqual(engine.spoken.last?.segments.count, all, "back past the start goes to the first sentence")
+        XCTAssertEqual(reader.playback?.elapsedBefore, 0)
+
+        reader.stop()
+        XCTAssertNil(reader.playback, "closing the player stops the reading")
+        XCTAssertNil(reader.readingId)
+    }
+
+    func test_skipping_past_the_end_stops_and_finishing_clears_the_player() {
+        let reader = reader()
+        reader.read(id: "msg:2", markdown: "One short sentence. And another one.")
+        reader.skip(by: 3_600)
+        XCTAssertNil(reader.playback)
+        XCTAssertNil(reader.readingId)
+
+        reader.read(id: "msg:3", markdown: "Done soon.")
+        engine.spoken.last?.finished()
+        XCTAssertNil(reader.playback)
+    }
+
+    func test_the_player_says_when_only_a_standard_voice_is_installed() {
+        let standard = [VoiceOption(identifier: "en.standard", language: "en-US", quality: .standard, isLanguageDefault: true)]
+        let premium = standard + [VoiceOption(identifier: "en.premium", language: "en-US", quality: .premium)]
+        let plain = reader(voices: standard)
+        plain.read(id: "msg:4", markdown: "Hello there.")
+        XCTAssertEqual(plain.playback?.hasGoodVoice, false)
+        plain.stop()
+        let better = reader(voices: premium)
+        better.read(id: "msg:5", markdown: "Hello there.")
+        XCTAssertEqual(better.playback?.hasGoodVoice, true)
+        XCTAssertEqual(engine.spoken.last?.voiceIdentifier, "en.premium")
     }
 
     func test_reading_takes_a_playback_session_and_finishing_gives_it_back() {

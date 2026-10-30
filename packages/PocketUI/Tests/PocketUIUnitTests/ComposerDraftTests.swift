@@ -3,6 +3,13 @@ import XCTest
 @testable import PocketUI
 
 final class ComposerDraftTests: XCTestCase {
+    /// Carter and warden: plain words become a ticket; the keeper files the marked message.
+    func test_a_ticket_request_is_marked_once() {
+        XCTAssertEqual(RoomComposerDraft.ticketRequest("  Let the text box lower when I scroll  "),
+                       "🎫 Ticket: Let the text box lower when I scroll")
+        XCTAssertEqual(RoomComposerDraft.ticketRequest("🎫 Ticket: already marked"), "🎫 Ticket: already marked")
+    }
+
     func test_restored_text_fills_an_empty_composer() {
         XCTAssertEqual(RoomComposerDraft.restoring("Ship it", into: ""), "Ship it")
         XCTAssertEqual(RoomComposerDraft.restoring("Ship it", into: "  \n "), "Ship it", "whitespace counts as empty")
