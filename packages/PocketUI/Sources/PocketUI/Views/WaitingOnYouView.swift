@@ -7,8 +7,10 @@ public struct WaitingOnYouView: View {
     private let state: WaitingOnYouState
     private let send: (WaitingOnYouIntent) -> Void
     private let onDone: () -> Void
-    @State private var writing: String?
-    @State private var words = ""
+    /// Words typed per ask, kept until the ask leaves the list (so a failed send keeps them for the retry).
+    @State private var drafts: [String: String] = [:]
+    /// Asks whose "Custom" box is open.
+    @State private var customOpen: Set<String> = []
 
     public init(state: WaitingOnYouState, send: @escaping (WaitingOnYouIntent) -> Void, onDone: @escaping () -> Void) {
         self.state = state
@@ -41,10 +43,8 @@ public struct WaitingOnYouView: View {
             // Words typed for an answer stay until it has gone (its ask leaves the list), so a failed send keeps
             // them for the retry (warden, #270).
             .onChange(of: state.rows.map(\.id)) { ids in
-                if let writing, !ids.contains(writing) {
-                    self.writing = nil
-                    words = ""
-                }
+                drafts = drafts.filter { ids.contains($0.key) }
+                customOpen = customOpen.filter { ids.contains($0) }
             }
             .navigationTitle(state.total > 0 ? "Waiting on you · \(state.total)" : "Waiting on you")
             #if os(iOS)
@@ -109,21 +109,19 @@ public struct WaitingOnYouView: View {
                 .disabled(isSending)
             }
 
-            if writing == row.id || (row.options.isEmpty && writing == nil) {
+            if row.options.isEmpty || customOpen.contains(row.id) {
                 HStack(spacing: 8) {
                     TextField(row.options.isEmpty ? "Your answer" : "Say what you want instead", text: binding(for: row.id),
                               axis: .vertical)
                         .lineLimit(1...4)
                         .textFieldStyle(.roundedBorder)
                     Button("Send") {
-                        let text = words.trimmingCharacters(in: .whitespacesAndNewlines)
-                        writing = row.id
+                        let text = (drafts[row.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                         send(row.options.isEmpty
                              ? .answer(id: row.id, choice: text, detail: "")
                              : .answer(id: row.id, choice: "Custom", detail: text))
                     }
-                    .disabled(isSending || words.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                              || (writing != nil && writing != row.id))
+                    .disabled(isSending || (drafts[row.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
 
@@ -137,14 +135,12 @@ public struct WaitingOnYouView: View {
     }
 
     private func startWriting(_ id: String) {
-        if writing != id { words = "" }
-        writing = id
+        customOpen.insert(id)
     }
 
-    /// One text box at a time: typing into an open question's box makes it the one being written.
+    /// Each ask keeps its own words, so writing one never locks or fills another (warden, #270).
     private func binding(for id: String) -> Binding<String> {
-        Binding(get: { writing == nil || writing == id ? words : "" },
-                set: { words = $0; writing = id })
+        Binding(get: { drafts[id] ?? "" }, set: { drafts[id] = $0 })
     }
 }
 #endif

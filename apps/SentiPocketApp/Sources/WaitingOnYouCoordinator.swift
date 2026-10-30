@@ -73,8 +73,6 @@ final class WaitingOnYouCoordinator: ObservableObject {
             // An older server without the list answers 404, which the shared fetch reads as access denied; so does a
             // server that will not show it to this sign-in. Either way the side panel leaves it out.
             state.isAvailable = false
-        } catch SessionTransportError.service(let status) where status == 404 || status == 405 {
-            state.isAvailable = false
         } catch SessionTransportError.reauthenticationRequired {
             onReauthenticationRequired()
         } catch SessionTransportError.cancelled {
