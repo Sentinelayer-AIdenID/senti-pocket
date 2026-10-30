@@ -17,9 +17,12 @@ public struct WaitingOnYouRow: Identifiable, Equatable, Sendable {
     public let askedAt: Date?
     /// Who asked, as the room names them.
     public let askedBy: String?
+    /// This ask, not just its ticket: a ticket that asks again is a new ask, with its own words (warden, #271).
+    public let askKey: String
 
     public init(id: String, roomId: String, roomTitle: String, title: String, question: String, options: [String],
-                custom: Bool, askedAt: Date?, askedBy: String?) {
+                custom: Bool, askedAt: Date?, askedBy: String?, askKey: String? = nil) {
+        self.askKey = askKey ?? id
         self.id = id
         self.roomId = roomId
         self.roomTitle = roomTitle

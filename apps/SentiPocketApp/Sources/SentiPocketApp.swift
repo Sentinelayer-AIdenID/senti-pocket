@@ -687,6 +687,8 @@ private struct AuthenticatedRootView: View {
             theme: theme,
             onSelectRoom: { sessionId in show(roomRoute(for: sessionId)) },
             onAllRooms: {
+                // The room being left reads nothing more as the drawer closes (warden, #271).
+                if let leaving = (roomPath.last ?? currentRoom)?.sessionId { roomReads.gone(leaving) }
                 roomPath = []
                 currentRoom = nil
                 closeDrawer()

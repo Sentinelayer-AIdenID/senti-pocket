@@ -143,7 +143,8 @@ final class WaitingOnYouCoordinator: ObservableObject {
                 options: item.options,
                 custom: item.custom,
                 askedAt: ParsedSessionTimestamp(item.askedAt).date,
-                askedBy: item.askedBy.flatMap { UUID(uuidString: $0) == nil ? $0 : nil }
+                askedBy: item.askedBy.flatMap { UUID(uuidString: $0) == nil ? $0 : nil },
+                askKey: item.askKey
             )
         }
         state.total = max(0, total - (items.count - shown.count))

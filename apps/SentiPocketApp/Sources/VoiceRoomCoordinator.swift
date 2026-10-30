@@ -139,6 +139,12 @@ final class VoiceRoomCoordinator: ObservableObject {
             guard let self else { return false }
             do {
                 try await self.poster.postCallStarted(sessionId: self.sessionId, text: ring, clientId: clientId)
+                // The ring sounds, and its 30 s run, once the agents have been rung, not while the ring message waits
+                // on the network or on the room's last end (warden, #271).
+                if self.state.isRinging {
+                    self.ringer?.startRinging()
+                    self.watchForPickup()
+                }
                 return true
             } catch {
                 // Nobody was rung, so nothing rings (warden, #267).
@@ -153,8 +159,6 @@ final class VoiceRoomCoordinator: ObservableObject {
             if state.isHandsFree { startListening() }
             return
         }
-        ringer?.startRinging()
-        watchForPickup()
     }
 
     /// No answer for a while: the ring stops and the line opens (hands-free, listening starts).

@@ -307,8 +307,8 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), ringer = FakeRinger(), poster = FakePoster()
         let room = room(with: ["pocket-forge"], listener: listener, speaker: speaker, audio: audio, ringer: ringer, poster: poster)
         room.begin()
-        XCTAssertTrue(ringer.ringing)
-        XCTAssertTrue(room.state.isRinging)
+        XCTAssertTrue(room.state.isRinging, "ringing from the start")
+        await until("the ring sounds once the agents are rung") { ringer.ringing }
         try? await Task.sleep(nanoseconds: 20_000_000)
         XCTAssertEqual(listener.starts, 0, "hands-free does not listen while it rings")
 
@@ -326,6 +326,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), ringer = FakeRinger(), poster = FakePoster()
         let room = room(with: ["pocket-forge"], listener: listener, speaker: speaker, audio: audio, ringer: ringer, poster: poster)
         room.begin()
+        await until("the ring sounds once the agents are rung") { ringer.ringing }
         clock.advance(VoiceRoomCoordinator.ringsFor - 1)
         try? await Task.sleep(nanoseconds: 20_000_000)
         XCTAssertTrue(ringer.ringing, "still ringing before the time is up")
