@@ -38,3 +38,18 @@ final class FlightRecordPresentationTests: XCTestCase {
         XCTAssertEqual(FlightRecordState.lines(narration: Array(repeating: ("", "x"), count: 50), commands: []).count, 30)
     }
 }
+
+/// Carter, #55240: "In the flight record we have agents we can have a separate list for humans too."
+final class FlightRecordPeopleTests: XCTestCase {
+    func test_the_people_list_has_only_people_here_first() {
+        let members = [
+            RoomRoster.Member(id: "human-ade", name: "Ade", kind: .person, status: .gone),
+            RoomRoster.Member(id: "claude-warden", name: "claude-warden", kind: .agent, status: .here),
+            RoomRoster.Member(id: "human-simone", name: "Simone", kind: .person, status: .here),
+            RoomRoster.Member(id: "ds-box", name: "ds-box", kind: .box, status: .here),
+            RoomRoster.Member(id: "human-carter", name: "carter", kind: .person, status: .idle)
+        ]
+        let state = FlightRecordState(people: members)
+        XCTAssertEqual(state.people.map(\.name), ["Simone", "carter", "Ade"])
+    }
+}

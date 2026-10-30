@@ -81,7 +81,11 @@ public struct FlightRecordPanel: View {
                         sectionTitle("Agents")
                         ForEach(state.agents) { agent in agentRow(agent) }
                     }
-                    if !state.isLoading, state.boxes.isEmpty, state.agents.isEmpty, state.failure == nil {
+                    if !state.people.isEmpty {
+                        sectionTitle("People")
+                        ForEach(state.people) { person in personRow(person) }
+                    }
+                    if !state.isLoading, state.boxes.isEmpty, state.agents.isEmpty, state.people.isEmpty, state.failure == nil {
                         Text("Nobody is working in this room right now.")
                             .font(.footnote)
                             .foregroundStyle(PocketPalette.textSecondary)
@@ -248,6 +252,37 @@ public struct FlightRecordPanel: View {
         .font(.caption2)
         .foregroundStyle(PocketPalette.textSecondary)
         .lineLimit(1)
+    }
+
+    /// A person who came: here (green), idle (gray) or gone (red), and when they were last seen.
+    private func personRow(_ person: RoomRoster.Member) -> some View {
+        HStack(alignment: .center, spacing: 10) {
+            RoomAvatar(name: person.name, isHuman: true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(person.name)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(PocketPalette.textPrimary)
+                    .lineLimit(1)
+                if let last = person.lastSeen, person.status != .here {
+                    Text("last seen \(PocketSidePanel.compactAge(of: last)) ago")
+                        .font(.caption)
+                        .foregroundStyle(PocketPalette.textSecondary)
+                }
+            }
+            Spacer(minLength: 0)
+            Circle()
+                .fill(person.status == .here ? PocketPalette.verified
+                      : person.status == .idle ? PocketPalette.textSecondary.opacity(0.5) : PocketPalette.danger)
+                .frame(width: 8, height: 8)
+            Text(person.status.label)
+                .font(.caption)
+                .foregroundStyle(PocketPalette.textSecondary)
+        }
+        .padding(12)
+        .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .padding(.horizontal, 12)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("pocket.flight.person.\(person.id)")
     }
 
     private func agentRow(_ agent: FlightRecordState.Agent) -> some View {
