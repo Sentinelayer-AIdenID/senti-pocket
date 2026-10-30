@@ -226,6 +226,25 @@ public struct TicketDecision: Equatable, Sendable {
         return "Assigned \(card) to \(UUID(uuidString: who) != nil ? personLabel(who) : "@\(who)")"
     }
 
+    /// What "Chat about it" posts (web `ticketChatMessage`): the card, ` — raised by <name>` when the raiser is known,
+    /// then the note after a blank line. The room renders the card as the ticket.
+    public static func chatAboutIt(
+        sessionId: String,
+        ticketId: String,
+        title: String,
+        note: String,
+        raisedBy: String?
+    ) -> String {
+        let card = Self.ticketCard(sessionId: sessionId, ticketId: ticketId, title: title)
+        let raiser = (raisedBy ?? "")
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        let head = raiser.isEmpty ? card : "\(card) — raised by \(raiser)"
+        let body = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        return body.isEmpty ? head : "\(head)\n\n\(body)"
+    }
+
     /// `[Ticket: <title on one line, no brackets>](/dashboard/sessions/<room>?ticket=<id>)`, the web's bare card.
     static func ticketCard(sessionId: String, ticketId: String, title: String) -> String {
         let cleanTitle = title

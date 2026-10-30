@@ -21,6 +21,8 @@ public enum RoomTicketsIntent: Equatable, Sendable {
     case comment(ticketId: String, body: String)
     /// Posts the ticket's last comment again, with the same key.
     case retryComment(ticketId: String)
+    /// "Chat about it" (web): the ticket's card and a note, posted to this room as you.
+    case chatAboutIt(ticketId: String, note: String)
 }
 
 /// The room's Tickets tab: Active / Archived (N), search across all tickets, ranked by impact. Tapping a ticket
@@ -194,6 +196,7 @@ public struct RoomTicketDetailView: View {
     @State private var assigning = false
     @State private var editing = false
     @State private var draftComment = ""
+    @State private var chatNote = ""
 
     public init(
         row: RoomTicketRow,
@@ -345,6 +348,34 @@ public struct RoomTicketDetailView: View {
         }
     }
 
+    /// "Chat about it", as on the web: the ticket's card goes to the room with your note, so everyone and every agent
+    /// sees it and an agent can pick it up.
+    @ViewBuilder
+    private var chatCard: some View {
+        if canAnswer {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Chat about it")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(PocketPalette.textPrimary)
+                TextField("Add a note (optional)", text: $chatNote, axis: .vertical)
+                    .lineLimit(1...4)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("pocket.ticket.chatNote")
+                Button {
+                    send(.chatAboutIt(ticketId: row.id, note: chatNote))
+                    chatNote = ""
+                } label: {
+                    Label("Post to this room", systemImage: "bubble.left.and.text.bubble.right")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(PocketPalette.accent)
+                .accessibilityIdentifier("pocket.ticket.chatAboutIt")
+            }
+            .padding(12)
+            .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+    }
+
     @ViewBuilder
     private var decisionCard: some View {
         if let decision = row.decision {
@@ -454,6 +485,8 @@ public struct RoomTicketDetailView: View {
                 actionsCard
 
                 decisionCard
+
+                chatCard
 
                 if let sequence = row.sourceSequenceId {
                     Button {
