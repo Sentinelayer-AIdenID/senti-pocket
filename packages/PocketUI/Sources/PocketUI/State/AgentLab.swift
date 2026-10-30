@@ -1,9 +1,9 @@
 import Foundation
 
-/// The lab an agent's model comes from, for the room's who-is-here glyphs (Carter, #55428: "Whichever labs you come
-/// from put that icon there with its number badge and also pulsate ... to show they're working"). Read from the
-/// model when the room knows it (a box's model), else from the agent's name. Shown as the lab's initial in its colour,
-/// not a brand logo.
+/// The lab an agent's model comes from, for the room's who-is-here row (Carter, #55428, then #55506: "get the
+/// transparent logo of each of the different boxes from different labs and assign them"). Read from the model when the
+/// room knows it (a box's model), else from the agent's name. Shown as the lab's logo where the app carries one, else
+/// its initial.
 public enum AgentLab: String, CaseIterable, Comparable, Sendable {
     case anthropic
     case openai
@@ -29,6 +29,18 @@ public enum AgentLab: String, CaseIterable, Comparable, Sendable {
         case .xai: return "Grok"
         case .zhipu: return "GLM"
         case .other: return "Other agents"
+        }
+    }
+
+    /// The app's image for the lab's mark (a template, tinted with `tint`); nil where the app carries none.
+    public var logoAsset: String? {
+        switch self {
+        case .anthropic: return "LabClaude"
+        case .openai: return "LabOpenAI"
+        case .deepseek: return "LabDeepSeek"
+        case .google: return "LabGemini"
+        case .moonshot: return "LabKimi"
+        case .xai, .zhipu, .other: return nil
         }
     }
 
@@ -62,44 +74,77 @@ public enum AgentLab: String, CaseIterable, Comparable, Sendable {
 
     /// The lab for an agent: its model first, then its id (claude-warden, codex-helper, ds-…, astra-…).
     public static func of(id: String, model: String?) -> AgentLab {
-        if let model, let lab = match(model.lowercased()) { return lab }
+        if let model, let lab = match(model) { return lab }
         let name = id.lowercased()
         if name.hasPrefix("ds-") { return .deepseek }
         if name.hasPrefix("astra-") { return .openai }
         return match(name) ?? .other
     }
 
+    /// Matched on whole words of the model or name, a version allowed right after ("gpt4o", "glm4"), never inside
+    /// another word (warden, #254: "opus" in "octopus" is not Claude).
     private static func match(_ text: String) -> AgentLab? {
         let rules: [(AgentLab, [String])] = [
             (.anthropic, ["claude", "opus", "sonnet", "haiku", "fable"]),
-            (.openai, ["gpt", "codex", "chatgpt", "openai", "astra"]),
+            (.openai, ["gpt", "codex", "chatgpt", "openai"]),
             (.deepseek, ["deepseek"]),
             (.google, ["gemini"]),
             (.moonshot, ["kimi", "moonshot"]),
             (.xai, ["grok"]),
             (.zhipu, ["glm"])
         ]
-        for (lab, words) in rules where words.contains(where: text.contains) { return lab }
+        let tokens = text.lowercased().split { !$0.isLetter && !$0.isNumber }
+        for (lab, words) in rules {
+            for token in tokens {
+                for word in words where token.hasPrefix(word) {
+                    let rest = token.dropFirst(word.count)
+                    if rest.isEmpty || rest.first?.isNumber == true { return lab }
+                }
+            }
+        }
         return nil
     }
 
-    /// Who is here, grouped by lab: how many agents, and whether any of them is active (not idle) now.
-    public struct Group: Equatable, Identifiable, Sendable {
-        public var id: AgentLab { lab }
+    /// One agent here, with its lab and whether it is working now.
+    public struct Present: Equatable, Identifiable, Sendable {
+        public let id: String
         public let lab: AgentLab
-        public let count: Int
         public let isWorking: Bool
     }
 
-    public static func groups(present: [RoomChatPresence.Person], models: [String: String]) -> [Group] {
-        var counts: [AgentLab: (count: Int, working: Bool)] = [:]
+    /// Each agent here once, working ones first, then by name (Carter, #55506: "just having all the logos in the
+    /// room ... have a max number on the screen and if that exceeds it we just put a group number"). `working` holds
+    /// the lowercased ids of the agents working now (`RoomChatPresentationState.workingAgentIds`).
+    public static func present(_ people: [RoomChatPresence.Person], models: [String: String],
+                               working: Set<String>) -> [Present] {
         var seen = Set<String>()
-        for person in present where !person.isHuman && seen.insert(person.id.lowercased()).inserted {
-            let lab = of(id: person.id, model: models[person.id.lowercased()])
-            let current = counts[lab] ?? (0, false)
-            counts[lab] = (current.count + 1, current.working || !person.isIdle)
+        return people.filter { !$0.isHuman && seen.insert($0.id.lowercased()).inserted }
+            .map { Present(id: $0.id, lab: of(id: $0.id, model: models[$0.id.lowercased()]),
+                           isWorking: working.contains($0.id.lowercased())) }
+            .sorted { ($0.isWorking ? 0 : 1, $0.id.lowercased()) < ($1.isWorking ? 0 : 1, $1.id.lowercased()) }
+    }
+
+    /// How many logos show before the rest become "+N".
+    public static let maximumShown = 6
+
+    /// The logos shown (working ones first) and how many more there are.
+    public static func shown(_ agents: [Present], maximum: Int = maximumShown) -> (shown: [Present], more: Int) {
+        (Array(agents.prefix(maximum)), max(0, agents.count - maximum))
+    }
+}
+
+extension RoomChatPresentationState {
+    /// The agents working now, lowercased: preparing a reply, or posted in the last `window`. Not presence, which
+    /// stays "active" while an agent's listener is connected (warden, #254); Carter, #55506: "If Claude is actively
+    /// sending signals from his terminal that's him working".
+    public func workingAgentIds(now: Date, window: TimeInterval = 120) -> Set<String> {
+        var ids = Set(composingAgents.map { $0.lowercased() })
+        let since = now.addingTimeInterval(-window)
+        for row in rows.reversed() {
+            guard case .message(let message) = row, let date = message.date else { continue }
+            if date < since { break }
+            if !message.isHuman { ids.insert(message.authorId.lowercased()) }
         }
-        return counts.map { Group(lab: $0.key, count: $0.value.count, isWorking: $0.value.working) }
-            .sorted { $0.lab < $1.lab }
+        return ids
     }
 }
