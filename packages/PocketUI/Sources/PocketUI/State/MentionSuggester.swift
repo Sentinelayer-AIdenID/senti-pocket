@@ -41,29 +41,54 @@ public enum MentionSuggester {
     }
 
     /// Where an edit ended in `new`, in characters: just after what was typed or pasted, or where text was removed.
+    ///
+    /// It runs on every keystroke, so it walks the two texts in place instead of copying each into an array of
+    /// characters (a long draft made typing lag, ticket 7674d10b). Typing at the end, the common case, is one
+    /// forward pass.
     public static func editOffset(from old: String, to new: String) -> Int {
-        let before = Array(old), after = Array(new)
+        var oldIndex = old.startIndex
+        var newIndex = new.startIndex
         var prefix = 0
-        while prefix < before.count, prefix < after.count, before[prefix] == after[prefix] { prefix += 1 }
-        var suffix = 0
-        while suffix < before.count - prefix, suffix < after.count - prefix,
-              before[before.count - 1 - suffix] == after[after.count - 1 - suffix] {
-            suffix += 1
+        while oldIndex < old.endIndex, newIndex < new.endIndex, old[oldIndex] == new[newIndex] {
+            old.formIndex(after: &oldIndex)
+            new.formIndex(after: &newIndex)
+            prefix += 1
         }
-        return after.count - suffix
+        // What is left of each after the common start; the edit ends where their common end begins.
+        let oldRest = old[oldIndex...]
+        let newRest = new[newIndex...]
+        var oldEnd = oldRest.endIndex
+        var newEnd = newRest.endIndex
+        while oldEnd > oldRest.startIndex, newEnd > newRest.startIndex {
+            let oldBefore = oldRest.index(before: oldEnd)
+            let newBefore = newRest.index(before: newEnd)
+            guard oldRest[oldBefore] == newRest[newBefore] else { break }
+            oldEnd = oldBefore
+            newEnd = newBefore
+        }
+        return prefix + newRest.distance(from: newRest.startIndex, to: newEnd)
     }
 
     /// The `@word` being typed at character `offset` of `draft`, anywhere in the text: the query and the characters
-    /// it covers (from the `@`).
+    /// it covers (from the `@`). Walks back from the offset only as far as the word goes.
     public static func activeQuery(in draft: String, at offset: Int) -> (query: String, range: Range<Int>)? {
-        let characters = Array(draft)
-        guard offset >= 0, offset <= characters.count else { return nil }
-        var start = offset
-        while start > 0, isHandleCharacter(characters[start - 1]) { start -= 1 }
-        guard start > 0, characters[start - 1] == "@" else { return nil }
-        let at = start - 1
-        if at > 0, !characters[at - 1].isWhitespace { return nil }
-        return (String(characters[start..<offset]), at..<offset)
+        guard offset >= 0, let end = draft.index(draft.startIndex, offsetBy: offset, limitedBy: draft.endIndex) else {
+            return nil
+        }
+        var start = end
+        var length = 0
+        while start > draft.startIndex {
+            let before = draft.index(before: start)
+            guard isHandleCharacter(draft[before]) else { break }
+            start = before
+            length += 1
+        }
+        guard start > draft.startIndex else { return nil }
+        let at = draft.index(before: start)
+        guard draft[at] == "@" else { return nil }
+        if at > draft.startIndex, !draft[draft.index(before: at)].isWhitespace { return nil }
+        let atOffset = offset - length - 1
+        return (String(draft[start..<end]), atOffset..<offset)
     }
 
     /// Puts `candidate` in place of the `@word` at `offset` (and the rest of that word after it), with a space after

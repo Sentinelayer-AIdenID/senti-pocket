@@ -461,23 +461,17 @@ public struct RoomComposerState: Equatable, Sendable {
         guard let maximumLength else { return nil }
         let count = draft.trimmingCharacters(in: .whitespacesAndNewlines).unicodeScalars.count
         guard count > maximumLength else { return nil }
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .decimal
-        let have = formatter.string(from: NSNumber(value: count)) ?? String(count)
-        let limit = formatter.string(from: NSNumber(value: maximumLength)) ?? String(maximumLength)
-        return "Too long to send: \(have) of \(limit) characters."
+        return "Too long to send: \(count.formatted(.number)) of \(maximumLength.formatted(.number)) characters."
     }
 
     /// How long a long draft is, counted as the limit counts (Carter, #54900); nil while it is short.
     public func lengthNote(for draft: String, from threshold: Int = 200) -> String? {
         let count = draft.trimmingCharacters(in: .whitespacesAndNewlines).unicodeScalars.count
         guard count >= threshold else { return nil }
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .decimal
-        let have = formatter.string(from: NSNumber(value: count)) ?? String(count)
+        // A formatter per call was the costliest part of a redraw while typing a long draft (ticket 7674d10b).
+        let have = count.formatted(.number)
         guard let maximumLength else { return "\(have) characters" }
-        let limit = formatter.string(from: NSNumber(value: maximumLength)) ?? String(maximumLength)
-        return "\(have) of \(limit) characters"
+        return "\(have) of \(maximumLength.formatted(.number)) characters"
     }
 }
 
@@ -1315,6 +1309,9 @@ public enum RoomComposerDraft {
     /// becomes without it, and the block. Typing and dictation add a little at a time and never come here.
     public static func pastedBlock(from old: String, to new: String, minimum: Int = pastedBlockLength)
         -> (draft: String, block: String)? {
+        // Every keystroke asks; a paste of `minimum` characters adds at least that many UTF-8 bytes, so a keystroke
+        // is answered without copying the draft (a long draft made typing lag, ticket 7674d10b).
+        guard new.utf8.count - old.utf8.count >= minimum else { return nil }
         let oldChars = Array(old)
         let newChars = Array(new)
         guard newChars.count - oldChars.count >= minimum else { return nil }
