@@ -83,18 +83,84 @@ public struct FlightRecordState: Equatable, Sendable {
         }
     }
 
+    /// The room's figures, as the web's two rows of three (Carter, 10-27 and #55014): boxes minted, active and
+    /// finished, then agent hours worked, days saved against one engineer, and the cost.
+    public struct Totals: Equatable, Sendable {
+        public let minted: Int
+        public let active: Int
+        public let finished: Int
+        /// The counts and the cost are minimums: the service left the room's oldest boxes out.
+        public let isMinimum: Bool
+        /// Agent hours worked, added together; nil when no box has a working record yet.
+        public let workedHours: Double?
+        /// The hours, and so the days saved, are a minimum: some records are missing or still being counted.
+        public let workIsMinimum: Bool
+        /// Days saved against one engineer at 8 hours a day; nil when the room's span is unknown.
+        public let savedDays: Double?
+        public let costUsd: Double?
+        /// The cost as a percent of engineers at $80 an hour for the same hours.
+        public let costPercent: Double?
+
+        public init(minted: Int, active: Int, finished: Int, isMinimum: Bool = false, workedHours: Double? = nil,
+                    workIsMinimum: Bool = false, savedDays: Double? = nil, costUsd: Double? = nil, costPercent: Double? = nil) {
+            self.minted = minted
+            self.active = active
+            self.finished = finished
+            self.isMinimum = isMinimum
+            self.workedHours = workedHours
+            self.workIsMinimum = workIsMinimum
+            self.savedDays = savedDays
+            self.costUsd = costUsd
+            self.costPercent = costPercent
+        }
+
+        /// A figure as the web writes it: one decimal below 10, none above, and a small positive value never as 0.
+        public static func amount(_ value: Double, locale: Locale = .current) -> String {
+            if value > 0 && value < 0.05 { return "<0.1" }
+            let formatter = NumberFormatter()
+            formatter.locale = locale
+            formatter.numberStyle = .decimal
+            formatter.maximumFractionDigits = value < 10 ? 1 : 0
+            return formatter.string(from: NSNumber(value: value)) ?? String(value)
+        }
+
+        /// A minimum reads "≥" (at least); one that rounds below 0.1 reads ">0".
+        public static func shown(_ value: Double, isMinimum: Bool, locale: Locale = .current) -> String {
+            let text = amount(value, locale: locale)
+            guard isMinimum else { return text }
+            return text == "<0.1" ? ">0" : "≥" + text
+        }
+
+        public static func dayUnit(_ value: Double, locale: Locale = .current) -> String {
+            amount(value, locale: locale) == "1" ? "day" : "days"
+        }
+
+        public static func usd(_ value: Double, locale: Locale = .current) -> String {
+            let formatter = NumberFormatter()
+            formatter.locale = locale
+            formatter.numberStyle = .currency
+            formatter.currencyCode = "USD"
+            formatter.minimumFractionDigits = value >= 100 ? 0 : 2
+            formatter.maximumFractionDigits = value >= 100 ? 0 : 2
+            return formatter.string(from: NSNumber(value: value)) ?? "$\(value)"
+        }
+    }
+
     public let boxes: [Box]
     public let agents: [Agent]
     public let finishedBoxes: Int
     public let isLoading: Bool
     public let failure: String?
+    public let totals: Totals?
 
-    public init(boxes: [Box] = [], agents: [Agent] = [], finishedBoxes: Int = 0, isLoading: Bool = false, failure: String? = nil) {
+    public init(boxes: [Box] = [], agents: [Agent] = [], finishedBoxes: Int = 0, isLoading: Bool = false, failure: String? = nil,
+                totals: Totals? = nil) {
         self.boxes = boxes
         self.agents = agents
         self.finishedBoxes = finishedBoxes
         self.isLoading = isLoading
         self.failure = failure
+        self.totals = totals
     }
 
     /// Thoughts and commands merged newest first, at most `limit`.

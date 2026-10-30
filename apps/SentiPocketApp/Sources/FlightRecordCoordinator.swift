@@ -16,6 +16,7 @@ final class FlightRecordCoordinator: ObservableObject {
     private var lives: [MintLife] = []
     private var flights: [String: MintFlightRecord] = [:]
     private var finished = 0
+    private var summary: MintRoomSummary?
     private var failure: String?
     private var expandedId: String?
     private var agents: [FlightRecordState.Agent] = []
@@ -25,16 +26,20 @@ final class FlightRecordCoordinator: ObservableObject {
     static let listInterval: TimeInterval = 30
     static let openBoxInterval: TimeInterval = 10
 
+    private let now: () -> Date
+
     init(
         sessionId: String,
         mint: any MintReading,
         sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
             try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-        }
+        },
+        now: @escaping () -> Date = Date.init
     ) {
         self.sessionId = sessionId
         self.mint = mint
         self.sleep = sleep
+        self.now = now
     }
 
     /// The panel opened: read now, then keep reading until `stop()`.
@@ -81,9 +86,11 @@ final class FlightRecordCoordinator: ObservableObject {
 
     func refresh() async {
         do {
-            let all = try await mint.roomLives(sessionId: sessionId)
-            lives = all.filter(\.isActive)
-            finished = all.count - lives.count
+            let room = try await mint.roomSnapshot(sessionId: sessionId)
+            lives = room.lives.filter(\.isActive)
+            let figures = MintRoomSummary(room: room, now: now())
+            summary = figures
+            finished = figures.finished
             failure = nil
         } catch MintError.notConfigured {
             // A build without the Flight record's service shows the room's agents only.
@@ -142,7 +149,24 @@ final class FlightRecordCoordinator: ObservableObject {
             agents: agents.filter { !boxNames.contains($0.id.lowercased()) },
             finishedBoxes: finished,
             isLoading: false,
-            failure: failure
+            failure: failure,
+            totals: summary.flatMap(Self.totals)
+        )
+    }
+
+    /// The figures the panel shows: none for a room that never ran a box.
+    static func totals(_ summary: MintRoomSummary) -> FlightRecordState.Totals? {
+        guard summary.minted > 0 else { return nil }
+        return FlightRecordState.Totals(
+            minted: summary.minted,
+            active: summary.active,
+            finished: summary.finished,
+            isMinimum: summary.listCut,
+            workedHours: summary.workKnown ? summary.workingHours : nil,
+            workIsMinimum: summary.workIsPartial,
+            savedDays: summary.workKnown ? summary.savedDays : nil,
+            costUsd: summary.costUsd,
+            costPercent: summary.costPercent
         )
     }
 }

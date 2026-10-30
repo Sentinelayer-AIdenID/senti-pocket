@@ -232,6 +232,9 @@ public struct RoomChatMessageRow: Equatable, Identifiable, Sendable {
     /// The last message of its author's run (the next row is someone else, a header or nothing): it carries the
     /// action row and the time.
     public var endsRun: Bool = true
+    /// The room changes hands here, a person after an agent or an agent after a person: a wider break with the time
+    /// above it (Carter, #55014).
+    public var startsTurn: Bool = false
     /// A voice room folded into this row (its start message): the whole call as one card.
     public var call: VoiceCallCard?
     /// For a reply shown in the room: its thread so far. Only the newest reply of a thread is shown, at its own time.
@@ -245,6 +248,11 @@ public struct RoomChatMessageRow: Equatable, Identifiable, Sendable {
     public var foldsRepeats: Bool = false
     /// A checkpoint's summary, for its sheet.
     public var checkpointSummary: String?
+    /// Background chatter not addressed to you (the orchestrator, the ticket keeper, boxes and agents talking to each
+    /// other): one small muted line that opens in place (Carter, #55014).
+    public var isQuiet: Bool = false
+    /// A box's launch line, collapsed to the box's name and status; its thread holds what the box said.
+    public var box: RoomBoxThread?
 }
 
 public enum RoomChatRow: Equatable, Identifiable, Sendable {
@@ -582,10 +590,21 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         var lastDay: DateComponents?
         var run: (authorId: String, date: Date)?
         var placedDivider = false
+        let ownHandles = RoomChatPresentationState.mentionHandles(forOwnAuthorIds: ownAuthorIds)
+        // A box's thread starts collapsed (warden, at Carter's #54962): its launch line is one line with the box's name
+        // and status, and what is said in the thread stays there, unless it is said to you.
+        let launches = RoomBoxThread.launches(in: messages)
+        var boxReplies: [Int64: [RoomChatMessageInput]] = [:]
+        let roomReplies = replies.filter { reply in
+            guard launches[reply.sequenceId] != nil else { return true }
+            boxReplies[reply.sequenceId, default: []].append(reply)
+            return ChatReferences.mentionHandles(in: reply.text).contains(where: ownHandles.contains)
+        }
+        let endedBoxes = RoomBoxThread.endedBoxes(in: messages)
         // A voice room's turns fold into one card on the message that started it.
         let folded = VoiceCallCard.fold(Self.interleave(
             messages: messages.sorted { $0.sequenceId < $1.sequenceId },
-            replies: replies
+            replies: roomReplies
         ))
         // A thread shows once, as its newest reply, so a busy thread is one line that moves down as it grows.
         let trails = RoomChatTrail.fold(folded.kept)
@@ -595,6 +614,12 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         let parents = Dictionary(
             messages.map { ($0.sequenceId, $0) },
             uniquingKeysWith: { first, _ in first }
+        )
+        // Threads you started or answered: what is said in them is said to you.
+        let ownIds = Set(ownAuthorIds.map { $0.lowercased() })
+        let yourThreads = Set(
+            messages.filter { ownIds.contains($0.authorId.lowercased()) }.map(\.sequenceId)
+                + replies.filter { ownIds.contains($0.authorId.lowercased()) }.map(\.sequenceId)
         )
         for input in ordered {
             if let date = input.date {
@@ -648,7 +673,18 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 repeats: repeated.counts[input.id] ?? 1,
                 repeatStack: repeated.stacks[input.id],
                 foldsRepeats: repeated.stacks[input.id] == input.id && expandedRepeats.contains(input.id),
-                checkpointSummary: input.checkpointSummary
+                checkpointSummary: input.checkpointSummary,
+                // A box's launch line is its own collapsed line, never background.
+                isQuiet: folded.cards[input.id] == nil && (input.isInlineReply || launches[input.sequenceId] == nil)
+                    && RoomChatQuiet.isQuiet(
+                        input,
+                        ownHandles: ownHandles,
+                        inYourThread: yourThreads.contains(input.isInlineReply ? input.sequenceId : (input.replyToSequenceId ?? -1))
+                    ),
+                box: input.isInlineReply ? nil : launches[input.sequenceId].map { launch in
+                    RoomBoxThread(launch: launch, replies: boxReplies[input.sequenceId] ?? [],
+                                  isEnded: endedBoxes.contains(launch.name.lowercased()))
+                }
             )))
             if input.kind == .message, let date = input.date {
                 run = (input.authorId, date)
@@ -664,6 +700,22 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 current.endsRun = false
                 rows[index] = .message(current)
             }
+        }
+        // A turn starts where a person follows an agent or an agent follows a person. A day, the unread line, a
+        // checkpoint or a call card is a break of its own, so the next message never starts a turn there.
+        var lastIsHuman: Bool?
+        for index in rows.indices {
+            guard case .message(var current) = rows[index], current.kind == .message, current.call == nil else {
+                lastIsHuman = nil
+                continue
+            }
+            // Background chatter and box lines show as one small line: they neither start a turn nor end one.
+            if current.isQuiet || current.box != nil { continue }
+            if let lastIsHuman, lastIsHuman != current.isHuman {
+                current.startsTurn = true
+                rows[index] = .message(current)
+            }
+            lastIsHuman = current.isHuman
         }
         self.rows = rows
         if let threadInput, !protectedFailure,
@@ -858,6 +910,121 @@ public enum RoomChatRepeats {
             kept.append(input)
         }
         return (kept, counts, stacks)
+    }
+}
+
+/// What in the room is background (Carter, #55014): said by the orchestrator or the ticket keeper, by a box (its
+/// signed speech), or by an agent to other agents, and not to you. Said to you means it mentions you or @all, or it
+/// is in a thread you started or answered. People are never background.
+public enum RoomChatQuiet {
+    /// The room's own voices: costs, mints, relay notices, ticket filing and "working on" lines.
+    static let systemAuthors: Set<String> = ["respawn-orchestrator", "ticket-keeper"]
+    /// The signature a box's relayed speech ends with.
+    static let boxSignature = "⟂ speech"
+
+    public static func isQuiet(_ input: RoomChatMessageInput, ownHandles: Set<String>, inYourThread: Bool) -> Bool {
+        guard !input.isHuman, input.kind == .message, !inYourThread else { return false }
+        let mentioned = ChatReferences.mentionHandles(in: input.text)
+        if mentioned.contains(where: ownHandles.contains) { return false }
+        if systemAuthors.contains(input.authorId.lowercased()) || input.text.contains(boxSignature) { return true }
+        // An agent speaking to other agents by name.
+        return !mentioned.isEmpty
+    }
+
+    /// The line a quiet row shows: its first line of text, without Markdown's marks or a box's signature.
+    public static func line(_ text: String) -> String {
+        let unsigned = RoomBoxThread.unsigned(text)
+        let first = unsigned.split(whereSeparator: \.isNewline).first.map(String.init) ?? unsigned
+        return first
+            .replacingOccurrences(of: #"\[([^\]]*)\]\([^)]*\)"#, with: "$1", options: .regularExpression)
+            .replacingOccurrences(of: #"[*`]+"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"^[#>\s]+"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+    }
+}
+
+/// A box's thread, collapsed (warden, at Carter's #54962). The respawn orchestrator's launch line ("🚀 Minted <name> …
+/// (life <id>)", respawn `bridge.ts`) shows as one line with the box's name and status; a tap opens the thread, where
+/// everything the box said is.
+public struct RoomBoxThread: Equatable, Sendable {
+    public struct Launch: Equatable, Sendable {
+        public let name: String
+        public let model: String?
+        public let ticketTitle: String?
+        public let lifeId: String
+    }
+
+    public let launch: Launch
+    /// Its final cost line was posted ("[cost] final: <name>: …"): the box has ended.
+    public let isEnded: Bool
+    /// How much was said in its thread.
+    public let replies: Int
+    public let newestAuthor: String?
+    public let newestLine: String?
+    public let newestAt: Date?
+
+    public var name: String { launch.name }
+
+    /// What the line says after the name: what was said last in the thread (by whom, when it was not the box), and
+    /// "finished" once the box has ended.
+    public var status: String {
+        let last = newestLine.map { line -> String in
+            guard let author = newestAuthor, author.lowercased() != name.lowercased() else { return line }
+            return "\(author): \(line)"
+        }
+        if isEnded { return last.map { "finished · \($0)" } ?? "finished" }
+        return last ?? launch.ticketTitle ?? "starting"
+    }
+
+    public init(launch: Launch, replies: [RoomChatMessageInput], isEnded: Bool) {
+        self.launch = launch
+        self.isEnded = isEnded
+        self.replies = replies.count
+        let newest = replies.max { ($0.date ?? .distantPast, $0.id) < ($1.date ?? .distantPast, $1.id) }
+        newestAuthor = newest?.authorName
+        newestLine = newest.map { RoomChatQuiet.line($0.text) }
+        newestAt = newest?.date
+    }
+
+    /// A box's speech without the relay's signature ("⟂ speech …").
+    static func unsigned(_ text: String) -> String {
+        guard let range = text.range(of: RoomChatQuiet.boxSignature) else { return text }
+        return String(text[..<range.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static let launchPattern =
+        #"^🚀 Minted ([A-Za-z0-9_.-]+)(?: on (\S+))?(?: for ticket \S+(?: \((.*?)\))?)?: its own machine \(life ([0-9a-f]{12})\)"#
+
+    /// The orchestrator's launch line, parsed.
+    public static func launch(_ text: String) -> Launch? {
+        guard let regex = try? NSRegularExpression(pattern: launchPattern),
+              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) else { return nil }
+        func group(_ index: Int) -> String? {
+            guard let range = Range(match.range(at: index), in: text) else { return nil }
+            return String(text[range])
+        }
+        guard let name = group(1), let lifeId = group(4) else { return nil }
+        return Launch(name: name, model: group(2), ticketTitle: group(3), lifeId: lifeId)
+    }
+
+    /// The room's launch lines, by their sequence.
+    static func launches(in messages: [RoomChatMessageInput]) -> [Int64: Launch] {
+        var found: [Int64: Launch] = [:]
+        for message in messages where message.kind == .message && message.authorId.lowercased() == "respawn-orchestrator" {
+            if let launch = launch(message.text) { found[message.sequenceId] = launch }
+        }
+        return found
+    }
+
+    /// The boxes whose final cost line was posted, by lowercased name.
+    static func endedBoxes(in messages: [RoomChatMessageInput]) -> Set<String> {
+        let prefix = "[cost] final: "
+        var ended = Set<String>()
+        for message in messages where message.authorId.lowercased() == "respawn-orchestrator" && message.text.hasPrefix(prefix) {
+            let rest = message.text.dropFirst(prefix.count)
+            if let colon = rest.firstIndex(of: ":") { ended.insert(rest[..<colon].lowercased()) }
+        }
+        return ended
     }
 }
 

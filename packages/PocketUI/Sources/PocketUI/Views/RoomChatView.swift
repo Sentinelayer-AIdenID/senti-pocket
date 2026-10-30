@@ -30,6 +30,8 @@ public struct RoomChatView: View {
     /// "Jump to latest" from a window further back: scroll to the bottom once the live room has loaded.
     @State private var scrollsToLatestWhenLoaded = false
     @State private var highlightedRowId: String?
+    /// Background lines opened in place.
+    @State private var expandedQuiet: Set<String> = []
     @State private var showsPresence = false
     /// A failed message the reader chose to edit: its text goes back into the composer.
     @State private var restoredDraft: RoomComposerRestore?
@@ -326,6 +328,9 @@ public struct RoomChatView: View {
             .padding(.vertical, 8)
             .accessibilityIdentifier("pocket.room.unreadDivider")
         case .message(let message):
+            if message.startsTurn {
+                RoomTurnBreak(date: message.date)
+            }
             RoomMessageRowView(
                 row: message,
                 ownHandles: state.ownMentionHandles,
@@ -338,9 +343,17 @@ public struct RoomChatView: View {
                 breakouts: state.breakouts,
                 attachmentPreviews: state.attachmentPreviews,
                 isReadingAloud: readingAloudId == message.readAloudId,
+                isExpanded: expandedQuiet.contains(message.id),
                 onOpenReplyTarget: { jump(to: $0, proxy: proxy) },
                 onOpenCheckpoint: { openCheckpoint = $0 },
                 onEdit: { editingRow = $0 },
+                onToggleQuiet: {
+                    if expandedQuiet.contains(message.id) {
+                        expandedQuiet.remove(message.id)
+                    } else {
+                        expandedQuiet.insert(message.id)
+                    }
+                },
                 send: send
             )
             .onAppear { send(.messageOnScreen(id: message.id, isOnScreen: true)) }
@@ -390,8 +403,7 @@ public struct RoomChatView: View {
             .font(.footnote.weight(.semibold))
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
-            .background(.regularMaterial, in: Capsule())
-            .overlay(Capsule().stroke(PocketPalette.separator, lineWidth: 0.5))
+            .pocketFloating(in: Capsule())
         }
         .buttonStyle(.plain)
         .padding(16)
@@ -536,9 +548,12 @@ private struct RoomMessageRowView: View {
     var breakouts: [String: RoomBreakoutCard] = [:]
     var attachmentPreviews: [String: Data] = [:]
     var isReadingAloud = false
+    /// A background line opened in place.
+    var isExpanded = false
     let onOpenReplyTarget: (Int64) -> Void
     var onOpenCheckpoint: (RoomChatMessageRow) -> Void = { _ in }
     var onEdit: (RoomChatMessageRow) -> Void = { _ in }
+    var onToggleQuiet: () -> Void = {}
     var send: (RoomChatIntent) -> Void = { _ in }
     /// How far the row follows a swipe to the right (swipe to reply, as in Messages).
     @State private var swipe: CGFloat = 0
@@ -602,16 +617,63 @@ private struct RoomMessageRowView: View {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(PocketPalette.separator.opacity(0.6), lineWidth: 0.5)
             )
-            .padding(.vertical, 6)
+            // A checkpoint is a boundary in the room: the same wide break as a change of turn.
+            .padding(.vertical, 12)
         case .message:
             if let call = row.call {
                 VoiceCallCardView(card: call, ownHandles: ownHandles)
                     .padding(.vertical, 6)
                     .accessibilityIdentifier("pocket.room.call.\(row.id)")
+            } else if let box = row.box {
+                RoomBoxLine(box: box) { send(.openThread(sequenceId: row.sequenceId)) }
+                    .padding(.vertical, 3)
+                    .accessibilityIdentifier("pocket.room.box.\(row.sequenceId)")
+            } else if row.isQuiet {
+                VStack(alignment: .leading, spacing: 0) {
+                    quietLine
+                    if isExpanded { message }
+                }
             } else {
                 message
             }
         }
+    }
+
+    /// Background chatter as one small muted line (Carter, #55014): who and their first line. A tap opens it in place,
+    /// and the line folds it back.
+    private var quietLine: some View {
+        Button(action: onToggleQuiet) {
+            HStack(spacing: 6) {
+                RoomAvatar(name: row.authorName, isHuman: false)
+                    .scaleEffect(0.62)
+                    .frame(width: 16, height: 16)
+                Text(row.authorName)
+                    .font(.caption2.weight(.semibold))
+                    .lineLimit(1)
+                    .layoutPriority(1)
+                if !isExpanded {
+                    Text(RoomChatQuiet.line(row.text))
+                        .font(.caption2)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                Spacer(minLength: 4)
+                if row.repeats > 1 {
+                    Text("×\(row.repeats)")
+                        .font(.caption2.monospacedDigit())
+                }
+                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                    .font(.caption2.weight(.semibold))
+            }
+            .foregroundStyle(PocketPalette.textSecondary)
+            .opacity(0.75)
+            .padding(.vertical, 3)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(row.authorName): \(RoomChatQuiet.line(row.text))")
+        .accessibilityHint(isExpanded ? "Folds it back to one line" : "Opens it")
+        .accessibilityIdentifier("pocket.room.quiet.\(row.id)")
     }
 
     private var message: some View {
@@ -747,8 +809,12 @@ private struct RoomMessageRowView: View {
         isHighlighted ? PocketPalette.warning.opacity(0.22) : PocketPalette.humanBubble
     }
 
-    /// Yours: a bubble on the right, as in Messages and the assistant apps, with your name over the first of a run
-    /// (Carter: his name was missing on his own messages).
+    /// Space above a row: tight inside one sender's run, wider where the sender changes (Carter, #55014). Where the
+    /// room changes hands, the turn break above the row adds the rest.
+    private var gapAbove: CGFloat { row.showsHeader ? 12 : 6 }
+
+    /// Yours: a solid charcoal bubble with white text on the right, set apart from everything else, with your name
+    /// over the first of a run (Carter: his name was missing on his own messages; #55014 for the contrast).
     private var ownMessage: some View {
         HStack(alignment: .bottom, spacing: 0) {
             Spacer(minLength: 56)
@@ -765,7 +831,15 @@ private struct RoomMessageRowView: View {
                     .foregroundStyle(PocketPalette.textPrimary)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 9)
-                    .background(bubbleFill, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    // The bubble is dark in both appearances, so what is in it takes the dark colours.
+                    .environment(\.colorScheme, .dark)
+                    .background(PocketPalette.ownBubble, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .overlay {
+                        if isHighlighted {
+                            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                                .strokeBorder(PocketPalette.warning, lineWidth: 2)
+                        }
+                    }
                 messageFooter
                 if row.endsRun || row.isEdited {
                     HStack(spacing: 6) {
@@ -781,7 +855,7 @@ private struct RoomMessageRowView: View {
                 }
             }
         }
-        .padding(.top, row.showsHeader ? 10 : 2)
+        .padding(.top, gapAbove)
     }
 
     /// Another person: a warm bubble on the left with their name.
@@ -808,11 +882,12 @@ private struct RoomMessageRowView: View {
             }
             Spacer(minLength: 32)
         }
-        .padding(.top, row.showsHeader ? 10 : 2)
+        .padding(.top, gapAbove)
     }
 
     /// An agent: full width, structured text without a bubble (as the assistant apps answer), its name and avatar
-    /// above, and the quiet action row under the last message of its run.
+    /// above, an edge in its own colour down the left (Carter, #55014), and the quiet action row under the last
+    /// message of its run.
     private var agentMessage: some View {
         VStack(alignment: .leading, spacing: 5) {
             if row.showsHeader {
@@ -821,19 +896,27 @@ private struct RoomMessageRowView: View {
                     authorLine
                 }
             }
-            replyQuote
-            ChatMarkdownView(text: row.text, ownHandles: ownHandles)
-                .font(.body)
-                .foregroundStyle(PocketPalette.textPrimary)
-            if row.isEdited {
-                Text("edited").font(.caption2).foregroundStyle(PocketPalette.textSecondary)
-            }
-            messageFooter
-            if row.endsRun {
-                if let views = row.views {
-                    RoomViewedLine(views: views)
+            VStack(alignment: .leading, spacing: 5) {
+                replyQuote
+                ChatMarkdownView(text: row.text, ownHandles: ownHandles)
+                    .font(.body)
+                    .foregroundStyle(PocketPalette.textPrimary)
+                if row.isEdited {
+                    Text("edited").font(.caption2).foregroundStyle(PocketPalette.textSecondary)
                 }
-                actionRow
+                messageFooter
+                if row.endsRun {
+                    if let views = row.views {
+                        RoomViewedLine(views: views)
+                    }
+                    actionRow
+                }
+            }
+            .padding(.leading, 12)
+            .overlay(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                    .fill(RoomAvatar.tint(for: row.authorName).opacity(0.7))
+                    .frame(width: 3)
             }
         }
         .padding(.horizontal, 2)
@@ -843,7 +926,7 @@ private struct RoomMessageRowView: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(isHighlighted ? PocketPalette.warning.opacity(0.22) : Color.clear)
         )
-        .padding(.top, row.showsHeader ? 10 : 0)
+        .padding(.top, gapAbove)
     }
 
     private var authorLine: some View {
@@ -984,16 +1067,19 @@ struct RoomAvatar: View {
         (18, 85, 55), (189, 65, 40), (262, 45, 55), (215, 60, 50), (330, 55, 52), (38, 85, 48), (200, 30, 45)
     ]
 
+    /// The colour this name always gets: its avatar, and an agent's edge down its messages.
+    static func tint(for name: String) -> Color {
+        let index = Int(name.unicodeScalars.reduce(UInt32(7)) { ($0 &* 31) &+ $1.value } % UInt32(tints.count))
+        return PocketPalette.themed(light: tints[index], dark: tints[index])
+    }
+
     var body: some View {
-        let index = Int(name.unicodeScalars.reduce(UInt32(7)) { ($0 &* 31) &+ $1.value } % UInt32(Self.tints.count))
-        let tint = Self.tints[index]
         Text(initials)
             .font(.system(size: 11, weight: .bold))
             .foregroundStyle(.white)
             .frame(width: 26, height: 26)
             // People are round, agents are rounded squares.
-            .background(PocketPalette.themed(light: tint, dark: tint),
-                        in: RoundedRectangle(cornerRadius: isHuman ? 13 : 7, style: .continuous))
+            .background(Self.tint(for: name), in: RoundedRectangle(cornerRadius: isHuman ? 13 : 7, style: .continuous))
             .accessibilityHidden(true)
     }
 
@@ -1301,10 +1387,13 @@ private struct RoomThreadSheet: View {
                         .disabled(!canSendReply)
                         .accessibilityLabel("Send reply")
                     }
-                    .padding(.horizontal, 12)
+                    .padding(.horizontal, 10)
                     .padding(.vertical, 8)
                     }
-                    .background(.bar)
+                    .pocketFloating(in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+                    .padding(.horizontal, 10)
+                    .padding(.top, 4)
+                    .padding(.bottom, 6)
                 }
             }
         }
@@ -1509,7 +1598,7 @@ private struct RoomComposerBar: View {
                     }
                 }
                 .frame(maxHeight: min(CGFloat(suggestions.count) * 48, 240))
-                .background(PocketPalette.raised)
+                .padding(.top, 6)
                 .overlay(alignment: .bottom) { Divider() }
             }
             if ticketMode {
@@ -1600,10 +1689,14 @@ private struct RoomComposerBar: View {
                 .accessibilityLabel("Send")
                 .accessibilityIdentifier("pocket.room.send")
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 10)
             .padding(.vertical, 8)
             }
-            .background(.bar)
+            // Lifted off the room (Carter, #55014): the room shows through its frosted glass as it scrolls under.
+            .pocketFloating(in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+            .padding(.horizontal, 10)
+            .padding(.top, 4)
+            .padding(.bottom, 6)
             .onChange(of: restored) { request in
                 guard let request else { return }
                 draft = RoomComposerDraft.restoring(request.text, into: draft)
@@ -1614,13 +1707,43 @@ private struct RoomComposerBar: View {
                 .foregroundStyle(PocketPalette.textSecondary)
                 .frame(maxWidth: .infinity)
                 .padding(12)
-                .background(.bar)
+                .pocketFloating(in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .padding(.horizontal, 10)
+                .padding(.bottom, 6)
                 .accessibilityIdentifier("pocket.room.composerDisabled")
         }
     }
 
     private var canSend: Bool {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && composer.lengthProblem(for: draft) == nil
+    }
+}
+
+/// Where the room changes hands, a person after an agent or an agent after a person: a hairline with the time, and
+/// a wider gap than between two messages of one turn (Carter, #55014).
+private struct RoomTurnBreak: View {
+    let date: Date?
+
+    var body: some View {
+        HStack(spacing: 10) {
+            line
+            if let date {
+                Text(date, style: .time)
+                    .font(.caption2.weight(.medium))
+                    .monospacedDigit()
+                    .foregroundStyle(PocketPalette.textSecondary)
+                line
+            }
+        }
+        .padding(.top, 14)
+        .padding(.bottom, 4)
+        .accessibilityHidden(true)
+    }
+
+    private var line: some View {
+        Rectangle()
+            .fill(PocketPalette.separator.opacity(0.7))
+            .frame(height: 0.5)
     }
 }
 

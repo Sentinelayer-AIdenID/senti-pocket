@@ -3,6 +3,21 @@ import XCTest
 @testable import PocketUI
 
 final class FlightRecordPresentationTests: XCTestCase {
+    /// The web's figures: one decimal below 10, a small positive value never reads as zero, a minimum reads "at least".
+    func test_room_figures_read_as_the_web_writes_them() {
+        let us = Locale(identifier: "en_US")
+        XCTAssertEqual(FlightRecordState.Totals.amount(12.46, locale: us), "12")
+        XCTAssertEqual(FlightRecordState.Totals.amount(3.14, locale: us), "3.1")
+        XCTAssertEqual(FlightRecordState.Totals.amount(0.01, locale: us), "<0.1")
+        XCTAssertEqual(FlightRecordState.Totals.amount(1234, locale: us), "1,234")
+        XCTAssertEqual(FlightRecordState.Totals.shown(3.14, isMinimum: true, locale: us), "≥3.1")
+        XCTAssertEqual(FlightRecordState.Totals.shown(0.01, isMinimum: true, locale: us), ">0")
+        XCTAssertEqual(FlightRecordState.Totals.dayUnit(1.02, locale: us), "day")
+        XCTAssertEqual(FlightRecordState.Totals.dayUnit(2, locale: us), "days")
+        XCTAssertEqual(FlightRecordState.Totals.usd(412.4, locale: us), "$412")
+        XCTAssertEqual(FlightRecordState.Totals.usd(41.5, locale: us), "$41.50")
+    }
+
     func test_commands_read_as_one_short_line() {
         XCTAssertEqual(FlightRecordState.command("/bin/bash -lc \"git add src tests\""), "git add src tests")
         XCTAssertEqual(FlightRecordState.command("/bin/bash -lc \"git add src/services/session_breakout_service.py"),

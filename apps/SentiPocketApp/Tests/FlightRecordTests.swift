@@ -1,4 +1,5 @@
 import Foundation
+import PocketContracts
 import PocketSyncClient
 import PocketUI
 import XCTest
@@ -7,13 +8,16 @@ import XCTest
 private final class FakeMint: MintReading, @unchecked Sendable {
     let lives: [MintLife]
     let records: [String: MintFlightRecord]
+    let totals: MintRoomTotals?
 
-    init(lives: [MintLife], records: [String: MintFlightRecord]) {
+    init(lives: [MintLife], records: [String: MintFlightRecord], totals: MintRoomTotals? = nil) {
         self.lives = lives
         self.records = records
+        self.totals = totals
     }
 
     func roomLives(sessionId: String) async throws -> [MintLife] { lives }
+    func roomSnapshot(sessionId: String) async throws -> MintRoomLives { MintRoomLives(lives: lives, totals: totals) }
     func flight(lifeId: String) async throws -> MintFlightRecord {
         guard let record = records[lifeId] else { throw MintError.unavailable }
         return record
@@ -36,6 +40,30 @@ private final class WorkTransport: RoomTransport, @unchecked Sendable {
 
 @MainActor
 final class FlightRecordTests: XCTestCase {
+    /// Carter (#55014): the web's room figures on top of the panel.
+    func test_the_room_figures_show_over_the_boxes() async {
+        let mint = FakeMint(
+            lives: [MintLife(id: "a", agentName: "astra", model: "m", phase: "working")],
+            records: [:],
+            totals: MintRoomTotals(lifeCount: 10, endedCount: 7, firstBornAt: "2026-10-27T10:00:00Z", lastEndAt: nil,
+                                   workingSeconds: 144_000, exactLives: 8, exactWorkingSeconds: 108_000,
+                                   exactCostUsd: 120, costUsd: 150)
+        )
+        let coordinator = FlightRecordCoordinator(sessionId: "room", mint: mint, sleep: { _ in },
+                                                  now: { ParsedSessionTimestamp("2026-10-29T10:00:00Z").date! })
+        await coordinator.refresh()
+        let totals = coordinator.state.totals
+        XCTAssertEqual(totals?.minted, 10)
+        XCTAssertEqual(totals?.active, 3)
+        XCTAssertEqual(totals?.finished, 7)
+        XCTAssertEqual(totals?.workedHours, 40)
+        XCTAssertEqual(totals?.savedDays ?? -1, 3, accuracy: 0.0001)
+        XCTAssertEqual(totals?.costUsd, 150)
+        XCTAssertEqual(coordinator.state.finishedBoxes, 7, "the summary line counts every finished box, listed or not")
+        XCTAssertNil(FlightRecordCoordinator.totals(MintRoomSummary(room: MintRoomLives(lives: []), now: Date())),
+                     "a room that never ran a box shows no figures")
+    }
+
     func test_the_flight_record_lists_running_boxes_with_what_each_is_doing_and_counts_the_finished() async {
         let mint = FakeMint(
             lives: [
