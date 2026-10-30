@@ -197,6 +197,9 @@ public struct RoomChatMessageRow: Equatable, Identifiable, Sendable {
     public var isInlineReply: Bool { inlineReplyId != nil }
     /// What a reply answers, when that message is loaded: "author: its first line".
     public var replyContext: String?
+    /// The last message of its author's run (the next row is someone else, a header or nothing): it carries the
+    /// action row and the time.
+    public var endsRun: Bool = true
 }
 
 public enum RoomChatRow: Equatable, Identifiable, Sendable {
@@ -251,6 +254,14 @@ public struct RoomChatReplyRow: Equatable, Identifiable, Sendable {
     public let isEdited: Bool
     /// Who has viewed this revision, once the room has read it.
     public let views: RoomChatViews?
+    /// The handle a reply to this reply mentions: the login for a person, the id for an agent.
+    public let authorHandle: String
+    /// Set when this answers another reply rather than the message.
+    public let parentReplyId: String?
+    /// How far it is indented in the thread (0 answers the message; capped so deep threads stay readable).
+    public var depth: Int = 0
+    /// Reactions on this reply: like, dislike and acknowledge counts and whether they are yours.
+    public let reactions: RoomChatReactions?
 
     public init(
         id: String,
@@ -260,7 +271,10 @@ public struct RoomChatReplyRow: Equatable, Identifiable, Sendable {
         text: String,
         date: Date?,
         isEdited: Bool,
-        views: RoomChatViews? = nil
+        views: RoomChatViews? = nil,
+        authorHandle: String = "",
+        parentReplyId: String? = nil,
+        reactions: RoomChatReactions? = nil
     ) {
         self.id = id
         self.authorName = authorName
@@ -270,6 +284,40 @@ public struct RoomChatReplyRow: Equatable, Identifiable, Sendable {
         self.date = date
         self.isEdited = isEdited
         self.views = views
+        self.authorHandle = authorHandle.isEmpty ? authorName : authorHandle
+        self.parentReplyId = parentReplyId
+        self.reactions = reactions
+    }
+
+    /// The deepest indent a thread shows; deeper replies sit at this depth, under their parent.
+    public static let maximumDepth = 3
+
+    /// Replies ordered as a tree: each reply right after the one it answers (oldest first among siblings), with its
+    /// depth. A reply whose parent is not in the thread is treated as answering the message.
+    public static func nested(_ replies: [RoomChatReplyRow]) -> [RoomChatReplyRow] {
+        let ids = Set(replies.map(\.id))
+        var children: [String: [RoomChatReplyRow]] = [:]
+        var roots: [RoomChatReplyRow] = []
+        for reply in replies {
+            if let parent = reply.parentReplyId, parent != reply.id, ids.contains(parent) {
+                children[parent, default: []].append(reply)
+            } else {
+                roots.append(reply)
+            }
+        }
+        var ordered: [RoomChatReplyRow] = []
+        var seen = Set<String>()
+        func visit(_ reply: RoomChatReplyRow, depth: Int) {
+            guard seen.insert(reply.id).inserted else { return }
+            var row = reply
+            row.depth = min(depth, maximumDepth)
+            ordered.append(row)
+            for child in children[reply.id] ?? [] { visit(child, depth: depth + 1) }
+        }
+        for root in roots { visit(root, depth: 0) }
+        // A cycle leaves replies unvisited: show them at the top level rather than lose them.
+        for reply in replies where !seen.contains(reply.id) { visit(reply, depth: 0) }
+        return ordered
     }
 }
 
@@ -545,12 +593,21 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 run = nil
             }
         }
+        // A message ends its run unless the next row is the same author's message without a header.
+        for index in rows.indices {
+            guard case .message(var current) = rows[index] else { continue }
+            if index + 1 < rows.count, case .message(let next) = rows[index + 1], !next.showsHeader,
+               next.authorId == current.authorId {
+                current.endsRun = false
+                rows[index] = .message(current)
+            }
+        }
         self.rows = rows
         if let threadInput, !protectedFailure,
            case .message(let parent)? = Self.messageRow(in: rows, for: threadInput.sequenceId) {
             self.thread = RoomChatThreadState(
                 parent: parent,
-                replies: threadInput.replies,
+                replies: RoomChatReplyRow.nested(threadInput.replies),
                 pending: threadInput.pending,
                 isLoading: threadInput.isLoading,
                 failureText: threadInput.failureText,
@@ -678,14 +735,15 @@ extension RoomChatMessageRow {
         inlineReplyId.map { "pocket.room.reply.\($0)" } ?? "pocket.room.message.\(sequenceId)"
     }
 
-    /// What a reaction on this row sends. A reply shown in the room shares its message's sequence, so it sends none
-    /// from here: a like on a reply must never land on the message it answers.
-    public func reaction(_ type: String) -> RoomChatIntent? {
-        isInlineReply ? nil : .react(sequenceId: sequenceId, type: type)
+    /// What a reaction on this row sends. A reply shown in the room shares its message's sequence, so it reacts to
+    /// the reply itself (the API takes it as `targetActionId`): a like on a reply never lands on the message it answers.
+    public func reaction(_ type: String) -> RoomChatIntent {
+        if let inlineReplyId { return .reactToReply(sequenceId: sequenceId, replyId: inlineReplyId, type: type) }
+        return .react(sequenceId: sequenceId, type: type)
     }
 
     /// The long-press menu, in order. A message's options act on the message. A reply shown in the room opens its
-    /// thread, reads itself aloud and copies itself; it has no pin, and no reactions from the room.
+    /// thread, reads itself aloud, reacts to itself and copies itself; it has no pin.
     public func options(canReply: Bool, canReact: Bool, canPin: Bool, isPinned: Bool, pinsFull: Bool) -> [RoomRowOption] {
         var options = [
             RoomRowOption(kind: .thread, title: canReply ? "Reply in thread" : "Open thread",
@@ -698,17 +756,14 @@ extension RoomChatMessageRow {
         if canReact {
             let liked = reactions?.chips.contains { $0.type == "like" && $0.isMine } == true
             let disliked = reactions?.chips.contains { $0.type == "dislike" && $0.isMine } == true
-            if let like = reaction(liked ? "unlike" : "like") {
-                options.append(RoomRowOption(kind: .like, title: liked ? "Remove like" : "Like",
-                                             symbol: liked ? "hand.thumbsup.fill" : "hand.thumbsup", intent: like))
-            }
-            if let dislike = reaction(disliked ? "undislike" : "dislike") {
-                options.append(RoomRowOption(kind: .dislike, title: disliked ? "Remove dislike" : "Dislike",
-                                             symbol: disliked ? "hand.thumbsdown.fill" : "hand.thumbsdown", intent: dislike))
-            }
-            if let ack = reaction("ack") {
-                options.append(RoomRowOption(kind: .acknowledge, title: "Acknowledge", symbol: "checkmark.circle", intent: ack))
-            }
+            options.append(RoomRowOption(kind: .like, title: liked ? "Remove like" : "Like",
+                                         symbol: liked ? "hand.thumbsup.fill" : "hand.thumbsup",
+                                         intent: reaction(liked ? "unlike" : "like")))
+            options.append(RoomRowOption(kind: .dislike, title: disliked ? "Remove dislike" : "Dislike",
+                                         symbol: disliked ? "hand.thumbsdown.fill" : "hand.thumbsdown",
+                                         intent: reaction(disliked ? "undislike" : "dislike")))
+            options.append(RoomRowOption(kind: .acknowledge, title: "Acknowledge", symbol: "checkmark.circle",
+                                         intent: reaction("ack")))
         }
         if canPin, !isInlineReply {
             options.append(RoomRowOption(
@@ -744,6 +799,10 @@ public enum RoomChatIntent: Equatable, Sendable {
     case openThread(sequenceId: Int64)
     case closeThread
     case sendReply(sequenceId: Int64, text: String)
+    /// A reply to a reply in a thread (it nests under it).
+    case sendReplyToReply(sequenceId: Int64, replyId: String, text: String)
+    /// Like, dislike, unlike, undislike or acknowledge a reply in a thread.
+    case reactToReply(sequenceId: Int64, replyId: String, type: String)
     /// The view brought `focusSequenceId` into view.
     case focusHandled
     /// Open a breakout started from this room (the screen navigates; the room keeps running).

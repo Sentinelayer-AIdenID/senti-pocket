@@ -77,6 +77,8 @@ public struct RoomChatView: View {
                     thread: thread,
                     ownHandles: state.ownMentionHandles,
                     readingAloudId: readingAloudId,
+                    mentionCandidates: state.mentionCandidates,
+                    canReact: state.canReact,
                     send: send,
                     draft: threadDraft(thread.parent.sequenceId)
                 )
@@ -492,6 +494,8 @@ private struct RoomMessageRowView: View {
     var isReadingAloud = false
     let onOpenReplyTarget: (Int64) -> Void
     var send: (RoomChatIntent) -> Void = { _ in }
+    /// How far the row follows a swipe to the right (swipe to reply, as in Messages).
+    @State private var swipe: CGFloat = 0
 
     var body: some View {
         switch row.kind {
@@ -544,85 +548,253 @@ private struct RoomMessageRowView: View {
     }
 
     private var message: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if row.showsHeader {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(row.authorName)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(row.isHuman ? PocketPalette.accentStrong : PocketPalette.textPrimary)
-                    if let date = row.date {
-                        Text(date, style: .time)
-                            .font(.caption)
-                            .foregroundStyle(PocketPalette.textSecondary)
-                    }
-                    if let views = row.views {
-                        RoomReadTicks(views: views)
-                    }
-                    Spacer(minLength: 0)
-                }
-                .padding(.top, 10)
-            }
-            if let reply = row.replyToSequenceId {
-                Button {
-                    if row.isInlineReply {
-                        send(.openThread(sequenceId: reply))
-                    } else {
-                        onOpenReplyTarget(reply)
-                    }
-                } label: {
-                    Label(row.replyContext ?? "Replying to #\(reply)", systemImage: "arrowshape.turn.up.left")
-                        .font(.caption)
-                        .foregroundStyle(PocketPalette.textSecondary)
-                        .lineLimit(1)
-                        .padding(.leading, 8)
-                        .overlay(alignment: .leading) {
-                            RoundedRectangle(cornerRadius: 1)
-                                .fill(PocketPalette.separator)
-                                .frame(width: 2)
-                        }
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(row.isInlineReply ? "In reply to \(row.replyContext ?? "message \(reply)"). Opens the thread." : "Replying to message \(reply)")
-            }
-            ChatMarkdownView(text: row.text, ownHandles: ownHandles)
-                .font(.body)
-                .foregroundStyle(PocketPalette.textPrimary)
-            if !row.attachments.isEmpty {
-                RoomAttachmentsView(chips: row.attachments, previews: attachmentPreviews, send: send)
-            }
-            if row.isEdited {
-                Text("edited")
-                    .font(.caption2)
-                    .foregroundStyle(PocketPalette.textSecondary)
-            }
-            if let views = row.views {
-                RoomViewedLine(views: views)
-            }
-            if let reactions = row.reactions {
-                RoomReactionBar(
-                    reactions: reactions,
-                    canReact: canReact,
-                    onReact: { type in row.reaction(type).map(send) },
-                    onOpenThread: { send(.openThread(sequenceId: row.sequenceId)) }
-                )
+        Group {
+            if row.isOwn {
+                ownMessage
+            } else if row.isHuman {
+                personMessage
+            } else {
+                agentMessage
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, row.isHuman ? 6 : 3)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            // The web's bubbles: people get the warm tint, agents blend with the page. Who is a person comes only
-            // from the server-authored `human-` id, never from a name or an id that spells a role.
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(isHighlighted ? PocketPalette.warning.opacity(0.22) : (row.isHuman ? PocketPalette.humanBubble : Color.clear))
-        )
-        .padding(.vertical, row.isHuman && row.showsHeader ? 2 : 0)
         .overlay(alignment: .topTrailing) {
             if isReadingAloud { RoomReadingAloudMark { send(.stopReadingAloud) } }
         }
+        .offset(x: swipe)
+        .background(alignment: .leading) {
+            // Revealed by the swipe: the reply arrow, filled once letting go would open the reply.
+            Image(systemName: swipe > Self.swipeToReply ? "arrowshape.turn.up.left.circle.fill" : "arrowshape.turn.up.left.circle")
+                .font(.title3)
+                .foregroundStyle(PocketPalette.accent)
+                .opacity(Double(min(swipe / Self.swipeToReply, 1)))
+                .padding(.leading, 4)
+                .accessibilityHidden(true)
+        }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 24, coordinateSpace: .local)
+                .onChanged { value in
+                    // Only a mostly sideways drag to the right: a scroll is never taken for a swipe.
+                    guard value.translation.width > 0,
+                          abs(value.translation.width) > abs(value.translation.height) * 1.8 else { return }
+                    swipe = min(value.translation.width, Self.swipeToReply + 24)
+                }
+                .onEnded { _ in
+                    if swipe > Self.swipeToReply { send(.openThread(sequenceId: row.sequenceId)) }
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.8)) { swipe = 0 }
+                }
+        )
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(row.accessibilityId)
+        .accessibilityAction(named: canReply ? "Reply in thread" : "Open thread") {
+            send(.openThread(sequenceId: row.sequenceId))
+        }
         .contextMenu { messageMenu }
+    }
+
+    private static let swipeToReply: CGFloat = 64
+
+    /// What a reply answers, quoted above it: tap to open the thread (or the message it replies to).
+    @ViewBuilder
+    private var replyQuote: some View {
+        if let reply = row.replyToSequenceId {
+            Button {
+                if row.isInlineReply {
+                    send(.openThread(sequenceId: reply))
+                } else {
+                    onOpenReplyTarget(reply)
+                }
+            } label: {
+                Label(row.replyContext ?? "Replying to #\(reply)", systemImage: "arrowshape.turn.up.left")
+                    .font(.caption)
+                    .foregroundStyle(PocketPalette.textSecondary)
+                    .lineLimit(1)
+                    .padding(.leading, 8)
+                    .overlay(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 1)
+                            .fill(PocketPalette.separator)
+                            .frame(width: 2)
+                    }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(row.isInlineReply ? "In reply to \(row.replyContext ?? "message \(reply)"). Opens the thread." : "Replying to message \(reply)")
+        }
+    }
+
+    /// Edited mark, attachments, who viewed it and the reactions: the same under every kind of message.
+    @ViewBuilder
+    private var messageFooter: some View {
+        if !row.attachments.isEmpty {
+            RoomAttachmentsView(chips: row.attachments, previews: attachmentPreviews, send: send)
+        }
+        if let reactions = row.reactions {
+            RoomReactionBar(
+                reactions: reactions,
+                canReact: canReact,
+                onReact: { send(row.reaction($0)) },
+                onOpenThread: { send(.openThread(sequenceId: row.sequenceId)) }
+            )
+        }
+    }
+
+    private var bubbleFill: Color {
+        isHighlighted ? PocketPalette.warning.opacity(0.22) : PocketPalette.humanBubble
+    }
+
+    /// Yours: a bubble on the right, as in Messages and the assistant apps.
+    private var ownMessage: some View {
+        HStack(alignment: .bottom, spacing: 0) {
+            Spacer(minLength: 56)
+            VStack(alignment: .trailing, spacing: 4) {
+                replyQuote
+                ChatMarkdownView(text: row.text, ownHandles: ownHandles)
+                    .font(.body)
+                    .foregroundStyle(PocketPalette.textPrimary)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .background(bubbleFill, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                messageFooter
+                if row.endsRun || row.isEdited {
+                    HStack(spacing: 6) {
+                        if row.isEdited { Text("edited") }
+                        if let date = row.date { Text(date, style: .time) }
+                        if let views = row.views { RoomReadTicks(views: views) }
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(PocketPalette.textSecondary)
+                }
+                if let views = row.views, row.endsRun {
+                    RoomViewedLine(views: views)
+                }
+            }
+        }
+        .padding(.top, row.showsHeader ? 10 : 2)
+    }
+
+    /// Another person: a warm bubble on the left with their name.
+    private var personMessage: some View {
+        HStack(alignment: .top, spacing: 8) {
+            RoomAvatar(name: row.authorName, isHuman: true)
+                .opacity(row.showsHeader ? 1 : 0)
+            VStack(alignment: .leading, spacing: 4) {
+                if row.showsHeader { authorLine }
+                replyQuote
+                ChatMarkdownView(text: row.text, ownHandles: ownHandles)
+                    .font(.body)
+                    .foregroundStyle(PocketPalette.textPrimary)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .background(bubbleFill, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                if row.isEdited {
+                    Text("edited").font(.caption2).foregroundStyle(PocketPalette.textSecondary)
+                }
+                messageFooter
+                if let views = row.views, row.endsRun {
+                    RoomViewedLine(views: views)
+                }
+            }
+            Spacer(minLength: 32)
+        }
+        .padding(.top, row.showsHeader ? 10 : 2)
+    }
+
+    /// An agent: full width, structured text without a bubble (as the assistant apps answer), its name and avatar
+    /// above, and the quiet action row under the last message of its run.
+    private var agentMessage: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if row.showsHeader {
+                HStack(spacing: 8) {
+                    RoomAvatar(name: row.authorName, isHuman: false)
+                    authorLine
+                }
+            }
+            replyQuote
+            ChatMarkdownView(text: row.text, ownHandles: ownHandles)
+                .font(.body)
+                .foregroundStyle(PocketPalette.textPrimary)
+            if row.isEdited {
+                Text("edited").font(.caption2).foregroundStyle(PocketPalette.textSecondary)
+            }
+            messageFooter
+            if row.endsRun {
+                if let views = row.views {
+                    RoomViewedLine(views: views)
+                }
+                actionRow
+            }
+        }
+        .padding(.horizontal, 2)
+        .padding(.vertical, 3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(isHighlighted ? PocketPalette.warning.opacity(0.22) : Color.clear)
+        )
+        .padding(.top, row.showsHeader ? 10 : 0)
+    }
+
+    private var authorLine: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(row.authorName)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(row.isHuman ? PocketPalette.accentStrong : PocketPalette.textPrimary)
+                .lineLimit(1)
+            if let date = row.date {
+                Text(date, style: .time)
+                    .font(.caption)
+                    .foregroundStyle(PocketPalette.textSecondary)
+            }
+            if let views = row.views {
+                RoomReadTicks(views: views)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// Copy, listen, like, dislike and more, as the assistant apps put under an answer: the row's own options, so a
+    /// reply shown in the room acts on itself here too.
+    private var actionRow: some View {
+        let options = row.options(canReply: canReply, canReact: canReact, canPin: canPin, isPinned: isPinned, pinsFull: pinsFull)
+        let shown = Self.actionRowKinds.compactMap { kind in options.first { $0.kind == kind } }
+        return HStack(spacing: 18) {
+            ForEach(shown) { option in
+                actionButton(option.kind == .thread ? "arrowshape.turn.up.left" : option.symbol, label: option.title) {
+                    perform(option)
+                }
+            }
+            Menu {
+                messageMenu
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(PocketPalette.textSecondary)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel("More actions")
+        }
+        .padding(.top, 2)
+    }
+
+    private static let actionRowKinds: [RoomRowOption.Kind] = [.copy, .listen, .like, .dislike, .thread]
+
+    private func perform(_ option: RoomRowOption) {
+        if option.kind == .copy {
+            copyToPasteboard(row.text)
+        } else if let intent = option.intent {
+            send(intent)
+        }
+    }
+
+    private func actionButton(_ symbol: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.footnote)
+                .foregroundStyle(PocketPalette.textSecondary)
+                .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
     }
 
     /// The long-press menu, from the row's own options: a reply shown in the room acts on itself, never on the
@@ -630,16 +802,42 @@ private struct RoomMessageRowView: View {
     private var messageMenu: some View {
         ForEach(row.options(canReply: canReply, canReact: canReact, canPin: canPin, isPinned: isPinned, pinsFull: pinsFull)) { option in
             Button {
-                if option.kind == .copy {
-                    copyToPasteboard(row.text)
-                } else if let intent = option.intent {
-                    send(intent)
-                }
+                perform(option)
             } label: {
                 Label(option.title, systemImage: option.symbol)
             }
             .disabled(!option.isEnabled)
         }
+    }
+}
+
+/// A round avatar with initials, coloured from the name so each agent keeps its colour.
+struct RoomAvatar: View {
+    let name: String
+    let isHuman: Bool
+
+    private static let tints: [(Double, Double, Double)] = [
+        (18, 85, 55), (189, 65, 40), (262, 45, 55), (215, 60, 50), (330, 55, 52), (38, 85, 48), (200, 30, 45)
+    ]
+
+    var body: some View {
+        let index = Int(name.unicodeScalars.reduce(UInt32(7)) { ($0 &* 31) &+ $1.value } % UInt32(Self.tints.count))
+        let tint = Self.tints[index]
+        Text(initials)
+            .font(.system(size: 11, weight: .bold))
+            .foregroundStyle(.white)
+            .frame(width: 26, height: 26)
+            // People are round, agents are rounded squares.
+            .background(PocketPalette.themed(light: tint, dark: tint),
+                        in: RoundedRectangle(cornerRadius: isHuman ? 13 : 7, style: .continuous))
+            .accessibilityHidden(true)
+    }
+
+    private var initials: String {
+        let parts = name.replacingOccurrences(of: "human-", with: "")
+            .split(whereSeparator: { $0 == " " || $0 == "-" || $0 == "_" })
+        let letters = parts.prefix(2).compactMap { $0.first.map(String.init) }
+        return letters.isEmpty ? "?" : letters.joined().uppercased()
     }
 }
 
@@ -718,8 +916,23 @@ private struct RoomThreadSheet: View {
     let thread: RoomChatThreadState
     let ownHandles: Set<String>
     var readingAloudId: String?
+    var mentionCandidates: [MentionCandidate] = []
+    var canReact = false
     let send: (RoomChatIntent) -> Void
     @Binding var draft: String
+    /// The reply being answered (a reply to a reply nests under it); nil answers the message.
+    @State private var answering: RoomChatReplyRow?
+
+    private var suggestions: [MentionCandidate] {
+        guard let active = MentionSuggester.activeQuery(in: draft) else { return [] }
+        return MentionSuggester.suggestions(for: active.query, among: mentionCandidates)
+    }
+
+    private func answer(_ reply: RoomChatReplyRow) {
+        answering = reply
+        let mention = "@\(reply.authorHandle) "
+        if !draft.hasPrefix(mention) { draft = mention + draft }
+    }
 
     var body: some View {
         NavigationStack {
@@ -768,17 +981,20 @@ private struct RoomThreadSheet: View {
                             }
                         }
                         .contentShape(Rectangle())
-                        .contextMenu {
-                            Button {
-                                send(.readAloud(id: RoomReadAloud.reply(reply.id), text: reply.text))
-                            } label: {
-                                Label("Listen", systemImage: "speaker.wave.2")
+                        .contextMenu { replyMenu(reply) }
+                        .gesture(DragGesture(minimumDistance: 30).onEnded { value in
+                            // Swipe right to answer this reply, as in Messages.
+                            if thread.canReply, value.translation.width > 60,
+                               abs(value.translation.width) > abs(value.translation.height) * 1.8 {
+                                answer(reply)
                             }
-                        }
+                        })
                         .padding(.leading, 12)
                         .overlay(alignment: .leading) {
                             Rectangle().fill(PocketPalette.separator).frame(width: 2)
                         }
+                        .padding(.leading, CGFloat(reply.depth) * 16)
+                        .accessibilityAction(named: "Reply") { answer(reply) }
                     }
                     ForEach(thread.pending) { pending in
                         RoomPendingRowView(
@@ -805,6 +1021,56 @@ private struct RoomThreadSheet: View {
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if thread.canReply {
                     VStack(alignment: .leading, spacing: 4) {
+                    if let answering {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrowshape.turn.up.left")
+                            Text("Replying to \(answering.authorName)")
+                                .lineLimit(1)
+                            Spacer(minLength: 0)
+                            Button {
+                                self.answering = nil
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Stop replying to \(answering.authorName)")
+                        }
+                        .font(.caption)
+                        .foregroundStyle(PocketPalette.textSecondary)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 8)
+                    }
+                    if !suggestions.isEmpty {
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 0) {
+                                ForEach(suggestions) { candidate in
+                                    Button {
+                                        draft = MentionSuggester.apply(candidate, to: draft)
+                                    } label: {
+                                        HStack(spacing: 10) {
+                                            Image(systemName: candidate.isAll ? "person.3.fill" : (candidate.isHuman ? "person.crop.circle.fill" : "cpu"))
+                                                .foregroundStyle(candidate.isHuman || candidate.isAll ? PocketPalette.accent : PocketPalette.listening)
+                                                .frame(width: 26)
+                                            Text(candidate.isAll ? "@all" : "@\(candidate.handle)")
+                                                .font(.subheadline.weight(.semibold))
+                                            Text(candidate.isAll ? "Everyone in the room" : candidate.displayName)
+                                                .font(.caption)
+                                                .foregroundStyle(PocketPalette.textSecondary)
+                                                .lineLimit(1)
+                                            Spacer(minLength: 0)
+                                        }
+                                        .padding(.horizontal, 14)
+                                        .padding(.vertical, 7)
+                                        .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityLabel(candidate.isAll ? "Mention everyone" : "Mention \(candidate.displayName), @\(candidate.handle)")
+                                    .accessibilityIdentifier("pocket.thread.mention.\(candidate.handle)")
+                                }
+                            }
+                        }
+                        .frame(maxHeight: min(CGFloat(suggestions.count) * 44, 200))
+                    }
                     if let problem = thread.replyLengthProblem(for: draft) {
                         Text(problem)
                             .font(.caption)
@@ -824,8 +1090,13 @@ private struct RoomThreadSheet: View {
                         Button {
                             let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
                             guard canSendReply else { return }
-                            send(.sendReply(sequenceId: thread.parent.sequenceId, text: text))
+                            if let answering {
+                                send(.sendReplyToReply(sequenceId: thread.parent.sequenceId, replyId: answering.id, text: text))
+                            } else {
+                                send(.sendReply(sequenceId: thread.parent.sequenceId, text: text))
+                            }
                             draft = ""
+                            answering = nil
                         } label: {
                             Image(systemName: "arrow.up.circle.fill").font(.system(size: 32))
                         }
@@ -844,6 +1115,45 @@ private struct RoomThreadSheet: View {
 
     private var canSendReply: Bool {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && thread.replyLengthProblem(for: draft) == nil
+    }
+
+    /// The same choices as a message in the room: reply, react, listen, copy.
+    @ViewBuilder
+    private func replyMenu(_ reply: RoomChatReplyRow) -> some View {
+        if thread.canReply {
+            Button {
+                answer(reply)
+            } label: {
+                Label("Reply", systemImage: "arrowshape.turn.up.left")
+            }
+        }
+        if canReact {
+            Button {
+                send(.reactToReply(sequenceId: thread.parent.sequenceId, replyId: reply.id, type: "like"))
+            } label: {
+                Label("Like", systemImage: "hand.thumbsup")
+            }
+            Button {
+                send(.reactToReply(sequenceId: thread.parent.sequenceId, replyId: reply.id, type: "dislike"))
+            } label: {
+                Label("Dislike", systemImage: "hand.thumbsdown")
+            }
+            Button {
+                send(.reactToReply(sequenceId: thread.parent.sequenceId, replyId: reply.id, type: "ack"))
+            } label: {
+                Label("Acknowledge", systemImage: "checkmark.circle")
+            }
+        }
+        Button {
+            send(.readAloud(id: RoomReadAloud.reply(reply.id), text: reply.text))
+        } label: {
+            Label("Listen", systemImage: "speaker.wave.2")
+        }
+        Button {
+            copyToPasteboard(reply.text)
+        } label: {
+            Label("Copy text", systemImage: "doc.on.doc")
+        }
     }
 }
 
