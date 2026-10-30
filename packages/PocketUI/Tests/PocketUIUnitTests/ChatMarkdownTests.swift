@@ -74,20 +74,20 @@ final class ChatMarkdownTests: XCTestCase {
     /// Carter and warden: the keeper's ticket links sat side by side; each is its own row now.
     func test_ticket_links_come_out_of_the_text_one_per_row() {
         let keeper = "🎫 Tickets for this message: [Ticket: Fix Phone notifications that stop updating]"
-            + "(/dashboard/sessions/e9e8dc5e-8d57-4603-975f-09156e3b4473?ticket=c2e3430f-894d-47b6-be6d-5a4d98939a52) · "
+            + "(/dashboard/sessions/11111111-2222-4333-8444-555555555555?ticket=aaaaaaaa-1111-4222-8333-444444444444) · "
             + "[Ticket: Keep Phone and web notifications synchronized]"
-            + "(/dashboard/sessions/e9e8dc5e-8d57-4603-975f-09156e3b4473?ticket=b562dbe7-865b-48bf-be36-e476d275f6a3)"
+            + "(/dashboard/sessions/11111111-2222-4333-8444-555555555555?ticket=bbbbbbbb-1111-4222-8333-444444444444)"
         let split = ChatReferences.ticketLinks(in: keeper)
         XCTAssertEqual(split.prose, "🎫 Tickets for this message:")
         XCTAssertEqual(split.tickets.map(\.title), ["Fix Phone notifications that stop updating",
                                                     "Keep Phone and web notifications synchronized"])
-        XCTAssertEqual(split.tickets.first?.ticketId, "c2e3430f-894d-47b6-be6d-5a4d98939a52")
+        XCTAssertEqual(split.tickets.first?.ticketId, "aaaaaaaa-1111-4222-8333-444444444444")
         XCTAssertEqual(split.tickets.first?.url.absoluteString,
-                       "https://sentinelayer.com/dashboard/sessions/e9e8dc5e-8d57-4603-975f-09156e3b4473?ticket=c2e3430f-894d-47b6-be6d-5a4d98939a52")
+                       "https://sentinelayer.com/dashboard/sessions/11111111-2222-4333-8444-555555555555?ticket=aaaaaaaa-1111-4222-8333-444444444444")
 
-        let inline = ChatReferences.ticketLinks(in: "🎫 1 new from #54924: P2 [Ticket: Lower the text box](https://sentinelayer.com/dashboard/sessions/e9e8dc5e?ticket=ba811458)")
+        let inline = ChatReferences.ticketLinks(in: "🎫 1 new from #54924: P2 [Ticket: Lower the text box](https://sentinelayer.com/dashboard/sessions/1111aaaa?ticket=cccc1111)")
         XCTAssertEqual(inline.prose, "🎫 1 new from #54924: P2")
-        XCTAssertEqual(inline.tickets.map(\.ticketId), ["ba811458"])
+        XCTAssertEqual(inline.tickets.map(\.ticketId), ["cccc1111"])
 
         let other = "See [the docs](https://example.com/dashboard/sessions/x?ticket=y) and nothing else"
         XCTAssertTrue(ChatReferences.ticketLinks(in: other).tickets.isEmpty, "only Senti's own ticket links")

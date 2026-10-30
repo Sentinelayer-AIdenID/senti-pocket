@@ -251,6 +251,9 @@ final class RoomChatCoordinator: ObservableObject {
         publish()
     }
 
+    /// Stacks of alike notices opened to show each one (by their first notice's id).
+    private var expandedRepeats: Set<String> = []
+
     func send(_ intent: RoomChatIntent) {
         switch intent {
         case .loadOlder:
@@ -329,6 +332,13 @@ final class RoomChatCoordinator: ObservableObject {
                   message.kind == .message, message.eventType == "session_message",
                   let target = RoomViewTarget(kind: .message, id: message.id, revision: message.revision) else { return }
             receiptsTracker?.setOnScreen(target, isOnScreen)
+        case .toggleRepeats(let stack):
+            if expandedRepeats.contains(stack) {
+                expandedRepeats.remove(stack)
+            } else {
+                expandedRepeats.insert(stack)
+            }
+            publish()
         case .replyOnScreen(let id, let isOnScreen):
             guard let reply = threadReplies.first(where: { $0.id == id }),
                   let target = RoomViewTarget(kind: .reply, id: reply.id, revision: reply.revision) else { return }
@@ -1519,7 +1529,8 @@ final class RoomChatCoordinator: ObservableObject {
             },
             canPin: canPin,
             pinLimit: pinLimit,
-            replies: inlineReplyInputs()
+            replies: inlineReplyInputs(),
+            expandedRepeats: expandedRepeats
         )
     }
 

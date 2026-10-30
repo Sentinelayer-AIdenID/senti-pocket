@@ -21,7 +21,7 @@ public struct MintLife: Equatable, Identifiable, Sendable {
     public let jobDescription: String?
     public let ticketId: String?
     public let ticketTitle: String?
-    public let consoleURL: URL?
+    public private(set) var consoleURL: URL?
     /// The room it works in.
     public let sessionId: String?
     /// What it has cost so far, in dollars.
@@ -286,6 +286,18 @@ public struct MintRoomSummary: Equatable, Sendable {
     }
 }
 
+extension MintLife {
+    /// The console opens in the app, so only one on the Flight record's own host is kept.
+    func consolePinned(to base: URL?) -> MintLife {
+        guard let console = consoleURL else { return self }
+        let sameHost = base?.host.map { $0.lowercased() == console.host?.lowercased() } ?? false
+        guard !sameHost else { return self }
+        var pinned = self
+        pinned.consoleURL = nil
+        return pinned
+    }
+}
+
 /// What a box has been thinking and doing, from its flight record: newest last.
 public struct MintFlightRecord: Equatable, Sendable {
     public struct Line: Equatable, Sendable {
@@ -370,14 +382,12 @@ extension MintReading {
 }
 
 public final class HTTPMintClient: MintReading, @unchecked Sendable {
-    public static let defaultBaseURL = URL(string: "https://sl-mint.eastus.cloudapp.azure.com")
-
     private let baseURL: URL?
     private let urlSession: URLSession
     private let tokenProvider: @Sendable () -> String?
 
-    public init(baseURL: URL? = HTTPMintClient.defaultBaseURL, urlSession: URLSession = .shared,
-                tokenProvider: @escaping @Sendable () -> String?) {
+    /// `baseURL` comes from the build (the app's `SENTI_MINT_URL`); with none, nothing is read and no box is shown.
+    public init(baseURL: URL?, urlSession: URLSession, tokenProvider: @escaping @Sendable () -> String?) {
         // The person's Senti token goes to an https origin only.
         self.baseURL = baseURL.flatMap { $0.scheme?.lowercased() == "https" ? $0 : nil }
         self.urlSession = urlSession
@@ -393,7 +403,9 @@ public final class HTTPMintClient: MintReading, @unchecked Sendable {
     public func roomSnapshot(sessionId: String) async throws -> MintRoomLives {
         guard !sessionId.isEmpty, sessionId.utf8.count <= 256 else { throw MintError.notConfigured }
         let json = try await get(path: "/api/mint/lives", query: [URLQueryItem(name: "sessionId", value: sessionId)])
-        return MintRoomLives(json: json, sessionId: sessionId)
+        let room = MintRoomLives(json: json, sessionId: sessionId)
+        return MintRoomLives(lives: room.lives.map { $0.consolePinned(to: baseURL) }, truncated: room.truncated,
+                             totals: room.totals, fleetList: room.fleetList)
     }
 
     public func flight(lifeId: String) async throws -> MintFlightRecord {

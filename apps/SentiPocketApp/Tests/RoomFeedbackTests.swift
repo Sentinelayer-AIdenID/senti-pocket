@@ -71,7 +71,7 @@ final class RoomFeedbackTests: XCTestCase {
 
 final class PushRouteTests: XCTestCase {
     func test_a_tapped_notification_opens_its_room_at_the_message_or_reply() {
-        let room = "e9e8dc5e-8d57-4603-975f-09156e3b4473"
+        let room = "11111111-2222-4333-8444-555555555555"
         let reply = "41bd8285-0df2-4b1c-8e6f-5e811ca737e7"
         let link = PushRoute.link(from: ["sessionId": room, "sequenceId": NSNumber(value: 54_918), "replyId": reply.uppercased()])
         XCTAssertEqual(link, SentiLink(sessionId: room, messageSequence: 54_918, replyId: reply))
