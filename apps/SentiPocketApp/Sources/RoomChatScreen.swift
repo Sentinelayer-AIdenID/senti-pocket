@@ -44,6 +44,7 @@ struct RoomChatScreen: View {
     @State private var showsTickets = false
     /// The room's summary, made on request (Carter, 10-30).
     @State private var showsSummary = false
+    @State private var showsInvite = false
     /// The tickets screen opens straight into a new ticket (the composer's "File a ticket").
     @State private var ticketsStartFiling = false
     @State private var showsAdmissions = false
@@ -82,6 +83,7 @@ struct RoomChatScreen: View {
     /// Posting spoken turns and the transcript, as you; nil where you cannot post.
     private let voicePoster: (any VoiceRoomPosting)?
     private let summaryGenerator: (any RoomSummaryGenerating)?
+    private let inviter: (any RoomInviting)?
     private let ticketWriter: (any RoomTicketWriting)?
     private let ticketLeases: any TicketLeaseStoring
     private let ticketExtras: (any RoomTicketExtrasReading)?
@@ -124,6 +126,7 @@ struct RoomChatScreen: View {
         self.ticketAnswerSender = route.membershipRole.lowercased() == "viewer" ? nil : sender
         self.voicePoster = route.membershipRole.lowercased() == "viewer" ? nil : sender as? any VoiceRoomPosting
         self.summaryGenerator = sender as? any RoomSummaryGenerating
+        self.inviter = sender as? any RoomInviting
         self.ticketWriter = ticketWriter
         self.ticketLeases = ticketLeases
         self.ticketExtras = ticketExtras
@@ -142,6 +145,8 @@ struct RoomChatScreen: View {
             membershipRole: route.membershipRole,
             // The API lets the owner rename a room, and nobody a breakout.
             canRename: route.membershipRole.lowercased() == "owner" && !route.isBreakout,
+            // Owners and admins invite people (the API enforces it); a breakout follows its parent room.
+            canInvite: ["owner", "admin"].contains(route.membershipRole.lowercased()) && !route.isBreakout,
             focusSequenceId: route.focusSequenceId,
             attachmentFetcher: attachmentFetcher,
             receipts: receipts,
@@ -385,6 +390,8 @@ struct RoomChatScreen: View {
                 }
             } else if intent == .stopReadingAloud {
                 reader.stop()
+            } else if intent == .openInvite {
+                showsInvite = true
             } else if intent == .peopleOpened {
                 // Which boxes still run, so the people list shows them as here or ended.
                 Task { await flight.refresh() }
@@ -608,6 +615,12 @@ struct RoomChatScreen: View {
             if open { CrashReporter.shared.note("summary opened") }
         }
         .onChange(of: coordinator.state.title) { _ in onRenamed() }
+        .sheet(isPresented: $showsInvite) {
+            if let inviter {
+                RoomInviteSheet(sessionId: route.sessionId, roomTitle: coordinator.state.title, inviter: inviter,
+                                onClose: { showsInvite = false })
+            }
+        }
         .sheet(isPresented: $showsTickets) {
             if let ticketsTransport {
                 NavigationStack {

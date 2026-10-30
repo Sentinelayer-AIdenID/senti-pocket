@@ -529,6 +529,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     public let pinLimit: Int
     /// You may rename the room: its owner, outside a breakout (the API's rule).
     public let canRename: Bool
+    /// You may invite people: the room's owner or an admin, outside a breakout.
+    public let canInvite: Bool
 
     /// Same-author rows closer together than this share one header.
     public static let groupingWindow: TimeInterval = 5 * 60
@@ -563,6 +565,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         canPin: Bool = false,
         pinLimit: Int = 10,
         canRename: Bool = false,
+        canInvite: Bool = false,
         replies: [RoomChatMessageInput] = [],
         expandedRepeats: Set<String> = [],
         calendar: Calendar = .current
@@ -594,6 +597,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         self.canPin = protectedFailure ? false : canPin
         self.pinLimit = max(1, pinLimit)
         self.canRename = protectedFailure ? false : canRename
+        self.canInvite = protectedFailure ? false : canInvite
 
         // Protected content never renders beside an auth or access failure.
         guard failure?.suppressesProtectedContent != true else {
@@ -1241,6 +1245,8 @@ public enum RoomChatIntent: Equatable, Sendable {
     case peopleOpened
     /// The room's owner gave it a new name (`RoomTitle.cleaned` already applied).
     case renameRoom(title: String)
+    /// Open the invite sheet (a share link, or an invite by email or username).
+    case openInvite
 }
 
 /// A room's name as the API takes it (`SessionTitlePayload`, `_normalize_session_title`): control characters out,
