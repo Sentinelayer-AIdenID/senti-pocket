@@ -114,6 +114,13 @@ final class CrashReportsTests: XCTestCase {
         XCTAssertTrue(report?.reason.contains("Memory at 08:00:13: 812 MB in use (peak 1240 MB), 95 MB left before the limit.") == true)
         XCTAssertTrue(report?.reason.contains("iOS warned about memory 2 times before it ended.") == true)
 
+        XCTAssertTrue(report?.reason.hasPrefix("On screen, then gone, with no crash of its own: the system ended it, most often for memory.") == true,
+                      "95 MB left: a memory kill")
+        run.availableMB = 3_263
+        XCTAssertTrue(run.closedReport(system: "iOS 26.0", device: "iPhone17,2")?.reason
+            .hasPrefix("On screen, then gone, with no crash of its own and memory to spare: most likely the app stopped responding") == true,
+                      "3 GB left: a freeze the system ended, as Carter's Tickets reports showed")
+
         run.isActive = false
         XCTAssertNil(run.closedReport(system: "iOS 26.0", device: "iPhone17,2"),
                      "leaving the app, the app switcher (a swipe-away) or an update makes it inactive first")
