@@ -75,8 +75,11 @@ final class NotificationsCoordinator: ObservableObject {
     private let now: @Sendable () -> Date
     private var updatedAt: Date?
     private var couldNotUpdate = false
-    /// Opened from a push before the bell had loaded.
-    private var openedBeforeLoad: [SentiLink] = []
+    /// Opened from a push or a banner but not in the bell yet (it reads every 30 s, and a tapped push may be newer
+    /// than the list); read when it arrives, if within ten minutes (warden, #275).
+    private var pendingOpened: [(link: SentiLink, id: String?, at: Date)] = []
+    /// Read marks the server refused; sent again on the next read of the bell (warden, #275).
+    private var failedMarks: Set<String> = []
     /// Read marks waiting to go to the server, sent a few at a time.
     private var markQueue: [String] = []
     private var marking = 0
@@ -138,9 +141,12 @@ final class NotificationsCoordinator: ObservableObject {
             couldNotUpdate = false
             updatedAt = now()
             if wasSignedOut, pollTask == nil { startPolling(readNow: false) }
-            let opened = openedBeforeLoad
-            openedBeforeLoad = []
-            for link in opened { markOpened(link) }
+            let opened = pendingOpened.filter { now().timeIntervalSince($0.at) < Self.pendingFor }
+            pendingOpened = []
+            for open in opened { markOpened(open.link, notificationId: open.id, at: open.at) }
+            let retry = failedMarks.filter { id in notifications.contains { $0.id == id && !$0.isRead } }
+            failedMarks = []
+            for id in retry { markRead(id) }
         } catch SessionTransportError.reauthenticationRequired {
             if failure != .reauthenticationRequired { onReauthenticationRequired() }
             failure = .reauthenticationRequired
@@ -169,8 +175,8 @@ final class NotificationsCoordinator: ObservableObject {
         sendMarks()
     }
 
-    /// A few marks at a time, never fifty at once (warden, #267). One that fails is unread again here, so the next
-    /// look at its room (or the bell) sends it again.
+    /// A few marks at a time, never fifty at once (warden, #267). One that fails is unread again here and is sent again
+    /// on the next read of the bell.
     private func sendMarks() {
         guard let marker else { return }
         while marking < Self.concurrentMarks, !markQueue.isEmpty {
@@ -188,6 +194,7 @@ final class NotificationsCoordinator: ObservableObject {
                 self.marking -= 1
                 if !sent {
                     self.locallyRead.remove(id)
+                    self.failedMarks.insert(id)
                     self.publish()
                 }
                 self.sendMarks()
@@ -195,16 +202,23 @@ final class NotificationsCoordinator: ObservableObject {
         }
     }
 
-    /// The notification a push or a banner was about, once it is opened: the one for that message (or reply), or for
-    /// the room when the link names no message.
-    func markOpened(_ link: SentiLink) {
-        let matches = notifications.filter { !$0.isRead && Self.opens($0, link) }
-        // A push tapped before the bell has loaded (the app was closed) is read once it has.
-        if matches.isEmpty, updatedAt == nil {
-            openedBeforeLoad = Array((openedBeforeLoad + [link]).suffix(10))
+    static let pendingFor: TimeInterval = 600
+
+    /// The notification a tapped push or banner was: by its id when the push carries one, else the one its link
+    /// names (a message, a reply, a ticket or an agent request), else the room's newest notice. One notification,
+    /// never the room's others. Not in the bell yet, it is read when it arrives.
+    func markOpened(_ link: SentiLink, notificationId: String? = nil, at: Date? = nil) {
+        let target: SentiNotification?
+        if let notificationId {
+            target = notifications.first { $0.id.lowercased() == notificationId }
+        } else {
+            target = notifications.first { !$0.isRead && !locallyRead.contains($0.id) && Self.opens($0, link) }
+        }
+        guard let target else {
+            pendingOpened = Array((pendingOpened + [(link, notificationId, at ?? now())]).suffix(10))
             return
         }
-        for notification in matches { markRead(notification.id) }
+        markRead(target.id)
     }
 
     static func opens(_ notification: SentiNotification, _ link: SentiLink) -> Bool {
@@ -212,7 +226,10 @@ final class NotificationsCoordinator: ObservableObject {
         guard target.sessionId == link.sessionId else { return false }
         if let reply = link.replyId { return target.replyId == reply }
         if let message = link.messageSequence { return target.messageSequence == message }
-        return target.messageSequence == nil && target.replyId == nil
+        if let ticket = link.ticketId { return target.ticketId == ticket }
+        if let admission = link.admissionId { return target.admissionId == admission }
+        return target.messageSequence == nil && target.replyId == nil && target.ticketId == nil
+            && target.admissionId == nil
     }
 
     /// There is no bulk endpoint, so each unread notification is marked on its own.

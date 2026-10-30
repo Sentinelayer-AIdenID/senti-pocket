@@ -11,7 +11,8 @@ enum VoiceLineEvent: Equatable, Sendable {
 enum VoiceLineError: Error, Equatable {
     /// No voice line on this server (switched off, no model, or an older server): the call waits for the agents.
     case unavailable
-    case rateLimited
+    /// Too many asks: wait this long (the server's Retry-After) before the next.
+    case rateLimited(retryAfter: TimeInterval?)
     case notAllowed
     case failed
 }
