@@ -393,6 +393,25 @@ extension HTTPRoomMessageSender: VoiceRoomPosting {
     /// One room write. `session` replaces the live deadlines for a slow call (the room summary).
     func post(sessionId: String, path: String, idempotencyKey: String, body: [String: Any],
               session: URLSession? = nil) async throws -> Data {
+        let (data, http) = try await postAnswer(sessionId: sessionId, path: path, idempotencyKey: idempotencyKey, body: body,
+                                                session: session)
+        switch http.statusCode {
+        case 200..<300:
+            return data
+        case 401:
+            throw RoomSendError.reauthenticationRequired
+        case 403, 404:
+            throw RoomSendError.notAllowed
+        case 409, 425, 429, 500..<600:
+            throw RoomSendError.retryable(retryAfterSeconds: http.value(forHTTPHeaderField: "Retry-After").flatMap(Int.init))
+        default:
+            throw RoomSendError.rejected
+        }
+    }
+
+    /// The same POST, answered as it came back: the caller reads the status and the request id.
+    func postAnswer(sessionId: String, path: String, idempotencyKey: String, body: [String: Any],
+                    session: URLSession? = nil) async throws -> (Data, HTTPURLResponse) {
         guard let apiBaseURL,
               var components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false) else {
             throw RoomSendError.notConfigured
@@ -423,18 +442,7 @@ extension HTTPRoomMessageSender: VoiceRoomPosting {
             throw RoomSendError.retryable(retryAfterSeconds: nil)
         }
         guard let http = response as? HTTPURLResponse else { throw RoomSendError.retryable(retryAfterSeconds: nil) }
-        switch http.statusCode {
-        case 200..<300:
-            return data
-        case 401:
-            throw RoomSendError.reauthenticationRequired
-        case 403, 404:
-            throw RoomSendError.notAllowed
-        case 409, 425, 429, 500..<600:
-            throw RoomSendError.retryable(retryAfterSeconds: http.value(forHTTPHeaderField: "Retry-After").flatMap(Int.init))
-        default:
-            throw RoomSendError.rejected
-        }
+        return (data, http)
     }
 }
 

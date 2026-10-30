@@ -600,7 +600,8 @@ struct RoomChatScreen: View {
         .sheet(isPresented: $showsSummary) {
             if let summaryGenerator {
                 RoomSummarySheet(sessionId: route.sessionId, roomTitle: coordinator.state.title, generator: summaryGenerator,
-                                 reader: reader, onClose: { showsSummary = false })
+                                 reader: reader, onClose: { showsSummary = false },
+                                 onReport: coordinator.state.composer.canPost ? { coordinator.send(.sendMessage(text: $0)) } : nil)
             }
         }
         .onChange(of: showsSummary) { open in
