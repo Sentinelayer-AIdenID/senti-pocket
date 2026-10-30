@@ -102,8 +102,8 @@ final class RoomRosterTests: XCTestCase {
         let boxes = sides[2]
         XCTAssertEqual(boxes.members.map(\.name), ["astra-brand-s"])
         XCTAssertEqual(boxes.online, 1)
-        XCTAssertEqual(roster.summary, "\(roster.activeCount) active · \(3 - roster.activeCount) idle · 3 offline",
-                       "the whole room's line leads with the ring's number")
+        XCTAssertEqual(roster.activeCount, 1, "mrrCarter only: forge idles and the box has done nothing yet")
+        XCTAssertEqual(roster.summary, "1 active · 2 idle · 3 offline", "the whole room's line leads with the ring's number")
     }
 
     func test_a_box_that_ended_but_runs_again_under_its_name_is_listed_once_as_running() {
