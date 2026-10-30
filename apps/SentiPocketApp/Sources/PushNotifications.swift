@@ -257,8 +257,11 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
         let title = content.title
         let body = content.body
         Task { @MainActor in
-            let presentation = ForegroundPush.presentation(sessionId: sessionId, roomOnScreen: self.currentRoomId(),
-                                                           bannerHosted: InAppBanner.shared.isHosted)
+            // During a call nothing slides in: a tap would take the room, and the call with it (warden, #267). It
+            // still lands in the bell and Notification Center.
+            let presentation = VoiceCallWindow.shared.isShowing ? ForegroundPush.quiet
+                : ForegroundPush.presentation(sessionId: sessionId, roomOnScreen: self.currentRoomId(),
+                                              bannerHosted: InAppBanner.shared.isHosted)
             guard presentation == .inApp else { return completionHandler(presentation.options) }
             InAppBanner.shared.show(title: title, body: body, link: link)
             completionHandler(presentation.options)

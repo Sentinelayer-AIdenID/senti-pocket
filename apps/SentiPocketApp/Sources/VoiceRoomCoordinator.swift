@@ -35,6 +35,8 @@ final class VoiceRoomCoordinator: ObservableObject {
     private let now: @Sendable () -> Date
     private let sleep: @Sendable (TimeInterval) async -> Void
     private let onEnded: @MainActor () -> Void
+    /// The call's record could not be saved after the call screen went: said in the room instead.
+    private let onRecordFailed: @MainActor (String) -> Void
 
     /// Answers waiting to be read, oldest first.
     private var queue: [VoiceRoomTurn] = []
@@ -83,7 +85,8 @@ final class VoiceRoomCoordinator: ObservableObject {
         sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
             try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
         },
-        onEnded: @escaping @MainActor () -> Void = {}
+        onEnded: @escaping @MainActor () -> Void = {},
+        onRecordFailed: @escaping @MainActor (String) -> Void = { _ in }
     ) {
         self.sessionId = sessionId
         self.you = you
@@ -97,6 +100,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         self.now = now
         self.sleep = sleep
         self.onEnded = onEnded
+        self.onRecordFailed = onRecordFailed
         state = VoiceRoomState(with: agents, startedAt: now())
     }
 
@@ -106,6 +110,8 @@ final class VoiceRoomCoordinator: ObservableObject {
         do {
             try audio.activate()
         } catch {
+            // Nothing rings without the phone's audio (warden, #267: it showed "Ringing…" for ever).
+            state.ringStopped = true
             state.notice = "The phone's audio is busy (a call or another app). End it and try again."
             return
         }
@@ -116,6 +122,8 @@ final class VoiceRoomCoordinator: ObservableObject {
             do {
                 try await self.poster.postCallStarted(sessionId: self.sessionId, text: ring, clientId: clientId)
             } catch {
+                // Nobody was rung, so nothing rings (warden, #267).
+                self.stopRinging()
                 self.state.notice = "The agents could not be rung. Check the connection."
             }
         }
@@ -416,26 +424,36 @@ final class VoiceRoomCoordinator: ObservableObject {
         state.phase = .ending
         audio.deactivate()
         let ended = now()
+        // The call screen goes at once; the call's record is saved after it (warden, #267: a stalled network held
+        // every control for up to two minutes).
+        onEnded()
+        let clientId = "voice-end-" + UUID().uuidString.lowercased()
+        var saved: VoiceTranscriptAttachment?
+        var failure: String?
         if !state.turns.isEmpty {
-            let markdown = Self.transcript(state, ended: ended, timings: timings)
-            let stamp = Self.fileStamp(state.startedAt)
-            let clientId = "voice-end-" + UUID().uuidString.lowercased()
-            var saved: VoiceTranscriptAttachment?
             do {
                 saved = try await poster.uploadTranscript(
                     sessionId: sessionId,
-                    filename: "voice-\(Self.slug(state.title))-\(stamp).md",
-                    markdown: markdown,
+                    filename: "voice-\(Self.slug(state.title))-\(Self.fileStamp(state.startedAt)).md",
+                    markdown: Self.transcript(state, ended: ended, timings: timings),
                     clientId: clientId + "-file"
                 )
             } catch {
-                state.notice = "The transcript could not be saved to the room."
+                failure = "The call's transcript could not be saved to the room."
             }
-            let text = Self.closingMessage(state, ended: ended, hasTranscript: saved != nil, timings: timings)
-            try? await poster.postCallEnded(sessionId: sessionId, text: text, transcript: saved, clientId: clientId)
+        }
+        // Always closed, even with nothing said, so its card ends and no agent says hello into a finished call.
+        let text = Self.closingMessage(state, ended: ended, hasTranscript: saved != nil, timings: timings)
+        do {
+            try await poster.postCallEnded(sessionId: sessionId, text: text, transcript: saved, clientId: clientId)
+        } catch {
+            failure = "The call's end could not be posted to the room. Its card may still show it as live."
         }
         state.phase = .ended
-        onEnded()
+        if let failure {
+            state.notice = failure
+            onRecordFailed(failure)
+        }
     }
 
     /// The whole conversation, oldest first, as Markdown.
@@ -469,7 +487,10 @@ final class VoiceRoomCoordinator: ObservableObject {
         var text = "📞 Voice room with \(state.title) ended · \(Self.duration(from: state.startedAt, to: ended)) · \(state.turns.count) turns."
         // Without the file, the conversation is the call's card in the room.
         if hasTranscript { text += " The full transcript is attached." }
-        if !asked.isEmpty { text += " \(asked) please post a 3–5 line summary of what we decided and what happens next." }
+        // Nothing said, nothing to sum up.
+        if !asked.isEmpty, !state.turns.isEmpty {
+            text += " \(asked) please post a 3–5 line summary of what we decided and what happens next."
+        }
         if let line = timings.line() { text += "\n" + line }
         return text
     }
