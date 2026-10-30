@@ -1,5 +1,6 @@
 import Foundation
 import PocketSyncClient
+import UIKit
 import UserNotifications
 import XCTest
 @testable import SentiPocketApp
@@ -46,6 +47,33 @@ final class InAppBannerTests: XCTestCase {
         XCTAssertEqual(banner.current?.id, second.id, "the first one's timer does not put the second away")
         banner.dismiss()
         XCTAssertNil(banner.current)
+    }
+
+    func test_a_tap_puts_it_away_and_opens_what_it_is_about() throws {
+        let banner = InAppBanner(lifetime: 60)
+        var opened: [SentiLink] = []
+        banner.onOpen = { opened.append($0) }
+        banner.show(title: "claude-warden", body: "merged", link: SentiLink(sessionId: "room-b", messageSequence: 7))
+        banner.cardFrame = CGRect(x: 10, y: 60, width: 370, height: 64)
+        banner.open(try XCTUnwrap(banner.current))
+        XCTAssertNil(banner.current)
+        XCTAssertEqual(opened, [SentiLink(sessionId: "room-b", messageSequence: 7)])
+        XCTAssertEqual(banner.cardFrame, .zero, "once it is away, its window takes no touches")
+    }
+
+    /// The banner's window sits above every sheet, so it must not swallow touches meant for the app under it.
+    func test_its_window_takes_touches_only_on_the_card() {
+        let window = InAppBannerCardWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        let banner = InAppBanner(lifetime: 60)
+        window.banner = banner
+        window.isHidden = false
+        defer { window.isHidden = true }
+
+        banner.cardFrame = CGRect(x: 10, y: 60, width: 370, height: 64)
+        XCTAssertNotNil(window.hitTest(CGPoint(x: 100, y: 80), with: nil))
+        XCTAssertNil(window.hitTest(CGPoint(x: 100, y: 400), with: nil), "the app under it takes that touch")
+        banner.cardFrame = .zero
+        XCTAssertNil(window.hitTest(CGPoint(x: 100, y: 80), with: nil), "with no card up, nothing is taken")
     }
 
     func test_it_goes_away_on_its_own() {
