@@ -38,6 +38,8 @@ public struct RoomChatMessageInput: Equatable, Sendable {
     public let work: [RoomChatWorkLine]
     /// A turn spoken in a voice room (`channel: "voice"`).
     public let isVoiceTurn: Bool
+    /// A checkpoint's summary.
+    public let checkpointSummary: String?
 
     public init(
         id: String,
@@ -56,7 +58,8 @@ public struct RoomChatMessageInput: Equatable, Sendable {
         views: RoomChatViews? = nil,
         inlineReplyId: String? = nil,
         work: [RoomChatWorkLine] = [],
-        isVoiceTurn: Bool = false
+        isVoiceTurn: Bool = false,
+        checkpointSummary: String? = nil
     ) {
         self.id = id
         self.sequenceId = sequenceId
@@ -75,6 +78,7 @@ public struct RoomChatMessageInput: Equatable, Sendable {
         self.inlineReplyId = inlineReplyId
         self.work = work
         self.isVoiceTurn = isVoiceTurn
+        self.checkpointSummary = checkpointSummary
     }
 }
 
@@ -235,6 +239,8 @@ public struct RoomChatMessageRow: Equatable, Identifiable, Sendable {
     /// The same notice again and again from one agent (only the numbers changed): shown once, the newest, with how
     /// many it stands for.
     public var repeats: Int = 1
+    /// A checkpoint's summary, for its sheet.
+    public var checkpointSummary: String?
 }
 
 public enum RoomChatRow: Equatable, Identifiable, Sendable {
@@ -630,7 +636,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 work: input.isInlineReply ? [] : input.work,
                 call: folded.cards[input.id],
                 trail: trails.trails[input.id],
-                repeats: repeated.counts[input.id] ?? 1
+                repeats: repeated.counts[input.id] ?? 1,
+                checkpointSummary: input.checkpointSummary
             )))
             if input.kind == .message, let date = input.date {
                 run = (input.authorId, date)
@@ -822,6 +829,32 @@ public enum RoomChatRepeats {
             }
         }
         return (kept, counts)
+    }
+}
+
+/// A checkpoint's summary as the web shows it: the overview, cut where the digest's lists begin (the web's
+/// `checkpointOverview`), so it reads as what the room discussed, not as verified work.
+public enum CheckpointText {
+    static let markers = [
+        "\n\nCovered sequence range:", "\nCovered sequence range:",
+        "\n\nReported work (unverified):", "\nReported work (unverified):",
+        "\n\nWork completed:", "\nWork completed:"
+    ]
+
+    public static func overview(_ summary: String) -> String {
+        var end = summary.endIndex
+        for marker in markers {
+            if let range = summary.range(of: marker), range.lowerBound > summary.startIndex, range.lowerBound < end {
+                end = range.lowerBound
+            }
+        }
+        return String(summary[..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// What Listen says: the title, then the overview.
+    public static func spoken(title: String, summary: String?) -> String {
+        let overview = summary.map(overview) ?? ""
+        return overview.isEmpty ? "Checkpoint. \(title)" : "Checkpoint. \(title).\n\n\(overview)"
     }
 }
 

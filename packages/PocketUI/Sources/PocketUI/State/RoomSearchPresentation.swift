@@ -59,6 +59,8 @@ public struct RoomSearchPresentationState: Equatable, Sendable {
 
 public enum RoomSearchIntent: Equatable, Sendable {
     case submit(String)
+    /// The words changed: search once typing pauses.
+    case typed(String)
     case loadMore
     /// Go to the message in the room.
     case open(sequenceId: Int64)

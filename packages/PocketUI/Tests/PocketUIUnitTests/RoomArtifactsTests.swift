@@ -37,6 +37,19 @@ final class RoomArtifactsTests: XCTestCase {
         XCTAssertEqual(artifacts.first { $0.kind == .file }?.title, "voice-call.md")
     }
 
+    /// Carter (#54900): "I cannot even find the checkpoint I saw earlier."
+    func test_checkpoints_are_artifacts_and_their_overview_stops_where_the_digest_lists_begin() {
+        let checkpoint = RoomArtifactSource(id: "cp-1", sequenceId: 9, author: "senti", text: "Voice room shipped",
+                                            date: base, isCheckpoint: true)
+        XCTAssertEqual(RoomArtifacts.extract(from: [checkpoint]).map(\.kind), [.checkpoint])
+        XCTAssertEqual(RoomArtifacts.extract(from: [checkpoint]).first?.title, "Voice room shipped")
+        let summary = "The room shipped the voice room and the player.\n\nReported work (unverified):\n- #210\n- #213"
+        XCTAssertEqual(CheckpointText.overview(summary), "The room shipped the voice room and the player.")
+        XCTAssertEqual(CheckpointText.spoken(title: "Voice room shipped", summary: summary),
+                       "Checkpoint. Voice room shipped.\n\nThe room shipped the voice room and the player.")
+        XCTAssertEqual(CheckpointText.spoken(title: "Bare", summary: nil), "Checkpoint. Bare")
+    }
+
     func test_a_senti_ticket_link_is_a_ticket_not_a_link_and_plain_text_has_nothing() {
         let absolute = "[Ticket: Fix the bell](https://sentinelayer.com/dashboard/sessions/e9e8dc5e?ticket=c2e3430f)"
         let artifacts = RoomArtifacts.extract(from: [message(1, "ticket-keeper", absolute, minutes: 0)])

@@ -23,6 +23,8 @@ public struct RoomChatView: View {
     /// A message the reader was taken to (a link, notification, search result or pin). It stays in place through
     /// pages loading above or below it and messages arriving, until the reader scrolls.
     @State private var heldAnchor: String?
+    /// A checkpoint opened from its row: read it, listen to it.
+    @State private var openCheckpoint: RoomChatMessageRow?
     /// "Jump to latest" from a window further back: scroll to the bottom once the live room has loaded.
     @State private var scrollsToLatestWhenLoaded = false
     @State private var highlightedRowId: String?
@@ -83,6 +85,9 @@ public struct RoomChatView: View {
                     draft: threadDraft(thread.parent.sequenceId)
                 )
             }
+        }
+        .sheet(item: $openCheckpoint) { row in
+            CheckpointSheet(row: row, send: send)
         }
         .navigationTitle(state.title)
         .navigationBarTitleDisplayModeInlineIfAvailable()
@@ -299,6 +304,7 @@ public struct RoomChatView: View {
                 attachmentPreviews: state.attachmentPreviews,
                 isReadingAloud: readingAloudId == message.readAloudId,
                 onOpenReplyTarget: { jump(to: $0, proxy: proxy) },
+                onOpenCheckpoint: { openCheckpoint = $0 },
                 send: send
             )
             .onAppear { send(.messageOnScreen(id: message.id, isOnScreen: true)) }
@@ -495,6 +501,7 @@ private struct RoomMessageRowView: View {
     var attachmentPreviews: [String: Data] = [:]
     var isReadingAloud = false
     let onOpenReplyTarget: (Int64) -> Void
+    var onOpenCheckpoint: (RoomChatMessageRow) -> Void = { _ in }
     var send: (RoomChatIntent) -> Void = { _ in }
     /// How far the row follows a swipe to the right (swipe to reply, as in Messages).
     @State private var swipe: CGFloat = 0
@@ -524,20 +531,33 @@ private struct RoomMessageRowView: View {
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 6)
         case .checkpoint:
-            HStack(spacing: 10) {
-                Image(systemName: "flag.checkered")
-                    .foregroundStyle(PocketPalette.accent)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Checkpoint")
-                        .font(.caption.weight(.semibold))
+            Button {
+                onOpenCheckpoint(row)
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "flag.checkered")
                         .foregroundStyle(PocketPalette.accent)
-                    Text(row.text)
-                        .font(.subheadline)
-                        .foregroundStyle(PocketPalette.textPrimary)
-                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Checkpoint")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(PocketPalette.accent)
+                        Text(row.text)
+                            .font(.subheadline)
+                            .foregroundStyle(PocketPalette.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 4)
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(PocketPalette.textSecondary)
+                        .accessibilityHidden(true)
                 }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityHint("Opens the checkpoint, to read or listen")
+            .accessibilityIdentifier("pocket.room.checkpoint.\(row.sequenceId)")
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -1777,4 +1797,80 @@ private struct RoomPinnedStrip: View {
     }
 }
 
+/// A checkpoint, opened from its row (Carter: find the checkpoint, and have Pocket read it): its title and the
+/// overview the web shows, the whole digest on demand, and Listen, which closes the sheet so the player shows.
+private struct CheckpointSheet: View {
+    let row: RoomChatMessageRow
+    let send: (RoomChatIntent) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var showsAll = false
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text(row.text)
+                        .font(.title3.bold())
+                        .foregroundStyle(PocketPalette.textPrimary)
+                    if let date = row.date {
+                        Text("\(row.authorName) · \(date.formatted(date: .abbreviated, time: .shortened))")
+                            .font(.caption)
+                            .foregroundStyle(PocketPalette.textSecondary)
+                    }
+                    if let summary = row.checkpointSummary {
+                        let overview = CheckpointText.overview(summary)
+                        ChatMarkdownView(text: overview.isEmpty ? summary : overview)
+                        if overview != summary.trimmingCharacters(in: .whitespacesAndNewlines) {
+                            DisclosureGroup("The whole digest", isExpanded: $showsAll) {
+                                ChatMarkdownView(text: summary)
+                                    .padding(.top, 6)
+                            }
+                            .font(.subheadline.weight(.semibold))
+                            .tint(PocketPalette.accentStrong)
+                        }
+                    } else {
+                        Text("This checkpoint has no summary.")
+                            .foregroundStyle(PocketPalette.textSecondary)
+                    }
+                }
+                .padding(18)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .navigationTitle("Checkpoint")
+            .navigationBarTitleDisplayModeInlineIfAvailable()
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                HStack(spacing: 12) {
+                    Button {
+                        send(.readAloud(id: "checkpoint:\(row.sequenceId)",
+                                        text: CheckpointText.spoken(title: row.text, summary: row.checkpointSummary)))
+                        dismiss()
+                    } label: {
+                        Label("Listen", systemImage: "speaker.wave.2.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(PocketPalette.accentStrong)
+                    .accessibilityIdentifier("pocket.checkpoint.listen")
+                    Button {
+                        send(.jumpToMessage(sequenceId: row.sequenceId))
+                        dismiss()
+                    } label: {
+                        Label("Show in room", systemImage: "text.bubble")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(.bar)
+            }
+        }
+        .accessibilityIdentifier("pocket.checkpoint.sheet")
+    }
+}
 #endif

@@ -58,6 +58,8 @@ public struct RoomSearchView: View {
             .navigationBarTitleDisplayModeInlineIfAvailable()
             .searchable(text: $text, prompt: "Words, names or agents")
             .onSubmit(of: .search) { send(.submit(text)) }
+            // Matches come as you type, once you pause (Carter: like lifting your hand for a second).
+            .onChange(of: text) { send(.typed($0)) }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { dismiss() }

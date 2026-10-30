@@ -40,6 +40,8 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
     public let attachments: [RoomAttachment]
     /// "voice" for a turn spoken in a voice room (the room shows it as transcript); nil for a typed post.
     public let channel: String?
+    /// A checkpoint's summary (its title is the text).
+    public let checkpointSummary: String?
     /// The wire event type. Only `session_message` rows take view receipts (the API refuses the others).
     public let eventType: String
 
@@ -59,7 +61,8 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         breakout: RoomBreakoutEvent? = nil,
         attachments: [RoomAttachment] = [],
         eventType: String = "session_message",
-        channel: String? = nil
+        channel: String? = nil,
+        checkpointSummary: String? = nil
     ) {
         self.id = id
         self.sequenceId = sequenceId
@@ -77,6 +80,7 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         self.attachments = attachments
         self.eventType = eventType
         self.channel = channel
+        self.checkpointSummary = checkpointSummary
     }
 
     /// Projects one wire event. Returns nil for events a room does not display (control, presence, edit
@@ -147,6 +151,9 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         self.channel = payload["channel"]?.stringValue.flatMap { value in
             value.isEmpty || value.count > 16 ? nil : value.lowercased()
         }
+        self.checkpointSummary = kind == .checkpoint
+            ? payload["summary"]?.stringValue.flatMap { $0.isEmpty ? nil : String($0.prefix(20_000)) }
+            : nil
         self.eventType = event
     }
 

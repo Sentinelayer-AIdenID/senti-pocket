@@ -38,14 +38,15 @@ final class RoomArtifactsCoordinator: ObservableObject {
             while sources.count < Self.messageLimit, !Task.isCancelled {
                 guard let page = try? await transport.roomEventsBefore(sessionId: sessionId, beforeSequence: before,
                                                                        limit: Self.pageSize) else { break }
-                for message in page.messages where message.kind == .message {
+                for message in page.messages where message.kind == .message || message.kind == .checkpoint {
                     sources.append(RoomArtifactSource(
                         id: message.id,
                         sequenceId: message.sequenceId,
                         author: message.authorName,
                         text: message.text,
                         date: ParsedSessionTimestamp(message.timestamp).date,
-                        files: message.attachments.map { ($0.attachmentId, $0.filename) }
+                        files: message.attachments.map { ($0.attachmentId, $0.filename) },
+                        isCheckpoint: message.kind == .checkpoint
                     ))
                 }
                 guard page.hasMore, let next = page.nextBeforeSequence ?? page.minSequence, next != before else { break }
