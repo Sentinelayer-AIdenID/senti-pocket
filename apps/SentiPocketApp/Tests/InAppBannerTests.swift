@@ -28,6 +28,17 @@ final class InAppBannerTests: XCTestCase {
         XCTAssertEqual(ForegroundPush.presentation(sessionId: "room-a", roomOnScreen: nil, bannerHosted: true), .inApp)
     }
 
+    /// Warden, #255: the pop played with the notification sound turned off.
+    func test_the_banner_sounds_and_taps_only_as_the_notification_settings_say() {
+        XCTAssertTrue(ForegroundPush.feedback(soundSetting: true, vibrateSetting: true, systemSounds: true) == (true, true))
+        XCTAssertTrue(ForegroundPush.feedback(soundSetting: false, vibrateSetting: true, systemSounds: true) == (false, true),
+                      "Pocket's notification sound off: no sound")
+        XCTAssertTrue(ForegroundPush.feedback(soundSetting: true, vibrateSetting: false, systemSounds: true) == (true, false),
+                      "vibrate off: no tap")
+        XCTAssertTrue(ForegroundPush.feedback(soundSetting: true, vibrateSetting: true, systemSounds: false) == (false, true),
+                      "the phone's sounds for Pocket off: no sound")
+    }
+
     func test_with_no_screen_to_show_it_ios_shows_its_own() {
         let shown = ForegroundPush.presentation(sessionId: "room-b", roomOnScreen: nil, bannerHosted: false)
         XCTAssertEqual(shown, .system)

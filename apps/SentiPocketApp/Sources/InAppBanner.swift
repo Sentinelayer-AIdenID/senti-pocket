@@ -18,6 +18,12 @@ enum ForegroundPush: Equatable {
         return bannerHosted ? .inApp : .system
     }
 
+    /// Whether Pocket's banner sounds and taps: as its notification settings say, and silent where the phone's
+    /// settings turn this app's notification sounds off.
+    static func feedback(soundSetting: Bool, vibrateSetting: Bool, systemSounds: Bool) -> (sound: Bool, haptic: Bool) {
+        (soundSetting && systemSounds, vibrateSetting)
+    }
+
     var options: UNNotificationPresentationOptions {
         switch self {
         case .quiet: return [.list]
