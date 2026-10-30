@@ -314,6 +314,20 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         XCTAssertTrue(poster.uploads.first?.markdown.contains("## Timings, measured on the phone") == true)
     }
 
+    /// Carter (#55058): the recognizer's fillers and doubled words are tidied before the turn reaches the room.
+    func test_a_spoken_turn_is_tidied_before_it_is_posted() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), poster = FakePoster()
+        let room = room(with: ["pocket-forge"], handsFree: false, listener: listener, speaker: speaker, audio: audio, poster: poster)
+        room.begin()
+        room.send(.toggleTalk)
+        await until("listening") { listener.partial != nil }
+        listener.say("um the the build is uh green")
+        room.send(.toggleTalk)
+        await until("posted") { poster.turns.count == 1 }
+        XCTAssertEqual(poster.turns, ["@pocket-forge The build is green"])
+        XCTAssertEqual(room.state.turns.last?.text, "The build is green")
+    }
+
     func test_a_finished_sentence_ends_a_hands_free_turn_sooner() {
         XCTAssertEqual(VoiceRoomCoordinator.pause(after: "Ship it tonight."), VoiceRoomCoordinator.pauseAfterSentence)
         XCTAssertEqual(VoiceRoomCoordinator.pause(after: "What about the build? "), VoiceRoomCoordinator.pauseAfterSentence)

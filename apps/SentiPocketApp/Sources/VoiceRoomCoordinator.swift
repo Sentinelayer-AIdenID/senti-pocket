@@ -2,6 +2,7 @@ import Foundation
 import PocketContracts
 import PocketSyncClient
 import PocketUI
+import PocketVoice
 
 /// A voice conversation in a room, run on the phone: you talk, the phone recognizes it and posts it to the room as a
 /// spoken turn (`channel: "voice"`), the agents answer in the room from their own listeners on their own models, and
@@ -302,7 +303,8 @@ final class VoiceRoomCoordinator: ObservableObject {
             guard let self else { return }
             let heard = await self.listener.stop()
             self.timings.record(.recognition, self.now().timeIntervalSince(asked))
-            let text = heard.isEmpty ? self.state.partial.trimmingCharacters(in: .whitespacesAndNewlines) : heard
+            // Fillers and words said twice are tidied before the turn is posted (Carter, #55058).
+            let text = SpokenCleanup.clean(heard.isEmpty ? self.state.partial : heard)
             self.state.partial = ""
             guard !text.isEmpty else {
                 self.state.phase = .ready
