@@ -165,6 +165,8 @@ TEAM_ID="${SENTI_APPLE_TEAM_ID:-}"
 BUNDLE_ID="${SENTI_BUNDLE_ID:-com.plexaura.sentipocket.app}"
 API_URL="${SENTI_API_URL:-}"
 GATEWAY_URL="${SENTI_GATEWAY_URL:-}"
+# Optional: the Flight record's service. Empty builds an app that shows no boxes.
+MINT_URL="${SENTI_MINT_URL:-}"
 DEVICE_UDID="${SENTI_DEVICE_UDID:-}"
 REGISTER_CONNECTED_DEVICE="${SENTI_REGISTER_CONNECTED_DEVICE:-0}"
 INSTALL_CONNECTED_DEVICE="${SENTI_INSTALL_CONNECTED_DEVICE:-0}"
@@ -183,6 +185,9 @@ OUTPUT_ROOT="${SENTI_IPA_OUTPUT_DIR:-$REPO_ROOT/build/ios}"
   || fail "SENTI_BUILD_NUMBER must be a positive integer"
 require_https_origin "SENTI_API_URL" "$API_URL"
 require_https_origin "SENTI_GATEWAY_URL" "$GATEWAY_URL"
+if [[ -n "$MINT_URL" ]]; then
+  require_https_origin "SENTI_MINT_URL" "$MINT_URL"
+fi
 require_binary_flag "SENTI_REGISTER_CONNECTED_DEVICE" "$REGISTER_CONNECTED_DEVICE"
 require_binary_flag "SENTI_INSTALL_CONNECTED_DEVICE" "$INSTALL_CONNECTED_DEVICE"
 require_binary_flag "SENTI_RETAIN_PRIVATE_DIAGNOSTICS" "$RETAIN_PRIVATE_DIAGNOSTICS"
@@ -502,6 +507,7 @@ COMMON_BUILD_SETTINGS=(
   "PRODUCT_BUNDLE_IDENTIFIER=$BUNDLE_ID"
   "SENTI_API_URL=$API_URL"
   "SENTI_GATEWAY_URL=$GATEWAY_URL"
+  "SENTI_MINT_URL=$MINT_URL"
   "PATH=$SAFE_XCODE_PATH"
   "SDKROOT=$IOS_SDK_ROOT"
   "${SECURE_EXECUTION_SETTINGS[@]}"
@@ -531,6 +537,7 @@ if [[ "$REGISTER_CONNECTED_DEVICE" == "1" ]]; then
     "APS_ENVIRONMENT=development" \
     "SENTI_API_URL=$API_URL" \
     "SENTI_GATEWAY_URL=$GATEWAY_URL" \
+    "SENTI_MINT_URL=$MINT_URL" \
     "PATH=$SAFE_XCODE_PATH" \
     "SDKROOT=$IOS_SDK_ROOT" \
     "${SECURE_EXECUTION_SETTINGS[@]}" \
@@ -591,6 +598,7 @@ if ! "$PYTHON3_BIN" "$SOURCE_ROOT/scripts/ios/verify_unsigned_release.py" \
   --build-number "$BUILD_NUMBER" \
   --api-url "$API_URL" \
   --gateway-url "$GATEWAY_URL" \
+  --mint-url "$MINT_URL" \
   --deployment-target "16.0" \
   >"$PRIVATE_DIAGNOSTICS_DIR/signed-release-bundle.log" 2>&1; then
   fail_build_step "signed Release icon, privacy, and bundle verification"
@@ -615,6 +623,9 @@ SIGNED_API_URL="$(/usr/libexec/PlistBuddy -c 'Print :SENTI_API_URL' "$APP_PATH/I
 SIGNED_GATEWAY_URL="$(/usr/libexec/PlistBuddy -c 'Print :SENTI_GATEWAY_URL' "$APP_PATH/Info.plist")"
 [[ "$SIGNED_GATEWAY_URL" == "$GATEWAY_URL" ]] \
   || fail "the signed app's SENTI_GATEWAY_URL does not match the requested Release origin"
+SIGNED_MINT_URL="$(/usr/libexec/PlistBuddy -c 'Print :SENTI_MINT_URL' "$APP_PATH/Info.plist" 2>/dev/null || true)"
+[[ "$SIGNED_MINT_URL" == "$MINT_URL" ]] \
+  || fail "the signed app's SENTI_MINT_URL does not match the requested origin"
 SIGNED_EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Info.plist")"
 [[ "$SIGNED_EXECUTABLE" =~ ^[A-Za-z0-9._+-]+$ && -f "$APP_PATH/$SIGNED_EXECUTABLE" ]] \
   || fail "the signed app has an invalid or missing CFBundleExecutable"

@@ -59,6 +59,17 @@ public struct MintLife: Equatable, Identifiable, Sendable {
     }
 }
 
+extension MintLife {
+    /// The console opens in the app, so only one on the Flight record's own host is kept.
+    func consolePinned(to base: URL?) -> MintLife {
+        guard let console = consoleURL else { return self }
+        let sameHost = base?.host.map { $0.lowercased() == console.host?.lowercased() } ?? false
+        guard !sameHost else { return self }
+        return MintLife(id: id, agentName: agentName, model: model, phase: phase, bornAt: bornAt, expiresAt: expiresAt,
+                        jobDescription: jobDescription, ticketId: ticketId, ticketTitle: ticketTitle, consoleURL: nil)
+    }
+}
+
 /// What a box has been thinking and doing, from its flight record: newest last.
 public struct MintFlightRecord: Equatable, Sendable {
     public struct Line: Equatable, Sendable {
@@ -134,14 +145,12 @@ public protocol MintReading: Sendable {
 }
 
 public final class HTTPMintClient: MintReading, @unchecked Sendable {
-    public static let defaultBaseURL = URL(string: "https://sl-mint.eastus.cloudapp.azure.com")
-
     private let baseURL: URL?
     private let urlSession: URLSession
     private let tokenProvider: @Sendable () -> String?
 
-    public init(baseURL: URL? = HTTPMintClient.defaultBaseURL, urlSession: URLSession = .shared,
-                tokenProvider: @escaping @Sendable () -> String?) {
+    /// `baseURL` comes from the build (the app's `SENTI_MINT_URL`); with none, nothing is read and no box is shown.
+    public init(baseURL: URL?, urlSession: URLSession, tokenProvider: @escaping @Sendable () -> String?) {
         // The person's Senti token goes to an https origin only.
         self.baseURL = baseURL.flatMap { $0.scheme?.lowercased() == "https" ? $0 : nil }
         self.urlSession = urlSession
@@ -153,7 +162,7 @@ public final class HTTPMintClient: MintReading, @unchecked Sendable {
     public func roomLives(sessionId: String) async throws -> [MintLife] {
         guard !sessionId.isEmpty, sessionId.utf8.count <= 256 else { throw MintError.notConfigured }
         let json = try await get(path: "/api/mint/lives", query: [URLQueryItem(name: "sessionId", value: sessionId)])
-        return (json["lives"]?.arrayValue ?? []).compactMap(MintLife.init(json:))
+        return (json["lives"]?.arrayValue ?? []).compactMap(MintLife.init(json:)).map { $0.consolePinned(to: baseURL) }
     }
 
     public func flight(lifeId: String) async throws -> MintFlightRecord {
