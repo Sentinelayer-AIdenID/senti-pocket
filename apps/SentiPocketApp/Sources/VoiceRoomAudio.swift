@@ -18,7 +18,19 @@ protocol VoiceListening: AnyObject {
 protocol VoiceSpeaking: AnyObject {
     /// `finished` runs once when the answer has been said, unless `stop()` comes first.
     func speak(_ markdown: String, as speaker: String, finished: @escaping @MainActor () -> Void)
+    /// The same, and `started` runs once at the answer's first sound (for the call's timings).
+    func speak(_ markdown: String, as speaker: String, started: @escaping @MainActor () -> Void,
+               finished: @escaping @MainActor () -> Void)
     func stop()
+}
+
+extension VoiceSpeaking {
+    /// A speaker that cannot tell when sound starts reports it at once.
+    func speak(_ markdown: String, as speaker: String, started: @escaping @MainActor () -> Void,
+               finished: @escaping @MainActor () -> Void) {
+        started()
+        speak(markdown, as: speaker, finished: finished)
+    }
 }
 
 /// The phone's audio for a voice room: held for the whole call, for listening and speaking in turn, through the
@@ -164,9 +176,16 @@ final class AgentVoiceSpeaker: NSObject, VoiceSpeaking, AVSpeechSynthesizerDeleg
     private var synthesizer: AVSpeechSynthesizer?
     private var last: AVSpeechUtterance?
     private var finished: (@MainActor () -> Void)?
+    private var started: (@MainActor () -> Void)?
 
     func speak(_ markdown: String, as speaker: String, finished: @escaping @MainActor () -> Void) {
+        speak(markdown, as: speaker, started: {}, finished: finished)
+    }
+
+    func speak(_ markdown: String, as speaker: String, started: @escaping @MainActor () -> Void,
+               finished: @escaping @MainActor () -> Void) {
         stop()
+        self.started = started
         let spoken = SpeechText.spoken(fromMarkdown: markdown)
         let segments = SpeechText.segments(spoken)
         guard !segments.isEmpty else {
@@ -190,9 +209,18 @@ final class AgentVoiceSpeaker: NSObject, VoiceSpeaking, AVSpeechSynthesizerDeleg
 
     func stop() {
         finished = nil
+        started = nil
         last = nil
         synthesizer?.stopSpeaking(at: .immediate)
         synthesizer = nil
+    }
+
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
+        MainActor.assumeIsolated {
+            guard let started else { return }
+            self.started = nil
+            started()
+        }
     }
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
