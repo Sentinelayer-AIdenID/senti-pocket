@@ -197,6 +197,7 @@ private struct AuthenticatedRootView: View {
     @State private var restoredLastRoom = false
     @AppStorage("pocket.theme") private var themeRaw = PocketThemePreference.system.rawValue
     @StateObject private var messageReader = MessageReader()
+    @ObservedObject private var readingSource = ReadAloudSource.shared
     private let roomTransport: any RoomTransport
     private let ticketsTransport: any RoomTicketsTransport
     private let admissionsTransport: any RoomAdmissionsTransport
@@ -358,6 +359,21 @@ private struct AuthenticatedRootView: View {
                     roomScreen(route)
                 }
             }
+            // Listening goes on when you leave its room (Carter, 10-30): outside that room the app keeps the player,
+            // and its title takes you back to the message.
+            .overlay(alignment: .bottom) {
+                if let playback = messageReader.playback, let source = readingSource.sessionId,
+                   source != (roomPath.last ?? currentRoom)?.sessionId {
+                    ReadAloudPlayer(reader: messageReader, playback: playback) {
+                        if let id = messageReader.readingId {
+                            open(ReadAloudSource.link(readingId: id, sessionId: source))
+                        }
+                    }
+                    .padding(.bottom, currentRoom == nil ? 16 : 72)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .animation(.spring(response: 0.3, dampingFraction: 0.9), value: messageReader.playback == nil)
             // The room moves right, a little smaller, its corners rounded into a card; a tap or a swipe on it closes.
             .overlay {
                 if drawerOpen {

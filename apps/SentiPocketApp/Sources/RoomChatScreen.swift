@@ -59,6 +59,7 @@ struct RoomChatScreen: View {
     @State private var appliedRouteLinks = false
     /// The times the app closed unexpectedly, offered once each to send to this room.
     @ObservedObject private var crashes = CrashReporter.shared
+    @ObservedObject private var readingSource = ReadAloudSource.shared
     @State private var offersCrashReports = false
     /// A box's console, shown in the app.
     @State private var consolePage: InAppPage?
@@ -372,6 +373,7 @@ struct RoomChatScreen: View {
             } else if case .openAttachment(let attachmentId) = intent {
                 openAttachment(attachmentId)
             } else if case .readAloud(let id, let text) = intent {
+                ReadAloudSource.shared.reading(in: route.sessionId)
                 if reader.read(id: id, markdown: text, title: readAloudTitle(for: id)) == .unavailable {
                     listenProblem = "A call or briefing is using the audio. Listen when it ends."
                 }
@@ -528,25 +530,12 @@ struct RoomChatScreen: View {
         }
         .animation(.spring(response: 0.32, dampingFraction: 0.9), value: voiceRoom != nil)
         .overlay(alignment: .bottom) {
-            // The Listen player: above the composer while a message is read (a voice room speaks on its own).
-            if voiceRoom == nil, let playback = reader.playback {
-                ReadAloudBar(state: ReadAloudBarState(
-                    title: playback.title,
-                    isPaused: playback.isPaused,
-                    elapsedBefore: playback.elapsedBefore,
-                    sentenceStartedAt: playback.sentenceStartedAt,
-                    sentenceLength: playback.sentenceLength,
-                    total: playback.total,
-                    hasGoodVoice: playback.hasGoodVoice
-                )) { action in
-                    switch action {
-                    case .togglePause: if playback.isPaused { reader.resume() } else { reader.pause() }
-                    case .skip(let seconds): reader.skip(by: seconds)
-                    case .close: reader.stop()
-                    case .showMessage: showReadingMessage()
-                    }
-                }
-                .padding(.bottom, 72)
+            // The Listen player: above the composer while this room's message is read (a voice room speaks on its
+            // own). Reading from another room, the app's own player shows instead, over every screen.
+            if voiceRoom == nil, let playback = reader.playback,
+               readingSource.sessionId == nil || readingSource.sessionId == route.sessionId {
+                ReadAloudPlayer(reader: reader, playback: playback, onShowMessage: showReadingMessage)
+                    .padding(.bottom, 72)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
@@ -749,8 +738,7 @@ struct RoomChatScreen: View {
         .onDisappear {
             CrashReporter.shared.note("room closed")
             coordinator.pause()
-            // Leaving the room stops what it was reading aloud.
-            reader.stop()
+            // Reading aloud goes on after you leave (Carter, 10-30); the app's player follows you to the next screen.
         }
         .onChange(of: scenePhase) { phase in
             switch phase {
