@@ -80,10 +80,13 @@ private final class FakePoster: VoiceRoomPosting, @unchecked Sendable {
     private var _uploads: [(filename: String, markdown: String)] = []
     private var _endings: [(text: String, attachmentId: String?)] = []
     private var _starts: [String] = []
+    private var _ids: [String] = []
     var starts: [String] { lock.withLock { _starts } }
+    /// The client ids of the ring and the end, in order.
+    var ids: [String] { lock.withLock { _ids } }
 
     func postCallStarted(sessionId: String, text: String, clientId: String) async throws {
-        lock.withLock { _starts.append(text) }
+        lock.withLock { _starts.append(text); _ids.append(clientId) }
     }
 
     var turns: [String] { lock.withLock { _turns } }
@@ -101,7 +104,7 @@ private final class FakePoster: VoiceRoomPosting, @unchecked Sendable {
     }
 
     func postCallEnded(sessionId: String, text: String, transcript: VoiceTranscriptAttachment?, clientId: String) async throws {
-        lock.withLock { _endings.append((text, transcript?.attachmentId)) }
+        lock.withLock { _endings.append((text, transcript?.attachmentId)); _ids.append(clientId) }
     }
 }
 
@@ -511,6 +514,10 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         XCTAssertTrue(poster.endings.first?.text.hasPrefix("📞 Voice room with pocket-forge ended") == true)
         XCTAssertFalse(poster.endings.first?.text.contains("summary") == true, "nothing to sum up")
         XCTAssertEqual(room.state.phase, .ended)
+        // Warden (API #1060): the end names its start, so the call log pairs them even with two phones in a room.
+        XCTAssertEqual(poster.ids.count, 2)
+        XCTAssertEqual(poster.ids[0].dropFirst("voice-start-".count), poster.ids[1].dropFirst("voice-end-".count))
+        XCTAssertTrue(poster.ids[1].hasPrefix("voice-end-"))
     }
 
     /// Warden (#267): hanging up locked the app until the transcript saved, up to two minutes on a stalled network.

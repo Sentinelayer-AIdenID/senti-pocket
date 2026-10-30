@@ -131,7 +131,7 @@ final class VoiceRoomCoordinator: ObservableObject {
             return
         }
         let ring = VoiceCallMarkers.start(caller: you, agents: invited, meeting: state.with.isEmpty)
-        let clientId = "voice-start-" + UUID().uuidString.lowercased()
+        let clientId = "voice-start-" + callId
         let previous = Self.closing[sessionId]
         startPost = Task { [weak self] in
             // The room's last call is closed first, so its end lands before this ring.
@@ -519,7 +519,9 @@ final class VoiceRoomCoordinator: ObservableObject {
     /// never went out (no audio, or the post failed) was never opened, so nothing closes it.
     private func saveRecord(ended: Date) async {
         guard await startPost?.value == true else { return }
-        let clientId = "voice-end-" + UUID().uuidString.lowercased()
+        // The end carries the start's own id, so the call log pairs them even when two phones call in one room
+        // (warden, API #1060).
+        let clientId = "voice-end-" + callId
         var saved: VoiceTranscriptAttachment?
         var failure: String?
         if !state.turns.isEmpty {
