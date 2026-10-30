@@ -442,6 +442,9 @@ extension HTTPRoomMessageSender: VoiceRoomPosting {
             throw RoomSendError.retryable(retryAfterSeconds: nil)
         }
         guard let http = response as? HTTPURLResponse else { throw RoomSendError.retryable(retryAfterSeconds: nil) }
+        if !(200..<300).contains(http.statusCode) {
+            ClientProblems.shared.roomRequestFailed(path: path, status: http.statusCode, response: http)
+        }
         return (data, http)
     }
 }
@@ -564,6 +567,9 @@ extension HTTPRoomMessageSender {
         }
         guard let http = response as? HTTPURLResponse else { throw RoomSendError.retryable(retryAfterSeconds: nil) }
         if http.statusCode == 401 { throw RoomSendError.reauthenticationRequired }
+        if !(200..<300).contains(http.statusCode) {
+            ClientProblems.shared.roomRequestFailed(path: path, status: http.statusCode, response: http)
+        }
         return (data, http)
     }
 }
