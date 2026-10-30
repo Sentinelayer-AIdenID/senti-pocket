@@ -262,6 +262,9 @@ private struct AuthenticatedRootView: View {
         )
         let details = SelectedSessionDetailCoordinator(
             transport: transport,
+            // The signing gateway is not deployed and Release pins no signing key yet (warden, 10-30): checkpoints
+            // open as the server holds them until it is.
+            opensVerifiedCheckpoints: PocketGatewayTrust.verifiesBundles,
             onReauthenticationRequired: {
                 revocationRelay.invalidateAuthentication()
             },
@@ -428,7 +431,8 @@ private struct AuthenticatedRootView: View {
         .sheet(isPresented: $presentsActivity) {
             SelectedSessionActivityBoundary(
                 sessions: sessions,
-                details: details
+                details: details,
+                reader: messageReader
             )
         }
         .onChange(of: checkpointPocket.isActive) { isActive in
@@ -821,6 +825,7 @@ private struct SelectedSessionPocketView: View {
 private struct SelectedSessionActivityBoundary: View {
     @ObservedObject var sessions: SessionListCoordinator
     @ObservedObject var details: SelectedSessionDetailCoordinator
+    @ObservedObject var reader: MessageReader
 
     @ViewBuilder
     var body: some View {
@@ -855,6 +860,12 @@ private struct SelectedSessionActivityBoundary: View {
             }
         }
         .id(sessions.selectedSessionId.map(UTF8ExactIdentity.init))
+        .sheet(item: Binding(
+            get: { details.serverCheckpoint },
+            set: { if $0 == nil { details.closeServerCheckpoint() } }
+        )) { row in
+            ServerCheckpointView(row: row, reader: reader) { details.closeServerCheckpoint() }
+        }
     }
 
     /// Item-based navigation destinations require iOS 17; Pocket's floor remains iOS 16.
@@ -909,7 +920,7 @@ private struct SelectedSessionActivityBoundary: View {
     @ViewBuilder
     private var checkpointContent: some View {
         if let state = details.checkpointState {
-            SessionCheckpointListView(state: state) { intent in
+            SessionCheckpointListView(state: state, verifies: PocketGatewayTrust.verifiesBundles) { intent in
                 details.send(intent)
             }
         } else {

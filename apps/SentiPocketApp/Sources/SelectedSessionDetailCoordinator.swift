@@ -113,19 +113,30 @@ final class SelectedSessionDetailCoordinator: ObservableObject {
     private var checkpointProvenance: SessionPresentationProvenance = .unavailable
     private var activityOperation: Task<Void, Never>?
     private var checkpointOperation: Task<Void, Never>?
+    /// A checkpoint opened as the server holds it. Pocket's verified view reads a signed copy through the Pocket
+    /// gateway, which was never deployed, and Release builds pin no signing key yet, so that view could only fail
+    /// (Carter, 10-30: "Verified checkpoint · Connection unavailable"). Until signing is live, a checkpoint opens here.
+    @Published private(set) var serverCheckpoint: SessionCheckpointRowPresentation?
+    private let opensVerifiedCheckpoints: Bool
 
     init(
         transport: any SessionTransport,
         clock: @escaping @Sendable () -> Date = { Date() },
+        opensVerifiedCheckpoints: Bool = true,
         onReauthenticationRequired: @escaping @MainActor () -> Void = {},
         onSelectionRevoked: @escaping @MainActor (String) -> Void = { _ in },
         onOpenCheckpoint: @escaping @MainActor (ExactCheckpointTarget) -> Void = { _ in }
     ) {
         self.transport = transport
         self.clock = clock
+        self.opensVerifiedCheckpoints = opensVerifiedCheckpoints
         self.onReauthenticationRequired = onReauthenticationRequired
         self.onSelectionRevoked = onSelectionRevoked
         self.onOpenCheckpoint = onOpenCheckpoint
+    }
+
+    func closeServerCheckpoint() {
+        serverCheckpoint = nil
     }
 
     deinit {
@@ -214,6 +225,12 @@ final class SelectedSessionDetailCoordinator: ObservableObject {
                       Self.byteExact($0.sessionId, sessionId)
                           && Self.byteExact($0.checkpointId, checkpointId)
                   }) == true else { return }
+            guard opensVerifiedCheckpoints else {
+                serverCheckpoint = checkpointState?.rows.first {
+                    Self.byteExact($0.sessionId, sessionId) && Self.byteExact($0.checkpointId, checkpointId)
+                }
+                return
+            }
             onOpenCheckpoint(ExactCheckpointTarget(
                 authenticationRevision: authenticationRevision,
                 sessionId: sessionId,
@@ -576,6 +593,8 @@ final class SelectedSessionDetailCoordinator: ObservableObject {
         activityState = nil
         checkpointState = nil
         destination = nil
+        // Another room, no room or a revoked sign-in: the checkpoint read from the last one goes with it (warden, #266).
+        serverCheckpoint = nil
     }
 
     private func reconcileDestination() {

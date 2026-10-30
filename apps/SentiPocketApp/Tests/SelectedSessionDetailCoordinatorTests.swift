@@ -312,6 +312,65 @@ final class SelectedSessionDetailCoordinatorTests: XCTestCase {
         XCTAssertEqual(opened.values.count, 1)
     }
 
+    /// Carter (10-30): "Verified checkpoint · Connection unavailable". The signing gateway is not deployed, so until
+    /// it is a checkpoint opens as the server holds it, and only the exact visible row, never the verified view.
+    func test_without_signing_a_checkpoint_opens_as_the_server_holds_it() async throws {
+        let transport = ControlledSessionDetailTransport()
+        let opened = ExactCheckpointTargetProbe()
+        let coordinator = SelectedSessionDetailCoordinator(
+            transport: transport,
+            opensVerifiedCheckpoints: false,
+            onOpenCheckpoint: { opened.values.append($0) }
+        )
+        let operation = try XCTUnwrap(coordinator.setSelectedSession("room-1", authenticationRevision: 9))
+        try await waitForRequests(transport, events: 1, actions: 1, checkpoints: 1)
+        await transport.resumeNextEvent(.success(try eventPage(sessionId: "room-1", marker: "visible")))
+        await transport.resumeNextAction(.success(try actionPage(sessionId: "room-1", marker: "visible")))
+        await transport.resumeNextCheckpoint(.success(try checkpointPage(sessionId: "room-1", marker: "visible")))
+        await operation.value
+
+        coordinator.send(.openCheckpoint(sessionId: "room-1", checkpointId: "checkpoint-forged"))
+        XCTAssertNil(coordinator.serverCheckpoint)
+        coordinator.send(.openCheckpoint(sessionId: "room-1", checkpointId: "checkpoint-visible"))
+        XCTAssertEqual(coordinator.serverCheckpoint?.checkpointId, "checkpoint-visible")
+        XCTAssertTrue(opened.values.isEmpty, "the verified view, which could only fail, is not opened")
+        coordinator.closeServerCheckpoint()
+        XCTAssertNil(coordinator.serverCheckpoint)
+
+        // Warden (#266): another room, no room or a revoked sign-in never leaves the last room's checkpoint to show.
+        coordinator.send(.openCheckpoint(sessionId: "room-1", checkpointId: "checkpoint-visible"))
+        XCTAssertNotNil(coordinator.serverCheckpoint)
+        coordinator.clearSelection()
+        XCTAssertNil(coordinator.serverCheckpoint, "cleared with the selection")
+    }
+
+    func test_a_server_checkpoint_goes_when_the_sign_in_is_revoked_or_the_room_changes() async throws {
+        let transport = ControlledSessionDetailTransport()
+        let coordinator = SelectedSessionDetailCoordinator(transport: transport, opensVerifiedCheckpoints: false)
+        let operation = try XCTUnwrap(coordinator.setSelectedSession("room-1", authenticationRevision: 9))
+        try await waitForRequests(transport, events: 1, actions: 1, checkpoints: 1)
+        await transport.resumeNextEvent(.success(try eventPage(sessionId: "room-1", marker: "visible")))
+        await transport.resumeNextAction(.success(try actionPage(sessionId: "room-1", marker: "visible")))
+        await transport.resumeNextCheckpoint(.success(try checkpointPage(sessionId: "room-1", marker: "visible")))
+        await operation.value
+
+        coordinator.send(.openCheckpoint(sessionId: "room-1", checkpointId: "checkpoint-visible"))
+        XCTAssertNotNil(coordinator.serverCheckpoint)
+        coordinator.invalidateAuthentication()
+        XCTAssertNil(coordinator.serverCheckpoint, "a revoked sign-in keeps no summary on screen")
+
+        let again = try XCTUnwrap(coordinator.setSelectedSession("room-1", authenticationRevision: 10))
+        try await waitForRequests(transport, events: 2, actions: 2, checkpoints: 2)
+        await transport.resumeNextEvent(.success(try eventPage(sessionId: "room-1", marker: "visible")))
+        await transport.resumeNextAction(.success(try actionPage(sessionId: "room-1", marker: "visible")))
+        await transport.resumeNextCheckpoint(.success(try checkpointPage(sessionId: "room-1", marker: "visible")))
+        await again.value
+        coordinator.send(.openCheckpoint(sessionId: "room-1", checkpointId: "checkpoint-visible"))
+        XCTAssertNotNil(coordinator.serverCheckpoint)
+        _ = coordinator.setSelectedSession("room-2", authenticationRevision: 10)
+        XCTAssertNil(coordinator.serverCheckpoint, "room 1's checkpoint never shows over room 2")
+    }
+
     func test_successful_activity_revision_clears_destination_when_exact_event_identity_changes() async throws {
         let transport = ControlledSessionDetailTransport()
         let coordinator = SelectedSessionDetailCoordinator(transport: transport)

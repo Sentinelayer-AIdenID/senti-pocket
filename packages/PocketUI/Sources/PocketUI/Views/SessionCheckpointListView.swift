@@ -6,15 +6,24 @@ public struct SessionCheckpointListView: View {
         "Fetches and verifies this exact signed checkpoint before any Pocket briefing content is shown."
     static let trustBoundaryMessage =
         "Room checkpoints are available through your membership. Opening one separately fetches and verifies the exact signed Pocket briefing before any briefing content is shown."
+    /// While this build verifies nothing, the list says what opening one does (warden, #266).
+    static let serverCheckpointOpenHint =
+        "Opens this checkpoint as the server holds it. It is not signed yet."
+    static let serverTrustBoundaryMessage =
+        "Room checkpoints are available through your membership. Opening one shows it as the server holds it; it is not signed yet, so Pocket does not call it verified."
 
     private let state: SessionCheckpointListPresentationState
+    private let verifies: Bool
     private let send: (PocketProductIntent) -> Void
 
+    /// `verifies` is whether this build checks signed checkpoints; without it the list never promises verification.
     public init(
         state: SessionCheckpointListPresentationState,
+        verifies: Bool = true,
         send: @escaping (PocketProductIntent) -> Void
     ) {
         self.state = state
+        self.verifies = verifies
         self.send = send
     }
 
@@ -58,7 +67,7 @@ public struct SessionCheckpointListView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityIdentifier(checkpointAccessibilityID(row))
-                    .accessibilityHint(Self.exactCheckpointOpenHint)
+                    .accessibilityHint(verifies ? Self.exactCheckpointOpenHint : Self.serverCheckpointOpenHint)
                     .listRowBackground(PocketPalette.raised)
                 }
             }
@@ -109,7 +118,7 @@ public struct SessionCheckpointListView: View {
 
     private var trustBoundaryNotice: some View {
         Label {
-            Text(Self.trustBoundaryMessage)
+            Text(verifies ? Self.trustBoundaryMessage : Self.serverTrustBoundaryMessage)
                 .font(.subheadline)
                 .fixedSize(horizontal: false, vertical: true)
         } icon: {
