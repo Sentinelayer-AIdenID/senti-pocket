@@ -100,10 +100,14 @@ public struct VoiceRoomPanel: View {
 
     private var header: some View {
         VStack(spacing: 4) {
+            // Several names shrink a little, then end in "…", and never run under the Add button.
             Text(state.title)
                 .font(.title2.weight(.semibold))
                 .foregroundStyle(PocketPalette.textPrimary)
                 .lineLimit(1)
+                .minimumScaleFactor(0.75)
+                .truncationMode(.tail)
+                .padding(.horizontal, state.canAdd ? 52 : 0)
             if state.isRinging {
                 Text("Ringing…")
                     .font(.subheadline)
