@@ -506,7 +506,8 @@ private struct AuthenticatedRootView: View {
                     }
                 case .openBriefing:
                     presentsCallLog = false
-                    presentsPocket = true
+                    // One sheet goes before the next comes: iOS 16 drops a sheet asked for while another is leaving.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { presentsPocket = true }
                 case .close:
                     presentsCallLog = false
                 }
