@@ -56,6 +56,8 @@ final class VoiceRoomCoordinator: ObservableObject {
     static let speakingLevel = 0.35
     /// One id for the whole call, so the voice line meters and limits it as one.
     private let callId = UUID().uuidString.lowercased()
+    /// The agent's call you answered, if this is one: the voice line grounds its answers in why it called.
+    private let ringCallId: String?
     private let now: @Sendable () -> Date
     private let sleep: @Sendable (TimeInterval) async -> Void
     private let onEnded: @MainActor () -> Void
@@ -118,6 +120,8 @@ final class VoiceRoomCoordinator: ObservableObject {
         poster: any VoiceRoomPosting,
         voiceLine: (any VoiceLining)? = nil,
         endpointer: (any VoiceEndpointing)? = nil,
+        ringCallId: String? = nil,
+        about: String? = nil,
         now: @escaping @Sendable () -> Date = { Date() },
         sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
             try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
@@ -136,11 +140,13 @@ final class VoiceRoomCoordinator: ObservableObject {
         self.poster = poster
         self.voiceLine = voiceLine
         self.endpointer = endpointer
+        self.ringCallId = ringCallId
         self.now = now
         self.sleep = sleep
         self.onEnded = onEnded
         self.onRecordFailed = onRecordFailed
         state = VoiceRoomState(with: agents, startedAt: now())
+        state.about = about.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
     }
 
     /// Rings the agents (one message that mentions them and opens the call's card), takes the phone's audio and plays
@@ -556,6 +562,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         let history = state.turns.dropLast().suffix(12).map { VoiceLineHistory(speaker: $0.speaker, text: $0.text) }
         let answerId = "line:" + UUID().uuidString.lowercased()
         let stream = voiceLine.voiceLine(sessionId: sessionId, agentId: agent, text: text, callId: callId,
+                                         ringCallId: ringCallId,
                                          history: Array(history))
         voiceLineAsk = Task { [weak self] in
             do {

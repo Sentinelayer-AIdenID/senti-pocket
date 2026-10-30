@@ -309,7 +309,7 @@ public struct VoiceRoomPanel: View {
         case .listening:
             return state.partial.isEmpty ? "…" : state.partial
         default:
-            return state.turns.last?.text ?? "Say something to \(state.title)."
+            return state.turns.last?.text ?? state.about.map { "Calling about: \($0)" } ?? "Say something to \(state.title)."
         }
     }
 

@@ -139,6 +139,8 @@ public struct VoiceRoomState: Equatable, Sendable {
     public var joined: [String] = []
     /// The ring has stopped: an agent picked up, nobody did for a while, or you started talking.
     public var ringStopped = false
+    /// Why the agent called, when you answered its call; shown until someone speaks.
+    public var about: String?
 
     public init(
         phase: Phase = .ready,
