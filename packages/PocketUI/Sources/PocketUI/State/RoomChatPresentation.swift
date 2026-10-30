@@ -230,6 +230,15 @@ public struct RoomChatMessageRow: Equatable, Identifiable, Sendable {
     public var endsRun: Bool = true
     /// A voice room folded into this row (its start message): the whole call as one card.
     public var call: VoiceCallCard?
+    /// For a reply shown in the room: its thread so far. Only the newest reply of a thread is shown, at its own time.
+    public var trail: RoomChatTrail?
+    /// The same notice again and again from one agent (only the numbers changed): shown once, the newest, with how
+    /// many it stands for.
+    public var repeats: Int = 1
+    /// The stack of alike notices this one belongs to (its first notice's id), folded or opened.
+    public var repeatStack: String?
+    /// Its stack is opened, and this is the stack's first notice: it offers to fold the stack again.
+    public var foldsRepeats: Bool = false
 }
 
 public enum RoomChatRow: Equatable, Identifiable, Sendable {
@@ -523,6 +532,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         canPin: Bool = false,
         pinLimit: Int = 10,
         replies: [RoomChatMessageInput] = [],
+        expandedRepeats: Set<String> = [],
         calendar: Calendar = .current
     ) {
         self.sessionId = sessionId
@@ -567,7 +577,11 @@ public struct RoomChatPresentationState: Equatable, Sendable {
             messages: messages.sorted { $0.sequenceId < $1.sequenceId },
             replies: replies
         ))
-        let ordered = folded.kept
+        // A thread shows once, as its newest reply, so a busy thread is one line that moves down as it grows.
+        let trails = RoomChatTrail.fold(folded.kept)
+        // An agent's notice that repeats with only its numbers changing (a retry counter) is one row.
+        let repeated = RoomChatRepeats.fold(trails.kept, expanded: expandedRepeats, keep: focusSequenceId)
+        let ordered = repeated.kept
         let parents = Dictionary(
             messages.map { ($0.sequenceId, $0) },
             uniquingKeysWith: { first, _ in first }
@@ -619,7 +633,11 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 inlineReplyId: input.inlineReplyId,
                 replyContext: input.replyToSequenceId.flatMap { parents[$0] }.map(Self.replyContext(for:)),
                 work: input.isInlineReply ? [] : input.work,
-                call: folded.cards[input.id]
+                call: folded.cards[input.id],
+                trail: trails.trails[input.id],
+                repeats: repeated.counts[input.id] ?? 1,
+                repeatStack: repeated.stacks[input.id],
+                foldsRepeats: repeated.stacks[input.id] == input.id && expandedRepeats.contains(input.id)
             )))
             if input.kind == .message, let date = input.date {
                 run = (input.authorId, date)
@@ -742,6 +760,96 @@ public enum RoomReadAloud {
     public static func reply(_ id: String) -> String { "reply:\(id)" }
 }
 
+/// A thread as the room shows it: how many replies, who wrote them (newest first), and the newest one is the row.
+public struct RoomChatTrail: Equatable, Sendable {
+    public let count: Int
+    public let authors: [String]
+
+    /// "4 replies · claude-warden, pocket-forge and 1 more".
+    public var label: String {
+        let replies = "\(count) \(count == 1 ? "reply" : "replies")"
+        guard !authors.isEmpty else { return replies }
+        let shown = authors.prefix(2).joined(separator: ", ")
+        let more = authors.count > 2 ? " and \(authors.count - 2) more" : ""
+        return "\(replies) · \(shown)\(more)"
+    }
+
+    /// Keeps each thread's newest reply where it is (at its own time) and drops the older ones, so a thread is one
+    /// row; that row says how many replies and who. Messages are untouched.
+    public static func fold(_ inputs: [RoomChatMessageInput]) -> (kept: [RoomChatMessageInput], trails: [String: RoomChatTrail]) {
+        var newest: [Int64: Int] = [:]
+        var groups: [Int64: [RoomChatMessageInput]] = [:]
+        for (index, input) in inputs.enumerated() where input.isInlineReply {
+            let thread = input.replyToSequenceId ?? input.sequenceId
+            newest[thread] = index
+            groups[thread, default: []].append(input)
+        }
+        guard !groups.isEmpty else { return (inputs, [:]) }
+        var kept: [RoomChatMessageInput] = []
+        kept.reserveCapacity(inputs.count)
+        var trails: [String: RoomChatTrail] = [:]
+        for (index, input) in inputs.enumerated() {
+            guard input.isInlineReply else {
+                kept.append(input)
+                continue
+            }
+            let thread = input.replyToSequenceId ?? input.sequenceId
+            guard newest[thread] == index, let group = groups[thread] else { continue }
+            var authors: [String] = []
+            for reply in group.reversed() where !authors.contains(reply.authorName) { authors.append(reply.authorName) }
+            trails[input.id] = RoomChatTrail(count: group.count, authors: authors)
+            kept.append(input)
+        }
+        return (kept, trails)
+    }
+}
+
+/// Runs of the same notice from one agent, where only the numbers change ("remains queued after 105 failed relay
+/// attempts", then 107, then 109): the run shows as its newest message with a count. People's messages, replies, and
+/// anything with different words are never folded.
+public enum RoomChatRepeats {
+    /// The words of a message with its numbers taken out, the part that must match.
+    static func shape(_ text: String) -> String {
+        text.replacingOccurrences(of: #"[0-9]+"#, with: "#", options: .regularExpression)
+    }
+
+    /// A notice that may stand in for others like it: an agent's plain message with nothing of its own. One with
+    /// attachments, reactions or a thread always shows (warden: folding must never hide what differs).
+    static func isFoldable(_ input: RoomChatMessageInput) -> Bool {
+        !input.isHuman && !input.isInlineReply && input.kind == .message && input.text.count >= 24
+            && input.attachments.isEmpty && (input.reactions?.isEmpty ?? true)
+    }
+
+    /// Folds each run of alike notices into its newest, counting them. A run is a stack, named by its first notice:
+    /// an opened stack (`expanded`) shows every notice, and a run holding `keep` (a message being opened from a link)
+    /// is never folded. `stacks` names the stack of every notice in one.
+    public static func fold(_ inputs: [RoomChatMessageInput], expanded: Set<String> = [], keep: Int64? = nil)
+        -> (kept: [RoomChatMessageInput], counts: [String: Int], stacks: [String: String]) {
+        var kept: [RoomChatMessageInput] = []
+        kept.reserveCapacity(inputs.count)
+        var counts: [String: Int] = [:]
+        var stacks: [String: String] = [:]
+        for input in inputs {
+            if let last = kept.last, isFoldable(input), isFoldable(last), input.authorId == last.authorId,
+               shape(input.text) == shape(last.text), input.text != last.text {
+                let stack = stacks[last.id] ?? last.id
+                stacks[last.id] = stack
+                stacks[input.id] = stack
+                if expanded.contains(stack) || input.sequenceId == keep || last.sequenceId == keep {
+                    kept.append(input)
+                } else {
+                    counts[input.id] = (counts[last.id] ?? 1) + 1
+                    counts[last.id] = nil
+                    kept[kept.count - 1] = input
+                }
+                continue
+            }
+            kept.append(input)
+        }
+        return (kept, counts, stacks)
+    }
+}
+
 /// One option in a row's long-press menu, and what it asks the room for.
 public struct RoomRowOption: Equatable, Identifiable, Sendable {
     public enum Kind: String, Sendable {
@@ -854,6 +962,8 @@ public enum RoomChatIntent: Equatable, Sendable {
     /// Pin a message for the whole room, or unpin it.
     case setPinned(sequenceId: Int64, isPinned: Bool)
     case replyOnScreen(id: String, isOnScreen: Bool)
+    /// Open a stack of alike notices to see each one, or fold it again.
+    case toggleRepeats(stack: String)
 }
 
 /// A pinned message in the room's strip.
