@@ -231,6 +231,8 @@ final class VoiceRoomCoordinator: ObservableObject {
             if on, state.phase == .ready, queue.isEmpty { startListening() }
         case .add(let agent):
             add(agent)
+        case .setMuted(let on):
+            setMuted(on)
         case .hangUp:
             Task { await hangUp() }
         }
@@ -274,6 +276,24 @@ final class VoiceRoomCoordinator: ObservableObject {
             self.addingNotice = nil
         }
         pendingAdds.append(posting)
+    }
+
+    /// Muted on the call screen (warden, #281): what was being heard is dropped, not posted, and nothing listens until
+    /// unmuted. Answers are still read. Unmuted, hands-free listening comes back.
+    private func setMuted(_ on: Bool) {
+        guard state.isMuted != on else { return }
+        state.isMuted = on
+        if on {
+            guard state.isListening else { return }
+            listenGeneration += 1
+            silenceWatch?.cancel()
+            listener.cancel()
+            lastHeard = nil
+            state.partial = ""
+            state.phase = .ready
+        } else if state.isHandsFree, state.phase == .ready, queue.isEmpty {
+            startListening()
+        }
     }
 
     // MARK: - Answers
@@ -404,7 +424,7 @@ final class VoiceRoomCoordinator: ObservableObject {
     // MARK: - Your turns
 
     private func startListening() {
-        guard state.phase == .ready || state.speaker != nil else { return }
+        guard !state.isMuted, state.phase == .ready || state.speaker != nil else { return }
         // Talking while it rings: no need to keep ringing.
         stopRinging()
         if state.speaker != nil {

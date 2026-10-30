@@ -804,4 +804,33 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         XCTAssertEqual(poster.starts.count, 1, "the call ended first: no one is asked to say hello")
         XCTAssertEqual(poster.endings.count, 1)
     }
+
+    /// Warden (#281): Mute on the lock screen's call screen stops the room hearing you. What was being heard is
+    /// dropped, answers are still read, and nothing listens again until unmuted.
+    func test_muting_on_the_call_screen_stops_listening_until_unmuted() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), poster = FakePoster()
+        let room = room(with: ["pocket-forge"], listener: listener, speaker: speaker, audio: FakeAudio(), poster: poster)
+        room.begin(rings: false)
+        await until("listening") { listener.partial != nil }
+        listener.say("This is private")
+        room.send(.setMuted(true))
+        XCTAssertTrue(room.state.isMuted)
+        XCTAssertFalse(room.state.isListening)
+        XCTAssertEqual(room.state.partial, "")
+        XCTAssertEqual(listener.cancels, 1)
+        clock.advance(VoiceRoomCoordinator.pauseEndsTurn + 1)
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertTrue(poster.turns.isEmpty, "nothing heard while muted is posted")
+
+        room.receive([message("a1", from: "pocket-forge", "Still here.", secondsAfterStart: 3)])
+        await until("the answer is read") { room.state.speaker == "pocket-forge" }
+        speaker.finish()
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(listener.starts, 1, "hands-free does not listen again while muted")
+        room.send(.toggleTalk)
+        XCTAssertFalse(room.state.isListening, "a tap does not listen while muted")
+
+        room.send(.setMuted(false))
+        await until("listening again once unmuted") { listener.starts == 2 && room.state.isListening }
+    }
 }

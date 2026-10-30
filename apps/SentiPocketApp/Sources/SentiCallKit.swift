@@ -56,6 +56,8 @@ public final class SentiCallManager: NSObject {
     var isIncomingBindingAuthorized: ((String, DeviceRingBindingFence) -> Bool)?
     /// The call ended / was declined → tear down (stop audio, drop the episode).
     public var onEnded: ((UUID) -> Void)?
+    /// Mute or unmute on the system's call screen (the lock screen included).
+    var onMuted: ((UUID, Bool) -> Void)?
     /// An agent's room call (the API's doorbell push) that CallKit accepted, with the UUID it rings under.
     var onRoomCallReceived: ((RoomCallDoorbell, UUID) -> Void)?
     /// Whether a room call may ring here at all: someone is signed in. Otherwise its mandatory ring ends at once.
@@ -328,6 +330,17 @@ extension SentiCallManager: @preconcurrency CXProviderDelegate {
         if active.removeValue(forKey: action.callUUID) != nil {
             onEnded?(action.callUUID)
         }
+        action.fulfill()
+    }
+
+    /// Mute on the call screen: the call's own microphone stops listening until unmuted (warden, #281). A person who
+    /// taps Mute expects the room to stop hearing them.
+    public func provider(_ provider: CXProvider, perform action: CXSetMutedCallAction) {
+        guard active[action.callUUID] != nil else {
+            action.fail()
+            return
+        }
+        onMuted?(action.callUUID, action.isMuted)
         action.fulfill()
     }
 

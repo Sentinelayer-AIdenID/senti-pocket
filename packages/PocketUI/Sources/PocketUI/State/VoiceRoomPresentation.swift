@@ -141,6 +141,8 @@ public struct VoiceRoomState: Equatable, Sendable {
     public var ringStopped = false
     /// Why the agent called, when you answered its call; shown until someone speaks.
     public var about: String?
+    /// Muted on the phone's call screen: nothing you say is heard or posted until unmuted.
+    public var isMuted = false
 
     public init(
         phase: Phase = .ready,
@@ -199,6 +201,8 @@ public enum VoiceRoomIntent: Equatable, Sendable {
     case setHandsFree(Bool)
     /// Bring another agent into the call.
     case add(String)
+    /// Muted (or unmuted) on the phone's own call screen: the microphone stops listening.
+    case setMuted(Bool)
     case hangUp
 }
 

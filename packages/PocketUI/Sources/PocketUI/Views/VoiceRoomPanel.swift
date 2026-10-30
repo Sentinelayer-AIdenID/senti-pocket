@@ -295,6 +295,7 @@ public struct VoiceRoomPanel: View {
     private var statusText: String {
         switch state.phase {
         case .ready where state.isRinging: return "Waiting for \(state.title) to pick up"
+        case .ready where state.isMuted: return "Muted on the call screen"
         case .ready: return state.isHandsFree ? "Your turn: talk, a pause sends it" : "Tap or hold to talk"
         case .listening: return "Listening"
         case .sending: return "Sending"

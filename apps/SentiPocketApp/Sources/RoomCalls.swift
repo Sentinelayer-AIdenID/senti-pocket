@@ -117,8 +117,9 @@ struct RoomCallsClient: RoomCallsAPI {
 }
 
 /// The calls agents ring you with, from the doorbell to the room (Carter's P0: agents call you). CallKit rings and
-/// you answer there; the conversation is the room's voice room with the caller, which opens when the app is in
-/// front. Declining, hanging up, and letting it ring out are told to the room through the API.
+/// you answer there; the conversation is the room's voice room with the caller, inside the system call, so it talks
+/// as soon as you answer, with the phone locked too (Carter, 10-30: "When you called me I answered but it didn't
+/// work"). Declining, hanging up, and letting it ring out are told to the room through the API.
 @MainActor
 final class RoomCallDesk: ObservableObject {
     static let shared = RoomCallDesk()
@@ -129,13 +130,19 @@ final class RoomCallDesk: ObservableObject {
         var details: RoomCallDetails?
         var answered = false
         var finished = false
+        /// CallKit has given the answered call its audio: the voice room can listen and speak.
+        var audioReady = false
 
         /// Whom the voice room talks with: the caller's id once read, else the name the doorbell carried.
         var partner: String { details?.callerActorId ?? doorbell.callerName }
     }
 
-    /// An answered call waiting for its room to come on screen.
+    /// An answered call waiting for its room's voice room to take it.
     @Published private(set) var waiting: Call?
+    /// The last call the phone's own call screen hung up: its voice room ends too.
+    @Published private(set) var hungUp: UUID?
+    /// The calls muted on the phone's own call screen: their voice rooms do not listen.
+    @Published private(set) var muted: Set<UUID> = []
     private(set) var calls: [UUID: Call] = [:]
 
     var api: any RoomCallsAPI
@@ -144,17 +151,21 @@ final class RoomCallDesk: ObservableObject {
     /// Puts the room on screen.
     var openRoom: (String) -> Void = { _ in }
     private let ringFor: TimeInterval
+    /// How long an answered call may wait for a voice room before it ends (warden, #281): never connected and silent.
+    private let takeWithin: TimeInterval
     private let sleep: @Sendable (TimeInterval) async -> Void
 
     init(
         api: any RoomCallsAPI = RoomCallsClient(apiBaseURL: GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_API_URL"])),
         ringFor: TimeInterval = 45,
+        takeWithin: TimeInterval = 60,
         sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
             try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
         }
     ) {
         self.api = api
         self.ringFor = ringFor
+        self.takeWithin = takeWithin
         self.sleep = sleep
     }
 
@@ -189,7 +200,9 @@ final class RoomCallDesk: ObservableObject {
         }
     }
 
-    /// Answered on the call screen: tell the room, then open it; its voice room starts once the app is in front.
+    /// Answered on the call screen: tell the room, then open it, where its voice room takes the call. One no voice
+    /// room takes in time (Pocket was killed and the push woke it with no room on screen) ends, rather than staying
+    /// connected and silent.
     func answered(_ uuid: UUID) {
         guard var call = calls[uuid], !call.finished else { return }
         call.answered = true
@@ -197,9 +210,23 @@ final class RoomCallDesk: ObservableObject {
         report(call, "answered")
         waiting = call
         openRoom(call.doorbell.sessionId)
+        let wait = takeWithin
+        Task { [weak self] in
+            await self?.sleep(wait)
+            guard let self, self.waiting?.uuid == uuid, self.isLive(uuid) else { return }
+            self.waiting = nil
+            self.finish(uuid, report: "ended")
+        }
     }
 
-    /// The call screen ended: before an answer that is a decline; after it, the end of the call.
+    /// Mute or unmute on the phone's own call screen.
+    func setMuted(_ uuid: UUID, _ isMuted: Bool) {
+        guard calls[uuid] != nil else { return }
+        if isMuted { muted.insert(uuid) } else { muted.remove(uuid) }
+    }
+
+    /// The call screen ended: before an answer that is a decline; after it, the end of the call, and its voice room
+    /// hangs up too.
     func ended(_ uuid: UUID) {
         guard let call = calls[uuid], !call.finished else { return }
         if waiting?.uuid == uuid {
@@ -208,22 +235,37 @@ final class RoomCallDesk: ObservableObject {
         }
         markFinished(uuid)
         report(call, call.answered ? "ended" : "declined")
+        if call.answered { hungUp = uuid }
     }
 
-    /// The room is on screen with the app in front: hand over the waiting call, ending the system call so its
-    /// audio is free for the voice room.
+    /// CallKit activated the audio of a call this desk owns.
+    func audioActivated(_ uuid: UUID) {
+        guard var call = calls[uuid], !call.finished else { return }
+        call.audioReady = true
+        calls[uuid] = call
+        if waiting?.uuid == uuid { waiting = call }
+    }
+
+    /// Whether the call is still going (not ended, declined or missed).
+    func isLive(_ uuid: UUID) -> Bool {
+        calls[uuid].map { !$0.finished } ?? false
+    }
+
+    /// The room's voice room takes the answered call once CallKit has given it audio. The system call stays up: its
+    /// audio is the voice room's, which is what keeps the call talking with the phone locked or Pocket in the
+    /// background.
     func takeWaiting(for sessionId: String) -> Call? {
-        guard let call = waiting, call.doorbell.sessionId == sessionId else { return nil }
+        guard let call = waiting, call.doorbell.sessionId == sessionId, call.audioReady else { return nil }
         waiting = nil
-        endSystemCall(call.uuid)
         return call
     }
 
-    /// The room's voice room for this call hung up.
+    /// The room's voice room for this call hung up: the system call ends with it.
     func voiceRoomEnded(_ call: Call) {
         guard let current = calls[call.uuid], !current.finished else { return }
         markFinished(call.uuid)
         report(current, "ended")
+        endSystemCall(call.uuid)
     }
 
     private func finish(_ uuid: UUID, report status: String?) {

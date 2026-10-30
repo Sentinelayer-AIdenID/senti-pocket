@@ -211,8 +211,14 @@ final class DialHost: ObservableObject {
             }
             self?.callEnded(callUUID)
         }
+        callManager.onMuted = { callUUID, muted in
+            if desk.owns(callUUID) { desk.setMuted(callUUID, muted) }
+        }
         callManager.onAudioSessionActivated = { [weak self] _, callUUID in
-            guard !desk.owns(callUUID) else { return }
+            if desk.owns(callUUID) {
+                desk.audioActivated(callUUID)
+                return
+            }
             self?.callKitAudioActivated(callUUID)
         }
         callManager.onAudioSessionDeactivated = { [weak self] _, callUUID in

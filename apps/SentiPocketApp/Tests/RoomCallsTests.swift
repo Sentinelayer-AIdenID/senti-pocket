@@ -103,7 +103,9 @@ final class RoomCallsTests: XCTestCase {
         XCTAssertEqual(completions, 2)
     }
 
-    func test_answering_tells_the_room_and_opens_it_and_the_voice_room_takes_over_in_front() async {
+    /// Carter (10-30): "When you called me I answered but it didn't work". The voice room takes the answered call
+    /// once CallKit gives it audio, inside the system call, which stays up until the voice room hangs up.
+    func test_answering_tells_the_room_and_opens_it_and_the_voice_room_talks_inside_the_system_call() async {
         let api = FakeCallsAPI(details: details())
         let desk = RoomCallDesk(api: api, sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) })
         var opened: [String] = []
@@ -119,18 +121,41 @@ final class RoomCallsTests: XCTestCase {
         await until("answered") { api.sent == ["answered"] }
         XCTAssertEqual(api.sent, ["answered"])
         XCTAssertEqual(opened, [doorbell.sessionId])
+        XCTAssertNil(desk.takeWaiting(for: doorbell.sessionId), "not before CallKit gives the call its audio")
+        desk.audioActivated(uuid)
+        XCTAssertEqual(desk.waiting?.audioReady, true, "the room hears that the waiting call can talk")
         XCTAssertNil(desk.takeWaiting(for: "another-room"))
         let taken = desk.takeWaiting(for: doorbell.sessionId)
         XCTAssertEqual(taken?.partner, "pocket-forge", "the voice room talks with the caller")
-        XCTAssertEqual(endedSystem, [uuid], "the system call ends so the voice room has the audio")
+        XCTAssertTrue(endedSystem.isEmpty, "the system call stays up: its audio is the voice room's")
         XCTAssertNil(desk.waiting)
+        XCTAssertTrue(desk.isLive(uuid))
 
         desk.voiceRoomEnded(taken!)
         await until("ended") { api.sent == ["answered", "ended"] }
         XCTAssertEqual(api.sent, ["answered", "ended"])
+        XCTAssertEqual(endedSystem, [uuid], "hanging up in Pocket ends the system call")
+        XCTAssertFalse(desk.isLive(uuid))
         desk.ended(uuid)
         try? await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertEqual(api.sent, ["answered", "ended"], "an ended call is not ended twice")
+        XCTAssertNil(desk.hungUp, "Pocket hung up, so nothing else has to")
+    }
+
+    /// Hanging up on the phone's own call screen (the call answered with the phone locked) ends the voice room too.
+    func test_hanging_up_on_the_call_screen_ends_the_voice_room() async {
+        let api = FakeCallsAPI(details: details())
+        let desk = RoomCallDesk(api: api, sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) })
+        let uuid = UUID()
+        desk.received(doorbell, uuid: uuid)
+        desk.answered(uuid)
+        desk.audioActivated(uuid)
+        XCTAssertNotNil(desk.takeWaiting(for: doorbell.sessionId))
+        desk.ended(uuid)
+        XCTAssertEqual(desk.hungUp, uuid, "the room's voice room is told to hang up")
+        await until("ended") { api.sent == ["answered", "ended"] }
+        desk.audioActivated(uuid)
+        XCTAssertFalse(desk.isLive(uuid), "a late audio callback does not bring it back")
     }
 
     func test_ending_before_an_answer_declines_and_after_it_ends() async {
@@ -151,6 +176,7 @@ final class RoomCallsTests: XCTestCase {
         await until("answered, then ended") { api.sent == ["declined", "answered", "ended"] }
         XCTAssertEqual(api.sent, ["declined", "answered", "ended"])
         XCTAssertNil(desk.waiting, "hung up before the room opened: nothing waits")
+        XCTAssertNotEqual(desk.hungUp, declined, "a declined call had no voice room to end")
     }
 
     func test_a_repeated_doorbell_ends_its_second_ring_and_a_finished_call_stops_ringing() async {
@@ -201,6 +227,48 @@ final class RoomCallsTests: XCTestCase {
         XCTAssertEqual(details?.status, "ringing")
         XCTAssertEqual(details?.ringExpiresAt, ParsedSessionTimestamp("2026-10-30T03:00:45Z").date)
         XCTAssertNil(RoomCallDetails(json: try JSONDecoder().decode(JSONValue.self, from: Data("{\"callId\": \"x\"}".utf8))))
+    }
+
+    /// Warden (#281): Mute on the phone's call screen reaches the room's voice room.
+    func test_mute_on_the_call_screen_is_kept_per_call() async {
+        let desk = RoomCallDesk(api: FakeCallsAPI(details: details()),
+                                sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) })
+        let uuid = UUID()
+        desk.received(doorbell, uuid: uuid)
+        desk.answered(uuid)
+        desk.setMuted(uuid, true)
+        XCTAssertEqual(desk.muted, [uuid])
+        desk.setMuted(uuid, false)
+        XCTAssertTrue(desk.muted.isEmpty)
+        desk.setMuted(UUID(), true)
+        XCTAssertTrue(desk.muted.isEmpty, "a call this desk does not own is ignored")
+    }
+
+    /// Warden (#281): an answered call no voice room takes ends, rather than staying connected and silent.
+    func test_an_answered_call_no_voice_room_takes_ends() async {
+        let api = FakeCallsAPI(details: details())
+        let desk = RoomCallDesk(api: api, ringFor: 3_600, takeWithin: 0.05,
+                                sleep: { seconds in try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) })
+        var endedSystem: [UUID] = []
+        desk.endSystemCall = { endedSystem.append($0) }
+        let uuid = UUID()
+        desk.received(doorbell, uuid: uuid)
+        desk.answered(uuid)
+        await until("ended") { endedSystem == [uuid] }
+        await until("told the room") { api.sent == ["answered", "ended"] }
+        XCTAssertNil(desk.waiting)
+        XCTAssertFalse(desk.isLive(uuid))
+
+        // One a voice room took in time is left alone.
+        let taken = UUID()
+        let other = RoomCallDoorbell(callId: "call_2", sessionId: doorbell.sessionId, callerName: "claude-warden")
+        desk.received(other, uuid: taken)
+        desk.answered(taken)
+        desk.audioActivated(taken)
+        XCTAssertNotNil(desk.takeWaiting(for: doorbell.sessionId))
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertTrue(desk.isLive(taken))
+        XCTAssertEqual(endedSystem, [uuid])
     }
 }
 #endif
