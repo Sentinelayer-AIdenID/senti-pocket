@@ -71,6 +71,19 @@ public struct RoomArtifact: Equatable, Identifiable, Sendable {
     public let date: Date?
     /// How many messages mention it.
     public let mentions: Int
+
+    public init(id: String, kind: Kind, title: String, detail: String?, url: URL?, sequenceId: Int64, author: String,
+                date: Date?, mentions: Int) {
+        self.id = id
+        self.kind = kind
+        self.title = title
+        self.detail = detail
+        self.url = url
+        self.sequenceId = sequenceId
+        self.author = author
+        self.date = date
+        self.mentions = mentions
+    }
 }
 
 public enum RoomArtifacts {

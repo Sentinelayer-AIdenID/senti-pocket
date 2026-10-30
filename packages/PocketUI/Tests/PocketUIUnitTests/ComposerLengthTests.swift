@@ -20,6 +20,17 @@ final class ComposerLengthTests: XCTestCase {
         XCTAssertEqual(composer.lengthProblem(for: waves), "Too long to send: 12 of 10 characters.")
     }
 
+    /// Carter (#54900): a long draft shows how long it is, counted as the limit counts.
+    func test_a_long_draft_shows_its_length_against_the_limit() {
+        let composer = RoomComposerState(canPost: true, disabledReason: nil, maximumLength: 64_000)
+        XCTAssertNil(composer.lengthNote(for: String(repeating: "a", count: 199)), "a short draft shows nothing")
+        XCTAssertEqual(composer.lengthNote(for: String(repeating: "a", count: 250)), "250 of 64,000 characters")
+        XCTAssertEqual(composer.lengthNote(for: "  " + String(repeating: "a", count: 200) + "  "), "200 of 64,000 characters",
+                       "surrounding spaces are not counted")
+        XCTAssertEqual(RoomComposerState.enabled.lengthNote(for: String(repeating: "a", count: 300)), "300 characters",
+                       "no known limit: the length alone")
+    }
+
     func test_a_pending_row_keeps_its_full_text_and_only_the_display_is_cut() {
         let long = String(repeating: "b", count: 70_000)
         let row = RoomChatPendingRow(clientId: "hm_1", text: long, status: .failed(reason: "Too long", canRetry: false))
