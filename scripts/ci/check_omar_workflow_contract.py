@@ -35,11 +35,21 @@ ALLOWED_USE_CODEX_LINE = 'use_codex: "false"'
 ALLOWED_CODEX_ONLY_LINE = 'codex_only: "false"'
 ALLOWED_FAILURE_POLICY_LINE = "llm_failure_policy: block"
 # One retry, and only this shape: after a billing or quota 429 the same action, model and contract run again on
-# its backup endpoint. The key and the endpoint are secrets, so neither is ever printed in a log.
+# its backup endpoint. The dispatch drill and the org's Azure route (vars.OMAR_ROUTE is azure) skip the first
+# attempt and run only that one. The key and the endpoint are secrets, so neither is ever printed in a log.
 ALLOWED_RETRY_API_KEY_LINE = "openai_api_key: ${{ secrets.AZURE_SOL61_API_KEY }}"
 ALLOWED_RETRY_BASE_URL_LINE = "OPENAI_BASE_URL: ${{ secrets.AZURE_SOL61_BASE_URL }}"
 FIRST_ATTEMPT_IF_LINE = (
-    "if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.quota_retry_drill) }}"
+    "if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.quota_retry_drill) && vars.OMAR_ROUTE != 'azure' }}"
+)
+# The classifier reads the route from GitHub's own comparison, the same case-insensitive one the first attempt's if:
+# makes, and checks it first; its branch must be live lines of the classify step itself, not text elsewhere.
+CLASSIFY_ROUTE_LINE = "ROUTE: ${{ vars.OMAR_ROUTE == 'azure' && 'azure' || '' }}"
+CLASSIFY_ROUTE_BRANCH = (
+    'if [ "${ROUTE}" = "azure" ]; then',
+    "retry=true",
+    "reason=azure_route",
+    'elif [ "${DRILL}" = "true" ]; then',
 )
 RETRY_IF_LINE = "if: ${{ steps.classify.outputs.retry == 'true' }}"
 CONTINUE_ON_ERROR_LINE = "continue-on-error: true"
@@ -107,6 +117,20 @@ def _nested_lines(step: list[str], block: str) -> set[str]:
     return nested
 
 
+def _classify_takes_the_org_route(job_lines: list[str]) -> bool:
+    steps = [
+        step for step in _step_blocks(job_lines) if "name: Classify Omar provider failure" in _step_keys(step)
+    ]
+    if len(steps) != 1:
+        return False
+    route_env = [line for line in _nested_lines(steps[0], "env:") if line.startswith("ROUTE:")]
+    if route_env != [CLASSIFY_ROUTE_LINE]:
+        return False
+    live = [line for line in (_uncommented(line) for line in steps[0]) if line]
+    size = len(CLASSIFY_ROUTE_BRANCH)
+    return any(tuple(live[index : index + size]) == CLASSIFY_ROUTE_BRANCH for index in range(len(live) - size + 1))
+
+
 def _direct_sol_configured(omar_job_lines: list[str]) -> bool:
     action_steps = [
         step
@@ -126,7 +150,8 @@ def _direct_sol_configured(omar_job_lines: list[str]) -> bool:
         return False
     if ALLOWED_RETRY_API_KEY_LINE in _nested_lines(first, "with:") or _nested_lines(first, "env:"):
         return False
-    # The retry: only after a classified billing or quota 429 (or the dispatch drill), and its failure fails the job.
+    # The retry: only after a classified billing or quota 429 (or the dispatch drill, or the org's Azure route), and
+    # its failure fails the job.
     if not {"id: omar_retry", RETRY_IF_LINE} <= retry_keys or CONTINUE_ON_ERROR_LINE in retry_keys:
         return False
     if not COMMON_ACTION_INPUT_LINES | {ALLOWED_RETRY_API_KEY_LINE} <= _nested_lines(retry, "with:"):
@@ -307,6 +332,11 @@ def validate_omar_workflow_text(workflow_text: str) -> None:
     if not _direct_sol_configured(omar_job_lines):
         raise OmarWorkflowContractError(
             "Omar review action must use repo-owned OpenAI Sol 6.1 on the legacy route, with one quota retry gated on the classifier"
+        )
+    if not _classify_takes_the_org_route(omar_job_lines):
+        raise OmarWorkflowContractError(
+            "Classify Omar provider failure must read ROUTE from GitHub's own vars.OMAR_ROUTE == 'azure' comparison "
+            "and check it first, before the drill: only that value may take the org's Azure route"
         )
     if sum(_uncommented(line) == CONTINUE_ON_ERROR_LINE for line in omar_job_lines) != 1:
         raise OmarWorkflowContractError(
@@ -500,7 +530,7 @@ jobs:
           echo "OPENAI_API_KEY is required for repo-owned Omar LLM scans."
       - name: Omar Gate
         id: omar
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.quota_retry_drill) }}
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.quota_retry_drill) && vars.OMAR_ROUTE != 'azure' }}
         continue-on-error: true
         uses: mrrCarter/sentinelayer-v1-action@2d5a8edd485595148254926c9fb318e0adae416a
         with:
@@ -517,10 +547,18 @@ jobs:
       - name: Classify Omar provider failure
         id: classify
         env:
+          ROUTE: ${{ vars.OMAR_ROUTE == 'azure' && 'azure' || '' }}
           DRILL: ${{ github.event_name == 'workflow_dispatch' && inputs.quota_retry_drill && 'true' || 'false' }}
           FIRST_FAILURE_CLASS: ${{ steps.omar.outputs.llm_failure_class || '' }}
         run: |
           echo "quota_retry_drill:"
+          if [ "${ROUTE}" = "azure" ]; then
+            retry=true
+            reason=azure_route
+          elif [ "${DRILL}" = "true" ]; then
+            retry=true
+            reason=dispatch_drill
+          fi
           python3 .github/scripts/omar_quota_failure.py "${findings}"
           reason=billing_quota_429
       - name: Validate the quota retry route
@@ -709,6 +747,10 @@ def _run_retry_self_tests(valid: str) -> None:
     retry_step = valid[valid.index("      - name: Omar Gate (quota retry)") : valid.index(
         "      - name: Resolve the Omar result that counts"
     )]
+    route_branch = "".join(f"          {line}\n" if line.startswith(("if ", "elif ")) else f"            {line}\n"
+                           for line in CLASSIFY_ROUTE_BRANCH)
+    drill_first_line = '          if [ "${DRILL}" = "true" ]; then\n'
+    assert valid.count(route_branch) == 1
     breaks = {
         "the retry key on the first attempt": valid.replace(
             ALLOWED_OPENAI_API_KEY_LINE, ALLOWED_RETRY_API_KEY_LINE, 1
@@ -731,6 +773,38 @@ def _run_retry_self_tests(valid: str) -> None:
         "a first attempt that fails the job by itself": valid.replace("        continue-on-error: true\n", "", 1),
         "a drill switch any event can set": valid.replace(
             FIRST_ATTEMPT_IF_LINE, "if: ${{ !inputs.quota_retry_drill }}", 1
+        ),
+        "a first attempt the org route does not skip": valid.replace(
+            FIRST_ATTEMPT_IF_LINE, "if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.quota_retry_drill) }}", 1
+        ),
+        "an org route the classifier does not read": valid.replace("          " + CLASSIFY_ROUTE_LINE + "\n", "", 1),
+        "an org route the classifier compares case-sensitively": valid.replace(
+            CLASSIFY_ROUTE_LINE, "ROUTE: ${{ vars.OMAR_ROUTE || '' }}", 1
+        ),
+        # M1: the azure branch leaves the classifier, its lines surviving only in another step or as comments.
+        "the classifier's azure branch moved to another step": valid.replace(route_branch, drill_first_line, 1).replace(
+            '        run: echo "route"\n', '        run: |\n          echo "route"\n' + route_branch, 1
+        ),
+        "the classifier's azure branch commented out": valid.replace(
+            route_branch,
+            "".join("          # " + line.strip() + "\n" for line in route_branch.splitlines()[:3]) + drill_first_line,
+            1,
+        ),
+        # M2: the route comes from the pull request, with the canonical line kept as a comment.
+        "a route the classifier reads from the pull request": valid.replace(
+            "          " + CLASSIFY_ROUTE_LINE + "\n",
+            "          # " + CLASSIFY_ROUTE_LINE + "\n          ROUTE: ${{ github.head_ref }}\n",
+            1,
+        ),
+        "a classifier that takes any org route value": valid.replace(
+            'if [ "${ROUTE}" = "azure" ]; then', 'if [ -n "${ROUTE}" ]; then', 1
+        ),
+        "an org route checked after the drill": valid.replace(
+            route_branch + "            retry=true\n            reason=dispatch_drill\n",
+            drill_first_line
+            + "            retry=true\n            reason=dispatch_drill\n"
+            + '          elif [ "${ROUTE}" = "azure" ]; then\n            retry=true\n            reason=azure_route\n',
+            1,
         ),
         "a later step that ignores its own failure": valid.replace(
             "      - name: Assert Omar LLM contract is active\n",
