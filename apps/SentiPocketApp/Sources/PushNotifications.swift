@@ -251,10 +251,19 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        let sessionId = notification.request.content.userInfo["sessionId"] as? String
+        let content = notification.request.content
+        let sessionId = content.userInfo["sessionId"] as? String
+        let link = PushRoute.link(from: content.userInfo)
+        let title = content.title
+        let body = content.body
         Task { @MainActor in
-            let onScreen = sessionId != nil && sessionId == self.currentRoomId()
-            completionHandler(onScreen ? [.list] : [.banner, .list, .sound, .badge])
+            let presentation = ForegroundPush.presentation(sessionId: sessionId, roomOnScreen: self.currentRoomId(),
+                                                           bannerHosted: InAppBanner.shared.isHosted)
+            if presentation == .inApp {
+                InAppBanner.shared.show(title: title, body: body, link: link)
+                RoomFeedback.shared.play(.received)
+            }
+            completionHandler(presentation.options)
         }
     }
 
