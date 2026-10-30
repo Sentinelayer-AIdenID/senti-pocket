@@ -60,6 +60,9 @@ struct RoomChatScreen: View {
     @State private var offersCrashReports = false
     /// A box's console, shown in the app.
     @State private var consolePage: InAppPage?
+    /// Agents' calls answered on the call screen; the one this room's voice room is for.
+    @ObservedObject private var callDesk = RoomCallDesk.shared
+    @State private var answeredCall: RoomCallDesk.Call?
     private let route: RoomRoute
     private let ticketsTransport: (any RoomTicketsTransport)?
     private let admissionsTransport: (any RoomAdmissionsTransport)?
@@ -254,6 +257,20 @@ struct RoomChatScreen: View {
         coordinator.onNewReplies = nil
         coordinator.readsRepliesOften = false
         voiceRoom = nil
+        if let answeredCall {
+            RoomCallDesk.shared.voiceRoomEnded(answeredCall)
+            self.answeredCall = nil
+        }
+    }
+
+    /// An agent's call answered on the call screen: once this room is on screen with the app in front, the system
+    /// call ends (freeing its audio) and the voice room starts with the caller.
+    private func takeAnsweredCall() {
+        guard UIApplication.shared.applicationState == .active, voiceRoom == nil, voicePoster != nil,
+              let call = callDesk.takeWaiting(for: route.sessionId) else { return }
+        answeredCall = call
+        CrashReporter.shared.note("call answered")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { startVoiceRoom(with: [call.partner]) }
     }
 
     /// Contributors and above file and change tickets (the API's `min_role="contributor"`). An unknown role offers
@@ -626,6 +643,7 @@ struct RoomChatScreen: View {
             CrashReporter.shared.note("room opened")
             coordinator.resume()
             applyRouteLinksOnce()
+            takeAnsweredCall()
         }
         .onDisappear {
             CrashReporter.shared.note("room closed")
@@ -635,11 +653,14 @@ struct RoomChatScreen: View {
         }
         .onChange(of: scenePhase) { phase in
             switch phase {
-            case .active: coordinator.resume()
+            case .active:
+                coordinator.resume()
+                takeAnsweredCall()
             case .background: coordinator.pause()
             default: break
             }
         }
+        .onReceive(callDesk.$waiting) { _ in takeAnsweredCall() }
     }
 
     /// Offers the unsent crash reports where they can be posted: in a room you can write in, with nothing else asked.

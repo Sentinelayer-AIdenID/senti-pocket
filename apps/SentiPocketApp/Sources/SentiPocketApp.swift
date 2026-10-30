@@ -456,6 +456,10 @@ private struct AuthenticatedRootView: View {
             // Apple push: a tap opens its room at the message; the room on screen gets no banner.
             PushRegistrar.shared.inbox = incomingLinks
             PushRegistrar.shared.currentRoomId = { currentRoom?.sessionId }
+            // An answered agent's call opens its room, where its voice room starts.
+            RoomCallDesk.shared.openRoom = { [weak incomingLinks] sessionId in
+                incomingLinks?.receive(SentiLink(sessionId: sessionId))
+            }
             Task { await PushRegistrar.shared.start() }
             openPendingLinkIfReady()
         }

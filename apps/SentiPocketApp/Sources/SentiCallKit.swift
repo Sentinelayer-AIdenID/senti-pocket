@@ -56,6 +56,10 @@ public final class SentiCallManager: NSObject {
     var isIncomingBindingAuthorized: ((String, DeviceRingBindingFence) -> Bool)?
     /// The call ended / was declined → tear down (stop audio, drop the episode).
     public var onEnded: ((UUID) -> Void)?
+    /// An agent's room call (the API's doorbell push) that CallKit accepted, with the UUID it rings under.
+    var onRoomCallReceived: ((RoomCallDoorbell, UUID) -> Void)?
+    /// Whether a room call may ring here at all: someone is signed in. Otherwise its mandatory ring ends at once.
+    var isRoomCallAuthorized: (() -> Bool)?
     /// CallKit ACTIVATED the audio session → safe to start capture/playback (hand to PocketVoice's DuplexAudioSessionLease).
     public var onAudioSessionActivated: ((AVAudioSession, UUID) -> Void)?
     /// CallKit DEACTIVATED audio. Any running or activation-waiting dial must stop before it can speak or write.
@@ -374,6 +378,24 @@ extension SentiCallManager: @preconcurrency PKPushRegistryDelegate {
         completion: @escaping () -> Void
     ) {
         replayCurrentVoipToken()
+        // An agent's room call (sentinelayer-api #1046): the doorbell names the caller, and the call is read with
+        // the person's own session after CallKit accepts the report. Every push is still reported, under a fresh UUID.
+        if let doorbell = RoomCallDoorbell.parse(dict) {
+            let call = IncomingDecisionCall(
+                id: UUID(), dialId: "", callerDisplayName: doorbell.callerName, message: "", context: nil, priority: "high"
+            )
+            ring(call) { [weak self] accepted in
+                if accepted {
+                    if self?.isRoomCallAuthorized?() == true {
+                        self?.onRoomCallReceived?(doorbell, call.id)
+                    } else {
+                        self?.end(call.id)
+                    }
+                }
+                completion()
+            }
+            return
+        }
         let authorize = isIncomingBindingAuthorized ?? { _, _ in false }
         let prepared = Self.prepareIncomingPush(
             dict,
