@@ -37,13 +37,43 @@ private final class RecordingMarker: NotificationReadMarking, @unchecked Sendabl
     }
 }
 
+/// Fails the first marks, then lets them through; counts how many are in flight at once.
+private final class TroubledMarker: NotificationReadMarking, @unchecked Sendable {
+    private let lock = NSLock()
+    private var failures: Int
+    private var inFlight = 0
+    private(set) var mostAtOnce = 0
+    private var ids: [String] = []
+
+    init(failures: Int = 0) { self.failures = failures }
+
+    func markRead(id: String) async throws {
+        let fail: Bool = lock.withLock {
+            inFlight += 1
+            mostAtOnce = max(mostAtOnce, inFlight)
+            if failures > 0 { failures -= 1; return true }
+            return false
+        }
+        try? await Task.sleep(nanoseconds: 5_000_000)
+        lock.withLock {
+            inFlight -= 1
+            if !fail { ids.append(id) }
+        }
+        if fail { throw RoomSendError.retryable(retryAfterSeconds: nil) }
+    }
+
+    func marked() -> [String] { lock.withLock { ids } }
+    func peak() -> Int { lock.withLock { mostAtOnce } }
+}
+
 @MainActor
 final class NotificationsCoordinatorTests: XCTestCase {
-    private func note(_ id: String, read: Bool = false, url: String? = nil, at: String = "2026-10-28T18:00:00Z") -> SentiNotification {
+    private func note(_ id: String, read: Bool = false, url: String? = nil, at: String = "2026-10-28T18:00:00Z",
+                      room: String = "room_1") -> SentiNotification {
         SentiNotification(
             id: id,
             kind: "mention",
-            sessionId: "room_1",
+            sessionId: room,
             title: "cobalt-warden mentioned you",
             link: url.flatMap(SentiLink.init(string:)),
             isRead: read,
@@ -58,6 +88,90 @@ final class NotificationsCoordinatorTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 2_000_000)
         }
         XCTFail("timed out waiting for: \(description)")
+    }
+
+    /// Carter (10-30): "Notification numbers don't go down or the notification marked as read as I click and open
+    /// them". A room on screen, however it was opened (a push, a banner, the side panel), reads its notifications.
+    func test_a_room_on_screen_reads_its_notifications_and_leaves_other_rooms_alone() async {
+        let marker = RecordingMarker()
+        let coordinator = NotificationsCoordinator(
+            transport: ScriptedNotifications([
+                .success(SentiNotificationsPage(notifications: [
+                    note("a1"), note("a2", read: true), note("b1", room: "room_2")
+                ])),
+                .success(SentiNotificationsPage(notifications: [
+                    note("a3"), note("a1"), note("a2", read: true), note("b1", room: "room_2")
+                ]))
+            ]),
+            marker: marker,
+            onReauthenticationRequired: {}
+        )
+        await coordinator.refresh()
+        XCTAssertEqual(coordinator.unreadCount, 2)
+
+        coordinator.markRoomRead("room_1")
+        XCTAssertEqual(coordinator.unreadCount, 1, "the badge goes down at once")
+        await waitUntil("a1 marked on the server") { marker.marked() == ["a1"] }
+
+        // A new one arrives while the room is on screen: read as it comes.
+        coordinator.roomOnScreen = { "room_1" }
+        await coordinator.refresh()
+        XCTAssertEqual(coordinator.state.unread.map(\.id), ["b1"], "another room's stays unread")
+        await waitUntil("a3 marked too") { Set(marker.marked()) == ["a1", "a3"] }
+    }
+
+    /// Warden (#267): read while the room's messages are on screen, not on the way in, and not under a sheet.
+    func test_the_room_read_tracker_reads_only_a_shown_uncovered_room() async {
+        let marker = RecordingMarker()
+        let coordinator = NotificationsCoordinator(
+            transport: ScriptedNotifications([
+                .success(SentiNotificationsPage(notifications: [note("a1"), note("b1", room: "room_2")])),
+                .success(SentiNotificationsPage(notifications: [note("a2"), note("a1"), note("b1", room: "room_2")]))
+            ]),
+            marker: marker,
+            onReauthenticationRequired: {}
+        )
+        let reads = RoomReadTracker(notifications: coordinator)
+        await coordinator.refresh()
+        XCTAssertEqual(coordinator.unreadCount, 2, "nothing read before a room is shown")
+
+        reads.isCovered = true
+        reads.shown("room_1")
+        XCTAssertEqual(coordinator.unreadCount, 2, "under a sheet or the side panel nothing is read")
+        reads.isCovered = false
+        XCTAssertEqual(coordinator.state.unread.map(\.id), ["b1"], "uncovered: its room's are read")
+
+        reads.isCovered = true
+        await coordinator.refresh()
+        XCTAssertEqual(Set(coordinator.state.unread.map(\.id)), ["a2", "b1"], "the poll reads nothing under the bell")
+
+        reads.gone("room_2")
+        XCTAssertEqual(reads.shownRoom, "room_1", "another room leaving keeps this one")
+        reads.gone("room_1")
+        reads.isCovered = false
+        XCTAssertEqual(Set(coordinator.state.unread.map(\.id)), ["a2", "b1"], "a room gone reads nothing")
+        await waitUntil("a1 marked") { marker.marked() == ["a1"] }
+    }
+
+    /// Warden (#267): one PATCH each, never fifty at once, and a failed one is retried rather than hidden.
+    func test_marks_go_a_few_at_a_time_and_a_failed_one_is_unread_again_for_the_next_try() async {
+        let marker = TroubledMarker(failures: 1)
+        let page = SentiNotificationsPage(notifications: (0..<12).map { note("n\($0)") })
+        let coordinator = NotificationsCoordinator(
+            transport: ScriptedNotifications([.success(page)]),
+            marker: marker,
+            onReauthenticationRequired: {}
+        )
+        await coordinator.refresh()
+        coordinator.markRoomRead("room_1")
+        XCTAssertEqual(coordinator.unreadCount, 0)
+        await waitUntil("all tried") { marker.marked().count == 11 }
+        XCTAssertLessThanOrEqual(marker.peak(), NotificationsCoordinator.concurrentMarks)
+        XCTAssertEqual(coordinator.unreadCount, 1, "the one that failed is unread again")
+
+        coordinator.markRoomRead("room_1")
+        await waitUntil("retried") { marker.marked().count == 12 }
+        XCTAssertEqual(coordinator.unreadCount, 0)
     }
 
     func test_refresh_counts_unread_and_opening_marks_read_and_returns_the_message() async {

@@ -54,7 +54,9 @@ final class HTTPNotificationReadMarker: NotificationReadMarking, @unchecked Send
 }
 
 /// The bell: the newest notifications, refreshed every minute while the app is active, with the unread count for
-/// the badge. Opening one marks it read (optimistically) and returns where to go.
+/// the badge. Opening one marks it read (optimistically) and returns where to go. A room on screen has its
+/// notifications read, however it was opened: from the bell, a push, a banner or the side panel (Carter, 10-30:
+/// "Notification numbers don't go down or the notification marked as read as I click and open them").
 @MainActor
 final class NotificationsCoordinator: ObservableObject {
     @Published private(set) var state = NotificationsPresentationState(rows: [], isLoading: true)
@@ -73,6 +75,12 @@ final class NotificationsCoordinator: ObservableObject {
     private let now: @Sendable () -> Date
     private var updatedAt: Date?
     private var couldNotUpdate = false
+    /// The room on screen, whose notifications are read as they come.
+    var roomOnScreen: @MainActor () -> String? = { nil }
+    /// Read marks waiting to go to the server, sent a few at a time.
+    private var markQueue: [String] = []
+    private var marking = 0
+    static let concurrentMarks = 4
 
     /// The web polls the bell about this often.
     static let pollInterval: TimeInterval = 30
@@ -130,6 +138,7 @@ final class NotificationsCoordinator: ObservableObject {
             couldNotUpdate = false
             updatedAt = now()
             if wasSignedOut, pollTask == nil { startPolling(readNow: false) }
+            if let room = roomOnScreen() { markRoomRead(room) }
         } catch SessionTransportError.reauthenticationRequired {
             if failure != .reauthenticationRequired { onReauthenticationRequired() }
             failure = .reauthenticationRequired
@@ -153,8 +162,43 @@ final class NotificationsCoordinator: ObservableObject {
         guard notifications.contains(where: { $0.id == id && !$0.isRead }), !locallyRead.contains(id) else { return }
         locallyRead.insert(id)
         publish()
+        guard marker != nil else { return }
+        markQueue.append(id)
+        sendMarks()
+    }
+
+    /// A few marks at a time, never fifty at once (warden, #267). One that fails is unread again here, so the next
+    /// look at its room (or the bell) sends it again.
+    private func sendMarks() {
         guard let marker else { return }
-        Task { try? await marker.markRead(id: id) }
+        while marking < Self.concurrentMarks, !markQueue.isEmpty {
+            let id = markQueue.removeFirst()
+            marking += 1
+            Task { [weak self] in
+                let sent: Bool
+                do {
+                    try await marker.markRead(id: id)
+                    sent = true
+                } catch {
+                    sent = false
+                }
+                guard let self else { return }
+                self.marking -= 1
+                if !sent {
+                    self.locallyRead.remove(id)
+                    self.publish()
+                }
+                self.sendMarks()
+            }
+        }
+    }
+
+    /// Every unread notification about a room, once the room is on screen.
+    func markRoomRead(_ sessionId: String) {
+        guard !sessionId.isEmpty else { return }
+        for notification in notifications where notification.sessionId == sessionId && !notification.isRead {
+            markRead(notification.id)
+        }
     }
 
     /// There is no bulk endpoint, so each unread notification is marked on its own.
@@ -182,5 +226,40 @@ final class NotificationsCoordinator: ObservableObject {
             updatedAt: updatedAt,
             couldNotUpdate: couldNotUpdate
         )
+    }
+}
+
+/// Which room is really there to read: shown with its messages loaded, and not covered by a sheet or the side panel
+/// (warden, #267: marking on navigation read a room that failed to load, and the poll read the room under the bell).
+/// The room screen says when its room is shown and gone; the app says when something covers it.
+@MainActor
+final class RoomReadTracker: ObservableObject {
+    private let notifications: NotificationsCoordinator
+    private(set) var shownRoom: String?
+    var isCovered = false {
+        didSet { if oldValue != isCovered { readNow() } }
+    }
+
+    init(notifications: NotificationsCoordinator) {
+        self.notifications = notifications
+        notifications.roomOnScreen = { [weak self] in self?.readableRoom }
+    }
+
+    /// The room whose notifications are read: none while covered.
+    var readableRoom: String? { isCovered ? nil : shownRoom }
+
+    /// A room's messages are on screen.
+    func shown(_ sessionId: String) {
+        shownRoom = sessionId
+        readNow()
+    }
+
+    /// A room left the screen; another room shown meanwhile keeps its place.
+    func gone(_ sessionId: String) {
+        if shownRoom == sessionId { shownRoom = nil }
+    }
+
+    private func readNow() {
+        if let room = readableRoom { notifications.markRoomRead(room) }
     }
 }

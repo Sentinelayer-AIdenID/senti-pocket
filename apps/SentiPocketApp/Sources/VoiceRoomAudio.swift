@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import PocketUI
 import PocketVoice
 import Speech
 
@@ -33,6 +34,13 @@ extension VoiceSpeaking {
     }
 }
 
+/// The ring you hear while a call waits for the agent to pick up.
+@MainActor
+protocol VoiceRoomRinging: AnyObject {
+    func startRinging()
+    func stopRinging()
+}
+
 /// The phone's audio for a voice room: held for the whole call, for listening and speaking in turn, through the
 /// speaker (or the headset), with other audio lowered.
 @MainActor
@@ -60,6 +68,65 @@ enum VoiceRoomAudioError: LocalizedError, Equatable {
     }
 }
 
+/// The ring you hear while a call waits: the two-tone ring of a phone line (440 and 480 Hz together, two seconds on
+/// and four off), made on the phone and played softly on a loop through the call's audio until the agent picks up.
+final class RingbackTone: VoiceRoomRinging {
+    private var player: AVAudioPlayer?
+
+    func startRinging() {
+        guard player == nil, let player = try? AVAudioPlayer(data: Self.cycle) else { return }
+        player.numberOfLoops = -1
+        player.volume = 0.35
+        player.prepareToPlay()
+        player.play()
+        self.player = player
+    }
+
+    func stopRinging() {
+        player?.stop()
+        player = nil
+    }
+
+    static let sampleRate = 16_000
+
+    /// One ring cycle as a WAV file.
+    static let cycle: Data = wav(ringCycle(), sampleRate: sampleRate)
+
+    /// Two seconds of the two tones, faded in and out so they do not click, then four seconds of quiet.
+    static func ringCycle() -> [Int16] {
+        let on = 2 * sampleRate, fade = sampleRate / 50
+        var samples = [Int16](repeating: 0, count: 6 * sampleRate)
+        for index in 0..<on {
+            let time = Double(index) / Double(sampleRate)
+            let edge = min(1, Double(min(index, on - 1 - index)) / Double(fade))
+            let tone = (sin(2 * .pi * 440 * time) + sin(2 * .pi * 480 * time)) / 2
+            samples[index] = Int16(tone * edge * 0.5 * Double(Int16.max))
+        }
+        return samples
+    }
+
+    /// 16-bit mono PCM samples as a WAV file.
+    static func wav(_ samples: [Int16], sampleRate: Int) -> Data {
+        var data = Data()
+        func put<T: FixedWidthInteger>(_ value: T) { withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) } }
+        let bytes = samples.count * 2
+        data.append(contentsOf: Array("RIFF".utf8))
+        put(UInt32(36 + bytes))
+        data.append(contentsOf: Array("WAVEfmt ".utf8))
+        put(UInt32(16))
+        put(UInt16(1))
+        put(UInt16(1))
+        put(UInt32(sampleRate))
+        put(UInt32(sampleRate * 2))
+        put(UInt16(2))
+        put(UInt16(16))
+        data.append(contentsOf: Array("data".utf8))
+        put(UInt32(bytes))
+        for sample in samples { put(sample) }
+        return data
+    }
+}
+
 final class PhoneVoiceRoomAudioSession: VoiceRoomAudioSession {
     func activate() throws {
         let session = AVAudioSession.sharedInstance()
@@ -75,6 +142,8 @@ final class PhoneVoiceRoomAudioSession: VoiceRoomAudioSession {
 /// Apple's on-device recognizer, as in push-to-talk, but it leaves the audio session to the voice room and reports
 /// partial results. It never falls back to server recognition.
 final class OnDeviceVoiceListener: VoiceListening {
+    /// How loud the microphone is, 0 to 1, about fifty times a second while listening (for the call's waveform).
+    var onLevel: (@MainActor @Sendable (Double) -> Void)?
     private let engine = AVAudioEngine()
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
@@ -112,8 +181,12 @@ final class OnDeviceVoiceListener: VoiceListening {
                 if final { self.isFinal = true }
             }
         }
+        let onLevel = self.onLevel
         input.installTap(onBus: 0, bufferSize: 1_024, format: format) { buffer, _ in
             request.append(buffer)
+            guard let onLevel else { return }
+            let level = Self.level(of: buffer)
+            Task { @MainActor in onLevel(level) }
         }
         hasTap = true
         engine.prepare()
@@ -158,6 +231,16 @@ final class OnDeviceVoiceListener: VoiceListening {
         request = nil
     }
 
+    /// The buffer's loudness (its root mean square, in decibels) as 0 to 1.
+    nonisolated static func level(of buffer: AVAudioPCMBuffer) -> Double {
+        guard let channel = buffer.floatChannelData?[0], buffer.frameLength > 0 else { return 0 }
+        let count = Int(buffer.frameLength)
+        var sum: Float = 0
+        for index in 0..<count { sum += channel[index] * channel[index] }
+        let rms = (sum / Float(count)).squareRoot()
+        return VoiceLevelMeter.level(decibels: 20 * log10(Double(max(rms, 1e-7))))
+    }
+
     private static func speechAuthorization() async -> SFSpeechRecognizerAuthorizationStatus {
         await withCheckedContinuation { continuation in
             SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
@@ -173,6 +256,8 @@ final class OnDeviceVoiceListener: VoiceListening {
 
 /// The phone's voices, one per agent (see `AgentVoices`), paced like Listen.
 final class AgentVoiceSpeaker: NSObject, VoiceSpeaking, AVSpeechSynthesizerDelegate {
+    /// Each word as it is said, by its length (for the call's waveform: the synthesizer reports words, not loudness).
+    var onWord: (@MainActor (Int) -> Void)?
     private var synthesizer: AVSpeechSynthesizer?
     private var last: AVSpeechUtterance?
     private var finished: (@MainActor () -> Void)?
@@ -220,6 +305,14 @@ final class AgentVoiceSpeaker: NSObject, VoiceSpeaking, AVSpeechSynthesizerDeleg
             guard let started else { return }
             self.started = nil
             started()
+        }
+    }
+
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, willSpeakRangeOfSpeechString characterRange: NSRange,
+                                       utterance: AVSpeechUtterance) {
+        MainActor.assumeIsolated {
+            guard synthesizer === self.synthesizer else { return }
+            onWord?(characterRange.length)
         }
     }
 
