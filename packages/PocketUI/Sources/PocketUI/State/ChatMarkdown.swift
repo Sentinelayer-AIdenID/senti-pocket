@@ -186,7 +186,7 @@ public enum ChatMarkdown {
     }
 
     /// A table starts where a line with a pipe is followed by a delimiter row of as many cells (`| --- | :-: |`), and
-    /// runs until a blank line or a line without a pipe.
+    /// runs until a blank line or the start of another block.
     private static func table(_ lines: [String], at index: Int) -> (table: ChatMarkdownTable, next: Int)? {
         guard index + 1 < lines.count, lines[index].contains("|") else { return nil }
         let header = tableCells(lines[index])
@@ -197,7 +197,11 @@ public enum ChatMarkdown {
         var next = index + 2
         while next < lines.count {
             let line = lines[next]
-            guard line.contains("|"), !line.trimmingCharacters(in: .whitespaces).isEmpty else { break }
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            // As on GitHub, a table runs to a blank line or the start of another block; a line without a pipe there
+            // is a row of one cell.
+            guard !trimmed.isEmpty, heading(trimmed) == nil, codeFence(trimmed) == nil, !trimmed.hasPrefix(">"),
+                  !isRule(trimmed), listItem(line) == nil else { break }
             let cells = tableCells(line)
             rows.append(Array((cells + Array(repeating: "", count: max(0, header.count - cells.count))).prefix(header.count)))
             next += 1
