@@ -132,25 +132,6 @@ public struct RoomRoster: Equatable, Sendable {
         return models
     }
 
-    /// A shown name as a post's author id has it (the server's `human-<login>`): lowercased, each run of other
-    /// characters one dash; nil for the unnamed viewer or nothing left.
-    static func login(_ name: String) -> String? {
-        guard name != RoomChatViews.unnamedPerson else { return nil }
-        var login = ""
-        var dash = false
-        for character in name.lowercased() {
-            if character.isASCII, character.isLetter || character.isNumber || character == "." || character == "_" || character == "-" {
-                login.append(character)
-                dash = false
-            } else if !dash {
-                login.append("-")
-                dash = true
-            }
-        }
-        let trimmed = login.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
     public static func build(posts: [Post], present: [RoomChatPresence.Person], runningBoxes: [Box],
                              endedBoxes: Set<String>, now: Date) -> RoomRoster {
         struct Seen {
@@ -172,14 +153,12 @@ public struct RoomRoster: Equatable, Sendable {
             }
             seen[key] = entry
         }
-        // Presence names a person by their account (`human-<user id>`, the server's unique key) and shows their login,
-        // while their posts are `human-<login>`: a person here who has posted is matched to their posts by login, so
-        // they are one member, not one here and one idle (Carter, #55524: "it kept my name in idle still").
+        // Presence names a person by their account (`human-<user id>`, the server's unique key), and gives their login,
+        // the handle their posts carry (`human-<login>`, API #1055): a person here is one member with their posts, not
+        // one here and one idle (Carter, #55524: "it kept my name in idle still").
         func key(_ person: RoomChatPresence.Person) -> String {
-            let id = person.id.lowercased()
-            guard person.isHuman, seen[id] == nil, let login = Self.login(person.name), seen["human-\(login)"] != nil
-            else { return id }
-            return "human-\(login)"
+            if person.isHuman, let login = person.login?.lowercased(), !login.isEmpty { return "human-\(login)" }
+            return person.id.lowercased()
         }
         let keyed = present.map { (key($0), $0) }
         // One person on two devices or tabs is here if either is (as the server merges them).

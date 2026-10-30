@@ -14,8 +14,13 @@ final class AgentLabTests: XCTestCase {
         XCTAssertEqual(AgentLab.of(id: "kimi-max", model: nil), .moonshot)
         XCTAssertEqual(AgentLab.of(id: "ticket-keeper", model: "unknown"), .other)
         XCTAssertEqual(AgentLab.of(id: "claude-warden", model: "deepseek-v4-pro"), .deepseek, "the model wins over the name")
-        XCTAssertEqual(AgentLab.of(id: "pocket-forge", model: nil), .anthropic, "Carter, #55533: forge is Claude")
-        XCTAssertEqual(AgentLab.of(id: "sol-max", model: nil), .openai)
+        XCTAssertEqual(AgentLab.of(id: "pocket-forge", model: nil, reported: "anthropic"), .anthropic,
+                       "Carter, #55533: forge is Claude, as the server says from its model")
+        XCTAssertEqual(AgentLab.of(id: "claude-like-name", model: nil, reported: "deepseek"), .deepseek,
+                       "the server's lab wins over the name")
+        XCTAssertEqual(AgentLab.of(id: "astra-brand-s", model: nil, reported: "other"), .openai,
+                       "an agent that sent no model is guessed from its name")
+        XCTAssertEqual(AgentLab.of(id: "sol-max", model: nil, reported: "other"), .other, "and nothing is invented")
         XCTAssertNil(AgentLab.other.initial, "an unknown lab shows a chip, not a letter")
     }
 
@@ -67,26 +72,51 @@ final class AgentLogoTests: XCTestCase {
         XCTAssertEqual(agents.map(\.lab), [.openai, .openai, .anthropic])
     }
 
-    /// Warden, #254: presence stays "active" while an agent's listener is connected, so it pulsed all the time.
-    func test_working_is_preparing_a_reply_or_a_post_in_the_last_two_minutes_not_presence() {
+    /// API #1055: the server's lab and box flag for the agents present.
+    func test_the_server_says_each_agents_lab_and_box() {
+        let present = [
+            RoomChatPresence.Person(id: "pocket-forge", name: "pocket-forge", isHuman: false, isIdle: false, lab: "anthropic"),
+            RoomChatPresence.Person(id: "astra-brand-s", name: "astra-brand-s", isHuman: false, isIdle: false, lab: "openai",
+                                    isBox: true)
+        ]
+        let agents = AgentLab.present(present, models: [:], signals: [:])
+        XCTAssertEqual(agents.map(\.lab), [.openai, .anthropic])
+        XCTAssertEqual(agents.map(\.isBox), [true, false])
+    }
+
+    /// Warden, #254 and API #1055: presence stayed "active" while an agent's listener was connected; working is now
+    /// the server's word, renewed by each thing the agent does.
+    func test_working_is_the_servers_word_or_a_reply_being_prepared() {
         let now = Date(timeIntervalSince1970: 1_793_400_000)
         func input(_ id: String, _ author: String, minutesAgo: Double) -> RoomChatMessageInput {
             RoomChatMessageInput(id: id, sequenceId: Int64(1000 - minutesAgo), kind: .message, authorId: author,
                                  authorName: author, isHuman: author.hasPrefix("human-"), text: "x", timestamp: "",
                                  date: now.addingTimeInterval(-minutesAgo * 60))
         }
+        let nowMs = Int64(now.timeIntervalSince1970 * 1000)
+        let presence = RoomChatPresence.make(isAvailable: true, humansOnline: 1, people: [
+            RoomChatPresence.Person(id: "claude-warden", name: "claude-warden", isHuman: false, isIdle: false,
+                                    isWorking: true, workingUntilMs: nowMs + 30_000),
+            RoomChatPresence.Person(id: "sol-max", name: "sol-max", isHuman: false, isIdle: false,
+                                    isWorking: true, workingUntilMs: nowMs - 1_000),
+            RoomChatPresence.Person(id: "pocket-forge", name: "pocket-forge", isHuman: false, isIdle: false)
+        ])
         let state = RoomChatPresentationState(
             sessionId: "room", title: "Room",
             messages: [
-                input("a", "ds-box-1", minutesAgo: 30),
-                input("b", "Claude-Warden", minutesAgo: 1),
+                input("a", "ds-box-1", minutesAgo: 1),
+                input("b", "pocket-forge", minutesAgo: 1),
                 input("c", "human-mrrcarter", minutesAgo: 0.5)
             ],
-            composingAgents: ["astra-council"]
+            composingAgents: ["astra-council"],
+            presence: presence
         )
         let signals = state.agentSignals(now: now)
-        XCTAssertEqual(Set(signals.keys), ["claude-warden", "astra-council"])
-        XCTAssertEqual(signals["claude-warden"], "b", "a sign is the newest post, so the next post is a new beat")
+        XCTAssertEqual(Set(signals.keys), ["claude-warden", "ds-box-1", "astra-council"])
+        XCTAssertEqual(signals["claude-warden"], "working:\(nowMs + 30_000)", "renewed working is a new beat")
+        XCTAssertNil(signals["sol-max"], "working that has run out is not working")
+        XCTAssertNil(signals["pocket-forge"], "present and not working, whatever it posted")
+        XCTAssertEqual(signals["ds-box-1"], "a", "a box not in presence counts by its newest post")
         XCTAssertEqual(signals["astra-council"], "typing:", "preparing a reply is a sign too")
     }
 }

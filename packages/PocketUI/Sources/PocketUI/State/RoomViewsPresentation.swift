@@ -116,12 +116,25 @@ public struct RoomChatPresence: Equatable, Sendable {
         public let name: String
         public let isHuman: Bool
         public let isIdle: Bool
+        /// From the server (API #1055): an agent's lab, whether it is working and until when, whether it runs in a
+        /// box; a person's login, the handle their posts carry.
+        public let lab: String?
+        public let isWorking: Bool
+        public let workingUntilMs: Int64?
+        public let isBox: Bool
+        public let login: String?
 
-        public init(id: String, name: String, isHuman: Bool, isIdle: Bool) {
+        public init(id: String, name: String, isHuman: Bool, isIdle: Bool, lab: String? = nil, isWorking: Bool = false,
+                    workingUntilMs: Int64? = nil, isBox: Bool = false, login: String? = nil) {
             self.id = id
             self.name = name
             self.isHuman = isHuman
             self.isIdle = isIdle
+            self.lab = lab
+            self.isWorking = isWorking
+            self.workingUntilMs = workingUntilMs
+            self.isBox = isBox
+            self.login = login
         }
     }
 

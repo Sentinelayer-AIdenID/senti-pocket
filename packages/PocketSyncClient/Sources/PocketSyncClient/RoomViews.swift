@@ -116,13 +116,29 @@ public struct RoomPresentParticipant: Equatable, Sendable {
     public let displayName: String?
     public let isIdle: Bool
     public let lastSeen: String?
+    /// An agent's lab as the server reports it from the model it sent (`anthropic`, `openai`, … or `other`).
+    public let lab: String?
+    /// Whether the server sees the agent working now, and until when that holds without news (ms since 1970).
+    public let isWorking: Bool
+    public let workingUntilMs: Int64?
+    /// The agent runs in a box.
+    public let isBox: Bool
+    /// A person's posting handle: their posts are `human-<login>`.
+    public let login: String?
 
-    public init(id: String, isHuman: Bool, displayName: String? = nil, isIdle: Bool = false, lastSeen: String? = nil) {
+    public init(id: String, isHuman: Bool, displayName: String? = nil, isIdle: Bool = false, lastSeen: String? = nil,
+                lab: String? = nil, isWorking: Bool = false, workingUntilMs: Int64? = nil, isBox: Bool = false,
+                login: String? = nil) {
         self.id = id
         self.isHuman = isHuman
         self.displayName = displayName
         self.isIdle = isIdle
         self.lastSeen = lastSeen
+        self.lab = lab
+        self.isWorking = isWorking
+        self.workingUntilMs = workingUntilMs
+        self.isBox = isBox
+        self.login = login
     }
 
     init?(json: JSONValue) {
@@ -134,7 +150,12 @@ public struct RoomPresentParticipant: Equatable, Sendable {
             isHuman: json["kind"]?.stringValue == "human" || id.lowercased().hasPrefix("human-"),
             displayName: name?.isEmpty == false ? name : nil,
             isIdle: json["state"]?.stringValue == "idle",
-            lastSeen: json["lastSeen"]?.stringValue
+            lastSeen: json["lastSeen"]?.stringValue,
+            lab: json["lab"]?.stringValue,
+            isWorking: json["working"]?.boolValue ?? false,
+            workingUntilMs: json["workingUntilMs"]?.intValue,
+            isBox: json["box"]?.boolValue ?? false,
+            login: json["login"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 }
         )
     }
 }

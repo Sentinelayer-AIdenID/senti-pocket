@@ -72,19 +72,17 @@ public enum AgentLab: String, CaseIterable, Comparable, Sendable {
         }
     }
 
-    /// The lab for an agent: its model first, then its id (claude-warden, codex-helper, ds-…, astra-…).
-    public static func of(id: String, model: String?) -> AgentLab {
+    /// The lab for an agent: as the server reports it from the agent's model (API #1055), else its model as the room
+    /// knows it, else its id (claude-warden, codex-helper, ds-…, astra-…). An agent that sent no model is "other" at
+    /// the server, and only then is it guessed.
+    public static func of(id: String, model: String?, reported: String? = nil) -> AgentLab {
+        if let reported, let lab = AgentLab(rawValue: reported.lowercased()), lab != .other { return lab }
         if let model, let lab = match(model) { return lab }
         let name = id.lowercased()
-        if let lab = crew[name] { return lab }
         if name.hasPrefix("ds-") { return .deepseek }
-        if name.hasPrefix("astra-") || name.hasPrefix("sol-") { return .openai }
+        if name.hasPrefix("astra-") { return .openai }
         return match(name) ?? .other
     }
-
-    /// The crew's agents whose names say nothing of their lab (Carter, #55533: "forge is here too and is Claude"),
-    /// until the room reports each agent's lab from its model (warden, ticket 2e33d88d).
-    private static let crew: [String: AgentLab] = ["pocket-forge": .anthropic]
 
     /// Matched on whole words of the model or name, a version allowed right after ("gpt4o", "glm4"), never inside
     /// another word (warden, #254: "opus" in "octopus" is not Claude).
@@ -136,12 +134,15 @@ public enum AgentLab: String, CaseIterable, Comparable, Sendable {
     public static func present(_ people: [RoomChatPresence.Person], models: [String: String],
                                signals: [String: String], boxes: [String] = []) -> [Present] {
         let boxIds = Set(boxes.map { $0.lowercased() })
+        let byId = Dictionary(people.map { ($0.id.lowercased(), $0) }, uniquingKeysWith: { first, _ in first })
         var seen = Set<String>()
         let ids = people.filter { !$0.isHuman }.map(\.id) + boxes
         return ids.filter { seen.insert($0.lowercased()).inserted }
             .map { id in
                 let key = id.lowercased()
-                return Present(id: id, lab: of(id: id, model: models[key]), isBox: boxIds.contains(key), signal: signals[key])
+                let person = byId[key]
+                return Present(id: id, lab: of(id: id, model: models[key], reported: person?.lab),
+                               isBox: (person?.isBox ?? false) || boxIds.contains(key), signal: signals[key])
             }
             .sorted { ($0.isWorking ? 0 : 1, $0.id.lowercased()) < ($1.isWorking ? 0 : 1, $1.id.lowercased()) }
     }
@@ -156,19 +157,26 @@ public enum AgentLab: String, CaseIterable, Comparable, Sendable {
 }
 
 extension RoomChatPresentationState {
-    /// The agents working now, lowercased id to their newest sign of it: preparing a reply, or their newest post in
-    /// the last `window`. Not presence, which stays "active" while an agent's listener is connected (warden, #254);
-    /// Carter, #55506: "If Claude is actively sending signals from his terminal that's him working". A new sign is a
+    /// The agents working now, lowercased id to their newest sign of it. The server says who is working and until when
+    /// (API #1055: `working`, `workingUntilMs`, renewed by each thing the agent does); Carter, #55506: "If Claude is
+    /// actively sending signals from his terminal that's him working". An agent not in presence (a box posting through
+    /// the room) counts by its newest post in the last `window`, and one preparing a reply counts too. A new sign is a
     /// new value, which is what makes a logo beat once (Carter, #55533: "palpitation movement when it senses something
     /// and then stillness").
     public func agentSignals(now: Date, window: TimeInterval = 120) -> [String: String] {
         var signals: [String: String] = [:]
+        let present = presence?.people.filter { !$0.isHuman } ?? []
+        let nowMs = Int64(now.timeIntervalSince1970 * 1000)
+        for person in present where person.isWorking && (person.workingUntilMs ?? .max) > nowMs {
+            signals[person.id.lowercased()] = "working:" + (person.workingUntilMs.map(String.init) ?? "")
+        }
+        let reported = Set(present.map { $0.id.lowercased() })
         let since = now.addingTimeInterval(-window)
         for row in rows.reversed() {
             guard case .message(let message) = row, let date = message.date else { continue }
             if date < since { break }
             let id = message.authorId.lowercased()
-            if !message.isHuman, signals[id] == nil { signals[id] = message.id }
+            if !message.isHuman, !reported.contains(id), signals[id] == nil { signals[id] = message.id }
         }
         for agent in composingAgents {
             let id = agent.lowercased()

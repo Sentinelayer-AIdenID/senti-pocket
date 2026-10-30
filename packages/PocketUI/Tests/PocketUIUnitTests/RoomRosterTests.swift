@@ -45,14 +45,15 @@ final class RoomRosterTests: XCTestCase {
     }
 
     /// Carter, #55524: "the presence indicator said I was idle and I moved to active but it kept my name in idle
-    /// still". Presence names a person `human-<user id>` with their login as the name; their posts are `human-<login>`.
+    /// still". Presence names a person `human-<user id>` and gives their login (API #1055); their posts are
+    /// `human-<login>`.
     func test_a_person_here_is_one_member_with_their_posts_and_here_if_any_device_is() throws {
         let account = "human-6c1f2a9e-0b7d-4c55-9e2a-1f0d3b8a7c42"
         let roster = RoomRoster.build(
             posts: [post("human-mrrcarter", 2, human: true), post("human-mrrcarter", 30, human: true)],
             present: [
-                RoomChatPresence.Person(id: account, name: "mrrCarter", isHuman: true, isIdle: true),
-                RoomChatPresence.Person(id: account, name: "mrrCarter", isHuman: true, isIdle: false)
+                RoomChatPresence.Person(id: account, name: "mrrCarter", isHuman: true, isIdle: true, login: "mrrCarter"),
+                RoomChatPresence.Person(id: account, name: "mrrCarter", isHuman: true, isIdle: false, login: "mrrCarter")
             ],
             runningBoxes: [], endedBoxes: [], now: now
         )
@@ -74,13 +75,6 @@ final class RoomRosterTests: XCTestCase {
         XCTAssertEqual(roster.members.count, 1)
         XCTAssertEqual(roster.members.first?.status, .here)
         XCTAssertEqual(roster.members.first?.posts, 1)
-    }
-
-    func test_a_name_reads_as_the_login_a_post_carries() {
-        XCTAssertEqual(RoomRoster.login("mrrCarter"), "mrrcarter")
-        XCTAssertEqual(RoomRoster.login("Jane Doe!"), "jane-doe")
-        XCTAssertNil(RoomRoster.login(RoomChatViews.unnamedPerson))
-        XCTAssertNil(RoomRoster.login("!!"))
     }
 
     func test_a_box_that_ended_but_runs_again_under_its_name_is_listed_once_as_running() {
