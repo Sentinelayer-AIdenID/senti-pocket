@@ -1042,9 +1042,12 @@ private struct RoomThreadSheet: View {
     /// The reply being answered (a reply to a reply nests under it); nil answers the message.
     @State private var answering: RoomChatReplyRow?
     @FocusState private var isReplying: Bool
+    /// Where the reply text last changed (the field does not say where the caret is), for an @ anywhere in it.
+    @State private var editOffset: Int?
+    @State private var lastDraft = ""
 
     private var suggestions: [MentionCandidate] {
-        guard let active = MentionSuggester.activeQuery(in: draft) else { return [] }
+        guard let active = MentionSuggester.activeQuery(in: draft, at: editOffset ?? draft.count) else { return [] }
         return MentionSuggester.suggestions(for: active.query, among: mentionCandidates)
     }
 
@@ -1166,7 +1169,7 @@ private struct RoomThreadSheet: View {
                             LazyVStack(alignment: .leading, spacing: 0) {
                                 ForEach(suggestions) { candidate in
                                     Button {
-                                        draft = MentionSuggester.apply(candidate, to: draft)
+                                        draft = MentionSuggester.apply(candidate, to: draft, at: editOffset ?? draft.count)
                                     } label: {
                                         HStack(spacing: 10) {
                                             Image(systemName: candidate.isAll ? "person.3.fill" : (candidate.isHuman ? "person.crop.circle.fill" : "cpu"))
@@ -1205,6 +1208,10 @@ private struct RoomThreadSheet: View {
                             .lineLimit(1...6)
                             .textFieldStyle(.plain)
                             .focused($isReplying)
+                            .onChange(of: draft) { new in
+                                editOffset = MentionSuggester.editOffset(from: lastDraft, to: new)
+                                lastDraft = new
+                            }
                             .padding(.horizontal, 12)
                             .padding(.vertical, 9)
                             .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -1372,9 +1379,12 @@ private struct RoomComposerBar: View {
     @FocusState private var isEditing: Bool
     /// "File as a ticket": what you type goes to the room as a ticket request, and the ticket keeper files it.
     @State private var ticketMode = false
+    /// Where the text last changed (the field does not say where the caret is), for an @ anywhere in it.
+    @State private var editOffset: Int?
+    @State private var lastDraft = ""
 
     private var suggestions: [MentionCandidate] {
-        guard let active = MentionSuggester.activeQuery(in: draft) else { return [] }
+        guard let active = MentionSuggester.activeQuery(in: draft, at: editOffset ?? draft.count) else { return [] }
         return MentionSuggester.suggestions(for: active.query, among: mentionCandidates)
     }
 
@@ -1395,7 +1405,7 @@ private struct RoomComposerBar: View {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(suggestions) { candidate in
                             Button {
-                                draft = MentionSuggester.apply(candidate, to: draft)
+                                draft = MentionSuggester.apply(candidate, to: draft, at: editOffset ?? draft.count)
                             } label: {
                                 HStack(spacing: 10) {
                                     Image(systemName: candidate.isAll ? "person.3.fill" : (candidate.isHuman ? "person.crop.circle.fill" : "cpu"))
@@ -1487,6 +1497,10 @@ private struct RoomComposerBar: View {
                     .lineLimit(1...6)
                     .textFieldStyle(.plain)
                     .focused($isEditing)
+                    .onChange(of: draft) { new in
+                        editOffset = MentionSuggester.editOffset(from: lastDraft, to: new)
+                        lastDraft = new
+                    }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 9)
                     .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 18, style: .continuous))

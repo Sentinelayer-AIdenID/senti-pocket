@@ -29,11 +29,54 @@ public struct MentionCandidate: Equatable, Identifiable, Sendable {
 /// - humans first, then agents active in the last 10 minutes, then the rest, alphabetical in each group;
 /// - your own handle is never offered; `@all` is offered for an empty query or a prefix of "all";
 /// - a match is a case-insensitive substring of the handle or the display name.
-/// The phone composer treats the end of the draft as the caret.
+/// The text field does not say where the caret is, so the composer takes the place the text last changed (Carter: a
+/// mention anywhere in the text, not only at its end).
 public enum MentionSuggester {
     public static let recentWindow: TimeInterval = 10 * 60
     /// Everyone who matches, in a list the composer scrolls (a room can have hundreds of agents).
     public static let maximumSuggestions = 60
+
+    static func isHandleCharacter(_ character: Character) -> Bool {
+        character.isLetter || character.isNumber || character == "_" || character == "-"
+    }
+
+    /// Where an edit ended in `new`, in characters: just after what was typed or pasted, or where text was removed.
+    public static func editOffset(from old: String, to new: String) -> Int {
+        let before = Array(old), after = Array(new)
+        var prefix = 0
+        while prefix < before.count, prefix < after.count, before[prefix] == after[prefix] { prefix += 1 }
+        var suffix = 0
+        while suffix < before.count - prefix, suffix < after.count - prefix,
+              before[before.count - 1 - suffix] == after[after.count - 1 - suffix] {
+            suffix += 1
+        }
+        return after.count - suffix
+    }
+
+    /// The `@word` being typed at character `offset` of `draft`, anywhere in the text: the query and the characters
+    /// it covers (from the `@`).
+    public static func activeQuery(in draft: String, at offset: Int) -> (query: String, range: Range<Int>)? {
+        let characters = Array(draft)
+        guard offset >= 0, offset <= characters.count else { return nil }
+        var start = offset
+        while start > 0, isHandleCharacter(characters[start - 1]) { start -= 1 }
+        guard start > 0, characters[start - 1] == "@" else { return nil }
+        let at = start - 1
+        if at > 0, !characters[at - 1].isWhitespace { return nil }
+        return (String(characters[start..<offset]), at..<offset)
+    }
+
+    /// Puts `candidate` in place of the `@word` at `offset` (and the rest of that word after it), with a space after
+    /// it unless one is already there.
+    public static func apply(_ candidate: MentionCandidate, to draft: String, at offset: Int) -> String {
+        guard let active = activeQuery(in: draft, at: offset) else { return draft }
+        var characters = Array(draft)
+        var end = active.range.upperBound
+        while end < characters.count, isHandleCharacter(characters[end]) { end += 1 }
+        let spaced = end < characters.count && characters[end].isWhitespace
+        characters.replaceSubrange(active.range.lowerBound..<end, with: Array("@" + candidate.handle + (spaced ? "" : " ")))
+        return String(characters)
+    }
 
     /// The query being typed at the end of `draft`, and where its `@` starts.
     public static func activeQuery(in draft: String) -> (query: String, atIndex: String.Index)? {
