@@ -496,3 +496,20 @@ extension HTTPRoomMessageSender: RoomMessageEditing {
         }
     }
 }
+
+/// Renaming a room (web `setSessionTitle`): its owner only, never a breakout.
+protocol RoomTitleSetting: Sendable {
+    /// The name as the API saved it.
+    func setTitle(sessionId: String, title: String) async throws -> String
+}
+
+extension HTTPRoomMessageSender: RoomTitleSetting {
+    /// `POST /api/v1/sessions/{id}/title` with `{"title": ...}`, under an idempotency key.
+    func setTitle(sessionId: String, title: String) async throws -> String {
+        let data = try await post(sessionId: sessionId, path: "title", idempotencyKey: "title-" + UUID().uuidString.lowercased(),
+                                  body: ["title": title])
+        let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        guard let saved = json?["title"] as? String, !saved.isEmpty else { return title }
+        return saved
+    }
+}

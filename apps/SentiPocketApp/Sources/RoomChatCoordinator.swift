@@ -12,7 +12,9 @@ final class RoomChatCoordinator: ObservableObject {
     @Published private(set) var state: RoomChatPresentationState
 
     let sessionId: String
-    private let title: String
+    /// The room's name; its owner can rename it.
+    private var title: String
+    private let canRename: Bool
     private let transport: any RoomTransport
     private let sender: (any RoomMessageSending)?
     private let identity: (any AccountIdentityProviding)?
@@ -159,6 +161,7 @@ final class RoomChatCoordinator: ObservableObject {
         actionSender: (any RoomActionSending)? = nil,
         identity: (any AccountIdentityProviding)? = nil,
         membershipRole: String? = nil,
+        canRename: Bool = false,
         focusSequenceId: Int64? = nil,
         ownAuthorIds: Set<String> = [],
         sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
@@ -175,6 +178,7 @@ final class RoomChatCoordinator: ObservableObject {
         self.directory = directory
         self.sessionId = sessionId
         self.title = title
+        self.canRename = canRename && sender is any RoomTitleSetting
         self.transport = transport
         self.sender = sender
         self.actionSender = actionSender
@@ -202,7 +206,8 @@ final class RoomChatCoordinator: ObservableObject {
             title: title,
             messages: [],
             isLoadingInitial: true,
-            composer: initialComposer
+            composer: initialComposer,
+            canRename: canRename && sender is any RoomTitleSetting
         )
         if let receipts {
             receiptsTracker = RoomReceiptsTracker(
@@ -305,6 +310,8 @@ final class RoomChatCoordinator: ObservableObject {
         case .dismissNotice:
             notice = nil
             publish()
+        case .renameRoom(let name):
+            rename(to: name)
         case .openThread(let sequenceId):
             openThread(sequenceId)
         case .closeThread:
@@ -1341,6 +1348,35 @@ final class RoomChatCoordinator: ObservableObject {
         onFeedback(mentioned ? .mentioned : .received)
     }
 
+    /// The owner's new name for the room (Carter, #55354), shown once the API has saved it. The room list picks it up
+    /// from the room screen.
+    private func rename(to raw: String) {
+        guard canRename, let setter = sender as? any RoomTitleSetting else { return }
+        guard let name = RoomTitle.cleaned(raw) else {
+            notice = "That name can't be used. Use up to \(RoomTitle.maximumLength) characters, not starting with #, >, * or -."
+            publish()
+            return
+        }
+        guard name != title else { return }
+        let sessionId = self.sessionId
+        Task { [weak self] in
+            do {
+                let saved = try await setter.setTitle(sessionId: sessionId, title: name)
+                guard let self else { return }
+                self.title = saved
+                self.publish()
+            } catch RoomSendError.reauthenticationRequired {
+                self?.onReauthenticationRequired()
+            } catch RoomSendError.notAllowed {
+                self?.notice = "Only the room's owner can rename it."
+                self?.publish()
+            } catch {
+                self?.notice = "The new name did not save. Check your connection and try again."
+                self?.publish()
+            }
+        }
+    }
+
     /// Your own message with new text (web `editSessionMessage`): saved against the revision you saw, then shown at
     /// once as edited; the room's own edit event agrees with it.
     private func editMessage(_ sequenceId: Int64, text raw: String) {
@@ -1547,6 +1583,7 @@ final class RoomChatCoordinator: ObservableObject {
             },
             canPin: canPin,
             pinLimit: pinLimit,
+            canRename: canRename,
             replies: inlineReplyInputs(),
             expandedRepeats: expandedRepeats
         )

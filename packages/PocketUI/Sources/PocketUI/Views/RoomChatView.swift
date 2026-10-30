@@ -35,6 +35,9 @@ public struct RoomChatView: View {
     /// Background lines opened in place.
     @State private var expandedQuiet: Set<String> = []
     @State private var showsPresence = false
+    /// The owner is renaming the room, and the name as typed.
+    @State private var renaming = false
+    @State private var renameDraft = ""
     /// A failed message the reader chose to edit: its text goes back into the composer.
     @State private var restoredDraft: RoomComposerRestore?
 
@@ -150,29 +153,46 @@ public struct RoomChatView: View {
         .navigationTitle(state.title)
         .navigationBarTitleDisplayModeInlineIfAvailable()
         .toolbar {
-            // One item for the connection and who is here, so the room's title keeps as much room as it can.
             ToolbarItem(placement: .primaryAction) {
-                HStack(spacing: 10) {
-                    // Beside the presence count the pill is its dot alone, so the title menu keeps its room;
-                    // the word is still read aloud, and spelled out in the "who is here" sheet.
-                    RoomConnectionPill(connection: state.connection, compact: state.presence != nil)
-                    if let presence = state.presence {
+                // While the floating avatars say who is here the pill is its dot alone, so the title keeps its room;
+                // the word is still read aloud, and spelled out in the "who is here" sheet.
+                RoomConnectionPill(connection: state.connection, compact: state.presence != nil)
+            }
+            // The owner taps the room's name to rename it (Carter, #55354); for anyone else it is the plain title.
+            if state.canRename {
+                ToolbarItem(placement: .principal) {
+                    Menu {
                         Button {
-                            showsPresence = true
+                            renameDraft = state.title
+                            renaming = true
                         } label: {
-                            // A toolbar shows a label's icon only, so the count sits beside the icon itself.
-                            HStack(spacing: 3) {
-                                Image(systemName: "person.2")
-                                Text(presence.compactCount)
-                                    .font(.caption.weight(.semibold))
-                                    .monospacedDigit()
-                            }
+                            Label("Rename", systemImage: "pencil")
                         }
-                        .accessibilityLabel(presence.label)
-                        .accessibilityIdentifier("pocket.room.presence")
+                        .accessibilityIdentifier("pocket.room.rename")
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(state.title)
+                                .font(.headline)
+                                .foregroundStyle(PocketPalette.textPrimary)
+                                .lineLimit(1)
+                            Image(systemName: "chevron.down.circle.fill")
+                                .font(.caption)
+                                .foregroundStyle(PocketPalette.textSecondary)
+                        }
                     }
+                    .accessibilityLabel(state.title)
+                    .accessibilityHint("Opens a menu to rename this room")
+                    .accessibilityIdentifier("pocket.room.title")
                 }
             }
+        }
+        .alert("Rename this room", isPresented: $renaming) {
+            TextField("Room name", text: $renameDraft)
+                .accessibilityIdentifier("pocket.room.rename.field")
+            Button("Save") { send(.renameRoom(title: renameDraft)) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Everyone in the room sees the new name, here and on the web. Up to \(RoomTitle.maximumLength) characters.")
         }
         .sheet(isPresented: $showsPresence) {
             RoomPresenceSheet(presence: state.presence, connection: state.connection, roster: roster)
@@ -230,6 +250,14 @@ public struct RoomChatView: View {
             .overlay(alignment: .bottomTrailing) {
                 if !readerAtBottom || state.canLoadNewer {
                     jumpToLatestButton(proxy: proxy)
+                }
+            }
+            // Who is here floats under the top bar and the pins, over the messages (Carter, #55354).
+            .overlay(alignment: .topTrailing) {
+                if let presence = state.presence {
+                    RoomPeopleAvatars(presence: presence) { showsPresence = true }
+                        .padding(.top, 8)
+                        .padding(.trailing, 12)
                 }
             }
             .safeAreaInset(edge: .top, spacing: 0) {

@@ -527,6 +527,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     public let canPin: Bool
     /// How many messages the room can pin at once.
     public let pinLimit: Int
+    /// You may rename the room: its owner, outside a breakout (the API's rule).
+    public let canRename: Bool
 
     /// Same-author rows closer together than this share one header.
     public static let groupingWindow: TimeInterval = 5 * 60
@@ -560,6 +562,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         pinned: [RoomChatPinned] = [],
         canPin: Bool = false,
         pinLimit: Int = 10,
+        canRename: Bool = false,
         replies: [RoomChatMessageInput] = [],
         expandedRepeats: Set<String> = [],
         calendar: Calendar = .current
@@ -590,6 +593,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         self.pinned = protectedFailure ? [] : pinned
         self.canPin = protectedFailure ? false : canPin
         self.pinLimit = max(1, pinLimit)
+        self.canRename = protectedFailure ? false : canRename
 
         // Protected content never renders beside an auth or access failure.
         guard failure?.suppressesProtectedContent != true else {
@@ -1235,6 +1239,26 @@ public enum RoomChatIntent: Equatable, Sendable {
     case toggleRepeats(stack: String)
     /// The people list opened: the room screen refreshes which boxes still run.
     case peopleOpened
+    /// The room's owner gave it a new name (`RoomTitle.cleaned` already applied).
+    case renameRoom(title: String)
+}
+
+/// A room's name as the API takes it (`SessionTitlePayload`, `_normalize_session_title`): control characters out,
+/// runs of white space one space, up to 80 characters, and not starting like a Markdown line ("# ", "> ", "* ",
+/// "- "), which the API refuses as a message body pasted in as a name.
+public enum RoomTitle {
+    public static let maximumLength = 80
+
+    /// The name to send, or nil when the API would refuse it.
+    public static func cleaned(_ raw: String) -> String? {
+        let words = raw.split(whereSeparator: \.isWhitespace).map { word in
+            String(String.UnicodeScalarView(word.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }))
+        }
+        let name = words.filter { !$0.isEmpty }.joined(separator: " ")
+        guard !name.isEmpty, name.count <= maximumLength, name.lowercased() != "null" else { return nil }
+        let markdownStarts = ["# ", "## ", "### ", "#### ", "##### ", "###### ", ">", "*", "- "]
+        return markdownStarts.contains(where: name.hasPrefix) ? nil : name
+    }
 }
 
 /// A pinned message in the room's strip.

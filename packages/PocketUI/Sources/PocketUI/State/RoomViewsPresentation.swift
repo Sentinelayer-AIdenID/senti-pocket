@@ -151,4 +151,58 @@ public struct RoomChatPresence: Equatable, Sendable {
             people: people.filter(\.isHuman) + people.filter { !$0.isHuman }
         )
     }
+
+    /// How many people and how many agents are here, each counted once (one agent can hold two leases).
+    public var humanCount: Int { Set(people.filter(\.isHuman).map { $0.id.lowercased() }).count }
+    public var agentCount: Int { Set(people.filter { !$0.isHuman }.map { $0.id.lowercased() }).count }
+
+    /// Who arrived and who left between two readings, for the notes that come out of the room's floating avatars
+    /// (Carter, #55354): people first, then agents, arrivals before departures, one note each. Nothing while either
+    /// reading cannot tell, so opening the room or coming back after an outage is not a crowd arriving.
+    public static func changes(from old: RoomChatPresence?, to new: RoomChatPresence?) -> [RoomPresenceChange] {
+        guard let old, let new, old.isAvailable, new.isAvailable else { return [] }
+        func names(_ presence: RoomChatPresence, humans: Bool) -> [(id: String, name: String)] {
+            var seen = Set<String>()
+            return presence.people.filter { $0.isHuman == humans && seen.insert($0.id.lowercased()).inserted }
+                .map { ($0.id.lowercased(), $0.name) }
+        }
+        var changes: [RoomPresenceChange] = []
+        for humans in [true, false] {
+            let before = names(old, humans: humans)
+            let after = names(new, humans: humans)
+            let beforeIds = Set(before.map(\.id))
+            let afterIds = Set(after.map(\.id))
+            let arrived = after.filter { !beforeIds.contains($0.id) }.map(\.name)
+            let left = before.filter { !afterIds.contains($0.id) }.map(\.name)
+            if let text = RoomPresenceChange.line(arrived, "joined") {
+                changes.append(RoomPresenceChange(isHuman: humans, joined: true, text: text))
+            }
+            if let text = RoomPresenceChange.line(left, "left") {
+                changes.append(RoomPresenceChange(isHuman: humans, joined: false, text: text))
+            }
+        }
+        return changes
+    }
+}
+
+/// Someone arriving in the room or leaving it: "Simone joined", "Simone and Ade left", "lab-box-1 and 3 more joined".
+public struct RoomPresenceChange: Equatable, Sendable {
+    public let isHuman: Bool
+    public let joined: Bool
+    public let text: String
+
+    public init(isHuman: Bool, joined: Bool, text: String) {
+        self.isHuman = isHuman
+        self.joined = joined
+        self.text = text
+    }
+
+    static func line(_ names: [String], _ verb: String) -> String? {
+        switch names.count {
+        case 0: return nil
+        case 1: return "\(names[0]) \(verb)"
+        case 2: return "\(names[0]) and \(names[1]) \(verb)"
+        default: return "\(names[0]) and \(names.count - 1) more \(verb)"
+        }
+    }
 }
