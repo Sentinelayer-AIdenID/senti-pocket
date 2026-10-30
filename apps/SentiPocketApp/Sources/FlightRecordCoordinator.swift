@@ -14,6 +14,8 @@ final class FlightRecordCoordinator: ObservableObject {
     private let mint: any MintReading
     private let sleep: @Sendable (TimeInterval) async -> Void
     private var lives: [MintLife] = []
+    /// The names of the room's boxes that ended, lowercased.
+    private var endedBoxNames: Set<String> = []
     private var flights: [String: MintFlightRecord] = [:]
     private var finished = 0
     private var summary: MintRoomSummary?
@@ -88,6 +90,8 @@ final class FlightRecordCoordinator: ObservableObject {
         do {
             let room = try await mint.roomSnapshot(sessionId: sessionId)
             lives = room.lives.filter(\.isActive)
+            let running = Set(lives.map { $0.agentName.lowercased() })
+            endedBoxNames = Set(room.lives.filter { !$0.isActive }.map { $0.agentName.lowercased() }).subtracting(running)
             let figures = MintRoomSummary(room: room, now: now())
             summary = figures
             finished = figures.finished
@@ -150,7 +154,8 @@ final class FlightRecordCoordinator: ObservableObject {
             finishedBoxes: finished,
             isLoading: false,
             failure: failure,
-            totals: summary.flatMap(Self.totals)
+            totals: summary.flatMap(Self.totals),
+            endedBoxNames: endedBoxNames
         )
     }
 

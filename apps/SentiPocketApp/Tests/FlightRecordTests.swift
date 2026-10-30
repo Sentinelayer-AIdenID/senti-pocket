@@ -88,6 +88,7 @@ final class FlightRecordTests: XCTestCase {
         let state = coordinator.state
         XCTAssertEqual(state.boxes.map(\.name), ["ds-aid-install-cli", "astra-billing-core"], "working boxes first; finished ones are left out")
         XCTAssertEqual(state.finishedBoxes, 1)
+        XCTAssertEqual(state.endedBoxNames, ["old-box"], "a call never rings a box that ended")
         XCTAssertEqual(state.boxes.first?.current, "$ npm test", "no thought yet: its newest command")
         XCTAssertEqual(state.boxes.last?.current, "Writing the ledger tests.")
         XCTAssertEqual(state.boxes.last?.job, "Billing core")

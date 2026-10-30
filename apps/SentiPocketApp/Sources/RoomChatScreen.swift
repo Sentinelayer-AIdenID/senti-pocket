@@ -204,19 +204,23 @@ struct RoomChatScreen: View {
         return people
     }
 
-    /// Whom you can talk with: the agents here now, then the agents who answered most recently.
+    /// Whom you can talk with (Carter, #55061): the agents here now, then those heard from within the hour, then the
+    /// boxes still running. A box that ended, or an agent long gone, is not offered.
     private var voicePartners: [String] {
-        var ids: [String] = []
-        var seen = Set<String>()
-        let present = (coordinator.state.presence?.people ?? []).filter { !$0.isHuman }.map(\.id)
-        let authors = coordinator.state.rows.reversed().compactMap { row -> String? in
-            if case .message(let message) = row, !message.isHuman { return message.authorId }
-            return nil
+        var posts: [VoiceCallRoster.Post] = []
+        var endedBoxes = flight.state.endedBoxNames
+        for row in coordinator.state.rows.reversed() {
+            guard case .message(let message) = row else { continue }
+            if let box = message.box, box.isEnded { endedBoxes.insert(box.launch.name.lowercased()) }
+            if !message.isHuman { posts.append(VoiceCallRoster.Post(authorId: message.authorId, at: message.date)) }
         }
-        for id in present + authors where !id.isEmpty && seen.insert(id.lowercased()).inserted {
-            ids.append(id)
-        }
-        return Array(ids.prefix(8))
+        return VoiceCallRoster.partners(
+            present: (coordinator.state.presence?.people ?? []).filter { !$0.isHuman }.map(\.id),
+            posts: posts,
+            runningBoxes: flight.state.boxes.map(\.name),
+            endedBoxes: endedBoxes,
+            now: Date()
+        )
     }
 
     /// Whose message (or reply) is being read, for the player.
@@ -344,6 +348,8 @@ struct RoomChatScreen: View {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
                         choosesVoicePartner = true
+                        // Which boxes still run, so the picker offers no box that ended.
+                        Task { await flight.refresh() }
                     } label: {
                         Label("Talk", systemImage: "waveform")
                     }
