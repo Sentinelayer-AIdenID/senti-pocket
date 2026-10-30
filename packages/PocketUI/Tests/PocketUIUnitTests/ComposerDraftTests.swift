@@ -88,8 +88,7 @@ final class ComposerDraftTests: XCTestCase {
     func test_the_sent_text_written_back_is_told_from_new_typing() {
         let sent = "Can you make sure the tables fit the screen"
         XCTAssertTrue(RoomComposerDraft.isWrittenBack(sent, sent: sent))
-        XCTAssertTrue(RoomComposerDraft.isWrittenBack(" screen
-", sent: sent), "its last word, committed late")
+        XCTAssertTrue(RoomComposerDraft.isWrittenBack(" screen ", sent: sent), "its last word, committed late")
         XCTAssertFalse(RoomComposerDraft.isWrittenBack("Also the logo", sent: sent), "new words are new")
         XCTAssertFalse(RoomComposerDraft.isWrittenBack("  ", sent: sent))
     }
