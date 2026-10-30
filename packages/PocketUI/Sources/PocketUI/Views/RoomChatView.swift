@@ -2553,19 +2553,20 @@ private struct RoomPresenceSheet: View {
                     .accessibilityIdentifier("pocket.room.presence.connection")
                 }
                 if !roster.members.isEmpty {
-                    ForEach(RoomRoster.Status.allCases, id: \.self) { status in
-                        let members = roster.members.filter { $0.status == status }
-                        if !members.isEmpty {
-                            Section(status.label) {
-                                ForEach(members) { member in
-                                    NavigationLink {
-                                        RoomMemberDetail(member: member)
-                                    } label: {
-                                        RoomMemberRow(member: member)
-                                    }
-                                    .accessibilityIdentifier("pocket.room.people.\(member.id)")
+                    // Agents and people apart, each with how many are online and offline (Carter, 10-30).
+                    ForEach(roster.sides, id: \.title) { side in
+                        Section {
+                            ForEach(side.members) { member in
+                                NavigationLink {
+                                    RoomMemberDetail(member: member)
+                                } label: {
+                                    RoomMemberRow(member: member)
                                 }
+                                .accessibilityIdentifier("pocket.room.people.\(member.id)")
                             }
+                        } header: {
+                            Text("\(side.title) · \(side.online) online · \(side.offline) offline")
+                                .accessibilityIdentifier("pocket.room.people.side.\(side.title.lowercased())")
                         }
                     }
                 } else if let people = presence?.people, !people.isEmpty {
