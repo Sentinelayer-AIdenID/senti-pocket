@@ -746,4 +746,62 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         XCTAssertEqual(room.state.with, [])
         XCTAssertEqual(poster.starts.count, 1)
     }
+
+    /// Warden (#279): on a call with two agents where one already has the floor, the agent added next still says hello.
+    func test_an_added_agents_hello_is_read_even_when_another_agent_has_the_floor() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), poster = FakePoster()
+        let room = room(with: ["pocket-forge", "claude-warden"], handsFree: false, listener: listener, speaker: speaker,
+                        audio: FakeAudio(), poster: poster)
+        room.begin()
+        await until("rang") { poster.starts.count == 1 }
+        room.receive([message("a1", from: "pocket-forge", "Hi Carter.")])
+        await until("pocket-forge has the floor") { room.state.speaker == "pocket-forge" }
+        speaker.finish()
+
+        room.send(.add("review-agent"))
+        await until("added") { poster.starts.count == 2 }
+        room.receive([message("c1", from: "review-agent", "Review agent here.", secondsAfterStart: 4)])
+        await until("its hello is read") { room.state.speaker == "review-agent" }
+        XCTAssertTrue(room.state.turns.filter(\.isHeld).isEmpty, "the hello is not held for the floor")
+        XCTAssertEqual(poster.turns.filter { $0.contains("has the floor") }, [], "nobody is told to hold")
+    }
+
+    /// Warden (#279): add someone and speak at once; the new agent's hello landing first never holds the answer.
+    func test_an_added_agents_hello_takes_no_floor_from_the_answer_to_your_turn() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), poster = FakePoster()
+        let room = room(with: ["pocket-forge"], handsFree: false, listener: listener, speaker: speaker, audio: FakeAudio(),
+                        poster: poster)
+        room.begin()
+        await until("rang") { poster.starts.count == 1 }
+        room.send(.add("claude-warden"))
+        await until("added") { poster.starts.count == 2 }
+        room.send(.toggleTalk)
+        await until("listening") { listener.partial != nil }
+        listener.say("Is the build up?")
+        room.send(.toggleTalk)
+        await until("posted") { poster.turns.count == 1 }
+
+        room.receive([
+            message("w1", from: "claude-warden", "Warden here.", secondsAfterStart: 3),
+            message("a1", from: "pocket-forge", "Yes, build 16 is up.", secondsAfterStart: 4)
+        ])
+        await until("the hello is read") { room.state.speaker == "claude-warden" }
+        speaker.finish()
+        await until("then the answer") { room.state.speaker == "pocket-forge" }
+        XCTAssertTrue(room.state.turns.filter(\.isHeld).isEmpty, "the answer is not held behind the hello")
+    }
+
+    /// Warden (#279): an add made as the call ends is never posted after the end.
+    func test_an_add_made_as_the_call_ends_is_not_posted_after_it() async {
+        let poster = FakePoster()
+        let room = room(with: ["pocket-forge"], handsFree: false, listener: FakeListener(), speaker: FakeSpeaker(),
+                        audio: FakeAudio(), poster: poster)
+        room.begin()
+        await until("rang") { poster.starts.count == 1 }
+        room.send(.add("claude-warden"))
+        await room.hangUp()
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(poster.starts.count, 1, "the call ended first: no one is asked to say hello")
+        XCTAssertEqual(poster.endings.count, 1)
+    }
 }
