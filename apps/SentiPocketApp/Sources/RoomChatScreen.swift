@@ -840,6 +840,11 @@ struct RoomChatScreen: View {
             }
         }
         .onReceive(callDesk.$waiting) { _ in takeAnsweredCall() }
+        // Muted on the phone's own call screen: the voice room stops listening (warden, #281).
+        .onReceive(callDesk.$muted) { muted in
+            guard let answeredCall, let voiceRoom else { return }
+            voiceRoom.send(.setMuted(muted.contains(answeredCall.uuid)))
+        }
         // Hung up on the phone's own call screen: the voice room ends with it.
         .onReceive(callDesk.$hungUp) { uuid in
             guard let uuid, answeredCall?.uuid == uuid, let voiceRoom else { return }

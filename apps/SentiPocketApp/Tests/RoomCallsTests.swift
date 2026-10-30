@@ -228,5 +228,47 @@ final class RoomCallsTests: XCTestCase {
         XCTAssertEqual(details?.ringExpiresAt, ParsedSessionTimestamp("2026-10-30T03:00:45Z").date)
         XCTAssertNil(RoomCallDetails(json: try JSONDecoder().decode(JSONValue.self, from: Data("{\"callId\": \"x\"}".utf8))))
     }
+
+    /// Warden (#281): Mute on the phone's call screen reaches the room's voice room.
+    func test_mute_on_the_call_screen_is_kept_per_call() async {
+        let desk = RoomCallDesk(api: FakeCallsAPI(details: details()),
+                                sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) })
+        let uuid = UUID()
+        desk.received(doorbell, uuid: uuid)
+        desk.answered(uuid)
+        desk.setMuted(uuid, true)
+        XCTAssertEqual(desk.muted, [uuid])
+        desk.setMuted(uuid, false)
+        XCTAssertTrue(desk.muted.isEmpty)
+        desk.setMuted(UUID(), true)
+        XCTAssertTrue(desk.muted.isEmpty, "a call this desk does not own is ignored")
+    }
+
+    /// Warden (#281): an answered call no voice room takes ends, rather than staying connected and silent.
+    func test_an_answered_call_no_voice_room_takes_ends() async {
+        let api = FakeCallsAPI(details: details())
+        let desk = RoomCallDesk(api: api, ringFor: 3_600, takeWithin: 0.05,
+                                sleep: { seconds in try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) })
+        var endedSystem: [UUID] = []
+        desk.endSystemCall = { endedSystem.append($0) }
+        let uuid = UUID()
+        desk.received(doorbell, uuid: uuid)
+        desk.answered(uuid)
+        await until("ended") { endedSystem == [uuid] }
+        await until("told the room") { api.sent == ["answered", "ended"] }
+        XCTAssertNil(desk.waiting)
+        XCTAssertFalse(desk.isLive(uuid))
+
+        // One a voice room took in time is left alone.
+        let taken = UUID()
+        let other = RoomCallDoorbell(callId: "call_2", sessionId: doorbell.sessionId, callerName: "claude-warden")
+        desk.received(other, uuid: taken)
+        desk.answered(taken)
+        desk.audioActivated(taken)
+        XCTAssertNotNil(desk.takeWaiting(for: doorbell.sessionId))
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertTrue(desk.isLive(taken))
+        XCTAssertEqual(endedSystem, [uuid])
+    }
 }
 #endif

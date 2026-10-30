@@ -141,6 +141,8 @@ final class RoomCallDesk: ObservableObject {
     @Published private(set) var waiting: Call?
     /// The last call the phone's own call screen hung up: its voice room ends too.
     @Published private(set) var hungUp: UUID?
+    /// The calls muted on the phone's own call screen: their voice rooms do not listen.
+    @Published private(set) var muted: Set<UUID> = []
     private(set) var calls: [UUID: Call] = [:]
 
     var api: any RoomCallsAPI
@@ -149,17 +151,21 @@ final class RoomCallDesk: ObservableObject {
     /// Puts the room on screen.
     var openRoom: (String) -> Void = { _ in }
     private let ringFor: TimeInterval
+    /// How long an answered call may wait for a voice room before it ends (warden, #281): never connected and silent.
+    private let takeWithin: TimeInterval
     private let sleep: @Sendable (TimeInterval) async -> Void
 
     init(
         api: any RoomCallsAPI = RoomCallsClient(apiBaseURL: GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_API_URL"])),
         ringFor: TimeInterval = 45,
+        takeWithin: TimeInterval = 60,
         sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
             try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
         }
     ) {
         self.api = api
         self.ringFor = ringFor
+        self.takeWithin = takeWithin
         self.sleep = sleep
     }
 
@@ -194,7 +200,9 @@ final class RoomCallDesk: ObservableObject {
         }
     }
 
-    /// Answered on the call screen: tell the room, then open it; its voice room starts once the app is in front.
+    /// Answered on the call screen: tell the room, then open it, where its voice room takes the call. One no voice
+    /// room takes in time (Pocket was killed and the push woke it with no room on screen) ends, rather than staying
+    /// connected and silent.
     func answered(_ uuid: UUID) {
         guard var call = calls[uuid], !call.finished else { return }
         call.answered = true
@@ -202,6 +210,19 @@ final class RoomCallDesk: ObservableObject {
         report(call, "answered")
         waiting = call
         openRoom(call.doorbell.sessionId)
+        let wait = takeWithin
+        Task { [weak self] in
+            await self?.sleep(wait)
+            guard let self, self.waiting?.uuid == uuid, self.isLive(uuid) else { return }
+            self.waiting = nil
+            self.finish(uuid, report: "ended")
+        }
+    }
+
+    /// Mute or unmute on the phone's own call screen.
+    func setMuted(_ uuid: UUID, _ isMuted: Bool) {
+        guard calls[uuid] != nil else { return }
+        if isMuted { muted.insert(uuid) } else { muted.remove(uuid) }
     }
 
     /// The call screen ended: before an answer that is a decline; after it, the end of the call, and its voice room
