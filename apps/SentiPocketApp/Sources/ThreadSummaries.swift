@@ -46,7 +46,8 @@ enum ThreadSummaryInput {
     }
 
     private static let commitExpression = try? NSRegularExpression(pattern: #"\b[0-9a-f]{7,40}\b"#)
-    private static let pullRequestExpression = try? NSRegularExpression(pattern: #"(?<![\w/])#\d{2,6}\b"#)
+    /// Two to four digits: a room's message numbers (#55514) are five and up, and are not pull requests (warden, #264).
+    private static let pullRequestExpression = try? NSRegularExpression(pattern: #"(?<![\w/])#\d{2,4}\b"#)
     private static let buildExpression = try? NSRegularExpression(pattern: #"\b20\d{8}\b"#)
 
     /// The commits, pull requests and builds the thread names, in the order it names them, each once. A commit is

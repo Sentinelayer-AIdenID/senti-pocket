@@ -44,7 +44,8 @@ final class ThreadSummaryTests: XCTestCase {
         let lines = [
             "claude-warden: #253 (bf68d264): pass. Merged at 402ef9d3 after #1054.",
             "pocket-forge: TestFlight 2026103014 is live from 6bcfc61f; #253 again.",
-            "astra-web: decade added deadbeef cafe 1234567 and 3.14"
+            "astra-web: decade added deadbeef cafe 1234567 and 3.14",
+            "claude-warden: reply #55514: re-review below"
         ]
         XCTAssertEqual(ThreadSummaryInput.record(in: lines),
                        ["#253", "bf68d264", "402ef9d3", "#1054", "2026103014", "6bcfc61f"])
