@@ -29,11 +29,11 @@ struct ServerCheckpointView: View {
                         .font(.title3.weight(.semibold))
                     Label("From the server · not signed yet", systemImage: "shield.slash")
                         .font(.footnote.weight(.semibold))
-                        .foregroundStyle(PocketPalette.textSecondary)
+                        .foregroundStyle(.secondary)
                         .accessibilityIdentifier("pocket.checkpoint.server.unsigned")
                     Text(coverage)
                         .font(.footnote)
-                        .foregroundStyle(PocketPalette.textSecondary)
+                        .foregroundStyle(.secondary)
                     Button {
                         if reader.readingId == readId {
                             reader.stop()
@@ -51,7 +51,7 @@ struct ServerCheckpointView: View {
                         .accessibilityIdentifier("pocket.checkpoint.server.summary")
                     Text("Pocket shows this checkpoint as the server holds it. A signed copy, checked on this phone, comes once the signing service is live.")
                         .font(.footnote)
-                        .foregroundStyle(PocketPalette.textSecondary)
+                        .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(16)
