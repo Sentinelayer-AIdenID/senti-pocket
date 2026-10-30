@@ -276,7 +276,7 @@ public struct RoomChatView: View {
             // #55424).
             .overlay(alignment: .top) {
                 if let presence = state.presence {
-                    RoomPeopleAvatars(presence: presence) { showsPresence = true }
+                    RoomPeopleAvatars(presence: presence, models: roster.modelsById) { showsPresence = true }
                         .padding(.top, 4)
                 }
             }

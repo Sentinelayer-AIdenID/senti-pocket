@@ -1,11 +1,15 @@
 import SwiftUI
 
 /// Who is here, floating at the top center of the room, under the top bar (Carter, #55354, then #55424: "no
-/// backgrounds ... more transparent ... dead center of the top"): an agent glyph and a person glyph, each with its
-/// count. Someone arriving or leaving shows as a note that grows out of the pair and fades, and the count ticks over.
-/// Tapping opens the people list.
+/// backgrounds ... more transparent ... dead center of the top", then #55428: "Whichever labs you come from put that
+/// icon there with its number badge and also pulsate ... to show they're working. Or idle"): one glyph per lab with
+/// its agents' count, pulsing while any of them is active, and a person glyph with the people's count. Someone
+/// arriving or leaving shows as a note that grows out of the row and fades, and the counts tick over. Tapping opens the
+/// people list.
 struct RoomPeopleAvatars: View {
     let presence: RoomChatPresence
+    /// Each agent's model where the room knows it (a box's), lowercased id to model, to tell its lab.
+    var models: [String: String] = [:]
     let onOpen: () -> Void
 
     /// How long a note stays before it fades.
@@ -25,16 +29,16 @@ struct RoomPeopleAvatars: View {
     var body: some View {
         Button(action: onOpen) {
             HStack(spacing: 14) {
-                glyph(isHuman: false, count: agents)
-                glyph(isHuman: true, count: humans)
+                ForEach(labs) { group in
+                    LabGlyph(group: group, reduceMotion: reduceMotion)
+                }
+                personGlyph
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        // Quiet (Carter, #55424: "no backgrounds ... more transparent"): the glyphs and counts alone, half see-through.
-        .opacity(0.55)
         .overlay(alignment: .top) { noteColumn.offset(y: 30) }
         .accessibilityLabel(label)
         .accessibilityHint("Opens the people list")
@@ -47,24 +51,31 @@ struct RoomPeopleAvatars: View {
         .onChange(of: presence) { now in arrive(now) }
     }
 
-    private var label: String {
-        guard presence.isAvailable else { return "Who is here is not known right now" }
-        return "\(agents) agent\(agents == 1 ? "" : "s") and \(humans) \(humans == 1 ? "person" : "people") here"
+    private var labs: [AgentLab.Group] {
+        AgentLab.groups(present: presence.people, models: models)
     }
 
-    /// An agent or a person, and how many: the glyph with its count beside it, no shape behind either.
-    private func glyph(isHuman: Bool, count: Int) -> some View {
+    private var label: String {
+        guard presence.isAvailable else { return "Who is here is not known right now" }
+        let agentsLine = labs.map { "\($0.count) \($0.lab.name)\($0.isWorking ? ", working" : "")" }
+        let people = "\(humans) \(humans == 1 ? "person" : "people")"
+        return (agentsLine + [people]).joined(separator: ", ") + " here"
+    }
+
+    /// People: the glyph with its count beside it, no shape behind, quiet (Carter, #55424).
+    private var personGlyph: some View {
         HStack(spacing: 3) {
-            Image(systemName: isHuman ? "person.fill" : "cpu")
+            Image(systemName: "person.fill")
                 .font(.system(size: 13, weight: .semibold))
             if presence.isAvailable {
-                Text("\(count)")
+                Text("\(humans)")
                     .font(.caption.weight(.semibold))
                     .monospacedDigit()
                     .contentTransition(.numericText())
             }
         }
         .foregroundStyle(PocketPalette.textPrimary)
+        .opacity(0.55)
         .accessibilityHidden(true)
     }
 
@@ -109,5 +120,44 @@ struct RoomPeopleAvatars: View {
                 withAnimation(.easeIn(duration: 0.5)) { notes.removeAll { $0.id == note.id } }
             }
         }
+    }
+}
+
+/// One lab's agents: its initial in its colour (a chip for an unknown lab) and how many, pulsing while any is active
+/// and resting quiet when all are idle.
+private struct LabGlyph: View {
+    let group: AgentLab.Group
+    let reduceMotion: Bool
+    @State private var lifted = false
+
+    var body: some View {
+        let (red, green, blue) = group.lab.tint
+        HStack(spacing: 3) {
+            if let initial = group.lab.initial {
+                Text(initial)
+                    .font(.system(size: 14, weight: .heavy, design: .rounded))
+            } else {
+                Image(systemName: "cpu")
+                    .font(.system(size: 13, weight: .semibold))
+            }
+            Text("\(group.count)")
+                .font(.caption.weight(.semibold))
+                .monospacedDigit()
+                .contentTransition(.numericText())
+        }
+        .foregroundStyle(Color(red: red, green: green, blue: blue))
+        .opacity(group.isWorking ? (lifted ? 1 : 0.6) : 0.45)
+        .scaleEffect(group.isWorking && lifted && !reduceMotion ? 1.12 : 1)
+        .onAppear { pulse(group.isWorking) }
+        .onChange(of: group.isWorking) { working in pulse(working) }
+        .accessibilityHidden(true)
+    }
+
+    private func pulse(_ working: Bool) {
+        guard working, !reduceMotion else {
+            lifted = false
+            return
+        }
+        withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) { lifted = true }
     }
 }

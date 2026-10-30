@@ -123,6 +123,15 @@ public struct RoomRoster: Equatable, Sendable {
     /// A box active within this long counts as here.
     public static let activeBox: TimeInterval = 5 * 60
 
+    /// Each member's model where the room knows it, by lowercased id (a box's model, from the Flight record).
+    public var modelsById: [String: String] {
+        var models: [String: String] = [:]
+        for member in members {
+            if let model = member.model, !model.isEmpty { models[member.id.lowercased()] = model }
+        }
+        return models
+    }
+
     public static func build(posts: [Post], present: [RoomChatPresence.Person], runningBoxes: [Box],
                              endedBoxes: Set<String>, now: Date) -> RoomRoster {
         struct Seen {
