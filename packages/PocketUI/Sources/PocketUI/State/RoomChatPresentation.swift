@@ -1339,7 +1339,8 @@ public enum RoomComposerDraft {
     }
 
     /// A paste this long is held as an attachment above the field (Carter, #55006), not poured into it.
-    public static let pastedBlockLength = 1_000
+    /// Carter (10-30): "when I paste a long text it should be much longer before it becomes an attachment".
+    public static let pastedBlockLength = 4_000
 
     /// The block of text that went into the draft at once, when it is long enough to be a paste: what the draft
     /// becomes without it, and the block. Typing and dictation add a little at a time and never come here.
@@ -1395,6 +1396,12 @@ public enum RoomComposerDraft {
         for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(savedKeyPrefix) {
             defaults.removeObject(forKey: key)
         }
+    }
+
+    /// A held block put back into the message as text (Carter, 10-30: "click on a text that became attachment to add
+    /// to it or unattach it"): after what was typed, a blank line apart.
+    public static func unattaching(_ block: String, into draft: String) -> String {
+        draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? block : draft + "\n\n" + block
     }
 
     /// What is sent: the typed words, then each held block, a blank line apart.

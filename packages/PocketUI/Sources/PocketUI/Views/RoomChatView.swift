@@ -1935,7 +1935,10 @@ private struct RoomComposerBar: View {
                             PastedChip(
                                 block: block,
                                 onOpen: { viewingPaste = PastedBlock(index: index, text: block) },
-                                onRemove: { pasted.remove(at: index) }
+                                onRemove: {
+                                    pasted.remove(at: index)
+                                    saveDraft()
+                                }
                             )
                         }
                     }
@@ -2089,9 +2092,31 @@ private struct RoomComposerBar: View {
                 if id != nil { isEditing = true }
             }
             .sheet(item: $viewingPaste) { item in
-                PastedBlockSheet(text: item.text) {
-                    if pasted.indices.contains(item.index) { pasted.remove(at: item.index) }
-                }
+                PastedBlockSheet(
+                    text: item.text,
+                    onSave: { edited in
+                        guard pasted.indices.contains(item.index) else { return }
+                        if edited.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            pasted.remove(at: item.index)
+                        } else {
+                            pasted[item.index] = edited
+                        }
+                        saveDraft()
+                    },
+                    onUnattach: { edited in
+                        guard pasted.indices.contains(item.index) else { return }
+                        pasted.remove(at: item.index)
+                        // Set as it is, not as a new paste: the text stays in the box.
+                        let joined = RoomComposerDraft.unattaching(edited, into: draft)
+                        lastDraft = joined
+                        draft = joined
+                        saveDraft()
+                    },
+                    onRemove: {
+                        if pasted.indices.contains(item.index) { pasted.remove(at: item.index) }
+                        saveDraft()
+                    }
+                )
             }
         } else if let reason = composer.disabledReason {
             Text(reason)
@@ -2158,36 +2183,53 @@ private struct PastedChip: View {
 }
 
 /// A held paste, read in full before it is sent.
+/// A held paste, open (Carter, 10-30: "I should be able to click on a text that became attachment to add to it or
+/// unattach it"): edit it in place, put it back into the message as text, or remove it.
 private struct PastedBlockSheet: View {
     let text: String
+    let onSave: (String) -> Void
+    let onUnattach: (String) -> Void
     let onRemove: () -> Void
+    @State private var edited = ""
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                Text(text)
-                    .font(.callout)
-                    .foregroundStyle(PocketPalette.textPrimary)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(16)
-            }
-            .pocketCanvas()
-            .navigationTitle("Pasted text")
-            .navigationBarTitleDisplayModeInlineIfAvailable()
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }
-                }
-                ToolbarItem(placement: .destructiveAction) {
-                    Button("Remove", role: .destructive) {
-                        onRemove()
-                        dismiss()
+            TextEditor(text: $edited)
+                .font(.callout)
+                .foregroundStyle(PocketPalette.textPrimary)
+                .scrollContentBackground(.hidden)
+                .padding(12)
+                .pocketCanvas()
+                .navigationTitle("Pasted text")
+                .navigationBarTitleDisplayModeInlineIfAvailable()
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Remove", role: .destructive) {
+                            onRemove()
+                            dismiss()
+                        }
+                        .accessibilityIdentifier("pocket.room.composer.paste.remove")
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") {
+                            onSave(edited)
+                            dismiss()
+                        }
+                        .accessibilityIdentifier("pocket.room.composer.paste.done")
+                    }
+                    ToolbarItem(placement: .bottomBar) {
+                        Button {
+                            onUnattach(edited)
+                            dismiss()
+                        } label: {
+                            Label("Put it in the message", systemImage: "text.insert")
+                        }
+                        .accessibilityIdentifier("pocket.room.composer.paste.unattach")
                     }
                 }
-            }
         }
+        .onAppear { edited = text }
     }
 }
 

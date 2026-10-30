@@ -47,7 +47,7 @@ final class ComposerDraftTests: XCTestCase {
 
     /// Carter (#55006): a very long paste sits above the field as an attachment, and is sent after the typed words.
     func test_a_long_paste_is_held_apart_and_sent_after_the_words() {
-        let block = String(repeating: "log line\n", count: 150)
+        let block = String(repeating: "log line\n", count: 500)
         let typed = "see the log: "
         let pasted = RoomComposerDraft.pastedBlock(from: typed, to: typed + block)
         XCTAssertEqual(pasted?.draft, typed, "the draft keeps what was typed")
@@ -56,7 +56,9 @@ final class ComposerDraftTests: XCTestCase {
         XCTAssertEqual(midway?.block, block, "a paste in the middle of the words")
         XCTAssertEqual(midway?.draft, "ab")
         XCTAssertNil(RoomComposerDraft.pastedBlock(from: "hello", to: "hello world"), "typing is never a paste")
-        XCTAssertNil(RoomComposerDraft.pastedBlock(from: "", to: String(repeating: "a", count: 999)), "short of the length")
+        XCTAssertNil(RoomComposerDraft.pastedBlock(from: "", to: String(repeating: "a", count: 3_999)), "short of the length")
+        XCTAssertGreaterThanOrEqual(RoomComposerDraft.pastedBlockLength, 4_000,
+                                    "Carter, 10-30: much longer before it becomes an attachment")
         XCTAssertEqual(RoomComposerDraft.outgoing("  look  ", blocks: ["one", "two"]), "look\n\none\n\ntwo")
         XCTAssertEqual(RoomComposerDraft.outgoing("", blocks: ["only"]), "only", "a paste alone can be sent")
         XCTAssertEqual(RoomComposerDraft.outgoing("  ", blocks: []), "")
@@ -113,5 +115,11 @@ final class ComposerDraftTests: XCTestCase {
         XCTAssertNil(defaults.string(forKey: RoomComposerDraft.savedKey(sessionId: "room-a")))
         XCTAssertNil(defaults.string(forKey: RoomComposerDraft.savedKey(sessionId: "room-b")))
         XCTAssertTrue(defaults.bool(forKey: "pocket.inapp.sounds"), "other settings stay")
+    }
+
+    /// Carter, 10-30: a held paste can be put back into the message as text.
+    func test_a_held_paste_goes_back_into_the_message_after_the_words() {
+        XCTAssertEqual(RoomComposerDraft.unattaching("the log", into: "see this:"), "see this:\n\nthe log")
+        XCTAssertEqual(RoomComposerDraft.unattaching("the log", into: "  "), "the log", "an empty box takes it as it is")
     }
 }
