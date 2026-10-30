@@ -19,7 +19,9 @@ enum VoiceLineError: Error, Equatable {
 
 /// Asking the voice line. A protocol so the call is testable without a network.
 protocol VoiceLining: Sendable {
-    func voiceLine(sessionId: String, agentId: String?, text: String, callId: String,
+    /// `ringCallId` is the agent's call you answered, if this is one: the server reads why the agent called and its
+    /// brief from it, so the quick answer can talk them through (Carter, 10-30).
+    func voiceLine(sessionId: String, agentId: String?, text: String, callId: String, ringCallId: String?,
                    history: [VoiceLineHistory]) -> AsyncThrowingStream<VoiceLineEvent, Error>
 }
 

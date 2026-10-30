@@ -10,19 +10,24 @@ public struct VoiceRoomPanel: View {
     private let state: VoiceRoomState
     private let meter: VoiceLevelMeter
     private let partnerLab: AgentLab?
+    private let addable: () -> [String]
     private let send: (VoiceRoomIntent) -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var pressStarted = Date()
     @State private var startedByPress = false
     @State private var pulse = false
     @State private var ringing = false
+    @State private var adding = false
+    @State private var candidates: [String] = []
 
-    /// `partnerLab` is the called agent's lab, for its logo and colour; nil in a meeting.
+    /// `partnerLab` is the called agent's lab, for its logo and colour; nil in a meeting. `addable` is who could be
+    /// brought into the call now (Carter, 10-30: "add warden mid-call"), asked when Add is tapped.
     public init(state: VoiceRoomState, meter: VoiceLevelMeter, partnerLab: AgentLab?,
-                send: @escaping (VoiceRoomIntent) -> Void) {
+                addable: @escaping () -> [String] = { [] }, send: @escaping (VoiceRoomIntent) -> Void) {
         self.state = state
         self.meter = meter
         self.partnerLab = partnerLab
+        self.addable = addable
         self.send = send
     }
 
@@ -42,23 +47,67 @@ public struct VoiceRoomPanel: View {
         .padding(.top, 20)
         .padding(.bottom, 22)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay(alignment: .topTrailing) {
+            if state.canAdd {
+                addButton
+                    .padding(.top, 16)
+                    .padding(.trailing, 18)
+            }
+        }
         .pocketCanvas()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("pocket.voice.panel")
+        .confirmationDialog("Add to the call", isPresented: $adding, titleVisibility: .visible) {
+            ForEach(candidates, id: \.self) { agent in
+                Button(agent) { send(.add(agent)) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(candidates.isEmpty
+                 ? "No other agent here can answer right now."
+                 : "They're asked to join with a hello. With more than one agent, the first to answer each turn has the floor.")
+        }
+    }
+
+    /// Brings someone else into the call: whoever can answer now and isn't in it already.
+    private var addButton: some View {
+        Button {
+            let inCall = Set(state.with.map { $0.lowercased() })
+            candidates = addable().filter { !inCall.contains($0.lowercased()) }
+            adding = true
+        } label: {
+            Image(systemName: "person.badge.plus")
+                .font(.title3)
+                .frame(width: 44, height: 44)
+                .background(PocketPalette.inset, in: Circle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(PocketPalette.textPrimary)
+        .accessibilityLabel("Add someone to the call")
+        .accessibilityIdentifier("pocket.voice.add")
+    }
+
+    /// The called agent's lab, only while the call has one agent: a group shows no one's logo.
+    private var lab: AgentLab? {
+        state.with.count == 1 ? partnerLab : nil
     }
 
     private var partnerTint: Color {
-        guard let partnerLab else { return PocketPalette.accent }
-        let (red, green, blue) = partnerLab.tint
+        guard let lab else { return PocketPalette.accent }
+        let (red, green, blue) = lab.tint
         return Color(red: red, green: green, blue: blue)
     }
 
     private var header: some View {
         VStack(spacing: 4) {
+            // Several names shrink a little, then end in "…", and never run under the Add button.
             Text(state.title)
                 .font(.title2.weight(.semibold))
                 .foregroundStyle(PocketPalette.textPrimary)
                 .lineLimit(1)
+                .minimumScaleFactor(0.75)
+                .truncationMode(.tail)
+                .padding(.horizontal, state.canAdd ? 52 : 0)
             if state.isRinging {
                 Text("Ringing…")
                     .font(.subheadline)
@@ -107,9 +156,11 @@ public struct VoiceRoomPanel: View {
     private var mark: some View {
         if state.with.isEmpty {
             Image(systemName: "person.3.fill").resizable().scaledToFit()
-        } else if let asset = partnerLab?.logoAsset {
+        } else if state.with.count > 1 {
+            Image(systemName: "person.2.fill").resizable().scaledToFit()
+        } else if let asset = lab?.logoAsset {
             Image(asset).renderingMode(.template).resizable().scaledToFit()
-        } else if let initial = partnerLab?.initial {
+        } else if let initial = lab?.initial {
             Text(initial).font(.system(size: 60, weight: .heavy, design: .rounded))
         } else {
             Image(systemName: "cpu").resizable().scaledToFit()
@@ -244,6 +295,7 @@ public struct VoiceRoomPanel: View {
     private var statusText: String {
         switch state.phase {
         case .ready where state.isRinging: return "Waiting for \(state.title) to pick up"
+        case .ready where state.isMuted: return "Muted on the call screen"
         case .ready: return state.isHandsFree ? "Your turn: talk, a pause sends it" : "Tap or hold to talk"
         case .listening: return "Listening"
         case .sending: return "Sending"
@@ -258,7 +310,7 @@ public struct VoiceRoomPanel: View {
         case .listening:
             return state.partial.isEmpty ? "…" : state.partial
         default:
-            return state.turns.last?.text ?? "Say something to \(state.title)."
+            return state.turns.last?.text ?? state.about.map { "Calling about: \($0)" } ?? "Say something to \(state.title)."
         }
     }
 

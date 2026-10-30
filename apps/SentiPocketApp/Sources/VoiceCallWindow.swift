@@ -12,11 +12,14 @@ final class VoiceCallWindow {
     /// Whether a call is on screen: banners stay quiet under it, so a tap can't take the room away mid-call.
     var isShowing: Bool { window != nil }
 
-    /// Shows the call; false when it cannot (one already up, or no active screen), and the call must not start.
+    /// Shows the call; false when it cannot (one already up, or no screen at all), and the call must not start. A call
+    /// answered with Pocket in the background or the phone locked is put on Pocket's screen for when you open it;
+    /// until then the phone's own call screen hangs it up.
     @discardableResult
     func show<Content: View>(_ content: Content) -> Bool {
-        guard window == nil, let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
-            .first(where: { $0.activationState == .foregroundActive }) else { return false }
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        guard window == nil,
+              let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first else { return false }
         let made = UIWindow(windowScene: scene)
         made.windowLevel = .normal + 1
         // Light or dark as the app is.

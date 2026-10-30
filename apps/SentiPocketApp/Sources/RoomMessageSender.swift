@@ -627,7 +627,7 @@ extension HTTPRoomMessageSender {
 
 extension HTTPRoomMessageSender: VoiceLining {
     /// `POST /api/v1/sessions/{id}/voice/turn` (API #1062) with your own bearer; the answer streams back as events.
-    func voiceLine(sessionId: String, agentId: String?, text: String, callId: String,
+    func voiceLine(sessionId: String, agentId: String?, text: String, callId: String, ringCallId: String?,
                    history: [VoiceLineHistory]) -> AsyncThrowingStream<VoiceLineEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
@@ -662,9 +662,17 @@ extension HTTPRoomMessageSender: VoiceLining {
                     }
                     var body: [String: Any] = ["text": String(text.prefix(2_000)), "callId": callId, "history": context]
                     body["agentId"] = agentId.map { $0.lowercased() } ?? NSNull()
+                    if let ringCallId { body["ringCallId"] = ringCallId }
                     request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-                    let (bytes, response) = try await urlSession.bytes(for: request)
+                    var (bytes, response) = try await urlSession.bytes(for: request)
+                    if (response as? HTTPURLResponse)?.statusCode == 422, body["ringCallId"] != nil {
+                        // A server from before call briefs refuses the field it doesn't know: the turn is asked again
+                        // without it, and answers from the room alone.
+                        body["ringCallId"] = nil
+                        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+                        (bytes, response) = try await urlSession.bytes(for: request)
+                    }
                     let http = response as? HTTPURLResponse
                     switch http?.statusCode ?? 0 {
                     case 200: break

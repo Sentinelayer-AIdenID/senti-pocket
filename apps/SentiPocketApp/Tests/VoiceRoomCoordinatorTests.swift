@@ -184,6 +184,29 @@ private final class OrderedPoster: VoiceRoomPosting, @unchecked Sendable {
     }
 }
 
+/// Opens the call, then refuses to ring anyone else.
+private final class RefusesAddsPoster: VoiceRoomPosting, @unchecked Sendable {
+    private let lock = NSLock()
+    private var rings = 0
+
+    func postCallStarted(sessionId: String, text: String, clientId: String) async throws {
+        let count = lock.withLock { () -> Int in
+            rings += 1
+            return rings
+        }
+        if count > 1 { throw RoomSendError.retryable(retryAfterSeconds: nil) }
+    }
+
+    func postVoiceTurn(sessionId: String, text: String, clientId: String) async throws {}
+
+    func uploadTranscript(sessionId: String, filename: String, markdown: String, clientId: String) async throws -> VoiceTranscriptAttachment {
+        VoiceTranscriptAttachment(attachmentId: "att-2", filename: filename, kind: "text", contentType: "text/markdown",
+                                  sizeBytes: markdown.utf8.count, status: "ready")
+    }
+
+    func postCallEnded(sessionId: String, text: String, transcript: VoiceTranscriptAttachment?, clientId: String) async throws {}
+}
+
 @MainActor
 private final class BusyAudio: VoiceRoomAudioSession {
     func activate() throws { throw VoiceRoomAudioError.recognizerUnavailable }
@@ -633,5 +656,181 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
                         poster: FakePoster())
         busy.begin()
         XCTAssertFalse(busy.state.isRinging, "no \"Ringing…\" for ever without the phone's audio")
+    }
+
+    /// Carter (10-30): call several agents at once. Each turn mentions them all, and the first to answer has the floor.
+    func test_a_call_with_several_agents_mentions_them_all_and_the_first_answer_has_the_floor() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), poster = FakePoster()
+        let room = room(with: ["pocket-forge", "claude-warden"], handsFree: false, listener: listener, speaker: speaker,
+                        audio: audio, poster: poster)
+        room.begin()
+        await until("rang") { poster.starts.count == 1 }
+        XCTAssertEqual(VoiceCallMarkers.calledAgents(in: poster.starts[0]), ["pocket-forge", "claude-warden"])
+        XCTAssertTrue(poster.starts[0].contains("has the floor"), "two agents share the floor")
+        room.send(.toggleTalk)
+        await until("listening") { listener.partial != nil }
+        listener.say("Who ships tonight?")
+        room.send(.toggleTalk)
+        await until("posted") { poster.turns.count == 1 }
+        XCTAssertEqual(poster.turns, ["@pocket-forge @claude-warden Who ships tonight?"])
+
+        room.receive([
+            message("a1", from: "claude-warden", "I will.", secondsAfterStart: 3),
+            message("b1", from: "pocket-forge", "Me.", secondsAfterStart: 4),
+            message("c1", from: "review-agent", "Not called.", secondsAfterStart: 5)
+        ])
+        await until("speaking") { room.state.speaker == "claude-warden" }
+        XCTAssertEqual(room.state.turns.filter(\.isHeld).map(\.speaker), ["pocket-forge"])
+        XCTAssertFalse(room.state.turns.contains { $0.speaker == "review-agent" }, "an agent not in the call is not heard")
+        await room.hangUp()
+        XCTAssertTrue(poster.endings.first?.text.contains("@pocket-forge @claude-warden please post") == true)
+    }
+
+    /// Carter (10-30): add warden mid-call. One message rings it; from then on its answers are read, and your turns
+    /// mention it too.
+    func test_adding_an_agent_mid_call_rings_it_and_its_answers_are_read() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), poster = FakePoster()
+        let room = room(with: ["pocket-forge"], handsFree: false, listener: listener, speaker: speaker, audio: audio,
+                        poster: poster)
+        room.begin()
+        await until("rang") { poster.starts.count == 1 }
+        room.receive([message("hi", from: "pocket-forge", "Hi Carter.")])
+        await until("hello") { room.state.speaker == "pocket-forge" }
+        speaker.finish()
+
+        room.send(.add("claude-warden"))
+        XCTAssertEqual(room.state.with, ["pocket-forge", "claude-warden"])
+        XCTAssertEqual(room.state.title, "pocket-forge and claude-warden")
+        XCTAssertEqual(room.state.notice, "claude-warden was asked to join. Their hello is read when it comes.")
+        await until("the add went out") { poster.starts.count == 2 }
+        XCTAssertEqual(VoiceCallMarkers.addedAgents(in: poster.starts[1]), ["claude-warden"])
+        XCTAssertTrue(poster.starts[1].contains("already going with pocket-forge"))
+        XCTAssertTrue(poster.ids[1].hasPrefix("voice-add-"))
+        room.send(.add("Claude-Warden"))
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(poster.starts.count, 2, "someone already in the call is not added twice")
+
+        room.receive([message("w1", from: "claude-warden", "Warden here.", secondsAfterStart: 6)])
+        await until("its hello is read") { room.state.speaker == "claude-warden" }
+        XCTAssertNil(room.state.notice, "everyone added has answered")
+        speaker.finish()
+
+        room.send(.toggleTalk)
+        await until("listening") { listener.partial != nil }
+        listener.say("Merge it")
+        room.send(.toggleTalk)
+        await until("posted") { poster.turns.count == 1 }
+        XCTAssertEqual(poster.turns, ["@pocket-forge @claude-warden Merge it"])
+    }
+
+    func test_an_agent_that_could_not_be_added_leaves_the_call_and_you_are_told() async {
+        let room = room(with: ["pocket-forge"], handsFree: false, listener: FakeListener(), speaker: FakeSpeaker(),
+                        audio: FakeAudio(), poster: RefusesAddsPoster())
+        room.begin()
+        room.send(.add("claude-warden"))
+        XCTAssertEqual(room.state.with, ["pocket-forge", "claude-warden"])
+        await until("taken back out") { room.state.with == ["pocket-forge"] }
+        XCTAssertEqual(room.state.notice, "claude-warden could not be added. Try again.")
+        room.receive([message("w1", from: "claude-warden", "Hello?", secondsAfterStart: 3)])
+        XCTAssertTrue(room.state.turns.isEmpty, "not in the call, not heard")
+    }
+
+    func test_a_meeting_has_no_one_to_add() async {
+        let poster = FakePoster()
+        let room = room(with: [], handsFree: false, listener: FakeListener(), speaker: FakeSpeaker(), audio: FakeAudio(),
+                        poster: poster)
+        room.begin()
+        await until("opened") { poster.starts.count == 1 }
+        room.send(.add("claude-warden"))
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(room.state.with, [])
+        XCTAssertEqual(poster.starts.count, 1)
+    }
+
+    /// Warden (#279): on a call with two agents where one already has the floor, the agent added next still says hello.
+    func test_an_added_agents_hello_is_read_even_when_another_agent_has_the_floor() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), poster = FakePoster()
+        let room = room(with: ["pocket-forge", "claude-warden"], handsFree: false, listener: listener, speaker: speaker,
+                        audio: FakeAudio(), poster: poster)
+        room.begin()
+        await until("rang") { poster.starts.count == 1 }
+        room.receive([message("a1", from: "pocket-forge", "Hi Carter.")])
+        await until("pocket-forge has the floor") { room.state.speaker == "pocket-forge" }
+        speaker.finish()
+
+        room.send(.add("review-agent"))
+        await until("added") { poster.starts.count == 2 }
+        room.receive([message("c1", from: "review-agent", "Review agent here.", secondsAfterStart: 4)])
+        await until("its hello is read") { room.state.speaker == "review-agent" }
+        XCTAssertTrue(room.state.turns.filter(\.isHeld).isEmpty, "the hello is not held for the floor")
+        XCTAssertEqual(poster.turns.filter { $0.contains("has the floor") }, [], "nobody is told to hold")
+    }
+
+    /// Warden (#279): add someone and speak at once; the new agent's hello landing first never holds the answer.
+    func test_an_added_agents_hello_takes_no_floor_from_the_answer_to_your_turn() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), poster = FakePoster()
+        let room = room(with: ["pocket-forge"], handsFree: false, listener: listener, speaker: speaker, audio: FakeAudio(),
+                        poster: poster)
+        room.begin()
+        await until("rang") { poster.starts.count == 1 }
+        room.send(.add("claude-warden"))
+        await until("added") { poster.starts.count == 2 }
+        room.send(.toggleTalk)
+        await until("listening") { listener.partial != nil }
+        listener.say("Is the build up?")
+        room.send(.toggleTalk)
+        await until("posted") { poster.turns.count == 1 }
+
+        room.receive([
+            message("w1", from: "claude-warden", "Warden here.", secondsAfterStart: 3),
+            message("a1", from: "pocket-forge", "Yes, build 16 is up.", secondsAfterStart: 4)
+        ])
+        await until("the hello is read") { room.state.speaker == "claude-warden" }
+        speaker.finish()
+        await until("then the answer") { room.state.speaker == "pocket-forge" }
+        XCTAssertTrue(room.state.turns.filter(\.isHeld).isEmpty, "the answer is not held behind the hello")
+    }
+
+    /// Warden (#279): an add made as the call ends is never posted after the end.
+    func test_an_add_made_as_the_call_ends_is_not_posted_after_it() async {
+        let poster = FakePoster()
+        let room = room(with: ["pocket-forge"], handsFree: false, listener: FakeListener(), speaker: FakeSpeaker(),
+                        audio: FakeAudio(), poster: poster)
+        room.begin()
+        await until("rang") { poster.starts.count == 1 }
+        room.send(.add("claude-warden"))
+        await room.hangUp()
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(poster.starts.count, 1, "the call ended first: no one is asked to say hello")
+        XCTAssertEqual(poster.endings.count, 1)
+    }
+
+    /// Warden (#281): Mute on the lock screen's call screen stops the room hearing you. What was being heard is
+    /// dropped, answers are still read, and nothing listens again until unmuted.
+    func test_muting_on_the_call_screen_stops_listening_until_unmuted() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), poster = FakePoster()
+        let room = room(with: ["pocket-forge"], listener: listener, speaker: speaker, audio: FakeAudio(), poster: poster)
+        room.begin(rings: false)
+        await until("listening") { listener.partial != nil }
+        listener.say("This is private")
+        room.send(.setMuted(true))
+        XCTAssertTrue(room.state.isMuted)
+        XCTAssertFalse(room.state.isListening)
+        XCTAssertEqual(room.state.partial, "")
+        XCTAssertEqual(listener.cancels, 1)
+        clock.advance(VoiceRoomCoordinator.pauseEndsTurn + 1)
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertTrue(poster.turns.isEmpty, "nothing heard while muted is posted")
+
+        room.receive([message("a1", from: "pocket-forge", "Still here.", secondsAfterStart: 3)])
+        await until("the answer is read") { room.state.speaker == "pocket-forge" }
+        speaker.finish()
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(listener.starts, 1, "hands-free does not listen again while muted")
+        room.send(.toggleTalk)
+        XCTAssertFalse(room.state.isListening, "a tap does not listen while muted")
+
+        room.send(.setMuted(false))
+        await until("listening again once unmuted") { listener.starts == 2 && room.state.isListening }
     }
 }

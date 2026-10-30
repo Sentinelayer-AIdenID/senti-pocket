@@ -298,7 +298,9 @@ struct RoomChatScreen: View {
         return nil
     }
 
-    private func startVoiceRoom(with agents: [String], answering: Bool = false) {
+    /// `answering` is the agent's call you picked up, if this is one: it does not ring, and its reason and brief
+    /// ground the quick answers.
+    private func startVoiceRoom(with agents: [String], answering call: RoomCallDesk.Call? = nil) {
         guard voiceRoom == nil, let voicePoster else { return }
         reader.stop()
         let handles = coordinator.state.ownMentionHandles.filter { $0 != "all" }.sorted()
@@ -320,18 +322,22 @@ struct RoomChatScreen: View {
             ownAuthorIds: Set(handles.map { "human-\($0)" }),
             listener: listener,
             speaker: speaker,
-            audio: PhoneVoiceRoomAudioSession(),
+            // An agent's call you answered talks inside the system call, whose audio CallKit owns.
+            audio: call == nil ? PhoneVoiceRoomAudioSession() : CallKitVoiceRoomAudioSession(),
             ringer: RingbackTone(),
             poster: voicePoster,
             voiceLine: voicePoster as? any VoiceLining,
             endpointer: voicePoster as? any VoiceEndpointing,
+            ringCallId: call?.doorbell.callId,
+            about: call?.details?.reason,
             onEnded: { endVoiceRoom() },
             onRecordFailed: { [weak coordinator] failure in coordinator?.show(notice: failure) }
         )
         // The call fills the screen, over the room and its bars, until you hang up (Carter, 10-30). Without its screen
         // there would be no way to hang up, so the call does not start, nothing of it is left wired, and you are told
         // (warden, #267).
-        guard VoiceCallWindow.shared.show(VoiceRoomHost(room: room, meter: meter, partnerLab: partnerLab(of: room))) else {
+        let host = VoiceRoomHost(room: room, meter: meter, partnerLab: partnerLab(of: room), addable: { voicePartners })
+        guard VoiceCallWindow.shared.show(host) else {
             CrashReporter.shared.note("voice call refused: no call screen")
             if let answeredCall {
                 RoomCallDesk.shared.voiceRoomEnded(answeredCall)
@@ -343,10 +349,12 @@ struct RoomChatScreen: View {
         coordinator.onLiveMessages = { [weak room] messages in room?.receive(messages) }
         coordinator.onNewReplies = { [weak room] replies in room?.receive(replies: replies) }
         coordinator.readsRepliesOften = true
+        // Answered with Pocket in the background, the room was resting: the call needs it live.
+        coordinator.resume()
         heard.room = room
         voiceRoom = room
         CrashReporter.shared.note(agents.isEmpty ? "voice meeting began" : "voice call began")
-        room.begin(rings: !answering)
+        room.begin(rings: call == nil)
     }
 
     /// Something covers the room: a sheet or the side panel (from the app), or this room's call.
@@ -367,20 +375,21 @@ struct RoomChatScreen: View {
         voiceRoom = nil
         VoiceCallWindow.shared.hide()
         voiceMeter.reset()
+        // A call that ended in the background lets the room rest again.
+        if scenePhase == .background { coordinator.pause() }
         if let answeredCall {
             RoomCallDesk.shared.voiceRoomEnded(answeredCall)
             self.answeredCall = nil
         }
     }
 
-    /// An agent's call answered on the call screen: once this room is on screen with the app in front, the system
-    /// call ends (freeing its audio) and the voice room starts with the caller.
+    /// An agent's call answered on the call screen: once this room has it and CallKit has given it audio, the voice
+    /// room starts with the caller inside the system call, with Pocket in front or not (Carter, 10-30).
     private func takeAnsweredCall() {
-        guard UIApplication.shared.applicationState == .active, voiceRoom == nil, voicePoster != nil,
-              let call = callDesk.takeWaiting(for: route.sessionId) else { return }
+        guard voiceRoom == nil, voicePoster != nil, let call = callDesk.takeWaiting(for: route.sessionId) else { return }
         answeredCall = call
         CrashReporter.shared.note("call answered")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { startVoiceRoom(with: [call.partner], answering: true) }
+        startVoiceRoom(with: [call.partner], answering: call)
     }
 
     /// Contributors and above file and change tickets (the API's `min_role="contributor"`). An unknown role offers
@@ -601,14 +610,15 @@ struct RoomChatScreen: View {
             }
         }
         .animation(.spring(response: 0.3, dampingFraction: 0.9), value: reader.playback == nil)
-        .confirmationDialog("Talk with", isPresented: $choosesVoicePartner, titleVisibility: .visible) {
-            ForEach(voicePartners, id: \.self) { agent in
-                Button(agent) { startVoiceRoom(with: [agent]) }
-            }
-            Button("Everyone (a meeting)") { startVoiceRoom(with: []) }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("You talk; they answer in the room and the phone reads each answer in that agent's voice. The whole conversation stays in the room as the call's card.")
+        // Tick one agent or several (Carter, 10-30), or call everyone as a meeting.
+        .sheet(isPresented: $choosesVoicePartner) {
+            VoiceCallPicker(partners: voicePartners, onCall: { agents in
+                choosesVoicePartner = false
+                startVoiceRoom(with: agents)
+            }, onCancel: {
+                choosesVoicePartner = false
+            })
+            .presentationDetents([.medium, .large])
         }
         .onDisappear {
             if let voiceRoom { Task { await voiceRoom.hangUp() } }
@@ -827,11 +837,22 @@ struct RoomChatScreen: View {
             case .active:
                 coordinator.resume()
                 takeAnsweredCall()
-            case .background: coordinator.pause()
+            // A call keeps the room live in the background: its answers come through the room.
+            case .background where voiceRoom == nil: coordinator.pause()
             default: break
             }
         }
         .onReceive(callDesk.$waiting) { _ in takeAnsweredCall() }
+        // Muted on the phone's own call screen: the voice room stops listening (warden, #281).
+        .onReceive(callDesk.$muted) { muted in
+            guard let answeredCall, let voiceRoom else { return }
+            voiceRoom.send(.setMuted(muted.contains(answeredCall.uuid)))
+        }
+        // Hung up on the phone's own call screen: the voice room ends with it.
+        .onReceive(callDesk.$hungUp) { uuid in
+            guard let uuid, answeredCall?.uuid == uuid, let voiceRoom else { return }
+            Task { await voiceRoom.hangUp() }
+        }
     }
 
     /// Done, on a screen shown as a sheet over the room.
@@ -976,9 +997,11 @@ struct VoiceRoomHost: View {
     @ObservedObject var room: VoiceRoomCoordinator
     let meter: VoiceLevelMeter
     let partnerLab: AgentLab?
+    /// Who could be brought into the call now.
+    let addable: () -> [String]
 
     var body: some View {
-        VoiceRoomPanel(state: room.state, meter: meter, partnerLab: partnerLab, send: room.send)
+        VoiceRoomPanel(state: room.state, meter: meter, partnerLab: partnerLab, addable: addable, send: room.send)
     }
 }
 
