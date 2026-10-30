@@ -89,15 +89,7 @@ public struct ReadAloudBar: View {
             }
         }
         .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(PocketPalette.raised)
-                .shadow(color: .black.opacity(0.16), radius: 12, y: 3)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(PocketPalette.separator.opacity(0.6), lineWidth: 0.5)
-        )
+        .pocketFloating(in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .padding(.horizontal, 10)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("pocket.readAloud.bar")

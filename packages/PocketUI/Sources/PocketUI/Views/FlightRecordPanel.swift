@@ -50,6 +50,10 @@ public struct FlightRecordPanel: View {
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
+                    if let totals = state.totals {
+                        FlightTotalsCard(totals: totals)
+                            .padding(.horizontal, 12)
+                    }
                     if let failure = state.failure, state.boxes.isEmpty {
                         Text(failure)
                             .font(.footnote)
@@ -81,6 +85,14 @@ public struct FlightRecordPanel: View {
         }
         .frame(maxHeight: .infinity, alignment: .top)
         .background(PocketPalette.canvas.ignoresSafeArea())
+        // A grabber on the edge it closes toward: swipe right to put it away.
+        .overlay(alignment: .leading) {
+            Capsule()
+                .fill(PocketPalette.separator)
+                .frame(width: 4, height: 36)
+                .padding(.leading, 5)
+                .accessibilityHidden(true)
+        }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("pocket.flight")
     }
@@ -242,6 +254,86 @@ public struct FlightRecordPanel: View {
         case .fail: return PocketPalette.danger
         case .neutral: return PocketPalette.textSecondary
         }
+    }
+}
+
+/// The room's figures in two rows of three, as the web's Flight record shows them, dense and in aligned numbers that
+/// do not jitter as they count (Carter, #55014): minted, active, finished; hours worked, days saved, cost.
+struct FlightTotalsCard: View {
+    let totals: FlightRecordState.Totals
+
+    var body: some View {
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 6), count: 3)
+        LazyVGrid(columns: columns, spacing: 6) {
+            tile(count(totals.minted), label: "Minted")
+            tile(count(totals.active), label: "Active")
+            tile(count(totals.finished), label: "Finished")
+            tile(worked, label: workedLabel)
+            tile(saved, label: "Saved vs 1 engineer")
+            tile(cost, label: costLabel)
+        }
+        .padding(8)
+        .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(PocketPalette.separator.opacity(0.7), lineWidth: 0.5)
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Room totals")
+        .accessibilityIdentifier("pocket.flight.totals")
+    }
+
+    private func count(_ value: Int) -> String { (totals.isMinimum ? "≥" : "") + "\(value)" }
+
+    private var worked: String {
+        guard let hours = totals.workedHours else { return "—" }
+        return FlightRecordState.Totals.shown(hours, isMinimum: totals.workIsMinimum) + " h"
+    }
+
+    private var workedLabel: String {
+        guard let hours = totals.workedHours else { return "Worked" }
+        let days = hours / 24
+        return "Worked · \(FlightRecordState.Totals.shown(days, isMinimum: totals.workIsMinimum)) \(FlightRecordState.Totals.dayUnit(days))"
+    }
+
+    private var saved: String {
+        guard totals.workedHours != nil, let days = totals.savedDays else { return "—" }
+        return "\(FlightRecordState.Totals.shown(days, isMinimum: totals.workIsMinimum)) \(FlightRecordState.Totals.dayUnit(days))"
+    }
+
+    private var cost: String {
+        guard let usd = totals.costUsd else { return "—" }
+        return (totals.isMinimum ? "≥" : "") + FlightRecordState.Totals.usd(usd)
+    }
+
+    private var costLabel: String {
+        guard let percent = totals.costPercent else { return "Cost" }
+        return "Cost · \(FlightRecordState.Totals.amount(percent))% of $80/h"
+    }
+
+    private func tile(_ value: String, label: String) -> some View {
+        VStack(spacing: 2) {
+            Text(value)
+                .font(.headline.weight(.semibold))
+                .tracking(-0.3)
+                .monospacedDigit()
+                .foregroundStyle(PocketPalette.textPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            Text(label)
+                .font(.system(size: 10, weight: .medium))
+                .textCase(.uppercase)
+                .tracking(0.6)
+                .foregroundStyle(PocketPalette.textSecondary)
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .minimumScaleFactor(0.8)
+        }
+        .frame(maxWidth: .infinity, minHeight: 52)
+        .padding(.vertical, 6)
+        .padding(.horizontal, 4)
+        .background(PocketPalette.inset.opacity(0.55), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .accessibilityElement(children: .combine)
     }
 }
 

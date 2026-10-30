@@ -27,15 +27,7 @@ public struct VoiceRoomPanel: View {
         .padding(.horizontal, 18)
         .padding(.top, 14)
         .padding(.bottom, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(PocketPalette.raised)
-                .shadow(color: .black.opacity(0.18), radius: 16, y: 4)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .stroke(PocketPalette.separator.opacity(0.6), lineWidth: 0.5)
-        )
+        .pocketFloating(in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .padding(.horizontal, 10)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("pocket.voice.panel")

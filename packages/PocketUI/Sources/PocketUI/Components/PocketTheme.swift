@@ -36,10 +36,15 @@ enum PocketPalette {
     static let inference = themed(light: (189, 70, 40), dark: (189, 70, 52))
     static let recommendation = Color.purple
 
+    /// The darker outer edge of a floating surface, under its light hairline.
+    static let floatingEdge = themed(light: (215, 18, 80), dark: (222, 30, 3))
+
     static let textPrimary = themed(light: (222, 47, 11), dark: (32, 20, 94))
     static let textSecondary = themed(light: (215, 25, 32), dark: (215, 20, 70))
 
     // Message bubbles, by who wrote them (the web's bubble tints).
+    /// Yours: solid charcoal with white text in both appearances, set apart from everything else (Carter, #55014).
+    static let ownBubble = themed(light: (222, 14, 20), dark: (222, 12, 24))
     static let humanBubble = themed(light: (30, 60, 94.5), dark: (28, 22, 12))
     static let agentBubble = themed(light: (0, 0, 100), dark: (222, 22, 11))
     static let ticketerBubble = themed(light: (262, 45, 96.5), dark: (262, 18, 12.5))
@@ -91,9 +96,31 @@ struct PocketCardModifier: ViewModifier {
     }
 }
 
+/// A surface that floats over the page (the composer, the player, the voice room, the jump button), lifted off it as
+/// in Carter's spec (#55014): frosted glass, so the room shows through; a two-tone edge, a light hairline inside a
+/// darker stroke; and two shadows, a tight direct one and a wide ambient one.
+struct PocketFloatingModifier<S: InsettableShape>: ViewModifier {
+    let shape: S
+
+    func body(content: Content) -> some View {
+        content
+            .background(.ultraThinMaterial, in: shape)
+            .overlay { shape.strokeBorder(PocketPalette.floatingEdge, lineWidth: 1) }
+            .overlay { shape.inset(by: 1).strokeBorder(Color.white.opacity(0.12), lineWidth: 1) }
+            .compositingGroup()
+            .shadow(color: .black.opacity(0.12), radius: 3, x: 0, y: 2)
+            .shadow(color: .black.opacity(0.18), radius: 20, x: 0, y: 10)
+    }
+}
+
 extension View {
     func pocketCard() -> some View {
         modifier(PocketCardModifier())
+    }
+
+    /// Lifts the view off the page as a floating surface of this shape.
+    public func pocketFloating<S: InsettableShape>(in shape: S) -> some View {
+        modifier(PocketFloatingModifier(shape: shape))
     }
 
     /// The theme's page colour behind a view, edge to edge.
