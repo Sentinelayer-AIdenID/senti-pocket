@@ -1,4 +1,5 @@
 import Foundation
+import PocketContracts
 import PocketSyncClient
 import PocketUI
 
