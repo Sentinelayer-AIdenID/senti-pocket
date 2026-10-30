@@ -216,10 +216,14 @@ final class ReasoningConnectivityMonitorTests: XCTestCase {
         file: StaticString = #filePath,
         line: UInt = #line
     ) async throws {
-        for _ in 0..<1_000 {
+        // A time budget, not a count of yields: on a busy runner a thousand yields could pass before the monitor's
+        // queue ran at all (hosted CI, 10-30).
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
             if predicate() { return }
-            await Task.yield()
+            try await Task.sleep(nanoseconds: 2_000_000)
         }
+        if predicate() { return }
         XCTFail("condition did not become true", file: file, line: line)
         throw ReasoningConnectivityMonitorTestError.timeout
     }
