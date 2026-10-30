@@ -109,6 +109,9 @@ final class RoomEventsTests: XCTestCase {
         {"id":"j2","event":"session_member_joined","sequenceId":55650,"agentId":"senti","payload":{}}
         """))
         XCTAssertEqual(unnamed?.text, "", "the room then says someone joined")
+
+        let reordered = RoomMessage(json: json(#"{"id":"j3","event":"session_member_joined","sequenceId":55651,"agentId":"senti","payload":{"displayName":"Jo\u202Eel\u2066 D"}}"#))
+        XCTAssertEqual(reordered?.text, "Joel D", "direction controls are dropped")
     }
 
     // MARK: - Pages

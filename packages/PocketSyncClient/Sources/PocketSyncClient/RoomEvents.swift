@@ -115,8 +115,12 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         case .memberJoined:
             // The server posts a join as itself; who joined is the payload's name (Carter, 10-30: the web said
             // "Joel joined", the phone "senti joined"). One line, as the web shows it.
-            text = String((payload["displayName"]?.stringValue ?? "")
-                .split(whereSeparator: { $0.isWhitespace || $0.isNewline }).joined(separator: " ").prefix(80))
+            // Direction overrides and isolates are dropped, so a name can't reorder the line it sits in (warden, #273).
+            let bidi: Set<Unicode.Scalar> = Set((0x202A...0x202E).compactMap(Unicode.Scalar.init)
+                + (0x2066...0x2069).compactMap(Unicode.Scalar.init) + [0x200E, 0x200F, 0x061C].compactMap(Unicode.Scalar.init))
+            let name = String(String.UnicodeScalarView((payload["displayName"]?.stringValue ?? "").unicodeScalars
+                .filter { !bidi.contains($0) }))
+            text = String(name.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).joined(separator: " ").prefix(80))
         case .breakoutOpened:
             text = ""
         case .breakoutOutcome:
