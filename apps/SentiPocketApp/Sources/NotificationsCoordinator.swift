@@ -245,8 +245,8 @@ final class RoomReadTracker: ObservableObject {
         notifications.roomOnScreen = { [weak self] in self?.readableRoom }
     }
 
-    /// The room whose notifications are read: none while covered.
-    var readableRoom: String? { isCovered ? nil : shownRoom }
+    /// The room whose notifications are read: none while covered, a call's window included.
+    var readableRoom: String? { isCovered || VoiceCallWindow.shared.isShowing ? nil : shownRoom }
 
     /// A room's messages are on screen.
     func shown(_ sessionId: String) {

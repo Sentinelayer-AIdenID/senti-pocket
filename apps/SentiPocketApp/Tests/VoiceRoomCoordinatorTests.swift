@@ -139,6 +139,48 @@ private final class TroubledPoster: VoiceRoomPosting, @unchecked Sendable {
     }
 }
 
+/// Writes every start and end into one shared log, and can hold a start or an end until released.
+private final class OrderedPoster: VoiceRoomPosting, @unchecked Sendable {
+    final class Log: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _events: [String] = []
+        func add(_ event: String) { lock.withLock { _events.append(event) } }
+        var events: [String] { lock.withLock { _events } }
+    }
+
+    private let lock = NSLock()
+    private let log: Log
+    private let name: String
+    private var holdStart: Bool
+    private var holdEnd: Bool
+
+    init(_ name: String, log: Log, holdStart: Bool = false, holdEnd: Bool = false) {
+        self.name = name
+        self.log = log
+        self.holdStart = holdStart
+        self.holdEnd = holdEnd
+    }
+
+    func release() { lock.withLock { holdStart = false; holdEnd = false } }
+
+    func postCallStarted(sessionId: String, text: String, clientId: String) async throws {
+        while lock.withLock({ holdStart }) { try await Task.sleep(nanoseconds: 2_000_000) }
+        log.add("\(name) start")
+    }
+
+    func postVoiceTurn(sessionId: String, text: String, clientId: String) async throws {}
+
+    func uploadTranscript(sessionId: String, filename: String, markdown: String, clientId: String) async throws -> VoiceTranscriptAttachment {
+        VoiceTranscriptAttachment(attachmentId: "att-1", filename: filename, kind: "text", contentType: "text/markdown",
+                                  sizeBytes: markdown.utf8.count, status: "ready")
+    }
+
+    func postCallEnded(sessionId: String, text: String, transcript: VoiceTranscriptAttachment?, clientId: String) async throws {
+        while lock.withLock({ holdEnd }) { try await Task.sleep(nanoseconds: 2_000_000) }
+        log.add("\(name) end")
+    }
+}
+
 @MainActor
 private final class BusyAudio: VoiceRoomAudioSession {
     func activate() throws { throw VoiceRoomAudioError.recognizerUnavailable }
@@ -508,6 +550,51 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         await room.hangUp()
         XCTAssertEqual(said, ["The call's transcript could not be saved to the room."])
         XCTAssertEqual(poster.endings, 1, "the call is still closed, without its file")
+    }
+
+    /// Warden (#267): a call whose ring never went out was never opened, so hanging up posts no end for it.
+    func test_a_call_that_was_never_rung_ends_without_an_end_message() async {
+        let poster = TroubledPoster(failsStart: true)
+        let room = room(with: ["pocket-forge"], listener: FakeListener(), speaker: FakeSpeaker(), audio: FakeAudio(),
+                        poster: poster)
+        room.begin()
+        await until("the ring failed") { room.state.notice != nil }
+        await room.hangUp()
+        XCTAssertEqual(poster.endings, 0, "no stray \"ended · 0 turns\"")
+        XCTAssertEqual(room.state.phase, .ended)
+    }
+
+    /// Warden (#267): the end waits for its start, and a new call's ring waits for the room's last end.
+    func test_the_end_never_lands_before_the_start_and_a_quick_recall_rings_after_the_old_end() async {
+        let log = OrderedPoster.Log()
+        let first = OrderedPoster("first", log: log, holdStart: true, holdEnd: false)
+        let call = room(with: ["pocket-forge"], handsFree: false, listener: FakeListener(), speaker: FakeSpeaker(),
+                        audio: FakeAudio(), poster: first)
+        call.begin()
+        let hanging = Task { await call.hangUp() }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(log.events, [], "the end waits while the start is still on its way")
+        first.release()
+        await hanging.value
+        XCTAssertEqual(log.events, ["first start", "first end"])
+
+        let slowEnd = OrderedPoster("second", log: log, holdEnd: true)
+        let second = room(with: ["pocket-forge"], handsFree: false, listener: FakeListener(), speaker: FakeSpeaker(),
+                          audio: FakeAudio(), poster: slowEnd)
+        second.begin()
+        await until("second rang") { log.events.count == 3 }
+        let closing = Task { await second.hangUp() }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+        let third = room(with: ["pocket-forge"], handsFree: false, listener: FakeListener(), speaker: FakeSpeaker(),
+                         audio: FakeAudio(), poster: OrderedPoster("third", log: log))
+        third.begin()
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(log.events.last, "second start", "the new ring waits for the old end")
+        slowEnd.release()
+        await closing.value
+        await until("third rang") { log.events.count == 5 }
+        XCTAssertEqual(Array(log.events.suffix(2)), ["second end", "third start"])
+        await third.hangUp()
     }
 
     func test_a_ring_that_could_not_be_sent_or_without_the_phones_audio_does_not_ring() async {

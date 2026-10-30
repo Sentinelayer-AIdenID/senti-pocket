@@ -125,5 +125,10 @@ final class RoomRosterTests: XCTestCase {
         XCTAssertEqual(agents?.active, 1)
         XCTAssertEqual(agents?.idle, 1)
         XCTAssertEqual(agents?.header, "Agents · 1 active · 1 idle · 0 offline")
+        // Warden (#269): the ring colours exactly what the count counts, by the same keys.
+        XCTAssertEqual(roster.activeKeys, ["claude-warden", RoomRoster.presenceKey(present[2])])
+        let withLogin = RoomChatPresence.Person(id: "human-8f2c", name: "Carter", isHuman: true, isIdle: false,
+                                                login: "mrrCarter")
+        XCTAssertEqual(RoomRoster.presenceKey(withLogin), "human-mrrcarter", "a person by the handle their posts carry")
     }
 }
