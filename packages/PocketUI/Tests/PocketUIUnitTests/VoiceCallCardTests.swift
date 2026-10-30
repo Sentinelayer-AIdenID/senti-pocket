@@ -61,6 +61,7 @@ final class VoiceCallCardTests: XCTestCase {
         ])
         XCTAssertEqual(live.cards["a"]?.isLive, true)
         XCTAssertEqual(live.cards["a"]?.summary(), "live · 1 turn")
+        XCTAssertEqual(live.kept.map(\.id), ["a", "b"], "a call not yet closed hides nothing an agent posts (warden)")
 
         let two = VoiceCallCard.fold([
             input("a", seq: 1, "human-mrrcarter", start, at: -5),
@@ -68,8 +69,25 @@ final class VoiceCallCardTests: XCTestCase {
             input("c", seq: 3, "human-mrrcarter", start, at: -3),
             input("d", seq: 4, "pocket-forge", "Again", at: -2)
         ])
-        XCTAssertEqual(two.kept.map(\.id), ["a", "c"])
+        XCTAssertEqual(two.kept.map(\.id), ["a", "b", "c", "d"], "neither call closed with its own message")
         XCTAssertEqual(two.cards["a"]?.isLive, false, "the second call closed the first")
+        XCTAssertEqual(two.cards["a"]?.turns.map(\.id), ["b"])
         XCTAssertEqual(two.cards["c"]?.turns.map(\.id), ["d"])
+    }
+
+    /// warden: a call the app never closed (it quit mid-call) must not hide agents' posts, and no call runs past
+    /// half an hour.
+    func test_an_unclosed_call_hides_nothing_and_a_call_stops_at_half_an_hour() {
+        let start = VoiceCallMarkers.start(caller: "mrrcarter", agents: ["pocket-forge"], meeting: false)
+        let folded = VoiceCallCard.fold([
+            input("a", seq: 1, "human-mrrcarter", start, at: -100),
+            input("b", seq: 2, "human-mrrcarter", "@pocket-forge spoken", at: -99, voice: true),
+            input("c", seq: 3, "pocket-forge", "An answer.", at: -98),
+            input("d", seq: 4, "pocket-forge", "Much later, unrelated to any call.", at: -40)
+        ])
+        XCTAssertEqual(folded.kept.map(\.id), ["a", "c", "d"], "only the spoken turn folds; the agent's posts stay")
+        XCTAssertEqual(folded.cards["a"]?.turns.map(\.id), ["b", "c"], "the card still lists the conversation")
+        XCTAssertEqual(folded.cards["a"]?.isLive, false, "past half an hour the call is over")
+        XCTAssertEqual(VoiceCallCard.longestCall, 30 * 60)
     }
 }
