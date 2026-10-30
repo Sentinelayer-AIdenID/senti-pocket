@@ -44,6 +44,45 @@ final class RoomRosterTests: XCTestCase {
         XCTAssertEqual(roster.members.map(\.status), roster.members.map(\.status).sorted(), "here first, then idle, gone, ended")
     }
 
+    /// Carter, #55524: "the presence indicator said I was idle and I moved to active but it kept my name in idle
+    /// still". Presence names a person `human-<user id>` with their login as the name; their posts are `human-<login>`.
+    func test_a_person_here_is_one_member_with_their_posts_and_here_if_any_device_is() throws {
+        let account = "human-6c1f2a9e-0b7d-4c55-9e2a-1f0d3b8a7c42"
+        let roster = RoomRoster.build(
+            posts: [post("human-mrrcarter", 2, human: true), post("human-mrrcarter", 30, human: true)],
+            present: [
+                RoomChatPresence.Person(id: account, name: "mrrCarter", isHuman: true, isIdle: true),
+                RoomChatPresence.Person(id: account, name: "mrrCarter", isHuman: true, isIdle: false)
+            ],
+            runningBoxes: [], endedBoxes: [], now: now
+        )
+        let people = roster.members.filter { $0.kind == .person }
+        XCTAssertEqual(people.count, 1, "not one here and one idle")
+        let carter = try XCTUnwrap(people.first)
+        XCTAssertEqual(carter.id, "human-mrrcarter")
+        XCTAssertEqual(carter.status, .here, "active on one device is here")
+        XCTAssertEqual(carter.posts, 2)
+    }
+
+    func test_a_person_without_a_login_matches_their_posts_by_account() throws {
+        let account = "human-0d9e8f7a-1111-4222-8333-944455556666"
+        let roster = RoomRoster.build(
+            posts: [post(account, 5, human: true)],
+            present: [RoomChatPresence.Person(id: account, name: "jake", isHuman: true, isIdle: false)],
+            runningBoxes: [], endedBoxes: [], now: now
+        )
+        XCTAssertEqual(roster.members.count, 1)
+        XCTAssertEqual(roster.members.first?.status, .here)
+        XCTAssertEqual(roster.members.first?.posts, 1)
+    }
+
+    func test_a_name_reads_as_the_login_a_post_carries() {
+        XCTAssertEqual(RoomRoster.login("mrrCarter"), "mrrcarter")
+        XCTAssertEqual(RoomRoster.login("Jane Doe!"), "jane-doe")
+        XCTAssertNil(RoomRoster.login(RoomChatViews.unnamedPerson))
+        XCTAssertNil(RoomRoster.login("!!"))
+    }
+
     func test_a_box_that_ended_but_runs_again_under_its_name_is_listed_once_as_running() {
         let roster = RoomRoster.build(
             posts: [], present: [],

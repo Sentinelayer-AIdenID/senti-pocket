@@ -132,6 +132,25 @@ public struct RoomRoster: Equatable, Sendable {
         return models
     }
 
+    /// A shown name as a post's author id has it (the server's `human-<login>`): lowercased, each run of other
+    /// characters one dash; nil for the unnamed viewer or nothing left.
+    static func login(_ name: String) -> String? {
+        guard name != RoomChatViews.unnamedPerson else { return nil }
+        var login = ""
+        var dash = false
+        for character in name.lowercased() {
+            if character.isASCII, character.isLetter || character.isNumber || character == "." || character == "_" || character == "-" {
+                login.append(character)
+                dash = false
+            } else if !dash {
+                login.append("-")
+                dash = true
+            }
+        }
+        let trimmed = login.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     public static func build(posts: [Post], present: [RoomChatPresence.Person], runningBoxes: [Box],
                              endedBoxes: Set<String>, now: Date) -> RoomRoster {
         struct Seen {
@@ -153,10 +172,20 @@ public struct RoomRoster: Equatable, Sendable {
             }
             seen[key] = entry
         }
-        let presence = Dictionary(present.map { ($0.id.lowercased(), $0) }, uniquingKeysWith: { first, _ in first })
-        for person in present where seen[person.id.lowercased()] == nil
-            && !RoomChatQuiet.systemAuthors.contains(person.id.lowercased()) {
-            seen[person.id.lowercased()] = Seen(name: person.name, isHuman: person.isHuman)
+        // Presence names a person by their account (`human-<user id>`, the server's unique key) and shows their login,
+        // while their posts are `human-<login>`: a person here who has posted is matched to their posts by login, so
+        // they are one member, not one here and one idle (Carter, #55524: "it kept my name in idle still").
+        func key(_ person: RoomChatPresence.Person) -> String {
+            let id = person.id.lowercased()
+            guard person.isHuman, seen[id] == nil, let login = Self.login(person.name), seen["human-\(login)"] != nil
+            else { return id }
+            return "human-\(login)"
+        }
+        let keyed = present.map { (key($0), $0) }
+        // One person on two devices or tabs is here if either is (as the server merges them).
+        let presence = Dictionary(keyed, uniquingKeysWith: { first, second in first.isIdle ? second : first })
+        for (key, person) in keyed where seen[key] == nil && !RoomChatQuiet.systemAuthors.contains(key) {
+            seen[key] = Seen(name: person.name, isHuman: person.isHuman)
         }
         let boxes = Dictionary(runningBoxes.map { ($0.name.lowercased(), $0) }, uniquingKeysWith: { first, _ in first })
         for box in runningBoxes where seen[box.name.lowercased()] == nil {
