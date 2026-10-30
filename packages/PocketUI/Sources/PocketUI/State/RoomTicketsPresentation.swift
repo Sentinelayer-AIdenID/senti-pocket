@@ -112,6 +112,20 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
     /// `done`, or `killed`, the API's other final status.
     public var isArchived: Bool { status == "done" || status == "killed" }
 
+    /// Someone is on it now: working, or in review, or held by a live lease (Carter, #55238: "the ones that are
+    /// currently being worked on should be atop with a progress bar").
+    public var isBeingWorkedOn: Bool {
+        !isArchived && (["working", "in_progress", "in_review"].contains(status) || lease?.isLive == true)
+    }
+
+    /// How far along a ticket being worked on is, by its stage: started, then in review. Carter asked for the signal
+    /// layer to judge this from everything happening in the room; until the API carries that estimate, the stage is
+    /// the honest number.
+    public var stageProgress: Double? {
+        guard isBeingWorkedOn else { return nil }
+        return status == "in_review" ? 0.85 : 0.45
+    }
+
     public var statusLabel: String {
         switch status {
         case "in_review": return "In review"
@@ -284,6 +298,8 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
 
     /// P0 first, unprioritised last; then the most recently changed.
     static func byImpact(_ lhs: RoomTicketRow, _ rhs: RoomTicketRow) -> Bool {
+        // Tickets being worked on come first (Carter, #55238), then by priority and the newest change.
+        if lhs.isBeingWorkedOn != rhs.isBeingWorkedOn { return lhs.isBeingWorkedOn }
         let left = lhs.priority ?? 9
         let right = rhs.priority ?? 9
         if left != right { return left < right }
