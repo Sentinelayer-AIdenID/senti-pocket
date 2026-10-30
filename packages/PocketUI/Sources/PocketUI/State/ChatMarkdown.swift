@@ -11,11 +11,42 @@ public enum ChatMarkdownBlock: Equatable, Sendable {
     case quote([ChatMarkdownBlock])
     case code(language: String?, text: String)
     case rule
+    case table(ChatMarkdownTable)
+}
+
+/// A GitHub-style table: a header row, a delimiter row that sets each column's alignment, then body rows. Every row
+/// has the header's number of cells (short rows are filled, extra cells dropped), as GitHub renders them.
+public struct ChatMarkdownTable: Equatable, Sendable {
+    public enum Alignment: Equatable, Sendable { case leading, center, trailing }
+
+    public let header: [String]
+    public let alignments: [Alignment]
+    public let rows: [[String]]
+
+    /// A column's width on screen: as wide as its longest cell reads, up to `maximum`, so long cells wrap.
+    public func columnWidths(perCharacter: Double = 7.6, padding: Double = 20, minimum: Double = 56, maximum: Double = 240) -> [Double] {
+        header.indices.map { column in
+            let longest = ([header] + rows).map { $0[column].count }.max() ?? 0
+            return min(max(Double(longest) * perCharacter + padding, minimum), maximum)
+        }
+    }
 }
 
 public struct ChatMarkdownListItem: Equatable, Sendable {
     public let depth: Int
     public let text: String
+
+    /// A GitHub task item's state and text: "[ ] open" or "[x] done".
+    public static func task(_ text: String) -> (done: Bool, text: String)? {
+        guard text.count >= 4, text.hasPrefix("["), text.dropFirst(2).first == "]", text.dropFirst(3).first == " " else {
+            return nil
+        }
+        switch text.dropFirst().first {
+        case " ": return (false, String(text.dropFirst(4)))
+        case "x", "X": return (true, String(text.dropFirst(4)))
+        default: return nil
+        }
+    }
 }
 
 public enum ChatMarkdown {
@@ -103,6 +134,13 @@ public enum ChatMarkdown {
                 continue
             }
 
+            if let table = table(lines, at: index) {
+                flushParagraph()
+                blocks.append(.table(table.table))
+                index = table.next
+                continue
+            }
+
             if let first = listItem(line) {
                 flushParagraph()
                 var items: [ChatMarkdownListItem] = [ChatMarkdownListItem(depth: first.depth, text: first.text)]
@@ -145,6 +183,70 @@ public enum ChatMarkdown {
         let compact = line.replacingOccurrences(of: " ", with: "")
         guard compact.count >= 3, let first = compact.first, "-*_".contains(first) else { return false }
         return compact.allSatisfy { $0 == first }
+    }
+
+    /// A table starts where a line with a pipe is followed by a delimiter row of as many cells (`| --- | :-: |`), and
+    /// runs until a blank line or a line without a pipe.
+    private static func table(_ lines: [String], at index: Int) -> (table: ChatMarkdownTable, next: Int)? {
+        guard index + 1 < lines.count, lines[index].contains("|") else { return nil }
+        let header = tableCells(lines[index])
+        guard !header.isEmpty, let alignments = tableAlignments(lines[index + 1]), alignments.count == header.count else {
+            return nil
+        }
+        var rows: [[String]] = []
+        var next = index + 2
+        while next < lines.count {
+            let line = lines[next]
+            guard line.contains("|"), !line.trimmingCharacters(in: .whitespaces).isEmpty else { break }
+            let cells = tableCells(line)
+            rows.append(Array((cells + Array(repeating: "", count: max(0, header.count - cells.count))).prefix(header.count)))
+            next += 1
+        }
+        return (ChatMarkdownTable(header: header, alignments: alignments, rows: rows), next)
+    }
+
+    /// A row's cells: split on pipes not escaped with a backslash, the outer pipes optional, each cell trimmed.
+    private static func tableCells(_ line: String) -> [String] {
+        var cells: [String] = []
+        var cell = ""
+        var escaped = false
+        for character in line.trimmingCharacters(in: .whitespaces) {
+            if escaped {
+                // An escaped pipe is a pipe in the cell; any other escape stays for the inline Markdown.
+                if character != "|" { cell.append("\\") }
+                cell.append(character)
+                escaped = false
+            } else if character == "\\" {
+                escaped = true
+            } else if character == "|" {
+                cells.append(cell)
+                cell = ""
+            } else {
+                cell.append(character)
+            }
+        }
+        if escaped { cell.append("\\") }
+        cells.append(cell)
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("|"), !cells.isEmpty { cells.removeFirst() }
+        if trimmed.hasSuffix("|"), !trimmed.hasSuffix("\\|"), !cells.isEmpty { cells.removeLast() }
+        return cells.map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    /// The delimiter row's alignments (`---`, `:--`, `:-:`, `--:`), or nil when the line is not one.
+    private static func tableAlignments(_ line: String) -> [ChatMarkdownTable.Alignment]? {
+        guard line.contains("-") else { return nil }
+        let cells = tableCells(line)
+        guard !cells.isEmpty, line.contains("|") else { return nil }
+        var alignments: [ChatMarkdownTable.Alignment] = []
+        for cell in cells {
+            let left = cell.hasPrefix(":")
+            let right = cell.hasSuffix(":")
+            let dashes = cell.dropFirst(left ? 1 : 0).dropLast(right && cell.count > 1 ? 1 : 0)
+            guard !dashes.isEmpty, dashes.allSatisfy({ $0 == "-" }) else { return nil }
+            alignments.append(left && right ? .center : (right ? .trailing : .leading))
+        }
+        return alignments
     }
 
     private static func listItem(_ line: String) -> (ordered: Bool, number: Int?, depth: Int, text: String)? {

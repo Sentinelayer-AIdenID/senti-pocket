@@ -88,10 +88,18 @@ private struct ChatMarkdownBlocksView: View {
             VStack(alignment: .leading, spacing: 3) {
                 ForEach(Array(items.enumerated()), id: \.offset) { offset, item in
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(ordered ? "\(start + offset)." : (item.depth == 0 ? "•" : "◦"))
-                            .monospacedDigit()
-                            .foregroundStyle(PocketPalette.textSecondary)
-                        inline(item.text)
+                        // A task item ("- [ ] ..." / "- [x] ...") shows its box, as GitHub does.
+                        if let task = ChatMarkdownListItem.task(item.text) {
+                            Image(systemName: task.done ? "checkmark.square.fill" : "square")
+                                .foregroundStyle(task.done ? PocketPalette.verified : PocketPalette.textSecondary)
+                                .accessibilityLabel(task.done ? "Done" : "Not done")
+                            inline(task.text)
+                        } else {
+                            Text(ordered ? "\(start + offset)." : (item.depth == 0 ? "•" : "◦"))
+                                .monospacedDigit()
+                                .foregroundStyle(PocketPalette.textSecondary)
+                            inline(item.text)
+                        }
                     }
                     .padding(.leading, CGFloat(item.depth) * 16)
                 }
@@ -118,7 +126,60 @@ private struct ChatMarkdownBlocksView: View {
             )
         case .rule:
             Divider().padding(.vertical, 4)
+        case .table(let table):
+            tableView(table)
         }
+    }
+
+    /// A table as a grid with a shaded header row and lines between rows (Carter, #55366). Each column is as wide as
+    /// its longest cell up to a cap, so long cells wrap, and a table wider than the screen scrolls inside itself.
+    private func tableView(_ table: ChatMarkdownTable) -> some View {
+        let widths = table.columnWidths()
+        return ScrollView(.horizontal, showsIndicators: false) {
+            Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
+                GridRow {
+                    ForEach(Array(table.header.enumerated()), id: \.offset) { column, text in
+                        tableCell(text, width: widths[column], alignment: table.alignments[column])
+                            .font(.subheadline.weight(.semibold))
+                    }
+                }
+                .background(PocketPalette.inset)
+                ForEach(Array(table.rows.prefix(Self.maximumTableRows).enumerated()), id: \.offset) { _, row in
+                    Divider()
+                    GridRow {
+                        ForEach(Array(row.enumerated()), id: \.offset) { column, text in
+                            tableCell(text, width: widths[column], alignment: table.alignments[column])
+                                .font(.subheadline)
+                        }
+                    }
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(PocketPalette.separator, lineWidth: 0.5)
+            )
+            .padding(.vertical, 2)
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    /// More rows than this are left out on the phone; the whole message is in its long view and on the web.
+    private static let maximumTableRows = 200
+
+    private func tableCell(_ text: String, width: Double, alignment: ChatMarkdownTable.Alignment) -> some View {
+        let frameAlignment: Alignment
+        let textAlignment: TextAlignment
+        switch alignment {
+        case .leading: (frameAlignment, textAlignment) = (.leading, .leading)
+        case .center: (frameAlignment, textAlignment) = (.center, .center)
+        case .trailing: (frameAlignment, textAlignment) = (.trailing, .trailing)
+        }
+        return inline(text)
+            .multilineTextAlignment(textAlignment)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .frame(width: width, alignment: frameAlignment)
     }
 
     private func inline(_ text: String) -> some View {
