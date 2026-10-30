@@ -303,7 +303,11 @@ struct LastRun: Codable, Equatable {
     /// The report for a run that ended while active; nil for one that ended inactive or in the background.
     func closedReport(system: String, device: String) -> CrashReport? {
         guard isActive else { return nil }
-        var lines = ["On screen, then gone, with no crash of its own: the system ended it, most often for memory."]
+        // With memory to spare, the likeliest end is a freeze the system ended (the watchdog), not a memory kill.
+        let memoryWasShort = availableMB.map { $0 < 200 } ?? true
+        var lines = [memoryWasShort
+            ? "On screen, then gone, with no crash of its own: the system ended it, most often for memory."
+            : "On screen, then gone, with no crash of its own and memory to spare: most likely the app stopped responding and the system ended it."]
         if let footprintMB {
             var memory = "Memory at \(CrashReportText.clock(updatedAt)): \(footprintMB) MB in use"
             if let peakFootprintMB, peakFootprintMB > footprintMB { memory += " (peak \(peakFootprintMB) MB)" }

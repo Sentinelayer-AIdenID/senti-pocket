@@ -516,43 +516,67 @@ struct RoomChatScreen: View {
         .onChange(of: coordinator.state.presence) { _ in
             if showsFlight { flight.setAgents(flightAgents) }
         }
-        .navigationDestination(isPresented: $showsAdmissions) {
+        // Agent requests, Tickets and Breakouts open as sheets over the room, never pushed onto its navigation. Pushed
+        // from the toolbar's overflow, Tickets froze the app in an endless layout pass on iOS 26 until the system
+        // ended it (Carter's crash report, 10-30; reproduced on the simulator, and gone as a sheet): the room kept
+        // re-rendering under the pushed screen and rebuilt it, and its search bar changed the room's layout again.
+        .sheet(isPresented: $showsAdmissions) {
             if let admissionsTransport, let admissionDecider {
-                AdmissionsScreen(
-                    sessionId: route.sessionId,
-                    transport: admissionsTransport,
-                    decider: admissionDecider,
-                    onReauthenticationRequired: onReauthenticationRequired
-                )
+                NavigationStack {
+                    AdmissionsScreen(
+                        sessionId: route.sessionId,
+                        transport: admissionsTransport,
+                        decider: admissionDecider,
+                        onReauthenticationRequired: onReauthenticationRequired
+                    )
+                    .toolbar { doneButton { showsAdmissions = false } }
+                }
                 .environment(\.openURL, linkAction)
             }
         }
         .onChange(of: showsTickets) { shown in
-            if !shown { ticketsStartFiling = false }
+            if shown {
+                CrashReporter.shared.note("tickets opened")
+            } else {
+                ticketsStartFiling = false
+            }
         }
-        .navigationDestination(isPresented: $showsTickets) {
+        .onChange(of: showsAdmissions) { shown in if shown { CrashReporter.shared.note("agent requests opened") } }
+        .onChange(of: showsBreakouts) { shown in if shown { CrashReporter.shared.note("breakouts opened") } }
+        .onChange(of: choosesVoicePartner) { shown in if shown { CrashReporter.shared.note("talk opened") } }
+        .sheet(isPresented: $showsTickets) {
             if let ticketsTransport {
-                RoomTicketsScreen(
-                    sessionId: route.sessionId,
-                    transport: ticketsTransport,
-                    sender: ticketAnswerSender,
-                    writer: writesTickets ? ticketWriter : nil,
-                    leases: ticketLeases,
-                    identity: identity,
-                    assignRoster: ticketAssignRoster,
-                    extras: ticketExtras,
-                    mint: writesTickets ? ticketMint : nil,
-                    startsFiling: ticketsStartFiling,
-                    onOpenMessage: { sequence in focus(on: sequence) },
-                    onReauthenticationRequired: onReauthenticationRequired
-                )
+                NavigationStack {
+                    RoomTicketsScreen(
+                        sessionId: route.sessionId,
+                        transport: ticketsTransport,
+                        sender: ticketAnswerSender,
+                        writer: writesTickets ? ticketWriter : nil,
+                        leases: ticketLeases,
+                        identity: identity,
+                        assignRoster: ticketAssignRoster,
+                        extras: ticketExtras,
+                        mint: writesTickets ? ticketMint : nil,
+                        startsFiling: ticketsStartFiling,
+                        onOpenMessage: { sequence in
+                            // The sheet closes first, then the room goes to the message.
+                            showsTickets = false
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { focus(on: sequence) }
+                        },
+                        onReauthenticationRequired: onReauthenticationRequired
+                    )
+                    .toolbar { doneButton { showsTickets = false } }
+                }
                 .environment(\.openURL, linkAction)
             }
         }
-        .navigationDestination(isPresented: $showsBreakouts) {
-            RoomBreakoutsView(cards: Array(coordinator.state.breakouts.values)) { childSessionId in
-                showsBreakouts = false
-                openBreakout(childSessionId)
+        .sheet(isPresented: $showsBreakouts) {
+            NavigationStack {
+                RoomBreakoutsView(cards: Array(coordinator.state.breakouts.values)) { childSessionId in
+                    showsBreakouts = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { openBreakout(childSessionId) }
+                }
+                .toolbar { doneButton { showsBreakouts = false } }
             }
         }
         // Room-wide actions sit under the room's title, so the toolbar keeps its width.
@@ -671,6 +695,13 @@ struct RoomChatScreen: View {
             }
         }
         .onReceive(callDesk.$waiting) { _ in takeAnsweredCall() }
+    }
+
+    /// Done, on a screen shown as a sheet over the room.
+    private func doneButton(_ close: @escaping () -> Void) -> some ToolbarContent {
+        ToolbarItem(placement: .cancellationAction) {
+            Button("Done", action: close)
+        }
     }
 
     /// Offers the unsent crash reports where they can be posted: in a room you can write in, with nothing else asked.

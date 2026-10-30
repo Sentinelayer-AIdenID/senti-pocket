@@ -187,6 +187,8 @@ private struct AuthenticatedRootView: View {
     @State private var currentRoom: RoomRoute?
     @State private var roomPath: [RoomRoute] = []
     @State private var drawerOpen = false
+    /// How far the room card moves right when the side panel opens; the panel fits in that space.
+    private static let drawerWidth: CGFloat = 300
     @State private var presentsPocket = false
     @State private var presentsActivity = false
     @State private var accountName: String?
@@ -327,9 +329,10 @@ private struct AuthenticatedRootView: View {
     var body: some View {
         ZStack(alignment: .leading) {
             // The side panel sits underneath; opening it pushes the room aside as a card (Carter #55006).
+            // The panel ends before the room card begins, so its right edge (unread counts, See all) is never under it.
             sidePanel
-                .frame(maxWidth: 330)
-                .padding(.trailing, 48)
+                .frame(width: Self.drawerWidth - 14)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .opacity(drawerOpen ? 1 : 0)
                 .allowsHitTesting(drawerOpen)
                 .accessibilityHidden(!drawerOpen)
@@ -371,7 +374,7 @@ private struct AuthenticatedRootView: View {
             .clipShape(RoundedRectangle(cornerRadius: drawerOpen ? 28 : 0, style: .continuous))
             .shadow(color: .black.opacity(drawerOpen ? 0.28 : 0), radius: 20, x: -6)
             .scaleEffect(drawerOpen ? 0.9 : 1, anchor: .leading)
-            .offset(x: drawerOpen ? 300 : 0)
+            .offset(x: drawerOpen ? Self.drawerWidth : 0)
             .ignoresSafeArea(edges: drawerOpen ? .vertical : [])
         }
         .pocketCanvas()
