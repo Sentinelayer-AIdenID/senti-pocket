@@ -735,7 +735,8 @@ private struct RoomMessageRowView: View {
             }
             .padding(.vertical, 6)
         case .memberJoined:
-            Text("\(row.authorName) joined the room")
+            // Who joined, by the name the server gives; never the server itself.
+            Text("\(row.text.isEmpty ? "Someone" : row.text) joined the room")
                 .font(.footnote)
                 .foregroundStyle(PocketPalette.textSecondary)
                 .frame(maxWidth: .infinity)

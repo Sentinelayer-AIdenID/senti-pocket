@@ -112,7 +112,12 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
             text = (payload["message"]?.stringValue ?? payload["text"]?.stringValue ?? "")
         case .checkpoint:
             text = (payload["title"]?.stringValue ?? payload["summary"]?.stringValue ?? "Checkpoint")
-        case .memberJoined, .breakoutOpened:
+        case .memberJoined:
+            // The server posts a join as itself; who joined is the payload's name (Carter, 10-30: the web said
+            // "Joel joined", the phone "senti joined"). One line, as the web shows it.
+            text = String((payload["displayName"]?.stringValue ?? "")
+                .split(whereSeparator: { $0.isWhitespace || $0.isNewline }).joined(separator: " ").prefix(80))
+        case .breakoutOpened:
             text = ""
         case .breakoutOutcome:
             text = payload["text"]?.stringValue ?? ""
