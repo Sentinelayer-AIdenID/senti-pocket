@@ -186,6 +186,9 @@ private struct AuthenticatedRootView: View {
     @StateObject private var revocationRelay: AuthenticatedSessionRevocationRelay
     @StateObject private var notifications: NotificationsCoordinator
     @State private var presentsNotifications = false
+    /// Your calls across your rooms: "Calls & briefings" (Carter, 10-30).
+    @StateObject private var callLog: CallLogCoordinator
+    @State private var presentsCallLog = false
     /// What waits on your decision across your rooms (ticket 931e1d2e).
     @StateObject private var waiting: WaitingOnYouCoordinator
     @State private var presentsWaiting = false
@@ -316,6 +319,10 @@ private struct AuthenticatedRootView: View {
         )
         _notifications = StateObject(wrappedValue: notifications)
         _roomReads = StateObject(wrappedValue: RoomReadTracker(notifications: notifications))
+        _callLog = StateObject(wrappedValue: CallLogCoordinator(
+            transport: transport,
+            onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
+        ))
         _waiting = StateObject(wrappedValue: WaitingOnYouCoordinator(
             transport: transport,
             sender: HTTPRoomMessageSender(apiBaseURL: apiURL),
@@ -473,6 +480,29 @@ private struct AuthenticatedRootView: View {
                     Task { await notifications.refresh(force: true) }
                 case .close:
                     presentsNotifications = false
+                }
+            }
+        }
+        .sheet(isPresented: $presentsCallLog) {
+            CallLogView(state: callLog.state, readingId: readingCallId) { intent in
+                switch intent {
+                case .refresh:
+                    Task { await callLog.refresh() }
+                case .loadMore:
+                    Task { await callLog.loadMore() }
+                case .open(let id):
+                    guard let link = callLog.link(for: id) else { return }
+                    presentsCallLog = false
+                    open(link)
+                case .listen(let id):
+                    if readingCallId == id {
+                        messageReader.stop()
+                    } else if let readable = callLog.readable(id) {
+                        ReadAloudSource.shared.reading(in: readable.sessionId)
+                        _ = messageReader.read(id: "call:" + id, markdown: readable.markdown, title: readable.title)
+                    }
+                case .close:
+                    presentsCallLog = false
                 }
             }
         }
@@ -673,7 +703,8 @@ private struct AuthenticatedRootView: View {
             },
             onCalls: {
                 closeDrawer()
-                presentsPocket = true
+                presentsCallLog = true
+                Task { await callLog.refresh() }
             },
             onActivity: {
                 closeDrawer()
@@ -717,10 +748,16 @@ private struct AuthenticatedRootView: View {
         )
     }
 
+    /// The call whose summary is being read aloud, if any.
+    private var readingCallId: String? {
+        guard let id = messageReader.readingId, id.hasPrefix("call:") else { return nil }
+        return String(id.dropFirst("call:".count))
+    }
+
     /// Something over the room: a sheet, or the side panel.
     private var roomCovered: Bool {
         drawerOpen || presentsNotifications || presentsWaiting || presentsPocket || presentsActivity || presentsSettings
-            || presentsNewRoom
+            || presentsNewRoom || presentsCallLog
     }
 
     /// The room list has loaded or failed, so a room opened from a link knows its title and your role in it.
