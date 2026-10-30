@@ -178,6 +178,22 @@ struct RoomChatScreen: View {
         return Array(ids.prefix(8))
     }
 
+    /// Whose message (or reply) is being read, for the player.
+    private func readAloudTitle(for id: String) -> String? {
+        if id.hasPrefix("msg:"), let sequence = Int64(id.dropFirst("msg:".count)),
+           case .message(let message)? = coordinator.state.messageRow(for: sequence) {
+            return message.authorName
+        }
+        if id.hasPrefix("reply:") {
+            let replyId = String(id.dropFirst("reply:".count))
+            for row in coordinator.state.rows {
+                if case .message(let message) = row, message.inlineReplyId == replyId { return message.authorName }
+            }
+            return coordinator.state.thread?.replies.first { $0.id == replyId }?.authorName
+        }
+        return nil
+    }
+
     private func startVoiceRoom(with agents: [String]) {
         guard voiceRoom == nil, let voicePoster else { return }
         reader.stop()
@@ -255,7 +271,7 @@ struct RoomChatScreen: View {
             } else if case .openAttachment(let attachmentId) = intent {
                 openAttachment(attachmentId)
             } else if case .readAloud(let id, let text) = intent {
-                if reader.read(id: id, markdown: text) == .unavailable {
+                if reader.read(id: id, markdown: text, title: readAloudTitle(for: id)) == .unavailable {
                     listenProblem = "A call or briefing is using the audio. Listen when it ends."
                 }
             } else if intent == .stopReadingAloud {
@@ -352,6 +368,29 @@ struct RoomChatScreen: View {
             }
         }
         .animation(.spring(response: 0.32, dampingFraction: 0.9), value: voiceRoom != nil)
+        .overlay(alignment: .bottom) {
+            // The Listen player: above the composer while a message is read (a voice room speaks on its own).
+            if voiceRoom == nil, let playback = reader.playback {
+                ReadAloudBar(state: ReadAloudBarState(
+                    title: playback.title,
+                    isPaused: playback.isPaused,
+                    elapsedBefore: playback.elapsedBefore,
+                    sentenceStartedAt: playback.sentenceStartedAt,
+                    sentenceLength: playback.sentenceLength,
+                    total: playback.total,
+                    hasGoodVoice: playback.hasGoodVoice
+                )) { action in
+                    switch action {
+                    case .togglePause: if playback.isPaused { reader.resume() } else { reader.pause() }
+                    case .skip(let seconds): reader.skip(by: seconds)
+                    case .close: reader.stop()
+                    }
+                }
+                .padding(.bottom, 72)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.spring(response: 0.3, dampingFraction: 0.9), value: reader.playback == nil)
         .confirmationDialog("Talk with", isPresented: $choosesVoicePartner, titleVisibility: .visible) {
             ForEach(voicePartners, id: \.self) { agent in
                 Button(agent) { startVoiceRoom(with: [agent]) }

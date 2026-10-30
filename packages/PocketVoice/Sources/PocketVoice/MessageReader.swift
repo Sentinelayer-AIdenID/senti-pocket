@@ -3,6 +3,27 @@ import Combine
 import Foundation
 import NaturalLanguage
 
+/// Where a reading is, for the player bar: estimated from the text (the phone's voices cannot say how long they will
+/// take), corrected as each sentence starts.
+public struct ReadAloudPlayback: Equatable, Sendable {
+    public let id: String
+    /// Whose message, when known.
+    public let title: String?
+    public let isPaused: Bool
+    /// Seconds read before the current sentence (or before the pause), and when the current sentence started.
+    public let elapsedBefore: TimeInterval
+    public let sentenceStartedAt: Date?
+    public let sentenceLength: TimeInterval
+    public let total: TimeInterval
+    /// False when only a standard voice is installed for the language: a better one can be downloaded in Settings.
+    public let hasGoodVoice: Bool
+
+    public func elapsed(at now: Date) -> TimeInterval {
+        guard let sentenceStartedAt else { return min(total, elapsedBefore) }
+        return min(total, elapsedBefore + min(sentenceLength, max(0, now.timeIntervalSince(sentenceStartedAt))))
+    }
+}
+
 /// Reads chat messages aloud with the phone's own voices, one at a time, like the web's Listen (sentinelayer-web
 /// `ListenButton`): reading another message stops the first.
 ///
@@ -29,6 +50,20 @@ public final class MessageReader: ObservableObject {
 
     /// What is being read, by the id given to `read`.
     @Published public private(set) var readingId: String?
+    /// The player bar's state while something is read.
+    @Published public private(set) var playback: ReadAloudPlayback?
+
+    /// The reading's sentences, each one's estimated start and length, and where it is.
+    private var segments: [SpeechText.Segment] = []
+    private var starts: [TimeInterval] = []
+    private var lengths: [TimeInterval] = []
+    private var current = 0
+    private var voiceIdentifier: String?
+    private var language = "en"
+    private var title: String?
+    private var hasGoodVoice = true
+    /// Characters a voice says in a second at the reading rate, before any correction.
+    static let charactersPerSecond: Double = 14.5
 
     private let engine: any MessageSpeechEngine
     private let sessions: DuplexAudioSessionLeaseManager
@@ -72,7 +107,7 @@ public final class MessageReader: ObservableObject {
     /// Reads a message aloud from the start, `markdown` being the text its row shows. Whatever was being read stops,
     /// the same message included (it starts over).
     @discardableResult
-    public func read(id: String, markdown: String) -> Outcome {
+    public func read(id: String, markdown: String, title: String? = nil) -> Outcome {
         let spoken = SpeechText.spoken(fromMarkdown: markdown)
         let segments = SpeechText.segments(spoken)
         guard !segments.isEmpty else { return .nothingToSay }
@@ -92,25 +127,101 @@ public final class MessageReader: ObservableObject {
                 return .unavailable
             }
         }
-        readingToken += 1
-        let token = readingToken
         readingId = id
         let phone = phoneLanguageTag()
         let language = VoicePicker.language(of: spoken, phoneLanguageTag: phone)
-        engine.speak(
-            segments,
-            voiceIdentifier: VoicePicker.voice(for: language, phoneLanguageTag: phone, from: voices()),
-            language: language
-        ) { [weak self] in
+        let installed = voices()
+        let ranked = VoicePicker.ranked(for: language, phoneLanguageTag: phone, from: installed)
+        self.segments = segments
+        self.language = language
+        self.title = title
+        voiceIdentifier = ranked.first?.identifier
+        hasGoodVoice = ranked.isEmpty || (ranked.first?.quality ?? .standard) > .standard
+        lengths = segments.map { Double($0.text.count) / Self.charactersPerSecond + $0.pauseAfter }
+        var running: TimeInterval = 0
+        starts = lengths.map { length in defer { running += length }; return running }
+        speak(from: 0)
+        return .started
+    }
+
+    /// Speaks from sentence `index` to the end, keeping the audio session.
+    private func speak(from index: Int) {
+        readingToken += 1
+        let token = readingToken
+        current = index
+        engine.segmentStarted = { [weak self] offset in self?.sentenceStarted(index + offset, token) }
+        engine.speak(Array(segments[index...]), voiceIdentifier: voiceIdentifier, language: language) { [weak self] in
             self?.finished(token)
         }
-        return .started
+        publishPlayback(startedAt: Date(), paused: false)
+    }
+
+    private func sentenceStarted(_ index: Int, _ token: Int) {
+        guard token == readingToken, readingId != nil, index < segments.count else { return }
+        current = index
+        publishPlayback(startedAt: Date(), paused: false)
+    }
+
+    private func publishPlayback(startedAt: Date?, paused: Bool, elapsedBefore: TimeInterval? = nil, length: TimeInterval? = nil) {
+        guard let readingId, current < segments.count else { return }
+        playback = ReadAloudPlayback(
+            id: readingId,
+            title: title,
+            isPaused: paused,
+            elapsedBefore: elapsedBefore ?? starts[current],
+            sentenceStartedAt: startedAt,
+            sentenceLength: length ?? lengths[current],
+            total: (starts.last ?? 0) + (lengths.last ?? 0),
+            hasGoodVoice: hasGoodVoice
+        )
+    }
+
+    /// Pauses at the end of the current word.
+    public func pause() {
+        guard readingId != nil, let playback, !playback.isPaused else { return }
+        let elapsed = playback.elapsed(at: Date())
+        engine.pause()
+        publishPlayback(startedAt: nil, paused: true, elapsed: elapsed)
+    }
+
+    public func resume() {
+        guard readingId != nil, let playback, playback.isPaused else { return }
+        engine.resume()
+        let end = starts[current] + lengths[current]
+        publishPlayback(startedAt: Date(), paused: false, elapsedBefore: playback.elapsedBefore,
+                        length: max(0, end - playback.elapsedBefore))
+    }
+
+    /// Moves `seconds` back or forward, to the start of the sentence there: a sentence is never cut in half.
+    public func skip(by seconds: TimeInterval) {
+        guard readingId != nil, let playback, !segments.isEmpty else { return }
+        let wanted = playback.elapsed(at: Date()) + seconds
+        // Forward past the end finishes the reading.
+        guard wanted < playback.total else {
+            stop()
+            return
+        }
+        let target = max(0, wanted)
+        var index = starts.lastIndex { $0 <= target } ?? 0
+        if seconds > 0, index <= current { index = current + 1 }
+        guard index < segments.count else {
+            stop()
+            return
+        }
+        engine.stop()
+        speak(from: index)
+    }
+
+    private func publishPlayback(startedAt: Date?, paused: Bool, elapsed: TimeInterval) {
+        let end = starts[current] + lengths[current]
+        publishPlayback(startedAt: startedAt, paused: paused, elapsedBefore: elapsed, length: max(0, end - elapsed))
     }
 
     /// Stops reading, if anything is being read, and gives the audio session back.
     public func stop() {
         guard readingId != nil else { return }
         readingId = nil
+        playback = nil
         readingToken += 1
         engine.stop()
         if let lease {
@@ -132,6 +243,7 @@ public final class MessageReader: ObservableObject {
     private func finished(_ token: Int) {
         guard token == readingToken, readingId != nil else { return }
         readingId = nil
+        playback = nil
         if let lease {
             self.lease = nil
             sessions.releasePlayback(lease)
@@ -184,6 +296,11 @@ protocol MessageSpeechEngine: AnyObject {
         finished: @escaping @MainActor () -> Void
     )
     func stop()
+    /// Pauses at the end of the current word, and goes on from there.
+    func pause()
+    func resume()
+    /// Called with each segment's index (in the list last given to `speak`) as it starts.
+    var segmentStarted: (@MainActor (Int) -> Void)? { get set }
 }
 
 /// One installed voice, as much as the choice needs.
@@ -283,7 +400,9 @@ final class AVMessageSpeechEngine: NSObject, MessageSpeechEngine, AVSpeechSynthe
     /// A new synthesizer for each reading: speaking right after stopping the same one can lose the new speech.
     private var synthesizer: AVSpeechSynthesizer?
     private var lastUtterance: AVSpeechUtterance?
+    private var utterances: [AVSpeechUtterance] = []
     private var finished: (@MainActor () -> Void)?
+    var segmentStarted: (@MainActor (Int) -> Void)?
 
     func speak(
         _ segments: [SpeechText.Segment],
@@ -303,6 +422,7 @@ final class AVMessageSpeechEngine: NSObject, MessageSpeechEngine, AVSpeechSynthe
             utterance.postUtteranceDelay = segment.pauseAfter
             synthesizer.speak(utterance)
             lastUtterance = utterance
+            utterances.append(utterance)
         }
         self.finished = finished
     }
@@ -310,8 +430,24 @@ final class AVMessageSpeechEngine: NSObject, MessageSpeechEngine, AVSpeechSynthe
     func stop() {
         finished = nil
         lastUtterance = nil
+        utterances = []
         synthesizer?.stopSpeaking(at: .immediate)
         synthesizer = nil
+    }
+
+    func pause() {
+        synthesizer?.pauseSpeaking(at: .word)
+    }
+
+    func resume() {
+        synthesizer?.continueSpeaking()
+    }
+
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
+        MainActor.assumeIsolated {
+            guard let index = utterances.firstIndex(where: { $0 === utterance }) else { return }
+            segmentStarted?(index)
+        }
     }
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
