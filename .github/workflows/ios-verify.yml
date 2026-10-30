@@ -2,7 +2,9 @@ name: iOS Verify
 
 on:
   workflow_dispatch:
+  # Pushes verify master only; stacked branches are verified once, through their pull requests.
   push:
+    branches: [master]
     paths:
       - ".gitattributes"
       - ".github/workflows/ios-verify.yml"
@@ -35,7 +37,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ios-verify-${{ github.workflow }}-${{ github.ref }}
+  # One run per pull request (or per branch for master): a new push cancels the run it supersedes.
+  group: ios-verify-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
