@@ -439,6 +439,8 @@ struct RoomChatScreen: View {
                 coordinator.send(intent)
             }
         }
+        // A call's window covers the room: its moving parts (the presence ring) rest underneath (warden, #265).
+        .environment(\.roomIsCovered, voiceRoom != nil)
         .toolbar {
             if voicePoster != nil {
                 ToolbarItem(placement: .navigationBarTrailing) {
