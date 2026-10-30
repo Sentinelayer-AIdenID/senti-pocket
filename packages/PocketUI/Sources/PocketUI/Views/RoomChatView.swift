@@ -27,6 +27,8 @@ public struct RoomChatView: View {
     @State private var openCheckpoint: RoomChatMessageRow?
     /// Your own message being edited.
     @State private var editingRow: RoomChatMessageRow?
+    /// A long message opened in full.
+    @State private var longRow: RoomChatMessageRow?
     /// "Jump to latest" from a window further back: scroll to the bottom once the live room has loaded.
     @State private var scrollsToLatestWhenLoaded = false
     @State private var highlightedRowId: String?
@@ -92,6 +94,9 @@ public struct RoomChatView: View {
         }
         .sheet(item: $openCheckpoint) { row in
             CheckpointSheet(row: row, send: send)
+        }
+        .sheet(item: $longRow) { row in
+            LongMessageSheet(row: row, ownHandles: state.ownMentionHandles, send: send)
         }
         .sheet(item: $editingRow) { row in
             MessageEditSheet(original: row.text) { text in
@@ -354,6 +359,7 @@ public struct RoomChatView: View {
                         expandedQuiet.insert(message.id)
                     }
                 },
+                onOpenLong: { longRow = $0 },
                 send: send
             )
             .onAppear { send(.messageOnScreen(id: message.id, isOnScreen: true)) }
@@ -554,6 +560,7 @@ private struct RoomMessageRowView: View {
     var onOpenCheckpoint: (RoomChatMessageRow) -> Void = { _ in }
     var onEdit: (RoomChatMessageRow) -> Void = { _ in }
     var onToggleQuiet: () -> Void = {}
+    var onOpenLong: (RoomChatMessageRow) -> Void = { _ in }
     var send: (RoomChatIntent) -> Void = { _ in }
     /// How far the row follows a swipe to the right (swipe to reply, as in Messages).
     @State private var swipe: CGFloat = 0
@@ -730,6 +737,19 @@ private struct RoomMessageRowView: View {
 
     private static let swipeToReply: CGFloat = 64
 
+    /// The message's words; a very long one shows its start and a card that opens all of it (Carter, #55006).
+    @ViewBuilder
+    private var messageText: some View {
+        if LongMessage.isLong(row.text) {
+            VStack(alignment: .leading, spacing: 8) {
+                ChatMarkdownView(text: LongMessage.preview(row.text), ownHandles: ownHandles)
+                LongMessageCard(characters: row.text.count) { onOpenLong(row) }
+            }
+        } else {
+            ChatMarkdownView(text: row.text, ownHandles: ownHandles)
+        }
+    }
+
     /// What a reply answers, quoted above it: tap to open the thread (or the message it replies to).
     @ViewBuilder
     private var replyQuote: some View {
@@ -811,7 +831,7 @@ private struct RoomMessageRowView: View {
                         .accessibilityIdentifier("pocket.room.ownName")
                 }
                 replyQuote
-                ChatMarkdownView(text: row.text, ownHandles: ownHandles)
+                messageText
                     .font(.body)
                     .foregroundStyle(PocketPalette.textPrimary)
                     .padding(.horizontal, 14)
@@ -851,7 +871,7 @@ private struct RoomMessageRowView: View {
             VStack(alignment: .leading, spacing: 4) {
                 if row.showsHeader { authorLine }
                 replyQuote
-                ChatMarkdownView(text: row.text, ownHandles: ownHandles)
+                messageText
                     .font(.body)
                     .foregroundStyle(PocketPalette.textPrimary)
                     .padding(.horizontal, 14)
@@ -883,7 +903,7 @@ private struct RoomMessageRowView: View {
             }
             VStack(alignment: .leading, spacing: 5) {
                 replyQuote
-                ChatMarkdownView(text: row.text, ownHandles: ownHandles)
+                messageText
                     .font(.body)
                     .foregroundStyle(PocketPalette.textPrimary)
                 if row.isEdited {
@@ -1531,16 +1551,21 @@ private struct RoomComposerBar: View {
     /// Where the text last changed (the field does not say where the caret is), for an @ anywhere in it.
     @State private var editOffset: Int?
     @State private var lastDraft = ""
+    /// Long pastes, held above the field as attachments and sent after the typed words (Carter, #55006).
+    @State private var pasted: [String] = []
+    @State private var viewingPaste: PastedBlock?
 
     private var suggestions: [MentionCandidate] {
         guard let active = MentionSuggester.activeQuery(in: draft, at: editOffset ?? draft.count) else { return [] }
         return MentionSuggester.suggestions(for: active.query, among: mentionCandidates)
     }
 
+    private var outgoing: String { RoomComposerDraft.outgoing(draft, blocks: pasted) }
+
     var body: some View {
         if composer.canPost {
             VStack(alignment: .leading, spacing: 0) {
-            if let problem = composer.lengthProblem(for: draft) {
+            if let problem = composer.lengthProblem(for: outgoing) {
                 Text(problem)
                     .font(.caption)
                     .foregroundStyle(PocketPalette.danger)
@@ -1585,6 +1610,22 @@ private struct RoomComposerBar: View {
                 .frame(maxHeight: min(CGFloat(suggestions.count) * 48, 240))
                 .padding(.top, 6)
                 .overlay(alignment: .bottom) { Divider() }
+            }
+            if !pasted.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(Array(pasted.enumerated()), id: \.offset) { index, block in
+                            PastedChip(
+                                block: block,
+                                onOpen: { viewingPaste = PastedBlock(index: index, text: block) },
+                                onRemove: { pasted.remove(at: index) }
+                            )
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
+                }
+                .accessibilityIdentifier("pocket.room.composer.pasted")
             }
             if ticketMode {
                 HStack(spacing: 6) {
@@ -1647,6 +1688,12 @@ private struct RoomComposerBar: View {
                     .textFieldStyle(.plain)
                     .focused($isEditing)
                     .onChange(of: draft) { new in
+                        if let paste = RoomComposerDraft.pastedBlock(from: lastDraft, to: new) {
+                            pasted.append(paste.block)
+                            lastDraft = paste.draft
+                            draft = paste.draft
+                            return
+                        }
                         editOffset = MentionSuggester.editOffset(from: lastDraft, to: new)
                         lastDraft = new
                     }
@@ -1659,10 +1706,11 @@ private struct RoomComposerBar: View {
                     )
                     .accessibilityIdentifier("pocket.room.composer")
                 Button {
-                    let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let text = outgoing
                     guard !text.isEmpty else { return }
                     send(ticketMode ? RoomComposerDraft.ticketRequest(text) : text)
                     ticketMode = false
+                    pasted = []
                     emptyComposer($draft, editing: $isEditing)
                 } label: {
                     Image(systemName: "arrow.up.circle.fill")
@@ -1686,6 +1734,11 @@ private struct RoomComposerBar: View {
                 guard let request else { return }
                 draft = RoomComposerDraft.restoring(request.text, into: draft)
             }
+            .sheet(item: $viewingPaste) { item in
+                PastedBlockSheet(text: item.text) {
+                    if pasted.indices.contains(item.index) { pasted.remove(at: item.index) }
+                }
+            }
         } else if let reason = composer.disabledReason {
             Text(reason)
                 .font(.footnote)
@@ -1700,7 +1753,174 @@ private struct RoomComposerBar: View {
     }
 
     private var canSend: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && composer.lengthProblem(for: draft) == nil
+        !outgoing.isEmpty && composer.lengthProblem(for: outgoing) == nil
+    }
+}
+
+/// A long paste held in the composer.
+private struct PastedBlock: Identifiable {
+    let index: Int
+    let text: String
+    var id: Int { index }
+}
+
+/// A long paste above the field: what it is and how long, a tap to read it, and a way to take it out.
+private struct PastedChip: View {
+    let block: String
+    let onOpen: () -> Void
+    let onRemove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button(action: onOpen) {
+                HStack(spacing: 8) {
+                    Image(systemName: "doc.plaintext")
+                        .foregroundStyle(PocketPalette.accent)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Pasted text")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(PocketPalette.textPrimary)
+                        Text("\(block.count.formatted()) characters")
+                            .font(.caption2)
+                            .foregroundStyle(PocketPalette.textSecondary)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Pasted text, \(block.count) characters")
+            .accessibilityHint("Shows it")
+            Button(action: onRemove) {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(PocketPalette.textSecondary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Remove the pasted text")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(PocketPalette.separator.opacity(0.7), lineWidth: 0.5)
+        )
+    }
+}
+
+/// A held paste, read in full before it is sent.
+private struct PastedBlockSheet: View {
+    let text: String
+    let onRemove: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                Text(text)
+                    .font(.callout)
+                    .foregroundStyle(PocketPalette.textPrimary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
+            }
+            .pocketCanvas()
+            .navigationTitle("Pasted text")
+            .navigationBarTitleDisplayModeInlineIfAvailable()
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+                ToolbarItem(placement: .destructiveAction) {
+                    Button("Remove", role: .destructive) {
+                        onRemove()
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The card under a long message's start: how long it is, and a tap to read all of it.
+struct LongMessageCard: View {
+    let characters: Int
+    let onOpen: () -> Void
+
+    var body: some View {
+        Button(action: onOpen) {
+            HStack(spacing: 10) {
+                Image(systemName: "doc.text")
+                    .font(.title3)
+                    .foregroundStyle(PocketPalette.accent)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Read the whole message")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(PocketPalette.textPrimary)
+                    Text("\(characters.formatted()) characters")
+                        .font(.caption2)
+                        .foregroundStyle(PocketPalette.textSecondary)
+                }
+                Spacer(minLength: 4)
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.caption)
+                    .foregroundStyle(PocketPalette.textSecondary)
+                    .accessibilityHidden(true)
+            }
+            .padding(10)
+            .background(PocketPalette.inset.opacity(0.6), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(PocketPalette.separator.opacity(0.6), lineWidth: 0.5)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Long message, \(characters) characters")
+        .accessibilityHint("Opens all of it")
+        .accessibilityIdentifier("pocket.room.longMessage")
+    }
+}
+
+/// A long message in full, as a page over the room: read it, copy it, or listen to it.
+struct LongMessageSheet: View {
+    let row: RoomChatMessageRow
+    let ownHandles: Set<String>
+    let send: (RoomChatIntent) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                ChatMarkdownView(text: row.text, ownHandles: ownHandles)
+                    .font(.body)
+                    .foregroundStyle(PocketPalette.textPrimary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
+            }
+            .pocketCanvas()
+            .navigationTitle(row.authorName)
+            .navigationBarTitleDisplayModeInlineIfAvailable()
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+                ToolbarItemGroup(placement: .primaryAction) {
+                    Button {
+                        copyToPasteboard(row.text)
+                    } label: {
+                        Label("Copy", systemImage: "doc.on.doc")
+                    }
+                    Button {
+                        send(.readAloud(id: row.readAloudId, text: row.text))
+                        dismiss()
+                    } label: {
+                        Label("Listen", systemImage: "speaker.wave.2")
+                    }
+                }
+            }
+        }
     }
 }
 

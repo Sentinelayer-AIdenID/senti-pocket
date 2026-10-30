@@ -9,6 +9,14 @@ public struct FlightRecordPanel: View {
     private let onExpand: (String?) -> Void
     private let onOpenConsole: (URL) -> Void
     @State private var expanded: String?
+    /// Which tab each opened box shows: its live steps, its shell, or its console streamed in place.
+    @State private var tabs: [String: BoxTab] = [:]
+
+    enum BoxTab: Hashable {
+        case live
+        case shell
+        case console
+    }
 
     public init(
         state: FlightRecordState,
@@ -154,8 +162,29 @@ public struct FlightRecordPanel: View {
             .accessibilityIdentifier("pocket.flight.box.\(box.id)")
 
             if isOpen {
+                let tab = tabs[box.id] ?? .live
+                let shown = tab == .shell ? box.lines.filter(\.isCommand) : box.lines
                 VStack(alignment: .leading, spacing: 6) {
-                    ForEach(box.lines) { line in
+                    // Live: thoughts and commands as they happen. Shell: only the commands, and how each ended.
+                    // Console: the box's own console, streamed here rather than in the browser (Carter, #55006).
+                    Picker("Steps", selection: Binding(get: { tab }, set: { tabs[box.id] = $0 })) {
+                        Text("Live").tag(BoxTab.live)
+                        Text("Shell").tag(BoxTab.shell)
+                        if box.consoleURL != nil { Text("Console").tag(BoxTab.console) }
+                    }
+                    .pickerStyle(.segmented)
+                    .accessibilityIdentifier("pocket.flight.steps.\(box.id)")
+                    if tab == .console, let url = box.consoleURL {
+                        BoxConsoleView(url: url)
+                            .frame(height: 420)
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .stroke(PocketPalette.separator.opacity(0.7), lineWidth: 0.5)
+                            )
+                            .accessibilityIdentifier("pocket.flight.console.\(box.id)")
+                    }
+                    ForEach(tab == .console ? [] : shown) { line in
                         HStack(alignment: .top, spacing: 8) {
                             Image(systemName: symbol(line))
                                 .font(.caption)
@@ -170,8 +199,8 @@ public struct FlightRecordPanel: View {
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
-                    if box.lines.isEmpty {
-                        Text("No steps recorded yet.")
+                    if tab != .console, shown.isEmpty {
+                        Text(tab == .shell ? "No commands run yet." : "No steps recorded yet.")
                             .font(.caption)
                             .foregroundStyle(PocketPalette.textSecondary)
                     }
@@ -179,7 +208,7 @@ public struct FlightRecordPanel: View {
                         Button {
                             onOpenConsole(url)
                         } label: {
-                            Label("Open its console", systemImage: "arrow.up.right.square")
+                            Label(tab == .console ? "Full screen" : "Open its console", systemImage: "terminal")
                                 .font(.caption.weight(.semibold))
                         }
                         .buttonStyle(.plain)
@@ -377,6 +406,68 @@ struct LiveLine: View {
             guard isLive, !reduceMotion else { return }
             withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) { phase = 1 }
         }
+    }
+}
+#endif
+
+#if os(iOS) && canImport(WebKit)
+import WebKit
+
+/// A box's read-only console, streamed in the Flight record. It stays on the console's own site: a link anywhere
+/// else is not followed here.
+struct BoxConsoleView: UIViewRepresentable {
+    let url: URL
+
+    func makeCoordinator() -> Coordinator { Coordinator(host: url.host) }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        // Nothing the console sets is kept after the panel closes.
+        configuration.websiteDataStore = .nonPersistent()
+        // The console is laid out for a desktop: at the phone's width, its text stays readable.
+        let fit = """
+        if (!document.querySelector('meta[name=viewport]')) {
+          const meta = document.createElement('meta');
+          meta.name = 'viewport';
+          meta.content = 'width=device-width, initial-scale=1';
+          document.head.appendChild(meta);
+        }
+        """
+        configuration.userContentController.addUserScript(
+            WKUserScript(source: fit, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
+        )
+        let view = WKWebView(frame: .zero, configuration: configuration)
+        view.navigationDelegate = context.coordinator
+        view.isOpaque = false
+        view.backgroundColor = .clear
+        view.load(URLRequest(url: url))
+        return view
+    }
+
+    func updateUIView(_ view: WKWebView, context: Context) {}
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        let host: String?
+
+        init(host: String?) {
+            self.host = host
+        }
+
+        func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            let target = action.request.url
+            let allowed = target?.scheme?.lowercased() == "https" && target?.host == host
+            decisionHandler(allowed ? .allow : .cancel)
+        }
+    }
+}
+#else
+struct BoxConsoleView: View {
+    let url: URL
+
+    var body: some View {
+        Text(url.absoluteString)
+            .font(.caption.monospaced())
     }
 }
 #endif

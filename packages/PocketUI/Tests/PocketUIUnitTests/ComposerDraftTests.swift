@@ -43,4 +43,35 @@ final class ComposerDraftTests: XCTestCase {
         XCTAssertEqual(RoomPendingRecovery(canPost: false), .copy,
                        "after a refusal the composer is gone, so Edit would discard the text")
     }
+
+
+    /// Carter (#55006): a very long paste sits above the field as an attachment, and is sent after the typed words.
+    func test_a_long_paste_is_held_apart_and_sent_after_the_words() {
+        let block = String(repeating: "log line\n", count: 150)
+        let typed = "see the log: "
+        let pasted = RoomComposerDraft.pastedBlock(from: typed, to: typed + block)
+        XCTAssertEqual(pasted?.draft, typed, "the draft keeps what was typed")
+        XCTAssertEqual(pasted?.block, block)
+        let midway = RoomComposerDraft.pastedBlock(from: "ab", to: "a" + block + "b")
+        XCTAssertEqual(midway?.block, block, "a paste in the middle of the words")
+        XCTAssertEqual(midway?.draft, "ab")
+        XCTAssertNil(RoomComposerDraft.pastedBlock(from: "hello", to: "hello world"), "typing is never a paste")
+        XCTAssertNil(RoomComposerDraft.pastedBlock(from: "", to: String(repeating: "a", count: 999)), "short of the length")
+        XCTAssertEqual(RoomComposerDraft.outgoing("  look  ", blocks: ["one", "two"]), "look\n\none\n\ntwo")
+        XCTAssertEqual(RoomComposerDraft.outgoing("", blocks: ["only"]), "only", "a paste alone can be sent")
+        XCTAssertEqual(RoomComposerDraft.outgoing("  ", blocks: []), "")
+    }
+
+    /// Carter (#55006): a very long message shows its start and a card that opens all of it.
+    func test_a_long_message_shows_its_start_and_closes_a_code_block_it_cuts() {
+        XCTAssertFalse(LongMessage.isLong("short"))
+        XCTAssertTrue(LongMessage.isLong(String(repeating: "x", count: 1_501)))
+        XCTAssertTrue(LongMessage.isLong(Array(repeating: "line", count: 31).joined(separator: "\n")), "many short lines")
+        let text = (["Intro line"] + ["```swift"] + (1...40).map { "let x\($0) = \($0)" } + ["```"]).joined(separator: "\n")
+        let preview = LongMessage.preview(text)
+        XCTAssertTrue(preview.hasPrefix("Intro line\n```swift\nlet x1 = 1"))
+        XCTAssertTrue(preview.hasSuffix("```"), "the cut code block is closed")
+        XCTAssertEqual(preview.components(separatedBy: "```").count % 2, 1, "fences come in pairs")
+        XCTAssertLessThanOrEqual(preview.split(separator: "\n").count, 9)
+    }
 }

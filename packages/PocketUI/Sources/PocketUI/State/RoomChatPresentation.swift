@@ -1194,6 +1194,62 @@ public enum RoomComposerDraft {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.hasPrefix("🎫") ? trimmed : "🎫 Ticket: \(trimmed)"
     }
+
+    /// A paste this long is held as an attachment above the field (Carter, #55006), not poured into it.
+    public static let pastedBlockLength = 1_000
+
+    /// The block of text that went into the draft at once, when it is long enough to be a paste: what the draft
+    /// becomes without it, and the block. Typing and dictation add a little at a time and never come here.
+    public static func pastedBlock(from old: String, to new: String, minimum: Int = pastedBlockLength)
+        -> (draft: String, block: String)? {
+        let oldChars = Array(old)
+        let newChars = Array(new)
+        guard newChars.count - oldChars.count >= minimum else { return nil }
+        var prefix = 0
+        while prefix < oldChars.count, oldChars[prefix] == newChars[prefix] { prefix += 1 }
+        var suffix = 0
+        while suffix < oldChars.count - prefix, oldChars[oldChars.count - 1 - suffix] == newChars[newChars.count - 1 - suffix] {
+            suffix += 1
+        }
+        let inserted = String(newChars[prefix..<(newChars.count - suffix)])
+        guard inserted.count >= minimum else { return nil }
+        // A paste over a selection replaced it: the draft keeps what was there.
+        return (String(oldChars), inserted)
+    }
+
+    /// What is sent: the typed words, then each held block, a blank line apart.
+    public static func outgoing(_ draft: String, blocks: [String]) -> String {
+        ([draft.trimmingCharacters(in: .whitespacesAndNewlines)] + blocks)
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+    }
+}
+
+/// A message too long to read in the room shows its start and a card that opens the whole of it (Carter, #55006).
+public enum LongMessage {
+    public static let characters = 1_500
+    public static let lines = 30
+    static let previewLines = 8
+    static let previewCharacters = 600
+
+    public static func isLong(_ text: String) -> Bool {
+        text.count > characters || text.split(separator: "\n", omittingEmptySubsequences: false).count > lines
+    }
+
+    /// The start of the message: its first lines, cut at a line end, with a code block it cuts into closed again.
+    public static func preview(_ text: String) -> String {
+        var kept: [Substring] = []
+        var count = 0
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            if kept.count >= previewLines || (count + line.count > previewCharacters && !kept.isEmpty) { break }
+            kept.append(line)
+            count += line.count + 1
+        }
+        var preview = kept.joined(separator: "\n")
+        if preview.count > previewCharacters { preview = String(preview.prefix(previewCharacters)) }
+        if preview.components(separatedBy: "```").count % 2 == 0 { preview += "\n```" }
+        return preview.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 }
 
 /// How a failed row keeps its text. Edit puts it back into the composer, so it needs one; when posting is refused
