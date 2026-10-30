@@ -1363,6 +1363,40 @@ public enum RoomComposerDraft {
         return (String(oldChars), inserted)
     }
 
+    /// Where a room's unsent text is kept on the phone.
+    public static func savedKey(sessionId: String) -> String { savedKeyPrefix + sessionId }
+    static let savedKeyPrefix = "pocket.draft."
+
+    /// How long a sent text stays saved: long enough for it to be on its way.
+    public static let savedAfterSend: TimeInterval = 8
+
+    /// Whether what is in the box is the text just sent coming back (the keyboard writing it back after the box was
+    /// emptied): the whole text, or its end of at least three characters. A first keystroke ("I", "a") is new typing
+    /// (warden, #262).
+    public static func isWrittenBack(_ text: String, sent: String) -> Bool {
+        let back = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let whole = sent.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !back.isEmpty else { return false }
+        return back == whole || (back.count >= 3 && whole.hasSuffix(back))
+    }
+
+    /// Once a send is confirmed (or given up), its saved text goes, unless newer text was saved since (warden, #262:
+    /// a crash just after a delivered send must not bring the text back to be sent twice).
+    public static func forgetSaved(sessionId: String, sent: String, in defaults: UserDefaults = .standard) {
+        let key = savedKey(sessionId: sessionId)
+        guard let saved = defaults.string(forKey: key) else { return }
+        let kept = saved.trimmingCharacters(in: .whitespacesAndNewlines)
+        let gone = sent.trimmingCharacters(in: .whitespacesAndNewlines)
+        if kept == gone || gone.contains(kept) { defaults.removeObject(forKey: key) }
+    }
+
+    /// Every room's saved text, on sign-out: the next person on the phone does not see it.
+    public static func forgetAllSaved(in defaults: UserDefaults = .standard) {
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(savedKeyPrefix) {
+            defaults.removeObject(forKey: key)
+        }
+    }
+
     /// What is sent: the typed words, then each held block, a blank line apart.
     public static func outgoing(_ draft: String, blocks: [String]) -> String {
         ([draft.trimmingCharacters(in: .whitespacesAndNewlines)] + blocks)

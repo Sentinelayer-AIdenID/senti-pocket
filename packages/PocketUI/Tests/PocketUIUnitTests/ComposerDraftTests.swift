@@ -74,4 +74,44 @@ final class ComposerDraftTests: XCTestCase {
         XCTAssertEqual(preview.components(separatedBy: "```").count % 2, 1, "fences come in pairs")
         XCTAssertLessThanOrEqual(preview.split(separator: "\n").count, 9)
     }
+
+    /// Carter, 10-30: "the crash happened and I lost all the things I was saying". A room's unsent text is kept on the
+    /// phone under its own key.
+    func test_each_room_keeps_its_unsent_text_under_its_own_key() {
+        XCTAssertEqual(RoomComposerDraft.savedKey(sessionId: "room-a"), "pocket.draft.room-a")
+        XCTAssertNotEqual(RoomComposerDraft.savedKey(sessionId: "room-a"), RoomComposerDraft.savedKey(sessionId: "room-b"))
+        XCTAssertGreaterThanOrEqual(RoomComposerDraft.savedAfterSend, 5, "kept long enough for the send to be on its way")
+    }
+
+    /// The keyboard can write the sent text back into the emptied box (dictation, a pending correction); that is not
+    /// a paste to hold as an attachment.
+    func test_the_sent_text_written_back_is_told_from_new_typing() {
+        let sent = "Can you make sure the tables fit the screen"
+        XCTAssertTrue(RoomComposerDraft.isWrittenBack(sent, sent: sent))
+        XCTAssertTrue(RoomComposerDraft.isWrittenBack(" screen ", sent: sent), "its last word, committed late")
+        XCTAssertFalse(RoomComposerDraft.isWrittenBack("Also the logo", sent: sent), "new words are new")
+        XCTAssertFalse(RoomComposerDraft.isWrittenBack("  ", sent: sent))
+        XCTAssertFalse(RoomComposerDraft.isWrittenBack("I", sent: sent), "a first keystroke is new typing")
+        XCTAssertFalse(RoomComposerDraft.isWrittenBack("make sure", sent: sent), "the middle of it is not its end")
+    }
+
+    /// Warden, #262: a confirmed send's saved text goes, but not newer text saved since; sign-out clears them all.
+    func test_saved_text_goes_once_its_send_is_confirmed_and_all_of_it_on_sign_out() throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "ComposerDraftTests"))
+        defer { defaults.removePersistentDomain(forName: "ComposerDraftTests") }
+        let key = RoomComposerDraft.savedKey(sessionId: "room-a")
+        defaults.set("Ship it tonight", forKey: key)
+        RoomComposerDraft.forgetSaved(sessionId: "room-a", sent: "Something else", in: defaults)
+        XCTAssertEqual(defaults.string(forKey: key), "Ship it tonight", "newer text stays")
+        RoomComposerDraft.forgetSaved(sessionId: "room-a", sent: "Ship it tonight", in: defaults)
+        XCTAssertNil(defaults.string(forKey: key))
+
+        defaults.set("a", forKey: RoomComposerDraft.savedKey(sessionId: "room-a"))
+        defaults.set("b", forKey: RoomComposerDraft.savedKey(sessionId: "room-b"))
+        defaults.set(true, forKey: "pocket.inapp.sounds")
+        RoomComposerDraft.forgetAllSaved(in: defaults)
+        XCTAssertNil(defaults.string(forKey: RoomComposerDraft.savedKey(sessionId: "room-a")))
+        XCTAssertNil(defaults.string(forKey: RoomComposerDraft.savedKey(sessionId: "room-b")))
+        XCTAssertTrue(defaults.bool(forKey: "pocket.inapp.sounds"), "other settings stay")
+    }
 }

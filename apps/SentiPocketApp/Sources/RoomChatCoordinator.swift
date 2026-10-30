@@ -315,6 +315,9 @@ final class RoomChatCoordinator: ObservableObject {
             publish()
             deliver(clientId)
         case .discardSend(let clientId):
+            for given in pending where given.clientId == clientId {
+                RoomComposerDraft.forgetSaved(sessionId: sessionId, sent: given.text)
+            }
             pending.removeAll { $0.clientId == clientId }
             pendingReplies.removeAll { $0.clientId == clientId }
             publish()
@@ -961,6 +964,7 @@ final class RoomChatCoordinator: ObservableObject {
             do {
                 try await actionSender.sendAction(request)
                 guard let self else { return }
+                RoomComposerDraft.forgetSaved(sessionId: self.sessionId, sent: item.text)
                 self.onFeedback?(.sent)
                 if self.openThreadSequence == item.targetSequenceId { await self.loadThread(item.targetSequenceId) }
                 self.pendingReplies.removeAll { $0.clientId == clientId }
@@ -1071,6 +1075,7 @@ final class RoomChatCoordinator: ObservableObject {
                 try await sender.sendHumanMessage(sessionId: sessionId, text: item.text, clientId: clientId)
                 guard let self else { return }
                 self.updatePending(clientId) { $0.status = .sent; $0.sentAt = self.now() }
+                RoomComposerDraft.forgetSaved(sessionId: sessionId, sent: item.text)
                 self.onFeedback?(.sent)
                 // Pull the echo now instead of waiting for the stream or the next poll.
                 await self.catchUp(self.generation)

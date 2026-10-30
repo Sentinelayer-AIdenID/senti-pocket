@@ -4,6 +4,13 @@ import XCTest
 @testable import SentiPocketApp
 
 final class CrashReportsTests: XCTestCase {
+    /// Every freeze on 10-30 began at a send: the step says how long the text was, never what it said.
+    func test_a_send_step_carries_the_texts_length_only() {
+        XCTAssertEqual(CrashReporter.sentLength(.sendMessage(text: "hello")), 5)
+        XCTAssertEqual(CrashReporter.sentLength(.sendReplyToReply(sequenceId: 1, replyId: "r1", text: "ok")), 2)
+        XCTAssertNil(CrashReporter.sentLength(.loadOlder))
+    }
+
     private let start = Date(timeIntervalSince1970: 1_800_000_000)
 
     private func json(_ object: Any) -> Data {

@@ -19,6 +19,11 @@ public struct RoomChatView: View {
     @State private var threadDrafts: [Int64: String] = [:]
     @State private var readerAtBottom = true
     @State private var didInitialScroll = false
+    /// A new list each time the room is put back at its newest rows (see `reopenAtLatest()`).
+    @State private var listEpoch = 0
+    /// A new list starts at its top, where "Load earlier messages" shows: until its first scroll down has landed, that
+    /// is not the reader asking for older history.
+    @State private var holdsOlderLoads = false
     @State private var anchorBeforeOlderLoad: String?
     /// A message the reader was taken to (a link, notification, search result or pin). It stays in place through
     /// pages loading above or below it and messages arriving, until the reader scrolls.
@@ -84,7 +89,8 @@ public struct RoomChatView: View {
                 actions: composerActions,
                 replying: replyTarget,
                 onCancelReply: { replyTarget = nil },
-                onIntent: send
+                onIntent: send,
+                draftKey: RoomComposerDraft.savedKey(sessionId: state.sessionId)
             ) { text in
                 if let target = replyTarget {
                     send(target.replyIntent(text))
@@ -326,11 +332,15 @@ public struct RoomChatView: View {
                 }
             }
             .onChange(of: state.pending.count) { count in
-                // Sending always brings you to the bottom, where your message appears. At once, not animated: an
-                // animated scroll from far up lays out every row on the way while the message and the keyboard move.
-                if count > 0 {
+                // Sending always brings you to the bottom, where your message appears. At the bottom, a short scroll
+                // on the next turn of the run loop. From up the history, the room is put back at its newest rows as a
+                // new list, the way it opens, instead of scrolling or trimming under the reader.
+                guard count > 0 else { return }
+                if readerAtBottom {
                     heldAnchor = nil
-                    proxy.scrollTo(Self.bottomId, anchor: .bottom)
+                    DispatchQueue.main.async { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
+                } else {
+                    reopenAtLatest()
                 }
             }
             .onChange(of: state.firstMessageId) { _ in
@@ -350,7 +360,24 @@ public struct RoomChatView: View {
                 setReaderAtBottom(true)
                 DispatchQueue.main.async { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
             }
+            // A list starts at its newest rows, not at its top (iOS 18 and later; before that, the first scroll takes
+            // it there). Only where it starts: rows arriving or loading later move nothing.
+            .modifier(StartsAtBottom())
+            // The whole list, its handlers with it, so a new one opens as the room does.
+            .id(listEpoch)
         }
+    }
+
+    /// Puts the room back at its newest rows as a new list, the way a room opens (which has never frozen), rather than
+    /// scrolling down to them or trimming the rows under the reader. Carter's 10-30 freezes all began with the room
+    /// moving a long way at a send; the last (14:53) came right after the trim to the newest rows, with the scroll still
+    /// to come.
+    private func reopenAtLatest() {
+        heldAnchor = nil
+        anchorBeforeOlderLoad = nil
+        didInitialScroll = false
+        holdsOlderLoads = true
+        listEpoch += 1
     }
 
     @ViewBuilder
@@ -364,7 +391,7 @@ public struct RoomChatView: View {
                 .font(.footnote.weight(.semibold))
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 12)
-                .onAppear { if didInitialScroll { loadOlder() } }
+                .onAppear { if didInitialScroll, !holdsOlderLoads { loadOlder() } }
                 .accessibilityIdentifier("pocket.room.loadOlder")
         } else {
             Text("Start of the room")
@@ -468,7 +495,7 @@ public struct RoomChatView: View {
             // only its newest rows, then the jump is at once.
             if state.jumpDownKeepsLatest {
                 send(.keepLatestForJumpDown)
-                DispatchQueue.main.async { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
+                reopenAtLatest()
                 return
             }
             withAnimation(.easeOut(duration: 0.25)) {
@@ -540,6 +567,8 @@ public struct RoomChatView: View {
             } else {
                 proxy.scrollTo(Self.bottomId, anchor: .bottom)
             }
+            // The list has left its top: from now on the header showing means the reader scrolled up to it.
+            DispatchQueue.main.async { holdsOlderLoads = false }
         }
     }
 
@@ -614,6 +643,17 @@ public struct RoomChatView: View {
     }
 
     private static let bottomId = "room-bottom"
+}
+
+/// A scroll view that starts at its bottom, where the iOS version can say so.
+private struct StartsAtBottom: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, macOS 15.0, *) {
+            content.defaultScrollAnchor(.bottom, for: .initialOffset)
+        } else {
+            content
+        }
+    }
 }
 
 private struct RoomMessageRowView: View {
@@ -1249,8 +1289,7 @@ private func emptyComposer(_ draft: Binding<String>, sent: String) {
     DispatchQueue.main.async {
         draft.wrappedValue = ""
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            let back = draft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !back.isEmpty, sent.contains(back) { draft.wrappedValue = "" }
+            if RoomComposerDraft.isWrittenBack(draft.wrappedValue, sent: sent) { draft.wrappedValue = "" }
         }
     }
 }
@@ -1755,8 +1794,16 @@ private struct RoomComposerBar: View {
     var replying: RoomChatMessageRow?
     var onCancelReply: () -> Void = {}
     var onIntent: (RoomChatIntent) -> Void = { _ in }
+    /// Where this room's unsent text is kept on the phone, so a crash or a relaunch never loses it.
+    var draftKey: String?
     let send: (String) -> Void
     @State private var draft = ""
+    /// The text just sent, for a moment: the keyboard can write it back into the emptied box (dictation, a pending
+    /// correction), and that is not a paste.
+    @State private var justSent: String?
+    /// While a send settles, the sent text stays saved (see `sendDraft()`); which send that is.
+    @State private var keepsSavedDraft = false
+    @State private var sends = 0
     @FocusState private var isEditing: Bool
     /// "File as a ticket": what you type goes to the room as a ticket request, and the ticket keeper files it.
     @State private var ticketMode = false
@@ -1766,6 +1813,50 @@ private struct RoomComposerBar: View {
     /// Long pastes, held above the field as attachments and sent after the typed words (Carter, #55006).
     @State private var pasted: [String] = []
     @State private var viewingPaste: PastedBlock?
+
+    /// Sends what is in the box. The box empties first; the message goes to the room on the next turn of the run loop,
+    /// so the emptied box, the new row and the scroll to it are not all laid out in one update (every freeze on 10-30
+    /// began at a send). The text stays saved on the phone for a few seconds more, long enough to be on its way: if
+    /// the app is closed before then, it is back in the box at the next launch.
+    private func sendDraft() {
+        let text = outgoing
+        guard !text.isEmpty else { return }
+        let message = ticketMode ? RoomComposerDraft.ticketRequest(text) : text
+        ticketMode = false
+        pasted = []
+        justSent = text
+        keepsSavedDraft = true
+        sends += 1
+        let sending = sends
+        if let draftKey { UserDefaults.standard.set(text, forKey: draftKey) }
+        emptyComposer($draft, sent: text)
+        DispatchQueue.main.async { send(message) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { if sends == sending { justSent = nil } }
+        DispatchQueue.main.asyncAfter(deadline: .now() + RoomComposerDraft.savedAfterSend) {
+            guard sends == sending else { return }
+            keepsSavedDraft = false
+            // Typing since is saved; the sent text itself goes when the room confirms it (`forgetSaved`).
+            if !outgoing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { saveDraft() }
+        }
+    }
+
+    private func saveDraft() {
+        guard let draftKey, !keepsSavedDraft else { return }
+        let text = outgoing
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            UserDefaults.standard.removeObject(forKey: draftKey)
+        } else {
+            UserDefaults.standard.set(text, forKey: draftKey)
+        }
+    }
+
+    private func restoreSavedDraft() {
+        guard let draftKey, draft.isEmpty, pasted.isEmpty,
+              let saved = UserDefaults.standard.string(forKey: draftKey), !saved.isEmpty else { return }
+        // Set as it was, not as a paste: a long draft stays text in the box.
+        lastDraft = saved
+        draft = saved
+    }
 
     private var suggestions: [MentionCandidate] {
         guard let active = MentionSuggester.activeQuery(in: draft, at: editOffset ?? draft.count) else { return [] }
@@ -1941,14 +2032,21 @@ private struct RoomComposerBar: View {
                     .textFieldStyle(.plain)
                     .focused($isEditing)
                     .onChange(of: draft) { new in
+                        if let sent = justSent, RoomComposerDraft.isWrittenBack(new, sent: sent) {
+                            // The keyboard writing the sent text back: `emptyComposer` empties it again.
+                            lastDraft = new
+                            return
+                        }
                         if let paste = RoomComposerDraft.pastedBlock(from: lastDraft, to: new) {
                             pasted.append(paste.block)
                             lastDraft = paste.draft
                             draft = paste.draft
+                            saveDraft()
                             return
                         }
                         editOffset = MentionSuggester.editOffset(from: lastDraft, to: new)
                         lastDraft = new
+                        saveDraft()
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 9)
@@ -1959,12 +2057,7 @@ private struct RoomComposerBar: View {
                     )
                     .accessibilityIdentifier("pocket.room.composer")
                 Button {
-                    let text = outgoing
-                    guard !text.isEmpty else { return }
-                    send(ticketMode ? RoomComposerDraft.ticketRequest(text) : text)
-                    ticketMode = false
-                    pasted = []
-                    emptyComposer($draft, sent: text)
+                    sendDraft()
                 } label: {
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.system(size: 32))
@@ -1987,6 +2080,9 @@ private struct RoomComposerBar: View {
                 guard let request else { return }
                 draft = RoomComposerDraft.restoring(request.text, into: draft)
             }
+            // What was being written here when the app last closed comes back (Carter, 10-30: "the crash happened
+            // and I lost all the things I was saying").
+            .onAppear(perform: restoreSavedDraft)
             // Swipe to reply and start typing at once: the keyboard comes up, and nothing in the room moves.
             .onChange(of: replying?.id) { id in
                 if id != nil { isEditing = true }
