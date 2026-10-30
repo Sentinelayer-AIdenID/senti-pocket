@@ -127,6 +127,16 @@ struct PocketGatewaySigningKeyRegistry: Sendable {
     }
 }
 
+/// What this build can verify, from its compiled key registry: never a literal, so a build that ships a reviewed bundle
+/// key turns verified checkpoints on by that change alone.
+public enum PocketGatewayTrust {
+    /// Whether any compiled key may sign checkpoint bundles. Release pins none yet, so its checkpoints open as the
+    /// server holds them.
+    public static var verifiesBundles: Bool {
+        PocketGatewaySigningKeyRegistry.production.hasKey(for: .bundle)
+    }
+}
+
 /// A posted receipt that passed the complete immutable trust decision. Its initializer is private, so downstream UI
 /// and state machines cannot relabel an untrusted wire `ActionReceipt` as verified.
 public struct VerifiedActionReceipt: Equatable, Sendable {
