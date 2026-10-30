@@ -65,6 +65,17 @@ public struct SentiWaitingItem: Equatable, Identifiable, Sendable {
         )
     }
 
+    /// One ask: a ticket can ask again later, and a new question is a new ask (warden, #270).
+    public var askKey: String { "\(ticketId)|\(askedAt)|\(question)" }
+
+    /// The same ask with its words passed through `hide` (the room's title, the ticket's title and the question), so
+    /// what is shown and what is posted never carry what the room hides.
+    public func redacted(_ hide: (String) -> String) -> SentiWaitingItem {
+        SentiWaitingItem(kind: kind, roomId: roomId, roomTitle: hide(roomTitle), ticketId: ticketId, title: hide(title),
+                         question: hide(question), options: options.map(hide), custom: custom, askedAt: askedAt,
+                         askedBy: askedBy, assignee: assignee)
+    }
+
     /// The one chat line that answers it, exactly as the web writes it (`decisionChatLine`): "Decision on
     /// [Ticket: <title>](/dashboard/sessions/<room>?ticket=<id>): <answer>[ — <detail>]", then "@<agent>" when an
     /// agent is assigned, or "(for <name>)" for an assigned person whose name is known. The server clears the ask by

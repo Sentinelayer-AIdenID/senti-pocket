@@ -19,7 +19,7 @@ final class WaitingOnYouCoordinator: ObservableObject {
 
     private var items: [SentiWaitingItem] = []
     private var total = 0
-    /// Asks answered here that the server may not have caught up with.
+    /// Asks answered here that the server may not have caught up with, by ask (a ticket can ask again).
     private var answered: Set<String> = []
     /// Each answer keeps the id it was first sent with, so a retry after a timed-out send never posts twice.
     private var pending: [String: (line: String, clientId: String)] = [:]
@@ -62,14 +62,18 @@ final class WaitingOnYouCoordinator: ObservableObject {
         if items.isEmpty { state.isLoading = true }
         do {
             let page = try await transport.waiting(limit: 50)
-            items = page.items
+            // The signal model's name never shows, here or in the answer posted (warden, #270).
+            items = page.items.map { $0.redacted(TicketSignal.hideModelName) }
             total = page.total
             // The server's word wins once it no longer lists an answered ask.
-            answered = answered.filter { id in items.contains { $0.ticketId == id } }
+            answered = answered.filter { key in items.contains { $0.askKey == key } }
             state.isAvailable = true
             state.notice = nil
+        } catch SessionTransportError.accessDenied {
+            // An older server without the list answers 404, which the shared fetch reads as access denied; so does a
+            // server that will not show it to this sign-in. Either way the side panel leaves it out.
+            state.isAvailable = false
         } catch SessionTransportError.service(let status) where status == 404 || status == 405 {
-            // An older server without the list: the side panel leaves it out.
             state.isAvailable = false
         } catch SessionTransportError.reauthenticationRequired {
             onReauthenticationRequired()
@@ -95,12 +99,14 @@ final class WaitingOnYouCoordinator: ObservableObject {
     }
 
     private func answer(_ id: String, choice: String, detail: String) {
-        guard let item = items.first(where: { $0.ticketId == id }), !state.sending.contains(id),
+        guard let item = items.first(where: { $0.ticketId == id && !answered.contains($0.askKey) }),
+              !state.sending.contains(id),
               !choice.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let key = item.askKey
         let line = item.answerLine(choice, detail: detail)
         // The same answer again (a retry) keeps its id; a different answer is a new message.
-        let clientId = pending[id].flatMap { $0.line == line ? $0.clientId : nil } ?? "hm_" + UUID().uuidString.lowercased()
-        pending[id] = (line, clientId)
+        let clientId = pending[key].flatMap { $0.line == line ? $0.clientId : nil } ?? "hm_" + UUID().uuidString.lowercased()
+        pending[key] = (line, clientId)
         state.sending.insert(id)
         state.notice = nil
         publish()
@@ -108,10 +114,17 @@ final class WaitingOnYouCoordinator: ObservableObject {
             guard let self else { return }
             do {
                 try await self.sender.sendHumanMessage(sessionId: item.roomId, text: line, clientId: clientId)
-                self.pending[id] = nil
-                self.answered.insert(id)
+                self.pending[key] = nil
+                self.answered.insert(key)
             } catch RoomSendError.reauthenticationRequired {
                 self.onReauthenticationRequired()
+            } catch RoomSendError.notAllowed {
+                // Said plainly, with no retry to offer (warden, #270).
+                self.pending[key] = nil
+                self.state.notice = "You can't post in that room any more, so your answer to \"\(item.title)\" was not sent."
+            } catch RoomSendError.rejected {
+                self.pending[key] = nil
+                self.state.notice = "Senti did not accept your answer to \"\(item.title)\". Open the ticket to answer there."
             } catch {
                 self.state.notice = "Your answer to \"\(item.title)\" did not go. Tap it again to retry."
             }
@@ -121,7 +134,7 @@ final class WaitingOnYouCoordinator: ObservableObject {
     }
 
     private func publish() {
-        let shown = items.filter { !answered.contains($0.ticketId) }
+        let shown = items.filter { !answered.contains($0.askKey) }
         state.rows = shown.map { item in
             WaitingOnYouRow(
                 id: item.ticketId,

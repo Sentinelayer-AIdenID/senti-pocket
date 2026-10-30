@@ -525,6 +525,8 @@ private struct AuthenticatedRootView: View {
             )
             sessions.start()
             notifications.startPolling()
+            // Waiting on you is read from sign-in on, not only once the app comes back to the front (warden, #270).
+            waiting.startPolling()
             // Apple push: a tap opens its room at the message; the room on screen gets no banner.
             PushRegistrar.shared.inbox = incomingLinks
             PushRegistrar.shared.currentRoomId = { (roomPath.last ?? currentRoom)?.sessionId }
@@ -543,6 +545,7 @@ private struct AuthenticatedRootView: View {
             InAppBanner.shared.onOpen = nil
             InAppBanner.shared.dismiss()
             notifications.stopPolling()
+            waiting.stopPolling()
             sessions.clearSelection()
             details.clearSelection()
             checkpointPocket.clearSelection()

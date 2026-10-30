@@ -38,6 +38,14 @@ public struct WaitingOnYouView: View {
             .scrollContentBackground(.hidden)
             .pocketCanvas()
             .refreshable { send(.refresh) }
+            // Words typed for an answer stay until it has gone (its ask leaves the list), so a failed send keeps
+            // them for the retry (warden, #270).
+            .onChange(of: state.rows.map(\.id)) { ids in
+                if let writing, !ids.contains(writing) {
+                    self.writing = nil
+                    words = ""
+                }
+            }
             .navigationTitle(state.total > 0 ? "Waiting on you · \(state.total)" : "Waiting on you")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
@@ -109,11 +117,10 @@ public struct WaitingOnYouView: View {
                         .textFieldStyle(.roundedBorder)
                     Button("Send") {
                         let text = words.trimmingCharacters(in: .whitespacesAndNewlines)
+                        writing = row.id
                         send(row.options.isEmpty
                              ? .answer(id: row.id, choice: text, detail: "")
                              : .answer(id: row.id, choice: "Custom", detail: text))
-                        words = ""
-                        writing = nil
                     }
                     .disabled(isSending || words.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                               || (writing != nil && writing != row.id))
