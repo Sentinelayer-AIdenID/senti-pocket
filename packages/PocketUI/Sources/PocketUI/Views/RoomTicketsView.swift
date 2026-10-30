@@ -23,6 +23,8 @@ public enum RoomTicketsIntent: Equatable, Sendable {
     case retryComment(ticketId: String)
     /// "Chat about it" (web): the ticket's card and a note, posted to this room as you.
     case chatAboutIt(ticketId: String, note: String)
+    /// Start an agent on its own machine for the ticket (web "Mint for this ticket").
+    case startAgent(ticketId: String)
 }
 
 /// The room's Tickets tab: Active / Archived (N), search across all tickets, ranked by impact. Tapping a ticket
@@ -89,6 +91,7 @@ public struct RoomTicketsView: View {
                         canComment: state.canFileTickets,
                         commentStatus: state.commentStatus[row.id],
                         canRetryComment: state.retryableComments.contains(row.id),
+                        canStartAgent: state.canStartAgents,
                         send: send
                     )
                 } label: {
@@ -144,7 +147,7 @@ private struct RoomTicketRowView: View {
                         .background(RoomTicketPalette.priority(row.priority).opacity(0.18), in: Capsule())
                         .foregroundStyle(RoomTicketPalette.priority(row.priority))
                 }
-                Text(row.title)
+                Text(row.displayTitle)
                     .font(.body.weight(.semibold))
                     .lineLimit(2)
             }
@@ -191,6 +194,8 @@ public struct RoomTicketDetailView: View {
     var canComment = false
     var commentStatus: String?
     var canRetryComment = false
+    /// Agents can be started from here: the room takes ticket writes and the mint admits this account.
+    var canStartAgent = false
     let send: (RoomTicketsIntent) -> Void
     @State private var customAnswer = ""
     @State private var assigning = false
@@ -212,9 +217,11 @@ public struct RoomTicketDetailView: View {
         canComment: Bool = false,
         commentStatus: String? = nil,
         canRetryComment: Bool = false,
+        canStartAgent: Bool = false,
         send: @escaping (RoomTicketsIntent) -> Void
     ) {
         self.row = row
+        self.canStartAgent = canStartAgent
         self.canAnswer = canAnswer
         self.decisionStatus = decisionStatus
         self.canRetryDecision = canRetryDecision
@@ -332,6 +339,17 @@ public struct RoomTicketDetailView: View {
                                 .accessibilityIdentifier("pocket.ticket.edit")
                         }
                     }
+                    if canStartAgent {
+                        Button {
+                            send(.startAgent(ticketId: row.id))
+                        } label: {
+                            Label("Start an agent on this", systemImage: "cpu")
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(PocketPalette.listening)
+                        .accessibilityHint("Starts an agent on its own machine for this ticket, then assigns it")
+                        .accessibilityIdentifier("pocket.ticket.startAgent")
+                    }
                     if actions.claim == .takeOver {
                         Text("The lease lapsed without a release. Taking over makes the ticket yours.")
                             .font(.caption)
@@ -441,7 +459,7 @@ public struct RoomTicketDetailView: View {
     public var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                Text(row.title)
+                Text(row.displayTitle)
                     .font(.title3.bold())
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
@@ -498,7 +516,7 @@ public struct RoomTicketDetailView: View {
                 }
 
                 Divider()
-                ChatMarkdownView(text: row.body.isEmpty ? "_No description._" : row.body)
+                ChatMarkdownView(text: row.body.isEmpty ? "_No description._" : row.displayBody)
                     .font(.body)
                 Divider()
                 commentsSection

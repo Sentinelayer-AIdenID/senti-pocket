@@ -128,6 +128,38 @@ final class MintFlightTests: XCTestCase {
         XCTAssertFalse(unpriced.workKnown, "no working record yet: no hours rather than at least 0")
     }
 
+    /// sentinelayer-web `listMintModels` and `mintAgent`.
+    func test_models_and_a_started_agent_read_as_the_web_reads_them() throws {
+        let models = (try json("""
+        {"models": [{"id": "model-a", "label": "Model A", "vendor": "v", "efforts": ["low", "turbo", "high"],
+                     "defaultEffort": "turbo"},
+                    {"id": "model-b", "label": "Model B", "note": "fast", "defaultEffort": "high"},
+                    {"label": "no id"}]}
+        """)["models"]?.arrayValue ?? []).compactMap(MintModel.init(json:))
+        XCTAssertEqual(models.map(\.id), ["model-a", "model-b"])
+        XCTAssertEqual(models[0].efforts, ["low", "high"], "only the efforts the web knows")
+        XCTAssertNil(models[0].defaultEffort, "a default it does not offer is no default")
+        XCTAssertNil(models[1].defaultEffort)
+        XCTAssertEqual(models[1].note, "fast")
+
+        let request = MintUpRequest(model: "model-a", effort: "high", jobDescription: "Do it", sessionId: "room-1",
+                                    agentName: "", ticketId: "t1", ticketTitle: "Fix it")
+        let body = request.body
+        XCTAssertEqual(body["model"] as? String, "model-a")
+        XCTAssertEqual(body["effort"] as? String, "high")
+        XCTAssertNil(body["agentName"], "an empty name lets the mint choose")
+        XCTAssertEqual((body["ticket"] as? [String: String])?["id"], "t1")
+        XCTAssertNil(MintUpRequest(model: "m", jobDescription: "j", sessionId: "r").body["ticket"])
+
+        let started = MintUpResponse(json: try json("""
+        {"lifeId": "life-1", "agentName": "mint-36d92287", "model": "model-a", "sessionId": "room-1", "phase": "booting",
+         "consoleUrl": "http://insecure/console", "shell": true}
+        """))
+        XCTAssertEqual(started?.agentName, "mint-36d92287")
+        XCTAssertNil(started?.consoleURL, "only an https console is offered")
+        XCTAssertNil(MintUpResponse(json: try json(#"{"lifeId": "x"}"#)), "no name, no agent")
+    }
+
     func test_a_flight_record_keeps_thoughts_and_commands_newest_last() throws {
         let record = MintFlightRecord(json: try json("""
         {"thinking": {"narration": [{"at": "2026-10-29T19:24:23Z", "text": "Reading the brief."},

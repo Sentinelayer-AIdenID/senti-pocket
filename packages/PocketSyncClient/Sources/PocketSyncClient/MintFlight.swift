@@ -352,6 +352,103 @@ public enum MintError: Error, Equatable, Sendable {
     /// The service does not admit this account (it is allowlisted).
     case forbidden
     case unavailable
+    /// No machine is free to start an agent on right now (the service said so).
+    case capacity
+    /// The service refused the request as it stands (a reason it gave, when it gave one).
+    case refused(String?)
+}
+
+/// A model an agent can be started on (sentinelayer-web `MintModel`), with the efforts it offers.
+public struct MintModel: Equatable, Identifiable, Sendable {
+    public let id: String
+    public let label: String
+    public let note: String?
+    /// none, low, medium, high, xhigh; empty when the model takes no effort setting.
+    public let efforts: [String]
+    public let defaultEffort: String?
+
+    public init(id: String, label: String, note: String? = nil, efforts: [String] = [], defaultEffort: String? = nil) {
+        self.id = id
+        self.label = label
+        self.note = note
+        self.efforts = efforts
+        self.defaultEffort = defaultEffort
+    }
+
+    init?(json: JSONValue) {
+        guard let id = json["id"]?.stringValue, !id.isEmpty else { return nil }
+        let known = ["none", "low", "medium", "high", "xhigh"]
+        let efforts = (json["efforts"]?.arrayValue ?? []).compactMap(\.stringValue).filter(known.contains)
+        let preferred = json["defaultEffort"]?.stringValue
+        self.init(
+            id: id,
+            label: json["label"]?.stringValue ?? id,
+            note: json["note"]?.stringValue,
+            efforts: efforts,
+            defaultEffort: preferred.flatMap { efforts.contains($0) ? $0 : nil }
+        )
+    }
+}
+
+/// Start an agent on its own machine in a room (sentinelayer-web `MintUpRequest`), optionally for a ticket.
+public struct MintUpRequest: Equatable, Sendable {
+    public let model: String
+    public let effort: String?
+    public let jobDescription: String
+    public let sessionId: String
+    public let agentName: String?
+    public let ticketId: String?
+    public let ticketTitle: String?
+
+    public init(model: String, effort: String? = nil, jobDescription: String, sessionId: String, agentName: String? = nil,
+                ticketId: String? = nil, ticketTitle: String? = nil) {
+        self.model = model
+        self.effort = effort
+        self.jobDescription = jobDescription
+        self.sessionId = sessionId
+        self.agentName = agentName
+        self.ticketId = ticketId
+        self.ticketTitle = ticketTitle
+    }
+
+    /// The body the service reads: empty optional fields are left out.
+    public var body: [String: Any] {
+        var body: [String: Any] = ["model": model, "jobDescription": jobDescription, "sessionId": sessionId]
+        if let effort { body["effort"] = effort }
+        if let agentName, !agentName.isEmpty { body["agentName"] = agentName }
+        if let ticketId { body["ticket"] = ["id": ticketId, "title": ticketTitle ?? ""] }
+        return body
+    }
+}
+
+/// The agent that started: its box, its name in the room, and its read-only console.
+public struct MintUpResponse: Equatable, Sendable {
+    public let lifeId: String
+    public let agentName: String
+    public let sessionId: String
+    public let phase: String
+    public let consoleURL: URL?
+
+    public init(lifeId: String, agentName: String, sessionId: String, phase: String, consoleURL: URL?) {
+        self.lifeId = lifeId
+        self.agentName = agentName
+        self.sessionId = sessionId
+        self.phase = phase
+        self.consoleURL = consoleURL
+    }
+
+    init?(json: JSONValue) {
+        guard let lifeId = json["lifeId"]?.stringValue, !lifeId.isEmpty,
+              let agentName = json["agentName"]?.stringValue, !agentName.isEmpty else { return nil }
+        let console = json["consoleUrl"]?.stringValue.flatMap(URL.init(string:))
+        self.init(
+            lifeId: lifeId,
+            agentName: agentName,
+            sessionId: json["sessionId"]?.stringValue ?? "",
+            phase: json["phase"]?.stringValue ?? "",
+            consoleURL: console?.scheme?.lowercased() == "https" ? console : nil
+        )
+    }
 }
 
 /// The reads the Flight record needs.
@@ -369,7 +466,13 @@ extension MintReading {
     }
 }
 
-public final class HTTPMintClient: MintReading, @unchecked Sendable {
+/// Starting agents (sentinelayer-web `listMintModels`, `mintAgent`): the models, and an agent on one of them.
+public protocol MintStarting: Sendable {
+    func models() async throws -> [MintModel]
+    func startAgent(_ request: MintUpRequest) async throws -> MintUpResponse
+}
+
+public final class HTTPMintClient: MintReading, MintStarting, @unchecked Sendable {
     public static let defaultBaseURL = URL(string: "https://sl-mint.eastus.cloudapp.azure.com")
 
     private let baseURL: URL?
@@ -415,11 +518,30 @@ public final class HTTPMintClient: MintReading, @unchecked Sendable {
         return request
     }
 
-    private func get(path: String, query: [URLQueryItem]) async throws -> JSONValue {
+    public func models() async throws -> [MintModel] {
+        let json = try await get(path: "/api/mint/models", query: [])
+        return (json["models"]?.arrayValue ?? []).compactMap(MintModel.init(json:))
+    }
+
+    /// Booting a machine takes a while: the web waits up to three minutes.
+    public func startAgent(_ request: MintUpRequest) async throws -> MintUpResponse {
+        let json = try await get(path: "/api/mint/up", query: [], method: "POST", body: request.body, timeout: 180)
+        guard let started = MintUpResponse(json: json) else { throw MintError.unavailable }
+        return started
+    }
+
+    private func get(path: String, query: [URLQueryItem], method: String = "GET", body: [String: Any]? = nil,
+                     timeout: TimeInterval = 30) async throws -> JSONValue {
         guard let baseURL else { throw MintError.notConfigured }
         guard let token = tokenProvider(), !token.isEmpty else { throw MintError.reauthenticationRequired }
-        guard let request = Self.request(baseURL: baseURL, path: path, query: query, token: token) else {
+        guard var request = Self.request(baseURL: baseURL, path: path, query: query, token: token) else {
             throw MintError.notConfigured
+        }
+        request.httpMethod = method
+        request.timeoutInterval = timeout
+        if let body {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         }
         let data: Data
         let response: URLResponse
@@ -428,6 +550,7 @@ public final class HTTPMintClient: MintReading, @unchecked Sendable {
         } catch {
             throw MintError.unavailable
         }
+        let json = try? JSONDecoder().decode(JSONValue.self, from: data)
         switch (response as? HTTPURLResponse)?.statusCode ?? 0 {
         case 200..<300:
             break
@@ -435,10 +558,14 @@ public final class HTTPMintClient: MintReading, @unchecked Sendable {
             throw MintError.reauthenticationRequired
         case 403:
             throw MintError.forbidden
+        case 429:
+            throw MintError.capacity
+        case 400, 409, 422:
+            throw MintError.refused(json?["error"]?.stringValue ?? json?["message"]?.stringValue)
         default:
             throw MintError.unavailable
         }
-        guard let json = try? JSONDecoder().decode(JSONValue.self, from: data) else { throw MintError.unavailable }
+        guard let json else { throw MintError.unavailable }
         return json
     }
 }
