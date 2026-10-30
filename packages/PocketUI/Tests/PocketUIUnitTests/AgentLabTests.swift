@@ -14,6 +14,8 @@ final class AgentLabTests: XCTestCase {
         XCTAssertEqual(AgentLab.of(id: "kimi-max", model: nil), .moonshot)
         XCTAssertEqual(AgentLab.of(id: "ticket-keeper", model: "unknown"), .other)
         XCTAssertEqual(AgentLab.of(id: "claude-warden", model: "deepseek-v4-pro"), .deepseek, "the model wins over the name")
+        XCTAssertEqual(AgentLab.of(id: "pocket-forge", model: nil), .anthropic, "Carter, #55533: forge is Claude")
+        XCTAssertEqual(AgentLab.of(id: "sol-max", model: nil), .openai)
         XCTAssertNil(AgentLab.other.initial, "an unknown lab shows a chip, not a letter")
     }
 
@@ -37,7 +39,7 @@ final class AgentLogoTests: XCTestCase {
     func test_each_agent_shows_once_working_first_with_its_labs_logo() {
         let present = [person("ds-box-1"), person("claude-warden"), person("CLAUDE-WARDEN"),
                        person("human-carter", human: true), person("astra-council")]
-        let agents = AgentLab.present(present, models: [:], working: ["claude-warden", "astra-council"])
+        let agents = AgentLab.present(present, models: [:], signals: ["claude-warden": "m9", "astra-council": "m8"])
         XCTAssertEqual(agents.map(\.id), ["astra-council", "claude-warden", "ds-box-1"])
         XCTAssertEqual(agents.map(\.lab), [.openai, .anthropic, .deepseek])
         XCTAssertEqual(agents.map(\.isWorking), [true, true, false])
@@ -47,12 +49,22 @@ final class AgentLogoTests: XCTestCase {
 
     func test_six_logos_show_then_a_count_of_the_rest() {
         let ids = (1...8).map { "box-\($0)" }
-        let agents = AgentLab.present(ids.map { person($0) }, models: [:], working: ["box-8"])
+        let agents = AgentLab.present(ids.map { person($0) }, models: [:], signals: ["box-8": "m1"])
         let cut = AgentLab.shown(agents)
         XCTAssertEqual(cut.shown.count, 6)
         XCTAssertEqual(cut.more, 2)
         XCTAssertEqual(cut.shown.first?.id, "box-8", "a working agent is never the one hidden")
         XCTAssertEqual(AgentLab.shown(Array(agents.prefix(6))).more, 0, "six fit with no count")
+    }
+
+    /// Carter, #55533: "Astra is codex ... two of them and since they're in a box we can give them one more small
+    /// badge". Running boxes post through the room and are not in presence.
+    func test_running_boxes_show_with_their_lab_and_a_box_badge_even_when_not_present() {
+        let agents = AgentLab.present([person("claude-warden"), person("astra-brand-s")], models: [:], signals: [:],
+                                      boxes: ["astra-brand-s", "astra-api-presence"])
+        XCTAssertEqual(agents.map(\.id), ["astra-api-presence", "astra-brand-s", "claude-warden"], "each once")
+        XCTAssertEqual(agents.map(\.isBox), [true, true, false])
+        XCTAssertEqual(agents.map(\.lab), [.openai, .openai, .anthropic])
     }
 
     /// Warden, #254: presence stays "active" while an agent's listener is connected, so it pulsed all the time.
@@ -72,6 +84,9 @@ final class AgentLogoTests: XCTestCase {
             ],
             composingAgents: ["astra-council"]
         )
-        XCTAssertEqual(state.workingAgentIds(now: now), ["claude-warden", "astra-council"])
+        let signals = state.agentSignals(now: now)
+        XCTAssertEqual(Set(signals.keys), ["claude-warden", "astra-council"])
+        XCTAssertEqual(signals["claude-warden"], "b", "a sign is the newest post, so the next post is a new beat")
+        XCTAssertEqual(signals["astra-council"], "typing:", "preparing a reply is a sign too")
     }
 }

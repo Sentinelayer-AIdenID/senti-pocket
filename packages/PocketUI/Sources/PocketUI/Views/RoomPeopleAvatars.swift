@@ -9,8 +9,10 @@ struct RoomPeopleAvatars: View {
     let presence: RoomChatPresence
     /// Each agent's model where the room knows it (a box's), lowercased id to model, to tell its lab.
     var models: [String: String] = [:]
-    /// The agents working now, lowercased ids: their logos pulse.
-    var working: Set<String> = []
+    /// Each working agent's newest sign of activity, by lowercased id: its logo beats once per new sign.
+    var signals: [String: String] = [:]
+    /// The room's running boxes, by name: shown even when not in presence, with a box badge.
+    var boxes: [String] = []
     let onOpen: () -> Void
 
     /// How long a note stays before it fades.
@@ -59,7 +61,7 @@ struct RoomPeopleAvatars: View {
     }
 
     private var agentsHere: [AgentLab.Present] {
-        AgentLab.present(presence.people, models: models, working: working)
+        AgentLab.present(presence.people, models: models, signals: signals, boxes: boxes)
     }
 
     private var shownAgents: [AgentLab.Present] { AgentLab.shown(agentsHere).shown }
@@ -134,24 +136,36 @@ struct RoomPeopleAvatars: View {
 }
 
 /// One agent here: its lab's logo in the lab's colour, solid (Carter, #55506: "I cannot see them anymore. They're too
-/// damn transparent"), or the lab's initial, or a chip for an unknown lab. While the agent works it pulses, and
-/// Claude's mark turns slowly, as its terminal spinner does; resting, it stays still.
+/// damn transparent"), or the lab's initial, or a chip for an unknown lab, with a small box badge for an agent running
+/// in a box. Still, until the agent does something: then it beats once, slowly, and Claude's mark turns a quarter,
+/// and it is still again (Carter, #55533: "palpitation movement when it senses something and then stillness").
 private struct AgentLogo: View {
     let agent: AgentLab.Present
     let reduceMotion: Bool
-    @State private var lifted = false
-    @State private var turned = false
+    @State private var beating = false
+    @State private var turn = 0.0
 
     var body: some View {
         let (red, green, blue) = agent.lab.tint
+        let tint = Color(red: red, green: green, blue: blue)
         mark
-            .foregroundStyle(Color(red: red, green: green, blue: blue))
+            .foregroundStyle(tint)
             .frame(width: 20, height: 20)
-            .rotationEffect(.degrees(agent.lab == .anthropic && turned ? 360 : 0))
-            .scaleEffect(agent.isWorking && lifted && !reduceMotion ? 1.18 : 1)
-            .shadow(color: Color(red: red, green: green, blue: blue).opacity(agent.isWorking && lifted ? 0.7 : 0), radius: 6)
-            .onAppear { animate(agent.isWorking) }
-            .onChange(of: agent.isWorking) { working in animate(working) }
+            .rotationEffect(.degrees(turn))
+            .scaleEffect(beating ? 1.22 : 1)
+            .shadow(color: tint.opacity(beating ? 0.75 : 0), radius: 7)
+            .overlay(alignment: .bottomTrailing) {
+                if agent.isBox {
+                    Image(systemName: "shippingbox.fill")
+                        .font(.system(size: 7, weight: .bold))
+                        .foregroundStyle(PocketPalette.textPrimary)
+                        .padding(2)
+                        .background(Circle().fill(PocketPalette.raised))
+                        .offset(x: 5, y: 5)
+                }
+            }
+            .onAppear { if agent.signal != nil { beat() } }
+            .onChange(of: agent.signal) { signal in if signal != nil { beat() } }
             .accessibilityHidden(true)
     }
 
@@ -169,15 +183,15 @@ private struct AgentLogo: View {
         }
     }
 
-    private func animate(_ working: Bool) {
-        guard working, !reduceMotion else {
-            lifted = false
-            turned = false
-            return
+    /// One slow beat: up and glowing over half a second, back down over most of a second, then still.
+    private func beat() {
+        guard !reduceMotion else { return }
+        withAnimation(.easeOut(duration: 0.5)) {
+            beating = true
+            if agent.lab == .anthropic { turn += 90 }
         }
-        withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) { lifted = true }
-        if agent.lab == .anthropic {
-            withAnimation(.linear(duration: 4).repeatForever(autoreverses: false)) { turned = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            withAnimation(.easeInOut(duration: 0.9)) { beating = false }
         }
     }
 }
