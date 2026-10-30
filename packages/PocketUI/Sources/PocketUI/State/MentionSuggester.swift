@@ -32,7 +32,8 @@ public struct MentionCandidate: Equatable, Identifiable, Sendable {
 /// The phone composer treats the end of the draft as the caret.
 public enum MentionSuggester {
     public static let recentWindow: TimeInterval = 10 * 60
-    public static let maximumSuggestions = 6
+    /// Everyone who matches, in a list the composer scrolls (a room can have hundreds of agents).
+    public static let maximumSuggestions = 60
 
     /// The query being typed at the end of `draft`, and where its `@` starts.
     public static func activeQuery(in draft: String) -> (query: String, atIndex: String.Index)? {

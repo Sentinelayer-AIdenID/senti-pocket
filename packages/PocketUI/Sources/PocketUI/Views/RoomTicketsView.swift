@@ -31,9 +31,11 @@ public struct RoomTicketsView: View {
     @State private var query = ""
     @State private var filing = false
 
-    public init(state: RoomTicketsPresentationState, send: @escaping (RoomTicketsIntent) -> Void) {
+    /// `startsFiling` opens the new-ticket sheet at once (the composer's "File a ticket").
+    public init(state: RoomTicketsPresentationState, startsFiling: Bool = false, send: @escaping (RoomTicketsIntent) -> Void) {
         self.state = state
         self.send = send
+        _filing = State(initialValue: startsFiling)
     }
 
     public var body: some View {

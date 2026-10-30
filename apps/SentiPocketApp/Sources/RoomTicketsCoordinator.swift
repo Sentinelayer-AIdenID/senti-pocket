@@ -586,6 +586,7 @@ final class RoomTicketsCoordinator: ObservableObject {
 struct RoomTicketsScreen: View {
     @StateObject private var coordinator: RoomTicketsCoordinator
     private let onOpenMessage: (@MainActor (Int64) -> Void)?
+    private let startsFiling: Bool
 
     init(
         sessionId: String,
@@ -596,10 +597,12 @@ struct RoomTicketsScreen: View {
         identity: (any AccountIdentityProviding)? = nil,
         assignRoster: [String] = [],
         extras: (any RoomTicketExtrasReading)? = nil,
+        startsFiling: Bool = false,
         onOpenMessage: (@MainActor (Int64) -> Void)? = nil,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.onOpenMessage = onOpenMessage
+        self.startsFiling = startsFiling && writer != nil
         _coordinator = StateObject(wrappedValue: RoomTicketsCoordinator(
             sessionId: sessionId,
             transport: transport,
@@ -615,7 +618,7 @@ struct RoomTicketsScreen: View {
     }
 
     var body: some View {
-        RoomTicketsView(state: coordinator.state) { intent in
+        RoomTicketsView(state: coordinator.state, startsFiling: startsFiling) { intent in
             if case .openSourceMessage(let sequence) = intent, let onOpenMessage {
                 onOpenMessage(sequence)
             } else {

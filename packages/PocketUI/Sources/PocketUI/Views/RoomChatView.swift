@@ -30,13 +30,18 @@ public struct RoomChatView: View {
     /// A failed message the reader chose to edit: its text goes back into the composer.
     @State private var restoredDraft: RoomComposerRestore?
 
+    /// What the composer's "+" offers besides mentioning: filing a ticket and searching, where the room has them.
+    private let composerActions: RoomComposerActions
+
     public init(
         state: RoomChatPresentationState,
         readingAloudId: String? = nil,
+        composerActions: RoomComposerActions = RoomComposerActions(),
         send: @escaping (RoomChatIntent) -> Void
     ) {
         self.state = state
         self.readingAloudId = readingAloudId
+        self.composerActions = composerActions
         self.send = send
     }
 
@@ -53,7 +58,13 @@ public struct RoomChatView: View {
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            RoomComposerBar(composer: state.composer, mentionCandidates: state.mentionCandidates, restored: restoredDraft) { text in
+            RoomComposerBar(
+                composer: state.composer,
+                mentionCandidates: state.mentionCandidates,
+                restored: restoredDraft,
+                actions: composerActions,
+                onIntent: send
+            ) { text in
                 send(.sendMessage(text: text))
             }
         }
@@ -545,7 +556,7 @@ private struct RoomMessageRowView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(row.authorName)
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(row.isHuman ? PocketPalette.listening : PocketPalette.textPrimary)
+                        .foregroundStyle(row.isHuman ? PocketPalette.accentStrong : PocketPalette.textPrimary)
                     if let date = row.date {
                         Text(date, style: .time)
                             .font(.caption)
@@ -591,13 +602,16 @@ private struct RoomMessageRowView: View {
                 )
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3)
+        .padding(.horizontal, 10)
+        .padding(.vertical, row.isHuman ? 6 : 3)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(isHighlighted ? PocketPalette.warning.opacity(0.18) : (row.isOwn ? PocketPalette.listening.opacity(0.08) : Color.clear))
+            // The web's bubbles: people get the warm tint, agents blend with the page. Who is a person comes only
+            // from the server-authored `human-` id, never from a name or an id that spells a role.
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(isHighlighted ? PocketPalette.warning.opacity(0.22) : (row.isHuman ? PocketPalette.humanBubble : Color.clear))
         )
+        .padding(.vertical, row.isHuman && row.showsHeader ? 2 : 0)
         .overlay(alignment: .topTrailing) {
             if isReadingAloud { RoomReadingAloudMark { send(.stopReadingAloud) } }
         }
@@ -931,10 +945,23 @@ private extension RoomChatPendingRow {
 
 /// The composer: multi-line, grows to six lines, sends the trimmed text. Hidden when the room cannot take posts,
 /// with the reason shown instead (for example a viewer membership).
+/// Which of the composer's "+" actions the room offers.
+public struct RoomComposerActions: Equatable, Sendable {
+    public var canFileTicket: Bool
+    public var canSearch: Bool
+
+    public init(canFileTicket: Bool = false, canSearch: Bool = false) {
+        self.canFileTicket = canFileTicket
+        self.canSearch = canSearch
+    }
+}
+
 private struct RoomComposerBar: View {
     let composer: RoomComposerState
     var mentionCandidates: [MentionCandidate] = []
     var restored: RoomComposerRestore?
+    var actions = RoomComposerActions()
+    var onIntent: (RoomChatIntent) -> Void = { _ in }
     let send: (String) -> Void
     @State private var draft = ""
 
@@ -955,31 +982,76 @@ private struct RoomComposerBar: View {
                     .accessibilityIdentifier("pocket.room.composer.tooLong")
             }
             if !suggestions.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
+                // Everyone who matches, people first: a list that scrolls, not a handful of chips.
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(suggestions) { candidate in
                             Button {
                                 draft = MentionSuggester.apply(candidate, to: draft)
                             } label: {
-                                HStack(spacing: 4) {
-                                    Image(systemName: candidate.isAll ? "person.3" : (candidate.isHuman ? "person" : "cpu"))
-                                    Text(candidate.isAll ? "@all · Everyone" : "@\(candidate.handle)")
+                                HStack(spacing: 10) {
+                                    Image(systemName: candidate.isAll ? "person.3.fill" : (candidate.isHuman ? "person.crop.circle.fill" : "cpu"))
+                                        .font(.body)
+                                        .foregroundStyle(candidate.isHuman || candidate.isAll ? PocketPalette.accent : PocketPalette.listening)
+                                        .frame(width: 26)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(candidate.isAll ? "@all" : "@\(candidate.handle)")
+                                            .font(.subheadline.weight(.semibold))
+                                            .foregroundStyle(PocketPalette.textPrimary)
+                                        Text(candidate.isAll ? "Everyone in the room" : candidate.displayName)
+                                            .font(.caption)
+                                            .foregroundStyle(PocketPalette.textSecondary)
+                                            .lineLimit(1)
+                                    }
+                                    Spacer(minLength: 0)
                                 }
-                                .font(.footnote.weight(.semibold))
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 6)
-                                .background(PocketPalette.raised, in: Capsule())
-                                .overlay(Capsule().stroke(PocketPalette.separator.opacity(0.6), lineWidth: 0.5))
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 7)
+                                .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel(candidate.isAll ? "Mention everyone" : "Mention \(candidate.displayName), @\(candidate.handle)")
                             .accessibilityIdentifier("pocket.room.mention.\(candidate.handle)")
                         }
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.top, 8)
                 }
+                .frame(maxHeight: min(CGFloat(suggestions.count) * 48, 240))
+                .background(PocketPalette.raised)
+                .overlay(alignment: .bottom) { Divider() }
             }
             HStack(alignment: .bottom, spacing: 8) {
+                Menu {
+                    Button {
+                        let separated = draft.isEmpty || draft.last?.isWhitespace == true
+                        draft += separated ? "@" : " @"
+                    } label: {
+                        Label("Mention someone", systemImage: "at")
+                    }
+                    if actions.canFileTicket {
+                        Button {
+                            onIntent(.openTickets(filing: true))
+                        } label: {
+                            Label("File a ticket", systemImage: "ticket")
+                        }
+                    }
+                    if actions.canSearch {
+                        Button {
+                            onIntent(.openSearch)
+                        } label: {
+                            Label("Search this room", systemImage: "magnifyingglass")
+                        }
+                    }
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(PocketPalette.textPrimary)
+                        .frame(width: 36, height: 36)
+                        .background(PocketPalette.raised, in: Circle())
+                        .overlay(Circle().stroke(PocketPalette.separator.opacity(0.8), lineWidth: 0.5))
+                }
+                .accessibilityLabel("More")
+                .accessibilityIdentifier("pocket.room.composer.plus")
+                .padding(.bottom, 1)
                 TextField("Message", text: $draft, axis: .vertical)
                     .lineLimit(1...6)
                     .textFieldStyle(.plain)

@@ -596,6 +596,9 @@ public enum RoomChatIntent: Equatable, Sendable {
     case loadNewer
     /// Leave a window further back for the live room (the newest messages).
     case jumpToLatest
+    /// The composer's "+": open the room's tickets (straight into a new ticket when `filing`), or its search.
+    case openTickets(filing: Bool)
+    case openSearch
     case readerAtBottom(Bool)
     case retry
     case jumpToMessage(sequenceId: Int64)
