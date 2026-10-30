@@ -17,20 +17,26 @@ final class VoiceCallWindow {
         // Light or dark as the app is.
         made.overrideUserInterfaceStyle = scene.windows.first { $0.isKeyWindow }?.traitCollection.userInterfaceStyle
             ?? .unspecified
-        made.rootViewController = UIHostingController(rootView: content)
-        made.transform = CGAffineTransform(translationX: 0, y: made.bounds.height)
+        let host = UIHostingController(rootView: content)
+        made.rootViewController = host
         made.isHidden = false
         window = made
-        UIView.animate(withDuration: 0.32, delay: 0, usingSpringWithDamping: 0.9, initialSpringVelocity: 0) {
-            made.transform = .identity
-        }
+        // It slides up. The view moves, not the window: a window's own transform is not reliably drawn.
+        let below = CGAffineTransform(translationX: 0, y: made.bounds.height)
+        host.view.transform = below
+        UIView.animate(withDuration: 0.32, delay: 0, usingSpringWithDamping: 0.9, initialSpringVelocity: 0, animations: {
+            host.view.transform = .identity
+        }, completion: { _ in
+            host.view.transform = .identity
+        })
     }
 
     func hide() {
         guard let window else { return }
         self.window = nil
+        let view = window.rootViewController?.view
         UIView.animate(withDuration: 0.25, animations: {
-            window.transform = CGAffineTransform(translationX: 0, y: window.bounds.height)
+            view?.transform = CGAffineTransform(translationX: 0, y: window.bounds.height)
         }, completion: { _ in
             window.isHidden = true
         })
