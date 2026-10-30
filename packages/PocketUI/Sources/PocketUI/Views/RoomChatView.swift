@@ -411,9 +411,8 @@ public struct RoomChatView: View {
                 attachmentPreviews: state.attachmentPreviews,
                 isReadingAloud: readingAloudId == message.readAloudId,
                 isExpanded: expandedQuiet.contains(message.id),
-                threadSummary: message.box != nil
-                    ? state.threadSummaries[message.sequenceId]
-                    : (message.isInlineReply ? message.replyToSequenceId.flatMap { state.threadSummaries[$0] } : nil),
+                threadSummary: message.summaryThreadId.flatMap { state.threadSummaries[$0] },
+                isReadingSummary: message.summaryReadAloudId.map { readingAloudId == $0 } ?? false,
                 onOpenReplyTarget: { jump(to: $0, proxy: proxy) },
                 onOpenCheckpoint: { openCheckpoint = $0 },
                 onEdit: { editingRow = $0 },
@@ -631,6 +630,8 @@ private struct RoomMessageRowView: View {
     var isExpanded = false
     /// What happened in this row's thread, summarized on the phone, for a box line or a thread's newest reply.
     var threadSummary: String?
+    /// That summary is being read aloud.
+    var isReadingSummary = false
     let onOpenReplyTarget: (Int64) -> Void
     var onOpenCheckpoint: (RoomChatMessageRow) -> Void = { _ in }
     var onEdit: (RoomChatMessageRow) -> Void = { _ in }
@@ -716,7 +717,8 @@ private struct RoomMessageRowView: View {
                     .padding(.vertical, 6)
                 )
             } else if let box = row.box {
-                RoomBoxLine(box: box, summary: threadSummary) { send(.openThread(sequenceId: row.sequenceId)) }
+                RoomBoxLine(box: box, summary: threadSummary, isReadingSummary: isReadingSummary,
+                            onListen: { listenToSummary() }) { send(.openThread(sequenceId: row.sequenceId)) }
                     .padding(.vertical, 3)
                     .accessibilityIdentifier("pocket.room.box.\(row.sequenceId)")
             } else if row.isQuiet {
@@ -875,9 +877,22 @@ private struct RoomMessageRowView: View {
             .buttonStyle(.plain)
             .accessibilityLabel(row.isInlineReply ? "\(quoteText(reply)). Opens the thread." : "Replying to message \(reply)")
             if let threadSummary, row.trail.map({ $0.count > 1 }) == true {
-                ThreadSummaryText(text: threadSummary)
-                    .padding(.leading, 10)
+                HStack(alignment: .top, spacing: 0) {
+                    ThreadSummaryText(text: threadSummary)
+                    Spacer(minLength: 0)
+                    ThreadSummaryListenButton(isReading: isReadingSummary) { listenToSummary() }
+                }
+                .padding(.leading, 10)
             }
+        }
+    }
+
+    /// Reads this row's thread summary aloud, or stops it (Carter, on #55474: "a voice version of the summary").
+    private func listenToSummary() {
+        if isReadingSummary {
+            send(.stopReadingAloud)
+        } else if let threadSummary, let id = row.summaryReadAloudId {
+            send(.readAloud(id: id, text: threadSummary))
         }
     }
 

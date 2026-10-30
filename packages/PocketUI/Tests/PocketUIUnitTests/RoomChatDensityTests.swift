@@ -129,6 +129,16 @@ final class RoomChatDensityTests: XCTestCase {
         XCTAssertEqual(shown.first { $0.id == "l10" }?.isQuiet, false, "the launch line is the box's own line")
         XCTAssertEqual(shown.map(\.id), ["m1", "l10", "reply-r4", "m11"],
                        "what the box says stays in its thread, except what it says to you")
+        // The thread's summary is the box's, both on its line and on what it says to you; it reads aloud as itself.
+        XCTAssertEqual(shown.first { $0.id == "l10" }?.summaryThreadId, 10)
+        XCTAssertEqual(shown.first { $0.id == "reply-r4" }?.summaryThreadId, 10)
+        XCTAssertNil(shown.first { $0.id == "m11" }?.summaryThreadId, "a message with no thread has no summary")
+        let boxLine = shown.first { $0.id == "l10" }
+        let boxReply = shown.first { $0.id == "reply-r4" }
+        XCTAssertNotEqual(boxLine?.summaryReadAloudId, boxLine?.readAloudId)
+        XCTAssertNotEqual(boxLine?.summaryReadAloudId, boxReply?.summaryReadAloudId, "only the row being read shows stop")
+        XCTAssertEqual(boxLine?.summaryReadAloudId.flatMap(RoomReadAloud.summaryThread), 10, "the player opens its thread")
+        XCTAssertNil(RoomReadAloud.summaryThread(RoomReadAloud.message(10)))
 
         let ended = RoomChatPresentationState(sessionId: "room", title: "Room", messages: messages + [
             input("c12", seq: 12, at: 500, author: "respawn-orchestrator",
