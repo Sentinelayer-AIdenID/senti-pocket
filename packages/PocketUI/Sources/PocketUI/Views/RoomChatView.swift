@@ -198,10 +198,14 @@ public struct RoomChatView: View {
                             .accessibilityIdentifier("pocket.room.invite")
                         }
                     } label: {
+                        // A long name (the server's auto-titles can run long) ends in "…" instead of pushing Talk into
+                        // the overflow menu and running under the bar's buttons (10-30).
                         Text(state.title)
                             .font(.headline)
                             .foregroundStyle(PocketPalette.textPrimary)
                             .lineLimit(1)
+                            .truncationMode(.tail)
+                            .frame(maxWidth: Self.titleWidth)
                     }
                     // The system's own chevron marks the menu; a second one of ours doubled it on iOS 26.
                     .menuIndicator(.visible)
@@ -659,6 +663,9 @@ public struct RoomChatView: View {
     }
 
     private static let bottomId = "room-bottom"
+    /// The widest the room's name gets in the top bar: room for the side panel button, the connection dot, Talk and
+    /// the menu on a 375-point phone.
+    static let titleWidth: CGFloat = 170
 }
 
 /// A thread summary opened whole: its read-aloud id (so the sheet shows Stop while it is read) and its text.
