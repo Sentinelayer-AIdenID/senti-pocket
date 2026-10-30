@@ -120,7 +120,8 @@ final class AgentLogoTests: XCTestCase {
         let working = state.agentsWorking(now: now)
         XCTAssertEqual(working, ["claude-warden"], "the server's word, while it holds; run out is not working")
         let renewed = RoomChatPresentationState(
-            sessionId: "room", title: "Room", presence: RoomChatPresence.make(isAvailable: true, humansOnline: 0, people: [
+            sessionId: "room", title: "Room", messages: [],
+            presence: RoomChatPresence.make(isAvailable: true, humansOnline: 0, people: [
                 RoomChatPresence.Person(id: "claude-warden", name: "claude-warden", isHuman: false, isIdle: false,
                                         isWorking: true, workingUntilMs: nowMs + 40_000)
             ]))
