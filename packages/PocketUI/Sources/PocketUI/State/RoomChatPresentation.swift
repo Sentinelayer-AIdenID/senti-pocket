@@ -840,6 +840,9 @@ public struct RoomChatPresentationState: Equatable, Sendable {
 public enum RoomReadAloud {
     public static func message(_ sequenceId: Int64) -> String { "msg:\(sequenceId)" }
     public static func reply(_ id: String) -> String { "reply:\(id)" }
+    /// A thread's summary, by the sequence id of the message the thread answers (Carter, on #55474: "a voice version
+    /// of the summary").
+    public static func summary(_ threadSequenceId: Int64) -> String { "summary:\(threadSequenceId)" }
 }
 
 /// A thread as the room shows it: how many replies, who wrote them (newest first), and the newest one is the row.
@@ -1127,6 +1130,12 @@ extension RoomChatMessageRow {
     /// What reads this row aloud. A reply shown in the room is read as itself, never as the message it answers.
     public var readAloudId: String {
         inlineReplyId.map(RoomReadAloud.reply) ?? RoomReadAloud.message(sequenceId)
+    }
+
+    /// The thread whose summary this row shows: a box line's own thread, or the thread a reply in the room is in.
+    public var summaryThreadId: Int64? {
+        if box != nil { return sequenceId }
+        return isInlineReply ? replyToSequenceId : nil
     }
 
     /// What a reply written to this row sends: into its thread, answering this reply when the row is one.

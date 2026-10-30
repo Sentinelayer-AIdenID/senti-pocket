@@ -287,6 +287,7 @@ struct RoomChatScreen: View {
             }
             return coordinator.state.thread?.replies.first { $0.id == replyId }?.authorName
         }
+        if id.hasPrefix("summary:") { return "Thread summary" }
         return nil
     }
 

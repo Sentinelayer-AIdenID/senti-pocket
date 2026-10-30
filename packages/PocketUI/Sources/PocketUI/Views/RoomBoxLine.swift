@@ -7,6 +7,10 @@ struct RoomBoxLine: View {
     let box: RoomBoxThread
     /// What happened in its thread, in a sentence or two, when the phone has summarized it.
     var summary: String?
+    /// The summary is being read aloud.
+    var isReadingSummary = false
+    /// Read the summary aloud, or stop (Carter, on #55474: "a voice version of the summary").
+    var onListen: (() -> Void)?
     let onOpen: () -> Void
 
     var body: some View {
@@ -40,7 +44,9 @@ struct RoomBoxLine: View {
                     .accessibilityHidden(true)
             }
             if let summary {
+                // Room on the right for the speaker, which sits over the card and is its own button.
                 ThreadSummaryText(text: summary)
+                    .padding(.trailing, onListen == nil ? 0 : ThreadSummaryListenButton.size)
             }
             }
             .padding(.horizontal, 10)
@@ -51,6 +57,13 @@ struct RoomBoxLine: View {
         .buttonStyle(.plain)
         .accessibilityLabel("Box \(box.name), \(box.status), \(box.replies) in its thread\(summary.map { ". Summary: \($0)" } ?? "")")
         .accessibilityHint("Opens its thread")
+        .overlay(alignment: .bottomTrailing) {
+            if summary != nil, let onListen {
+                ThreadSummaryListenButton(isReading: isReadingSummary, action: onListen)
+                    .padding(.trailing, 4)
+                    .padding(.bottom, 2)
+            }
+        }
     }
 }
 
@@ -71,6 +84,26 @@ struct ThreadSummaryText: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .accessibilityIdentifier("pocket.room.threadSummary")
+    }
+}
+
+/// Reads a thread's summary aloud, or stops it: a small speaker after the summary.
+struct ThreadSummaryListenButton: View {
+    static let size: CGFloat = 30
+    let isReading: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: isReading ? "stop.fill" : "speaker.wave.2.fill")
+                .font(.caption)
+                .foregroundStyle(PocketPalette.accentStrong)
+                .frame(width: Self.size, height: Self.size)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(isReading ? "Stop reading the summary" : "Listen to the summary")
+        .accessibilityIdentifier("pocket.room.threadSummary.listen")
     }
 }
 #endif
