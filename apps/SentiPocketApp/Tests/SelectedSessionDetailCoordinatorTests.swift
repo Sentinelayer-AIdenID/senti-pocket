@@ -312,6 +312,32 @@ final class SelectedSessionDetailCoordinatorTests: XCTestCase {
         XCTAssertEqual(opened.values.count, 1)
     }
 
+    /// Carter (10-30): "Verified checkpoint · Connection unavailable". The signing gateway is not deployed, so until
+    /// it is a checkpoint opens as the server holds it, and only the exact visible row, never the verified view.
+    func test_without_signing_a_checkpoint_opens_as_the_server_holds_it() async throws {
+        let transport = ControlledSessionDetailTransport()
+        let opened = ExactCheckpointTargetProbe()
+        let coordinator = SelectedSessionDetailCoordinator(
+            transport: transport,
+            opensVerifiedCheckpoints: false,
+            onOpenCheckpoint: { opened.values.append($0) }
+        )
+        let operation = try XCTUnwrap(coordinator.setSelectedSession("room-1", authenticationRevision: 9))
+        try await waitForRequests(transport, events: 1, actions: 1, checkpoints: 1)
+        await transport.resumeNextEvent(.success(try eventPage(sessionId: "room-1", marker: "visible")))
+        await transport.resumeNextAction(.success(try actionPage(sessionId: "room-1", marker: "visible")))
+        await transport.resumeNextCheckpoint(.success(try checkpointPage(sessionId: "room-1", marker: "visible")))
+        await operation.value
+
+        coordinator.send(.openCheckpoint(sessionId: "room-1", checkpointId: "checkpoint-forged"))
+        XCTAssertNil(coordinator.serverCheckpoint)
+        coordinator.send(.openCheckpoint(sessionId: "room-1", checkpointId: "checkpoint-visible"))
+        XCTAssertEqual(coordinator.serverCheckpoint?.checkpointId, "checkpoint-visible")
+        XCTAssertTrue(opened.values.isEmpty, "the verified view, which could only fail, is not opened")
+        coordinator.closeServerCheckpoint()
+        XCTAssertNil(coordinator.serverCheckpoint)
+    }
+
     func test_successful_activity_revision_clears_destination_when_exact_event_identity_changes() async throws {
         let transport = ControlledSessionDetailTransport()
         let coordinator = SelectedSessionDetailCoordinator(transport: transport)
