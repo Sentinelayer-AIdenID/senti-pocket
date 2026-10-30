@@ -567,3 +567,53 @@ extension HTTPRoomMessageSender {
         return (data, http)
     }
 }
+
+extension HTTPRoomMessageSender {
+    /// `POST /api/v1/sessions`: a new private room you own, of a type (Carter, #55287: "rooms optimized just for
+    /// specific things like study together"). The id is made here; the mutation token is signed over it and the
+    /// route, as the API checks before anything else.
+    func createRoom(title: String, roomType: String, maxMembers: Int = 25) async throws -> String {
+        guard let apiBaseURL,
+              var components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false) else {
+            throw RoomSendError.notConfigured
+        }
+        guard let token = tokenProvider(), !token.isEmpty else { throw RoomSendError.reauthenticationRequired }
+        components.percentEncodedPath = "/api/v1/sessions"
+        components.query = nil
+        guard let url = components.url else { throw RoomSendError.notConfigured }
+        let sessionId = UUID().uuidString.lowercased()
+        let key = "create-" + UUID().uuidString.lowercased()
+        guard let csrf = SessionMutationCSRF.token(bearer: token, sessionId: sessionId, routeTemplate: "POST /api/v1/sessions",
+                                                   idempotencyKey: key) else {
+            throw RoomSendError.notConfigured
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue(key, forHTTPHeaderField: "Idempotency-Key")
+        request.setValue("session-mutation", forHTTPHeaderField: "X-Sentinelayer-Session-Mutation")
+        request.setValue(csrf, forHTTPHeaderField: "X-CSRF-Token")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "sessionId": sessionId, "title": title, "roomType": roomType, "visibility": "private", "maxMembers": maxMembers
+        ])
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await urlSession.data(for: request)
+        } catch {
+            throw RoomSendError.retryable(retryAfterSeconds: nil)
+        }
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        switch status {
+        case 200..<300:
+            let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            return (object?["sessionId"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? sessionId
+        case 401: throw RoomSendError.reauthenticationRequired
+        case 403: throw RoomSendError.notAllowed
+        case 429, 500..<600: throw RoomSendError.retryable(retryAfterSeconds: nil)
+        default: throw RoomSendError.rejected
+        }
+    }
+}

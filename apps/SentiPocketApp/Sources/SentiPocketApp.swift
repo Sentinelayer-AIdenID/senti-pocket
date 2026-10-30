@@ -182,6 +182,7 @@ private struct AuthenticatedRootView: View {
     @Environment(\.scenePhase) private var rootScenePhase
     @ObservedObject private var whisperModelCoordinator: WhisperModelProvisioningCoordinator
     @ObservedObject private var incomingLinks: IncomingLinkInbox
+    @State private var presentsNewRoom = false
     @State private var presentsSettings = false
     /// The room on screen, the root of the stack; nil shows your rooms. Breakouts push onto `roomPath`.
     @State private var currentRoom: RoomRoute?
@@ -463,6 +464,20 @@ private struct AuthenticatedRootView: View {
                 }
             )
         }
+        .sheet(isPresented: $presentsNewRoom) {
+            if let creator = roomSender as? any RoomCreating {
+                NewRoomSheet(
+                    creator: creator,
+                    onCreated: { sessionId, title in
+                        presentsNewRoom = false
+                        sessions.send(.refreshSessions)
+                        // You made it, so you own it: the owner's tools (rename, invite) are there at once.
+                        show(RoomRoute(sessionId: sessionId, title: title, membershipRole: "owner"))
+                    },
+                    onClose: { presentsNewRoom = false }
+                )
+            }
+        }
         .onAppear {
             checkpointPocket.setSelectedSession(
                 sessions.selectedSessionId,
@@ -608,7 +623,11 @@ private struct AuthenticatedRootView: View {
             onSettings: {
                 closeDrawer()
                 presentsSettings = true
-            }
+            },
+            onNewRoom: roomSender is any RoomCreating ? {
+                closeDrawer()
+                presentsNewRoom = true
+            } : nil
         )
     }
 
