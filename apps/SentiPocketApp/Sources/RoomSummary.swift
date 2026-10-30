@@ -32,12 +32,43 @@ protocol RoomSummaryGenerating: Sendable {
     func generateSummary(sessionId: String) async throws -> RoomSummary
 }
 
+/// Why a summary was not made, as the server (or the edge in front of it) answered: what the sheet says, and the
+/// line it can send to the room so the failure reaches the agents at once (Carter, #55375: "that error should somehow
+/// reach you guys quick. We cannot allow an error like that to go unnoticed").
+struct RoomSummaryFailure: Error, Equatable {
+    let status: Int
+    /// The server's request id; nil when the request was refused before it reached the server.
+    let requestId: String?
+
+    var message: String {
+        switch status {
+        case 403, 404: return "Only the room's owner can summarize it."
+        case 429: return "That's the most summaries for this minute. Try again in a minute."
+        case 500..<600 where requestId == nil: return "Summaries aren't open on the server yet."
+        case 500..<600: return "The summary service didn't answer (error \(status)). Try again in a minute."
+        default: return "The summary could not be made (error \(status))."
+        }
+    }
+
+    /// One line for the room, with what an agent needs to find it in the logs.
+    func report(build: String) -> String {
+        let reached = requestId.map { "request id `\($0)`" } ?? "refused before it reached the server (no request id)"
+        return "Pocket problem: Summarize this room failed with HTTP \(status), \(reached). Build \(build)."
+    }
+}
+
 extension HTTPRoomMessageSender: RoomSummaryGenerating {
     /// The summary can take up to the API's 60 seconds, longer than the live requests' deadline, so it gets its own
     /// session: no cache, no cookies, the bearer per request.
     func generateSummary(sessionId: String) async throws -> RoomSummary {
-        let data = try await post(sessionId: sessionId, path: "summary/generate", idempotencyKey: "summary-" + UUID().uuidString.lowercased(),
-                                  body: [:], session: Self.summarySession)
+        let (data, http) = try await postAnswer(sessionId: sessionId, path: "summary/generate",
+                                                idempotencyKey: "summary-" + UUID().uuidString.lowercased(),
+                                                body: [:], session: Self.summarySession)
+        if http.statusCode == 401 { throw RoomSendError.reauthenticationRequired }
+        guard (200..<300).contains(http.statusCode) else {
+            let requestId = http.value(forHTTPHeaderField: "X-Request-Id").flatMap { $0.isEmpty ? nil : $0 }
+            throw RoomSummaryFailure(status: http.statusCode, requestId: requestId)
+        }
         guard let summary = RoomSummary(json: data) else { throw RoomSendError.rejected }
         return summary
     }
@@ -60,15 +91,18 @@ struct RoomSummarySheet: View {
     let generator: any RoomSummaryGenerating
     @ObservedObject var reader: MessageReader
     var onClose: () -> Void
+    /// Posts a failure's report line to the room, when the room lets you post.
+    var onReport: ((String) -> Void)?
 
     private enum Phase: Equatable {
         case working
         case ready(RoomSummary)
-        case failed(String)
+        case failed(String, report: String?)
     }
 
     @State private var phase: Phase = .working
     @State private var copied = false
+    @State private var reported = false
 
     var body: some View {
         NavigationStack {
@@ -117,11 +151,23 @@ struct RoomSummarySheet: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
-                    case .failed(let message):
+                    case .failed(let message, let report):
                         Text(message)
                             .foregroundStyle(.red)
-                        Button("Try again") { Task { await load() } }
-                            .buttonStyle(.bordered)
+                            .accessibilityIdentifier("pocket.room.summary.failure")
+                        HStack(spacing: 12) {
+                            Button("Try again") { Task { await load() } }
+                                .buttonStyle(.bordered)
+                            if let report, let onReport {
+                                Button(reported ? "Sent to the room" : "Send this problem to the room") {
+                                    onReport(report)
+                                    reported = true
+                                }
+                                .buttonStyle(.bordered)
+                                .disabled(reported)
+                                .accessibilityIdentifier("pocket.room.summary.report")
+                            }
+                        }
                     }
                 }
                 .padding(20)
@@ -143,14 +189,21 @@ struct RoomSummarySheet: View {
 
     private var readId: String { "summary:\(sessionId)" }
 
+    private static var build: String {
+        (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String) ?? "unknown"
+    }
+
     private func load() async {
         phase = .working
         do {
             phase = .ready(try await generator.generateSummary(sessionId: sessionId))
         } catch RoomSendError.reauthenticationRequired {
-            phase = .failed("Sign in again to summarize this room.")
+            phase = .failed("Sign in again to summarize this room.", report: nil)
+        } catch let failure as RoomSummaryFailure {
+            CrashReporter.shared.note("summary failed \(failure.status)")
+            phase = .failed(failure.message, report: failure.report(build: Self.build))
         } catch {
-            phase = .failed("The summary could not be made just now. Try again in a minute.")
+            phase = .failed("The summary could not be made just now. Check your connection and try again.", report: nil)
         }
     }
 
