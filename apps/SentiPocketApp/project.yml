@@ -80,6 +80,9 @@ targets:
         # placeholder intact, GatewayEndpoint rejects it too.
         SENTI_API_URL: "$(SENTI_API_URL)"
         SENTI_GATEWAY_URL: "$(SENTI_GATEWAY_URL)"
+        # Optional: the Flight record's service, also an explicit HTTPS origin from the build. Without it the Flight
+        # record shows the room's agents and no boxes.
+        SENTI_MINT_URL: "$(SENTI_MINT_URL)"
     settings:
       base:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

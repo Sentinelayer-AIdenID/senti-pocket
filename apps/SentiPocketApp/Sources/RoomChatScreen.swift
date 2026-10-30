@@ -114,7 +114,12 @@ struct RoomChatScreen: View {
         ))
         _flight = StateObject(wrappedValue: FlightRecordCoordinator(
             sessionId: route.sessionId,
-            mint: HTTPMintClient(tokenProvider: { SessionTokenStore.load() })
+            mint: HTTPMintClient(
+                baseURL: GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_MINT_URL"]),
+                // No cache and no cookie store for a request that carries the person's token.
+                urlSession: SentiHTTPTransportPolicy.protectedReadSession,
+                tokenProvider: { SessionTokenStore.load() }
+            )
         ))
     }
 
