@@ -249,6 +249,78 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         XCTAssertTrue(poster.uploads.first?.filename.hasPrefix("voice-pocket-forge-") == true)
     }
 
+    /// Carter (10-30): in a meeting the first agent to answer takes the turn; the others hold, and they are told.
+    func test_in_a_meeting_the_first_answer_takes_the_turn_and_the_others_hold() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), poster = FakePoster()
+        let room = room(with: [], handsFree: false, listener: listener, speaker: speaker, audio: audio, poster: poster)
+        room.begin()
+        room.send(.toggleTalk)
+        await until("listening") { listener.partial != nil }
+        listener.say("Who takes the release notes?")
+        room.send(.toggleTalk)
+        await until("posted") { poster.turns.count == 1 }
+
+        room.receive([
+            message("a1", from: "review-agent", "I will.", secondsAfterStart: 3),
+            message("b1", from: "build-agent", "I can take them.", secondsAfterStart: 4),
+            message("c1", from: "docs-agent", "Me too.", secondsAfterStart: 5)
+        ])
+        await until("speaking") { room.state.speaker == "review-agent" }
+        await until("floor posted") { poster.turns.count == 2 }
+        XCTAssertEqual(poster.turns.last, "🎙️ review-agent has the floor for this turn. Everyone else, hold until the next one.",
+                       "the others are told once")
+        XCTAssertEqual(room.state.turns.filter(\.isHeld).map(\.speaker), ["build-agent", "docs-agent"])
+        XCTAssertEqual(room.state.waiting, 0, "held answers are never read")
+        room.receive([message("a2", from: "review-agent", "Draft by noon.", secondsAfterStart: 6)])
+        XCTAssertEqual(room.state.waiting, 1, "the agent with the floor keeps it")
+        speaker.finish()
+        await until("second") { speaker.spoken.count == 2 }
+        speaker.finish()
+
+        // The next turn opens the floor again.
+        room.send(.toggleTalk)
+        await until("listening again") { listener.partial != nil }
+        listener.say("And the changelog?")
+        room.send(.toggleTalk)
+        await until("posted again") { poster.turns.count == 3 }
+        room.receive([message("b2", from: "build-agent", "That one is mine.", secondsAfterStart: 8)])
+        await until("build speaks") { room.state.speaker == "build-agent" }
+        XCTAssertEqual(room.timings.held, 2)
+    }
+
+    /// Carter (10-30): the call measures itself, and the closing message says how fast it was.
+    func test_a_call_measures_its_turns_and_reports_them_when_it_ends() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), poster = FakePoster()
+        let room = room(with: ["pocket-forge"], handsFree: false, listener: listener, speaker: speaker, audio: audio, poster: poster)
+        room.begin()
+        room.send(.toggleTalk)
+        await until("listening") { listener.partial != nil }
+        listener.say("Status please.")
+        clock.advance(0.5)
+        room.send(.toggleTalk)
+        await until("posted") { poster.turns.count == 1 }
+        clock.advance(3)
+        room.receive([message("m1", from: "pocket-forge", "Build 21 is up.", secondsAfterStart: 4)])
+        await until("speaking") { room.state.speaker == "pocket-forge" }
+        XCTAssertEqual(room.timings.percentile(.answer, 0.5), 3, "turn posted to answer arriving")
+        XCTAssertEqual(room.timings.percentile(.gap, 0.5), 3.5, "the last word heard to the answer's first sound")
+        XCTAssertNotNil(room.timings.percentile(.recognition, 0.5))
+        XCTAssertNotNil(room.timings.percentile(.post, 0.5))
+        speaker.finish()
+
+        await room.hangUp()
+        XCTAssertTrue(poster.endings.first?.text.contains("\nTimings: you stop → answer heard 3.5 s") == true,
+                      poster.endings.first?.text ?? "")
+        XCTAssertTrue(poster.uploads.first?.markdown.contains("## Timings, measured on the phone") == true)
+    }
+
+    func test_a_finished_sentence_ends_a_hands_free_turn_sooner() {
+        XCTAssertEqual(VoiceRoomCoordinator.pause(after: "Ship it tonight."), VoiceRoomCoordinator.pauseAfterSentence)
+        XCTAssertEqual(VoiceRoomCoordinator.pause(after: "What about the build? "), VoiceRoomCoordinator.pauseAfterSentence)
+        XCTAssertEqual(VoiceRoomCoordinator.pause(after: "Ship it and then"), VoiceRoomCoordinator.pauseEndsTurn)
+        XCTAssertEqual(VoiceRoomCoordinator.pause(after: ""), VoiceRoomCoordinator.pauseEndsTurn)
+    }
+
     func test_hanging_up_a_call_where_nothing_was_said_posts_nothing() async {
         let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), poster = FakePoster()
         let room = room(with: ["pocket-forge"], handsFree: false, listener: listener, speaker: speaker, audio: audio, poster: poster)

@@ -7,13 +7,95 @@ public struct VoiceRoomTurn: Equatable, Identifiable, Sendable {
     public let isYou: Bool
     public let text: String
     public let at: Date
+    /// In a meeting, another agent already had the floor for this turn: kept in the transcript, never read aloud.
+    public let isHeld: Bool
 
-    public init(id: String, speaker: String, isYou: Bool, text: String, at: Date) {
+    public init(id: String, speaker: String, isYou: Bool, text: String, at: Date, isHeld: Bool = false) {
         self.id = id
         self.speaker = speaker
         self.isYou = isYou
         self.text = text
         self.at = at
+        self.isHeld = isHeld
+    }
+}
+
+/// How fast a call felt, measured on the phone (Carter, 10-30: "something to measure response time for TTS and
+/// STT"). Each measure keeps every sample; the call's end reports the middle (p50) and the slow end (p95).
+public struct VoiceCallTimings: Equatable, Sendable {
+    public enum Measure: String, CaseIterable, Sendable {
+        /// You stopped talking (the last word heard) to the first sound of the answer: the gap people feel.
+        case gap
+        /// Your turn accepted by the room to the first answer arriving on the phone.
+        case answer
+        /// Ending your turn to the phone's recognizer handing over its words.
+        case recognition
+        /// Sending your turn to the room accepting it.
+        case post
+        /// Asking the phone to speak an answer to its first sound.
+        case voiceStart
+
+        public var label: String {
+            switch self {
+            case .gap: return "you stop → answer heard"
+            case .answer: return "turn posted → answer arrives"
+            case .recognition: return "speech recognized"
+            case .post: return "turn posted"
+            case .voiceStart: return "voice starts"
+            }
+        }
+    }
+
+    public private(set) var samples: [Measure: [TimeInterval]] = [:]
+    /// Answers held because another agent had the floor.
+    public private(set) var held = 0
+
+    public init() {}
+
+    public var isEmpty: Bool { samples.values.allSatisfy(\.isEmpty) && held == 0 }
+
+    public mutating func record(_ measure: Measure, _ seconds: TimeInterval) {
+        guard seconds.isFinite, seconds >= 0 else { return }
+        samples[measure, default: []].append(seconds)
+    }
+
+    public mutating func noteHeld() { held += 1 }
+
+    /// The nearest-rank percentile (0...1) of a measure, nil without samples.
+    public func percentile(_ measure: Measure, _ fraction: Double) -> TimeInterval? {
+        guard let values = samples[measure], !values.isEmpty else { return nil }
+        let sorted = values.sorted()
+        let rank = Int((fraction * Double(sorted.count)).rounded(.up)) - 1
+        return sorted[min(max(rank, 0), sorted.count - 1)]
+    }
+
+    /// For the call's closing message: "Timings: you stop → answer heard 4.2 s (p95 6.0 s, 5 turns) · …".
+    public func line() -> String? {
+        let parts = Measure.allCases.compactMap { measure -> String? in
+            guard let middle = percentile(measure, 0.5), let slow = percentile(measure, 0.95) else { return nil }
+            let count = samples[measure]?.count ?? 0
+            return count > 1
+                ? "\(measure.label) \(Self.seconds(middle)) (p95 \(Self.seconds(slow)), \(count))"
+                : "\(measure.label) \(Self.seconds(middle))"
+        }
+        var line = parts.joined(separator: " · ")
+        if held > 0 { line += (line.isEmpty ? "" : " · ") + "\(held) held for the floor" }
+        return line.isEmpty ? nil : "Timings: " + line + "."
+    }
+
+    /// For the transcript: a table of every measure.
+    public func markdown() -> [String] {
+        var lines = ["| Measure | p50 | p95 | Samples |", "| --- | --- | --- | --- |"]
+        for measure in Measure.allCases {
+            guard let middle = percentile(measure, 0.5), let slow = percentile(measure, 0.95) else { continue }
+            lines.append("| \(measure.label) | \(Self.seconds(middle)) | \(Self.seconds(slow)) | \(samples[measure]?.count ?? 0) |")
+        }
+        if held > 0 { lines.append("| answers held for the floor | | | \(held) |") }
+        return lines.count > 2 ? lines : []
+    }
+
+    static func seconds(_ value: TimeInterval) -> String {
+        String(format: "%.1f s", value)
     }
 }
 

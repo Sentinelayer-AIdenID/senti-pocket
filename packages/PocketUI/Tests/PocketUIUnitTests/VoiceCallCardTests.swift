@@ -12,6 +12,31 @@ final class VoiceCallCardTests: XCTestCase {
                              date: base.addingTimeInterval(minutes * 60), isVoiceTurn: voice)
     }
 
+    func test_a_meeting_ring_tells_agents_the_first_answer_has_the_floor() {
+        let meeting = VoiceCallMarkers.start(caller: "mrrcarter", agents: ["a", "b"], meeting: true)
+        XCTAssertTrue(meeting.contains("the first agent to answer a turn has the floor"))
+        XCTAssertEqual(VoiceCallMarkers.calledAgents(in: meeting), ["a", "b"])
+        XCTAssertFalse(VoiceCallMarkers.start(caller: "mrrcarter", agents: ["a"], meeting: false).contains("floor"),
+                       "one agent has the floor anyway")
+    }
+
+    func test_timings_report_the_middle_and_the_slow_end() {
+        var timings = VoiceCallTimings()
+        XCTAssertNil(timings.line())
+        XCTAssertTrue(timings.markdown().isEmpty)
+        for seconds in [2.0, 3.0, 4.0, 5.0, 9.0] { timings.record(.gap, seconds) }
+        timings.record(.voiceStart, 0.24)
+        timings.record(.gap, -1)
+        timings.record(.answer, .infinity)
+        timings.noteHeld()
+        XCTAssertEqual(timings.percentile(.gap, 0.5), 4, "nearest rank")
+        XCTAssertEqual(timings.percentile(.gap, 0.95), 9)
+        XCTAssertNil(timings.percentile(.answer, 0.5), "nonsense samples are dropped")
+        XCTAssertEqual(timings.line(),
+                       "Timings: you stop → answer heard 4.0 s (p95 9.0 s, 5) · voice starts 0.2 s · 1 held for the floor.")
+        XCTAssertEqual(timings.markdown().count, 5, "header, rule, two measures and the held line")
+    }
+
     func test_the_markers_ring_by_mention_and_close_by_their_own_words() {
         let start = VoiceCallMarkers.start(caller: "mrrcarter", agents: ["pocket-forge", "claude-warden"], meeting: true)
         XCTAssertTrue(start.hasPrefix("📞 Calling @pocket-forge @claude-warden: mrrcarter started a voice meeting."))

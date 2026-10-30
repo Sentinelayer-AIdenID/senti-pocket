@@ -641,9 +641,16 @@ private struct RoomMessageRowView: View {
             .padding(.vertical, 12)
         case .message:
             if let call = row.call {
-                VoiceCallCardView(card: call, ownHandles: ownHandles)
+                // The call's card answers like a message (Carter, #55058): swipe to reply, its menu, a like, a thread.
+                messageChrome(
+                    VStack(alignment: .leading, spacing: 4) {
+                        VoiceCallCardView(card: call, ownHandles: ownHandles)
+                            .accessibilityIdentifier("pocket.room.call.\(row.id)")
+                        messageFooter
+                        if canReply || canReact { actionRow }
+                    }
                     .padding(.vertical, 6)
-                    .accessibilityIdentifier("pocket.room.call.\(row.id)")
+                )
             } else if let box = row.box {
                 RoomBoxLine(box: box) { send(.openThread(sequenceId: row.sequenceId)) }
                     .padding(.vertical, 3)
@@ -697,15 +704,23 @@ private struct RoomMessageRowView: View {
     }
 
     private var message: some View {
-        Group {
-            if row.isOwn {
-                ownMessage
-            } else if row.isHuman {
-                personMessage
-            } else {
-                agentMessage
+        messageChrome(
+            Group {
+                if row.isOwn {
+                    ownMessage
+                } else if row.isHuman {
+                    personMessage
+                } else {
+                    agentMessage
+                }
             }
-        }
+        )
+    }
+
+    /// What every message answers to: swipe to reply, a long press or a double tap for its options, and the mark
+    /// while it is read aloud.
+    private func messageChrome<Content: View>(_ content: Content) -> some View {
+        content
         .overlay(alignment: .topTrailing) {
             if isReadingAloud { RoomReadingAloudMark { send(.stopReadingAloud) } }
         }
