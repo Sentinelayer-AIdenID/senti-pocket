@@ -1202,6 +1202,8 @@ public enum RoomChatIntent: Equatable, Sendable {
     case replyOnScreen(id: String, isOnScreen: Bool)
     /// Open a stack of alike notices to see each one, or fold it again.
     case toggleRepeats(stack: String)
+    /// The people list opened: the room screen refreshes which boxes still run.
+    case peopleOpened
 }
 
 /// A pinned message in the room's strip.

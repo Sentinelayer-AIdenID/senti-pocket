@@ -244,6 +244,22 @@ struct RoomChatScreen: View {
         }
     }
 
+    /// Everyone who came (Carter, 10-30): who posted and when, who is here now, and the boxes the Flight record knows.
+    private var roster: RoomRoster {
+        var posts: [RoomRoster.Post] = []
+        for row in coordinator.state.rows {
+            guard case .message(let message) = row else { continue }
+            posts.append(RoomRoster.Post(authorId: message.authorId, name: message.authorName, isHuman: message.isHuman,
+                                         at: message.date))
+        }
+        let boxes = flight.state.boxes.map {
+            RoomRoster.Box(name: $0.name, model: $0.model, phase: $0.phase, job: $0.job, lastActivity: $0.lastActivity,
+                           expiresAt: $0.expiresAt)
+        }
+        return RoomRoster.build(posts: posts, present: coordinator.state.presence?.people ?? [], runningBoxes: boxes,
+                                endedBoxes: flight.state.endedBoxNames, now: Date())
+    }
+
     /// Whose message (or reply) is being read, for the player.
     private func readAloudTitle(for id: String) -> String? {
         if id.hasPrefix("msg:"), let sequence = Int64(id.dropFirst("msg:".count)),
@@ -342,7 +358,8 @@ struct RoomChatScreen: View {
             composerActions: RoomComposerActions(
                 canFileTicket: ticketsTransport != nil && writesTickets && !route.isBreakout,
                 canSearch: search != nil
-            )
+            ),
+            roster: roster
         ) { intent in
             CrashReporter.shared.note(intent)
             if case .openBreakout(let childSessionId) = intent {
@@ -360,6 +377,9 @@ struct RoomChatScreen: View {
                 }
             } else if intent == .stopReadingAloud {
                 reader.stop()
+            } else if intent == .peopleOpened {
+                // Which boxes still run, so the people list shows them as here or ended.
+                Task { await flight.refresh() }
             } else {
                 coordinator.send(intent)
             }

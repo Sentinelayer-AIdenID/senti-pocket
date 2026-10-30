@@ -41,15 +41,20 @@ public struct RoomChatView: View {
     /// What the composer's "+" offers besides mentioning: filing a ticket and searching, where the room has them.
     private let composerActions: RoomComposerActions
 
+    /// Everyone who came to the room, for its people list.
+    private let roster: RoomRoster
+
     public init(
         state: RoomChatPresentationState,
         readingAloudId: String? = nil,
         composerActions: RoomComposerActions = RoomComposerActions(),
+        roster: RoomRoster = .empty,
         send: @escaping (RoomChatIntent) -> Void
     ) {
         self.state = state
         self.readingAloudId = readingAloudId
         self.composerActions = composerActions
+        self.roster = roster
         self.send = send
     }
 
@@ -170,7 +175,8 @@ public struct RoomChatView: View {
             }
         }
         .sheet(isPresented: $showsPresence) {
-            RoomPresenceSheet(presence: state.presence, connection: state.connection)
+            RoomPresenceSheet(presence: state.presence, connection: state.connection, roster: roster)
+                .onAppear { send(.peopleOpened) }
         }
         // A container, so the composer, the send button and every row keep their own identifiers and labels
         // (without it the screen's identifier replaced theirs).
@@ -2258,6 +2264,8 @@ private struct RoomReadingAloudMark: View {
 private struct RoomPresenceSheet: View {
     let presence: RoomChatPresence?
     let connection: RoomConnectionState
+    /// Everyone who came, when the room screen knows it; otherwise who is here now.
+    var roster: RoomRoster = .empty
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -2274,7 +2282,23 @@ private struct RoomPresenceSheet: View {
                     .accessibilityElement(children: .combine)
                     .accessibilityIdentifier("pocket.room.presence.connection")
                 }
-                if let people = presence?.people, !people.isEmpty {
+                if !roster.members.isEmpty {
+                    ForEach(RoomRoster.Status.allCases, id: \.self) { status in
+                        let members = roster.members.filter { $0.status == status }
+                        if !members.isEmpty {
+                            Section(status.label) {
+                                ForEach(members) { member in
+                                    NavigationLink {
+                                        RoomMemberDetail(member: member)
+                                    } label: {
+                                        RoomMemberRow(member: member)
+                                    }
+                                    .accessibilityIdentifier("pocket.room.people.\(member.id)")
+                                }
+                            }
+                        }
+                    }
+                } else if let people = presence?.people, !people.isEmpty {
                     Section {
                         ForEach(people) { person in
                             HStack(spacing: 8) {
@@ -2307,6 +2331,100 @@ private struct RoomPresenceSheet: View {
     }
 }
 
+
+/// Green for here, gray for idle, red for gone or ended.
+private func rosterColor(_ status: RoomRoster.Status) -> Color {
+    switch status {
+    case .here: return PocketPalette.verified
+    case .idle: return PocketPalette.textSecondary.opacity(0.5)
+    case .gone, .ended: return PocketPalette.danger
+    }
+}
+
+private func rosterAgo(_ date: Date?) -> String? {
+    guard let date else { return nil }
+    let formatter = RelativeDateTimeFormatter()
+    formatter.unitsStyle = .short
+    return formatter.localizedString(for: date, relativeTo: Date())
+}
+
+private func rosterSpan(_ seconds: TimeInterval?) -> String? {
+    guard let seconds, seconds >= 60 else { return nil }
+    let minutes = Int(seconds / 60)
+    return minutes < 60 ? "\(minutes) min" : "\(minutes / 60) h \(minutes % 60) min"
+}
+
+/// One person, agent or box in the people list: who, what, and when they were last heard from.
+private struct RoomMemberRow: View {
+    let member: RoomRoster.Member
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(rosterColor(member.status))
+                .frame(width: 9, height: 9)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(member.name).lineLimit(1)
+                    Text(member.kind.rawValue)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(PocketPalette.textSecondary)
+                }
+                Text([member.model, member.status == .ended ? "destroyed" : nil,
+                      rosterAgo(member.lastSeen).map { "last \($0)" }].compactMap { $0 }.joined(separator: " · "))
+                    .font(.caption)
+                    .foregroundStyle(PocketPalette.textSecondary)
+                    .lineLimit(1)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(member.name), \(member.kind.rawValue), \(member.status.label)")
+    }
+}
+
+/// Everything the room knows about one member (Carter: "what model and strength and how long they were here for
+/// and whether they're still active or destroyed").
+private struct RoomMemberDetail: View {
+    let member: RoomRoster.Member
+
+    var body: some View {
+        List {
+            Section {
+                HStack(spacing: 8) {
+                    Circle().fill(rosterColor(member.status)).frame(width: 10, height: 10)
+                    Text(member.status == .ended ? "Destroyed" : member.status.label)
+                }
+                row("Kind", member.kind.rawValue)
+                row("Model", member.model)
+                row("Effort", member.effort)
+                row("Job", member.job)
+                row("Phase", member.phase)
+            }
+            Section("Time in the room") {
+                row("First seen", rosterAgo(member.firstSeen))
+                row("Last seen", rosterAgo(member.lastSeen))
+                row("Here for", rosterSpan(member.timeHere))
+                row("Messages", member.posts > 0 ? "\(member.posts)" : nil)
+                row("Box ends", rosterAgo(member.expiresAt))
+            }
+        }
+        .navigationTitle(member.name)
+        .navigationBarTitleDisplayModeInlineIfAvailable()
+    }
+
+    @ViewBuilder
+    private func row(_ label: String, _ value: String?) -> some View {
+        if let value, !value.isEmpty {
+            HStack(alignment: .top) {
+                Text(label).foregroundStyle(PocketPalette.textSecondary)
+                Spacer(minLength: 12)
+                Text(value).multilineTextAlignment(.trailing)
+            }
+            .accessibilityElement(children: .combine)
+        }
+    }
+}
 
 /// The room's pinned messages above the chat, like the web's strip: newest pin first, tap to jump to one.
 private struct RoomPinnedStrip: View {
