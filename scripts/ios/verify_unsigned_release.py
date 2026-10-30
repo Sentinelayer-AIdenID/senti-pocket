@@ -64,7 +64,7 @@ APP_ICON_NAME = "AppIcon"
 APP_ICON_FILENAME = "SentiPocketAppIcon.png"
 APP_ICON_SHA256 = "495904bf6d5a1fc41cfebfaa1fe1e67cb20a3c6882194408406210c2097a1b8f"
 PROJECT_SPEC_RELATIVE = Path("apps/SentiPocketApp/project.yml")
-PROJECT_SPEC_SHA256 = "957966359162332844f836876f08df15ac82b7147a2dc90e8a42c6106eb72be0"
+PROJECT_SPEC_SHA256 = "b7ce938c207ae993a7452020a0bdbe138291c801fbfcb7a4751d7922332ad674"
 APP_ICON_WIDTH = 1024
 APP_ICON_HEIGHT = 1024
 APP_ICON_CHANNELS = 3
@@ -182,7 +182,7 @@ APPROVED_BUILT_ICON_SIZES = {
     "AppIcon83.5x83.5": 83.5,
 }
 PBX_ID_RE = re.compile(r"^[A-F0-9]{24}$")
-SENSITIVE_SETTING_KEYS = frozenset({"SENTI_API_URL", "SENTI_GATEWAY_URL"})
+SENSITIVE_SETTING_KEYS = frozenset({"SENTI_API_URL", "SENTI_GATEWAY_URL", "SENTI_MINT_URL"})
 EMPTY_EXECUTION_OVERRIDE_KEYS = frozenset(
     {
         "C_COMPILER_LAUNCHER",
@@ -328,6 +328,8 @@ class Expectations:
     developer_dir: PurePosixPath
     sdk_root: PurePosixPath
     sdk_version: str
+    # Optional: the Flight record's service. Empty means the build carries none (empty or absent everywhere).
+    mint_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -338,6 +340,7 @@ class BundleExpectations:
     api_url: str
     gateway_url: str
     deployment_target: str
+    mint_url: str = ""
 
 
 def _safe_repr(value: Any) -> str:
@@ -578,6 +581,10 @@ def validate_expectations(expected: Expectations) -> list[str]:
         error = _https_origin_error(name, value)
         if error:
             errors.append(error)
+    if expected.mint_url:
+        error = _https_origin_error("mint_url", expected.mint_url)
+        if error:
+            errors.append(error)
     products_root = expected.products_root
     if (
         not isinstance(products_root, Path)
@@ -645,6 +652,10 @@ def validate_bundle_expectations(expected: BundleExpectations) -> list[str]:
         ("gateway_url", expected.gateway_url),
     ):
         error = _https_origin_error(name, value)
+        if error:
+            errors.append(error)
+    if expected.mint_url:
+        error = _https_origin_error("mint_url", expected.mint_url)
         if error:
             errors.append(error)
     return errors
@@ -2412,6 +2423,16 @@ def _require_exact(
                 )
 
 
+def _require_optional_origin(
+    values: Mapping[str, Any], key: str, wanted: str, errors: list[str]
+) -> None:
+    """An optional origin: exactly the requested one, or empty or absent when none was requested."""
+    if wanted:
+        _require_exact(values, {key: wanted}, errors)
+    else:
+        _require_empty_or_absent(values, {key}, errors)
+
+
 def _require_empty_or_absent(
     values: Mapping[str, Any], keys: Iterable[str], errors: list[str]
 ) -> None:
@@ -2557,6 +2578,7 @@ def verify_settings_file(
         },
         errors,
     )
+    _require_optional_origin(settings, "SENTI_MINT_URL", expected.mint_url, errors)
     optional_empty_settings = set(OPTIONAL_EMPTY_RESOLVED_SETTINGS)
     if expected.configuration == "Debug":
         optional_empty_settings.add("EXCLUDED_SOURCE_FILE_NAMES")
@@ -3680,6 +3702,7 @@ def _verify_app_bundle_contents(
             },
             errors,
         )
+        _require_optional_origin(info, "SENTI_MINT_URL", expected.mint_url, errors)
         background_modes = info.get("UIBackgroundModes")
         if (
             not isinstance(background_modes, list)
@@ -3767,6 +3790,7 @@ def _add_expectation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--build-number", required=True)
     parser.add_argument("--api-url", required=True)
     parser.add_argument("--gateway-url", required=True)
+    parser.add_argument("--mint-url", default="")
     parser.add_argument("--deployment-target", default="16.0")
     parser.add_argument("--products-root", required=True, type=Path)
     parser.add_argument("--developer-dir", required=True, type=PurePosixPath)
@@ -3790,6 +3814,7 @@ def _expectations_from_args(args: argparse.Namespace) -> Expectations:
         developer_dir=args.developer_dir,
         sdk_root=args.sdk_root,
         sdk_version=args.sdk_version,
+        mint_url=args.mint_url,
     )
 
 
@@ -3799,6 +3824,7 @@ def _add_bundle_identity_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--build-number", required=True)
     parser.add_argument("--api-url", required=True)
     parser.add_argument("--gateway-url", required=True)
+    parser.add_argument("--mint-url", default="")
     parser.add_argument("--deployment-target", default="16.0")
 
 
@@ -3810,6 +3836,7 @@ def _bundle_expectations_from_args(args: argparse.Namespace) -> BundleExpectatio
         api_url=args.api_url,
         gateway_url=args.gateway_url,
         deployment_target=args.deployment_target,
+        mint_url=args.mint_url,
     )
 
 
