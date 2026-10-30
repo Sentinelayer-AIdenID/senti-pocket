@@ -63,6 +63,17 @@ private final class FakeAudio: VoiceRoomAudioSession {
     func deactivate() { active = false }
 }
 
+@MainActor
+private final class FakeRinger: VoiceRoomRinging {
+    var ringing = false
+    var rings = 0
+    func startRinging() {
+        ringing = true
+        rings += 1
+    }
+    func stopRinging() { ringing = false }
+}
+
 private final class FakePoster: VoiceRoomPosting, @unchecked Sendable {
     private let lock = NSLock()
     private var _turns: [String] = []
@@ -107,8 +118,8 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
     private let clock = TestClock()
 
     private func room(with agents: [String], handsFree: Bool = true,
-                      listener: FakeListener, speaker: FakeSpeaker, audio: FakeAudio, poster: FakePoster,
-                      onEnded: @escaping @MainActor () -> Void = {}) -> VoiceRoomCoordinator {
+                      listener: FakeListener, speaker: FakeSpeaker, audio: FakeAudio, ringer: FakeRinger? = nil,
+                      poster: FakePoster, onEnded: @escaping @MainActor () -> Void = {}) -> VoiceRoomCoordinator {
         let clock = self.clock
         let room = VoiceRoomCoordinator(
             sessionId: "room_1",
@@ -118,6 +129,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
             listener: listener,
             speaker: speaker,
             audio: audio,
+            ringer: ringer,
             poster: poster,
             now: { clock.now },
             // Time moves only when a test moves it; the pause watcher just polls.
@@ -148,8 +160,13 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         room.begin()
         XCTAssertTrue(audio.active)
         XCTAssertEqual(room.state.phase, .ready, "not hands-free: waits for a tap")
+        await until("rang") { poster.starts.count == 1 }
+        XCTAssertTrue(poster.starts[0].hasPrefix("📞 Calling @pocket-forge:"), "the call rings the agent by mention")
+        XCTAssertEqual(VoiceCallMarkers.calledAgents(in: poster.starts[0]), ["pocket-forge"])
+        XCTAssertTrue(room.state.isRinging, "ringing until the agent answers")
 
         room.send(.toggleTalk)
+        XCTAssertFalse(room.state.isRinging, "talking stops the ring")
         await until("listening") { listener.partial != nil }
         listener.say("Ship the composer fix tonight")
         XCTAssertEqual(room.state.partial, "Ship the composer fix tonight")
@@ -158,10 +175,6 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         XCTAssertEqual(poster.turns, ["@pocket-forge Ship the composer fix tonight"], "your turn mentions the agent")
         XCTAssertEqual(room.state.turns.map(\.isYou), [true])
 
-        await until("rang") { poster.starts.count == 1 }
-        XCTAssertTrue(poster.starts[0].hasPrefix("📞 Calling @pocket-forge:"), "the call rings the agent by mention")
-        XCTAssertEqual(VoiceCallMarkers.calledAgents(in: poster.starts[0]), ["pocket-forge"])
-        XCTAssertTrue(room.state.isRinging, "ringing until the agent answers")
         room.receive([
             message("m1", from: "claude-warden", "Not my call"),
             message("m2", from: "human-mrrcarter", "@pocket-forge Ship the composer fix tonight"),
@@ -169,8 +182,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         ])
         await until("speaking") { room.state.speaker == "pocket-forge" }
         XCTAssertEqual(speaker.spoken.map(\.speaker), ["pocket-forge"], "another agent and your own echo are not read")
-        XCTAssertFalse(room.state.isRinging, "the agent joined by answering")
-        XCTAssertEqual(room.state.joined, ["pocket-forge"])
+        XCTAssertEqual(room.state.joined, ["pocket-forge"], "the agent joined by answering")
         room.receive([message("m3", from: "pocket-forge", "On it. **Build 09** goes out tonight.")])
         speaker.finish()
         XCTAssertEqual(speaker.spoken.count, 1, "a message seen twice is read once")
@@ -181,12 +193,13 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), poster = FakePoster()
         let room = room(with: [], listener: listener, speaker: speaker, audio: audio, poster: poster)
         room.begin()
+        clock.advance(VoiceRoomCoordinator.ringsFor + 0.1)
         await until("listening") { listener.partial != nil }
-        room.receive([message("m1", from: "pocket-forge", "First answer")])
+        listener.say("What is left for tonight")
+        room.receive([message("m1", from: "pocket-forge", "First answer", secondsAfterStart: -28)])
         XCTAssertTrue(speaker.spoken.isEmpty, "never read over you")
         XCTAssertEqual(room.state.waiting, 1)
 
-        listener.say("What is left for tonight")
         // Hands-free: a pause ends the turn.
         clock.advance(VoiceRoomCoordinator.pauseEndsTurn + 0.1)
         await until("sent after a pause") { poster.turns.count == 1 }
@@ -202,6 +215,70 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         // The phase changes at once; the microphone starts a moment later.
         await until("listening again") { room.state.isListening && listener.starts == 2 }
         XCTAssertEqual(listener.starts, 2, "hands-free: listening comes back after the answers")
+    }
+
+    /// Carter (10-30): "when I call there should be a ring calling and when picked up there should be me hearing the
+    /// hi Carter part. These only come or came after I spoke".
+    func test_a_call_rings_until_the_agent_picks_up_and_its_hello_is_heard_before_you_say_anything() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), ringer = FakeRinger(), poster = FakePoster()
+        let room = room(with: ["pocket-forge"], listener: listener, speaker: speaker, audio: audio, ringer: ringer, poster: poster)
+        room.begin()
+        XCTAssertTrue(ringer.ringing)
+        XCTAssertTrue(room.state.isRinging)
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(listener.starts, 0, "hands-free does not listen while it rings")
+
+        room.receive([message("hi", from: "pocket-forge", "Hi Carter, forge here.")])
+        XCTAssertFalse(ringer.ringing, "picked up: the ring stops")
+        XCTAssertFalse(room.state.isRinging)
+        await until("the hello is read") { room.state.speaker == "pocket-forge" }
+        XCTAssertEqual(speaker.spoken.map(\.text), ["Hi Carter, forge here."])
+        speaker.finish()
+        await until("then it listens") { listener.starts == 1 && room.state.isListening }
+        XCTAssertEqual(ringer.rings, 1)
+    }
+
+    func test_with_no_answer_the_ring_stops_and_the_line_opens() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), ringer = FakeRinger(), poster = FakePoster()
+        let room = room(with: ["pocket-forge"], listener: listener, speaker: speaker, audio: audio, ringer: ringer, poster: poster)
+        room.begin()
+        clock.advance(VoiceRoomCoordinator.ringsFor - 1)
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertTrue(ringer.ringing, "still ringing before the time is up")
+        clock.advance(1.1)
+        await until("the line opens") { listener.starts == 1 }
+        XCTAssertFalse(ringer.ringing)
+        XCTAssertFalse(room.state.isRinging)
+        XCTAssertEqual(room.state.notice?.hasPrefix("pocket-forge hasn't picked up yet."), true)
+        room.receive([message("late", from: "pocket-forge", "Sorry, here now.", secondsAfterStart: 31)])
+        XCTAssertNil(room.state.notice, "a late answer clears it")
+    }
+
+    func test_an_answer_that_lands_before_you_talk_is_read_at_once_but_one_that_lands_while_you_talk_waits() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), poster = FakePoster()
+        let room = room(with: ["pocket-forge"], listener: listener, speaker: speaker, audio: audio, poster: poster)
+        room.begin(rings: false)
+        await until("listening") { listener.partial != nil }
+        room.receive([message("m1", from: "pocket-forge", "Hi Carter.")])
+        await until("read at once") { room.state.speaker == "pocket-forge" }
+        XCTAssertEqual(listener.cancels, 1, "the microphone gave way")
+        speaker.finish()
+        await until("listening again") { listener.starts == 2 && listener.partial != nil }
+
+        listener.say("Wait, one more thing")
+        room.receive([message("m2", from: "pocket-forge", "Also, build 15 is up.", secondsAfterStart: 3)])
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(speaker.spoken.count, 1, "never read over you")
+        XCTAssertEqual(room.state.waiting, 1)
+    }
+
+    func test_answering_an_agents_own_call_does_not_ring() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), ringer = FakeRinger(), poster = FakePoster()
+        let room = room(with: ["pocket-forge"], listener: listener, speaker: speaker, audio: audio, ringer: ringer, poster: poster)
+        room.begin(rings: false)
+        XCTAssertEqual(ringer.rings, 0)
+        XCTAssertFalse(room.state.isRinging)
+        await until("hands-free listens at once") { listener.starts == 1 }
     }
 
     func test_old_messages_from_before_the_call_are_not_read() async {

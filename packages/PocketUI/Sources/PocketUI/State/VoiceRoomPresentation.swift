@@ -128,6 +128,8 @@ public struct VoiceRoomState: Equatable, Sendable {
     public var notice: String?
     /// The agents who have answered so far; until one does, the call is ringing.
     public var joined: [String] = []
+    /// The ring has stopped: an agent picked up, nobody did for a while, or you started talking.
+    public var ringStopped = false
 
     public init(
         phase: Phase = .ready,
@@ -160,7 +162,7 @@ public struct VoiceRoomState: Equatable, Sendable {
 
     public var isListening: Bool { phase == .listening }
 
-    public var isRinging: Bool { joined.isEmpty && phase != .ending && phase != .ended }
+    public var isRinging: Bool { joined.isEmpty && !ringStopped && phase != .ending && phase != .ended }
 
     public var speaker: String? {
         if case .speaking(let speaker) = phase { return speaker }

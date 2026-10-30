@@ -38,6 +38,8 @@ struct RoomChatScreen: View {
     @State private var showsArtifacts = false
     /// A voice conversation in this room, while one is open.
     @State private var voiceRoom: VoiceRoomCoordinator?
+    /// The call's waveform: your microphone and the agent's words.
+    @State private var voiceMeter = VoiceLevelMeter()
     @State private var choosesVoicePartner = false
     @Environment(\.openURL) private var openExternalURL
     @Environment(\.scenePhase) private var scenePhase
@@ -294,19 +296,26 @@ struct RoomChatScreen: View {
         return nil
     }
 
-    private func startVoiceRoom(with agents: [String]) {
+    private func startVoiceRoom(with agents: [String], answering: Bool = false) {
         guard voiceRoom == nil, let voicePoster else { return }
         reader.stop()
         let handles = coordinator.state.ownMentionHandles.filter { $0 != "all" }.sorted()
+        let meter = voiceMeter
+        meter.reset()
+        let listener = OnDeviceVoiceListener()
+        listener.onLevel = { level in meter.hear(level, from: .you) }
+        let speaker = AgentVoiceSpeaker()
+        speaker.onWord = { length in meter.hear(VoiceLevelMeter.level(wordLength: length), from: .agent) }
         let room = VoiceRoomCoordinator(
             sessionId: route.sessionId,
             with: agents,
             invited: agents.isEmpty ? voicePartners : agents,
             you: handles.first ?? "you",
             ownAuthorIds: Set(handles.map { "human-\($0)" }),
-            listener: OnDeviceVoiceListener(),
-            speaker: AgentVoiceSpeaker(),
+            listener: listener,
+            speaker: speaker,
             audio: PhoneVoiceRoomAudioSession(),
+            ringer: RingbackTone(),
             poster: voicePoster,
             onEnded: { endVoiceRoom() }
         )
@@ -315,7 +324,14 @@ struct RoomChatScreen: View {
         coordinator.readsRepliesOften = true
         voiceRoom = room
         CrashReporter.shared.note(agents.isEmpty ? "voice meeting began" : "voice call began")
-        room.begin()
+        room.begin(rings: !answering)
+    }
+
+    /// The called agent's lab as the room's presence reports it, for the call screen's logo; nil in a meeting.
+    private func partnerLab(of room: VoiceRoomCoordinator) -> AgentLab? {
+        guard room.state.with.count == 1, let partner = room.state.with.first else { return nil }
+        let person = coordinator.state.presence?.people.first { $0.id.lowercased() == partner.lowercased() }
+        return AgentLab.of(id: partner, model: nil, reported: person?.lab)
     }
 
     private func endVoiceRoom() {
@@ -324,6 +340,7 @@ struct RoomChatScreen: View {
         coordinator.onNewReplies = nil
         coordinator.readsRepliesOften = false
         voiceRoom = nil
+        voiceMeter.reset()
         if let answeredCall {
             RoomCallDesk.shared.voiceRoomEnded(answeredCall)
             self.answeredCall = nil
@@ -337,7 +354,7 @@ struct RoomChatScreen: View {
               let call = callDesk.takeWaiting(for: route.sessionId) else { return }
         answeredCall = call
         CrashReporter.shared.note("call answered")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { startVoiceRoom(with: [call.partner]) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { startVoiceRoom(with: [call.partner], answering: true) }
     }
 
     /// Contributors and above file and change tickets (the API's `min_role="contributor"`). An unknown role offers
@@ -541,14 +558,12 @@ struct RoomChatScreen: View {
             }
         }
         .animation(.spring(response: 0.32, dampingFraction: 0.9), value: showsArtifacts)
-        .overlay(alignment: .bottom) {
+        // The call fills the screen, over the room and its bars, until you hang up (Carter, 10-30).
+        .fullScreenCover(isPresented: Binding(get: { voiceRoom != nil }, set: { _ in })) {
             if let voiceRoom {
-                VoiceRoomHost(room: voiceRoom)
-                    .padding(.bottom, 6)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                VoiceRoomHost(room: voiceRoom, meter: voiceMeter, partnerLab: partnerLab(of: voiceRoom))
             }
         }
-        .animation(.spring(response: 0.32, dampingFraction: 0.9), value: voiceRoom != nil)
         .overlay(alignment: .bottom) {
             // The Listen player: above the composer while this room's message is read (a voice room speaks on its
             // own). Reading from another room, the app's own player shows instead, over every screen.
@@ -923,8 +938,10 @@ private struct RoomSearchSheet: View {
 /// Watches the voice room so its panel follows every change.
 private struct VoiceRoomHost: View {
     @ObservedObject var room: VoiceRoomCoordinator
+    let meter: VoiceLevelMeter
+    let partnerLab: AgentLab?
 
     var body: some View {
-        VoiceRoomPanel(state: room.state, send: room.send)
+        VoiceRoomPanel(state: room.state, meter: meter, partnerLab: partnerLab, send: room.send)
     }
 }

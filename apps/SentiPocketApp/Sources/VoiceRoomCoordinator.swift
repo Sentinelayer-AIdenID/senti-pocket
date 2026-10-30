@@ -9,7 +9,13 @@ import PocketVoice
 /// the phone reads each answer aloud in that agent's own voice. No audio leaves the phone. With one agent, your turns
 /// mention it so it knows they are for it; with everyone, it is a meeting and every agent's answer is read.
 ///
-/// One thing at a time: while you talk, answers wait; while an answer is read, the next waits. Hands-free, listening
+/// It rings like a call: a ringback tone plays and the phone does not listen until the agent picks up by answering, so
+/// its hello is heard before you say anything (Carter, 10-30: "when I call there should be a ring calling and when
+/// picked up there should be me hearing the hi Carter part"). After a while with no answer the ring stops and the
+/// line is open.
+///
+/// One thing at a time: while you talk, answers wait; while an answer is read, the next waits. An answer that lands
+/// while the phone is listening but you have not started talking is read at once. Hands-free, listening
 /// comes back after the answers and a pause sends your turn. Hanging up saves the whole transcript to the room as one
 /// Markdown file on the message that closes the call, which asks the agents for a short summary.
 @MainActor
@@ -24,6 +30,7 @@ final class VoiceRoomCoordinator: ObservableObject {
     private let listener: any VoiceListening
     private let speaker: any VoiceSpeaking
     private let audio: any VoiceRoomAudioSession
+    private let ringer: (any VoiceRoomRinging)?
     private let poster: any VoiceRoomPosting
     private let now: @Sendable () -> Date
     private let sleep: @Sendable (TimeInterval) async -> Void
@@ -35,6 +42,7 @@ final class VoiceRoomCoordinator: ObservableObject {
     private var taken: Set<String> = []
     private var lastHeard: Date?
     private var silenceWatch: Task<Void, Never>?
+    private var ringWatch: Task<Void, Never>?
     private var listenGeneration = 0
 
     /// How fast the call is, measured as it goes; reported when it ends.
@@ -57,6 +65,8 @@ final class VoiceRoomCoordinator: ObservableObject {
     static let longestTurn: TimeInterval = 50
     /// Answers from just before the call started still count (clocks differ a little).
     static let clockSlack: TimeInterval = 5
+    /// How long the call rings before the line opens without an answer.
+    static let ringsFor: TimeInterval = 30
 
     init(
         sessionId: String,
@@ -67,6 +77,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         listener: any VoiceListening,
         speaker: any VoiceSpeaking,
         audio: any VoiceRoomAudioSession,
+        ringer: (any VoiceRoomRinging)? = nil,
         poster: any VoiceRoomPosting,
         now: @escaping @Sendable () -> Date = { Date() },
         sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
@@ -81,6 +92,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         self.listener = listener
         self.speaker = speaker
         self.audio = audio
+        self.ringer = ringer
         self.poster = poster
         self.now = now
         self.sleep = sleep
@@ -88,9 +100,9 @@ final class VoiceRoomCoordinator: ObservableObject {
         state = VoiceRoomState(with: agents, startedAt: now())
     }
 
-    /// Rings the agents (one message that mentions them and opens the call's card), takes the phone's audio and,
-    /// hands-free, starts listening.
-    func begin() {
+    /// Rings the agents (one message that mentions them and opens the call's card), takes the phone's audio and plays
+    /// the ring until an agent picks up. Answering an agent's own call there is nothing to ring: the line is open.
+    func begin(rings: Bool = true) {
         do {
             try audio.activate()
         } catch {
@@ -107,7 +119,37 @@ final class VoiceRoomCoordinator: ObservableObject {
                 self.state.notice = "The agents could not be rung. Check the connection."
             }
         }
-        if state.isHandsFree { startListening() }
+        guard rings else {
+            state.ringStopped = true
+            if state.isHandsFree { startListening() }
+            return
+        }
+        ringer?.startRinging()
+        watchForPickup()
+    }
+
+    /// No answer for a while: the ring stops and the line opens (hands-free, listening starts).
+    private func watchForPickup() {
+        let started = now()
+        ringWatch = Task { [weak self] in
+            while let self, !Task.isCancelled, self.state.isRinging {
+                await self.sleep(0.25)
+                guard !Task.isCancelled, self.state.isRinging else { return }
+                guard self.now().timeIntervalSince(started) >= Self.ringsFor else { continue }
+                self.stopRinging()
+                self.state.notice = "\(self.state.title) hasn't picked up yet. Talk when you're ready; the answer is read when it comes."
+                if self.state.isHandsFree, self.state.phase == .ready { self.startListening() }
+                return
+            }
+        }
+    }
+
+    private func stopRinging() {
+        ringWatch?.cancel()
+        ringWatch = nil
+        guard state.isRinging else { return }
+        state.ringStopped = true
+        ringer?.stopRinging()
     }
 
     func send(_ intent: VoiceRoomIntent) {
@@ -136,6 +178,7 @@ final class VoiceRoomCoordinator: ObservableObject {
             take(id: "msg:\(message.id)", author: message.authorId, isHuman: message.isHuman, text: message.text,
                  timestamp: message.timestamp)
         }
+        yieldIfNotTalking()
         speakIfReady()
     }
 
@@ -145,7 +188,18 @@ final class VoiceRoomCoordinator: ObservableObject {
             take(id: "reply:\(reply.id)", author: reply.authorId, isHuman: reply.isHuman, text: reply.text,
                  timestamp: reply.createdAt)
         }
+        yieldIfNotTalking()
         speakIfReady()
+    }
+
+    /// Hands-free listening that has heard nothing yet gives way to an answer that has come in: it is read now, and
+    /// listening comes back after it. Once you have started talking, answers wait.
+    private func yieldIfNotTalking() {
+        guard state.isListening, state.isHandsFree, !queue.isEmpty, lastHeard == nil, state.partial.isEmpty else { return }
+        listenGeneration += 1
+        silenceWatch?.cancel()
+        listener.cancel()
+        state.phase = .ready
     }
 
     private func take(id: String, author: String, isHuman: Bool, text: String, timestamp: String) {
@@ -158,6 +212,11 @@ final class VoiceRoomCoordinator: ObservableObject {
         let name = isHuman ? String(author.dropFirst("human-".count)) : author
         if !state.with.isEmpty, !state.with.contains(where: { $0.lowercased() == lowered }) { return }
         taken.insert(id)
+        if state.joined.isEmpty {
+            // Picked up: the ring stops and the answer is read.
+            stopRinging()
+            state.notice = nil
+        }
         if !state.joined.contains(where: { $0.lowercased() == lowered }) { state.joined.append(name) }
         // In a meeting the first agent to answer a turn has the floor; the others are kept, not read (Carter, 10-30).
         if state.with.isEmpty, !isHuman {
@@ -230,6 +289,8 @@ final class VoiceRoomCoordinator: ObservableObject {
 
     private func startListening() {
         guard state.phase == .ready || state.speaker != nil else { return }
+        // Talking while it rings: no need to keep ringing.
+        stopRinging()
         if state.speaker != nil {
             // Talking over an answer cuts it off; the ones after it wait.
             speaker.stop()
@@ -345,6 +406,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         guard state.phase != .ending, state.phase != .ended else { return }
         listenGeneration += 1
         silenceWatch?.cancel()
+        stopRinging()
         listener.cancel()
         speaker.stop()
         queue.removeAll()

@@ -1,64 +1,126 @@
 #if canImport(SwiftUI)
 import SwiftUI
 
-/// The voice room, over the bottom of the room: who you are talking with and for how long, what is being said now
-/// (yours as it is recognized, or the agent's as it is read aloud), and one big button. Tap it to talk and tap again
-/// to send, or hold it while you talk and let go to send. In hands-free, a pause sends and listening comes back after
-/// each answer.
+/// The voice room as a call, filling the screen (Carter, 10-30: "it should be in the actual voice room with you"): who
+/// you are talking with, large, ringing until it picks up; a live waveform of whoever is talking; what is being said
+/// now as captions (yours as it is recognized, or the agent's as it is read aloud); and one big button. Tap it to talk
+/// and tap again to send, or hold it while you talk and let go to send. In hands-free, a pause sends and listening
+/// comes back after each answer. The room's chat stays behind it until you hang up.
 public struct VoiceRoomPanel: View {
     private let state: VoiceRoomState
+    private let meter: VoiceLevelMeter
+    private let partnerLab: AgentLab?
     private let send: (VoiceRoomIntent) -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var pressStarted = Date()
     @State private var startedByPress = false
     @State private var pulse = false
+    @State private var ringing = false
 
-    public init(state: VoiceRoomState, send: @escaping (VoiceRoomIntent) -> Void) {
+    /// `partnerLab` is the called agent's lab, for its logo and colour; nil in a meeting.
+    public init(state: VoiceRoomState, meter: VoiceLevelMeter, partnerLab: AgentLab?,
+                send: @escaping (VoiceRoomIntent) -> Void) {
         self.state = state
+        self.meter = meter
+        self.partnerLab = partnerLab
         self.send = send
     }
 
     public var body: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 0) {
             header
+            Spacer(minLength: 12)
+            partner
+            VoiceWaveform(meter: meter, agentTint: partnerTint)
+                .padding(.top, 28)
             nowLine
+                .padding(.top, 16)
+            Spacer(minLength: 12)
             controls
         }
-        .padding(.horizontal, 18)
-        .padding(.top, 14)
-        .padding(.bottom, 10)
-        .pocketFloating(in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .padding(.horizontal, 10)
+        .padding(.horizontal, 22)
+        .padding(.top, 20)
+        .padding(.bottom, 22)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .pocketCanvas()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("pocket.voice.panel")
     }
 
+    private var partnerTint: Color {
+        guard let partnerLab else { return PocketPalette.accent }
+        let (red, green, blue) = partnerLab.tint
+        return Color(red: red, green: green, blue: blue)
+    }
+
     private var header: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(PocketPalette.listening)
-                .frame(width: 8, height: 8)
-                .accessibilityHidden(true)
-            Text(state.isRinging ? "Ringing \(state.title)…" : "Voice · \(state.title)")
-                .font(.subheadline.weight(.semibold))
+        VStack(spacing: 4) {
+            Text(state.title)
+                .font(.title2.weight(.semibold))
                 .foregroundStyle(PocketPalette.textPrimary)
                 .lineLimit(1)
-            Spacer(minLength: 4)
-            TimelineView(.periodic(from: state.startedAt, by: 1)) { context in
-                Text(Self.elapsed(from: state.startedAt, to: context.date))
-                    .font(.caption.monospacedDigit())
+            if state.isRinging {
+                Text("Ringing…")
+                    .font(.subheadline)
                     .foregroundStyle(PocketPalette.textSecondary)
+                    .accessibilityIdentifier("pocket.voice.ringing")
+            } else {
+                TimelineView(.periodic(from: state.startedAt, by: 1)) { context in
+                    Text(Self.elapsed(from: state.startedAt, to: context.date))
+                        .font(.subheadline.monospacedDigit())
+                        .foregroundStyle(PocketPalette.textSecondary)
+                }
+                .accessibilityLabel("Call time")
             }
-            .accessibilityLabel("Call time")
+        }
+    }
+
+    /// The agent's logo on a large coin; while it rings, rings spread out from it.
+    private var partner: some View {
+        ZStack {
+            if state.isRinging && !reduceMotion {
+                ForEach(0..<2, id: \.self) { index in
+                    Circle()
+                        .stroke(partnerTint.opacity(ringing ? 0 : 0.5), lineWidth: 2)
+                        .frame(width: 150, height: 150)
+                        .scaleEffect(ringing ? 1.6 : 1)
+                        .animation(.easeOut(duration: 1.6).repeatForever(autoreverses: false).delay(Double(index) * 0.8),
+                                   value: ringing)
+                }
+                .onAppear { ringing = true }
+                .onDisappear { ringing = false }
+            }
+            Circle()
+                .fill(PocketPalette.raised)
+                .frame(width: 150, height: 150)
+                .overlay(Circle().stroke(partnerTint.opacity(0.55), lineWidth: 2))
+                .shadow(color: .black.opacity(0.35), radius: 14, y: 8)
+            mark
+                .foregroundStyle(partnerTint)
+                .frame(width: 70, height: 70)
+        }
+        .frame(height: 220)
+        .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private var mark: some View {
+        if state.with.isEmpty {
+            Image(systemName: "person.3.fill").resizable().scaledToFit()
+        } else if let asset = partnerLab?.logoAsset {
+            Image(asset).renderingMode(.template).resizable().scaledToFit()
+        } else if let initial = partnerLab?.initial {
+            Text(initial).font(.system(size: 60, weight: .heavy, design: .rounded))
+        } else {
+            Image(systemName: "cpu").resizable().scaledToFit()
         }
     }
 
     @ViewBuilder
     private var nowLine: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(spacing: 8) {
             HStack(spacing: 8) {
                 if let speaker = state.speaker {
-                    RoomAvatar(name: speaker, isHuman: false)
                     Text("\(speaker) is speaking")
                         .font(.footnote.weight(.semibold))
                         .foregroundStyle(PocketPalette.textPrimary)
@@ -67,7 +129,6 @@ public struct VoiceRoomPanel: View {
                         .font(.footnote.weight(.semibold))
                         .foregroundStyle(state.isListening ? PocketPalette.accentStrong : PocketPalette.textSecondary)
                 }
-                Spacer(minLength: 0)
                 if state.waiting > 0 {
                     Text("\(state.waiting) more")
                         .font(.caption2.weight(.semibold))
@@ -78,19 +139,23 @@ public struct VoiceRoomPanel: View {
                 }
             }
             Text(lineText)
-                .font(.callout)
+                .font(.title3)
                 .foregroundStyle(PocketPalette.textPrimary)
-                .lineLimit(3)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .multilineTextAlignment(.center)
+                .lineLimit(6)
+                .minimumScaleFactor(0.8)
+                .frame(maxWidth: .infinity)
                 .animation(.easeOut(duration: 0.15), value: lineText)
+                .accessibilityIdentifier("pocket.voice.caption")
             if let notice = state.notice {
                 Text(notice)
                     .font(.caption)
                     .foregroundStyle(PocketPalette.warning)
+                    .multilineTextAlignment(.center)
                     .accessibilityIdentifier("pocket.voice.notice")
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity)
         .accessibilityElement(children: .combine)
     }
 
@@ -178,6 +243,7 @@ public struct VoiceRoomPanel: View {
 
     private var statusText: String {
         switch state.phase {
+        case .ready where state.isRinging: return "Waiting for \(state.title) to pick up"
         case .ready: return state.isHandsFree ? "Your turn: talk, a pause sends it" : "Tap or hold to talk"
         case .listening: return "Listening"
         case .sending: return "Sending"
