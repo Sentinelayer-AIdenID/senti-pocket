@@ -157,6 +157,8 @@ public struct RoomChatView: View {
                 .padding(.horizontal, 12)
                 .padding(.bottom, 8)
             }
+            // Dragging the messages lowers the keyboard with the finger, as in Messages.
+            .scrollDismissesKeyboard(.interactively)
             // The reader scrolling lets go of a message they were taken to.
             .simultaneousGesture(DragGesture(minimumDistance: 8).onChanged { _ in
                 if heldAnchor != nil { heldAnchor = nil }
@@ -892,6 +894,22 @@ struct RoomAvatar: View {
     }
 }
 
+/// Empties a composer after a send. A field that is still editing (dictation, or an autocorrection or a predictive word
+/// in progress) writes its pending text back just after it is emptied, so a sent message stayed in the box. Editing
+/// ends first, the box is emptied again on the next turn of the run loop, and the keyboard comes back if it was up.
+@MainActor
+private func emptyComposer(_ draft: Binding<String>, editing: FocusState<Bool>.Binding) {
+    let wasEditing = editing.wrappedValue
+    draft.wrappedValue = ""
+    editing.wrappedValue = false
+    DispatchQueue.main.async {
+        draft.wrappedValue = ""
+        if wasEditing {
+            DispatchQueue.main.async { editing.wrappedValue = true }
+        }
+    }
+}
+
 private func copyToPasteboard(_ text: String) {
     #if os(iOS)
     UIPasteboard.general.string = text
@@ -973,6 +991,7 @@ private struct RoomThreadSheet: View {
     @Binding var draft: String
     /// The reply being answered (a reply to a reply nests under it); nil answers the message.
     @State private var answering: RoomChatReplyRow?
+    @FocusState private var isReplying: Bool
 
     private var suggestions: [MentionCandidate] {
         guard let active = MentionSuggester.activeQuery(in: draft) else { return [] }
@@ -1062,6 +1081,7 @@ private struct RoomThreadSheet: View {
                 }
                 .padding(16)
             }
+            .scrollDismissesKeyboard(.interactively)
             .navigationTitle(thread.replies.count == 1 ? "1 reply" : "\(thread.replies.count) replies")
             .navigationBarTitleDisplayModeInlineIfAvailable()
             .toolbar {
@@ -1134,6 +1154,7 @@ private struct RoomThreadSheet: View {
                         TextField("Reply", text: $draft, axis: .vertical)
                             .lineLimit(1...6)
                             .textFieldStyle(.plain)
+                            .focused($isReplying)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 9)
                             .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -1146,7 +1167,7 @@ private struct RoomThreadSheet: View {
                             } else {
                                 send(.sendReply(sequenceId: thread.parent.sequenceId, text: text))
                             }
-                            draft = ""
+                            emptyComposer($draft, editing: $isReplying)
                             answering = nil
                         } label: {
                             Image(systemName: "arrow.up.circle.fill").font(.system(size: 32))
@@ -1298,6 +1319,7 @@ private struct RoomComposerBar: View {
     var onIntent: (RoomChatIntent) -> Void = { _ in }
     let send: (String) -> Void
     @State private var draft = ""
+    @FocusState private var isEditing: Bool
 
     private var suggestions: [MentionCandidate] {
         guard let active = MentionSuggester.activeQuery(in: draft) else { return [] }
@@ -1389,6 +1411,7 @@ private struct RoomComposerBar: View {
                 TextField("Message", text: $draft, axis: .vertical)
                     .lineLimit(1...6)
                     .textFieldStyle(.plain)
+                    .focused($isEditing)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 9)
                     .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -1401,7 +1424,7 @@ private struct RoomComposerBar: View {
                     let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !text.isEmpty else { return }
                     send(text)
-                    draft = ""
+                    emptyComposer($draft, editing: $isEditing)
                 } label: {
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.system(size: 32))
