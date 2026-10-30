@@ -242,6 +242,10 @@ public struct RoomChatMessageRow: Equatable, Identifiable, Sendable {
     /// The same notice again and again from one agent (only the numbers changed): shown once, the newest, with how
     /// many it stands for.
     public var repeats: Int = 1
+    /// The stack of alike notices this one belongs to (its first notice's id), folded or opened.
+    public var repeatStack: String?
+    /// Its stack is opened, and this is the stack's first notice: it offers to fold the stack again.
+    public var foldsRepeats: Bool = false
     /// A checkpoint's summary, for its sheet.
     public var checkpointSummary: String?
     /// Background chatter not addressed to you (the orchestrator, the ticket keeper, boxes and agents talking to each
@@ -557,6 +561,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         canPin: Bool = false,
         pinLimit: Int = 10,
         replies: [RoomChatMessageInput] = [],
+        expandedRepeats: Set<String> = [],
         calendar: Calendar = .current
     ) {
         self.sessionId = sessionId
@@ -616,7 +621,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         // A thread shows once, as its newest reply, so a busy thread is one line that moves down as it grows.
         let trails = RoomChatTrail.fold(folded.kept)
         // An agent's notice that repeats with only its numbers changing (a retry counter) is one row.
-        let repeated = RoomChatRepeats.fold(trails.kept)
+        let repeated = RoomChatRepeats.fold(trails.kept, expanded: expandedRepeats, keep: focusSequenceId)
         let ordered = repeated.kept
         let parents = Dictionary(
             messages.map { ($0.sequenceId, $0) },
@@ -678,6 +683,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 call: folded.cards[input.id],
                 trail: trails.trails[input.id],
                 repeats: repeated.counts[input.id] ?? 1,
+                repeatStack: repeated.stacks[input.id],
+                foldsRepeats: repeated.stacks[input.id] == input.id && expandedRepeats.contains(input.id),
                 checkpointSummary: input.checkpointSummary,
                 // A box's launch line is its own collapsed line, never background.
                 isQuiet: folded.cards[input.id] == nil && (input.isInlineReply || launches[input.sequenceId] == nil)
@@ -881,22 +888,40 @@ public enum RoomChatRepeats {
         text.replacingOccurrences(of: #"[0-9]+"#, with: "#", options: .regularExpression)
     }
 
-    public static func fold(_ inputs: [RoomChatMessageInput]) -> (kept: [RoomChatMessageInput], counts: [String: Int]) {
+    /// A notice that may stand in for others like it: an agent's plain message with nothing of its own. One with
+    /// attachments, reactions or a thread always shows (warden: folding must never hide what differs).
+    static func isFoldable(_ input: RoomChatMessageInput) -> Bool {
+        !input.isHuman && !input.isInlineReply && input.kind == .message && input.text.count >= 24
+            && input.attachments.isEmpty && (input.reactions?.isEmpty ?? true)
+    }
+
+    /// Folds each run of alike notices into its newest, counting them. A run is a stack, named by its first notice:
+    /// an opened stack (`expanded`) shows every notice, and a run holding `keep` (a message being opened from a link)
+    /// is never folded. `stacks` names the stack of every notice in one.
+    public static func fold(_ inputs: [RoomChatMessageInput], expanded: Set<String> = [], keep: Int64? = nil)
+        -> (kept: [RoomChatMessageInput], counts: [String: Int], stacks: [String: String]) {
         var kept: [RoomChatMessageInput] = []
         kept.reserveCapacity(inputs.count)
         var counts: [String: Int] = [:]
+        var stacks: [String: String] = [:]
         for input in inputs {
-            if let last = kept.last, !input.isHuman, !last.isHuman, !input.isInlineReply, !last.isInlineReply,
-               input.kind == .message, last.kind == .message, input.authorId == last.authorId,
-               input.text.count >= 24, shape(input.text) == shape(last.text), input.text != last.text {
-                counts[input.id] = (counts[last.id] ?? 1) + 1
-                counts[last.id] = nil
-                kept[kept.count - 1] = input
-            } else {
-                kept.append(input)
+            if let last = kept.last, isFoldable(input), isFoldable(last), input.authorId == last.authorId,
+               shape(input.text) == shape(last.text), input.text != last.text {
+                let stack = stacks[last.id] ?? last.id
+                stacks[last.id] = stack
+                stacks[input.id] = stack
+                if expanded.contains(stack) || input.sequenceId == keep || last.sequenceId == keep {
+                    kept.append(input)
+                } else {
+                    counts[input.id] = (counts[last.id] ?? 1) + 1
+                    counts[last.id] = nil
+                    kept[kept.count - 1] = input
+                }
+                continue
             }
+            kept.append(input)
         }
-        return (kept, counts)
+        return (kept, counts, stacks)
     }
 }
 
@@ -1164,6 +1189,8 @@ public enum RoomChatIntent: Equatable, Sendable {
     /// Pin a message for the whole room, or unpin it.
     case setPinned(sequenceId: Int64, isPinned: Bool)
     case replyOnScreen(id: String, isOnScreen: Bool)
+    /// Open a stack of alike notices to see each one, or fold it again.
+    case toggleRepeats(stack: String)
 }
 
 /// A pinned message in the room's strip.

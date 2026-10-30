@@ -61,11 +61,12 @@ public struct VoiceCallCard: Equatable, Sendable {
     }
 
     /// A call never stretches past this, so one that was never closed does not swallow the room.
-    public static let longestCall: TimeInterval = 90 * 60
+    public static let longestCall: TimeInterval = 30 * 60
 
     /// Takes each voice room out of the rows, oldest first: from its opening message to its closing one, the caller's
-    /// spoken turns and the called agents' posts and replies become the card on the opening message. Anything else in
-    /// that stretch stays in the room as it was.
+    /// spoken turns and the called agents' posts become the card on the opening message. The agents' posts leave the
+    /// room only for a call that closed with its closing message: a call that never closed (the app quit mid-call)
+    /// lists them on its card and hides none of them (warden). Anything else in that stretch stays as it was.
     public static func fold(_ inputs: [RoomChatMessageInput]) -> (kept: [RoomChatMessageInput], cards: [String: VoiceCallCard]) {
         var kept: [RoomChatMessageInput] = []
         kept.reserveCapacity(inputs.count)
@@ -81,6 +82,7 @@ public struct VoiceCallCard: Equatable, Sendable {
             }
             let caller = input.authorId.lowercased()
             let limit = input.date.map { $0.addingTimeInterval(longestCall) }
+            let closed = closes(after: index, in: inputs, caller: caller, limit: limit)
             var turns: [Turn] = []
             var others: [RoomChatMessageInput] = []
             var endedAt: Date?
@@ -103,6 +105,7 @@ public struct VoiceCallCard: Equatable, Sendable {
                 if candidate.kind == .message, (fromCaller && candidate.isVoiceTurn) || fromCalled {
                     turns.append(Turn(id: candidate.id, speaker: candidate.authorName, isHuman: candidate.isHuman,
                                       text: candidate.text, at: candidate.date))
+                    if fromCalled, !closed { others.append(candidate) }
                 } else {
                     others.append(candidate)
                 }
@@ -118,6 +121,22 @@ public struct VoiceCallCard: Equatable, Sendable {
             index = next
         }
         return (kept, cards)
+    }
+
+    /// Whether the call opened at `index` closes with its caller's closing message before the limit, and before the
+    /// same caller opens another call.
+    static func closes(after index: Int, in inputs: [RoomChatMessageInput], caller: String, limit: Date?) -> Bool {
+        var next = index + 1
+        while next < inputs.count {
+            let candidate = inputs[next]
+            if let limit, let at = candidate.date, at > limit { return false }
+            if candidate.isHuman, candidate.authorId.lowercased() == caller {
+                if VoiceCallMarkers.isEnd(candidate.text) { return true }
+                if candidate.kind == .message, VoiceCallMarkers.calledAgents(in: candidate.text) != nil { return false }
+            }
+            next += 1
+        }
+        return false
     }
 
     /// "4 turns · 3 min", or "live · 4 turns".

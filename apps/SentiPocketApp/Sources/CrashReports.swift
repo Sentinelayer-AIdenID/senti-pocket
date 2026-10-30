@@ -40,7 +40,8 @@ extension CrashReport {
         for crash in payload.crashDiagnostics ?? [] {
             var exception: String?
             if #available(iOS 17.0, *), let thrown = crash.exceptionReason {
-                exception = "\(thrown.exceptionName): \(thrown.composedMessage)"
+                exception = exceptionLine(name: thrown.exceptionName, className: thrown.className,
+                                          format: thrown.formatString)
             }
             let reason = Self.reason(
                 exceptionType: crash.exceptionType?.intValue,
@@ -104,6 +105,15 @@ extension CrashReport {
 
     /// The crash in words: the exception and signal by name and what they usually mean, then what the code or the
     /// system said.
+    /// An Objective-C exception as a report shows it: its name, its class and its format string as written in the
+    /// code. The values filled into that format can describe objects, paths or links, so they never leave the phone.
+    static func exceptionLine(name: String, className: String, format: String) -> String {
+        var line = name
+        if !className.isEmpty, className != name { line += " (\(className))" }
+        if !format.isEmpty { line += ": " + format }
+        return line
+    }
+
     static func reason(exceptionType: Int?, signal: Int?, termination: String?, exception: String?, memoryRegion: String?) -> String {
         var names: [String] = []
         if let exceptionType { names.append(machExceptions[exceptionType] ?? "exception \(exceptionType)") }
