@@ -147,6 +147,8 @@ struct RoomChatScreen: View {
             canRename: route.membershipRole.lowercased() == "owner" && !route.isBreakout,
             // Owners and admins invite people (the API enforces it); a breakout follows its parent room.
             canInvite: ["owner", "admin"].contains(route.membershipRole.lowercased()) && !route.isBreakout,
+            // Thread summaries are written on the phone, where Apple's on-device model is available.
+            summarizer: OnDeviceThreadSummarizer(),
             focusSequenceId: route.focusSequenceId,
             attachmentFetcher: attachmentFetcher,
             receipts: receipts,

@@ -15,6 +15,11 @@ final class RoomChatCoordinator: ObservableObject {
     /// The room's name; its owner can rename it.
     private var title: String
     private let canRename: Bool
+    /// Thread summaries written on the phone (Carter, #55474), by parent sequence, with the reply count each was
+    /// written for; a thread is summarized again only once it has grown.
+    private var threadSummaries: [Int64: (replies: Int, text: String)] = [:]
+    private var summarizing: Int64?
+    private let summarizer: (any ThreadSummarizing)?
     private let canInvite: Bool
     private let transport: any RoomTransport
     private let sender: (any RoomMessageSending)?
@@ -164,6 +169,7 @@ final class RoomChatCoordinator: ObservableObject {
         membershipRole: String? = nil,
         canRename: Bool = false,
         canInvite: Bool = false,
+        summarizer: (any ThreadSummarizing)? = nil,
         focusSequenceId: Int64? = nil,
         ownAuthorIds: Set<String> = [],
         sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
@@ -182,6 +188,7 @@ final class RoomChatCoordinator: ObservableObject {
         self.title = title
         self.canRename = canRename && sender is any RoomTitleSetting
         self.canInvite = canInvite && sender is any RoomInviting
+        self.summarizer = summarizer
         self.transport = transport
         self.sender = sender
         self.actionSender = actionSender
@@ -1381,6 +1388,31 @@ final class RoomChatCoordinator: ObservableObject {
         }
     }
 
+    /// Writes the next thread summary the room lacks, one at a time and off the main thread: the thread with the most
+    /// replies first, and again only once it has grown. A phone without the on-device model writes none.
+    private func summarizeNextThread(_ replies: [RoomChatMessageInput]) {
+        guard let summarizer, summarizing == nil, !liveTasks.isEmpty else { return }
+        var byThread: [Int64: [RoomChatMessageInput]] = [:]
+        for reply in replies { byThread[reply.sequenceId, default: []].append(reply) }
+        let due = byThread
+            .filter { $0.value.count >= ThreadSummaryInput.minimumReplies && threadSummaries[$0.key]?.replies != $0.value.count }
+            .max { $0.value.count < $1.value.count }
+        guard let (parent, thread) = due else { return }
+        summarizing = parent
+        let lines = ThreadSummaryInput.lines(thread)
+        let count = thread.count
+        Task.detached(priority: .utility) { [weak self] in
+            let text = await summarizer.summarize(thread: lines)
+            await MainActor.run {
+                guard let self else { return }
+                self.summarizing = nil
+                // Remembered even when there is none, so a phone without the model doesn't ask again for this count.
+                self.threadSummaries[parent] = (count, text ?? "")
+                if text != nil { self.publish() }
+            }
+        }
+    }
+
     /// Your own message with new text (web `editSessionMessage`): saved against the revision you saw, then shown at
     /// once as edited; the room's own edit event agrees with it.
     private func editMessage(_ sequenceId: Int64, text raw: String) {
@@ -1547,6 +1579,7 @@ final class RoomChatCoordinator: ObservableObject {
                 maximumReplyLength: RoomActionRequest.replyLimit
             )
         }
+        let replyInputs = inlineReplyInputs()
         state = RoomChatPresentationState(
             sessionId: sessionId,
             title: title,
@@ -1589,9 +1622,11 @@ final class RoomChatCoordinator: ObservableObject {
             pinLimit: pinLimit,
             canRename: canRename,
             canInvite: canInvite,
-            replies: inlineReplyInputs(),
+            threadSummaries: threadSummaries.compactMapValues { $0.text.isEmpty ? nil : $0.text },
+            replies: replyInputs,
             expandedRepeats: expandedRepeats
         )
+        summarizeNextThread(replyInputs)
     }
 
     /// Each message's "working on" lines, oldest first, with whether each is still live (not done, and newer than
