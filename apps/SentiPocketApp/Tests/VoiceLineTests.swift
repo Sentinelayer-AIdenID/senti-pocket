@@ -232,10 +232,12 @@ final class VoiceEndpointingTests: XCTestCase {
         let room = await listening(endpointer, listener, poster)
         listener.say("Status please")
         for _ in 0..<400 where poster.turns.isEmpty { try? await Task.sleep(nanoseconds: 5_000_000) }
-        try? await Task.sleep(nanoseconds: 100_000_000)
-        for _ in 0..<200 where listener.partial == nil { try? await Task.sleep(nanoseconds: 2_000_000) }
+        XCTAssertEqual(endpointer.asked.count, 1)
         room.send(.toggleTalk)
-        await room.hangUp()
+        for _ in 0..<200 where listener.partial == nil { try? await Task.sleep(nanoseconds: 2_000_000) }
+        listener.say("And one more thing")
+        try? await Task.sleep(nanoseconds: 700_000_000)
         XCTAssertEqual(endpointer.asked.count, 1, "asked once, then never again in this call")
+        await room.hangUp()
     }
 }
