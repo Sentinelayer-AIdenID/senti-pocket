@@ -175,15 +175,19 @@ private struct RoomTicketRowView: View {
                 }
             }
             // Being worked on: how far along, and who holds it (Carter, #55238).
-            if let progress = row.stageProgress {
+            if let progress = row.barProgress {
                 VStack(alignment: .leading, spacing: 3) {
                     ProgressView(value: progress)
                         .progressViewStyle(.linear)
                         .tint(RoomTicketPalette.status(row.status))
-                    if let holder = row.lease.flatMap({ $0.isLive ? $0.holder : nil }) {
-                        Text("\(RoomTicketRow.displayName(holder)) is on it")
+                    let holder = row.lease.flatMap { $0.isLive ? $0.holder : nil }
+                    let parts = [holder.map { "\(RoomTicketRow.displayName($0)) is on it" }, row.estimateBasis]
+                        .compactMap { $0 }
+                    if !parts.isEmpty {
+                        Text(parts.joined(separator: " · "))
                             .font(.caption2)
                             .foregroundStyle(PocketPalette.textSecondary)
+                            .lineLimit(2)
                     }
                 }
                 .accessibilityElement(children: .combine)

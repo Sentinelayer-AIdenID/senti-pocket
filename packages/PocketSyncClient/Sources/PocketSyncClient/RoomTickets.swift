@@ -46,6 +46,25 @@ public struct RoomTicketLease: Equatable, Sendable {
     }
 }
 
+/// How far along a ticket being worked on is, as the server's scorer judged it (API #1052): 0...1, a short
+/// server-made reason, and when. Absent until scored, and whenever the scorer is off.
+public struct RoomTicketProgress: Equatable, Sendable {
+    public let value: Double
+    public let basis: String
+    public let at: String
+
+    public init(value: Double, basis: String, at: String) {
+        self.value = min(max(value, 0), 1)
+        self.basis = String(basis.prefix(200))
+        self.at = at
+    }
+
+    init?(json: JSONValue?) {
+        guard let json, let value = json["value"]?.doubleValue, value.isFinite else { return nil }
+        self.init(value: value, basis: json["basis"]?.stringValue ?? "", at: json["at"]?.stringValue ?? "")
+    }
+}
+
 public struct RoomTicket: Equatable, Identifiable, Sendable {
     public let id: String
     public let title: String
@@ -65,6 +84,8 @@ public struct RoomTicket: Equatable, Identifiable, Sendable {
     public let staleClaim: Bool
     /// Present while a lease exists, live or expired.
     public let lease: RoomTicketLease?
+    /// The scorer's estimate, on reads that carry it; kept across feed events that don't (`RoomTicketBoard.upsert`).
+    public var progress: RoomTicketProgress?
 
     public init?(json: JSONValue) {
         guard let id = json["id"]?.stringValue, !id.isEmpty,
@@ -85,6 +106,7 @@ public struct RoomTicket: Equatable, Identifiable, Sendable {
         self.unaccepted = json["unaccepted"]?.boolValue ?? false
         self.staleClaim = json["staleClaim"]?.boolValue ?? false
         self.lease = RoomTicketLease(json: json["lease"])
+        self.progress = RoomTicketProgress(json: json["progress"])
     }
 
     public init(
@@ -203,8 +225,16 @@ public struct RoomTicketBoard: Equatable, Sendable {
     /// Keeps the higher version. Returns whether the board changed.
     @discardableResult
     public mutating func upsert(_ ticket: RoomTicket) -> Bool {
-        if let current = tickets[ticket.id], current.version >= ticket.version { return false }
-        tickets[ticket.id] = ticket
+        if let current = tickets[ticket.id], current.version >= ticket.version {
+            // The same version again, from a read that carries the scorer's estimate: take the estimate.
+            guard let progress = ticket.progress, current.version == ticket.version, current.progress != progress else { return false }
+            tickets[ticket.id]?.progress = progress
+            return true
+        }
+        var next = ticket
+        // Feed events carry no estimate: a newer version keeps the last one seen until a read brings a fresh one.
+        if next.progress == nil { next.progress = tickets[ticket.id]?.progress }
+        tickets[ticket.id] = next
         return true
     }
 

@@ -608,7 +608,9 @@ final class RoomTicketsCoordinator: ObservableObject {
                             isLive: lease.isLive(at: instant),
                             expiresAt: lease.expiresAt.flatMap { ParsedSessionTimestamp($0).date }
                         )
-                    }
+                    },
+                    estimate: ticket.progress?.value,
+                    estimateBasis: ticket.progress?.basis
                 )
             },
             showsArchived: showsArchived,
