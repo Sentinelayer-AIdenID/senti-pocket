@@ -54,7 +54,9 @@ final class HTTPNotificationReadMarker: NotificationReadMarking, @unchecked Send
 }
 
 /// The bell: the newest notifications, refreshed every minute while the app is active, with the unread count for
-/// the badge. Opening one marks it read (optimistically) and returns where to go.
+/// the badge. Opening one marks it read (optimistically) and returns where to go. A room on screen has its
+/// notifications read, however it was opened: from the bell, a push, a banner or the side panel (Carter, 10-30:
+/// "Notification numbers don't go down or the notification marked as read as I click and open them").
 @MainActor
 final class NotificationsCoordinator: ObservableObject {
     @Published private(set) var state = NotificationsPresentationState(rows: [], isLoading: true)
@@ -73,6 +75,8 @@ final class NotificationsCoordinator: ObservableObject {
     private let now: @Sendable () -> Date
     private var updatedAt: Date?
     private var couldNotUpdate = false
+    /// The room on screen, whose notifications are read as they come.
+    var roomOnScreen: @MainActor () -> String? = { nil }
 
     /// The web polls the bell about this often.
     static let pollInterval: TimeInterval = 30
@@ -130,6 +134,7 @@ final class NotificationsCoordinator: ObservableObject {
             couldNotUpdate = false
             updatedAt = now()
             if wasSignedOut, pollTask == nil { startPolling(readNow: false) }
+            if let room = roomOnScreen() { markRoomRead(room) }
         } catch SessionTransportError.reauthenticationRequired {
             if failure != .reauthenticationRequired { onReauthenticationRequired() }
             failure = .reauthenticationRequired
@@ -155,6 +160,14 @@ final class NotificationsCoordinator: ObservableObject {
         publish()
         guard let marker else { return }
         Task { try? await marker.markRead(id: id) }
+    }
+
+    /// Every unread notification about a room, once the room is on screen.
+    func markRoomRead(_ sessionId: String) {
+        guard !sessionId.isEmpty else { return }
+        for notification in notifications where notification.sessionId == sessionId && !notification.isRead {
+            markRead(notification.id)
+        }
     }
 
     /// There is no bulk endpoint, so each unread notification is marked on its own.

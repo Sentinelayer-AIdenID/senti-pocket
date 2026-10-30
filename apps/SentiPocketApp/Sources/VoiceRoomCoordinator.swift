@@ -119,7 +119,8 @@ final class VoiceRoomCoordinator: ObservableObject {
                 self.state.notice = "The agents could not be rung. Check the connection."
             }
         }
-        guard rings else {
+        // Nobody to ring (a meeting in a room with no agents): the line is open at once.
+        guard rings, !invited.isEmpty else {
             state.ringStopped = true
             if state.isHandsFree { startListening() }
             return

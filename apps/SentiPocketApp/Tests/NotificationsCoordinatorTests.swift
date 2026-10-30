@@ -39,11 +39,12 @@ private final class RecordingMarker: NotificationReadMarking, @unchecked Sendabl
 
 @MainActor
 final class NotificationsCoordinatorTests: XCTestCase {
-    private func note(_ id: String, read: Bool = false, url: String? = nil, at: String = "2026-10-28T18:00:00Z") -> SentiNotification {
+    private func note(_ id: String, read: Bool = false, url: String? = nil, at: String = "2026-10-28T18:00:00Z",
+                      room: String = "room_1") -> SentiNotification {
         SentiNotification(
             id: id,
             kind: "mention",
-            sessionId: "room_1",
+            sessionId: room,
             title: "cobalt-warden mentioned you",
             link: url.flatMap(SentiLink.init(string:)),
             isRead: read,
@@ -58,6 +59,36 @@ final class NotificationsCoordinatorTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 2_000_000)
         }
         XCTFail("timed out waiting for: \(description)")
+    }
+
+    /// Carter (10-30): "Notification numbers don't go down or the notification marked as read as I click and open
+    /// them". A room on screen, however it was opened (a push, a banner, the side panel), reads its notifications.
+    func test_a_room_on_screen_reads_its_notifications_and_leaves_other_rooms_alone() async {
+        let marker = RecordingMarker()
+        let coordinator = NotificationsCoordinator(
+            transport: ScriptedNotifications([
+                .success(SentiNotificationsPage(notifications: [
+                    note("a1"), note("a2", read: true), note("b1", room: "room_2")
+                ])),
+                .success(SentiNotificationsPage(notifications: [
+                    note("a3"), note("a1"), note("a2", read: true), note("b1", room: "room_2")
+                ]))
+            ]),
+            marker: marker,
+            onReauthenticationRequired: {}
+        )
+        await coordinator.refresh()
+        XCTAssertEqual(coordinator.unreadCount, 2)
+
+        coordinator.markRoomRead("room_1")
+        XCTAssertEqual(coordinator.unreadCount, 1, "the badge goes down at once")
+        await waitUntil("a1 marked on the server") { marker.marked() == ["a1"] }
+
+        // A new one arrives while the room is on screen: read as it comes.
+        coordinator.roomOnScreen = { "room_1" }
+        await coordinator.refresh()
+        XCTAssertEqual(coordinator.state.unread.map(\.id), ["b1"], "another room's stays unread")
+        await waitUntil("a3 marked too") { Set(marker.marked()) == ["a1", "a3"] }
     }
 
     func test_refresh_counts_unread_and_opening_marks_read_and_returns_the_message() async {

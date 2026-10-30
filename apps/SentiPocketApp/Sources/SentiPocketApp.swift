@@ -468,6 +468,10 @@ private struct AuthenticatedRootView: View {
         .onChange(of: roomListSettled) { _ in openPendingLinkIfReady() }
         // The app icon shows the bell's unread count.
         .onChange(of: notifications.unreadCount) { count in PushRegistrar.shared.setBadge(count) }
+        // Opening a room, by any way in, reads its notifications.
+        .onChange(of: (roomPath.last ?? currentRoom)?.sessionId) { sessionId in
+            if let sessionId { notifications.markRoomRead(sessionId) }
+        }
         .sheet(isPresented: $presentsSettings) {
             WhisperModelSettingsView(
                 coordinator: whisperModelCoordinator,
@@ -504,7 +508,8 @@ private struct AuthenticatedRootView: View {
             notifications.startPolling()
             // Apple push: a tap opens its room at the message; the room on screen gets no banner.
             PushRegistrar.shared.inbox = incomingLinks
-            PushRegistrar.shared.currentRoomId = { currentRoom?.sessionId }
+            PushRegistrar.shared.currentRoomId = { (roomPath.last ?? currentRoom)?.sessionId }
+            notifications.roomOnScreen = { (roomPath.last ?? currentRoom)?.sessionId }
             // A notification while Pocket is open slides in over it, and a tap opens it here (Carter, #55508).
             InAppBanner.shared.onOpen = { link in open(link) }
             InAppBanner.shared.isHosted = true
