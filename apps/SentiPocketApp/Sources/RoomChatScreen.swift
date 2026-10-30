@@ -58,6 +58,8 @@ struct RoomChatScreen: View {
     /// The times the app closed unexpectedly, offered once each to send to this room.
     @ObservedObject private var crashes = CrashReporter.shared
     @State private var offersCrashReports = false
+    /// A box's console, shown in the app.
+    @State private var consolePage: InAppPage?
     private let route: RoomRoute
     private let ticketsTransport: (any RoomTicketsTransport)?
     private let admissionsTransport: (any RoomAdmissionsTransport)?
@@ -363,7 +365,11 @@ struct RoomChatScreen: View {
                         state: flight.state,
                         onClose: { showsFlight = false },
                         onExpand: { flight.expand($0) },
-                        onOpenConsole: { openExternalURL($0) }
+                        // The console opens in the app (Carter, #55006); anything not https goes nowhere.
+                        onOpenConsole: { url in
+                            CrashReporter.shared.note("console opened")
+                            consolePage = InAppPage(url: url)
+                        }
                     )
                     .frame(maxWidth: 380)
                     .padding(.leading, 40)
@@ -537,6 +543,10 @@ struct RoomChatScreen: View {
         }
         .sheet(item: $attachmentPreview) { item in
             AttachmentQuickLook(url: item.url)
+                .ignoresSafeArea()
+        }
+        .sheet(item: $consolePage) { page in
+            SafariSheet(url: page.url)
                 .ignoresSafeArea()
         }
         .alert("Couldn't open the file", isPresented: Binding(
