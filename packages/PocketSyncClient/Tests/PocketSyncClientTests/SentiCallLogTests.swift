@@ -38,4 +38,10 @@ final class SentiCallLogTests: XCTestCase {
         XCTAssertEqual(ring.direction, "incoming")
         XCTAssertEqual(ring.status, "missed")
     }
+
+    /// Warden (#272): a reply without its list is an error, not "no calls yet".
+    func test_a_reply_without_the_list_is_an_error() {
+        XCTAssertThrowsError(try JSONDecoder().decode(SentiCallLogPage.self, from: Data(#"{"nextCursor": null}"#.utf8)))
+        XCTAssertEqual(try JSONDecoder().decode(SentiCallLogPage.self, from: Data(#"{"calls": []}"#.utf8)).calls, [])
+    }
 }

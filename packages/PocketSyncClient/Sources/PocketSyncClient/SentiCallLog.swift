@@ -138,7 +138,8 @@ public struct SentiCallLogPage: Decodable, Equatable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        let rows = (try? container.decode([JSONValue].self, forKey: .calls)) ?? []
+        // A reply without its list is an error, not "no calls yet" (warden, #272).
+        let rows = try container.decode([JSONValue].self, forKey: .calls)
         self.calls = rows.compactMap(SentiCall.init(json:))
         self.nextCursor = try? container.decode(String.self, forKey: .nextCursor)
     }
