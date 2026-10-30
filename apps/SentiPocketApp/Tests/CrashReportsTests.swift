@@ -66,6 +66,17 @@ final class CrashReportsTests: XCTestCase {
             .hasSuffix("(a call push arrived and no call was shown)"))
     }
 
+    /// An exception is sent as written in the code, never with the values filled in at run time.
+    func test_an_exception_is_its_name_class_and_unfilled_format() {
+        XCTAssertEqual(
+            CrashReport.exceptionLine(name: "NSRangeException", className: "NSException",
+                                      format: "*** -[NSBigMutableString substringWithRange:]: Range %@ out of bounds; string length %lu"),
+            "NSRangeException (NSException): *** -[NSBigMutableString substringWithRange:]: Range %@ out of bounds; string length %lu"
+        )
+        XCTAssertEqual(CrashReport.exceptionLine(name: "NSGenericException", className: "NSGenericException", format: ""),
+                       "NSGenericException", "a class named like the exception is not repeated")
+    }
+
     func test_a_report_delivered_again_keeps_its_id() {
         let one = CrashReport.identity(.crash, at: start, reason: "r", frames: ["A +0x1", "B +0x2"])
         XCTAssertEqual(one, CrashReport.identity(.crash, at: start, reason: "r", frames: ["A +0x1", "B +0x2"]))
