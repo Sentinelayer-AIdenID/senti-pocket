@@ -74,6 +74,11 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
     public let decision: TicketDecision?
     public let lease: RoomTicketInput.Lease?
 
+    /// The title and body as a person sees them: the signal model's name hidden, as the web shows them. Edits and
+    /// posts keep the ticket's own words.
+    public var displayTitle: String { TicketSignal.publicTitle(title) }
+    public var displayBody: String { TicketSignal.hideModelName(body) }
+
     public init(
         id: String,
         title: String,
@@ -172,6 +177,8 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
     public let commentStatus: [String: String]
     /// Tickets whose comment failed in a way posting it again may fix (Retry reuses its key, so it never posts twice).
     public let retryableComments: Set<String>
+    /// "Start an agent on this" is offered: you can write tickets here and the mint admits your account.
+    public let canStartAgents: Bool
 
     public static let fileStatusKey = "__file__"
     /// The status a comment reaches once the ticket has it.
@@ -199,7 +206,8 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
         personNames: [String: String] = [:],
         comments: [String: [RoomTicketCommentRow]] = [:],
         commentStatus: [String: String] = [:],
-        retryableComments: Set<String> = []
+        retryableComments: Set<String> = [],
+        canStartAgents: Bool = false
     ) {
         let all = tickets.map { input in
             let body = input.body
@@ -222,6 +230,7 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
         let protected = failure?.suppressesProtectedContent == true
         let canWrite = canWriteTickets && !protected
         self.canFileTickets = canWrite
+        self.canStartAgents = canWrite && canStartAgents
         var actions: [String: RoomTicketActions] = [:]
         if canWrite {
             for row in all {

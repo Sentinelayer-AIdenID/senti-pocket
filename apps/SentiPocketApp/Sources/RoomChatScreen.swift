@@ -60,6 +60,14 @@ struct RoomChatScreen: View {
     @State private var offersCrashReports = false
     /// A box's console, shown in the app.
     @State private var consolePage: InAppPage?
+    /// Starting agents for tickets (the mint admits only some accounts; the tickets screen asks once). The mint is
+    /// the build's `SENTI_MINT_URL`; a build without one offers no agents.
+    private let ticketMint = HTTPMintClient(
+        baseURL: GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_MINT_URL"]),
+        // No cache and no cookie store for a request that carries the person's token.
+        urlSession: SentiHTTPTransportPolicy.protectedReadSession,
+        tokenProvider: { SessionTokenStore.load() }
+    )
     /// Agents' calls answered on the call screen; the one this room's voice room is for.
     @ObservedObject private var callDesk = RoomCallDesk.shared
     @State private var answeredCall: RoomCallDesk.Call?
@@ -533,6 +541,7 @@ struct RoomChatScreen: View {
                     identity: identity,
                     assignRoster: ticketAssignRoster,
                     extras: ticketExtras,
+                    mint: writesTickets ? ticketMint : nil,
                     startsFiling: ticketsStartFiling,
                     onOpenMessage: { sequence in focus(on: sequence) },
                     onReauthenticationRequired: onReauthenticationRequired
@@ -632,6 +641,7 @@ struct RoomChatScreen: View {
                     identity: identity,
                     assignRoster: ticketAssignRoster,
                     extras: ticketExtras,
+                    mint: writesTickets ? ticketMint : nil,
                     onOpenMessage: { sequence in focus(on: sequence) },
                     onReauthenticationRequired: onReauthenticationRequired
                 )

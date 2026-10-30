@@ -70,6 +70,20 @@ final class RoomTicketsCoordinator: ObservableObject {
     static let fileStatusKey = RoomTicketsPresentationState.fileStatusKey
     private var filedCount = 0
 
+    /// Starting agents for tickets: offered once the mint has answered for this account.
+    private let mint: (any MintStarting)?
+    private var mintAdmits = false
+    private var askedMint = false
+    /// The ticket an agent is being started for, for the screen's sheet.
+    @Published var agentTicket: AgentTicket?
+
+    struct AgentTicket: Identifiable, Equatable {
+        let id: String
+        let title: String
+        let status: String
+        let body: String
+    }
+
     struct TicketFields: Equatable {
         let title: String
         let body: String
@@ -89,6 +103,7 @@ final class RoomTicketsCoordinator: ObservableObject {
         assignRoster: [String] = [],
         extras: (any RoomTicketExtrasReading)? = nil,
         focusTicketId: String? = nil,
+        mint: (any MintStarting)? = nil,
         now: @escaping @Sendable () -> Date = { Date() },
         sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
             try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
@@ -105,6 +120,7 @@ final class RoomTicketsCoordinator: ObservableObject {
         self.assignRoster = assignRoster
         self.extras = extras
         self.focusTicketId = focusTicketId
+        self.mint = mint
         self.now = now
         self.sleep = sleep
         self.onReauthenticationRequired = onReauthenticationRequired
@@ -112,6 +128,7 @@ final class RoomTicketsCoordinator: ObservableObject {
     }
 
     func start() {
+        askMintOnce()
         guard pollTask == nil else { return }
         pollTask = Task { [weak self] in
             guard let self else { return }
@@ -129,6 +146,18 @@ final class RoomTicketsCoordinator: ObservableObject {
         pollTask = nil
     }
 
+    /// Whether this account may start agents: the mint lists its models only for accounts it admits.
+    private func askMintOnce() {
+        guard let mint, canWriteTickets, !askedMint else { return }
+        askedMint = true
+        Task { [weak self] in
+            let models = try? await mint.models()
+            guard let self, let models, !models.isEmpty else { return }
+            self.mintAdmits = true
+            self.publish()
+        }
+    }
+
     func send(_ intent: RoomTicketsIntent) {
         switch intent {
         case .setShowsArchived(let archived):
@@ -141,6 +170,9 @@ final class RoomTicketsCoordinator: ObservableObject {
             Task { await refresh() }
         case .openSourceMessage:
             break   // the room screen handles jumping to a message
+        case .startAgent(let ticketId):
+            guard mintAdmits, let ticket = board?.tickets[ticketId] else { return }
+            agentTicket = AgentTicket(id: ticket.id, title: ticket.title, status: ticket.status, body: ticket.body)
         case .answerDecision(let ticketId, let answer, let detail):
             answerDecision(ticketId: ticketId, answer: answer, detail: detail)
         case .retryDecision(let ticketId):
@@ -601,7 +633,8 @@ final class RoomTicketsCoordinator: ObservableObject {
                 list.map { RoomTicketCommentRow(id: $0.id, authorId: $0.actorId, body: $0.body, createdAt: $0.createdAt) }
             },
             commentStatus: commentStatus,
-            retryableComments: retryableComments
+            retryableComments: retryableComments,
+            canStartAgents: mintAdmits
         )
     }
 }
@@ -621,12 +654,15 @@ struct RoomTicketsScreen: View {
         identity: (any AccountIdentityProviding)? = nil,
         assignRoster: [String] = [],
         extras: (any RoomTicketExtrasReading)? = nil,
+        mint: (any MintStarting)? = nil,
         startsFiling: Bool = false,
         onOpenMessage: (@MainActor (Int64) -> Void)? = nil,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.onOpenMessage = onOpenMessage
         self.startsFiling = startsFiling && writer != nil
+        self.sessionId = sessionId
+        self.mint = mint
         _coordinator = StateObject(wrappedValue: RoomTicketsCoordinator(
             sessionId: sessionId,
             transport: transport,
@@ -637,9 +673,13 @@ struct RoomTicketsScreen: View {
             canWriteTickets: writer != nil,
             assignRoster: assignRoster,
             extras: extras,
+            mint: mint,
             onReauthenticationRequired: onReauthenticationRequired
         ))
     }
+
+    private let sessionId: String
+    private let mint: (any MintStarting)?
 
     var body: some View {
         RoomTicketsView(state: coordinator.state, startsFiling: startsFiling) { intent in
@@ -651,6 +691,13 @@ struct RoomTicketsScreen: View {
         }
         .onAppear { coordinator.start() }
         .onDisappear { coordinator.stop() }
+        .sheet(item: $coordinator.agentTicket) { ticket in
+            if let mint {
+                TicketAgentSheet(ticket: ticket, sessionId: sessionId, mint: mint) { agentName in
+                    coordinator.send(.assign(ticketId: ticket.id, assignee: agentName))
+                }
+            }
+        }
     }
 }
 
@@ -671,10 +718,13 @@ struct RoomTicketLinkScreen: View {
         identity: (any AccountIdentityProviding)? = nil,
         assignRoster: [String] = [],
         extras: (any RoomTicketExtrasReading)? = nil,
+        mint: (any MintStarting)? = nil,
         onOpenMessage: @escaping @MainActor (Int64) -> Void,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.onOpenMessage = onOpenMessage
+        self.sessionId = sessionId
+        self.mint = mint
         _coordinator = StateObject(wrappedValue: RoomTicketsCoordinator(
             sessionId: sessionId,
             transport: transport,
@@ -686,9 +736,13 @@ struct RoomTicketLinkScreen: View {
             assignRoster: assignRoster,
             extras: extras,
             focusTicketId: ticketId,
+            mint: mint,
             onReauthenticationRequired: onReauthenticationRequired
         ))
     }
+
+    private let sessionId: String
+    private let mint: (any MintStarting)?
 
     var body: some View {
         NavigationStack {
@@ -703,6 +757,13 @@ struct RoomTicketLinkScreen: View {
         }
         .onAppear { coordinator.start() }
         .onDisappear { coordinator.stop() }
+        .sheet(item: $coordinator.agentTicket) { ticket in
+            if let mint {
+                TicketAgentSheet(ticket: ticket, sessionId: sessionId, mint: mint) { agentName in
+                    coordinator.send(.assign(ticketId: ticket.id, assignee: agentName))
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -722,7 +783,8 @@ struct RoomTicketLinkScreen: View {
                 comments: state.comments[row.id],
                 canComment: state.canFileTickets,
                 commentStatus: state.commentStatus[row.id],
-                canRetryComment: state.retryableComments.contains(row.id)
+                canRetryComment: state.retryableComments.contains(row.id),
+                canStartAgent: state.canStartAgents
             ) { intent in
                 if case .openSourceMessage(let sequence) = intent {
                     onOpenMessage(sequence)
