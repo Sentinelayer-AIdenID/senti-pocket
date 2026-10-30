@@ -1357,6 +1357,28 @@ public enum LongMessage {
         if preview.components(separatedBy: "```").count % 2 == 0 { preview += "\n```" }
         return preview.trimmingCharacters(in: .whitespacesAndNewlines)
     }
+
+    /// What a long message shows (its preview, and its length for the card), or nil for one shown whole: what a row's
+    /// body asks on every redraw. Each answer reads the whole text, so it is kept per text (Carter's 08:06 freeze on
+    /// build 2026103005 stopped in `preview`'s split, inside a row's body).
+    public static func shown(_ text: String) -> (preview: String, characters: Int)? {
+        let key = text as NSString
+        if let known = memo.object(forKey: key) { return known.value }
+        let value = isLong(text) ? (preview(text), text.count) : nil
+        memo.setObject(Shown(value), forKey: key)
+        return value
+    }
+
+    private final class Shown {
+        let value: (preview: String, characters: Int)?
+        init(_ value: (preview: String, characters: Int)?) { self.value = value }
+    }
+
+    private static let memo: NSCache<NSString, Shown> = {
+        let cache = NSCache<NSString, Shown>()
+        cache.countLimit = 2_000
+        return cache
+    }()
 }
 
 /// How a failed row keeps its text. Edit puts it back into the composer, so it needs one; when posting is refused

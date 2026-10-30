@@ -301,7 +301,7 @@ struct LastRun: Codable, Equatable {
     }
 
     /// The report for a run that ended while active; nil for one that ended inactive or in the background.
-    func closedReport(system: String, device: String) -> CrashReport? {
+    func closedReport(system: String, device: String, stall: MainThreadWatch.Stall? = nil) -> CrashReport? {
         guard isActive else { return nil }
         // With memory to spare, the likeliest end is a freeze the system ended (the watchdog), not a memory kill.
         let memoryWasShort = availableMB.map { $0 < 200 } ?? true
@@ -316,6 +316,11 @@ struct LastRun: Codable, Equatable {
         }
         if memoryWarnings > 0 {
             lines.append("iOS warned about memory \(memoryWarnings) \(memoryWarnings == 1 ? "time" : "times") before it ended.")
+        }
+        // The watch's last word on this run: the main thread stopped answering and never came back.
+        if let stall, stall.startedAt >= launchedAt {
+            lines.append(String(format: "The main thread stopped answering at %@, right after \"%@\", and was still stuck %.1f s later when the app ended.",
+                                CrashReportText.clock(stall.startedAt), stall.afterStep, stall.seconds))
         }
         return CrashReport(
             id: "closed-\(Int(launchedAt.timeIntervalSince1970))",
@@ -364,10 +369,13 @@ final class CrashReporter: NSObject, ObservableObject, MXMetricManagerSubscriber
         guard run == nil, !Self.isTestRun else { return }
         let now = Date()
         var found: [CrashReport] = []
+        let stall = MainThreadWatch.shared.unrecoveredStall()
         if let data = try? Data(contentsOf: runURL), let previous = try? JSONDecoder().decode(LastRun.self, from: data),
-           let closed = previous.closedReport(system: Self.system, device: Self.device) {
+           let closed = previous.closedReport(system: Self.system, device: Self.device, stall: stall) {
             found.append(closed)
         }
+        MainThreadWatch.shared.activeChanged(UIApplication.shared.applicationState == .active)
+        MainThreadWatch.shared.start()
         run = LastRun(build: Self.build, launchedAt: now, updatedAt: now,
                       isActive: UIApplication.shared.applicationState == .active)
         sample()
@@ -394,6 +402,7 @@ final class CrashReporter: NSObject, ObservableObject, MXMetricManagerSubscriber
     /// Active or not. Leaving the app, the app switcher and system screens all make it inactive first, and the app
     /// delegate reports a quit (`applicationWillTerminate`) here before the app ends.
     func activeChanged(_ isActive: Bool) {
+        MainThreadWatch.shared.activeChanged(isActive)
         guard var run, run.isActive != isActive else { return }
         run.isActive = isActive
         run.note(isActive ? "active" : "inactive", at: Date())
@@ -403,6 +412,7 @@ final class CrashReporter: NSObject, ObservableObject, MXMetricManagerSubscriber
 
     /// A step taken in the app, by name only, for the next report.
     func note(_ step: String) {
+        MainThreadWatch.shared.note(step)
         guard var run else { return }
         run.note(step, at: Date())
         self.run = run
@@ -413,6 +423,12 @@ final class CrashReporter: NSObject, ObservableObject, MXMetricManagerSubscriber
     func note(_ intent: RoomChatIntent) {
         guard let step = Self.step(for: intent) else { return }
         note(step)
+    }
+
+    /// The same, with how many rows the room had, so a freeze can be tied to the room's size.
+    func note(_ intent: RoomChatIntent, rows: Int) {
+        guard let step = Self.step(for: intent) else { return }
+        note("\(step) (\(rows) rows)")
     }
 
     nonisolated static func step(for intent: RoomChatIntent) -> String? {
@@ -493,5 +509,108 @@ final class CrashReporter: NSObject, ObservableObject, MXMetricManagerSubscriber
     private static func availableMB() -> Int? {
         let bytes = os_proc_available_memory()
         return bytes > 0 ? Int(bytes / 1_048_576) : nil
+    }
+}
+
+/// Watches the main thread from a background queue (Carter's 07:39 freeze: the phone's stack held only Apple's
+/// frames, and the last step was a send). When the main thread stops answering for more than 1.5 s, the stall is
+/// written down from here at once, since a frozen app cannot write it later, and rewritten while it lasts, so the
+/// next launch can say when it began, after which step, and how long it went on.
+final class MainThreadWatch: @unchecked Sendable {
+    struct Stall: Codable, Equatable {
+        var startedAt: Date
+        var afterStep: String
+        var seconds: Double
+        var recovered: Bool
+    }
+
+    static let shared = MainThreadWatch(url: MainThreadWatch.file)
+    static let threshold: TimeInterval = 1.5
+
+    private let url: URL
+    private let lock = NSLock()
+    private let queue = DispatchQueue(label: "pocket.main-thread-watch", qos: .utility)
+    private var timer: DispatchSourceTimer?
+    private var lastBeat = Date()
+    private var lastStep = "launch"
+    private var stall: Stall?
+    /// Only an app on screen is watched: a suspended app's threads all stop, and its first moments back are no stall.
+    private var isActive = true
+
+    init(url: URL) {
+        self.url = url
+    }
+
+    private static var file: URL {
+        let folder = (try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                                   appropriateFor: nil, create: true))
+            ?? FileManager.default.temporaryDirectory
+        return folder.appendingPathComponent("pocket-main-stall.json")
+    }
+
+    /// The stall the last run ended in, if it never recovered; read once, before this run starts watching.
+    func unrecoveredStall() -> Stall? {
+        guard let data = try? Data(contentsOf: url), let stall = try? JSONDecoder().decode(Stall.self, from: data),
+              !stall.recovered else { return nil }
+        return stall
+    }
+
+    func start() {
+        guard timer == nil else { return }
+        try? FileManager.default.removeItem(at: url)
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 0.5, repeating: 0.5)
+        timer.setEventHandler { [weak self] in self?.tick() }
+        self.timer = timer
+        timer.resume()
+    }
+
+    func note(_ step: String) {
+        lock.lock()
+        lastStep = step
+        lock.unlock()
+    }
+
+    func activeChanged(_ active: Bool) {
+        lock.lock()
+        isActive = active
+        lastBeat = Date()
+        lock.unlock()
+    }
+
+    private func tick() {
+        let now = Date()
+        lock.lock()
+        let gap = now.timeIntervalSince(lastBeat)
+        var written: Stall?
+        if !isActive {
+            lastBeat = now
+        } else if gap > Self.threshold {
+            var current = stall ?? Stall(startedAt: lastBeat, afterStep: lastStep, seconds: 0, recovered: false)
+            current.seconds = gap
+            stall = current
+            written = current
+        }
+        lock.unlock()
+        if let written { write(written) }
+        DispatchQueue.main.async { [weak self] in self?.beat() }
+    }
+
+    private func beat() {
+        lock.lock()
+        lastBeat = Date()
+        let ended = stall.map { Stall(startedAt: $0.startedAt, afterStep: $0.afterStep, seconds: $0.seconds, recovered: true) }
+        stall = nil
+        lock.unlock()
+        if let ended {
+            write(ended)
+            let line = String(format: "main thread stalled %.1f s after %@", ended.seconds, ended.afterStep)
+            Task { @MainActor in CrashReporter.shared.note(line) }
+        }
+    }
+
+    private func write(_ stall: Stall) {
+        guard let data = try? JSONEncoder().encode(stall) else { return }
+        try? data.write(to: url, options: .atomic)
     }
 }
