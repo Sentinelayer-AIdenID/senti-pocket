@@ -47,7 +47,7 @@ final class InlineReplyRowsTests: XCTestCase {
 
     /// The room was full of one bridge warning with a rising retry count: that is one row with a count.
     func test_a_notice_repeating_with_only_its_numbers_changed_is_one_row() {
-        let warn = { (n: Int) in "⚠ bridge: message from life 0d7010eb4e60 (frame 707) remains queued after \(n) failed relay attempts." }
+        let warn = { (n: Int) in "⚠ bridge: message from life a1b2c3d4e5f6 (frame 707) remains queued after \(n) failed relay attempts." }
         let messages = [
             input("m1", seq: 1, at: 0, author: "respawn-orchestrator", text: warn(105)),
             input("m2", seq: 2, at: 60, author: "respawn-orchestrator", text: warn(107)),
@@ -64,7 +64,75 @@ final class InlineReplyRowsTests: XCTestCase {
             return nil
         }
         XCTAssertEqual(rows.first { $0.id == "m3" }?.repeats, 3)
+        XCTAssertEqual(rows.first { $0.id == "m3" }?.repeatStack, "m1", "a stack is named by its first notice")
         XCTAssertEqual(rows.first { $0.id == "m5" }?.repeats, 1)
+        XCTAssertNil(rows.first { $0.id == "m5" }?.repeatStack, "a lone notice is in no stack")
+    }
+
+    /// warden: folding must never hide what differs. A notice with a file, a reaction or a thread always shows.
+    func test_a_notice_with_something_of_its_own_never_folds() {
+        let warn = { (n: Int) in "⚠ bridge: message from life a1b2c3d4e5f6 (frame 707) remains queued after \(n) failed relay attempts." }
+        let file = RoomAttachmentChip(attachmentId: "att-1", filename: "trace.txt", kind: .other, processingStatus: "ready")
+        func notice(_ id: String, _ seq: Int64, _ n: Int, reactions: RoomChatReactions? = nil,
+                    attachments: [RoomAttachmentChip] = []) -> RoomChatMessageInput {
+            RoomChatMessageInput(id: id, sequenceId: seq, kind: .message, authorId: "respawn-orchestrator",
+                                 authorName: "respawn-orchestrator", isHuman: false, text: warn(n), timestamp: "",
+                                 date: Date(timeIntervalSince1970: 1_800_000_000 + Double(seq) * 60),
+                                 reactions: reactions, attachments: attachments)
+        }
+        let state = RoomChatPresentationState(sessionId: "room", title: "Room", messages: [
+            notice("m1", 1, 1),
+            notice("m2", 2, 2, attachments: [file]),
+            notice("m3", 3, 3),
+            notice("m4", 4, 4, reactions: RoomChatReactions(replyCount: 2)),
+            notice("m5", 5, 5),
+            notice("m6", 6, 6, reactions: RoomChatReactions(chips: [.init(type: "like", count: 1, isMine: false)])),
+            notice("m7", 7, 7),
+            notice("m8", 8, 8)
+        ])
+        XCTAssertEqual(messageIds(state), ["m1", "m2", "m3", "m4", "m5", "m6", "m8"],
+                       "a file, a thread and a reaction each stand alone; only the last plain pair folds")
+        XCTAssertTrue(RoomChatRepeats.isFoldable(notice("x", 9, 9, reactions: RoomChatReactions())),
+                      "an empty reaction line is nothing of its own")
+    }
+
+    /// warden: a folded stack opens to show each notice, and folds again from its first one.
+    func test_an_opened_stack_shows_each_notice_and_offers_to_fold_again() {
+        let warn = { (n: Int) in "⚠ bridge: message from life a1b2c3d4e5f6 (frame 707) remains queued after \(n) failed relay attempts." }
+        let messages = [
+            input("m1", seq: 1, at: 0, text: warn(1)),
+            input("m2", seq: 2, at: 60, text: warn(2)),
+            input("m3", seq: 3, at: 120, text: warn(3))
+        ]
+        let opened = RoomChatPresentationState(sessionId: "room", title: "Room", messages: messages,
+                                               expandedRepeats: ["m1"])
+        XCTAssertEqual(messageIds(opened), ["m1", "m2", "m3"], "an opened stack shows every notice")
+        let rows = opened.rows.compactMap { row -> RoomChatMessageRow? in
+            if case .message(let message) = row { return message }
+            return nil
+        }
+        XCTAssertEqual(rows.map(\.repeatStack), ["m1", "m1", "m1"])
+        XCTAssertEqual(rows.map(\.foldsRepeats), [true, false, false], "only the first notice offers to fold again")
+        XCTAssertEqual(rows.map(\.repeats), [1, 1, 1])
+
+        let other = RoomChatPresentationState(sessionId: "room", title: "Room", messages: messages,
+                                              expandedRepeats: ["m9"])
+        XCTAssertEqual(messageIds(other), ["m3"], "opening another stack leaves this one folded")
+    }
+
+    /// A notice opened from a link (a search hit, a pin) is never folded away under a newer one.
+    func test_a_notice_being_opened_keeps_its_run_unfolded() {
+        let warn = { (n: Int) in "⚠ bridge: message from life a1b2c3d4e5f6 (frame 707) remains queued after \(n) failed relay attempts." }
+        let messages = [
+            input("m1", seq: 1, at: 0, text: warn(1)),
+            input("m2", seq: 2, at: 60, text: warn(2)),
+            input("m3", seq: 3, at: 120, text: warn(3))
+        ]
+        let focused = RoomChatPresentationState(sessionId: "room", title: "Room", messages: messages,
+                                                focusSequenceId: 1)
+        XCTAssertTrue(messageIds(focused).contains("m1"), "the message being opened is on screen")
+        XCTAssertEqual(RoomChatRepeats.fold(messages, keep: 2).kept.map(\.id), ["m1", "m2", "m3"],
+                       "a run holding the kept message does not fold")
     }
 
     private func messageIds(_ state: RoomChatPresentationState) -> [String] {
