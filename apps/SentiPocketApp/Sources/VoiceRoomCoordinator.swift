@@ -137,8 +137,9 @@ final class VoiceRoomCoordinator: ObservableObject {
                 guard !Task.isCancelled, self.state.isRinging else { return }
                 guard self.now().timeIntervalSince(started) >= Self.ringsFor else { continue }
                 self.stopRinging()
-                self.state.notice = "\(self.state.title) hasn't picked up yet. Talk when you're ready; the answer is read when it comes."
                 if self.state.isHandsFree, self.state.phase == .ready { self.startListening() }
+                // After listening starts, which clears notices.
+                self.state.notice = "\(self.state.title) hasn't picked up yet. Talk when you're ready; the answer is read when it comes."
                 return
             }
         }
