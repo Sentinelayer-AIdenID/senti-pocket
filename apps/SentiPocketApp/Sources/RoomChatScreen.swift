@@ -418,6 +418,7 @@ struct RoomChatScreen: View {
                 Button {
                     CrashReporter.shared.note("flight record opened")
                     flight.setAgents(flightAgents)
+                    flight.setPeople(roster.members)
                     showsFlight = true
                 } label: {
                     Label("Flight record", systemImage: "airplane")
@@ -574,7 +575,10 @@ struct RoomChatScreen: View {
             }
         }
         .onChange(of: coordinator.state.presence) { _ in
-            if showsFlight { flight.setAgents(flightAgents) }
+            if showsFlight {
+                flight.setAgents(flightAgents)
+                flight.setPeople(roster.members)
+            }
         }
         // Agent requests, Tickets and Breakouts open as sheets over the room, never pushed onto its navigation. Pushed
         // from the toolbar's overflow, Tickets froze the app in an endless layout pass on iOS 26 until the system

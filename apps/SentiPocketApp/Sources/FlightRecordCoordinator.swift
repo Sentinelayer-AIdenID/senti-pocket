@@ -22,6 +22,7 @@ final class FlightRecordCoordinator: ObservableObject {
     private var failure: String?
     private var expandedId: String?
     private var agents: [FlightRecordState.Agent] = []
+    private var people: [RoomRoster.Member] = []
     private var loop: Task<Void, Never>?
     private var expandedLoop: Task<Void, Never>?
 
@@ -83,6 +84,13 @@ final class FlightRecordCoordinator: ObservableObject {
     func setAgents(_ agents: [FlightRecordState.Agent]) {
         guard agents != self.agents else { return }
         self.agents = agents
+        publish()
+    }
+
+    /// The room's people for their own list, from the room's roster.
+    func setPeople(_ people: [RoomRoster.Member]) {
+        guard people != self.people else { return }
+        self.people = people
         publish()
     }
 
@@ -151,6 +159,7 @@ final class FlightRecordCoordinator: ObservableObject {
         state = FlightRecordState(
             boxes: boxes,
             agents: agents.filter { !boxNames.contains($0.id.lowercased()) },
+            people: people,
             finishedBoxes: finished,
             isLoading: false,
             failure: failure,

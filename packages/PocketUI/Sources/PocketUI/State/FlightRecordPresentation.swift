@@ -148,6 +148,9 @@ public struct FlightRecordState: Equatable, Sendable {
 
     public let boxes: [Box]
     public let agents: [Agent]
+    /// The people who came to the room, here first (Carter, #55240: "In the flight record we have agents we can have a
+    /// separate list for humans too").
+    public let people: [RoomRoster.Member]
     public let finishedBoxes: Int
     public let isLoading: Bool
     public let failure: String?
@@ -155,10 +158,11 @@ public struct FlightRecordState: Equatable, Sendable {
     /// The names of the room's boxes that ended (destroyed, killed or lost), lowercased: a call never rings them.
     public let endedBoxNames: Set<String>
 
-    public init(boxes: [Box] = [], agents: [Agent] = [], finishedBoxes: Int = 0, isLoading: Bool = false, failure: String? = nil,
-                totals: Totals? = nil, endedBoxNames: Set<String> = []) {
+    public init(boxes: [Box] = [], agents: [Agent] = [], people: [RoomRoster.Member] = [], finishedBoxes: Int = 0,
+                isLoading: Bool = false, failure: String? = nil, totals: Totals? = nil, endedBoxNames: Set<String> = []) {
         self.boxes = boxes
         self.agents = agents
+        self.people = people.filter { $0.kind == .person }.sorted { ($0.status, $0.name.lowercased()) < ($1.status, $1.name.lowercased()) }
         self.finishedBoxes = finishedBoxes
         self.isLoading = isLoading
         self.failure = failure
