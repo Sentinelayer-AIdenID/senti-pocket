@@ -1252,7 +1252,9 @@ private func emptyComposer(_ draft: Binding<String>, sent: String) {
     }
 }
 
+/// A message's text, its tables as tab-separated rows (`ChatMarkdown.copyText`).
 private func copyToPasteboard(_ text: String) {
+    let text = ChatMarkdown.copyText(text)
     #if os(iOS)
     UIPasteboard.general.string = text
     #elseif os(macOS)

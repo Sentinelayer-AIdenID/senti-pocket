@@ -30,6 +30,35 @@ public struct ChatMarkdownTable: Equatable, Sendable {
             return min(max(Double(longest) * perCharacter + padding, minimum), maximum)
         }
     }
+
+    /// The widths for a screen `available` wide (Carter, #55517: "if they are only 2 or 3 cells they stay within the
+    /// bounds of the screen ... and if more then they can move with slider"). A table that fits keeps its widths. One
+    /// whose columns can each have `readable` points is narrowed to the screen, its widest columns giving way first and
+    /// their cells wrapping. Wider than that, it keeps its widths and scrolls sideways.
+    public func fittedWidths(available: Double, readable: Double = 90) -> (widths: [Double], scrolls: Bool) {
+        let natural = columnWidths()
+        guard natural.reduce(0, +) > available else { return (natural, false) }
+        guard Double(natural.count) * readable <= available else { return (natural, true) }
+        var widths = natural
+        var held = Set<Int>()
+        while true {
+            let heldWidth = held.reduce(0) { $0 + widths[$1] }
+            let free = natural.indices.filter { !held.contains($0) }
+            let scale = (available - heldWidth) / free.reduce(0) { $0 + natural[$1] }
+            var narrowed = false
+            for column in free {
+                let floor = min(natural[column], readable)
+                if natural[column] * scale < floor {
+                    widths[column] = floor
+                    held.insert(column)
+                    narrowed = true
+                } else {
+                    widths[column] = natural[column] * scale
+                }
+            }
+            if !narrowed { return (widths, false) }
+        }
+    }
 }
 
 public struct ChatMarkdownListItem: Equatable, Sendable {
@@ -65,6 +94,43 @@ public enum ChatMarkdown {
         var blocks = parseLines(text.components(separatedBy: "\n"))
         if let overflow, !overflow.isEmpty { blocks.append(.paragraph(overflow)) }
         return blocks
+    }
+
+    /// A message as it is copied (Carter, #55517: "if I copy that message im not copying some really weirdly formatted
+    /// message just because there's a table on there right?"): its text as written, except that each table becomes
+    /// plain rows of tab-separated cells, which paste as columns into Notes, Mail or a spreadsheet, without its pipes
+    /// or delimiter row. Code blocks are left as they are.
+    public static func copyText(_ source: String) -> String {
+        let lines = source.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+            .components(separatedBy: "\n")
+        var copied: [String] = []
+        var fence: String?
+        var index = 0
+        while index < lines.count {
+            let line = lines[index]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if let open = fence {
+                if trimmed.hasPrefix(open), trimmed.allSatisfy({ $0 == open.first }) { fence = nil }
+            } else if let opened = codeFence(trimmed) {
+                fence = opened.marker
+            } else if let found = table(lines, at: index) {
+                for row in [found.table.header] + found.table.rows {
+                    copied.append(row.map(plainCell).joined(separator: "\t"))
+                }
+                index = found.next
+                continue
+            }
+            copied.append(line)
+            index += 1
+        }
+        return copied.joined(separator: "\n")
+    }
+
+    /// A cell's words without the Markdown marks that would show as characters once pasted.
+    private static func plainCell(_ cell: String) -> String {
+        var text = cell
+        for mark in ["**", "__", "`"] { text = text.replacingOccurrences(of: mark, with: "") }
+        return text.replacingOccurrences(of: "<br>", with: " ")
     }
 
     private static func parseLines(_ lines: [String]) -> [ChatMarkdownBlock] {
