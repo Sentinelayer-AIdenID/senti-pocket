@@ -293,7 +293,8 @@ public struct RoomChatView: View {
                     RoomPeopleAvatars(presence: presence, models: roster.modelsById,
                                       signals: state.agentSignals(now: Date()),
                                       working: state.agentsWorking(now: Date()),
-                                      boxes: roster.members.filter { $0.kind == .box && $0.status != .ended }.map(\.name)) {
+                                      boxes: roster.members.filter { $0.kind == .box && $0.status != .ended }.map(\.name),
+                                      activeCount: roster.members.isEmpty ? nil : roster.activeCount) {
                         showsPresence = true
                     }
                         .padding(.top, 4)
@@ -2571,7 +2572,7 @@ private struct RoomPresenceSheet: View {
                                 .accessibilityIdentifier("pocket.room.people.\(member.id)")
                             }
                         } header: {
-                            Text("\(side.title) · \(side.online) online · \(side.offline) offline")
+                            Text(side.header)
                                 .accessibilityIdentifier("pocket.room.people.side.\(side.title.lowercased())")
                         }
                     }

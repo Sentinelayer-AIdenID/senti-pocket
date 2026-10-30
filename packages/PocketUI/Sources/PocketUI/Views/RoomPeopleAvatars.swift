@@ -20,6 +20,9 @@ struct RoomPeopleAvatars: View {
     var working: Set<String> = []
     /// The room's running boxes, by name: shown even when not in presence, with a box badge.
     var boxes: [String] = []
+    /// How many are here and active, as the people list counts them (Carter, 10-30: the ring said 2 while the list
+    /// said 9 online); nil counts the ring's own logos that are not idle.
+    var activeCount: Int?
     let onOpen: () -> Void
 
     /// How long a note stays before it fades.
@@ -41,6 +44,8 @@ struct RoomPeopleAvatars: View {
     @State private var dragFrom: Double?
     @State private var settlingUntil = Date.distantPast
     @State private var front: Int?
+    /// The signs already seen, to tell which agent just did something.
+    @State private var seenSignals: [String: String] = [:]
     private let turn = Timer.publish(every: 1.0 / 30, on: .main, in: .common).autoconnect()
 
     /// One logo on the ring: an agent (its lab's logo) or a person.
@@ -60,7 +65,7 @@ struct RoomPeopleAvatars: View {
     var body: some View {
         let items = ringItems
         let isRing = PresenceRingLayout.isRing(items.count)
-        let online = items.filter { !$0.isIdle }.count
+        let online = activeCount ?? items.filter { !$0.isIdle }.count
         ZStack {
             ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                 let spot = PresenceRingLayout.spot(index: index, count: items.count, rotation: rotation)
@@ -108,8 +113,12 @@ struct RoomPeopleAvatars: View {
             shown = presence
             agents = presence.agentCount
             humans = presence.humanCount
+            seenSignals = signals
         }
         .onChange(of: presence) { now in arrive(now) }
+        // Whoever just posted comes to the front of the ring, and the ring holds there a while (Carter, 10-30:
+        // "whenever each one sends a message it scrolls to that one. An indication of who's interacting now").
+        .onChange(of: signals) { now in bringForward(now, items: items) }
     }
 
     @ViewBuilder
@@ -120,14 +129,15 @@ struct RoomPeopleAvatars: View {
                     .modifier(PresenceCoin(shape: Circle()))
             } else {
                 Image(systemName: "person.fill")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(PocketPalette.textPrimary)
                     .modifier(PresenceCoin(shape: Circle()))
             }
         }
-        // Idle but not gone: still on the ring, greyed (Carter, 10-30).
-        .saturation(item.isIdle ? 0 : 1)
-        .opacity(item.isIdle ? 0.5 : 1)
+        // Idle but not gone: still on the ring, greyed (Carter, 10-30), and still easy to see ("I can barely see the
+        // logos").
+        .saturation(item.isIdle ? 0.3 : 1)
+        .opacity(item.isIdle ? 0.78 : 1)
     }
 
     /// The number online, with a green dot, in the middle (Carter, 10-30: "If one idles that number drops").
@@ -148,6 +158,20 @@ struct RoomPeopleAvatars: View {
         .overlay(Capsule().strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
         .shadow(color: .black.opacity(0.35), radius: 3, y: 2)
         .accessibilityHidden(true)
+    }
+
+    /// How long the ring holds on an agent that just did something before it turns by itself again.
+    static let holdOnActivity: TimeInterval = 8
+
+    private func bringForward(_ now: [String: String], items: [RingItem]) {
+        let changed = now.filter { seenSignals[$0.key] != $0.value }.map(\.key)
+        seenSignals = now
+        guard PresenceRingLayout.isRing(items.count), dragFrom == nil,
+              let index = items.firstIndex(where: { item in changed.contains { "a:" + $0 == item.id } }) else { return }
+        settlingUntil = Date().addingTimeInterval(Self.holdOnActivity)
+        let target = PresenceRingLayout.rotation(bringingToFront: index, count: items.count, from: rotation)
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.8)) { rotation = target }
+        tickIfNewFront(count: items.count)
     }
 
     /// A light tap each time a new logo comes to the front (Carter, 10-30: "that small vibration feel that we get when
@@ -220,20 +244,23 @@ struct RoomPeopleAvatars: View {
     }
 }
 
-/// A coin under each presence logo: solid, lit from above, ringed and shadowed, so it reads over any message behind it.
+/// A coin under each presence logo: a little see-through glass, lit from above, ringed and shadowed, so the logo
+/// stands out over any message behind it in light and dark (Carter, 10-30: "Make them more prominent and slight
+/// transparent. Same for dark theme").
 private struct PresenceCoin<S: InsettableShape>: ViewModifier {
     let shape: S
     var fixedWidth = true
-    static var size: CGFloat { 28 }
+    static var size: CGFloat { 34 }
 
     func body(content: Content) -> some View {
         content
             .frame(width: fixedWidth ? Self.size : nil, height: Self.size)
-            .background(shape.fill(PocketPalette.raised))
-            .overlay(shape.fill(LinearGradient(colors: [.white.opacity(0.16), .clear], startPoint: .top, endPoint: .center))
+            .background(shape.fill(PocketPalette.raised.opacity(0.78)))
+            .background(.ultraThinMaterial, in: shape)
+            .overlay(shape.fill(LinearGradient(colors: [.white.opacity(0.18), .clear], startPoint: .top, endPoint: .center))
                 .allowsHitTesting(false))
-            .overlay(shape.strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
-            .shadow(color: .black.opacity(0.4), radius: 3, y: 2)
+            .overlay(shape.strokeBorder(Color.primary.opacity(0.18), lineWidth: 0.75))
+            .shadow(color: .black.opacity(0.35), radius: 4, y: 2)
     }
 }
 
@@ -252,7 +279,7 @@ private struct AgentLogo: View {
         let tint = Color(red: red, green: green, blue: blue)
         mark
             .foregroundStyle(tint)
-            .frame(width: 17, height: 17)
+            .frame(width: 21, height: 21)
             .rotationEffect(.degrees(turn))
             .scaleEffect(beating ? 1.22 : 1)
             .shadow(color: tint.opacity(beating ? 0.75 : 0), radius: 7)

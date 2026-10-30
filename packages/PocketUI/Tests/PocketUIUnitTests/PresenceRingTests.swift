@@ -36,6 +36,21 @@ final class PresenceRingTests: XCTestCase {
         XCTAssertNil(PresenceRingLayout.frontIndex(count: 5, rotation: 0), "the arc has no front to pass")
     }
 
+    /// Carter (10-30): "whenever each one sends a message it scrolls to that one".
+    func test_an_agent_that_just_posted_is_brought_to_the_front_the_short_way_round() {
+        let count = 8
+        let step = 2 * Double.pi / Double(count)
+        for index in 0..<count {
+            for start in [0, 1.3, -5.0, 40.0] {
+                let turned = PresenceRingLayout.rotation(bringingToFront: index, count: count, from: start)
+                XCTAssertEqual(PresenceRingLayout.frontIndex(count: count, rotation: turned), index)
+                XCTAssertLessThanOrEqual(abs(turned - start), Double.pi + 0.0001, "never the long way round")
+            }
+        }
+        XCTAssertEqual(PresenceRingLayout.rotation(bringingToFront: 7, count: count, from: 0), step, accuracy: 0.0001,
+                       "one step back, not seven forward")
+    }
+
     /// Carter (10-30): idle but not destroyed stays on the ring, greyed; a working agent is never greyed.
     func test_an_idle_agent_is_greyed_unless_it_is_working() {
         let present = [
