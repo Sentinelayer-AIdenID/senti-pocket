@@ -289,11 +289,11 @@ public struct RoomChatView: View {
                 canReact: state.canReact,
                 canReply: state.composer.canPost,
                 canPin: state.canPin,
-                isPinned: state.pinned.contains { $0.sequenceId == message.sequenceId },
+                isPinned: state.isPinned(message),
                 pinsFull: state.pinned.count >= state.pinLimit,
                 breakouts: state.breakouts,
                 attachmentPreviews: state.attachmentPreviews,
-                isReadingAloud: readingAloudId == RoomReadAloud.message(message.sequenceId),
+                isReadingAloud: readingAloudId == message.readAloudId,
                 onOpenReplyTarget: { jump(to: $0, proxy: proxy) },
                 send: send
             )
@@ -427,10 +427,7 @@ public struct RoomChatView: View {
     /// The focused message's row once it is loaded; nil when nothing is focused or it has not loaded yet.
     private var focusRowId: String? {
         guard let focus = state.focusSequenceId else { return nil }
-        return state.rows.first { row in
-            if case .message(let message) = row { return message.sequenceId == focus }
-            return false
-        }?.id
+        return state.messageRow(for: focus)?.id
     }
 
     /// Brings the focused message's row into view, highlights it, and reports it handled.
@@ -452,11 +449,7 @@ public struct RoomChatView: View {
     }
 
     private func jump(to sequenceId: Int64, proxy: ScrollViewProxy) {
-        let target = state.rows.first { row in
-            if case .message(let message) = row { return message.sequenceId == sequenceId }
-            return false
-        }
-        guard let target else {
+        guard let target = state.messageRow(for: sequenceId) else {
             // Not loaded: the room loads the window around it and the focus brings it into view.
             send(.jumpToMessage(sequenceId: sequenceId))
             return
@@ -571,13 +564,25 @@ private struct RoomMessageRowView: View {
             }
             if let reply = row.replyToSequenceId {
                 Button {
-                    onOpenReplyTarget(reply)
+                    if row.isInlineReply {
+                        send(.openThread(sequenceId: reply))
+                    } else {
+                        onOpenReplyTarget(reply)
+                    }
                 } label: {
-                    Label("Replying to #\(reply)", systemImage: "arrowshape.turn.up.left")
+                    Label(row.replyContext ?? "Replying to #\(reply)", systemImage: "arrowshape.turn.up.left")
                         .font(.caption)
                         .foregroundStyle(PocketPalette.textSecondary)
+                        .lineLimit(1)
+                        .padding(.leading, 8)
+                        .overlay(alignment: .leading) {
+                            RoundedRectangle(cornerRadius: 1)
+                                .fill(PocketPalette.separator)
+                                .frame(width: 2)
+                        }
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(row.isInlineReply ? "In reply to \(row.replyContext ?? "message \(reply)"). Opens the thread." : "Replying to message \(reply)")
             }
             ChatMarkdownView(text: row.text, ownHandles: ownHandles)
                 .font(.body)
@@ -597,7 +602,7 @@ private struct RoomMessageRowView: View {
                 RoomReactionBar(
                     reactions: reactions,
                     canReact: canReact,
-                    onReact: { send(.react(sequenceId: row.sequenceId, type: $0)) },
+                    onReact: { type in row.reaction(type).map(send) },
                     onOpenThread: { send(.openThread(sequenceId: row.sequenceId)) }
                 )
             }
@@ -616,56 +621,24 @@ private struct RoomMessageRowView: View {
             if isReadingAloud { RoomReadingAloudMark { send(.stopReadingAloud) } }
         }
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("pocket.room.message.\(row.sequenceId)")
+        .accessibilityIdentifier(row.accessibilityId)
         .contextMenu { messageMenu }
     }
 
-    @ViewBuilder
+    /// The long-press menu, from the row's own options: a reply shown in the room acts on itself, never on the
+    /// message it answers.
     private var messageMenu: some View {
-        Button {
-            send(.openThread(sequenceId: row.sequenceId))
-        } label: {
-            Label(canReply ? "Reply in thread" : "Open thread", systemImage: "bubble.left.and.bubble.right")
-        }
-        // Always "Listen": a context menu can show content from before the reading started, so Stop is the speaker
-        // button on the row being read.
-        Button {
-            send(.readAloud(id: RoomReadAloud.message(row.sequenceId), text: row.text))
-        } label: {
-            Label("Listen", systemImage: "speaker.wave.2")
-        }
-        if canReact {
-            let liked = row.reactions?.chips.contains { $0.type == "like" && $0.isMine } == true
-            let disliked = row.reactions?.chips.contains { $0.type == "dislike" && $0.isMine } == true
+        ForEach(row.options(canReply: canReply, canReact: canReact, canPin: canPin, isPinned: isPinned, pinsFull: pinsFull)) { option in
             Button {
-                send(.react(sequenceId: row.sequenceId, type: liked ? "unlike" : "like"))
+                if option.kind == .copy {
+                    copyToPasteboard(row.text)
+                } else if let intent = option.intent {
+                    send(intent)
+                }
             } label: {
-                Label(liked ? "Remove like" : "Like", systemImage: liked ? "hand.thumbsup.fill" : "hand.thumbsup")
+                Label(option.title, systemImage: option.symbol)
             }
-            Button {
-                send(.react(sequenceId: row.sequenceId, type: disliked ? "undislike" : "dislike"))
-            } label: {
-                Label(disliked ? "Remove dislike" : "Dislike", systemImage: disliked ? "hand.thumbsdown.fill" : "hand.thumbsdown")
-            }
-            Button {
-                send(.react(sequenceId: row.sequenceId, type: "ack"))
-            } label: {
-                Label("Acknowledge", systemImage: "checkmark.circle")
-            }
-        }
-        if canPin {
-            Button {
-                send(.setPinned(sequenceId: row.sequenceId, isPinned: !isPinned))
-            } label: {
-                Label(isPinned ? "Unpin" : (pinsFull ? "Pinned messages are full" : "Pin"),
-                      systemImage: isPinned ? "pin.slash" : "pin")
-            }
-            .disabled(!isPinned && pinsFull)
-        }
-        Button {
-            copyToPasteboard(row.text)
-        } label: {
-            Label("Copy text", systemImage: "doc.on.doc")
+            .disabled(!option.isEnabled)
         }
     }
 }

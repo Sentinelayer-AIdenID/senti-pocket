@@ -39,6 +39,9 @@ final class RoomChatCoordinator: ObservableObject {
     /// Who answered in threads, as of each one's newest reply: most agent and box output is replies, so they are
     /// offered for @ like anyone who posted.
     private var replyAuthors: [String: (name: String, isHuman: Bool, date: Date?)] = [:]
+    /// Threaded replies by action id (newest revision), shown in the room at their own time. Bounded to the newest.
+    private var inlineReplies: [String: RoomReply] = [:]
+    static let inlineReplyLimit = 1_500
     private var lastActionsRefresh: Date?
     private var actionsRefreshInFlight = false
     private var openThreadSequence: Int64?
@@ -73,6 +76,8 @@ final class RoomChatCoordinator: ObservableObject {
     private var focusFallbackCount = 0
     /// Arrivals refresh reactions at most this often (the web polls about every 15s).
     static let actionsRefreshInterval: TimeInterval = 10
+    /// How often an open room reads replies (the web polls about every 15s).
+    static let actionsPollInterval: TimeInterval = 15
     static let viewerReason = "You're a viewer in this room: you can read it, but not post."
     /// How long an accepted message waits for its echo before the pending row is dropped (the next poll still
     /// brings it in).
@@ -688,6 +693,15 @@ final class RoomChatCoordinator: ObservableObject {
         // The projection covers the newest actions; keep older summaries it no longer includes.
         for (sequence, summary) in page.byTarget { summaries[sequence] = summary }
         noteReplyAuthors(page.replies)
+        // Replies stay as rows too (newest revision wins), the newest few thousand.
+        for reply in page.replies {
+            if let known = inlineReplies[reply.id], known.revision >= reply.revision { continue }
+            inlineReplies[reply.id] = reply
+        }
+        if inlineReplies.count > Self.inlineReplyLimit {
+            let keep = inlineReplies.values.sorted { $0.createdAt > $1.createdAt }.prefix(Self.inlineReplyLimit)
+            inlineReplies = Dictionary(keep.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        }
         // The pinned list is the room's whole current list.
         pinned = page.pinned
         pinLimit = page.pinLimit
@@ -761,6 +775,9 @@ final class RoomChatCoordinator: ObservableObject {
         threadLoading = true
         publish()
         Task { [weak self] in await self?.loadThread(sequenceId) }
+        // A reply shown in the room can answer a message further back than the loaded rows: load the room around
+        // that message, and the thread opens on it once it is there.
+        if timeline.index(ofSequence: sequenceId) == nil { focus(on: sequenceId) }
     }
 
     private func noteReplyAuthors(_ replies: [RoomReply]) {
@@ -1069,6 +1086,17 @@ final class RoomChatCoordinator: ObservableObject {
     private func startLive(_ current: UInt64) {
         liveTasks.append(Task { [weak self] in await self?.runStream(current) })
         liveTasks.append(Task { [weak self] in await self?.runSafetyPoll(current) })
+        liveTasks.append(Task { [weak self] in await self?.runActionsPoll(current) })
+    }
+
+    /// Replies are actions, which the stream does not carry: read them every few seconds while the room is open, as
+    /// the web does, so a reply shows in the room without waiting for the next message.
+    private func runActionsPoll(_ current: UInt64) async {
+        while !Task.isCancelled, current == generation {
+            await sleep(Self.actionsPollInterval)
+            guard current == generation, !Task.isCancelled else { return }
+            await refreshActions()
+        }
     }
 
     private func runStream(_ current: UInt64) async {
@@ -1335,8 +1363,39 @@ final class RoomChatCoordinator: ObservableObject {
                 )
             },
             canPin: canPin,
-            pinLimit: pinLimit
+            pinLimit: pinLimit,
+            replies: inlineReplyInputs()
         )
+    }
+
+    /// Threaded replies shown in the room at their own time, as the web shows them (most agent and box output is
+    /// replies). Only within the loaded stretch of the room: never before its oldest row, and, below a window further
+    /// back, never after its newest.
+    private func inlineReplyInputs() -> [RoomChatMessageInput] {
+        guard !inlineReplies.isEmpty, let first = timeline.messages.first else { return [] }
+        let floor = dateCache[first.id] ?? ParsedSessionTimestamp(first.timestamp).date
+        let ceiling: Date? = timeline.hasMoreNewer
+            ? timeline.messages.last.flatMap { dateCache[$0.id] ?? ParsedSessionTimestamp($0.timestamp).date }
+            : nil
+        return inlineReplies.values.compactMap { reply in
+            guard let date = ParsedSessionTimestamp(reply.createdAt).date else { return nil }
+            if let floor, date < floor { return nil }
+            if let ceiling, date > ceiling { return nil }
+            return RoomChatMessageInput(
+                id: "reply-\(reply.id)",
+                sequenceId: reply.targetSequenceId,
+                kind: .message,
+                authorId: reply.authorId,
+                authorName: reply.isHuman ? String(reply.authorId.dropFirst("human-".count)) : reply.authorId,
+                isHuman: reply.isHuman,
+                text: reply.text,
+                timestamp: reply.createdAt,
+                replyToSequenceId: reply.targetSequenceId,
+                isEdited: reply.isEdited,
+                date: date,
+                inlineReplyId: reply.id
+            )
+        }
     }
 
     // MARK: - Read receipts and presence
