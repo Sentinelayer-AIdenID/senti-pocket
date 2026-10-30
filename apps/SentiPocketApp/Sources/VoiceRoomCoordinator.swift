@@ -37,6 +37,8 @@ final class VoiceRoomCoordinator: ObservableObject {
     /// The server said it has no voice line: the rest of the call waits for the agents' own answers.
     private var voiceLineOff = false
     private var voiceLineAsk: Task<Void, Never>?
+    /// After a 429 the voice line rests until then (the server's Retry-After).
+    private var voiceLineRestsUntil = Date.distantPast
     /// One id for the whole call, so the voice line meters and limits it as one.
     private let callId = UUID().uuidString.lowercased()
     private let now: @Sendable () -> Date
@@ -411,6 +413,8 @@ final class VoiceRoomCoordinator: ObservableObject {
             self.floorHolder = nil
             self.floorAnnounced = false
             self.gapAnswerId = nil
+            // What is left of the last quick answer goes first, so none of it plays after you spoke (warden, #274).
+            self.dropVoiceLineLeftovers()
             self.state.phase = .ready
             self.speakIfReady()
             self.askVoiceLine(text)
@@ -431,10 +435,7 @@ final class VoiceRoomCoordinator: ObservableObject {
     /// as it arrives, and the agent's own answer still comes in the room after. A new turn drops what is left of the
     /// last quick answer.
     private func askVoiceLine(_ text: String) {
-        guard let voiceLine, !voiceLineOff else { return }
-        voiceLineAsk?.cancel()
-        queue.removeAll { $0.id.hasPrefix("line:") }
-        state.waiting = queue.count
+        guard let voiceLine, !voiceLineOff, now() >= voiceLineRestsUntil else { return }
         let agent = state.with.count == 1 ? state.with[0] : nil
         let speaker = (agent ?? "room") + Self.voiceSuffix
         let history = state.turns.dropLast().suffix(12).map { VoiceLineHistory(speaker: $0.speaker, text: $0.text) }
@@ -449,10 +450,24 @@ final class VoiceRoomCoordinator: ObservableObject {
                 }
             } catch VoiceLineError.unavailable {
                 self?.voiceLineOff = true
+            } catch VoiceLineError.notAllowed {
+                // Not this person's to use (warden, #274): off for the rest of the call.
+                self?.voiceLineOff = true
+            } catch VoiceLineError.rateLimited(let retryAfter) {
+                guard let self else { return }
+                self.voiceLineRestsUntil = self.now().addingTimeInterval(min(300, max(1, retryAfter ?? 30)))
             } catch {
-                // A busy or failed voice line is quiet: the agents' own answers still come.
+                // A failed voice line is quiet: the agents' own answers still come.
             }
         }
+    }
+
+    /// A new turn or hang-up: the last quick answer stops streaming and what is left of it is not read.
+    private func dropVoiceLineLeftovers() {
+        voiceLineAsk?.cancel()
+        voiceLineAsk = nil
+        queue.removeAll { $0.id.hasPrefix("line:") }
+        state.waiting = queue.count
     }
 
     private func takeVoiceLine(_ sentence: String, answerId: String, as speaker: String) {
@@ -504,6 +519,8 @@ final class VoiceRoomCoordinator: ObservableObject {
         // The call screen goes at once; the call's record is saved after it (warden, #267: a stalled network held
         // every control for up to two minutes).
         onEnded()
+        // A quick answer still streaming stops with the call, so it isn't billed until it times out (warden, #274).
+        dropVoiceLineLeftovers()
         let saving = Task { [self] in await saveRecord(ended: ended) }
         Self.closing[sessionId] = saving
         await saving.value
@@ -574,7 +591,8 @@ final class VoiceRoomCoordinator: ObservableObject {
     /// The message that closes the call: how long, the transcript, and a request for a short summary.
     static func closingMessage(_ state: VoiceRoomState, ended: Date, hasTranscript: Bool,
                                timings: VoiceCallTimings = VoiceCallTimings()) -> String {
-        let speakers = Array(Set(state.turns.filter { !$0.isYou }.map(\.speaker))).sorted()
+        // The voice line is never asked for a summary: it speaks for the room, it isn't an agent (warden, #274).
+        let speakers = Array(Set(state.turns.filter { !$0.isYou && !$0.speaker.hasSuffix(voiceSuffix) }.map(\.speaker))).sorted()
         let asked = (state.with.isEmpty ? speakers : state.with).map { "@\($0)" }.joined(separator: " ")
         var text = "📞 Voice room with \(state.title) ended · \(Self.duration(from: state.startedAt, to: ended)) · \(state.turns.count) turns."
         // Without the file, the conversation is the call's card in the room.

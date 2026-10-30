@@ -158,3 +158,59 @@ final class VoiceLineCallTests: XCTestCase {
         await room.hangUp()
     }
 }
+
+/// Answers with one sentence and keeps streaming until the call lets it go.
+private final class StreamingVoiceLine: VoiceLining, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _stopped = false
+    var stopped: Bool { lock.withLock { _stopped } }
+
+    func voiceLine(sessionId: String, agentId: String?, text: String, callId: String,
+                   history: [VoiceLineHistory]) -> AsyncThrowingStream<VoiceLineEvent, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.yield(.sentence("The room is busy right now."))
+            continuation.onTermination = { [weak self] _ in self?.lock.withLock { self?._stopped = true } }
+        }
+    }
+}
+
+private final class EndPoster: VoiceRoomPosting, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _endings: [String] = []
+    var endings: [String] { lock.withLock { _endings } }
+    func postCallStarted(sessionId: String, text: String, clientId: String) async throws {}
+    func postVoiceTurn(sessionId: String, text: String, clientId: String) async throws {}
+    func uploadTranscript(sessionId: String, filename: String, markdown: String, clientId: String) async throws -> VoiceTranscriptAttachment {
+        VoiceTranscriptAttachment(attachmentId: "att-1", filename: filename, kind: "text", contentType: "text/markdown",
+                                  sizeBytes: markdown.utf8.count, status: "ready")
+    }
+    func postCallEnded(sessionId: String, text: String, transcript: VoiceTranscriptAttachment?, clientId: String) async throws {
+        lock.withLock { _endings.append(text) }
+    }
+}
+
+/// Warden (#274): hang-up stops a quick answer still streaming, and a meeting's end never asks the voice line for a
+/// summary.
+@MainActor
+final class VoiceLineHangUpTests: XCTestCase {
+    func test_hanging_up_stops_the_stream_and_the_end_does_not_ask_the_voice_line_to_sum_up() async {
+        let line = StreamingVoiceLine(), listener = LineListener(), speaker = LineSpeaker(), poster = EndPoster()
+        let room = VoiceRoomCoordinator(sessionId: "room_meeting", with: [], invited: ["pocket-forge"], you: "mrrcarter",
+                                        ownAuthorIds: ["human-mrrcarter"], listener: listener, speaker: speaker,
+                                        audio: LineAudio(), poster: poster, voiceLine: line,
+                                        sleep: { _ in try? await Task.sleep(nanoseconds: 1_000_000) })
+        room.send(.setHandsFree(false))
+        room.begin(rings: false)
+        room.send(.toggleTalk)
+        for _ in 0..<200 where listener.partial == nil { try? await Task.sleep(nanoseconds: 2_000_000) }
+        listener.say("Who is working on the build?")
+        room.send(.toggleTalk)
+        for _ in 0..<400 where speaker.spoken.isEmpty { try? await Task.sleep(nanoseconds: 2_000_000) }
+        XCTAssertEqual(room.state.speaker, "room (voice)")
+        XCTAssertFalse(line.stopped)
+        await room.hangUp()
+        for _ in 0..<200 where !line.stopped { try? await Task.sleep(nanoseconds: 2_000_000) }
+        XCTAssertTrue(line.stopped, "the stream ends with the call")
+        XCTAssertFalse(poster.endings.first?.contains("@room") == true, poster.endings.first ?? "")
+    }
+}
