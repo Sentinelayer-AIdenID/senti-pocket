@@ -34,6 +34,8 @@ public struct RoomChatMessageInput: Equatable, Sendable {
     /// message it answers, so everything the row does to itself keys on this id instead.
     public let inlineReplyId: String?
     public var isInlineReply: Bool { inlineReplyId != nil }
+    /// Agents' "working on" lines about this message, oldest first.
+    public let work: [RoomChatWorkLine]
 
     public init(
         id: String,
@@ -50,7 +52,8 @@ public struct RoomChatMessageInput: Equatable, Sendable {
         reactions: RoomChatReactions? = nil,
         attachments: [RoomAttachmentChip] = [],
         views: RoomChatViews? = nil,
-        inlineReplyId: String? = nil
+        inlineReplyId: String? = nil,
+        work: [RoomChatWorkLine] = []
     ) {
         self.id = id
         self.sequenceId = sequenceId
@@ -67,6 +70,25 @@ public struct RoomChatMessageInput: Equatable, Sendable {
         self.attachments = attachments
         self.views = views
         self.inlineReplyId = inlineReplyId
+        self.work = work
+    }
+}
+
+/// One "working on" line under a message: who, what they said, and whether it is still live.
+public struct RoomChatWorkLine: Equatable, Identifiable, Sendable {
+    public let id: String
+    public let actorId: String
+    public let text: String
+    public let at: Date?
+    /// Not done, and newer than the room's staleness window.
+    public let isLive: Bool
+
+    public init(id: String, actorId: String, text: String, at: Date?, isLive: Bool) {
+        self.id = id
+        self.actorId = actorId
+        self.text = text
+        self.at = at
+        self.isLive = isLive
     }
 }
 
@@ -197,6 +219,8 @@ public struct RoomChatMessageRow: Equatable, Identifiable, Sendable {
     public var isInlineReply: Bool { inlineReplyId != nil }
     /// What a reply answers, when that message is loaded: "author: its first line".
     public var replyContext: String?
+    /// Agents' "working on" lines about this message.
+    public var work: [RoomChatWorkLine] = []
     /// The last message of its author's run (the next row is someone else, a header or nothing): it carries the
     /// action row and the time.
     public var endsRun: Bool = true
@@ -585,7 +609,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 attachments: input.attachments,
                 views: input.views,
                 inlineReplyId: input.inlineReplyId,
-                replyContext: input.replyToSequenceId.flatMap { parents[$0] }.map(Self.replyContext(for:))
+                replyContext: input.replyToSequenceId.flatMap { parents[$0] }.map(Self.replyContext(for:)),
+                work: input.isInlineReply ? [] : input.work
             )))
             if input.kind == .message, let date = input.date {
                 run = (input.authorId, date)

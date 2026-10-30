@@ -137,6 +137,37 @@ public struct RoomReactionSummary: Equatable, Sendable {
     }
 }
 
+/// An agent saying what it is doing about a message (an action of type `working_on`), e.g. "drafting the fix" or
+/// "done: filed 1 ticket".
+public struct RoomWorkingOn: Equatable, Identifiable, Sendable {
+    public let id: String
+    public let targetSequenceId: Int64
+    public let actorId: String
+    public let note: String
+    public let createdAt: String
+
+    public init(id: String, targetSequenceId: Int64, actorId: String, note: String, createdAt: String) {
+        self.id = id
+        self.targetSequenceId = targetSequenceId
+        self.actorId = actorId
+        self.note = note
+        self.createdAt = createdAt
+    }
+
+    init?(json: JSONValue) {
+        guard json["actionType"]?.stringValue == "working_on",
+              let id = json["id"]?.stringValue, !id.isEmpty,
+              let target = json["targetSequenceId"]?.intValue, target > 0,
+              let actor = json["actorId"]?.stringValue, !actor.isEmpty else { return nil }
+        let note = (json["note"]?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        self.init(id: id, targetSequenceId: target, actorId: actor, note: note.isEmpty ? "working on it" : note,
+                  createdAt: json["createdAt"]?.stringValue ?? "")
+    }
+
+    /// Finished: the agent's note says so.
+    public var isDone: Bool { note.lowercased().hasPrefix("done") }
+}
+
 /// A message pinned for the room (`projection.pinnedMessages`): newest pin first, at most the room's pin limit.
 public struct RoomPinnedMessage: Equatable, Identifiable, Sendable {
     /// The pin action's id.
@@ -170,6 +201,10 @@ public struct RoomPinnedMessage: Equatable, Identifiable, Sendable {
 public struct RoomActionsPage: Decodable, Equatable, Sendable {
     public let byTarget: [Int64: RoomReactionSummary]
     public let replies: [RoomReply]
+    /// "Working on" updates in the page, oldest first.
+    public let workingOn: [RoomWorkingOn]
+    /// How long a "working on" stays current without a newer one (the API's `workingOnStaleAfterSeconds`).
+    public let workingOnStaleAfter: TimeInterval
     /// The room's pinned messages, newest pin first.
     public let pinned: [RoomPinnedMessage]
     /// How many messages the room can pin at once (the API's limit).
@@ -178,11 +213,15 @@ public struct RoomActionsPage: Decodable, Equatable, Sendable {
     public init(
         byTarget: [Int64: RoomReactionSummary] = [:],
         replies: [RoomReply] = [],
+        workingOn: [RoomWorkingOn] = [],
+        workingOnStaleAfter: TimeInterval = 900,
         pinned: [RoomPinnedMessage] = [],
         pinLimit: Int = 10
     ) {
         self.byTarget = byTarget
         self.replies = replies
+        self.workingOn = workingOn
+        self.workingOnStaleAfter = workingOnStaleAfter
         self.pinned = pinned
         self.pinLimit = pinLimit
     }
@@ -209,6 +248,8 @@ public struct RoomActionsPage: Decodable, Equatable, Sendable {
             if let existing = latest[reply.id], existing.revision >= reply.revision { continue }
             latest[reply.id] = reply
         }
+        self.workingOn = actions.compactMap(RoomWorkingOn.init(json:)).sorted { ($0.createdAt, $0.id) < ($1.createdAt, $1.id) }
+        self.workingOnStaleAfter = TimeInterval(max(60, min(86_400, projection["workingOnStaleAfterSeconds"]?.intValue ?? 900)))
         self.replies = latest.values.sorted {
             ($0.createdAt, $0.id) < ($1.createdAt, $1.id)
         }

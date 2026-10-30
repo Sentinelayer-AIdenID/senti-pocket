@@ -30,6 +30,10 @@ private struct LinkedTicket: Identifiable {
 /// here, another room opens through `openRoom`, and other web links open in the browser.
 struct RoomChatScreen: View {
     @StateObject private var coordinator: RoomChatCoordinator
+    /// Who is working on what (the boxes' flight records), read only while the panel is open.
+    @StateObject private var flight: FlightRecordCoordinator
+    @State private var showsFlight = false
+    @Environment(\.openURL) private var openExternalURL
     @Environment(\.scenePhase) private var scenePhase
     @State private var showsTickets = false
     /// The tickets screen opens straight into a new ticket (the composer's "File a ticket").
@@ -108,6 +112,38 @@ struct RoomChatScreen: View {
             directory: ticketExtras,
             onReauthenticationRequired: onReauthenticationRequired
         ))
+        _flight = StateObject(wrappedValue: FlightRecordCoordinator(
+            sessionId: route.sessionId,
+            mint: HTTPMintClient(
+                baseURL: GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_MINT_URL"]),
+                // No cache and no cookie store for a request that carries the person's token.
+                urlSession: SentiHTTPTransportPolicy.protectedReadSession,
+                tokenProvider: { SessionTokenStore.load() }
+            )
+        ))
+    }
+
+    /// The room's agents for the Flight record: those here now, then any that said what they are working on,
+    /// live work first.
+    private var flightAgents: [FlightRecordState.Agent] {
+        let work = coordinator.latestWork()
+        var agents: [FlightRecordState.Agent] = []
+        for person in coordinator.state.presence?.people ?? [] where !person.isHuman {
+            let line = work[person.id]
+            agents.append(FlightRecordState.Agent(id: person.id, isHere: true, isIdle: person.isIdle,
+                                                  status: line?.text, statusAt: line?.at))
+        }
+        for (actor, line) in work where !actor.lowercased().hasPrefix("human-")
+            && !agents.contains(where: { $0.id == actor }) {
+            agents.append(FlightRecordState.Agent(id: actor, isHere: false, isIdle: false, status: line.text, statusAt: line.at))
+        }
+        return agents.sorted {
+            let left = ($0.status.map { !$0.lowercased().hasPrefix("done") } ?? false ? 0 : 1, $0.isHere ? 0 : 1,
+                        -($0.statusAt?.timeIntervalSince1970 ?? 0))
+            let right = ($1.status.map { !$0.lowercased().hasPrefix("done") } ?? false ? 0 : 1, $1.isHere ? 0 : 1,
+                         -($1.statusAt?.timeIntervalSince1970 ?? 0))
+            return left < right
+        }
     }
 
     /// The room's agents for ticket assignment, as the web builds them from the room (the member directory is not
@@ -184,6 +220,16 @@ struct RoomChatScreen: View {
             }
         }
         .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button {
+                    flight.setAgents(flightAgents)
+                    showsFlight = true
+                } label: {
+                    Label("Flight record", systemImage: "airplane")
+                }
+                .accessibilityLabel("Flight record: who is working on what")
+                .accessibilityIdentifier("pocket.room.flight")
+            }
             if decidesAdmissions {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
@@ -214,6 +260,35 @@ struct RoomChatScreen: View {
                     .accessibilityIdentifier("pocket.room.tickets")
                 }
             }
+        }
+        .overlay {
+            if showsFlight {
+                ZStack(alignment: .trailing) {
+                    Color.black.opacity(0.32)
+                        .ignoresSafeArea()
+                        .onTapGesture { showsFlight = false }
+                        .accessibilityLabel("Close the flight record")
+                        .accessibilityAddTraits(.isButton)
+                    FlightRecordPanel(
+                        state: flight.state,
+                        onClose: { showsFlight = false },
+                        onExpand: { flight.expand($0) },
+                        onOpenConsole: { openExternalURL($0) }
+                    )
+                    .frame(maxWidth: 380)
+                    .padding(.leading, 40)
+                    .gesture(DragGesture(minimumDistance: 20).onEnded { value in
+                        if value.translation.width > 60 { showsFlight = false }
+                    })
+                    .transition(.move(edge: .trailing))
+                }
+                .onAppear { flight.start() }
+                .onDisappear { flight.stop() }
+            }
+        }
+        .animation(.spring(response: 0.32, dampingFraction: 0.9), value: showsFlight)
+        .onChange(of: coordinator.state.presence) { _ in
+            if showsFlight { flight.setAgents(flightAgents) }
         }
         .navigationDestination(isPresented: $showsAdmissions) {
             if let admissionsTransport, let admissionDecider {
