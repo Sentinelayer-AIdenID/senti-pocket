@@ -42,9 +42,9 @@ public struct WaitingOnYouView: View {
             .refreshable { send(.refresh) }
             // Words typed for an answer stay until it has gone (its ask leaves the list), so a failed send keeps
             // them for the retry (warden, #270).
-            .onChange(of: state.rows.map(\.id)) { ids in
-                drafts = drafts.filter { ids.contains($0.key) }
-                customOpen = customOpen.filter { ids.contains($0) }
+            .onChange(of: state.rows.map(\.askKey)) { keys in
+                drafts = drafts.filter { keys.contains($0.key) }
+                customOpen = customOpen.filter { keys.contains($0) }
             }
             .navigationTitle(state.total > 0 ? "Waiting on you · \(state.total)" : "Waiting on you")
             #if os(iOS)
@@ -101,7 +101,7 @@ public struct WaitingOnYouView: View {
                                 .accessibilityIdentifier("pocket.waiting.option.\(row.id).\(option)")
                         }
                         if row.custom {
-                            Button("Custom") { startWriting(row.id) }
+                            Button("Custom") { startWriting(row.askKey) }
                                 .buttonStyle(.bordered)
                         }
                     }
@@ -109,19 +109,19 @@ public struct WaitingOnYouView: View {
                 .disabled(isSending)
             }
 
-            if row.options.isEmpty || customOpen.contains(row.id) {
+            if row.options.isEmpty || customOpen.contains(row.askKey) {
                 HStack(spacing: 8) {
-                    TextField(row.options.isEmpty ? "Your answer" : "Say what you want instead", text: binding(for: row.id),
+                    TextField(row.options.isEmpty ? "Your answer" : "Say what you want instead", text: binding(for: row.askKey),
                               axis: .vertical)
                         .lineLimit(1...4)
                         .textFieldStyle(.roundedBorder)
                     Button("Send") {
-                        let text = (drafts[row.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        let text = (drafts[row.askKey] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                         send(row.options.isEmpty
                              ? .answer(id: row.id, choice: text, detail: "")
                              : .answer(id: row.id, choice: "Custom", detail: text))
                     }
-                    .disabled(isSending || (drafts[row.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(isSending || (drafts[row.askKey] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
 

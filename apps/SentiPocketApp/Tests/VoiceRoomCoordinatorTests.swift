@@ -80,10 +80,13 @@ private final class FakePoster: VoiceRoomPosting, @unchecked Sendable {
     private var _uploads: [(filename: String, markdown: String)] = []
     private var _endings: [(text: String, attachmentId: String?)] = []
     private var _starts: [String] = []
+    private var _ids: [String] = []
     var starts: [String] { lock.withLock { _starts } }
+    /// The client ids of the ring and the end, in order.
+    var ids: [String] { lock.withLock { _ids } }
 
     func postCallStarted(sessionId: String, text: String, clientId: String) async throws {
-        lock.withLock { _starts.append(text) }
+        lock.withLock { _starts.append(text); _ids.append(clientId) }
     }
 
     var turns: [String] { lock.withLock { _turns } }
@@ -101,7 +104,7 @@ private final class FakePoster: VoiceRoomPosting, @unchecked Sendable {
     }
 
     func postCallEnded(sessionId: String, text: String, transcript: VoiceTranscriptAttachment?, clientId: String) async throws {
-        lock.withLock { _endings.append((text, transcript?.attachmentId)) }
+        lock.withLock { _endings.append((text, transcript?.attachmentId)); _ids.append(clientId) }
     }
 }
 
@@ -307,8 +310,8 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), ringer = FakeRinger(), poster = FakePoster()
         let room = room(with: ["pocket-forge"], listener: listener, speaker: speaker, audio: audio, ringer: ringer, poster: poster)
         room.begin()
-        XCTAssertTrue(ringer.ringing)
-        XCTAssertTrue(room.state.isRinging)
+        XCTAssertTrue(room.state.isRinging, "ringing from the start")
+        await until("the ring sounds once the agents are rung") { ringer.ringing }
         try? await Task.sleep(nanoseconds: 20_000_000)
         XCTAssertEqual(listener.starts, 0, "hands-free does not listen while it rings")
 
@@ -322,10 +325,27 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         XCTAssertEqual(ringer.rings, 1)
     }
 
+    /// Warden (#275): the ring sounds once the ring message has gone out, not while it waits.
+    func test_the_ring_waits_for_the_ring_message() async {
+        let log = OrderedPoster.Log()
+        let held = OrderedPoster("held", log: log, holdStart: true)
+        let ringer = FakeRinger()
+        let room = room(with: ["pocket-forge"], listener: FakeListener(), speaker: FakeSpeaker(), audio: FakeAudio(),
+                        ringer: ringer, poster: held)
+        room.begin()
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertFalse(ringer.ringing, "silent while the ring message is on its way")
+        XCTAssertTrue(room.state.isRinging, "the screen still says it is calling")
+        held.release()
+        await until("rings once the agents are rung") { ringer.ringing }
+        await room.hangUp()
+    }
+
     func test_with_no_answer_the_ring_stops_and_the_line_opens() async {
         let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), ringer = FakeRinger(), poster = FakePoster()
         let room = room(with: ["pocket-forge"], listener: listener, speaker: speaker, audio: audio, ringer: ringer, poster: poster)
         room.begin()
+        await until("the ring sounds once the agents are rung") { ringer.ringing }
         clock.advance(VoiceRoomCoordinator.ringsFor - 1)
         try? await Task.sleep(nanoseconds: 20_000_000)
         XCTAssertTrue(ringer.ringing, "still ringing before the time is up")
@@ -510,6 +530,10 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         XCTAssertTrue(poster.endings.first?.text.hasPrefix("📞 Voice room with pocket-forge ended") == true)
         XCTAssertFalse(poster.endings.first?.text.contains("summary") == true, "nothing to sum up")
         XCTAssertEqual(room.state.phase, .ended)
+        // Warden (API #1060): the end names its start, so the call log pairs them even with two phones in a room.
+        XCTAssertEqual(poster.ids.count, 2)
+        XCTAssertEqual(poster.ids[0].dropFirst("voice-start-".count), poster.ids[1].dropFirst("voice-end-".count))
+        XCTAssertTrue(poster.ids[1].hasPrefix("voice-end-"))
     }
 
     /// Warden (#267): hanging up locked the app until the transcript saved, up to two minutes on a stalled network.

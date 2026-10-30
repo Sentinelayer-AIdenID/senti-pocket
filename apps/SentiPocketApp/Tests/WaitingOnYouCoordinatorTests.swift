@@ -162,10 +162,12 @@ final class WaitingOnYouCoordinatorTests: XCTestCase {
             sender: sender
         )
         await waiting.refresh()
+        let firstKey = waiting.state.rows.first?.askKey
         _ = waiting.send(.answer(id: "t1", choice: "Yes", detail: ""))
         await waitUntil("answered") { sender.sent.count == 1 && waiting.state.rows.isEmpty }
         await waiting.refresh()
         XCTAssertEqual(waiting.state.rows.map(\.question), ["Ship to everyone?"])
+        XCTAssertNotEqual(waiting.state.rows.first?.askKey, firstKey, "its own words, not the last ask's (warden, #271)")
         _ = waiting.send(.answer(id: "t1", choice: "No", detail: ""))
         await waitUntil("the new ask is answered too") { sender.sent.count == 2 }
         XCTAssertNotEqual(sender.sent[0].clientId, sender.sent[1].clientId, "a new ask is a new message")
