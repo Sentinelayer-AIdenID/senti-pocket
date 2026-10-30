@@ -4,14 +4,16 @@ import XCTest
 /// Carter (10-30): "Make it start curving around 6 and allow it to for a full circumference from there that goes all
 /// the way to the back ... you can scroll that circle ... it's endless and can add as many as possible".
 final class PresenceRingTests: XCTestCase {
-    func test_up_to_six_sit_on_an_arc_either_side_of_the_count_and_more_go_round_a_ring() {
+    func test_up_to_six_sit_on_an_arc_centred_under_the_count_and_more_go_round_a_ring() {
         XCTAssertFalse(PresenceRingLayout.isRing(6))
         XCTAssertTrue(PresenceRingLayout.isRing(7))
 
         let arc = (0..<4).map { PresenceRingLayout.spot(index: $0, count: 4, rotation: 0) }
         XCTAssertEqual(arc[0].x, -arc[3].x, accuracy: 0.001, "the arc is even either side")
         XCTAssertEqual(arc[1].x, -arc[2].x, accuracy: 0.001)
-        XCTAssertTrue(arc.allSatisfy { abs($0.x) > 1 }, "the middle is the online count's, not a logo's")
+        XCTAssertEqual(PresenceRingLayout.spot(index: 1, count: 3, rotation: 0).x, 0, accuracy: 0.001,
+                       "the arc is centred: the count sits above it, not in its middle (Carter, 10-30)")
+        XCTAssertEqual(PresenceRingLayout.spot(index: 0, count: 1, rotation: 0).x, 0, accuracy: 0.001, "one logo, centred")
         XCTAssertLessThan(arc[0].y, arc[1].y, "the ends curve back")
         XCTAssertEqual(PresenceRingLayout.spot(index: 0, count: 4, rotation: 1).x, arc[0].x, "the arc does not turn")
     }
