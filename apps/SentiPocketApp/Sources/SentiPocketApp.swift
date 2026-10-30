@@ -499,8 +499,14 @@ private struct AuthenticatedRootView: View {
                         messageReader.stop()
                     } else if let readable = callLog.readable(id) {
                         ReadAloudSource.shared.reading(in: readable.sessionId)
-                        _ = messageReader.read(id: "call:" + id, markdown: readable.markdown, title: readable.title)
+                        if messageReader.read(id: "call:" + id, markdown: readable.markdown, title: readable.title)
+                            == .unavailable {
+                            callLog.show(notice: "Listening isn't available while a call or a briefing holds the audio.")
+                        }
                     }
+                case .openBriefing:
+                    presentsCallLog = false
+                    presentsPocket = true
                 case .close:
                     presentsCallLog = false
                 }
@@ -592,6 +598,9 @@ private struct AuthenticatedRootView: View {
     /// Opens a Senti link in the app: the room, at the message it names, with its ticket or agent requests on top.
     @MainActor
     private func open(_ link: SentiLink) {
+        // Whatever was open on top goes, so the room opened is the one you see (warden, #272).
+        presentsCallLog = false
+        presentsWaiting = false
         let row = sessions.state.rows.first { UTF8ExactIdentity.matches($0.sessionId, link.sessionId) }
         presentsNotifications = false
         presentsSettings = false

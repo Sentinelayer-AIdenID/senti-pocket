@@ -57,12 +57,47 @@ final class CallLogCoordinatorTests: XCTestCase {
         XCTAssertEqual(log.readable("v1")?.markdown, "pocket-forge: Next build rings first.")
     }
 
-    func test_a_call_opens_in_its_room_at_the_message_that_ended_it() async {
+    /// Warden (#272): the room folds a closed call onto its start, so the link must land there, on a row that exists.
+    func test_a_call_opens_in_its_room_at_its_card_which_the_room_shows() async {
         let log = CallLogCoordinator(transport: ScriptedCalls([.success(SentiCallLogPage(calls: [voiceRoom("v1")]))]))
         await log.refresh()
         let link = log.link(for: "v1")
         XCTAssertEqual(link?.sessionId, "room-1")
-        XCTAssertEqual(link?.messageSequence, 55598)
+        XCTAssertEqual(link?.messageSequence, 55589)
+
+        let start = VoiceCallMarkers.start(caller: "mrrcarter", agents: ["pocket-forge"], meeting: false)
+        let at = Date()
+        func input(_ seq: Int64, _ author: String, _ text: String, _ seconds: Double) -> RoomChatMessageInput {
+            RoomChatMessageInput(id: "m\(seq)", sequenceId: seq, kind: .message, authorId: author, authorName: author,
+                                 isHuman: author.hasPrefix("human-"), text: text, timestamp: "",
+                                 date: at.addingTimeInterval(seconds))
+        }
+        let folded = VoiceCallCard.fold([
+            input(55589, "human-mrrcarter", start, 0),
+            input(55590, "pocket-forge", "Hi Carter, forge here.", 10),
+            input(55598, "human-mrrcarter", "📞 Voice room with pocket-forge ended · 2 min 40 s · 7 turns.", 160)
+        ])
+        let rows = Set(folded.kept.map(\.sequenceId))
+        XCTAssertTrue(rows.contains(link?.messageSequence ?? -1), "the link lands on the card's row")
+        XCTAssertFalse(rows.contains(55598), "the end folds into the card and has no row of its own")
+    }
+
+    /// Warden (#272): opening still works after a refresh replaced the list under an open detail; the model name never
+    /// shows.
+    func test_a_call_stays_openable_after_a_refresh_and_its_words_hide_the_model_name() async {
+        var call = voiceRoom("v1")
+        call = SentiCall(kind: call.kind, id: call.id, sessionId: call.sessionId, roomTitle: "Jev lab", status: call.status,
+                         startedAt: call.startedAt, with: call.with, summaries: [SentiCall.Summary(author: "pocket-forge",
+                         text: "Route it through Jev first.")], startSequenceId: 10)
+        let log = CallLogCoordinator(transport: ScriptedCalls([
+            .success(SentiCallLogPage(calls: [call])),
+            .success(SentiCallLogPage(calls: []))
+        ]))
+        await log.refresh()
+        XCTAssertEqual(log.state.rows.first?.roomTitle, "the signal layer lab")
+        XCTAssertEqual(log.state.rows.first?.summaries.first?.text, "Route it through the signal layer first.")
+        await log.refresh()
+        XCTAssertNotNil(log.link(for: "v1"), "a detail still open can still open its call")
     }
 
     func test_earlier_calls_page_in_without_repeats_and_an_older_server_says_so() async {
