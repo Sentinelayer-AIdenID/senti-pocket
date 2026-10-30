@@ -67,6 +67,28 @@ final class InlineReplyRowsTests: XCTestCase {
         XCTAssertEqual(rows.first { $0.id == "m5" }?.repeats, 1)
     }
 
+    /// Carter (#55006 reply): he could not edit his own message.
+    func test_only_your_own_messages_offer_edit_when_you_can_post() throws {
+        let state = RoomChatPresentationState(
+            sessionId: "room", title: "Room",
+            messages: [input("m1", seq: 1, at: 0, author: "human-mrrcarter", text: "mine"),
+                       input("m2", seq: 2, at: 10, author: "review-agent", text: "theirs")],
+            ownAuthorIds: ["human-mrrcarter"]
+        )
+        let rows = state.rows.compactMap { row -> RoomChatMessageRow? in
+            if case .message(let message) = row { return message }
+            return nil
+        }
+        let mine = try XCTUnwrap(rows.first { $0.id == "m1" })
+        let theirs = try XCTUnwrap(rows.first { $0.id == "m2" })
+        XCTAssertTrue(mine.options(canReply: true, canReact: true, canPin: false, isPinned: false, pinsFull: false, canEdit: true)
+            .contains { $0.kind == .edit })
+        XCTAssertFalse(mine.options(canReply: false, canReact: true, canPin: false, isPinned: false, pinsFull: false, canEdit: false)
+            .contains { $0.kind == .edit }, "a viewer cannot edit")
+        XCTAssertFalse(theirs.options(canReply: true, canReact: true, canPin: false, isPinned: false, pinsFull: false, canEdit: true)
+            .contains { $0.kind == .edit }, "never someone else's")
+    }
+
     private func messageIds(_ state: RoomChatPresentationState) -> [String] {
         state.rows.compactMap { row in
             if case .message(let message) = row { return message.id }

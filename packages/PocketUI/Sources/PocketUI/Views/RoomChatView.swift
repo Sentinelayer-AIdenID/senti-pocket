@@ -25,6 +25,8 @@ public struct RoomChatView: View {
     @State private var heldAnchor: String?
     /// A checkpoint opened from its row: read it, listen to it.
     @State private var openCheckpoint: RoomChatMessageRow?
+    /// Your own message being edited.
+    @State private var editingRow: RoomChatMessageRow?
     /// "Jump to latest" from a window further back: scroll to the bottom once the live room has loaded.
     @State private var scrollsToLatestWhenLoaded = false
     @State private var highlightedRowId: String?
@@ -88,6 +90,39 @@ public struct RoomChatView: View {
         }
         .sheet(item: $openCheckpoint) { row in
             CheckpointSheet(row: row, send: send)
+        }
+        .sheet(item: $editingRow) { row in
+            MessageEditSheet(original: row.text) { text in
+                if let replyId = row.inlineReplyId {
+                    send(.editReply(sequenceId: row.sequenceId, replyId: replyId, text: text))
+                } else {
+                    send(.editMessage(sequenceId: row.sequenceId, text: text))
+                }
+            }
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if let notice = state.notice {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .foregroundStyle(PocketPalette.warning)
+                    Text(notice)
+                        .font(.footnote)
+                        .foregroundStyle(PocketPalette.textPrimary)
+                    Spacer(minLength: 4)
+                    Button {
+                        send(.dismissNotice)
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(PocketPalette.textSecondary)
+                    }
+                    .accessibilityLabel("Dismiss")
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(.bar)
+                .accessibilityIdentifier("pocket.room.notice")
+            }
         }
         .navigationTitle(state.title)
         .navigationBarTitleDisplayModeInlineIfAvailable()
@@ -305,6 +340,7 @@ public struct RoomChatView: View {
                 isReadingAloud: readingAloudId == message.readAloudId,
                 onOpenReplyTarget: { jump(to: $0, proxy: proxy) },
                 onOpenCheckpoint: { openCheckpoint = $0 },
+                onEdit: { editingRow = $0 },
                 send: send
             )
             .onAppear { send(.messageOnScreen(id: message.id, isOnScreen: true)) }
@@ -502,6 +538,7 @@ private struct RoomMessageRowView: View {
     var isReadingAloud = false
     let onOpenReplyTarget: (Int64) -> Void
     var onOpenCheckpoint: (RoomChatMessageRow) -> Void = { _ in }
+    var onEdit: (RoomChatMessageRow) -> Void = { _ in }
     var send: (RoomChatIntent) -> Void = { _ in }
     /// How far the row follows a swipe to the right (swipe to reply, as in Messages).
     @State private var swipe: CGFloat = 0
@@ -622,7 +659,7 @@ private struct RoomMessageRowView: View {
         // Simultaneous, so a single tap on a link or a button inside the message is never held back.
         .simultaneousGesture(TapGesture(count: 2).onEnded { showsOptions = true })
         .confirmationDialog("Message options", isPresented: $showsOptions, titleVisibility: .hidden) {
-            ForEach(row.options(canReply: canReply, canReact: canReact, canPin: canPin, isPinned: isPinned, pinsFull: pinsFull)) { option in
+            ForEach(row.options(canReply: canReply, canReact: canReact, canPin: canPin, isPinned: isPinned, pinsFull: pinsFull, canEdit: canReply)) { option in
                 Button(option.title) { perform(option) }
                     .disabled(!option.isEnabled)
             }
@@ -695,11 +732,18 @@ private struct RoomMessageRowView: View {
         isHighlighted ? PocketPalette.warning.opacity(0.22) : PocketPalette.humanBubble
     }
 
-    /// Yours: a bubble on the right, as in Messages and the assistant apps.
+    /// Yours: a bubble on the right, as in Messages and the assistant apps, with your name over the first of a run
+    /// (Carter: his name was missing on his own messages).
     private var ownMessage: some View {
         HStack(alignment: .bottom, spacing: 0) {
             Spacer(minLength: 56)
             VStack(alignment: .trailing, spacing: 4) {
+                if row.showsHeader {
+                    Text(row.authorName)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(PocketPalette.accentStrong)
+                        .accessibilityIdentifier("pocket.room.ownName")
+                }
                 replyQuote
                 ChatMarkdownView(text: row.text, ownHandles: ownHandles)
                     .font(.body)
@@ -808,7 +852,7 @@ private struct RoomMessageRowView: View {
     /// Copy, listen, like, dislike and more, as the assistant apps put under an answer: the row's own options, so a
     /// reply shown in the room acts on itself here too.
     private var actionRow: some View {
-        let options = row.options(canReply: canReply, canReact: canReact, canPin: canPin, isPinned: isPinned, pinsFull: pinsFull)
+        let options = row.options(canReply: canReply, canReact: canReact, canPin: canPin, isPinned: isPinned, pinsFull: pinsFull, canEdit: canReply)
         let shown = Self.actionRowKinds.compactMap { kind in options.first { $0.kind == kind } }
         return HStack(spacing: 18) {
             ForEach(shown) { option in
@@ -833,7 +877,9 @@ private struct RoomMessageRowView: View {
     private static let actionRowKinds: [RoomRowOption.Kind] = [.copy, .listen, .like, .dislike, .thread]
 
     private func perform(_ option: RoomRowOption) {
-        if option.kind == .copy {
+        if option.kind == .edit {
+            onEdit(row)
+        } else if option.kind == .copy {
             copyToPasteboard(row.text)
         } else if let intent = option.intent {
             send(intent)
@@ -855,7 +901,7 @@ private struct RoomMessageRowView: View {
     /// The long-press menu, from the row's own options: a reply shown in the room acts on itself, never on the
     /// message it answers.
     private var messageMenu: some View {
-        ForEach(row.options(canReply: canReply, canReact: canReact, canPin: canPin, isPinned: isPinned, pinsFull: pinsFull)) { option in
+        ForEach(row.options(canReply: canReply, canReact: canReact, canPin: canPin, isPinned: isPinned, pinsFull: pinsFull, canEdit: canReply)) { option in
             Button {
                 perform(option)
             } label: {
@@ -1042,6 +1088,8 @@ private struct RoomThreadSheet: View {
     /// The reply being answered (a reply to a reply nests under it); nil answers the message.
     @State private var answering: RoomChatReplyRow?
     @FocusState private var isReplying: Bool
+    /// Your own reply being edited.
+    @State private var editingReply: RoomChatReplyRow?
     /// Where the reply text last changed (the field does not say where the caret is), for an @ anywhere in it.
     @State private var editOffset: Int?
     @State private var lastDraft = ""
@@ -1135,6 +1183,11 @@ private struct RoomThreadSheet: View {
                 .padding(16)
             }
             .scrollDismissesKeyboard(.interactively)
+            .sheet(item: $editingReply) { reply in
+                MessageEditSheet(original: reply.text) { text in
+                    send(.editReply(sequenceId: thread.parent.sequenceId, replyId: reply.id, text: text))
+                }
+            }
             .navigationTitle(thread.replies.count == 1 ? "1 reply" : "\(thread.replies.count) replies")
             .navigationBarTitleDisplayModeInlineIfAvailable()
             .toolbar {
@@ -1277,6 +1330,13 @@ private struct RoomThreadSheet: View {
             send(.readAloud(id: RoomReadAloud.reply(reply.id), text: reply.text))
         } label: {
             Label("Listen", systemImage: "speaker.wave.2")
+        }
+        if reply.isOwn, thread.canReply {
+            Button {
+                editingReply = reply
+            } label: {
+                Label("Edit", systemImage: "pencil")
+            }
         }
         Button {
             copyToPasteboard(reply.text)
@@ -1885,6 +1945,50 @@ private struct CheckpointSheet: View {
             }
         }
         .accessibilityIdentifier("pocket.checkpoint.sheet")
+    }
+}
+/// Edits your own message or reply: the text as it is now, Save sends the new text (the room shows it as edited).
+private struct MessageEditSheet: View {
+    let original: String
+    let onSave: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var text: String
+    @FocusState private var focused: Bool
+
+    init(original: String, onSave: @escaping (String) -> Void) {
+        self.original = original
+        self.onSave = onSave
+        _text = State(initialValue: original)
+    }
+
+    private var canSave: Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty && trimmed != original.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        NavigationStack {
+            TextEditor(text: $text)
+                .focused($focused)
+                .padding(12)
+                .accessibilityIdentifier("pocket.edit.text")
+                .navigationTitle("Edit message")
+                .navigationBarTitleDisplayModeInlineIfAvailable()
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { dismiss() }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Save") {
+                            onSave(text)
+                            dismiss()
+                        }
+                        .disabled(!canSave)
+                        .accessibilityIdentifier("pocket.edit.save")
+                    }
+                }
+                .onAppear { focused = true }
+        }
     }
 }
 #endif
