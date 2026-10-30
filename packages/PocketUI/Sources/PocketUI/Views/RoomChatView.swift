@@ -97,6 +97,7 @@ public struct RoomChatView: View {
                     readingAloudId: readingAloudId,
                     mentionCandidates: state.mentionCandidates,
                     canReact: state.canReact,
+                    actions: composerActions,
                     send: send,
                     draft: threadDraft(thread.parent.sequenceId)
                 )
@@ -1243,10 +1244,15 @@ private struct RoomThreadSheet: View {
     var readingAloudId: String?
     var mentionCandidates: [MentionCandidate] = []
     var canReact = false
+    /// What the room's "+" offers, offered here too (Carter, 10-30: "everything I'd have in the chatbox ... inside a
+    /// reply too").
+    var actions = RoomComposerActions()
     let send: (RoomChatIntent) -> Void
     @Binding var draft: String
     /// The reply being answered (a reply to a reply nests under it); nil answers the message.
     @State private var answering: RoomChatReplyRow?
+    /// "File as a ticket": the reply goes to the room's ticket keeper as a ticket request.
+    @State private var ticketMode = false
     @FocusState private var isReplying: Bool
     /// Your own reply being edited.
     @State private var editingReply: RoomChatReplyRow?
@@ -1416,8 +1422,65 @@ private struct RoomThreadSheet: View {
                             .padding(.top, 6)
                             .accessibilityIdentifier("pocket.thread.composer.tooLong")
                     }
+                    if ticketMode {
+                        HStack(spacing: 6) {
+                            Image(systemName: "ticket")
+                                .foregroundStyle(PocketPalette.accentStrong)
+                                .accessibilityHidden(true)
+                            Text("Describe what you want; it becomes a ticket.")
+                                .font(.caption)
+                                .foregroundStyle(PocketPalette.textSecondary)
+                            Spacer(minLength: 4)
+                            Button {
+                                ticketMode = false
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(PocketPalette.textSecondary)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Not a ticket")
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.top, 6)
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("pocket.thread.composer.ticketMode")
+                    }
                     HStack(alignment: .bottom, spacing: 8) {
-                        TextField("Reply", text: $draft, axis: .vertical)
+                        Menu {
+                            Button {
+                                let separated = draft.isEmpty || draft.last?.isWhitespace == true
+                                draft += separated ? "@" : " @"
+                                isReplying = true
+                            } label: {
+                                Label("Mention someone", systemImage: "at")
+                            }
+                            Button {
+                                ticketMode = true
+                                isReplying = true
+                            } label: {
+                                Label("File as a ticket", systemImage: "ticket")
+                            }
+                            if actions.canSearch {
+                                // Search opens over the room, so the thread steps aside first.
+                                Button {
+                                    send(.closeThread)
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { send(.openSearch) }
+                                } label: {
+                                    Label("Search this room", systemImage: "magnifyingglass")
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "plus")
+                                .font(.system(size: 17, weight: .semibold))
+                                .foregroundStyle(PocketPalette.textPrimary)
+                                .frame(width: 36, height: 36)
+                                .background(PocketPalette.raised, in: Circle())
+                                .overlay(Circle().stroke(PocketPalette.separator.opacity(0.8), lineWidth: 0.5))
+                        }
+                        .accessibilityLabel("More")
+                        .accessibilityIdentifier("pocket.thread.composer.plus")
+                        .padding(.bottom, 1)
+                        TextField(ticketMode ? "Describe the ticket" : "Reply", text: $draft, axis: .vertical)
                             .lineLimit(1...6)
                             .textFieldStyle(.plain)
                             .focused($isReplying)
@@ -1430,8 +1493,10 @@ private struct RoomThreadSheet: View {
                             .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                             .accessibilityIdentifier("pocket.thread.composer")
                         Button {
-                            let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
                             guard canSendReply else { return }
+                            let text = ticketMode ? RoomComposerDraft.ticketRequest(typed) : typed
+                            ticketMode = false
                             if let answering {
                                 send(.sendReplyToReply(sequenceId: thread.parent.sequenceId, replyId: answering.id, text: text))
                             } else {
