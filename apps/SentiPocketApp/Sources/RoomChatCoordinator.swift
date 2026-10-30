@@ -15,6 +15,7 @@ final class RoomChatCoordinator: ObservableObject {
     /// The room's name; its owner can rename it.
     private var title: String
     private let canRename: Bool
+    private let canInvite: Bool
     private let transport: any RoomTransport
     private let sender: (any RoomMessageSending)?
     private let identity: (any AccountIdentityProviding)?
@@ -162,6 +163,7 @@ final class RoomChatCoordinator: ObservableObject {
         identity: (any AccountIdentityProviding)? = nil,
         membershipRole: String? = nil,
         canRename: Bool = false,
+        canInvite: Bool = false,
         focusSequenceId: Int64? = nil,
         ownAuthorIds: Set<String> = [],
         sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
@@ -179,6 +181,7 @@ final class RoomChatCoordinator: ObservableObject {
         self.sessionId = sessionId
         self.title = title
         self.canRename = canRename && sender is any RoomTitleSetting
+        self.canInvite = canInvite && sender is any RoomInviting
         self.transport = transport
         self.sender = sender
         self.actionSender = actionSender
@@ -207,7 +210,8 @@ final class RoomChatCoordinator: ObservableObject {
             messages: [],
             isLoadingInitial: true,
             composer: initialComposer,
-            canRename: canRename && sender is any RoomTitleSetting
+            canRename: canRename && sender is any RoomTitleSetting,
+            canInvite: canInvite && sender is any RoomInviting
         )
         if let receipts {
             receiptsTracker = RoomReceiptsTracker(
@@ -330,7 +334,7 @@ final class RoomChatCoordinator: ObservableObject {
             guard focusTarget != nil else { return }
             focusTarget = nil
             publish()
-        case .openBreakout, .openAttachment, .readAloud, .stopReadingAloud, .openTickets, .openSearch, .peopleOpened:
+        case .openBreakout, .openAttachment, .readAloud, .stopReadingAloud, .openTickets, .openSearch, .peopleOpened, .openInvite:
             break   // the room screen navigates or presents
         case .setPinned(let sequenceId, let isPinned):
             setPinned(isPinned, on: sequenceId)
@@ -1584,6 +1588,7 @@ final class RoomChatCoordinator: ObservableObject {
             canPin: canPin,
             pinLimit: pinLimit,
             canRename: canRename,
+            canInvite: canInvite,
             replies: inlineReplyInputs(),
             expandedRepeats: expandedRepeats
         )

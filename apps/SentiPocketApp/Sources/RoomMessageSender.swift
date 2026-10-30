@@ -521,3 +521,49 @@ extension HTTPRoomMessageSender: RoomTitleSetting {
         return saved
     }
 }
+
+extension HTTPRoomMessageSender {
+    /// A POST to a member or invitation route under the room: the bearer, the native mutation intent header, an
+    /// idempotency key and the route-bound mutation token (`SessionMutationCSRF`), as editing and admissions send
+    /// them. Answered as it came back; the caller reads the status.
+    func sessionMutation(sessionId: String, path: String, routeTemplate: String, keyPrefix: String,
+                         body: [String: Any]) async throws -> (Data, HTTPURLResponse) {
+        guard let apiBaseURL,
+              var components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false) else {
+            throw RoomSendError.notConfigured
+        }
+        guard let token = tokenProvider(), !token.isEmpty else { throw RoomSendError.reauthenticationRequired }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        guard !sessionId.isEmpty, sessionId.utf8.count <= 256,
+              let encodedSession = sessionId.addingPercentEncoding(withAllowedCharacters: allowed) else {
+            throw RoomSendError.rejected
+        }
+        components.percentEncodedPath = "/api/v1/sessions/\(encodedSession)/\(path)"
+        components.query = nil
+        guard let url = components.url else { throw RoomSendError.notConfigured }
+        let key = keyPrefix + "-" + UUID().uuidString.lowercased()
+        guard let csrf = SessionMutationCSRF.token(bearer: token, sessionId: sessionId, routeTemplate: routeTemplate,
+                                                   idempotencyKey: key) else {
+            throw RoomSendError.notConfigured
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue(key, forHTTPHeaderField: "Idempotency-Key")
+        request.setValue("session-mutation", forHTTPHeaderField: "X-Sentinelayer-Session-Mutation")
+        request.setValue(csrf, forHTTPHeaderField: "X-CSRF-Token")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await urlSession.data(for: request)
+        } catch {
+            throw RoomSendError.retryable(retryAfterSeconds: nil)
+        }
+        guard let http = response as? HTTPURLResponse else { throw RoomSendError.retryable(retryAfterSeconds: nil) }
+        if http.statusCode == 401 { throw RoomSendError.reauthenticationRequired }
+        return (data, http)
+    }
+}

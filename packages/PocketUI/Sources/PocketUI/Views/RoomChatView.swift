@@ -158,17 +158,28 @@ public struct RoomChatView: View {
                 // the word is still read aloud, and spelled out in the "who is here" sheet.
                 RoomConnectionPill(connection: state.connection, compact: state.presence != nil)
             }
-            // The owner taps the room's name to rename it (Carter, #55354); for anyone else it is the plain title.
-            if state.canRename {
+            // The owner taps the room's name to rename it (Carter, #55354) or invite people; for anyone who can do
+            // neither it is the plain title.
+            if state.canRename || state.canInvite {
                 ToolbarItem(placement: .principal) {
                     Menu {
-                        Button {
-                            renameDraft = state.title
-                            renaming = true
-                        } label: {
-                            Label("Rename", systemImage: "pencil")
+                        if state.canRename {
+                            Button {
+                                renameDraft = state.title
+                                renaming = true
+                            } label: {
+                                Label("Rename", systemImage: "pencil")
+                            }
+                            .accessibilityIdentifier("pocket.room.rename")
                         }
-                        .accessibilityIdentifier("pocket.room.rename")
+                        if state.canInvite {
+                            Button {
+                                send(.openInvite)
+                            } label: {
+                                Label("Invite people", systemImage: "person.badge.plus")
+                            }
+                            .accessibilityIdentifier("pocket.room.invite")
+                        }
                     } label: {
                         HStack(spacing: 4) {
                             Text(state.title)
@@ -181,7 +192,7 @@ public struct RoomChatView: View {
                         }
                     }
                     .accessibilityLabel(state.title)
-                    .accessibilityHint("Opens a menu to rename this room")
+                    .accessibilityHint("Opens the room's menu")
                     .accessibilityIdentifier("pocket.room.title")
                 }
             }
@@ -195,8 +206,17 @@ public struct RoomChatView: View {
             Text("Everyone in the room sees the new name, here and on the web. Up to \(RoomTitle.maximumLength) characters.")
         }
         .sheet(isPresented: $showsPresence) {
-            RoomPresenceSheet(presence: state.presence, connection: state.connection, roster: roster)
-                .onAppear { send(.peopleOpened) }
+            RoomPresenceSheet(
+                presence: state.presence,
+                connection: state.connection,
+                roster: roster,
+                onInvite: state.canInvite ? {
+                    showsPresence = false
+                    // After this sheet has gone, so the invite sheet can come up.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { send(.openInvite) }
+                } : nil
+            )
+            .onAppear { send(.peopleOpened) }
         }
         // A container, so the composer, the send button and every row keep their own identifiers and labels
         // (without it the screen's identifier replaced theirs).
@@ -2296,11 +2316,21 @@ private struct RoomPresenceSheet: View {
     let connection: RoomConnectionState
     /// Everyone who came, when the room screen knows it; otherwise who is here now.
     var roster: RoomRoster = .empty
+    /// Invite people, for the room's owner or an admin.
+    var onInvite: (() -> Void)?
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             List {
+                if let onInvite {
+                    Section {
+                        Button(action: onInvite) {
+                            Label("Invite people", systemImage: "person.badge.plus")
+                        }
+                        .accessibilityIdentifier("pocket.room.people.invite")
+                    }
+                }
                 Section {
                     HStack(spacing: 8) {
                         Circle()
