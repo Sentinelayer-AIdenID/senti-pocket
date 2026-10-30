@@ -841,6 +841,17 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     }
 }
 
+/// A thread's summary, as written on the phone: labeled lines, the objective first (Carter, 10-30: Objective, What
+/// changed, How, Checks, Record). A row shows the objective alone; the whole of it opens in a sheet.
+public enum ThreadSummaryFormat {
+    /// The line a row shows: the objective without its label (or, for a summary in one paragraph, all of it).
+    public static func headline(_ summary: String) -> String {
+        let first = summary.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? summary
+        let label = "**Objective:** "
+        return first.hasPrefix(label) ? String(first.dropFirst(label.count)) : first
+    }
+}
+
 /// The ids of what the room reads aloud, so the row being read can show it.
 public enum RoomReadAloud {
     public static func message(_ sequenceId: Int64) -> String { "msg:\(sequenceId)" }

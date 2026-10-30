@@ -37,4 +37,32 @@ final class ThreadSummaryTests: XCTestCase {
         let long = ThreadSummaryInput.cleaned(String(repeating: "word ", count: 100))
         XCTAssertEqual(long?.count, ThreadSummaryInput.maximumSummaryLength + 1)
     }
+
+    /// Carter (10-30): the record is "the specific commit block or cryptographic hash mapping the work directly back".
+    /// It is copied from the thread, never written by the model, and plain words or numbers are not taken for one.
+    func test_the_record_is_the_commits_prs_and_builds_the_thread_names_each_once() {
+        let lines = [
+            "claude-warden: #253 (bf68d264): pass. Merged at 402ef9d3 after #1054.",
+            "pocket-forge: TestFlight 2026103014 is live from 6bcfc61f; #253 again.",
+            "astra-web: decade added deadbeef cafe 1234567 and 3.14"
+        ]
+        XCTAssertEqual(ThreadSummaryInput.record(in: lines),
+                       ["#253", "bf68d264", "402ef9d3", "#1054", "2026103014", "6bcfc61f"])
+    }
+
+    /// The parts in Carter's order, labeled, the objective first; an empty part is left out, and with no objective
+    /// there is no summary.
+    func test_the_summary_is_labeled_parts_with_the_objective_first() throws {
+        let text = try XCTUnwrap(ThreadSummaryInput.composed(
+            objective: "Stop Pocket freezing at send.", changed: "A send from up the history reopens the room.",
+            how: "pocket-forge changed RoomChatView; warden reviewed.", checks: "", record: ["#262", "cdec7a2c"]))
+        XCTAssertEqual(text, """
+        **Objective:** Stop Pocket freezing at send.
+        **What changed:** A send from up the history reopens the room.
+        **How:** pocket-forge changed RoomChatView; warden reviewed.
+        **Record:** `#262`, `cdec7a2c`
+        """)
+        XCTAssertEqual(ThreadSummaryFormat.headline(text), "Stop Pocket freezing at send.", "the row shows the objective")
+        XCTAssertNil(ThreadSummaryInput.composed(objective: " ", changed: "x", how: "y", checks: "z", record: []))
+    }
 }

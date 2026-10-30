@@ -11,6 +11,8 @@ struct RoomBoxLine: View {
     var isReadingSummary = false
     /// Read the summary aloud, or stop (Carter, on #55474: "a voice version of the summary").
     var onListen: (() -> Void)?
+    /// Open the whole summary (Carter, 10-30: "clicking on the summary message can give you a pop up of the rest").
+    var onOpenSummary: (() -> Void)?
     let onOpen: () -> Void
 
     var body: some View {
@@ -44,9 +46,9 @@ struct RoomBoxLine: View {
                     .accessibilityHidden(true)
             }
             if let summary {
-                // Room on the right for the speaker, which sits over the card and is its own button.
+                // Room on the right for the open and speaker buttons, which sit over the card and are their own.
                 ThreadSummaryText(text: summary)
-                    .padding(.trailing, onListen == nil ? 0 : ThreadSummaryListenButton.size)
+                    .padding(.trailing, ThreadSummaryListenButton.size * CGFloat([onListen != nil, onOpenSummary != nil].filter { $0 }.count))
             }
             }
             .padding(.horizontal, 10)
@@ -58,10 +60,13 @@ struct RoomBoxLine: View {
         .accessibilityLabel("Box \(box.name), \(box.status), \(box.replies) in its thread\(summary.map { ". Summary: \($0)" } ?? "")")
         .accessibilityHint("Opens its thread")
         .overlay(alignment: .bottomTrailing) {
-            if summary != nil, let onListen {
-                ThreadSummaryListenButton(isReading: isReadingSummary, action: onListen)
-                    .padding(.trailing, 4)
-                    .padding(.bottom, 2)
+            if summary != nil {
+                HStack(spacing: 0) {
+                    if let onOpenSummary { ThreadSummaryOpenButton(action: onOpenSummary) }
+                    if let onListen { ThreadSummaryListenButton(isReading: isReadingSummary, action: onListen) }
+                }
+                .padding(.trailing, 4)
+                .padding(.bottom, 2)
             }
         }
     }
@@ -77,13 +82,68 @@ struct ThreadSummaryText: View {
                 .font(.caption2)
                 .foregroundStyle(PocketPalette.accentStrong)
                 .accessibilityHidden(true)
-            Text(text)
+            Text(ThreadSummaryFormat.headline(text))
                 .font(.caption)
                 .foregroundStyle(PocketPalette.textSecondary)
-                .lineLimit(3)
+                .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .accessibilityIdentifier("pocket.room.threadSummary")
+    }
+}
+
+/// Opens a thread's whole summary: a small page icon beside the speaker.
+struct ThreadSummaryOpenButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "doc.text.magnifyingglass")
+                .font(.caption)
+                .foregroundStyle(PocketPalette.accentStrong)
+                .frame(width: ThreadSummaryListenButton.size, height: ThreadSummaryListenButton.size)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Read the whole summary")
+        .accessibilityIdentifier("pocket.room.threadSummary.open")
+    }
+}
+
+/// A thread's whole summary, in a sheet: each part on its line, the record's ids as written, and Listen.
+struct ThreadSummarySheet: View {
+    let summary: String
+    let isReading: Bool
+    let onListen: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Button(action: onListen) {
+                        Label(isReading ? "Stop" : "Listen", systemImage: isReading ? "stop.fill" : "speaker.wave.2.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("pocket.room.threadSummary.sheet.listen")
+                    ChatMarkdownView(text: summary.replacingOccurrences(of: "\n", with: "\n\n"), ownHandles: [])
+                        .accessibilityIdentifier("pocket.room.threadSummary.sheet.text")
+                    Text("Written on this phone from the thread's newest replies. The record is copied from the thread.")
+                        .font(.footnote)
+                        .foregroundStyle(PocketPalette.textSecondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(16)
+            }
+            .pocketCanvas()
+            .navigationTitle("Thread summary")
+            .navigationBarTitleDisplayModeInlineIfAvailable()
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
     }
 }
 

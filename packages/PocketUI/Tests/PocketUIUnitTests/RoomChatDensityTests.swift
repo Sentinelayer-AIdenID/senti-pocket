@@ -98,6 +98,12 @@ final class RoomChatDensityTests: XCTestCase {
         XCTAssertEqual(RoomChatQuiet.line("test ⟂ speech c705 · life 1"), "test")
     }
 
+    /// Carter (10-30): a row shows the summary's objective; the whole of it opens in a sheet.
+    func test_a_row_shows_the_summarys_objective_alone() {
+        XCTAssertEqual(ThreadSummaryFormat.headline("**Objective:** Ship it.\n**What changed:** Things."), "Ship it.")
+        XCTAssertEqual(ThreadSummaryFormat.headline("One paragraph from an older phone."), "One paragraph from an older phone.")
+    }
+
     func test_a_box_thread_is_one_line_with_the_box_and_its_status() {
         let launch = """
         🚀 Minted astra-breakout-api3 on gpt-6-astra for ticket 1a2b3c4d (Breakouts (API) fix): its own machine \
