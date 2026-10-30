@@ -710,6 +710,12 @@ private struct RoomMessageRowView: View {
     @State private var showsOptions = false
 
     var body: some View {
+        RenderTrace.row(row.sequenceId)
+        return rowBody
+    }
+
+    @ViewBuilder
+    private var rowBody: some View {
         switch row.kind {
         case .breakoutOpened(let childSessionId):
             RoomBreakoutCardView(card: breakouts[childSessionId], startedBy: row.authorName) {
