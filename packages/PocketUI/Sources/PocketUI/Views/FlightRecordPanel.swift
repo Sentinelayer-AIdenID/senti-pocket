@@ -163,10 +163,14 @@ public struct FlightRecordPanel: View {
 
             if isOpen {
                 let tab = tabs[box.id] ?? .live
+                // Shell is the box's terminal: its commands with what they print, from the console's own stream.
+                // Without a console link it falls back to the commands alone.
+                let shellURL = box.consoleURL.flatMap(BoxShell.eventsURL(console:))
+                let showsTerminal = tab == .shell && shellURL != nil
                 let shown = tab == .shell ? box.lines.filter(\.isCommand) : box.lines
                 VStack(alignment: .leading, spacing: 6) {
-                    // Live: thoughts and commands as they happen. Shell: only the commands, and how each ended.
-                    // Console: the box's own console, streamed here rather than in the browser (Carter, #55006).
+                    // Live: thoughts and commands as they happen. Shell: the terminal (Carter: "shell does not show
+                    // me shell"). Console: the box's own console, streamed here rather than in the browser (#55006).
                     Picker("Steps", selection: Binding(get: { tab }, set: { tabs[box.id] = $0 })) {
                         Text("Live").tag(BoxTab.live)
                         Text("Shell").tag(BoxTab.shell)
@@ -174,6 +178,12 @@ public struct FlightRecordPanel: View {
                     }
                     .pickerStyle(.segmented)
                     .accessibilityIdentifier("pocket.flight.steps.\(box.id)")
+                    if showsTerminal, let shellURL {
+                        BoxShellView(eventsURL: shellURL)
+                            .frame(height: 420)
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .accessibilityIdentifier("pocket.flight.shell.\(box.id)")
+                    }
                     if tab == .console, let url = box.consoleURL {
                         BoxConsoleView(url: url)
                             .frame(height: 420)
@@ -184,7 +194,7 @@ public struct FlightRecordPanel: View {
                             )
                             .accessibilityIdentifier("pocket.flight.console.\(box.id)")
                     }
-                    ForEach(tab == .console ? [] : shown) { line in
+                    ForEach(tab == .console || showsTerminal ? [] : shown) { line in
                         HStack(alignment: .top, spacing: 8) {
                             Image(systemName: symbol(line))
                                 .font(.caption)
@@ -199,7 +209,7 @@ public struct FlightRecordPanel: View {
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
-                    if tab != .console, shown.isEmpty {
+                    if tab != .console, !showsTerminal, shown.isEmpty {
                         Text(tab == .shell ? "No commands run yet." : "No steps recorded yet.")
                             .font(.caption)
                             .foregroundStyle(PocketPalette.textSecondary)
