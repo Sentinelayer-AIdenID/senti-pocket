@@ -232,6 +232,9 @@ public struct RoomChatMessageRow: Equatable, Identifiable, Sendable {
     public var call: VoiceCallCard?
     /// For a reply shown in the room: its thread so far. Only the newest reply of a thread is shown, at its own time.
     public var trail: RoomChatTrail?
+    /// The same notice again and again from one agent (only the numbers changed): shown once, the newest, with how
+    /// many it stands for.
+    public var repeats: Int = 1
 }
 
 public enum RoomChatRow: Equatable, Identifiable, Sendable {
@@ -571,7 +574,9 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         ))
         // A thread shows once, as its newest reply, so a busy thread is one line that moves down as it grows.
         let trails = RoomChatTrail.fold(folded.kept)
-        let ordered = trails.kept
+        // An agent's notice that repeats with only its numbers changing (a retry counter) is one row.
+        let repeated = RoomChatRepeats.fold(trails.kept)
+        let ordered = repeated.kept
         let parents = Dictionary(
             messages.map { ($0.sequenceId, $0) },
             uniquingKeysWith: { first, _ in first }
@@ -624,7 +629,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 replyContext: input.replyToSequenceId.flatMap { parents[$0] }.map(Self.replyContext(for:)),
                 work: input.isInlineReply ? [] : input.work,
                 call: folded.cards[input.id],
-                trail: trails.trails[input.id]
+                trail: trails.trails[input.id],
+                repeats: repeated.counts[input.id] ?? 1
             )))
             if input.kind == .message, let date = input.date {
                 run = (input.authorId, date)
@@ -788,6 +794,34 @@ public struct RoomChatTrail: Equatable, Sendable {
             kept.append(input)
         }
         return (kept, trails)
+    }
+}
+
+/// Runs of the same notice from one agent, where only the numbers change ("remains queued after 105 failed relay
+/// attempts", then 107, then 109): the run shows as its newest message with a count. People's messages, replies, and
+/// anything with different words are never folded.
+public enum RoomChatRepeats {
+    /// The words of a message with its numbers taken out, the part that must match.
+    static func shape(_ text: String) -> String {
+        text.replacingOccurrences(of: #"[0-9]+"#, with: "#", options: .regularExpression)
+    }
+
+    public static func fold(_ inputs: [RoomChatMessageInput]) -> (kept: [RoomChatMessageInput], counts: [String: Int]) {
+        var kept: [RoomChatMessageInput] = []
+        kept.reserveCapacity(inputs.count)
+        var counts: [String: Int] = [:]
+        for input in inputs {
+            if let last = kept.last, !input.isHuman, !last.isHuman, !input.isInlineReply, !last.isInlineReply,
+               input.kind == .message, last.kind == .message, input.authorId == last.authorId,
+               input.text.count >= 24, shape(input.text) == shape(last.text), input.text != last.text {
+                counts[input.id] = (counts[last.id] ?? 1) + 1
+                counts[last.id] = nil
+                kept[kept.count - 1] = input
+            } else {
+                kept.append(input)
+            }
+        }
+        return (kept, counts)
     }
 }
 

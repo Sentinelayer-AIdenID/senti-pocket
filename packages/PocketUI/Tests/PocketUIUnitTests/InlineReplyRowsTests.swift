@@ -45,6 +45,28 @@ final class InlineReplyRowsTests: XCTestCase {
         XCTAssertNil(rows.first { $0.id == "m1" }?.trail, "messages carry no trail")
     }
 
+    /// The room was full of one bridge warning with a rising retry count: that is one row with a count.
+    func test_a_notice_repeating_with_only_its_numbers_changed_is_one_row() {
+        let warn = { (n: Int) in "⚠ bridge: message from life 0d7010eb4e60 (frame 707) remains queued after \(n) failed relay attempts." }
+        let messages = [
+            input("m1", seq: 1, at: 0, author: "respawn-orchestrator", text: warn(105)),
+            input("m2", seq: 2, at: 60, author: "respawn-orchestrator", text: warn(107)),
+            input("m3", seq: 3, at: 120, author: "respawn-orchestrator", text: warn(109)),
+            input("m4", seq: 4, at: 180, author: "respawn-orchestrator", text: "[cost] something else entirely here"),
+            input("m5", seq: 5, at: 240, author: "respawn-orchestrator", text: warn(111)),
+            input("m6", seq: 6, at: 300, author: "human-mrrcarter", text: "same words 1 same words same words"),
+            input("m7", seq: 7, at: 360, author: "human-mrrcarter", text: "same words 2 same words same words")
+        ]
+        let state = RoomChatPresentationState(sessionId: "room", title: "Room", messages: messages)
+        XCTAssertEqual(messageIds(state), ["m3", "m4", "m5", "m6", "m7"], "a run folds; a different message breaks it; people never fold")
+        let rows = state.rows.compactMap { row -> RoomChatMessageRow? in
+            if case .message(let message) = row { return message }
+            return nil
+        }
+        XCTAssertEqual(rows.first { $0.id == "m3" }?.repeats, 3)
+        XCTAssertEqual(rows.first { $0.id == "m5" }?.repeats, 1)
+    }
+
     private func messageIds(_ state: RoomChatPresentationState) -> [String] {
         state.rows.compactMap { row in
             if case .message(let message) = row { return message.id }

@@ -649,6 +649,12 @@ private struct RoomMessageRowView: View {
     /// Edited mark, attachments, who viewed it and the reactions: the same under every kind of message.
     @ViewBuilder
     private var messageFooter: some View {
+        if row.repeats > 1 {
+            Label("\(row.repeats) times, only the numbers changed", systemImage: "square.stack")
+                .font(.caption2)
+                .foregroundStyle(PocketPalette.textSecondary)
+                .accessibilityIdentifier("pocket.room.repeats")
+        }
         if !row.work.isEmpty {
             RoomWorkLines(lines: row.work)
         }
