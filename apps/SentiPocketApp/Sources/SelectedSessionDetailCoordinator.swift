@@ -593,6 +593,8 @@ final class SelectedSessionDetailCoordinator: ObservableObject {
         activityState = nil
         checkpointState = nil
         destination = nil
+        // Another room, no room or a revoked sign-in: the checkpoint read from the last one goes with it (warden, #266).
+        serverCheckpoint = nil
     }
 
     private func reconcileDestination() {

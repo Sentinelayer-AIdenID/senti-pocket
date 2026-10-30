@@ -9,9 +9,14 @@ final class VoiceCallWindow {
     static let shared = VoiceCallWindow()
     private var window: UIWindow?
 
-    func show<Content: View>(_ content: Content) {
+    /// Whether a call is on screen: banners stay quiet under it, so a tap can't take the room away mid-call.
+    var isShowing: Bool { window != nil }
+
+    /// Shows the call; false when it cannot (one already up, or no active screen), and the call must not start.
+    @discardableResult
+    func show<Content: View>(_ content: Content) -> Bool {
         guard window == nil, let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
-            .first(where: { $0.activationState == .foregroundActive }) else { return }
+            .first(where: { $0.activationState == .foregroundActive }) else { return false }
         let made = UIWindow(windowScene: scene)
         made.windowLevel = .normal + 1
         // Light or dark as the app is.
@@ -29,6 +34,7 @@ final class VoiceCallWindow {
         }, completion: { _ in
             host.view.transform = .identity
         })
+        return true
     }
 
     func hide() {
