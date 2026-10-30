@@ -23,6 +23,8 @@ struct WhisperModelSettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                inAppSection
+                notificationsSection
                 modelStatusSection
                 modelActionsSection
                 accountSection
@@ -172,6 +174,45 @@ struct WhisperModelSettingsView: View {
         } footer: {
             Text("Required file: \(WhisperModelProvisioningCoordinator.requiredFileName) (about \(Self.requiredSizeText)). Senti Pocket has no model downloader; choose a file already available in Files. The selected source location is never persisted.")
         }
+    }
+
+    @AppStorage("pocket.push.sound") private var pushSound = true
+    @AppStorage("pocket.push.vibrate") private var pushVibrate = true
+    @AppStorage("pocket.push.previews") private var pushPreviews = true
+    @AppStorage("pocket.inapp.sounds") private var inAppSounds = true
+    @AppStorage("pocket.inapp.haptics") private var inAppHaptics = true
+
+    /// The room on screen: a soft sound and a tap when you send and when a message arrives, the chime for a mention.
+    private var inAppSection: some View {
+        Section {
+            Toggle("Sounds in a room", isOn: $inAppSounds)
+                .accessibilityIdentifier("settings.inapp.sounds")
+            Toggle("Vibrate in a room", isOn: $inAppHaptics)
+                .accessibilityIdentifier("settings.inapp.haptics")
+        } header: {
+            Text("While the app is open")
+        } footer: {
+            Text("A soft sound and a tap when you send and when a message arrives, and the chime when you are mentioned. The silent switch silences the sounds; the taps still play.")
+        }
+    }
+
+    /// How this phone's notifications arrive (sent to the server, which builds each push with them).
+    private var notificationsSection: some View {
+        Section {
+            Toggle("Sound", isOn: $pushSound)
+                .accessibilityIdentifier("settings.push.sound")
+            Toggle("Vibrate", isOn: $pushVibrate)
+                .accessibilityIdentifier("settings.push.vibrate")
+            Toggle("Show message previews", isOn: $pushPreviews)
+                .accessibilityIdentifier("settings.push.previews")
+        } header: {
+            Text("Notifications")
+        } footer: {
+            Text("With sound off and vibrate on, a notification vibrates without a sound. Your silent switch still silences sounds. With previews off, the lock screen shows only which room.")
+        }
+        .onChange(of: pushSound) { _ in PushRegistrar.shared.preferencesChanged() }
+        .onChange(of: pushVibrate) { _ in PushRegistrar.shared.preferencesChanged() }
+        .onChange(of: pushPreviews) { _ in PushRegistrar.shared.preferencesChanged() }
     }
 
     @ViewBuilder

@@ -78,6 +78,12 @@ APPROVED_RESOURCE_REFERENCES = frozenset(
         PurePosixPath("Resources/Assets.xcassets"),
         PurePosixPath("Resources/PrivacyInfo.xcprivacy"),
         PurePosixPath(f"Resources/{FIXTURE_NAME}"),
+        # Notification and in-app sounds: rendered by scripts/ios/make_sounds.py (the web's chime, a silent file so a
+        # soundless push still vibrates, and the room's send and receive sounds).
+        PurePosixPath("Resources/chime.caf"),
+        PurePosixPath("Resources/silence.caf"),
+        PurePosixPath("Resources/receive.caf"),
+        PurePosixPath("Resources/send.caf"),
     }
 )
 APPROVED_PACKAGE_PRODUCTS = frozenset(

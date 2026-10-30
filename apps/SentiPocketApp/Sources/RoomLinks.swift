@@ -50,6 +50,12 @@ final class IncomingLinkInbox: ObservableObject {
         return true
     }
 
+    /// Queues a link that is already a Senti room link (a tapped notification).
+    func receive(_ link: SentiLink) {
+        pending = link
+        revision &+= 1
+    }
+
     /// The newest link not yet opened. Taking it clears it, so each link opens once.
     func take() -> SentiLink? {
         defer { pending = nil }

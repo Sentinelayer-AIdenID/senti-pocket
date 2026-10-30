@@ -363,6 +363,14 @@ struct RoomChatScreen: View {
         }
         .onDisappear {
             if let voiceRoom { Task { await voiceRoom.hangUp() } }
+            coordinator.onFeedback = nil
+        }
+        .onAppear {
+            // The room on screen sounds and vibrates, except during a voice room, which speaks instead.
+            coordinator.onFeedback = { event in
+                guard voiceRoom == nil else { return }
+                RoomFeedback.shared.play(event)
+            }
         }
         .onChange(of: coordinator.state.presence) { _ in
             if showsFlight { flight.setAgents(flightAgents) }

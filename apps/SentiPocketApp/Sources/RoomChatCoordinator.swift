@@ -98,6 +98,8 @@ final class RoomChatCoordinator: ObservableObject {
     }
     /// Replies seen before any were read are not news.
     private var hasReadReplies = false
+    /// The room on screen sounding and vibrating: your message sent, a message or reply arriving, a mention of you.
+    var onFeedback: (@MainActor (RoomFeedbackEvent) -> Void)?
     static let viewerReason = "You're a viewer in this room: you can read it, but not post."
     /// How long an accepted message waits for its echo before the pending row is dropped (the next poll still
     /// brings it in).
@@ -719,7 +721,10 @@ final class RoomChatCoordinator: ObservableObject {
         noteReplyAuthors(page.replies)
         // Replies not seen before go to a voice room listening in (none on the first read: those are history).
         let unseen = page.replies.filter { inlineReplies[$0.id] == nil }
-        if hasReadReplies, !unseen.isEmpty { onNewReplies?(unseen) }
+        if hasReadReplies, !unseen.isEmpty {
+            onNewReplies?(unseen)
+            arrivalFeedback(unseen.map { ($0.authorId, $0.text) })
+        }
         hasReadReplies = true
         // Replies stay as rows too (newest revision wins), the newest few thousand.
         for reply in page.replies {
@@ -911,6 +916,7 @@ final class RoomChatCoordinator: ObservableObject {
             do {
                 try await actionSender.sendAction(request)
                 guard let self else { return }
+                self.onFeedback?(.sent)
                 if self.openThreadSequence == item.targetSequenceId { await self.loadThread(item.targetSequenceId) }
                 self.pendingReplies.removeAll { $0.clientId == clientId }
                 self.publish()
@@ -990,6 +996,7 @@ final class RoomChatCoordinator: ObservableObject {
                 try await sender.sendHumanMessage(sessionId: sessionId, text: item.text, clientId: clientId)
                 guard let self else { return }
                 self.updatePending(clientId) { $0.status = .sent; $0.sentAt = self.now() }
+                self.onFeedback?(.sent)
                 // Pull the echo now instead of waiting for the stream or the next poll.
                 await self.catchUp(self.generation)
                 await self.sleep(Self.sentEchoGrace)
@@ -1273,13 +1280,28 @@ final class RoomChatCoordinator: ObservableObject {
             let fresh = messages.filter { $0.sequenceId > lastAppliedSequence }
             unread.noteArrivals(fresh, readerIsAtBottom: false, selfAuthorIds: ownAuthorIds)
             if !fresh.isEmpty { onLiveMessages?(fresh) }
+            arrivalFeedback(fresh.filter { $0.kind == .message }.map { ($0.authorId, $0.text) })
         } else {
             let oldest = timeline.oldestSequence
             let result = timeline.merge(messages)
             noteOldestTrimmed(was: oldest)
             unread.noteArrivals(result.inserted, readerIsAtBottom: readerAtBottom, selfAuthorIds: ownAuthorIds)
             if !result.inserted.isEmpty { onLiveMessages?(result.inserted) }
+            arrivalFeedback(result.inserted.filter { $0.kind == .message }.map { ($0.authorId, $0.text) })
         }
+    }
+
+    /// A message or reply from someone else arrived in the room on screen: a mention of you sounds the chime, anything
+    /// else the soft pop. Your own (echoes of what you sent) make no sound; the send already did.
+    private func arrivalFeedback(_ arrivals: [(authorId: String, text: String)]) {
+        guard let onFeedback else { return }
+        let others = arrivals.filter { !$0.authorId.isEmpty && !ownAuthorIds.contains($0.authorId.lowercased()) }
+        guard !others.isEmpty else { return }
+        let handles = state.ownMentionHandles
+        let mentioned = !handles.isEmpty && others.contains { arrival in
+            !Set(ChatReferences.mentionHandles(in: arrival.text)).isDisjoint(with: handles)
+        }
+        onFeedback(mentioned ? .mentioned : .received)
     }
 
     private func pruneComposing() {

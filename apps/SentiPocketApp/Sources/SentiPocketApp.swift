@@ -12,6 +12,8 @@ import PocketVoice
 @main
 struct SentiPocketApp: App {
     @Environment(\.scenePhase) private var scenePhase
+    /// Apple push: the device token and the notification center's delegate (`PushRegistrar`).
+    @UIApplicationDelegateAdaptor(PocketAppDelegate.self) private var appDelegate
     /// Device-local model ownership is app-lifetime and deliberately independent of authentication.
     @StateObject private var whisperModel = WhisperModelProvisioningCoordinator()
     /// Room links iOS hands the app (universal links), held until a signed-in root opens them.
@@ -114,7 +116,11 @@ struct SentiPocketApp: App {
                 authenticationEpoch: signIn.authenticationEpoch,
                 whisperModelCoordinator: whisperModel,
                 incomingLinks: incomingLinks,
-                onSignOut: { signIn.send(.signOut) },
+                onSignOut: {
+                    // This phone stops getting the person's notifications before the sign-in goes.
+                    PushRegistrar.shared.signOut()
+                    signIn.send(.signOut)
+                },
                 onReauthenticationRequired: { expectedEpoch in
                     guard signIn.isCurrentAuthentication(expectedEpoch) else { return }
                     signIn.invalidateAuthentication(expectedEpoch: expectedEpoch)
@@ -130,7 +136,11 @@ struct SentiPocketApp: App {
                 authenticationEpoch: signIn.authenticationEpoch,
                 whisperModelCoordinator: whisperModel,
                 incomingLinks: incomingLinks,
-                onSignOut: { signIn.send(.signOut) },
+                onSignOut: {
+                    // This phone stops getting the person's notifications before the sign-in goes.
+                    PushRegistrar.shared.signOut()
+                    signIn.send(.signOut)
+                },
                 onReauthenticationRequired: { expectedEpoch in
                     signIn.invalidateAuthentication(expectedEpoch: expectedEpoch)
                 }
@@ -410,6 +420,8 @@ private struct AuthenticatedRootView: View {
         }
         .onChange(of: incomingLinks.revision) { _ in openPendingLinkIfReady() }
         .onChange(of: roomListSettled) { _ in openPendingLinkIfReady() }
+        // The app icon shows the bell's unread count.
+        .onChange(of: notifications.unreadCount) { count in PushRegistrar.shared.setBadge(count) }
         .sheet(isPresented: $presentsSettings) {
             WhisperModelSettingsView(
                 coordinator: whisperModelCoordinator,
@@ -430,6 +442,10 @@ private struct AuthenticatedRootView: View {
             )
             sessions.start()
             notifications.startPolling()
+            // Apple push: a tap opens its room at the message; the room on screen gets no banner.
+            PushRegistrar.shared.inbox = incomingLinks
+            PushRegistrar.shared.currentRoomId = { currentRoom?.sessionId }
+            Task { await PushRegistrar.shared.start() }
             openPendingLinkIfReady()
         }
         .onDisappear {
