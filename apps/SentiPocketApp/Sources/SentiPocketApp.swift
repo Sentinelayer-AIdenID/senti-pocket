@@ -631,6 +631,7 @@ private struct AuthenticatedRootView: View {
             receipts: roomReceipts,
             search: roomSearch,
             reader: messageReader,
+            onRenamed: { sessions.send(.refreshSessions) },
             onReauthenticationRequired: invalidateProtectedAuthentication
         )
     }

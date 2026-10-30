@@ -90,6 +90,8 @@ struct RoomChatScreen: View {
     private let openRoom: @MainActor (SentiLink) -> Void
     private let openChildRoom: @MainActor (RoomRoute) -> Void
     private let onReauthenticationRequired: @MainActor () -> Void
+    /// The room was renamed here: the room list reads the new name.
+    private let onRenamed: @MainActor () -> Void
 
     init(
         route: RoomRoute,
@@ -109,6 +111,7 @@ struct RoomChatScreen: View {
         receipts: (any RoomReceiptsClient)? = nil,
         search: (any RoomSearching)? = nil,
         reader: MessageReader,
+        onRenamed: @escaping @MainActor () -> Void = {},
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.route = route
@@ -127,6 +130,7 @@ struct RoomChatScreen: View {
         self.identity = identity
         self.openRoom = openRoom
         self.openChildRoom = openChildRoom
+        self.onRenamed = onRenamed
         self.onReauthenticationRequired = onReauthenticationRequired
         _coordinator = StateObject(wrappedValue: RoomChatCoordinator(
             sessionId: route.sessionId,
@@ -136,6 +140,8 @@ struct RoomChatScreen: View {
             actionSender: actionSender,
             identity: identity,
             membershipRole: route.membershipRole,
+            // The API lets the owner rename a room, and nobody a breakout.
+            canRename: route.membershipRole.lowercased() == "owner" && !route.isBreakout,
             focusSequenceId: route.focusSequenceId,
             attachmentFetcher: attachmentFetcher,
             receipts: receipts,
@@ -593,13 +599,14 @@ struct RoomChatScreen: View {
         .onChange(of: choosesVoicePartner) { shown in if shown { CrashReporter.shared.note("talk opened") } }
         .sheet(isPresented: $showsSummary) {
             if let summaryGenerator {
-                RoomSummarySheet(sessionId: route.sessionId, roomTitle: route.title, generator: summaryGenerator,
+                RoomSummarySheet(sessionId: route.sessionId, roomTitle: coordinator.state.title, generator: summaryGenerator,
                                  reader: reader, onClose: { showsSummary = false })
             }
         }
         .onChange(of: showsSummary) { open in
             if open { CrashReporter.shared.note("summary opened") }
         }
+        .onChange(of: coordinator.state.title) { _ in onRenamed() }
         .sheet(isPresented: $showsTickets) {
             if let ticketsTransport {
                 NavigationStack {
