@@ -77,6 +77,29 @@ final class RoomRosterTests: XCTestCase {
         XCTAssertEqual(roster.members.first?.posts, 1)
     }
 
+    /// Carter, 10-30: "I need agents and humans separated and a total number of online and offline".
+    func test_the_people_list_has_agents_and_people_apart_with_online_and_offline_counts() throws {
+        let roster = RoomRoster.build(
+            posts: [post("human-mrrcarter", 2, human: true), post("human-griff", 300, human: true),
+                    post("claude-warden", 30), post("old-agent", 300)],
+            present: [
+                RoomChatPresence.Person(id: "human-6c1f", name: "mrrCarter", isHuman: true, isIdle: false, login: "mrrcarter"),
+                RoomChatPresence.Person(id: "pocket-forge", name: "pocket-forge", isHuman: false, isIdle: true)
+            ],
+            runningBoxes: [RoomRoster.Box(name: "astra-brand-s", model: "m", phase: "ready", lastActivity: nil)],
+            endedBoxes: [], now: now
+        )
+        let sides = roster.sides
+        XCTAssertEqual(sides.map(\.title), ["Agents", "People"])
+        let agents = try XCTUnwrap(sides.first)
+        XCTAssertEqual(agents.online, 2, "pocket-forge here but idle, and the running box")
+        XCTAssertEqual(agents.offline, 2, "claude-warden heard from within the hour but not here, and old-agent")
+        XCTAssertTrue(agents.members.prefix(2).allSatisfy(\.isOnline), "online first")
+        let people = try XCTUnwrap(sides.last)
+        XCTAssertEqual(people.online, 1)
+        XCTAssertEqual(people.offline, 1)
+    }
+
     func test_a_box_that_ended_but_runs_again_under_its_name_is_listed_once_as_running() {
         let roster = RoomRoster.build(
             posts: [], present: [],

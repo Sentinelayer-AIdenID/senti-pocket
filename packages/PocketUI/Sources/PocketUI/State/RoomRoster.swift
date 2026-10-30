@@ -48,10 +48,12 @@ public struct RoomRoster: Equatable, Sendable {
         public let lastSeen: Date?
         public let expiresAt: Date?
         public let posts: Int
+        /// In the room now: in presence (active or idle), or a box still running.
+        public let isOnline: Bool
 
         public init(id: String, name: String, kind: Kind, status: Status, model: String? = nil, effort: String? = nil,
                     job: String? = nil, phase: String? = nil, firstSeen: Date? = nil, lastSeen: Date? = nil,
-                    expiresAt: Date? = nil, posts: Int = 0) {
+                    expiresAt: Date? = nil, posts: Int = 0, isOnline: Bool = false) {
             self.id = id
             self.name = name
             self.kind = kind
@@ -64,6 +66,7 @@ public struct RoomRoster: Equatable, Sendable {
             self.lastSeen = lastSeen
             self.expiresAt = expiresAt
             self.posts = posts
+            self.isOnline = isOnline
         }
 
         /// From the first post seen here to the last one.
@@ -132,6 +135,29 @@ public struct RoomRoster: Equatable, Sendable {
         return models
     }
 
+    /// One side of the people list (Carter, 10-30: "I need agents and humans separated and a total number of online and
+    /// offline"): agents (boxes with them) or people, online ones first, with how many are online and offline.
+    public struct Side: Equatable, Sendable {
+        public let title: String
+        public let members: [Member]
+        public var online: Int { members.filter(\.isOnline).count }
+        public var offline: Int { members.count - online }
+    }
+
+    /// Agents, then people; a side with nobody is left out.
+    public var sides: [Side] {
+        let agents = members.filter { $0.kind != .person }
+        let people = members.filter { $0.kind == .person }
+        func ordered(_ list: [Member]) -> [Member] {
+            list.enumerated().sorted { a, b in
+                if a.element.isOnline != b.element.isOnline { return a.element.isOnline }
+                return a.offset < b.offset
+            }.map(\.element)
+        }
+        return [Side(title: "Agents", members: ordered(agents)), Side(title: "People", members: ordered(people))]
+            .filter { !$0.members.isEmpty }
+    }
+
     public static func build(posts: [Post], present: [RoomChatPresence.Person], runningBoxes: [Box],
                              endedBoxes: Set<String>, now: Date) -> RoomRoster {
         struct Seen {
@@ -182,7 +208,7 @@ public struct RoomRoster: Equatable, Sendable {
                 let status: Status = (here.map { !$0.isIdle } ?? false) || active ? .here : .idle
                 return Member(id: key, name: box.name, kind: .box, status: status, model: box.model, effort: box.effort,
                               job: box.job, phase: box.phase, firstSeen: entry.first, lastSeen: latest(entry.last, box.lastActivity),
-                              expiresAt: box.expiresAt, posts: entry.posts)
+                              expiresAt: box.expiresAt, posts: entry.posts, isOnline: true)
             }
             if ended.contains(key) {
                 return Member(id: key, name: entry.name, kind: .box, status: .ended, phase: "ended",
@@ -197,7 +223,7 @@ public struct RoomRoster: Equatable, Sendable {
                 status = .gone
             }
             return Member(id: key, name: entry.name, kind: entry.isHuman ? .person : .agent, status: status,
-                          firstSeen: entry.first, lastSeen: entry.last, posts: entry.posts)
+                          firstSeen: entry.first, lastSeen: entry.last, posts: entry.posts, isOnline: here != nil)
         }
         .sorted {
             if $0.status != $1.status { return $0.status < $1.status }

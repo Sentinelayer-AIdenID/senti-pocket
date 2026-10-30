@@ -33,17 +33,35 @@ struct RoomPeopleAvatars: View {
 
     var body: some View {
         Button(action: onOpen) {
-            HStack(spacing: 10) {
-                ForEach(shownAgents) { agent in
-                    AgentLogo(agent: agent, reduceMotion: reduceMotion)
+            HStack(spacing: 8) {
+                // Said plainly that this is who is here (Carter, 10-30: "make it known it's a presence icon").
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(PocketPalette.verified)
+                        .frame(width: 6, height: 6)
+                    Text("Here")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(PocketPalette.textSecondary)
                 }
-                if hiddenAgents > 0 {
-                    Text("+\(hiddenAgents)")
-                        .font(.caption.weight(.bold))
-                        .monospacedDigit()
-                        .foregroundStyle(PocketPalette.textPrimary)
+                .accessibilityHidden(true)
+                // Close together and lifted off the room, as on the web (Carter, 10-30: "put them closer to each other
+                // ... make them feel more 3D so they can stand out and prevent the background from inhaling them").
+                HStack(spacing: -6) {
+                    ForEach(shownAgents) { agent in
+                        AgentLogo(agent: agent, reduceMotion: reduceMotion)
+                            .modifier(PresenceCoin(shape: Circle()))
+                    }
+                    if hiddenAgents > 0 {
+                        Text("+\(hiddenAgents)")
+                            .font(.caption2.weight(.bold))
+                            .monospacedDigit()
+                            .foregroundStyle(PocketPalette.textPrimary)
+                            .modifier(PresenceCoin(shape: Circle()))
+                    }
                 }
                 personGlyph
+                    .padding(.horizontal, 8)
+                    .modifier(PresenceCoin(shape: Capsule(), fixedWidth: false))
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
@@ -137,6 +155,23 @@ struct RoomPeopleAvatars: View {
     }
 }
 
+/// A coin under each presence logo: solid, lit from above, ringed and shadowed, so it reads over any message behind it.
+private struct PresenceCoin<S: InsettableShape>: ViewModifier {
+    let shape: S
+    var fixedWidth = true
+    static var size: CGFloat { 28 }
+
+    func body(content: Content) -> some View {
+        content
+            .frame(width: fixedWidth ? Self.size : nil, height: Self.size)
+            .background(shape.fill(PocketPalette.raised))
+            .overlay(shape.fill(LinearGradient(colors: [.white.opacity(0.16), .clear], startPoint: .top, endPoint: .center))
+                .allowsHitTesting(false))
+            .overlay(shape.strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
+            .shadow(color: .black.opacity(0.4), radius: 3, y: 2)
+    }
+}
+
 /// One agent here: its lab's logo in the lab's colour, solid (Carter, #55506: "I cannot see them anymore. They're too
 /// damn transparent"), or the lab's initial, or a chip for an unknown lab, with a small box badge for an agent running
 /// in a box. Still, until the agent does something: then it beats once, slowly, and Claude's mark turns a quarter,
@@ -152,7 +187,7 @@ private struct AgentLogo: View {
         let tint = Color(red: red, green: green, blue: blue)
         mark
             .foregroundStyle(tint)
-            .frame(width: 20, height: 20)
+            .frame(width: 17, height: 17)
             .rotationEffect(.degrees(turn))
             .scaleEffect(beating ? 1.22 : 1)
             .shadow(color: tint.opacity(beating ? 0.75 : 0), radius: 7)
