@@ -15,19 +15,19 @@ final class LaunchUrgency: ObservableObject {
 /// The SentinelLayer logo grows in and bursts out at launch, over the app while it loads your rooms (Carter, #55287:
 /// "a nice growing and disappearing animation of sentinelayer logo at all start ... the loading room messages can
 /// be in the background"; #55513: "give it more time for someone to read it. Let it grow longer and just explode in
-/// the screen"). It grows in slowly, keeps growing while the motto is read, and leaves by flying out at you in a glow
-/// as the app shows through. It stays at least `shortest` so the motto can be read, never longer than `longest`, and
-/// leaves once the rooms are in. Opened by a notification, a link or a call, it leaves at once. Reduce Motion gets a
+/// the screen"; #55539: "a tad" faster). It grows in, keeps growing while the motto is read, and leaves by flying
+/// out at you in a glow as the app shows through. It stays at least `shortest` so the motto can be read, never longer
+/// than `longest`, and leaves once the rooms are in. Opened by a notification, a link or a call, it leaves at once. Reduce Motion gets a
 /// plain fade. Tests and previews skip it.
 struct LaunchSplash: View {
     /// The room list has loaded (or failed): the app underneath is ready.
     let isReady: Bool
 
-    static let shortest: TimeInterval = 2.8
-    static let longest: TimeInterval = 4.0
+    static let shortest: TimeInterval = 2.0
+    static let longest: TimeInterval = 3.0
     /// How long the logo takes to grow in, and then to burst out.
-    static let growIn: TimeInterval = 1.2
-    static let burst: TimeInterval = 0.6
+    static let growIn: TimeInterval = 0.9
+    static let burst: TimeInterval = 0.5
     static let motto = "Every agent. One room. Proof of everything."
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
