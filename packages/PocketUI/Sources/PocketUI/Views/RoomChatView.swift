@@ -410,6 +410,9 @@ public struct RoomChatView: View {
                 attachmentPreviews: state.attachmentPreviews,
                 isReadingAloud: readingAloudId == message.readAloudId,
                 isExpanded: expandedQuiet.contains(message.id),
+                threadSummary: message.box != nil
+                    ? state.threadSummaries[message.sequenceId]
+                    : (message.isInlineReply ? message.replyToSequenceId.flatMap { state.threadSummaries[$0] } : nil),
                 onOpenReplyTarget: { jump(to: $0, proxy: proxy) },
                 onOpenCheckpoint: { openCheckpoint = $0 },
                 onEdit: { editingRow = $0 },
@@ -618,6 +621,8 @@ private struct RoomMessageRowView: View {
     var isReadingAloud = false
     /// A background line opened in place.
     var isExpanded = false
+    /// What happened in this row's thread, summarized on the phone, for a box line or a thread's newest reply.
+    var threadSummary: String?
     let onOpenReplyTarget: (Int64) -> Void
     var onOpenCheckpoint: (RoomChatMessageRow) -> Void = { _ in }
     var onEdit: (RoomChatMessageRow) -> Void = { _ in }
@@ -703,7 +708,7 @@ private struct RoomMessageRowView: View {
                     .padding(.vertical, 6)
                 )
             } else if let box = row.box {
-                RoomBoxLine(box: box) { send(.openThread(sequenceId: row.sequenceId)) }
+                RoomBoxLine(box: box, summary: threadSummary) { send(.openThread(sequenceId: row.sequenceId)) }
                     .padding(.vertical, 3)
                     .accessibilityIdentifier("pocket.room.box.\(row.sequenceId)")
             } else if row.isQuiet {
@@ -861,6 +866,10 @@ private struct RoomMessageRowView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel(row.isInlineReply ? "\(quoteText(reply)). Opens the thread." : "Replying to message \(reply)")
+            if let threadSummary, row.trail.map({ $0.count > 1 }) == true {
+                ThreadSummaryText(text: threadSummary)
+                    .padding(.leading, 10)
+            }
         }
     }
 

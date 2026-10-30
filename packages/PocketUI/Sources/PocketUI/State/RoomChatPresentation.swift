@@ -525,6 +525,9 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     public let canRename: Bool
     /// You may invite people: the room's owner or an admin, outside a breakout.
     public let canInvite: Bool
+    /// A short summary of a thread, by its parent's sequence, shown on the room's row for it before it is opened
+    /// (Carter, #55474: "I wish I had the summarized here at top level before I even open the thread").
+    public let threadSummaries: [Int64: String]
 
     /// Same-author rows closer together than this share one header.
     public static let groupingWindow: TimeInterval = 5 * 60
@@ -560,6 +563,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         pinLimit: Int = 10,
         canRename: Bool = false,
         canInvite: Bool = false,
+        threadSummaries: [Int64: String] = [:],
         replies: [RoomChatMessageInput] = [],
         expandedRepeats: Set<String> = [],
         calendar: Calendar = .current
@@ -592,6 +596,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         self.pinLimit = max(1, pinLimit)
         self.canRename = protectedFailure ? false : canRename
         self.canInvite = protectedFailure ? false : canInvite
+        self.threadSummaries = protectedFailure ? [:] : threadSummaries
 
         // Protected content never renders beside an auth or access failure.
         guard failure?.suppressesProtectedContent != true else {
@@ -1040,9 +1045,12 @@ public struct RoomBoxThread: Equatable, Sendable {
     static let launchPattern =
         #"^🚀 Minted ([A-Za-z0-9_.-]+)(?: on (\S+))?(?: for ticket \S+(?: \((.*?)\))?)?: its own machine \(life ([0-9a-f]{12})\)"#
 
+    /// Compiled once: every room update reads every orchestrator line for launches.
+    private static let launchExpression = try? NSRegularExpression(pattern: launchPattern)
+
     /// The orchestrator's launch line, parsed.
     public static func launch(_ text: String) -> Launch? {
-        guard let regex = try? NSRegularExpression(pattern: launchPattern),
+        guard text.hasPrefix("🚀 Minted "), let regex = launchExpression,
               let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) else { return nil }
         func group(_ index: Int) -> String? {
             guard let range = Range(match.range(at: index), in: text) else { return nil }
