@@ -321,6 +321,7 @@ struct LastRun: Codable, Equatable {
         if let stall, stall.startedAt >= launchedAt {
             lines.append(String(format: "The main thread stopped answering at %@, right after \"%@\", and was still stuck %.1f s later when the app ended.",
                                 CrashReportText.clock(stall.startedAt), stall.afterStep, stall.seconds))
+            if let draws = stall.drawsText { lines.append("While it was stuck: \(draws).") }
         }
         return CrashReport(
             id: "closed-\(Int(launchedAt.timeIntervalSince1970))",
@@ -542,6 +543,17 @@ final class MainThreadWatch: @unchecked Sendable {
         var afterStep: String
         var seconds: Double
         var recovered: Bool
+        /// Message rows drawn while it lasted, and the last one drawn (`RenderTrace`); nil in older records.
+        var rowDraws: Int?
+        var lastRow: Int64?
+
+        /// "1,240 row draws, the last #55578", or nil when none were counted.
+        var drawsText: String? {
+            guard let rowDraws else { return nil }
+            let count = rowDraws.formatted(.number.locale(Locale(identifier: "en_US")))
+            let last = (lastRow ?? 0) > 0 ? ", the last #\(lastRow ?? 0)" : ""
+            return "\(count) row \(rowDraws == 1 ? "draw" : "draws")\(last)"
+        }
     }
 
     static let shared = MainThreadWatch(url: MainThreadWatch.file)
@@ -554,6 +566,8 @@ final class MainThreadWatch: @unchecked Sendable {
     private var lastBeat = Date()
     private var lastStep = "launch"
     private var stall: Stall?
+    /// Row draws counted when the current stall began.
+    private var drawsAtStart = 0
     /// Only an app on screen is watched: a suspended app's threads all stop, and its first moments back are no stall.
     private var isActive = true
 
@@ -606,8 +620,12 @@ final class MainThreadWatch: @unchecked Sendable {
         if !isActive {
             lastBeat = now
         } else if gap > Self.threshold {
+            let trace = RenderTrace.snapshot()
+            if stall == nil { drawsAtStart = trace.draws }
             var current = stall ?? Stall(startedAt: lastBeat, afterStep: lastStep, seconds: 0, recovered: false)
             current.seconds = gap
+            current.rowDraws = trace.draws - drawsAtStart
+            current.lastRow = trace.lastRow
             stall = current
             written = current
         }
@@ -619,12 +637,16 @@ final class MainThreadWatch: @unchecked Sendable {
     private func beat() {
         lock.lock()
         lastBeat = Date()
-        let ended = stall.map { Stall(startedAt: $0.startedAt, afterStep: $0.afterStep, seconds: $0.seconds, recovered: true) }
+        let ended = stall.map {
+            Stall(startedAt: $0.startedAt, afterStep: $0.afterStep, seconds: $0.seconds, recovered: true,
+                  rowDraws: $0.rowDraws, lastRow: $0.lastRow)
+        }
         stall = nil
         lock.unlock()
         if let ended {
             write(ended)
-            let line = String(format: "main thread stalled %.1f s after %@", ended.seconds, ended.afterStep)
+            var line = String(format: "main thread stalled %.1f s after %@", ended.seconds, ended.afterStep)
+            if let draws = ended.drawsText { line += " (\(draws))" }
             Task { @MainActor in CrashReporter.shared.trail(line) }
         }
     }

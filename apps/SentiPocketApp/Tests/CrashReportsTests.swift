@@ -144,6 +144,31 @@ final class CrashReportsTests: XCTestCase {
                      "leaving the app, the app switcher (a swipe-away) or an update makes it inactive first")
     }
 
+    /// Build 14's freeze: the stack was inside a row's drawing. The report now says whether the room was redrawing
+    /// itself over and over (thousands of row draws) or stuck on one piece of work (a handful).
+    func test_a_stall_says_how_many_rows_were_drawn_while_it_lasted() {
+        var run = LastRun(build: "2026103016", launchedAt: start, updatedAt: start, isActive: true)
+        run.availableMB = 3_256
+        let stall = MainThreadWatch.Stall(startedAt: start.addingTimeInterval(5), afterStep: "drawerOpened", seconds: 8.5,
+                                          recovered: false, rowDraws: 12_480, lastRow: 55_578)
+        let reason = run.closedReport(system: "iOS 26.5.1", device: "iPhone18,2", stall: stall)?.reason ?? ""
+        XCTAssertTrue(reason.contains("While it was stuck: 12,480 row draws, the last #55578."), reason)
+
+        XCTAssertEqual(MainThreadWatch.Stall(startedAt: start, afterStep: "x", seconds: 2, recovered: true,
+                                             rowDraws: 1, lastRow: 0).drawsText, "1 row draw")
+        let older = MainThreadWatch.Stall(startedAt: start, afterStep: "x", seconds: 2, recovered: true)
+        XCTAssertNil(older.drawsText, "a record from before the count says nothing about draws")
+    }
+
+    func test_the_render_trace_counts_row_draws_and_keeps_the_last() {
+        let before = RenderTrace.snapshot().draws
+        RenderTrace.row(41)
+        RenderTrace.row(42)
+        let after = RenderTrace.snapshot()
+        XCTAssertEqual(after.draws - before, 2)
+        XCTAssertEqual(after.lastRow, 42)
+    }
+
     func test_the_room_message_puts_the_newest_first_with_its_thread_in_a_code_block() {
         var crash = report("c", minutes: 5)
         crash.frames = ["SentiPocketApp +0x1a2b", "SwiftUI +0x55"]
