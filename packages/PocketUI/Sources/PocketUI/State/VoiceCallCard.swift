@@ -1,0 +1,132 @@
+import Foundation
+
+/// The two messages that open and close a voice room in the room, written by the phone and read back to fold the call
+/// into one card. Plain text, so the web and every agent read them as ordinary messages; the mentions in the opening
+/// one are the ring.
+public enum VoiceCallMarkers {
+    static let startPrefix = "📞 Calling "
+    static let endPrefix = "📞 Voice room with "
+
+    /// "📞 Calling @pocket-forge: …" (one agent) or "📞 Calling @a @b: …" (a meeting).
+    public static func start(caller: String, agents: [String], meeting: Bool) -> String {
+        let mentions = agents.map { "@\($0)" }.joined(separator: " ")
+        let what = meeting ? "a voice meeting" : "a voice room with you"
+        return "\(startPrefix)\(mentions): \(caller) started \(what). Answer each of their spoken turns as a short "
+            + "top-level post: 1–3 spoken sentences, no markdown. The phone reads it aloud in your own voice."
+    }
+
+    /// The agents an opening message calls, or nil when the text does not open a call.
+    public static func calledAgents(in text: String) -> [String]? {
+        guard text.hasPrefix(startPrefix), let colon = text.firstIndex(of: ":") else { return nil }
+        let names = text[text.index(text.startIndex, offsetBy: startPrefix.count)..<colon]
+            .split(separator: " ")
+            .compactMap { word -> String? in
+                guard word.hasPrefix("@"), word.count > 1 else { return nil }
+                return String(word.dropFirst()).lowercased()
+            }
+        return names.isEmpty ? nil : names
+    }
+
+    public static func isEnd(_ text: String) -> Bool {
+        text.hasPrefix(endPrefix) && text.contains(" ended")
+    }
+}
+
+/// A voice room shown as one card in the room: who, how long, live or ended, and the whole conversation, which opens
+/// with a tap. Carter: a call should not be all over the room.
+public struct VoiceCallCard: Equatable, Sendable {
+    public struct Turn: Equatable, Identifiable, Sendable {
+        public let id: String
+        public let speaker: String
+        public let isHuman: Bool
+        public let text: String
+        public let at: Date?
+    }
+
+    public let id: String
+    public let agents: [String]
+    public let caller: String
+    public let startedAt: Date?
+    public let endedAt: Date?
+    public let turns: [Turn]
+
+    public var isLive: Bool { endedAt == nil }
+
+    public var title: String {
+        switch agents.count {
+        case 0: return "Voice room"
+        case 1: return "Voice room with \(agents[0])"
+        default: return "Voice meeting with " + agents.dropLast().joined(separator: ", ") + " and " + (agents.last ?? "")
+        }
+    }
+
+    /// A call never stretches past this, so one that was never closed does not swallow the room.
+    public static let longestCall: TimeInterval = 90 * 60
+
+    /// Takes each voice room out of the rows, oldest first: from its opening message to its closing one, the caller's
+    /// spoken turns and the called agents' posts and replies become the card on the opening message. Anything else in
+    /// that stretch stays in the room as it was.
+    public static func fold(_ inputs: [RoomChatMessageInput]) -> (kept: [RoomChatMessageInput], cards: [String: VoiceCallCard]) {
+        var kept: [RoomChatMessageInput] = []
+        kept.reserveCapacity(inputs.count)
+        var cards: [String: VoiceCallCard] = [:]
+        var index = 0
+        while index < inputs.count {
+            let input = inputs[index]
+            guard input.isHuman, input.kind == .message, !input.isInlineReply,
+                  let agents = VoiceCallMarkers.calledAgents(in: input.text) else {
+                kept.append(input)
+                index += 1
+                continue
+            }
+            let caller = input.authorId.lowercased()
+            let limit = input.date.map { $0.addingTimeInterval(longestCall) }
+            var turns: [Turn] = []
+            var others: [RoomChatMessageInput] = []
+            var endedAt: Date?
+            var next = index + 1
+            while next < inputs.count {
+                let candidate = inputs[next]
+                if let limit, let at = candidate.date, at > limit { break }
+                let fromCaller = candidate.isHuman && candidate.authorId.lowercased() == caller
+                if fromCaller, candidate.kind == .message, VoiceCallMarkers.calledAgents(in: candidate.text) != nil {
+                    // A new call from the same person closes this one where it stopped.
+                    endedAt = turns.last?.at ?? input.date
+                    break
+                }
+                if fromCaller, VoiceCallMarkers.isEnd(candidate.text) {
+                    endedAt = candidate.date ?? input.date
+                    next += 1
+                    break
+                }
+                let fromCalled = !candidate.isHuman && agents.contains(candidate.authorId.lowercased())
+                if candidate.kind == .message, (fromCaller && candidate.isVoiceTurn) || fromCalled {
+                    turns.append(Turn(id: candidate.id, speaker: candidate.authorName, isHuman: candidate.isHuman,
+                                      text: candidate.text, at: candidate.date))
+                } else {
+                    others.append(candidate)
+                }
+                next += 1
+            }
+            if endedAt == nil, let limit, let last = turns.last?.at ?? input.date, Date() > limit {
+                endedAt = last
+            }
+            cards[input.id] = VoiceCallCard(id: input.id, agents: agents, caller: input.authorName,
+                                            startedAt: input.date, endedAt: endedAt, turns: turns)
+            kept.append(input)
+            kept.append(contentsOf: others)
+            index = next
+        }
+        return (kept, cards)
+    }
+
+    /// "4 turns · 3 min", or "live · 4 turns".
+    public func summary(now: Date = Date()) -> String {
+        let count = "\(turns.count) \(turns.count == 1 ? "turn" : "turns")"
+        guard let startedAt else { return count }
+        if isLive { return "live · \(count)" }
+        let seconds = max(0, Int((endedAt ?? now).timeIntervalSince(startedAt)))
+        let length = seconds < 60 ? "\(seconds) s" : "\(seconds / 60) min"
+        return "\(count) · \(length)"
+    }
+}

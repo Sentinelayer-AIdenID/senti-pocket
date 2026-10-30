@@ -44,6 +44,8 @@ public struct VoiceRoomState: Equatable, Sendable {
     /// After an answer is read, listening starts again by itself, and a pause ends your turn.
     public var isHandsFree: Bool
     public var notice: String?
+    /// The agents who have answered so far; until one does, the call is ringing.
+    public var joined: [String] = []
 
     public init(
         phase: Phase = .ready,
@@ -75,6 +77,8 @@ public struct VoiceRoomState: Equatable, Sendable {
     }
 
     public var isListening: Bool { phase == .listening }
+
+    public var isRinging: Bool { joined.isEmpty && phase != .ending && phase != .ended }
 
     public var speaker: String? {
         if case .speaking(let speaker) = phase { return speaker }

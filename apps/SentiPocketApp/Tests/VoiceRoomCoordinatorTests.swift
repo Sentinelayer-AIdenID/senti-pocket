@@ -68,6 +68,12 @@ private final class FakePoster: VoiceRoomPosting, @unchecked Sendable {
     private var _turns: [String] = []
     private var _uploads: [(filename: String, markdown: String)] = []
     private var _endings: [(text: String, attachmentId: String?)] = []
+    private var _starts: [String] = []
+    var starts: [String] { lock.withLock { _starts } }
+
+    func postCallStarted(sessionId: String, text: String, clientId: String) async throws {
+        lock.withLock { _starts.append(text) }
+    }
 
     var turns: [String] { lock.withLock { _turns } }
     var uploads: [(filename: String, markdown: String)] { lock.withLock { _uploads } }
@@ -152,6 +158,10 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         XCTAssertEqual(poster.turns, ["@pocket-forge Ship the composer fix tonight"], "your turn mentions the agent")
         XCTAssertEqual(room.state.turns.map(\.isYou), [true])
 
+        await until("rang") { poster.starts.count == 1 }
+        XCTAssertTrue(poster.starts[0].hasPrefix("📞 Calling @pocket-forge:"), "the call rings the agent by mention")
+        XCTAssertEqual(VoiceCallMarkers.calledAgents(in: poster.starts[0]), ["pocket-forge"])
+        XCTAssertTrue(room.state.isRinging, "ringing until the agent answers")
         room.receive([
             message("m1", from: "claude-warden", "Not my call"),
             message("m2", from: "human-mrrcarter", "@pocket-forge Ship the composer fix tonight"),
@@ -159,6 +169,8 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         ])
         await until("speaking") { room.state.speaker == "pocket-forge" }
         XCTAssertEqual(speaker.spoken.map(\.speaker), ["pocket-forge"], "another agent and your own echo are not read")
+        XCTAssertFalse(room.state.isRinging, "the agent joined by answering")
+        XCTAssertEqual(room.state.joined, ["pocket-forge"])
         room.receive([message("m3", from: "pocket-forge", "On it. **Build 09** goes out tonight.")])
         speaker.finish()
         XCTAssertEqual(speaker.spoken.count, 1, "a message seen twice is read once")

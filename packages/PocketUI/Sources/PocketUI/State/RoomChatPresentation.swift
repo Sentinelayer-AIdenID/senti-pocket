@@ -36,6 +36,8 @@ public struct RoomChatMessageInput: Equatable, Sendable {
     public var isInlineReply: Bool { inlineReplyId != nil }
     /// Agents' "working on" lines about this message, oldest first.
     public let work: [RoomChatWorkLine]
+    /// A turn spoken in a voice room (`channel: "voice"`).
+    public let isVoiceTurn: Bool
 
     public init(
         id: String,
@@ -53,7 +55,8 @@ public struct RoomChatMessageInput: Equatable, Sendable {
         attachments: [RoomAttachmentChip] = [],
         views: RoomChatViews? = nil,
         inlineReplyId: String? = nil,
-        work: [RoomChatWorkLine] = []
+        work: [RoomChatWorkLine] = [],
+        isVoiceTurn: Bool = false
     ) {
         self.id = id
         self.sequenceId = sequenceId
@@ -71,6 +74,7 @@ public struct RoomChatMessageInput: Equatable, Sendable {
         self.views = views
         self.inlineReplyId = inlineReplyId
         self.work = work
+        self.isVoiceTurn = isVoiceTurn
     }
 }
 
@@ -224,6 +228,8 @@ public struct RoomChatMessageRow: Equatable, Identifiable, Sendable {
     /// The last message of its author's run (the next row is someone else, a header or nothing): it carries the
     /// action row and the time.
     public var endsRun: Bool = true
+    /// A voice room folded into this row (its start message): the whole call as one card.
+    public var call: VoiceCallCard?
 }
 
 public enum RoomChatRow: Equatable, Identifiable, Sendable {
@@ -556,10 +562,12 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         var lastDay: DateComponents?
         var run: (authorId: String, date: Date)?
         var placedDivider = false
-        let ordered = Self.interleave(
+        // A voice room's turns fold into one card on the message that started it.
+        let folded = VoiceCallCard.fold(Self.interleave(
             messages: messages.sorted { $0.sequenceId < $1.sequenceId },
             replies: replies
-        )
+        ))
+        let ordered = folded.kept
         let parents = Dictionary(
             messages.map { ($0.sequenceId, $0) },
             uniquingKeysWith: { first, _ in first }
@@ -610,7 +618,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 views: input.views,
                 inlineReplyId: input.inlineReplyId,
                 replyContext: input.replyToSequenceId.flatMap { parents[$0] }.map(Self.replyContext(for:)),
-                work: input.isInlineReply ? [] : input.work
+                work: input.isInlineReply ? [] : input.work,
+                call: folded.cards[input.id]
             )))
             if input.kind == .message, let date = input.date {
                 run = (input.authorId, date)

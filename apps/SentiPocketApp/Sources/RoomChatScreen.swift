@@ -201,6 +201,7 @@ struct RoomChatScreen: View {
         let room = VoiceRoomCoordinator(
             sessionId: route.sessionId,
             with: agents,
+            invited: agents.isEmpty ? voicePartners : agents,
             you: handles.first ?? "you",
             ownAuthorIds: Set(handles.map { "human-\($0)" }),
             listener: OnDeviceVoiceListener(),

@@ -47,7 +47,7 @@ public struct VoiceRoomPanel: View {
                 .fill(PocketPalette.listening)
                 .frame(width: 8, height: 8)
                 .accessibilityHidden(true)
-            Text("Voice · \(state.title)")
+            Text(state.isRinging ? "Ringing \(state.title)…" : "Voice · \(state.title)")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(PocketPalette.textPrimary)
                 .lineLimit(1)

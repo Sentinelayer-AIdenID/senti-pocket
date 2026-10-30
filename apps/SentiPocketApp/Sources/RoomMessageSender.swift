@@ -344,12 +344,20 @@ struct VoiceTranscriptAttachment: Equatable, Sendable {
 /// What a voice room writes to the room, as you: your spoken turns (`channel: "voice"`, so the room shows them as
 /// transcript), the transcript as a Markdown file, and the message that closes the call with it attached.
 protocol VoiceRoomPosting: Sendable {
+    /// The message that rings the agents: it mentions them, and opens the call's card in the room.
+    func postCallStarted(sessionId: String, text: String, clientId: String) async throws
     func postVoiceTurn(sessionId: String, text: String, clientId: String) async throws
     func uploadTranscript(sessionId: String, filename: String, markdown: String, clientId: String) async throws -> VoiceTranscriptAttachment
     func postCallEnded(sessionId: String, text: String, transcript: VoiceTranscriptAttachment?, clientId: String) async throws
 }
 
 extension HTTPRoomMessageSender: VoiceRoomPosting {
+    func postCallStarted(sessionId: String, text: String, clientId: String) async throws {
+        _ = try await post(sessionId: sessionId, path: "human-message", idempotencyKey: clientId, body: [
+            "text": text, "clientId": clientId
+        ])
+    }
+
     func postVoiceTurn(sessionId: String, text: String, clientId: String) async throws {
         _ = try await post(sessionId: sessionId, path: "human-message", idempotencyKey: clientId, body: [
             "text": text, "clientId": clientId, "channel": "voice"

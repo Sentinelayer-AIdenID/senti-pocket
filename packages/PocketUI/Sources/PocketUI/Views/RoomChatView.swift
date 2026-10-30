@@ -547,7 +547,13 @@ private struct RoomMessageRowView: View {
             )
             .padding(.vertical, 6)
         case .message:
-            message
+            if let call = row.call {
+                VoiceCallCardView(card: call, ownHandles: ownHandles)
+                    .padding(.vertical, 6)
+                    .accessibilityIdentifier("pocket.room.call.\(row.id)")
+            } else {
+                message
+            }
         }
     }
 
