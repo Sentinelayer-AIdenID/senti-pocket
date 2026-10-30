@@ -435,3 +435,62 @@ extension HTTPRoomMessageSender: VoiceRoomPosting {
         }
     }
 }
+
+/// Editing your own message or reply (web `editSessionMessage`).
+protocol RoomMessageEditing: Sendable {
+    func editMessage(sessionId: String, messageId: String, isReply: Bool, text: String, expectedRevision: Int64) async throws
+}
+
+extension HTTPRoomMessageSender: RoomMessageEditing {
+    /// `PATCH /api/v1/sessions/{id}/messages/{message_id}` (or `/replies/{action_id}`) with the revision being edited,
+    /// so an edit never lands over someone else's, an idempotency key, and the route-bound mutation token.
+    func editMessage(sessionId: String, messageId: String, isReply: Bool, text: String, expectedRevision: Int64) async throws {
+        guard let apiBaseURL,
+              var components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false) else {
+            throw RoomSendError.notConfigured
+        }
+        guard let token = tokenProvider(), !token.isEmpty else { throw RoomSendError.reauthenticationRequired }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        guard !sessionId.isEmpty, sessionId.utf8.count <= 256,
+              let encodedSession = sessionId.addingPercentEncoding(withAllowedCharacters: allowed),
+              let encodedId = messageId.addingPercentEncoding(withAllowedCharacters: allowed), !encodedId.isEmpty,
+              !text.isEmpty, text.unicodeScalars.count <= Self.maximumLength else {
+            throw RoomSendError.rejected
+        }
+        let resource = isReply ? "replies" : "messages"
+        components.percentEncodedPath = "/api/v1/sessions/\(encodedSession)/\(resource)/\(encodedId)"
+        components.query = nil
+        guard let url = components.url else { throw RoomSendError.notConfigured }
+        let key = "edit-" + UUID().uuidString.lowercased()
+        let template = isReply
+            ? "PATCH /api/v1/sessions/{session_id}/replies/{action_id}"
+            : "PATCH /api/v1/sessions/{session_id}/messages/{message_id}"
+        guard let csrf = SessionMutationCSRF.token(bearer: token, sessionId: sessionId, routeTemplate: template,
+                                                   idempotencyKey: key) else {
+            throw RoomSendError.notConfigured
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "PATCH"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue(key, forHTTPHeaderField: "Idempotency-Key")
+        request.setValue("session-mutation", forHTTPHeaderField: "X-Sentinelayer-Session-Mutation")
+        request.setValue(csrf, forHTTPHeaderField: "X-CSRF-Token")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["text": text, "expectedRevision": expectedRevision])
+        let response: URLResponse
+        do {
+            (_, response) = try await urlSession.data(for: request)
+        } catch {
+            throw RoomSendError.retryable(retryAfterSeconds: nil)
+        }
+        switch (response as? HTTPURLResponse)?.statusCode ?? 0 {
+        case 200..<300: return
+        case 401: throw RoomSendError.reauthenticationRequired
+        case 403, 404: throw RoomSendError.notAllowed
+        case 409, 412: throw RoomSendError.rejected   // it changed since: the room has the newer text
+        case 425, 429, 500..<600: throw RoomSendError.retryable(retryAfterSeconds: nil)
+        default: throw RoomSendError.rejected
+        }
+    }
+}

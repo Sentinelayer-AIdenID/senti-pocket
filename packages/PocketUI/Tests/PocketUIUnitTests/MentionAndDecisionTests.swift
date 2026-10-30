@@ -5,6 +5,26 @@ import XCTest
 final class MentionSuggesterTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
 
+    /// Carter (#55006): a mention anywhere in the text, not only at its end.
+    func test_a_mention_typed_in_the_middle_of_the_text_is_offered_and_put_in_place() {
+        let before = "ask to check the build"
+        let typed = "ask @war to check the build"
+        let offset = MentionSuggester.editOffset(from: "ask @wa to check the build", to: typed)
+        XCTAssertEqual(offset, 8, "the edit ended just after the typed letter")
+        XCTAssertEqual(MentionSuggester.activeQuery(in: typed, at: offset)?.query, "war")
+        let warden = MentionCandidate(handle: "claude-warden", displayName: "claude-warden", isHuman: false)
+        XCTAssertEqual(MentionSuggester.apply(warden, to: typed, at: offset), "ask @claude-warden to check the build",
+                       "the name goes where the @ is, keeping one space after it")
+        // Typed one key at a time, as on a keyboard: a space after "ask" (two spaces in a row read the same either
+        // way), then the @, which is where the caret is.
+        let spaced = "ask  to check the build"
+        XCTAssertGreaterThan(MentionSuggester.editOffset(from: before, to: spaced), 3)
+        XCTAssertEqual(MentionSuggester.editOffset(from: spaced, to: "ask @ to check the build"), 5)
+        XCTAssertEqual(MentionSuggester.activeQuery(in: "ask @ to check the build", at: 5)?.query, "", "a bare @ lists everyone")
+        XCTAssertNil(MentionSuggester.activeQuery(in: "mail me@home now", at: 10), "an @ inside a word is not a mention")
+        XCTAssertEqual(MentionSuggester.apply(warden, to: "hi @cl", at: 6), "hi @claude-warden ", "at the end it adds the space")
+    }
+
     func test_the_query_is_the_trailing_at_token_after_whitespace_or_the_start() {
         XCTAssertEqual(MentionSuggester.activeQuery(in: "@cob")?.query, "cob")
         XCTAssertEqual(MentionSuggester.activeQuery(in: "ping @")?.query, "")

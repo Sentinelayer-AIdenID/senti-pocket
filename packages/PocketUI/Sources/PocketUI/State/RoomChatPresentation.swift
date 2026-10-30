@@ -467,6 +467,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     public let title: String
     public let rows: [RoomChatRow]
     public let isLoadingInitial: Bool
+    /// Something the room has to tell you once (an edit that did not save).
+    public let notice: String?
     public let canLoadOlder: Bool
     public let isLoadingOlder: Bool
     /// The rows are a window further back (a jump to an old message): newer messages load as the reader scrolls
@@ -517,6 +519,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         unreadDividerSequence: Int64? = nil,
         unreadCount: Int = 0,
         isLoadingInitial: Bool = false,
+        notice: String? = nil,
         canLoadOlder: Bool = false,
         isLoadingOlder: Bool = false,
         canLoadNewer: Bool = false,
@@ -544,6 +547,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         self.sessionId = sessionId
         self.title = title
         self.isLoadingInitial = isLoadingInitial
+        self.notice = notice
         self.canLoadOlder = canLoadOlder
         self.isLoadingOlder = isLoadingOlder
         self.canLoadNewer = canLoadNewer
@@ -886,7 +890,7 @@ public enum CheckpointText {
 /// One option in a row's long-press menu, and what it asks the room for.
 public struct RoomRowOption: Equatable, Identifiable, Sendable {
     public enum Kind: String, Sendable {
-        case thread, listen, like, dislike, acknowledge, pin, copy
+        case thread, listen, like, dislike, acknowledge, pin, edit, copy
     }
 
     public let kind: Kind
@@ -919,7 +923,8 @@ extension RoomChatMessageRow {
 
     /// The long-press menu, in order. A message's options act on the message. A reply shown in the room opens its
     /// thread, reads itself aloud, reacts to itself and copies itself; it has no pin.
-    public func options(canReply: Bool, canReact: Bool, canPin: Bool, isPinned: Bool, pinsFull: Bool) -> [RoomRowOption] {
+    public func options(canReply: Bool, canReact: Bool, canPin: Bool, isPinned: Bool, pinsFull: Bool,
+                        canEdit: Bool = false) -> [RoomRowOption] {
         var options = [
             RoomRowOption(kind: .thread, title: canReply ? "Reply in thread" : "Open thread",
                           symbol: "bubble.left.and.bubble.right", intent: .openThread(sequenceId: sequenceId)),
@@ -949,6 +954,10 @@ extension RoomChatMessageRow {
                 isEnabled: isPinned || !pinsFull
             ))
         }
+        // Your own words can be edited (the view asks for the new text).
+        if canEdit, isOwn, kind == .message {
+            options.append(RoomRowOption(kind: .edit, title: "Edit", symbol: "pencil", intent: nil))
+        }
         options.append(RoomRowOption(kind: .copy, title: "Copy text", symbol: "doc.on.doc", intent: nil))
         return options
     }
@@ -956,6 +965,12 @@ extension RoomChatMessageRow {
 
 /// What the room screen can ask for.
 public enum RoomChatIntent: Equatable, Sendable {
+    /// Your own message, with new text.
+    case editMessage(sequenceId: Int64, text: String)
+    /// Your own reply (in a thread, or shown in the room), with new text.
+    case editReply(sequenceId: Int64, replyId: String, text: String)
+    /// Close the room's notice.
+    case dismissNotice
     case loadOlder
     /// The reader reached the bottom of a window further back: load the next newer page.
     case loadNewer

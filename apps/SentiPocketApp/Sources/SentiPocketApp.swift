@@ -326,6 +326,13 @@ private struct AuthenticatedRootView: View {
 
     var body: some View {
         ZStack(alignment: .leading) {
+            // The side panel sits underneath; opening it pushes the room aside as a card (Carter #55006).
+            sidePanel
+                .frame(maxWidth: 330)
+                .padding(.trailing, 48)
+                .opacity(drawerOpen ? 1 : 0)
+                .allowsHitTesting(drawerOpen)
+                .accessibilityHidden(!drawerOpen)
             NavigationStack(path: $roomPath) {
                 Group {
                     if let currentRoom {
@@ -348,23 +355,27 @@ private struct AuthenticatedRootView: View {
                     roomScreen(route)
                 }
             }
-            if drawerOpen {
-                Color.black.opacity(0.32)
-                    .ignoresSafeArea()
-                    .onTapGesture { closeDrawer() }
-                    .accessibilityLabel("Close the side panel")
-                    .accessibilityAddTraits(.isButton)
-                    .transition(.opacity)
-                sidePanel
-                    .frame(maxWidth: 330)
-                    .padding(.trailing, 48)
-                    .gesture(DragGesture(minimumDistance: 20).onEnded { value in
-                        if value.translation.width < -60 { closeDrawer() }
-                    })
-                    .transition(.move(edge: .leading))
+            // The room moves right, a little smaller, its corners rounded into a card; a tap or a swipe on it closes.
+            .overlay {
+                if drawerOpen {
+                    Color.black.opacity(0.22)
+                        .onTapGesture { closeDrawer() }
+                        .gesture(DragGesture(minimumDistance: 20).onEnded { value in
+                            if value.translation.width < -40 { closeDrawer() }
+                        })
+                        .accessibilityLabel("Close the side panel")
+                        .accessibilityAddTraits(.isButton)
+                        .transition(.opacity)
+                }
             }
+            .clipShape(RoundedRectangle(cornerRadius: drawerOpen ? 28 : 0, style: .continuous))
+            .shadow(color: .black.opacity(drawerOpen ? 0.28 : 0), radius: 20, x: -6)
+            .scaleEffect(drawerOpen ? 0.9 : 1, anchor: .leading)
+            .offset(x: drawerOpen ? 300 : 0)
+            .ignoresSafeArea(edges: drawerOpen ? .vertical : [])
         }
-        .animation(.spring(response: 0.32, dampingFraction: 0.9), value: drawerOpen)
+        .pocketCanvas()
+        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: drawerOpen)
         // Opening the side panel reads the bell, so its count is never older than the panel.
         .onChange(of: drawerOpen) { open in
             if open { Task { await notifications.refresh(force: true) } }

@@ -100,6 +100,8 @@ final class RoomChatCoordinator: ObservableObject {
     private var hasReadReplies = false
     /// The room on screen sounding and vibrating: your message sent, a message or reply arriving, a mention of you.
     var onFeedback: (@MainActor (RoomFeedbackEvent) -> Void)?
+    /// Something to tell the person once (an edit that did not save).
+    private var notice: String?
     static let viewerReason = "You're a viewer in this room: you can read it, but not post."
     /// How long an accepted message waits for its echo before the pending row is dropped (the next poll still
     /// brings it in).
@@ -296,6 +298,13 @@ final class RoomChatCoordinator: ObservableObject {
             publish()
         case .react(let sequenceId, let type):
             react(type, on: sequenceId)
+        case .editMessage(let sequenceId, let text):
+            editMessage(sequenceId, text: text)
+        case .editReply(let sequenceId, let replyId, let text):
+            editReply(replyId, in: sequenceId, text: text)
+        case .dismissNotice:
+            notice = nil
+            publish()
         case .openThread(let sequenceId):
             openThread(sequenceId)
         case .closeThread:
@@ -1314,6 +1323,64 @@ final class RoomChatCoordinator: ObservableObject {
         onFeedback(mentioned ? .mentioned : .received)
     }
 
+    /// Your own message with new text (web `editSessionMessage`): saved against the revision you saw, then shown at
+    /// once as edited; the room's own edit event agrees with it.
+    private func editMessage(_ sequenceId: Int64, text raw: String) {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let editor = sender as? any RoomMessageEditing,
+              let message = timeline.messages.first(where: { $0.sequenceId == sequenceId }),
+              ownAuthorIds.contains(message.authorId.lowercased()), !text.isEmpty, text != message.text else { return }
+        let sessionId = self.sessionId
+        Task { [weak self] in
+            do {
+                try await editor.editMessage(sessionId: sessionId, messageId: message.id, isReply: false, text: text,
+                                             expectedRevision: message.revision)
+                guard let self else { return }
+                self.timeline.merge([RoomMessage(
+                    id: message.id, sequenceId: message.sequenceId, kind: message.kind, authorId: message.authorId,
+                    authorName: message.authorName, isHuman: message.isHuman, text: text, timestamp: message.timestamp,
+                    replyToSequenceId: message.replyToSequenceId, clientMessageId: message.clientMessageId,
+                    revision: message.revision + 1, isEdited: true, breakout: message.breakout,
+                    attachments: message.attachments, eventType: message.eventType, channel: message.channel,
+                    checkpointSummary: message.checkpointSummary
+                )])
+                self.publish()
+            } catch RoomSendError.reauthenticationRequired {
+                self?.onReauthenticationRequired()
+            } catch {
+                self?.notice = "That edit did not save. The message may have changed since; open it and try again."
+                self?.publish()
+            }
+        }
+    }
+
+    /// Your own reply with new text, in its thread or shown in the room.
+    private func editReply(_ replyId: String, in sequenceId: Int64, text raw: String) {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let editor = sender as? any RoomMessageEditing,
+              let reply = inlineReplies[replyId] ?? threadReplies.first(where: { $0.id == replyId }),
+              ownAuthorIds.contains(reply.authorId.lowercased()), !text.isEmpty, text != reply.text else { return }
+        let sessionId = self.sessionId
+        Task { [weak self] in
+            do {
+                try await editor.editMessage(sessionId: sessionId, messageId: reply.id, isReply: true, text: text,
+                                             expectedRevision: reply.revision)
+                guard let self else { return }
+                let edited = RoomReply(id: reply.id, targetSequenceId: reply.targetSequenceId,
+                                       targetActionId: reply.targetActionId, authorId: reply.authorId, text: text,
+                                       createdAt: reply.createdAt, revision: reply.revision + 1, isEdited: true)
+                if self.inlineReplies[reply.id] != nil { self.inlineReplies[reply.id] = edited }
+                if let index = self.threadReplies.firstIndex(where: { $0.id == reply.id }) { self.threadReplies[index] = edited }
+                self.publish()
+            } catch RoomSendError.reauthenticationRequired {
+                self?.onReauthenticationRequired()
+            } catch {
+                self?.notice = "That edit did not save. The reply may have changed since; open it and try again."
+                self?.publish()
+            }
+        }
+    }
+
     private func pruneComposing() {
         let cutoff = now().addingTimeInterval(-Self.composingLifetime)
         let before = composing.count
@@ -1430,6 +1497,7 @@ final class RoomChatCoordinator: ObservableObject {
             unreadDividerSequence: unread.dividerSequence,
             unreadCount: unread.unreadCount,
             isLoadingInitial: isLoadingInitial,
+            notice: notice,
             canLoadOlder: hasLoadedInitial && timeline.hasMoreOlder,
             isLoadingOlder: isLoadingOlder || isLoadingWindow,
             canLoadNewer: hasLoadedInitial && timeline.hasMoreNewer,

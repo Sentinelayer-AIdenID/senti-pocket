@@ -621,14 +621,25 @@ struct RoomChatScreen: View {
         coordinator.focus(on: sequence)
     }
 
+    /// A link tapped inside the thread sheet: the sheet closes first, then the ticket or message opens over the room
+    /// (Carter: a ticket from a thread did nothing until he left the thread; the room cannot show a second sheet).
+    private func afterClosingThread(_ open: @escaping () -> Void) {
+        guard coordinator.state.thread != nil else {
+            open()
+            return
+        }
+        coordinator.send(.closeThread)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { open() }
+    }
+
     private func handle(_ url: URL) -> OpenURLAction.Result {
         switch RoomLinkRouter.action(for: url, inRoom: route.sessionId) {
         case .focusMessage(let sequence):
-            focus(on: sequence)
+            afterClosingThread { focus(on: sequence) }
             return .handled
         case .openTicket(let ticketId):
             guard ticketsTransport != nil else { return .discarded }
-            linkedTicket = LinkedTicket(id: ticketId)
+            afterClosingThread { linkedTicket = LinkedTicket(id: ticketId) }
             return .handled
         case .openAdmissions:
             guard decidesAdmissions else { return .discarded }
