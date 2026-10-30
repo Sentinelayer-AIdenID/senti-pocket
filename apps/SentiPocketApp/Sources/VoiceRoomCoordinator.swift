@@ -29,6 +29,8 @@ final class VoiceRoomCoordinator: ObservableObject {
     /// Agents added mid-call that have not answered yet, and the notice that says so.
     private var adding: Set<String> = []
     private var addingNotice: String?
+    /// The messages adding agents, still on their way: the call's end waits for them, so no add lands after it.
+    private var pendingAdds: [Task<Void, Never>] = []
     private let ownAuthorIds: Set<String>
     private let listener: any VoiceListening
     private let speaker: any VoiceSpeaking
@@ -251,11 +253,12 @@ final class VoiceRoomCoordinator: ObservableObject {
         addingNotice = notice
         let text = VoiceCallMarkers.added(caller: you, agent: name, joining: others)
         let clientId = "voice-add-\(callId)-\(UUID().uuidString.lowercased())"
-        Task { [weak self] in
+        let posting = Task { [weak self] in
             guard let self else { return }
             // After the message that opened the call, so the card exists before anyone is added to it; a call that
-            // never opened has no one to add.
+            // never opened has no one to add, and one already ending asks no one to say hello (warden, #279).
             var added = await self.startPost?.value == true
+            if self.state.phase == .ending || self.state.phase == .ended { return }
             if added {
                 do {
                     try await self.poster.postCallStarted(sessionId: self.sessionId, text: text, clientId: clientId)
@@ -270,6 +273,7 @@ final class VoiceRoomCoordinator: ObservableObject {
             self.state.notice = "\(name) could not be added. Try again."
             self.addingNotice = nil
         }
+        pendingAdds.append(posting)
     }
 
     // MARK: - Answers
@@ -320,14 +324,17 @@ final class VoiceRoomCoordinator: ObservableObject {
             state.notice = nil
         }
         if !state.joined.contains(where: { $0.lowercased() == lowered }) { state.joined.append(name) }
-        if adding.remove(lowered) != nil, adding.isEmpty, let addingNotice, state.notice == addingNotice {
+        // An agent added mid-call says hello once: it is read whoever has the floor, and it takes neither the floor
+        // nor the turn's timing (warden, #279).
+        let isAddedHello = adding.remove(lowered) != nil
+        if isAddedHello, adding.isEmpty, let addingNotice, state.notice == addingNotice {
             // Everyone added has answered.
             state.notice = nil
             self.addingNotice = nil
         }
         // With more than one agent (a meeting, or several picked or added) the first to answer a turn has the floor;
         // the others are kept, not read (Carter, 10-30).
-        if state.sharesFloor, !isHuman {
+        if state.sharesFloor, !isHuman, !isAddedHello {
             if let holder = floorHolder, holder.id != lowered {
                 state.turns.append(VoiceRoomTurn(id: id, speaker: name, isYou: false, text: text, at: at, isHeld: true))
                 timings.noteHeld()
@@ -336,7 +343,7 @@ final class VoiceRoomCoordinator: ObservableObject {
             }
             floorHolder = (lowered, name)
         }
-        if let since = awaitingAnswerSince {
+        if !isAddedHello, let since = awaitingAnswerSince {
             timings.record(.answer, now().timeIntervalSince(since))
             awaitingAnswerSince = nil
             gapAnswerId = id
@@ -649,6 +656,8 @@ final class VoiceRoomCoordinator: ObservableObject {
     /// never went out (no audio, or the post failed) was never opened, so nothing closes it.
     private func saveRecord(ended: Date) async {
         guard await startPost?.value == true else { return }
+        // An add still on its way lands before the end, never after it.
+        for add in pendingAdds { await add.value }
         // The end carries the start's own id, so the call log pairs them even when two phones call in one room
         // (warden, API #1060).
         let clientId = "voice-end-" + callId
