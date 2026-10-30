@@ -788,11 +788,26 @@ private struct RoomMessageRowView: View {
     /// Edited mark, attachments, who viewed it and the reactions: the same under every kind of message.
     @ViewBuilder
     private var messageFooter: some View {
-        if row.repeats > 1 {
-            Label("\(row.repeats) times, only the numbers changed", systemImage: "square.stack")
-                .font(.caption2)
-                .foregroundStyle(PocketPalette.textSecondary)
-                .accessibilityIdentifier("pocket.room.repeats")
+        if row.repeats > 1, let stack = row.repeatStack {
+            Button {
+                send(.toggleRepeats(stack: stack))
+            } label: {
+                Label("\(row.repeats) times, only the numbers changed · Show each", systemImage: "square.stack")
+                    .font(.caption2)
+                    .foregroundStyle(PocketPalette.textSecondary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("pocket.room.repeats")
+        } else if row.foldsRepeats, let stack = row.repeatStack {
+            Button {
+                send(.toggleRepeats(stack: stack))
+            } label: {
+                Label("Fold these alike notices into one", systemImage: "square.stack")
+                    .font(.caption2)
+                    .foregroundStyle(PocketPalette.textSecondary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("pocket.room.repeats.fold")
         }
         if !row.work.isEmpty {
             RoomWorkLines(lines: row.work)
