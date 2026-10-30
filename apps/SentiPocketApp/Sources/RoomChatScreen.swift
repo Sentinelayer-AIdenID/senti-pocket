@@ -55,6 +55,9 @@ struct RoomChatScreen: View {
     @State private var openingAttachment = false
     @State private var linkedTicket: LinkedTicket?
     @State private var appliedRouteLinks = false
+    /// The times the app closed unexpectedly, offered once each to send to this room.
+    @ObservedObject private var crashes = CrashReporter.shared
+    @State private var offersCrashReports = false
     private let route: RoomRoute
     private let ticketsTransport: (any RoomTicketsTransport)?
     private let admissionsTransport: (any RoomAdmissionsTransport)?
@@ -218,10 +221,12 @@ struct RoomChatScreen: View {
         coordinator.onNewReplies = { [weak room] replies in room?.receive(replies: replies) }
         coordinator.readsRepliesOften = true
         voiceRoom = room
+        CrashReporter.shared.note(agents.isEmpty ? "voice meeting began" : "voice call began")
         room.begin()
     }
 
     private func endVoiceRoom() {
+        CrashReporter.shared.note("voice room ended")
         coordinator.onLiveMessages = nil
         coordinator.onNewReplies = nil
         coordinator.readsRepliesOften = false
@@ -266,6 +271,7 @@ struct RoomChatScreen: View {
                 canSearch: search != nil
             )
         ) { intent in
+            CrashReporter.shared.note(intent)
             if case .openBreakout(let childSessionId) = intent {
                 openBreakout(childSessionId)
             } else if case .openTickets(let filing) = intent {
@@ -300,6 +306,7 @@ struct RoomChatScreen: View {
             }
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button {
+                    CrashReporter.shared.note("flight record opened")
                     flight.setAgents(flightAgents)
                     showsFlight = true
                 } label: {
@@ -441,7 +448,7 @@ struct RoomChatScreen: View {
             Button("Everyone (a meeting)") { startVoiceRoom(with: []) }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("You talk; they answer in the room and the phone reads each answer in that agent's voice. Hanging up saves the transcript to the room.")
+            Text("You talk; they answer in the room and the phone reads each answer in that agent's voice. The whole conversation stays in the room as the call's card.")
         }
         .onDisappear {
             if let voiceRoom { Task { await voiceRoom.hangUp() } }
@@ -498,6 +505,7 @@ struct RoomChatScreen: View {
         // Room-wide actions sit under the room's title, so the toolbar keeps its width.
         .toolbarTitleMenu {
             Button {
+                CrashReporter.shared.note("artifacts opened")
                 showsArtifacts = true
                 artifacts.open()
             } label: {
@@ -542,6 +550,23 @@ struct RoomChatScreen: View {
         } message: {
             Text(listenProblem ?? "")
         }
+        .alert("Pocket closed unexpectedly", isPresented: $offersCrashReports) {
+            Button("Send to this room") {
+                let reports = crashes.unhandled
+                coordinator.send(.sendMessage(text: CrashReportText.message(reports)))
+                crashes.markHandled(reports)
+            }
+            Button("Not now", role: .cancel) { crashes.markHandled(crashes.unhandled) }
+        } message: {
+            Text("Send what the phone recorded to this room so it can be fixed? It has where the app stopped and your last few taps, never your messages.")
+        }
+        .task {
+            // A moment after the room opens, so iOS can hand over its own crash records first and both go together.
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            offerCrashReports()
+        }
+        .onChange(of: crashes.unhandled.count) { _ in offerCrashReports() }
+        .onChange(of: coordinator.state.composer.canPost) { _ in offerCrashReports() }
         .sheet(item: $linkedTicket) { linked in
             if let ticketsTransport {
                 RoomTicketLinkScreen(
@@ -562,10 +587,12 @@ struct RoomChatScreen: View {
         }
         .environment(\.openURL, linkAction)
         .onAppear {
+            CrashReporter.shared.note("room opened")
             coordinator.resume()
             applyRouteLinksOnce()
         }
         .onDisappear {
+            CrashReporter.shared.note("room closed")
             coordinator.pause()
             // Leaving the room stops what it was reading aloud.
             reader.stop()
@@ -577,6 +604,12 @@ struct RoomChatScreen: View {
             default: break
             }
         }
+    }
+
+    /// Offers the unsent crash reports where they can be posted: in a room you can write in, with nothing else asked.
+    private func offerCrashReports() {
+        guard !crashes.unhandled.isEmpty, coordinator.state.composer.canPost, voiceRoom == nil else { return }
+        offersCrashReports = true
     }
 
     /// A link that opened this room may also name a ticket or the agent requests: open those once, over the room.

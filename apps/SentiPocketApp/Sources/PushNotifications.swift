@@ -186,7 +186,14 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
 final class PocketAppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         UNUserNotificationCenter.current().delegate = PushRegistrar.shared
+        // First, so the last run's end and iOS's crash records are read before anything else can fail.
+        CrashReporter.shared.start()
         return true
+    }
+
+    /// A quit is not a crash: written before the app ends.
+    func applicationWillTerminate(_ application: UIApplication) {
+        CrashReporter.shared.activeChanged(false)
     }
 
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
