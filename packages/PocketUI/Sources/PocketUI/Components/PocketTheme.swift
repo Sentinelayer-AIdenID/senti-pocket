@@ -96,7 +96,8 @@ extension View {
         modifier(PocketCardModifier())
     }
 
-    func pocketCanvas() -> some View {
+    /// The theme's page colour behind a view, edge to edge.
+    public func pocketCanvas() -> some View {
         background(PocketPalette.canvas.ignoresSafeArea())
     }
 }
