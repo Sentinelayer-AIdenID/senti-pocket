@@ -413,8 +413,14 @@ final class CrashReporter: NSObject, ObservableObject, MXMetricManagerSubscriber
     /// A step taken in the app, by name only, for the next report.
     func note(_ step: String) {
         MainThreadWatch.shared.note(step)
+        trail(step)
+    }
+
+    /// A line in the trail that is not a step (a stall the app came back from), so the next stall still names the
+    /// step it came after, not the stall before it.
+    func trail(_ line: String) {
         guard var run else { return }
-        run.note(step, at: Date())
+        run.note(line, at: Date())
         self.run = run
         write()
     }
@@ -605,7 +611,7 @@ final class MainThreadWatch: @unchecked Sendable {
         if let ended {
             write(ended)
             let line = String(format: "main thread stalled %.1f s after %@", ended.seconds, ended.afterStep)
-            Task { @MainActor in CrashReporter.shared.note(line) }
+            Task { @MainActor in CrashReporter.shared.trail(line) }
         }
     }
 
