@@ -298,7 +298,9 @@ struct RoomChatScreen: View {
         return nil
     }
 
-    private func startVoiceRoom(with agents: [String], answering: Bool = false) {
+    /// `answering` is the agent's call you picked up, if this is one: it does not ring, and its reason and brief
+    /// ground the quick answers.
+    private func startVoiceRoom(with agents: [String], answering call: RoomCallDesk.Call? = nil) {
         guard voiceRoom == nil, let voicePoster else { return }
         reader.stop()
         let handles = coordinator.state.ownMentionHandles.filter { $0 != "all" }.sorted()
@@ -325,6 +327,8 @@ struct RoomChatScreen: View {
             poster: voicePoster,
             voiceLine: voicePoster as? any VoiceLining,
             endpointer: voicePoster as? any VoiceEndpointing,
+            ringCallId: call?.doorbell.callId,
+            about: call?.details?.reason,
             onEnded: { endVoiceRoom() },
             onRecordFailed: { [weak coordinator] failure in coordinator?.show(notice: failure) }
         )
@@ -347,7 +351,7 @@ struct RoomChatScreen: View {
         heard.room = room
         voiceRoom = room
         CrashReporter.shared.note(agents.isEmpty ? "voice meeting began" : "voice call began")
-        room.begin(rings: !answering)
+        room.begin(rings: call == nil)
     }
 
     /// Something covers the room: a sheet or the side panel (from the app), or this room's call.
@@ -381,7 +385,7 @@ struct RoomChatScreen: View {
               let call = callDesk.takeWaiting(for: route.sessionId) else { return }
         answeredCall = call
         CrashReporter.shared.note("call answered")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { startVoiceRoom(with: [call.partner], answering: true) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { startVoiceRoom(with: [call.partner], answering: call) }
     }
 
     /// Contributors and above file and change tickets (the API's `min_role="contributor"`). An unknown role offers

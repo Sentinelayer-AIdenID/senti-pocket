@@ -26,16 +26,16 @@ final class VoiceLineEventReaderTests: XCTestCase {
 private final class FakeVoiceLine: VoiceLining, @unchecked Sendable {
     private let lock = NSLock()
     private var answers: [Result<[String], VoiceLineError>]
-    private(set) var asks: [(agentId: String?, text: String, history: [VoiceLineHistory])] = []
+    private(set) var asks: [(agentId: String?, text: String, ringCallId: String?, history: [VoiceLineHistory])] = []
 
     init(_ answers: [Result<[String], VoiceLineError>]) { self.answers = answers }
 
     var askCount: Int { lock.withLock { asks.count } }
 
-    func voiceLine(sessionId: String, agentId: String?, text: String, callId: String,
+    func voiceLine(sessionId: String, agentId: String?, text: String, callId: String, ringCallId: String?,
                    history: [VoiceLineHistory]) -> AsyncThrowingStream<VoiceLineEvent, Error> {
         let answer: Result<[String], VoiceLineError> = lock.withLock {
-            asks.append((agentId, text, history))
+            asks.append((agentId, text, ringCallId, history))
             return answers.isEmpty ? .failure(.failed) : answers.removeFirst()
         }
         return AsyncThrowingStream { continuation in
@@ -103,11 +103,12 @@ final class VoiceLineCallTests: XCTestCase {
         XCTFail("timed out waiting for: \(what)")
     }
 
-    private func call(_ line: FakeVoiceLine, listener: LineListener, speaker: LineSpeaker, poster: LinePoster) -> VoiceRoomCoordinator {
+    private func call(_ line: FakeVoiceLine, listener: LineListener, speaker: LineSpeaker, poster: LinePoster,
+                      ringCallId: String? = nil, about: String? = nil) -> VoiceRoomCoordinator {
         let room = VoiceRoomCoordinator(sessionId: "room_line", with: ["pocket-forge"], you: "mrrcarter",
                                         ownAuthorIds: ["human-mrrcarter"], listener: listener, speaker: speaker,
-                                        audio: LineAudio(), poster: poster, voiceLine: line,
-                                        sleep: { _ in try? await Task.sleep(nanoseconds: 1_000_000) })
+                                        audio: LineAudio(), poster: poster, voiceLine: line, ringCallId: ringCallId,
+                                        about: about, sleep: { _ in try? await Task.sleep(nanoseconds: 1_000_000) })
         room.send(.setHandsFree(false))
         return room
     }
@@ -129,6 +130,7 @@ final class VoiceLineCallTests: XCTestCase {
         await until("the first sentence is heard") { speaker.spoken.count == 1 }
         XCTAssertEqual(line.asks.first?.agentId, "pocket-forge")
         XCTAssertEqual(line.asks.first?.text, "What's new in the build?")
+        XCTAssertNil(line.asks.first?.ringCallId, "a call you started is nobody's ring")
         XCTAssertEqual(speaker.spoken[0].speaker, "pocket-forge", "in the agent's own voice")
         XCTAssertEqual(room.state.speaker, "pocket-forge (voice)", "shown as the voice line")
         speaker.finish()
@@ -140,6 +142,25 @@ final class VoiceLineCallTests: XCTestCase {
 
         await room.hangUp()
         XCTAssertTrue(poster.uploads.first?.contains("Turns marked (voice) are the fast voice line") == true)
+    }
+
+    /// Carter (10-30): "send an agent with your intentions and everything that you need, and the agent will call me
+    /// and talk to me". Answering an agent's call, the quick answers are asked with that call, whose reason and brief
+    /// the server reads; the screen says what it is about until someone speaks.
+    func test_answering_an_agents_call_asks_the_voice_line_with_that_call() async {
+        let line = FakeVoiceLine([.success(["I need your yes on the release."])])
+        let listener = LineListener(), speaker = LineSpeaker(), poster = LinePoster()
+        let room = call(line, listener: listener, speaker: speaker, poster: poster,
+                        ringCallId: "8c2f6c4e-2d7a-4a8e-9a43-0f1d2b3c4d5e", about: "The release needs your yes")
+        XCTAssertEqual(room.state.about, "The release needs your yes")
+        let blank = VoiceRoomCoordinator(sessionId: "r", with: ["a"], you: "me", ownAuthorIds: [], listener: LineListener(),
+                                         speaker: LineSpeaker(), audio: LineAudio(), poster: LinePoster(), about: "   ")
+        XCTAssertNil(blank.state.about, "a blank reason says nothing")
+        room.begin(rings: false)
+        await turn(room, listener, "What do you need?")
+        await until("asked") { line.askCount == 1 }
+        XCTAssertEqual(line.asks.first?.ringCallId, "8c2f6c4e-2d7a-4a8e-9a43-0f1d2b3c4d5e")
+        await room.hangUp()
     }
 
     func test_without_a_voice_line_on_the_server_the_call_stops_asking() async {
@@ -165,7 +186,7 @@ private final class StreamingVoiceLine: VoiceLining, @unchecked Sendable {
     private var _stopped = false
     var stopped: Bool { lock.withLock { _stopped } }
 
-    func voiceLine(sessionId: String, agentId: String?, text: String, callId: String,
+    func voiceLine(sessionId: String, agentId: String?, text: String, callId: String, ringCallId: String?,
                    history: [VoiceLineHistory]) -> AsyncThrowingStream<VoiceLineEvent, Error> {
         AsyncThrowingStream { continuation in
             continuation.yield(.sentence("The room is busy right now."))
@@ -315,5 +336,106 @@ final class VoiceEndpointingTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 700_000_000)
         XCTAssertEqual(endpointer.asked.count, 1, "asked once, then never again in this call")
         await room.hangUp()
+    }
+}
+
+/// Answers each voice turn with the next status in line, and keeps every body it was sent.
+private final class VoiceTurnURLProtocol: URLProtocol {
+    private static let lock = NSLock()
+    private static var statuses: [Int] = []
+    private static var bodies: [[String: Any]] = []
+
+    static func reset(statuses: [Int]) {
+        lock.withLock {
+            self.statuses = statuses
+            bodies = []
+        }
+    }
+
+    static func sent() -> [[String: Any]] { lock.withLock { bodies } }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        var data = request.httpBody ?? Data()
+        if data.isEmpty, let stream = request.httpBodyStream {
+            stream.open()
+            var buffer = [UInt8](repeating: 0, count: 65_536)
+            while stream.hasBytesAvailable {
+                let read = stream.read(&buffer, maxLength: buffer.count)
+                if read <= 0 { break }
+                data.append(buffer, count: read)
+            }
+            stream.close()
+        }
+        let status: Int = Self.lock.withLock {
+            Self.bodies.append((try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:])
+            return Self.statuses.isEmpty ? 200 : Self.statuses.removeFirst()
+        }
+        let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil,
+                                       headerFields: ["Content-Type": "text/event-stream"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        let events = status == 200
+            ? "event: sentence\ndata: {\"text\": \"Yes.\"}\n\nevent: done\ndata: {\"speaker\": \"pocket-forge (voice)\", \"chars\": 4}\n\n"
+            : "{}"
+        client?.urlProtocol(self, didLoad: Data(events.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+/// The voice turn as the server is asked it.
+final class VoiceLineRequestTests: XCTestCase {
+    private func sender() -> HTTPRoomMessageSender {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [VoiceTurnURLProtocol.self]
+        return HTTPRoomMessageSender(apiBaseURL: URL(string: "https://api.example.invalid"),
+                                     urlSession: URLSession(configuration: configuration),
+                                     tokenProvider: { "test-bearer-token" })
+    }
+
+    private func sentences(ringCallId: String?) async throws -> [String] {
+        var heard: [String] = []
+        let stream = sender().voiceLine(sessionId: "room-1", agentId: "Pocket-Forge", text: "Status?",
+                                        callId: "4f1c2d3e-5a6b-4c7d-8e9f-0a1b2c3d4e5f", ringCallId: ringCallId, history: [])
+        for try await event in stream {
+            if case .sentence(let text) = event { heard.append(text) }
+        }
+        return heard
+    }
+
+    func test_an_answered_call_rides_along_and_a_call_you_started_sends_none() async throws {
+        VoiceTurnURLProtocol.reset(statuses: [200])
+        let heard = try await sentences(ringCallId: "ring-1")
+        XCTAssertEqual(heard, ["Yes."])
+        XCTAssertEqual(VoiceTurnURLProtocol.sent().first?["ringCallId"] as? String, "ring-1")
+        XCTAssertEqual(VoiceTurnURLProtocol.sent().first?["agentId"] as? String, "pocket-forge")
+
+        VoiceTurnURLProtocol.reset(statuses: [200])
+        _ = try await sentences(ringCallId: nil)
+        XCTAssertNil(VoiceTurnURLProtocol.sent().first?["ringCallId"], "no key at all, so an older server takes it")
+    }
+
+    /// A server from before call briefs refuses the field it does not know (422): the turn is asked again without
+    /// it, once, and still answered.
+    func test_a_server_without_call_briefs_is_asked_again_without_the_call() async throws {
+        VoiceTurnURLProtocol.reset(statuses: [422, 200])
+        let heard = try await sentences(ringCallId: "ring-1")
+        XCTAssertEqual(heard, ["Yes."])
+        let sent = VoiceTurnURLProtocol.sent()
+        XCTAssertEqual(sent.count, 2)
+        XCTAssertEqual(sent.first?["ringCallId"] as? String, "ring-1")
+        XCTAssertNil(sent.last?["ringCallId"])
+        XCTAssertEqual(sent.last?["text"] as? String, "Status?")
+
+        VoiceTurnURLProtocol.reset(statuses: [422, 200])
+        do {
+            _ = try await sentences(ringCallId: nil)
+            XCTFail("a refused turn without the call is not asked again")
+        } catch {
+            XCTAssertEqual(VoiceTurnURLProtocol.sent().count, 1)
+        }
     }
 }
