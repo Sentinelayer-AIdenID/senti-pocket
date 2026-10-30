@@ -33,6 +33,9 @@ struct RoomChatScreen: View {
     /// Who is working on what (the boxes' flight records), read only while the panel is open.
     @StateObject private var flight: FlightRecordCoordinator
     @State private var showsFlight = false
+    /// The room's artifacts (PRs, tickets, files, links, code), read on their own when the panel opens.
+    @StateObject private var artifacts: RoomArtifactsCoordinator
+    @State private var showsArtifacts = false
     /// A voice conversation in this room, while one is open.
     @State private var voiceRoom: VoiceRoomCoordinator?
     @State private var choosesVoicePartner = false
@@ -118,6 +121,7 @@ struct RoomChatScreen: View {
             directory: ticketExtras,
             onReauthenticationRequired: onReauthenticationRequired
         ))
+        _artifacts = StateObject(wrappedValue: RoomArtifactsCoordinator(sessionId: route.sessionId, transport: transport))
         _flight = StateObject(wrappedValue: FlightRecordCoordinator(
             sessionId: route.sessionId,
             mint: HTTPMintClient(tokenProvider: { SessionTokenStore.load() })
@@ -361,6 +365,44 @@ struct RoomChatScreen: View {
             }
         }
         .animation(.spring(response: 0.32, dampingFraction: 0.9), value: showsFlight)
+        .overlay {
+            if showsArtifacts {
+                ZStack(alignment: .trailing) {
+                    Color.black.opacity(0.32)
+                        .ignoresSafeArea()
+                        .onTapGesture { showsArtifacts = false }
+                        .accessibilityLabel("Close artifacts")
+                        .accessibilityAddTraits(.isButton)
+                    RoomArtifactsPanel(
+                        artifacts: artifacts.artifacts,
+                        isLoading: artifacts.isLoading,
+                        messagesRead: artifacts.messagesRead,
+                        onClose: { showsArtifacts = false },
+                        onOpenMessage: { sequence in
+                            showsArtifacts = false
+                            focus(on: sequence)
+                        },
+                        onOpen: { url in
+                            showsArtifacts = false
+                            // Senti links (a ticket, a message) stay in the app; anything else opens in the browser.
+                            if case .openInBrowser(let absolute) = RoomLinkRouter.action(for: url, inRoom: route.sessionId) {
+                                openExternalURL(absolute)
+                            } else {
+                                _ = handle(url)
+                            }
+                        }
+                    )
+                    .frame(maxWidth: 380)
+                    .padding(.leading, 40)
+                    .gesture(DragGesture(minimumDistance: 20).onEnded { value in
+                        if value.translation.width > 60 { showsArtifacts = false }
+                    })
+                    .transition(.move(edge: .trailing))
+                }
+                .onDisappear { artifacts.close() }
+            }
+        }
+        .animation(.spring(response: 0.32, dampingFraction: 0.9), value: showsArtifacts)
         .overlay(alignment: .bottom) {
             if let voiceRoom {
                 VoiceRoomHost(room: voiceRoom)
@@ -455,6 +497,12 @@ struct RoomChatScreen: View {
         }
         // Room-wide actions sit under the room's title, so the toolbar keeps its width.
         .toolbarTitleMenu {
+            Button {
+                showsArtifacts = true
+                artifacts.open()
+            } label: {
+                Label("Artifacts", systemImage: "square.stack.3d.up")
+            }
             if search != nil {
                 Button {
                     showsSearch = true
