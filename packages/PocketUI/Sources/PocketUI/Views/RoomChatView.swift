@@ -83,11 +83,11 @@ public struct RoomChatView: View {
                 composer: state.composer,
                 mentionCandidates: state.mentionCandidates,
                 restored: restoredDraft,
-                draftKey: RoomComposerDraft.savedKey(sessionId: state.sessionId),
                 actions: composerActions,
                 replying: replyTarget,
                 onCancelReply: { replyTarget = nil },
-                onIntent: send
+                onIntent: send,
+                draftKey: RoomComposerDraft.savedKey(sessionId: state.sessionId)
             ) { text in
                 if let target = replyTarget {
                     send(target.replyIntent(text))
