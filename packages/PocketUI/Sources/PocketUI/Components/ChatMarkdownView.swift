@@ -3,11 +3,16 @@ import SwiftUI
 
 /// Renders a chat or ticket body as the web does: block layout from `ChatMarkdown`, inline styling from
 /// `ChatInlineMarkdown`. Parsed blocks are cached by text, so scrolling a long room does not re-parse rows.
-struct ChatMarkdownView: View {
+public struct ChatMarkdownView: View {
     let text: String
     var ownHandles: Set<String> = []
 
-    var body: some View {
+    public init(text: String, ownHandles: Set<String> = []) {
+        self.text = text
+        self.ownHandles = ownHandles
+    }
+
+    public var body: some View {
         ChatMarkdownBlocksView(blocks: ChatMarkdownCache.blocks(for: text), ownHandles: ownHandles)
     }
 }

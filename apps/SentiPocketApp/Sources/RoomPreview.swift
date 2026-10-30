@@ -280,7 +280,21 @@ private struct RoomPreviewTickets: RoomTicketsTransport {
 }
 
 /// Accepts every message after a short delay, so the composer's pending states can be seen in the preview.
-private struct RoomPreviewSender: RoomMessageSending, RoomActionSending {
+private struct RoomPreviewSender: RoomMessageSending, RoomActionSending, RoomSummaryGenerating {
+    func generateSummary(sessionId: String) async throws -> RoomSummary {
+        try? await Task.sleep(nanoseconds: 1_200_000_000)
+        let text = [
+            "The team is fixing two findings in the onboarding flow.",
+            "",
+            "- **Paste validation** is fixed and build 319 is green; Alex asked for a look on device.",
+            "- **The retry counter** is next, after finding 1 ships.",
+            "- A breakout is ordering the fixes; 2 of 3 have acknowledged."
+        ].joined(separator: "\n")
+        let body: [String: Any] = ["ok": true, "summary": ["title": "Design review: onboarding fixes", "summary": text, "model": "preview"]]
+        guard let summary = RoomSummary(json: try JSONSerialization.data(withJSONObject: body)) else { throw RoomSendError.rejected }
+        return summary
+    }
+
     func sendHumanMessage(sessionId: String, text: String, clientId: String) async throws {
         try? await Task.sleep(nanoseconds: 600_000_000)
     }

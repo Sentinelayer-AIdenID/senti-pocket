@@ -323,7 +323,7 @@ final class RoomChatCoordinator: ObservableObject {
             guard focusTarget != nil else { return }
             focusTarget = nil
             publish()
-        case .openBreakout, .openAttachment, .readAloud, .stopReadingAloud, .openTickets, .openSearch:
+        case .openBreakout, .openAttachment, .readAloud, .stopReadingAloud, .openTickets, .openSearch, .peopleOpened:
             break   // the room screen navigates or presents
         case .setPinned(let sequenceId, let isPinned):
             setPinned(isPinned, on: sequenceId)

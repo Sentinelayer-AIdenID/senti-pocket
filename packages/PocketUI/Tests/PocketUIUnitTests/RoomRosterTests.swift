@@ -1,0 +1,56 @@
+import Foundation
+import XCTest
+@testable import PocketUI
+
+final class RoomRosterTests: XCTestCase {
+    private let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+    private func post(_ id: String, _ minutesAgo: Double, human: Bool = false) -> RoomRoster.Post {
+        RoomRoster.Post(authorId: id, name: id, isHuman: human, at: now.addingTimeInterval(-minutesAgo * 60))
+    }
+
+    /// Carter (10-30): everyone who came, not only who is here, with green, gray or red, and what each one is.
+    func test_everyone_who_came_is_listed_with_how_they_are() throws {
+        let roster = RoomRoster.build(
+            posts: [
+                post("human-mrrcarter", 2, human: true), post("human-mrrcarter", 90, human: true),
+                post("claude-warden", 30), post("old-agent", 300), post("respawn-orchestrator", 1),
+                post("ds-old-box", 200), post("ds-live-box", 3)
+            ],
+            present: [
+                RoomChatPresence.Person(id: "human-mrrcarter", name: "mrrcarter", isHuman: true, isIdle: false),
+                RoomChatPresence.Person(id: "pocket-forge", name: "pocket-forge", isHuman: false, isIdle: true)
+            ],
+            runningBoxes: [RoomRoster.Box(name: "ds-live-box", model: "deepseek-v4-pro", effort: "high", phase: "working",
+                                          job: "Fix the bell", lastActivity: now.addingTimeInterval(-60))],
+            endedBoxes: ["ds-old-box"],
+            now: now
+        )
+        let byId = Dictionary(uniqueKeysWithValues: roster.members.map { ($0.id, $0) })
+        XCTAssertNil(byId["respawn-orchestrator"], "the room's own services are not people in it")
+        XCTAssertEqual(byId["human-mrrcarter"]?.status, .here)
+        XCTAssertEqual(byId["human-mrrcarter"]?.posts, 2)
+        XCTAssertEqual(byId["human-mrrcarter"]?.timeHere, 88 * 60, "from the first post seen to the last")
+        XCTAssertEqual(byId["pocket-forge"]?.status, .idle, "here but idle")
+        XCTAssertEqual(byId["claude-warden"]?.status, .idle, "heard from within the hour")
+        XCTAssertEqual(byId["old-agent"]?.status, .gone)
+        XCTAssertEqual(byId["ds-old-box"]?.status, .ended)
+        XCTAssertEqual(byId["ds-old-box"]?.kind, .box)
+        let live = try XCTUnwrap(byId["ds-live-box"])
+        XCTAssertEqual(live.status, .here, "active a minute ago")
+        XCTAssertEqual(live.model, "deepseek-v4-pro")
+        XCTAssertEqual(live.effort, "high")
+        XCTAssertEqual(live.job, "Fix the bell")
+        XCTAssertEqual(roster.members.map(\.status), roster.members.map(\.status).sorted(), "here first, then idle, gone, ended")
+    }
+
+    func test_a_box_that_ended_but_runs_again_under_its_name_is_listed_once_as_running() {
+        let roster = RoomRoster.build(
+            posts: [], present: [],
+            runningBoxes: [RoomRoster.Box(name: "ds-web", model: "m", phase: "ready", lastActivity: nil)],
+            endedBoxes: ["ds-web"], now: now
+        )
+        XCTAssertEqual(roster.members.count, 1)
+        XCTAssertEqual(roster.members.first?.status, .idle, "running, quiet for now")
+    }
+}
