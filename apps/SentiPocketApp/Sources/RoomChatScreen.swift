@@ -368,7 +368,7 @@ struct RoomChatScreen: View {
             ),
             roster: roster
         ) { intent in
-            CrashReporter.shared.note(intent)
+            CrashReporter.shared.note(intent, rows: coordinator.state.rows.count)
             if case .openBreakout(let childSessionId) = intent {
                 openBreakout(childSessionId)
             } else if case .openTickets(let filing) = intent {

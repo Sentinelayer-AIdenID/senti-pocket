@@ -305,12 +305,11 @@ public struct RoomChatView: View {
                 }
             }
             .onChange(of: state.pending.count) { count in
-                // Sending always brings you to the bottom, where your message appears.
+                // Sending always brings you to the bottom, where your message appears. At once, not animated: an
+                // animated scroll from far up lays out every row on the way while the message and the keyboard move.
                 if count > 0 {
                     heldAnchor = nil
-                    withAnimation(.easeOut(duration: 0.2)) {
-                        proxy.scrollTo(Self.bottomId, anchor: .bottom)
-                    }
+                    proxy.scrollTo(Self.bottomId, anchor: .bottom)
                 }
             }
             .onChange(of: state.firstMessageId) { _ in
@@ -1186,17 +1185,20 @@ struct RoomAvatar: View {
 }
 
 /// Empties a composer after a send. A field that is still editing (dictation, or an autocorrection or a predictive word
-/// in progress) writes its pending text back just after it is emptied, so a sent message stayed in the box. Editing
-/// ends first, the box is emptied again on the next turn of the run loop, and the keyboard comes back if it was up.
+/// in progress) can write its pending text back just after it is emptied, so a sent message stayed in the box: it is
+/// emptied again on the next turn of the run loop, and a moment later if what came back is the sent text itself.
+///
+/// The keyboard stays where it is. It used to go down and come straight back on every send, which moved the whole room
+/// twice under the keyboard while the new message arrived; both of Carter's freezes on 10-30 came right after a send,
+/// on a phone (the simulator's keyboard never moves), so the bounce is gone.
 @MainActor
-private func emptyComposer(_ draft: Binding<String>, editing: FocusState<Bool>.Binding) {
-    let wasEditing = editing.wrappedValue
+private func emptyComposer(_ draft: Binding<String>, sent: String) {
     draft.wrappedValue = ""
-    editing.wrappedValue = false
     DispatchQueue.main.async {
         draft.wrappedValue = ""
-        if wasEditing {
-            DispatchQueue.main.async { editing.wrappedValue = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            let back = draft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !back.isEmpty, sent.contains(back) { draft.wrappedValue = "" }
         }
     }
 }
@@ -1536,7 +1538,7 @@ private struct RoomThreadSheet: View {
                             } else {
                                 send(.sendReply(sequenceId: thread.parent.sequenceId, text: text))
                             }
-                            emptyComposer($draft, editing: $isReplying)
+                            emptyComposer($draft, sent: typed)
                             answering = nil
                         } label: {
                             Image(systemName: "arrow.up.circle.fill").font(.system(size: 32))
@@ -1903,7 +1905,7 @@ private struct RoomComposerBar: View {
                     send(ticketMode ? RoomComposerDraft.ticketRequest(text) : text)
                     ticketMode = false
                     pasted = []
-                    emptyComposer($draft, editing: $isEditing)
+                    emptyComposer($draft, sent: text)
                 } label: {
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.system(size: 32))
