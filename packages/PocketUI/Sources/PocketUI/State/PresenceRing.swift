@@ -25,6 +25,16 @@ public enum PresenceRingLayout {
     public static func isRing(_ count: Int) -> Bool { count > arcLimit }
 
     /// How far across the ring or arc reaches.
+    /// The turn, nearest to `from`, that puts logo `index` at the front: the ring takes the short way round.
+    public static func rotation(bringingToFront index: Int, count: Int, from: Double) -> Double {
+        guard count > 0 else { return from }
+        let step = 2 * Double.pi / Double(count)
+        var delta = (-Double(index) * step - from).truncatingRemainder(dividingBy: 2 * Double.pi)
+        if delta > Double.pi { delta -= 2 * Double.pi }
+        if delta <= -Double.pi { delta += 2 * Double.pi }
+        return from + delta
+    }
+
     public static func radius(_ count: Int) -> Double { isRing(count) ? 62 : 84 }
 
     /// Where item `index` of `count` sits. On the arc the online count takes the middle slot, so the logos sit either

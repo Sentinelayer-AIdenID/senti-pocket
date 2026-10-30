@@ -109,4 +109,21 @@ final class RoomRosterTests: XCTestCase {
         XCTAssertEqual(roster.members.count, 1)
         XCTAssertEqual(roster.members.first?.status, .idle, "running, quiet for now")
     }
+
+    /// Carter (10-30): the ring said 2 while the people list said 9 online. Both now count the active ones the same
+    /// way, and the list says how many are idle.
+    func test_the_ring_and_the_people_list_count_active_the_same_way() {
+        let now = Date()
+        let present = [
+            RoomChatPresence.Person(id: "claude-warden", name: "claude-warden", isHuman: false, isIdle: false),
+            RoomChatPresence.Person(id: "pocket-forge", name: "pocket-forge", isHuman: false, isIdle: true),
+            RoomChatPresence.Person(id: "human-mrrcarter", name: "mrrcarter", isHuman: true, isIdle: false)
+        ]
+        let roster = RoomRoster.build(posts: [], present: present, runningBoxes: [], endedBoxes: [], now: now)
+        XCTAssertEqual(roster.activeCount, 2)
+        let agents = roster.sides.first { $0.title == "Agents" }
+        XCTAssertEqual(agents?.active, 1)
+        XCTAssertEqual(agents?.idle, 1)
+        XCTAssertEqual(agents?.header, "Agents · 1 active · 1 idle · 0 offline")
+    }
 }

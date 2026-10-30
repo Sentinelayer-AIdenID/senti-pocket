@@ -439,6 +439,8 @@ struct RoomChatScreen: View {
                 coordinator.send(intent)
             }
         }
+        // A call's window covers the room: its moving parts (the presence ring) rest underneath (warden, #265).
+        .environment(\.roomIsCovered, voiceRoom != nil)
         .toolbar {
             if voicePoster != nil {
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -763,6 +765,14 @@ struct RoomChatScreen: View {
             // A moment after the room opens, so iOS can hand over its own crash records first and both go together.
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             offerCrashReports()
+        }
+        .task {
+            // The room's running boxes, for the ring and its count, kept fresh while the room is open (Carter, 10-30:
+            // the count only caught up once the people list was opened).
+            while !Task.isCancelled {
+                await flight.refresh()
+                try? await Task.sleep(nanoseconds: 60_000_000_000)
+            }
         }
         .onChange(of: crashes.unhandled.count) { _ in offerCrashReports() }
         .onChange(of: coordinator.state.composer.canPost) { _ in offerCrashReports() }

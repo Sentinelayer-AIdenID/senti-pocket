@@ -51,6 +51,9 @@ public struct RoomRoster: Equatable, Sendable {
         /// In the room now: in presence (active or idle), or a box still running.
         public let isOnline: Bool
 
+        /// In the room and doing something now (not idle).
+        public var isActive: Bool { isOnline && status == .here }
+
         public init(id: String, name: String, kind: Kind, status: Status, model: String? = nil, effort: String? = nil,
                     job: String? = nil, phase: String? = nil, firstSeen: Date? = nil, lastSeen: Date? = nil,
                     expiresAt: Date? = nil, posts: Int = 0, isOnline: Bool = false) {
@@ -142,9 +145,19 @@ public struct RoomRoster: Equatable, Sendable {
         public let members: [Member]
         public var online: Int { members.filter(\.isOnline).count }
         public var offline: Int { members.count - online }
+        /// Online and doing something now: the number the room's ring shows (Carter, 10-30: "If one idles that number
+        /// drops").
+        public var active: Int { members.filter(\.isActive).count }
+        public var idle: Int { online - active }
+
+        /// "Agents · 2 active · 5 idle · 3 offline", so the ring's number and the list's agree.
+        public var header: String { "\(title) · \(active) active · \(idle) idle · \(offline) offline" }
     }
 
     /// Agents, then people; a side with nobody is left out.
+    /// How many are in the room and active: the ring's number, the same as the people list's.
+    public var activeCount: Int { members.filter(\.isActive).count }
+
     public var sides: [Side] {
         let agents = members.filter { $0.kind != .person }
         let people = members.filter { $0.kind == .person }
