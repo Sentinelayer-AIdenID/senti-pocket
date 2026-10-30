@@ -360,6 +360,9 @@ public struct RoomChatView: View {
                 setReaderAtBottom(true)
                 DispatchQueue.main.async { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
             }
+            // A list starts at its newest rows, not at its top (iOS 18 and later; before that, the first scroll takes
+            // it there). Only where it starts: rows arriving or loading later move nothing.
+            .modifier(StartsAtBottom())
             // The whole list, its handlers with it, so a new one opens as the room does.
             .id(listEpoch)
         }
@@ -640,6 +643,17 @@ public struct RoomChatView: View {
     }
 
     private static let bottomId = "room-bottom"
+}
+
+/// A scroll view that starts at its bottom, where the iOS version can say so.
+private struct StartsAtBottom: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, macOS 15.0, *) {
+            content.defaultScrollAnchor(.bottom, for: .initialOffset)
+        } else {
+            content
+        }
+    }
 }
 
 private struct RoomMessageRowView: View {
