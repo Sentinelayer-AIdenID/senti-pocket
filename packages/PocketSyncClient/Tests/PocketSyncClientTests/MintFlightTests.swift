@@ -11,21 +11,26 @@ final class MintFlightTests: XCTestCase {
     func test_lives_decode_tolerantly_and_only_https_consoles_open() throws {
         let page = try json("""
         {"lives": [
-          {"lifeId": "0d7010eb4e60", "agentName": "astra-breakout-api2", "model": "model-a", "phase": "ready",
-           "expiresAt": "2026-10-29T21:54:14.548Z", "job": {"description": "Ticket 36d92287: fix round 2"},
-           "ticket": {"id": "36d92287", "title": "Breakouts API fix round 2"},
-           "consoleUrl": "https://sl-mint.eastus.cloudapp.azure.com/console?life=0d7010eb4e60"},
-          {"lifeId": "a71fc80c2408", "agentName": "astra-breakout-api", "phase": "destroyed", "consoleUrl": "http://insecure"},
+          {"lifeId": "life-aaaa0001", "agentName": "box-one", "model": "model-a", "phase": "ready",
+           "expiresAt": "2026-10-29T21:54:14.548Z", "job": {"description": "Ticket tkt00001: fix round 2"},
+           "ticket": {"id": "tkt00001", "title": "Breakouts API fix round 2"},
+           "consoleUrl": "https://mint.example.invalid/console?life=life-aaaa0001"},
+          {"lifeId": "life-aaaa0002", "agentName": "box-two", "phase": "destroyed", "consoleUrl": "http://insecure"},
           {"agentName": "no id"}
         ]}
         """)
         let lives = (page["lives"]?.arrayValue ?? []).compactMap(MintLife.init(json:))
-        XCTAssertEqual(lives.map(\.id), ["0d7010eb4e60", "a71fc80c2408"], "a life without an id is skipped")
+        XCTAssertEqual(lives.map(\.id), ["life-aaaa0001", "life-aaaa0002"], "a life without an id is skipped")
         XCTAssertTrue(lives[0].isActive)
         XCTAssertFalse(lives[1].isActive, "destroyed boxes are finished")
         XCTAssertEqual(lives[0].ticketTitle, "Breakouts API fix round 2")
         XCTAssertNotNil(lives[0].consoleURL)
         XCTAssertNil(lives[1].consoleURL, "only an https console link is offered")
+        let base = URL(string: "https://mint.example.invalid")
+        XCTAssertNotNil(lives[0].consolePinned(to: base).consoleURL, "a console on the Flight record's own host stays")
+        XCTAssertNil(lives[0].consolePinned(to: URL(string: "https://elsewhere.example.invalid")).consoleURL,
+                     "the console opens in the app, so one on any other host is dropped")
+        XCTAssertNil(lives[0].consolePinned(to: nil).consoleURL)
     }
 
     /// sentinelayer-web `useRoomLives`: a mint that ignores the room filter lists everyone's boxes; only this room's
@@ -192,13 +197,15 @@ final class MintFlightTests: XCTestCase {
     }
 
     func test_requests_carry_the_token_to_the_mint_origin_only() throws {
-        let base = try XCTUnwrap(URL(string: "https://sl-mint.eastus.cloudapp.azure.com"))
+        let base = try XCTUnwrap(URL(string: "https://mint.example.invalid"))
         let request = try XCTUnwrap(HTTPMintClient.request(baseURL: base, path: "/api/mint/lives",
                                                             query: [URLQueryItem(name: "sessionId", value: "room 1")], token: "t"))
-        XCTAssertEqual(request.url?.host, "sl-mint.eastus.cloudapp.azure.com")
+        XCTAssertEqual(request.url?.host, "mint.example.invalid")
         XCTAssertEqual(request.url?.query, "sessionId=room%201")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer t")
-        XCTAssertNil(HTTPMintClient(baseURL: URL(string: "http://plain.example"), tokenProvider: { "t" }).baseURLForTesting,
-                     "the token never goes to a plain-http origin")
+        XCTAssertNil(HTTPMintClient(baseURL: URL(string: "http://plain.example"), urlSession: .shared, tokenProvider: { "t" })
+            .baseURLForTesting, "the token never goes to a plain-http origin")
+        XCTAssertNil(HTTPMintClient(baseURL: nil, urlSession: .shared, tokenProvider: { "t" }).baseURLForTesting,
+                     "a build without the service reads nothing")
     }
 }
