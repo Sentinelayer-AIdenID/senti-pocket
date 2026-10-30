@@ -25,6 +25,7 @@ struct WhisperModelSettingsView: View {
             Form {
                 inAppSection
                 notificationsSection
+                crashSection
                 modelStatusSection
                 modelActionsSection
                 accountSection
@@ -213,6 +214,28 @@ struct WhisperModelSettingsView: View {
         .onChange(of: pushSound) { _ in PushRegistrar.shared.preferencesChanged() }
         .onChange(of: pushVibrate) { _ in PushRegistrar.shared.preferencesChanged() }
         .onChange(of: pushPreviews) { _ in PushRegistrar.shared.preferencesChanged() }
+    }
+
+    @ObservedObject private var crashes = CrashReporter.shared
+
+    /// The times Pocket closed unexpectedly, as the phone recorded them, to share for fixing.
+    private var crashSection: some View {
+        Section {
+            if crashes.recorded.isEmpty {
+                Text("None recorded")
+                    .foregroundStyle(.secondary)
+            } else {
+                ShareLink(item: CrashReportText.message(crashes.recorded)) {
+                    Label("Share \(crashes.recorded.count) \(crashes.recorded.count == 1 ? "report" : "reports")",
+                          systemImage: "square.and.arrow.up")
+                }
+                .accessibilityIdentifier("settings.crashes.share")
+            }
+        } header: {
+            Text("Crash reports")
+        } footer: {
+            Text("When Pocket closes unexpectedly, the phone records where it stopped and your last few taps, never your messages. Pocket offers to send each one to the next room you open; here you can share them all.")
+        }
     }
 
     @ViewBuilder
