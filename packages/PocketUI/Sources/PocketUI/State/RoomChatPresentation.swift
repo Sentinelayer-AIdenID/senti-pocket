@@ -1363,6 +1363,19 @@ public enum RoomComposerDraft {
         return (String(oldChars), inserted)
     }
 
+    /// Where a room's unsent text is kept on the phone.
+    public static func savedKey(sessionId: String) -> String { "pocket.draft.\(sessionId)" }
+
+    /// How long a sent text stays saved: long enough for it to be on its way.
+    public static let savedAfterSend: TimeInterval = 8
+
+    /// Whether what is in the box is the text just sent coming back (the keyboard writing it back after the box was
+    /// emptied), not something new.
+    public static func isWrittenBack(_ text: String, sent: String) -> Bool {
+        let back = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !back.isEmpty && sent.contains(back)
+    }
+
     /// What is sent: the typed words, then each held block, a blank line apart.
     public static func outgoing(_ draft: String, blocks: [String]) -> String {
         ([draft.trimmingCharacters(in: .whitespacesAndNewlines)] + blocks)

@@ -431,10 +431,24 @@ final class CrashReporter: NSObject, ObservableObject, MXMetricManagerSubscriber
         note(step)
     }
 
-    /// The same, with how many rows the room had, so a freeze can be tied to the room's size.
+    /// The same, with how many rows the room had, so a freeze can be tied to the room's size. A send also says how
+    /// long the text was and whether it was being dictated (every freeze on 10-30 began at a send, on a phone).
     func note(_ intent: RoomChatIntent, rows: Int) {
         guard let step = Self.step(for: intent) else { return }
-        note("\(step) (\(rows) rows)")
+        var details = ["\(rows) rows"]
+        if let length = Self.sentLength(intent) {
+            details.append("\(length) chars")
+            if KeyboardInput.isDictating { details.append("dictating") }
+        }
+        note("\(step) (\(details.joined(separator: ", ")))")
+    }
+
+    /// How long a sent text is (never what it says).
+    nonisolated static func sentLength(_ intent: RoomChatIntent) -> Int? {
+        switch intent {
+        case .sendMessage(let text), .sendReply(_, let text), .sendReplyToReply(_, _, let text): return text.count
+        default: return nil
+        }
     }
 
     nonisolated static func step(for intent: RoomChatIntent) -> String? {
@@ -618,5 +632,36 @@ final class MainThreadWatch: @unchecked Sendable {
     private func write(_ stall: Stall) {
         guard let data = try? JSONEncoder().encode(stall) else { return }
         try? data.write(to: url, options: .atomic)
+    }
+}
+
+/// The keyboard of the field being typed in, for the freeze recorder's notes.
+@MainActor
+enum KeyboardInput {
+    /// Dictation is the input mode of the field being typed in.
+    static var isDictating: Bool {
+        FirstResponder.find()?.textInputMode?.primaryLanguage == "dictation"
+    }
+
+    /// The responder the keyboard types into, found the way UIKit offers: an action sent to nil reaches it first.
+    private final class FirstResponder: NSObject {
+        static var found: UIResponder?
+
+        static func find() -> UIResponder? {
+            found = nil
+            UIApplication.shared.sendAction(#selector(UIResponder.pocketCaptureFirstResponder), to: nil, from: nil, for: nil)
+            defer { found = nil }
+            return found
+        }
+    }
+
+    fileprivate static func captured(_ responder: UIResponder) {
+        FirstResponder.found = responder
+    }
+}
+
+extension UIResponder {
+    @objc fileprivate func pocketCaptureFirstResponder() {
+        KeyboardInput.captured(self)
     }
 }
