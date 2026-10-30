@@ -885,7 +885,20 @@ public struct RoomChatTrail: Equatable, Sendable {
 public enum RoomChatRepeats {
     /// The words of a message with its numbers taken out, the part that must match.
     static func shape(_ text: String) -> String {
-        text.replacingOccurrences(of: #"[0-9]+"#, with: "#", options: .regularExpression)
+        // Each run of digits becomes one "#", by hand: this runs for every pair of neighbouring notices on every update.
+        var shaped = ""
+        shaped.reserveCapacity(text.count)
+        var inNumber = false
+        for character in text {
+            if character.isASCII, character.isNumber {
+                if !inNumber { shaped.append("#") }
+                inNumber = true
+            } else {
+                shaped.append(character)
+                inNumber = false
+            }
+        }
+        return shaped
     }
 
     /// A notice that may stand in for others like it: an agent's plain message with nothing of its own. One with
@@ -944,15 +957,33 @@ public enum RoomChatQuiet {
     }
 
     /// The line a quiet row shows: its first line of text, without Markdown's marks or a box's signature.
+    ///
+    /// A quiet row asks for its line on every render, so the expressions are compiled once and each text's line is
+    /// remembered: compiling them per call showed up on the main thread in the watchdog's stack (Carter, 10-30).
     public static func line(_ text: String) -> String {
+        if let known = lineCache.object(forKey: text as NSString) { return known as String }
         let unsigned = RoomBoxThread.unsigned(text)
         let first = unsigned.split(whereSeparator: \.isNewline).first.map(String.init) ?? unsigned
-        return first
-            .replacingOccurrences(of: #"\[([^\]]*)\]\([^)]*\)"#, with: "$1", options: .regularExpression)
-            .replacingOccurrences(of: #"[*`]+"#, with: "", options: .regularExpression)
-            .replacingOccurrences(of: #"^[#>\s]+"#, with: "", options: .regularExpression)
-            .trimmingCharacters(in: .whitespaces)
+        var line = first
+        for (expression, template) in lineRules {
+            line = expression.stringByReplacingMatches(in: line, range: NSRange(line.startIndex..., in: line), withTemplate: template)
+        }
+        line = line.trimmingCharacters(in: .whitespaces)
+        lineCache.setObject(line as NSString, forKey: text as NSString)
+        return line
     }
+
+    private static let lineRules: [(NSRegularExpression, String)] = [
+        (#"\[([^\]]*)\]\([^)]*\)"#, "$1"),
+        (#"[*`]+"#, ""),
+        (#"^[#>\s]+"#, "")
+    ].compactMap { pattern, template in (try? NSRegularExpression(pattern: pattern)).map { ($0, template) } }
+
+    private static let lineCache: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
+        cache.countLimit = 2_000
+        return cache
+    }()
 }
 
 /// A box's thread, collapsed (warden, at Carter's #54962). The respawn orchestrator's launch line ("🚀 Minted <name> …

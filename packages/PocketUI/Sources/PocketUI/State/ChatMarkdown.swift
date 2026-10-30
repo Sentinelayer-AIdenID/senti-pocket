@@ -257,11 +257,13 @@ public enum ChatReferences {
         return (sessionId, ticketId)
     }
 
+    private static let mentionExpression = try? NSRegularExpression(pattern: #"(?:^|\s)@([A-Za-z0-9_-]+)"#)
+
     /// Ranges of `@handle` mentions: an `@` at the start or after whitespace, then letters, digits, `_` or `-`
     /// (web `extractMentions.ts`). Returned as UTF-16 offsets for AttributedString styling.
     public static func mentionHandles(in text: String) -> [String] {
-        let pattern = #"(?:^|\s)@([A-Za-z0-9_-]+)"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        // Most messages mention no one: skip the expression entirely (this runs for every agent message per update).
+        guard text.contains("@"), let regex = mentionExpression else { return [] }
         let range = NSRange(text.startIndex..., in: text)
         var seen = Set<String>()
         var handles: [String] = []
