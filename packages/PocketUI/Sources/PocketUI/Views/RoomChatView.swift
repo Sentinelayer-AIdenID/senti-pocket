@@ -272,12 +272,12 @@ public struct RoomChatView: View {
                     jumpToLatestButton(proxy: proxy)
                 }
             }
-            // Who is here floats under the top bar and the pins, over the messages (Carter, #55354).
-            .overlay(alignment: .topTrailing) {
+            // Who is here floats at the top center, under the top bar and the pins, over the messages (Carter, #55354,
+            // #55424).
+            .overlay(alignment: .top) {
                 if let presence = state.presence {
                     RoomPeopleAvatars(presence: presence) { showsPresence = true }
-                        .padding(.top, 8)
-                        .padding(.trailing, 12)
+                        .padding(.top, 4)
                 }
             }
             .safeAreaInset(edge: .top, spacing: 0) {

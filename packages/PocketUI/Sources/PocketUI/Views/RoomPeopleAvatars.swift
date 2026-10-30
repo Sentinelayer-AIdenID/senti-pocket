@@ -1,9 +1,9 @@
 import SwiftUI
 
-/// Two avatars floating under the room's top bar, the agents and the people here, each with its count (Carter,
-/// #55354: "a bot avatar and a human avatar ... just floating under the top part"). Someone arriving or leaving
-/// shows as a note that grows out of their avatar and fades, and the count ticks over. Tapping opens the people list.
-/// Agents are a rounded square and people a circle, as their avatars are in the room.
+/// Who is here, floating at the top center of the room, under the top bar (Carter, #55354, then #55424: "no
+/// backgrounds ... more transparent ... dead center of the top"): an agent glyph and a person glyph, each with its
+/// count. Someone arriving or leaving shows as a note that grows out of the pair and fades, and the count ticks over.
+/// Tapping opens the people list.
 struct RoomPeopleAvatars: View {
     let presence: RoomChatPresence
     let onOpen: () -> Void
@@ -24,18 +24,18 @@ struct RoomPeopleAvatars: View {
 
     var body: some View {
         Button(action: onOpen) {
-            HStack(spacing: 12) {
-                avatar(isHuman: false, count: agents)
-                avatar(isHuman: true, count: humans)
+            HStack(spacing: 14) {
+                glyph(isHuman: false, count: agents)
+                glyph(isHuman: true, count: humans)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(.ultraThinMaterial, in: Capsule())
-            .overlay(Capsule().stroke(PocketPalette.separator.opacity(0.6), lineWidth: 0.5))
-            .shadow(color: PocketPalette.floatingEdge.opacity(0.35), radius: 10, y: 4)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .overlay(alignment: .topTrailing) { noteColumn.offset(y: 48) }
+        // Quiet (Carter, #55424: "no backgrounds ... more transparent"): the glyphs and counts alone, half see-through.
+        .opacity(0.55)
+        .overlay(alignment: .top) { noteColumn.offset(y: 30) }
         .accessibilityLabel(label)
         .accessibilityHint("Opens the people list")
         .accessibilityIdentifier("pocket.room.presence")
@@ -52,34 +52,25 @@ struct RoomPeopleAvatars: View {
         return "\(agents) agent\(agents == 1 ? "" : "s") and \(humans) \(humans == 1 ? "person" : "people") here"
     }
 
-    private func avatar(isHuman: Bool, count: Int) -> some View {
-        Image(systemName: isHuman ? "person.fill" : "cpu")
-            .font(.system(size: 14, weight: .semibold))
-            .foregroundStyle(.white)
-            .frame(width: 30, height: 30)
-            .background(isHuman ? PocketPalette.accent : PocketPalette.listening,
-                        in: RoundedRectangle(cornerRadius: isHuman ? 15 : 8, style: .continuous))
-            .overlay(alignment: .topTrailing) {
-                if presence.isAvailable {
-                    Text("\(count)")
-                        .font(.caption2.weight(.bold))
-                        .monospacedDigit()
-                        .contentTransition(.numericText())
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 4)
-                        .frame(minWidth: 17, minHeight: 17)
-                        .background(Capsule().fill(PocketPalette.verified))
-                        .overlay(Capsule().stroke(PocketPalette.canvas, lineWidth: 1.5))
-                        .offset(x: 7, y: -7)
-                }
+    /// An agent or a person, and how many: the glyph with its count beside it, no shape behind either.
+    private func glyph(isHuman: Bool, count: Int) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: isHuman ? "person.fill" : "cpu")
+                .font(.system(size: 13, weight: .semibold))
+            if presence.isAvailable {
+                Text("\(count)")
+                    .font(.caption.weight(.semibold))
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
             }
-            .accessibilityHidden(true)
+        }
+        .foregroundStyle(PocketPalette.textPrimary)
+        .accessibilityHidden(true)
     }
 
-    /// The notes under the avatars, newest last. Each lines up under its own avatar and grows out of it; one column,
-    /// so a person's note and an agent's never overlap.
+    /// The notes under the glyphs, newest last, centered under the pair and growing out of it.
     private var noteColumn: some View {
-        VStack(alignment: .trailing, spacing: 4) {
+        VStack(spacing: 4) {
             ForEach(notes) { note in
                 HStack(spacing: 5) {
                     Image(systemName: note.change.joined ? "arrow.down.right.circle.fill" : "arrow.up.left.circle.fill")
@@ -90,15 +81,13 @@ struct RoomPeopleAvatars: View {
                 }
                 .font(.caption.weight(.semibold))
                 .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(.regularMaterial, in: Capsule())
-                .overlay(Capsule().stroke(PocketPalette.separator.opacity(0.6), lineWidth: 0.5))
+                .padding(.vertical, 4)
+                .background(.ultraThinMaterial, in: Capsule())
+                .opacity(0.9)
                 .fixedSize()
-                // The person avatar ends 10 pt in from the capsule's right edge, the agent avatar 52 pt.
-                .padding(.trailing, note.change.isHuman ? 4 : 46)
                 .transition(reduceMotion
                     ? .opacity
-                    : .scale(scale: 0.2, anchor: .topTrailing).combined(with: .opacity))
+                    : .scale(scale: 0.2, anchor: .top).combined(with: .opacity))
             }
         }
         .allowsHitTesting(false)
