@@ -23,6 +23,8 @@ struct RoomPeopleAvatars: View {
     /// How many are here and active, as the people list counts them (Carter, 10-30: the ring said 2 while the list
     /// said 9 online); nil counts the ring's own logos that are not idle.
     var activeCount: Int?
+    /// Something covers the room (the people list, a call): the ring stops turning by itself.
+    var isPaused = false
     let onOpen: () -> Void
 
     /// How long a note stays before it fades.
@@ -34,19 +36,30 @@ struct RoomPeopleAvatars: View {
     }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.roomIsCovered) private var roomIsCovered
     @State private var notes: [Note] = []
     @State private var agents = 0
     @State private var humans = 0
     @State private var shown: RoomChatPresence?
 
-    /// How far the ring has turned, in radians; where a drag began; whether a hand is on it.
+    /// How far the ring has turned by hand, in radians; where a drag began; until when it holds still after a hand or
+    /// an arrival; and from when it has been turning by itself (it drifts slowly from `rotation` after that).
     @State private var rotation = 0.0
     @State private var dragFrom: Double?
     @State private var settlingUntil = Date.distantPast
+    @State private var turnBase = Date()
     @State private var front: Int?
+    @State private var lastTick = Date.distantPast
     /// The signs already seen, to tell which agent just did something.
     @State private var seenSignals: [String: String] = [:]
-    private let turn = Timer.publish(every: 1.0 / 30, on: .main, in: .common).autoconnect()
+    #if canImport(UIKit)
+    @State private var haptics = UIImpactFeedbackGenerator(style: .light)
+    #endif
+
+    /// How fast the ring turns by itself, in radians a second.
+    static let drift = 0.22
+    /// Taps never come closer together than this (warden, #265: a 100-member ring tapped about three times a second).
+    static let tickSpacing: TimeInterval = 0.08
 
     /// One logo on the ring: an agent (its lab's logo) or a person.
     private struct RingItem: Identifiable {
@@ -55,52 +68,80 @@ struct RoomPeopleAvatars: View {
         let isIdle: Bool
     }
 
+    /// Agents first, then people, each once (warden, #265: a person seen twice was drawn twice).
     private var ringItems: [RingItem] {
         let agents = agentsHere.map { RingItem(id: "a:" + $0.id.lowercased(), agent: $0, isIdle: $0.isIdle) }
+        var seen = Set<String>()
         let people = presence.people.filter(\.isHuman)
+            .filter { seen.insert($0.id.lowercased()).inserted }
             .map { RingItem(id: "p:" + $0.id.lowercased(), agent: nil, isIdle: $0.isIdle) }
         return agents + people
     }
 
+    /// The ring rests while something covers the room: the people list, or a call over everything.
+    private var resting: Bool { isPaused || roomIsCovered }
+
+    /// The ring's turn at a moment: where a hand left it, plus its slow drift since it was last let go.
+    private func turn(at date: Date, isRing: Bool) -> Double {
+        guard isRing, dragFrom == nil, !reduceMotion, !resting else { return rotation }
+        return drifted(at: date)
+    }
+
+    private func drifted(at date: Date) -> Double {
+        rotation - Self.drift * max(0, date.timeIntervalSince(max(turnBase, settlingUntil)))
+    }
+
     var body: some View {
+        // Worked out once per change of who is here, not on every frame of the turn.
         let items = ringItems
         let isRing = PresenceRingLayout.isRing(items.count)
-        let online = activeCount ?? items.filter { !$0.isIdle }.count
-        ZStack {
-            ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                let spot = PresenceRingLayout.spot(index: index, count: items.count, rotation: rotation)
-                ringItem(item)
-                    .scaleEffect(spot.scale)
-                    .opacity(spot.opacity)
-                    .offset(x: spot.x, y: spot.y)
-                    .zIndex(spot.depth)
+        let online = presence.isAvailable ? String(activeCount ?? items.filter { !$0.isIdle }.count) : "?"
+        // Past six it turns by itself, slowly, unless a hand is on it (Carter, 10-30: "or it scrolls by itself"); the
+        // clock stops for an arc, with Reduce Motion, under a hand, or while the room is covered (warden, #265).
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !isRing || reduceMotion || dragFrom != nil || resting)) { context in
+            let turned = turn(at: context.date, isRing: isRing)
+            ZStack {
+                ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                    ringItem(item)
+                        .modifier(RingPlacement(index: index, count: items.count, rotation: turned))
+                }
+                onlineCount(online)
+                    .zIndex(isRing ? 0.2 : 2)
             }
-            onlineCount(online)
-                .zIndex(isRing ? 0.2 : 2)
         }
         .frame(width: PresenceRingLayout.radius(items.count) * 2 + 32, height: isRing ? 56 : 44)
         .contentShape(Rectangle())
         .gesture(DragGesture(minimumDistance: 4)
             .onChanged { value in
                 guard isRing else { return }
-                let from = dragFrom ?? rotation
-                dragFrom = from
-                rotation = from + value.translation.width / PresenceRingLayout.radius(items.count)
+                if dragFrom == nil {
+                    // A hand takes the ring where the drift had it.
+                    rotation = turn(at: Date(), isRing: isRing)
+                    dragFrom = rotation
+                    #if canImport(UIKit)
+                    haptics.prepare()
+                    #endif
+                }
+                rotation = (dragFrom ?? rotation) + value.translation.width / PresenceRingLayout.radius(items.count)
                 tickIfNewFront(count: items.count)
             }
             .onEnded { value in
                 guard isRing else { return }
                 dragFrom = nil
-                settlingUntil = Date().addingTimeInterval(1.2)
+                let now = Date()
+                settlingUntil = now.addingTimeInterval(1.2)
+                turnBase = now
                 let fling = (value.predictedEndTranslation.width - value.translation.width) / PresenceRingLayout.radius(items.count)
                 withAnimation(.easeOut(duration: 0.7)) { rotation += fling }
+                // Where the fling comes to rest gets its tap.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { tickIfNewFront(count: items.count) }
             })
         .onTapGesture(perform: onOpen)
-        // Past six it turns by itself, slowly, unless a hand is on it (Carter, 10-30: "or it scrolls by itself").
-        .onReceive(turn) { _ in
-            guard isRing, dragFrom == nil, Date() > settlingUntil, !reduceMotion else { return }
-            rotation -= 0.22 / 30
-            tickIfNewFront(count: items.count)
+        // Resting keeps the ring where it was; turning again starts from there, with no jump for the time it rested.
+        .onChange(of: resting) { nowResting in
+            let now = Date()
+            if nowResting, isRing, dragFrom == nil, !reduceMotion { rotation = drifted(at: now) }
+            turnBase = now
         }
         .overlay(alignment: .top) { noteColumn.offset(y: isRing ? 44 : 34) }
         .accessibilityElement(children: .ignore)
@@ -141,12 +182,12 @@ struct RoomPeopleAvatars: View {
     }
 
     /// The number online, with a green dot, in the middle (Carter, 10-30: "If one idles that number drops").
-    private func onlineCount(_ online: Int) -> some View {
+    private func onlineCount(_ online: String) -> some View {
         HStack(spacing: 4) {
             Circle()
-                .fill(online > 0 ? PocketPalette.verified : PocketPalette.textSecondary)
+                .fill(online != "0" && online != "?" ? PocketPalette.verified : PocketPalette.textSecondary)
                 .frame(width: 7, height: 7)
-            Text("\(online)")
+            Text(online)
                 .font(.caption.weight(.bold))
                 .monospacedDigit()
                 .foregroundStyle(PocketPalette.textPrimary)
@@ -166,12 +207,16 @@ struct RoomPeopleAvatars: View {
     private func bringForward(_ now: [String: String], items: [RingItem]) {
         let changed = now.filter { seenSignals[$0.key] != $0.value }.map(\.key)
         seenSignals = now
-        guard PresenceRingLayout.isRing(items.count), dragFrom == nil,
+        guard PresenceRingLayout.isRing(items.count), dragFrom == nil, !resting,
               let index = items.firstIndex(where: { item in changed.contains { "a:" + $0 == item.id } }) else { return }
-        settlingUntil = Date().addingTimeInterval(Self.holdOnActivity)
+        let now = Date()
+        rotation = turn(at: now, isRing: true)
+        settlingUntil = now.addingTimeInterval(Self.holdOnActivity)
+        turnBase = now
         let target = PresenceRingLayout.rotation(bringingToFront: index, count: items.count, from: rotation)
         withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.8)) { rotation = target }
-        tickIfNewFront(count: items.count)
+        // Taps are for a hand on the ring and its fling, not for the ring moving itself (warden, #265).
+        front = index
     }
 
     /// A light tap each time a new logo comes to the front (Carter, 10-30: "that small vibration feel that we get when
@@ -181,9 +226,10 @@ struct RoomPeopleAvatars: View {
         guard now != front else { return }
         let first = front == nil
         front = now
-        guard !first else { return }
+        guard !first, Date().timeIntervalSince(lastTick) >= Self.tickSpacing else { return }
+        lastTick = Date()
         #if canImport(UIKit)
-        UIImpactFeedbackGenerator(style: .light).impactOccurred(intensity: 0.6)
+        haptics.impactOccurred(intensity: 0.6)
         #endif
     }
 
@@ -241,6 +287,40 @@ struct RoomPeopleAvatars: View {
                 withAnimation(.easeIn(duration: 0.5)) { notes.removeAll { $0.id == note.id } }
             }
         }
+    }
+}
+
+private struct RoomCoveredKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+public extension EnvironmentValues {
+    /// Something covers the room from outside its own view (a call's own window): its moving parts rest.
+    var roomIsCovered: Bool {
+        get { self[RoomCoveredKey.self] }
+        set { self[RoomCoveredKey.self] = newValue }
+    }
+}
+
+/// Where one logo sits for a turn of the ring. The turn itself is what animates, so a fling or an arrival moves each
+/// logo along the circle, not straight across it (warden, #265).
+private struct RingPlacement: ViewModifier, Animatable {
+    let index: Int
+    let count: Int
+    var rotation: Double
+
+    var animatableData: Double {
+        get { rotation }
+        set { rotation = newValue }
+    }
+
+    func body(content: Content) -> some View {
+        let spot = PresenceRingLayout.spot(index: index, count: count, rotation: rotation)
+        return content
+            .scaleEffect(spot.scale)
+            .opacity(spot.opacity)
+            .offset(x: spot.x, y: spot.y)
+            .zIndex(spot.depth)
     }
 }
 

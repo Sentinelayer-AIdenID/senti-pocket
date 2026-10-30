@@ -96,6 +96,8 @@ struct RoomChatScreen: View {
     private let onReauthenticationRequired: @MainActor () -> Void
     /// The room was renamed here: the room list reads the new name.
     private let onRenamed: @MainActor () -> Void
+    /// The room's messages are on screen (true) or it left the screen (false): its notifications are read only then.
+    private let onShown: @MainActor (String, Bool) -> Void
 
     init(
         route: RoomRoute,
@@ -116,6 +118,7 @@ struct RoomChatScreen: View {
         search: (any RoomSearching)? = nil,
         reader: MessageReader,
         onRenamed: @escaping @MainActor () -> Void = {},
+        onShown: @escaping @MainActor (String, Bool) -> Void = { _, _ in },
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.route = route
@@ -136,6 +139,7 @@ struct RoomChatScreen: View {
         self.openRoom = openRoom
         self.openChildRoom = openChildRoom
         self.onRenamed = onRenamed
+        self.onShown = onShown
         self.onReauthenticationRequired = onReauthenticationRequired
         _coordinator = StateObject(wrappedValue: RoomChatCoordinator(
             sessionId: route.sessionId,
@@ -317,16 +321,26 @@ struct RoomChatScreen: View {
             audio: PhoneVoiceRoomAudioSession(),
             ringer: RingbackTone(),
             poster: voicePoster,
-            onEnded: { endVoiceRoom() }
+            onEnded: { endVoiceRoom() },
+            onRecordFailed: { [weak coordinator] failure in coordinator?.show(notice: failure) }
         )
         coordinator.onLiveMessages = { [weak room] messages in room?.receive(messages) }
         coordinator.onNewReplies = { [weak room] replies in room?.receive(replies: replies) }
         coordinator.readsRepliesOften = true
+        // The call fills the screen, over the room and its bars, until you hang up (Carter, 10-30). Without its screen
+        // there would be no way to hang up, so the call does not start (warden, #267).
+        guard VoiceCallWindow.shared.show(VoiceRoomHost(room: room, meter: meter, partnerLab: partnerLab(of: room))) else {
+            CrashReporter.shared.note("voice call refused: no call screen")
+            return
+        }
         voiceRoom = room
-        // The call fills the screen, over the room and its bars, until you hang up (Carter, 10-30).
-        VoiceCallWindow.shared.show(VoiceRoomHost(room: room, meter: meter, partnerLab: partnerLab(of: room)))
         CrashReporter.shared.note(agents.isEmpty ? "voice meeting began" : "voice call began")
         room.begin(rings: !answering)
+    }
+
+    /// The room's messages have loaded and are on screen.
+    private var messagesShown: Bool {
+        !coordinator.state.isLoadingInitial && coordinator.state.failure == nil
     }
 
     /// The called agent's lab as the room's presence reports it, for the call screen's logo; nil in a meeting.
@@ -425,6 +439,8 @@ struct RoomChatScreen: View {
                 coordinator.send(intent)
             }
         }
+        // A call's window covers the room: its moving parts (the presence ring) rest underneath (warden, #265).
+        .environment(\.roomIsCovered, voiceRoom != nil)
         .toolbar {
             if voicePoster != nil {
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -785,9 +801,13 @@ struct RoomChatScreen: View {
             coordinator.resume()
             applyRouteLinksOnce()
             takeAnsweredCall()
+            if messagesShown { onShown(route.sessionId, true) }
         }
+        // Read once its messages are actually here, not on the way in: a room that fails to load reads nothing.
+        .onChange(of: messagesShown) { shown in onShown(route.sessionId, shown) }
         .onDisappear {
             CrashReporter.shared.note("room closed")
+            onShown(route.sessionId, false)
             coordinator.pause()
             // Reading aloud goes on after you leave (Carter, 10-30); the app's player follows you to the next screen.
         }

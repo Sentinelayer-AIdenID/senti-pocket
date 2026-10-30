@@ -189,6 +189,8 @@ private struct AuthenticatedRootView: View {
     /// What waits on your decision across your rooms (ticket 931e1d2e).
     @StateObject private var waiting: WaitingOnYouCoordinator
     @State private var presentsWaiting = false
+    /// Which room is shown and uncovered, so its notifications are read only while you can see it (warden, #267).
+    @StateObject private var roomReads: RoomReadTracker
     @Environment(\.scenePhase) private var rootScenePhase
     @ObservedObject private var whisperModelCoordinator: WhisperModelProvisioningCoordinator
     @ObservedObject private var incomingLinks: IncomingLinkInbox
@@ -267,7 +269,7 @@ private struct AuthenticatedRootView: View {
             transport: transport,
             // The signing gateway is not deployed and Release pins no signing key yet (warden, 10-30): checkpoints
             // open as the server holds them until it is.
-            opensVerifiedCheckpoints: false,
+            opensVerifiedCheckpoints: PocketGatewayTrust.verifiesBundles,
             onReauthenticationRequired: {
                 revocationRelay.invalidateAuthentication()
             },
@@ -304,14 +306,16 @@ private struct AuthenticatedRootView: View {
         _checkpointPocket = StateObject(wrappedValue: checkpointPocket)
         _checkpointNarrationRevocation = StateObject(wrappedValue: checkpointNarrationRevocation)
         _revocationRelay = StateObject(wrappedValue: revocationRelay)
-        _notifications = StateObject(wrappedValue: NotificationsCoordinator(
+        let notifications = NotificationsCoordinator(
             transport: transport,
             marker: HTTPNotificationReadMarker(apiBaseURL: apiURL),
             roomTitle: { sessionId in
                 sessions.state.rows.first { UTF8ExactIdentity.matches($0.sessionId, sessionId) }?.title
             },
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
-        ))
+        )
+        _notifications = StateObject(wrappedValue: notifications)
+        _roomReads = StateObject(wrappedValue: RoomReadTracker(notifications: notifications))
         _waiting = StateObject(wrappedValue: WaitingOnYouCoordinator(
             transport: transport,
             sender: HTTPRoomMessageSender(apiBaseURL: apiURL),
@@ -485,10 +489,8 @@ private struct AuthenticatedRootView: View {
         .onChange(of: roomListSettled) { _ in openPendingLinkIfReady() }
         // The app icon shows the bell's unread count.
         .onChange(of: notifications.unreadCount) { count in PushRegistrar.shared.setBadge(count) }
-        // Opening a room, by any way in, reads its notifications.
-        .onChange(of: (roomPath.last ?? currentRoom)?.sessionId) { sessionId in
-            if let sessionId { notifications.markRoomRead(sessionId) }
-        }
+        // A room on screen reads its notifications once its messages show; anything over it pauses that.
+        .onChange(of: roomCovered) { covered in roomReads.isCovered = covered }
         .sheet(isPresented: $presentsSettings) {
             WhisperModelSettingsView(
                 coordinator: whisperModelCoordinator,
@@ -526,7 +528,6 @@ private struct AuthenticatedRootView: View {
             // Apple push: a tap opens its room at the message; the room on screen gets no banner.
             PushRegistrar.shared.inbox = incomingLinks
             PushRegistrar.shared.currentRoomId = { (roomPath.last ?? currentRoom)?.sessionId }
-            notifications.roomOnScreen = { (roomPath.last ?? currentRoom)?.sessionId }
             // A notification while Pocket is open slides in over it, and a tap opens it here (Carter, #55508).
             InAppBanner.shared.onOpen = { link in open(link) }
             InAppBanner.shared.isHosted = true
@@ -700,8 +701,16 @@ private struct AuthenticatedRootView: View {
             search: roomSearch,
             reader: messageReader,
             onRenamed: { sessions.send(.refreshSessions) },
+            onShown: { [roomReads] sessionId, isShown in
+                if isShown { roomReads.shown(sessionId) } else { roomReads.gone(sessionId) }
+            },
             onReauthenticationRequired: invalidateProtectedAuthentication
         )
+    }
+
+    /// Something over the room: a sheet, or the side panel.
+    private var roomCovered: Bool {
+        drawerOpen || presentsNotifications || presentsWaiting || presentsPocket || presentsActivity || presentsSettings
     }
 
     /// The room list has loaded or failed, so a room opened from a link knows its title and your role in it.
@@ -948,7 +957,7 @@ private struct SelectedSessionActivityBoundary: View {
     @ViewBuilder
     private var checkpointContent: some View {
         if let state = details.checkpointState {
-            SessionCheckpointListView(state: state) { intent in
+            SessionCheckpointListView(state: state, verifies: PocketGatewayTrust.verifiesBundles) { intent in
                 details.send(intent)
             }
         } else {
