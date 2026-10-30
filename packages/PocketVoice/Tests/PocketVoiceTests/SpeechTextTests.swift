@@ -24,6 +24,14 @@ final class SpeechTextTests: XCTestCase {
         XCTAssertEqual(SpeechText.spoken(fromMarkdown: "The ⟂ sign mid-line stays."), "The ⟂ sign mid-line stays.")
     }
 
+    func test_a_table_is_read_by_its_cells_without_its_delimiter_row() {
+        let spoken = SpeechText.spoken(fromMarkdown: "| Area | Grade |\n| --- | :-: |\n| Voice | B |\nafter --- dash")
+        XCTAssertTrue(spoken.contains("Area Grade"), spoken)
+        XCTAssertTrue(spoken.contains("Voice B"), spoken)
+        XCTAssertEqual(spoken.components(separatedBy: "---").count, 2, "only the dashes in prose stay: \(spoken)")
+        XCTAssertFalse(spoken.contains(":-:"), spoken)
+    }
+
     func test_a_code_block_is_announced_instead_of_read_aloud() {
         let spoken = SpeechText.spoken(fromMarkdown: "before\n```\nrm -rf /\n```\nafter")
         XCTAssertTrue(spoken.contains("code block"))

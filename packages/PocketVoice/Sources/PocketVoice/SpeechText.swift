@@ -75,6 +75,8 @@ public enum SpeechText {
         ("^\\s{0,3}>\\s?", "", [.anchorsMatchLines]),
         ("^\\s{0,3}(?:[-*+]|\\d+\\.)\\s+", "", [.anchorsMatchLines]),
         ("^\\s{0,3}[-*_]{3,}\\s*$", "", [.anchorsMatchLines]),
+        // A table's delimiter row ("| --- | :-: |") is not said; its cells are read with a pause between them.
+        ("^[ \\t]*\\|?[ \\t]*:?-+:?[ \\t]*(\\|[ \\t]*:?-+:?[ \\t]*)+\\|?[ \\t]*$", "", [.anchorsMatchLines]),
         ("\\|", " ", []),
         ("(^|\\s)@([a-z0-9][\\w-]*)", "$1$2", [.caseInsensitive]),
         ("[ \\t]+", " ", []),
