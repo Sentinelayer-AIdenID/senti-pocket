@@ -622,10 +622,11 @@ private struct RoomMessageRowView: View {
                     onOpenReplyTarget(reply)
                 }
             } label: {
-                Label(row.replyContext ?? "Replying to #\(reply)", systemImage: "arrowshape.turn.up.left")
+                Label(quoteText(reply), systemImage: row.trail.map { $0.count > 1 } == true
+                        ? "bubble.left.and.bubble.right" : "arrowshape.turn.up.left")
                     .font(.caption)
                     .foregroundStyle(PocketPalette.textSecondary)
-                    .lineLimit(1)
+                    .lineLimit(2)
                     .padding(.leading, 8)
                     .overlay(alignment: .leading) {
                         RoundedRectangle(cornerRadius: 1)
@@ -634,8 +635,15 @@ private struct RoomMessageRowView: View {
                     }
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(row.isInlineReply ? "In reply to \(row.replyContext ?? "message \(reply)"). Opens the thread." : "Replying to message \(reply)")
+            .accessibilityLabel(row.isInlineReply ? "\(quoteText(reply)). Opens the thread." : "Replying to message \(reply)")
         }
+    }
+
+    /// What the quote says: what the reply answers, and for a thread how many replies and who.
+    private func quoteText(_ reply: Int64) -> String {
+        let answers = row.replyContext ?? "Replying to #\(reply)"
+        guard let trail = row.trail, trail.count > 1 else { return answers }
+        return "\(trail.label) on \(answers)"
     }
 
     /// Edited mark, attachments, who viewed it and the reactions: the same under every kind of message.

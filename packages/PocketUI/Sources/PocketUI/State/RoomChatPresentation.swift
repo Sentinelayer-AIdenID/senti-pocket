@@ -230,6 +230,8 @@ public struct RoomChatMessageRow: Equatable, Identifiable, Sendable {
     public var endsRun: Bool = true
     /// A voice room folded into this row (its start message): the whole call as one card.
     public var call: VoiceCallCard?
+    /// For a reply shown in the room: its thread so far. Only the newest reply of a thread is shown, at its own time.
+    public var trail: RoomChatTrail?
 }
 
 public enum RoomChatRow: Equatable, Identifiable, Sendable {
@@ -567,7 +569,9 @@ public struct RoomChatPresentationState: Equatable, Sendable {
             messages: messages.sorted { $0.sequenceId < $1.sequenceId },
             replies: replies
         ))
-        let ordered = folded.kept
+        // A thread shows once, as its newest reply, so a busy thread is one line that moves down as it grows.
+        let trails = RoomChatTrail.fold(folded.kept)
+        let ordered = trails.kept
         let parents = Dictionary(
             messages.map { ($0.sequenceId, $0) },
             uniquingKeysWith: { first, _ in first }
@@ -619,7 +623,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 inlineReplyId: input.inlineReplyId,
                 replyContext: input.replyToSequenceId.flatMap { parents[$0] }.map(Self.replyContext(for:)),
                 work: input.isInlineReply ? [] : input.work,
-                call: folded.cards[input.id]
+                call: folded.cards[input.id],
+                trail: trails.trails[input.id]
             )))
             if input.kind == .message, let date = input.date {
                 run = (input.authorId, date)
@@ -740,6 +745,50 @@ public struct RoomChatPresentationState: Equatable, Sendable {
 public enum RoomReadAloud {
     public static func message(_ sequenceId: Int64) -> String { "msg:\(sequenceId)" }
     public static func reply(_ id: String) -> String { "reply:\(id)" }
+}
+
+/// A thread as the room shows it: how many replies, who wrote them (newest first), and the newest one is the row.
+public struct RoomChatTrail: Equatable, Sendable {
+    public let count: Int
+    public let authors: [String]
+
+    /// "4 replies · claude-warden, pocket-forge and 1 more".
+    public var label: String {
+        let replies = "\(count) \(count == 1 ? "reply" : "replies")"
+        guard !authors.isEmpty else { return replies }
+        let shown = authors.prefix(2).joined(separator: ", ")
+        let more = authors.count > 2 ? " and \(authors.count - 2) more" : ""
+        return "\(replies) · \(shown)\(more)"
+    }
+
+    /// Keeps each thread's newest reply where it is (at its own time) and drops the older ones, so a thread is one
+    /// row; that row says how many replies and who. Messages are untouched.
+    public static func fold(_ inputs: [RoomChatMessageInput]) -> (kept: [RoomChatMessageInput], trails: [String: RoomChatTrail]) {
+        var newest: [Int64: Int] = [:]
+        var groups: [Int64: [RoomChatMessageInput]] = [:]
+        for (index, input) in inputs.enumerated() where input.isInlineReply {
+            let thread = input.replyToSequenceId ?? input.sequenceId
+            newest[thread] = index
+            groups[thread, default: []].append(input)
+        }
+        guard !groups.isEmpty else { return (inputs, [:]) }
+        var kept: [RoomChatMessageInput] = []
+        kept.reserveCapacity(inputs.count)
+        var trails: [String: RoomChatTrail] = [:]
+        for (index, input) in inputs.enumerated() {
+            guard input.isInlineReply else {
+                kept.append(input)
+                continue
+            }
+            let thread = input.replyToSequenceId ?? input.sequenceId
+            guard newest[thread] == index, let group = groups[thread] else { continue }
+            var authors: [String] = []
+            for reply in group.reversed() where !authors.contains(reply.authorName) { authors.append(reply.authorName) }
+            trails[input.id] = RoomChatTrail(count: group.count, authors: authors)
+            kept.append(input)
+        }
+        return (kept, trails)
+    }
 }
 
 /// One option in a row's long-press menu, and what it asks the room for.

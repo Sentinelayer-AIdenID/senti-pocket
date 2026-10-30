@@ -20,6 +20,31 @@ final class InlineReplyRowsTests: XCTestCase {
         )
     }
 
+    /// Carter: agents' back-and-forth should not be all over the room. A thread is one row: its newest reply, at its
+    /// own time, saying how many replies and who; it moves down as the thread grows, and the message stays put.
+    func test_a_thread_is_one_row_at_its_newest_reply_and_moves_down_as_it_grows() {
+        let messages = [
+            input("m1", seq: 1, at: 0, author: "human-mrrcarter", text: "Senti web doesn't work"),
+            input("m2", seq: 2, at: 100, text: "cost line"),
+            input("m3", seq: 3, at: 200, text: "another")
+        ]
+        let replies = [
+            input("reply-1", seq: 1, at: 50, author: "claude-warden", replyTo: 1, inline: true),
+            input("reply-2", seq: 1, at: 150, author: "pocket-forge", replyTo: 1, inline: true),
+            input("reply-3", seq: 1, at: 250, author: "claude-warden", replyTo: 1, inline: true),
+            input("reply-4", seq: 2, at: 120, author: "ticket-keeper", replyTo: 2, inline: true)
+        ]
+        let state = RoomChatPresentationState(sessionId: "room", title: "Room", messages: messages, replies: replies)
+        XCTAssertEqual(messageIds(state), ["m1", "m2", "reply-4", "m3", "reply-3"])
+        let rows = state.rows.compactMap { row -> RoomChatMessageRow? in
+            if case .message(let message) = row { return message }
+            return nil
+        }
+        XCTAssertEqual(rows.first { $0.id == "reply-3" }?.trail?.label, "3 replies · claude-warden, pocket-forge")
+        XCTAssertEqual(rows.first { $0.id == "reply-4" }?.trail?.count, 1)
+        XCTAssertNil(rows.first { $0.id == "m1" }?.trail, "messages carry no trail")
+    }
+
     private func messageIds(_ state: RoomChatPresentationState) -> [String] {
         state.rows.compactMap { row in
             if case .message(let message) = row { return message.id }
@@ -39,16 +64,17 @@ final class InlineReplyRowsTests: XCTestCase {
             input("reply-undated", seq: 100, at: nil, author: "review-agent", replyTo: 100, inline: true)
         ]
         let state = RoomChatPresentationState(sessionId: "room", title: "Room", messages: messages, replies: replies)
-        XCTAssertEqual(messageIds(state), ["m100", "reply-a", "m110", "m120", "reply-b", "reply-undated"],
-                       "each reply after the messages that came before it; one without a time goes last")
+        XCTAssertEqual(messageIds(state), ["m100", "m110", "m120", "reply-b", "reply-undated"],
+                       "each thread once, as its newest reply at its own time; one without a time goes last")
 
         let reply = state.rows.compactMap { row -> RoomChatMessageRow? in
-            if case .message(let message) = row, message.id == "reply-a" { return message }
+            if case .message(let message) = row, message.id == "reply-undated" { return message }
             return nil
         }.first
         XCTAssertEqual(reply?.isInlineReply, true)
         XCTAssertEqual(reply?.replyContext, "respawn-orchestrator: Cost line one", "it quotes what it answers")
-        XCTAssertEqual(reply?.showsHeader, true)
+        XCTAssertEqual(reply?.trail, RoomChatTrail(count: 2, authors: ["review-agent"]), "the thread's two replies, one author")
+        XCTAssertEqual(reply?.trail?.label, "2 replies · review-agent")
     }
 
     func test_a_reply_to_a_message_that_is_not_loaded_has_no_quote_and_long_lines_are_cut() {
