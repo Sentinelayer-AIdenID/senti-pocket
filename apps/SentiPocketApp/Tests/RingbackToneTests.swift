@@ -2,6 +2,7 @@ import XCTest
 @testable import SentiPocketApp
 
 /// The ring a call plays until the agent picks up (Carter, 10-30: "there should be a ring calling").
+@MainActor
 final class RingbackToneTests: XCTestCase {
     func test_the_ring_is_two_seconds_of_tone_then_four_of_quiet_as_a_wav_file() {
         let rate = RingbackTone.sampleRate
