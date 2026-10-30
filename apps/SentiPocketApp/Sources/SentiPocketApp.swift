@@ -264,7 +264,7 @@ private struct AuthenticatedRootView: View {
             transport: transport,
             // The signing gateway is not deployed and Release pins no signing key yet (warden, 10-30): checkpoints
             // open as the server holds them until it is.
-            opensVerifiedCheckpoints: false,
+            opensVerifiedCheckpoints: PocketGatewayTrust.verifiesBundles,
             onReauthenticationRequired: {
                 revocationRelay.invalidateAuthentication()
             },
@@ -925,7 +925,7 @@ private struct SelectedSessionActivityBoundary: View {
     @ViewBuilder
     private var checkpointContent: some View {
         if let state = details.checkpointState {
-            SessionCheckpointListView(state: state) { intent in
+            SessionCheckpointListView(state: state, verifies: PocketGatewayTrust.verifiesBundles) { intent in
                 details.send(intent)
             }
         } else {
