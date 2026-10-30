@@ -85,6 +85,9 @@ final class FlightRecordCoordinator: ObservableObject {
             lives = all.filter(\.isActive)
             finished = all.count - lives.count
             failure = nil
+        } catch MintError.notConfigured {
+            // A build without the Flight record's service shows the room's agents only.
+            failure = nil
         } catch MintError.forbidden {
             failure = "This account cannot see the room's boxes."
         } catch {
