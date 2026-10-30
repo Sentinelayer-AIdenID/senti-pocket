@@ -82,6 +82,9 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
     @AppStorage("pocket.push.vibrate") var vibrate = true
     @AppStorage("pocket.push.previews") var showPreviews = true
     @AppStorage("pocket.push.token") private var storedToken = ""
+    /// Settings the server has not confirmed yet; sent again when the app comes back.
+    @AppStorage("pocket.push.preferencesPending") private var preferencesPending = false
+    private var activeObserver: NSObjectProtocol?
 
     /// Where a tapped notification goes.
     weak var inbox: IncomingLinkInbox?
@@ -95,6 +98,13 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
     /// After sign-in: asks for notifications (the first time), then registers with Apple; the token comes back
     /// through the app delegate.
     func start() async {
+        if activeObserver == nil {
+            activeObserver = NotificationCenter.default.addObserver(
+                forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.sendPendingPreferences() }
+            }
+        }
         let center = UNUserNotificationCenter.current()
         let settings = await center.notificationSettings()
         var allowed = settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional
@@ -122,30 +132,59 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
             try await client.register(token: token, environment: environment,
                                       bundleId: Bundle.main.bundleIdentifier ?? "", appVersion: version)
             isRegistered = true
-            try? await client.setPreferences(token: token, sound: sound, vibrate: vibrate, showPreviews: showPreviews)
+            preferencesPending = true
+            sendPendingPreferences()
         } catch {
             // The API may not offer push yet; the next launch tries again.
             isRegistered = false
         }
     }
 
-    /// Settings changed: the server sends this phone's next push with them.
+    /// Settings changed: the server sends this phone's next push with them. Until the server confirms, they stay
+    /// pending and go again each time the app comes back, so "previews off" never silently fails to apply (warden).
     func preferencesChanged() {
         guard !storedToken.isEmpty else { return }
-        let token = storedToken, sound = sound, vibrate = vibrate, previews = showPreviews
-        Task { try? await self.client.setPreferences(token: token, sound: sound, vibrate: vibrate, showPreviews: previews) }
+        preferencesPending = true
+        sendPendingPreferences()
     }
 
-    /// Sign-out: this phone stops getting this person's notifications.
+    private func sendPendingPreferences() {
+        guard preferencesPending, !storedToken.isEmpty else { return }
+        let token = storedToken, sound = sound, vibrate = vibrate, previews = showPreviews
+        Task {
+            guard (try? await self.client.setPreferences(token: token, sound: sound, vibrate: vibrate, showPreviews: previews)) != nil
+            else { return }
+            // Only what was sent is confirmed: a later change is still pending.
+            if self.storedToken == token, self.sound == sound, self.vibrate == vibrate, self.showPreviews == previews {
+                self.preferencesPending = false
+            }
+        }
+    }
+
+    /// Sign-out: this phone stops getting this person's notifications. The sign-in goes right after this, so the
+    /// request carries the person's credential from now, and tries again a few times while the app runs: a dropped
+    /// connection must not leave this phone registered for them (warden). The credential is held in memory only.
     func signOut() {
         guard !storedToken.isEmpty else { return }
         let token = storedToken
         storedToken = ""
+        preferencesPending = false
         isRegistered = false
         UIApplication.shared.unregisterForRemoteNotifications()
-        Task { try? await self.client.unregister(token: token) }
+        let bearer = SessionTokenStore.load()
+        var unregistering = client
+        unregistering.tokenProvider = { bearer }
+        Task {
+            for attempt in 0..<Self.unregisterAttempts {
+                if (try? await unregistering.unregister(token: token)) != nil { return }
+                try? await Task.sleep(nanoseconds: UInt64(2 << attempt) * 1_000_000_000)
+            }
+        }
         setBadge(0)
     }
+
+    /// Tries over about a minute (2, 4, 8, 16 and 32 seconds apart).
+    static let unregisterAttempts = 5
 
     /// The app icon's badge: the bell's unread count.
     func setBadge(_ count: Int) {
