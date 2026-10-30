@@ -28,12 +28,15 @@ final class ChatMarkdownTableTests: XCTestCase {
     }
 
     func test_a_table_inside_a_list_item_indent_and_right_after_a_paragraph_line() {
-        let blocks = ChatMarkdown.parse("Code, across 7 repos:\n  | Repo | Merged |\n  |---|---|\n  | Pocket | 20 |\nnext")
+        let blocks = ChatMarkdown.parse("Code, across 7 repos:\n  | Repo | Merged |\n  |---|---|\n  | Pocket | 20 |\n\nnext\n| a | b |\n|---|---|\n- item")
         XCTAssertEqual(blocks.first, .paragraph("Code, across 7 repos:"))
         guard case .table(let table)? = blocks.dropFirst().first else { return XCTFail("\(blocks)") }
         XCTAssertEqual(table.header, ["Repo", "Merged"])
         XCTAssertEqual(table.rows, [["Pocket", "20"]])
-        XCTAssertEqual(blocks.last, .paragraph("next"), "a line without a pipe ends the table")
+        XCTAssertEqual(blocks.dropFirst(2).first, .paragraph("next"), "a blank line ends the table")
+        guard case .table(let second)? = blocks.dropFirst(3).first else { return XCTFail("\(blocks)") }
+        XCTAssertEqual(second.rows, [], "the start of a list ends it too")
+        XCTAssertEqual(blocks.count, 5)
     }
 
     func test_short_rows_are_filled_long_rows_cut_and_escaped_pipes_kept() {
