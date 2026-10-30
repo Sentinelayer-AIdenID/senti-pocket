@@ -109,4 +109,58 @@ final class NotificationsCoordinatorTests: XCTestCase {
         XCTAssertEqual(asked, 1, "a signed-out bell asks once and stops")
         XCTAssertEqual(coordinator.state.failure, .reauthenticationRequired)
     }
+
+    /// Carter: the phone's bell stopped updating while the server had new mentions. A failed read must say so, and
+    /// a later read must recover.
+    func test_a_failed_read_keeps_the_list_says_so_and_the_next_read_recovers() async {
+        let stamp = Date(timeIntervalSince1970: 1_793_300_000)
+        let coordinator = NotificationsCoordinator(
+            transport: ScriptedNotifications([
+                .success(SentiNotificationsPage(notifications: [note("n1")])),
+                .failure(URLError(.timedOut)),
+                .success(SentiNotificationsPage(notifications: [note("n2", at: "2026-10-28T19:00:00Z"), note("n1")]))
+            ]),
+            marker: nil,
+            now: { stamp },
+            onReauthenticationRequired: {}
+        )
+        await coordinator.refresh()
+        XCTAssertEqual(coordinator.state.updatedAt, stamp)
+        XCTAssertFalse(coordinator.state.couldNotUpdate)
+        await coordinator.refresh()
+        XCTAssertEqual(coordinator.state.unread.map(\.id), ["n1"], "the list stays")
+        XCTAssertTrue(coordinator.state.couldNotUpdate, "and says it could not update")
+        XCTAssertNil(coordinator.state.failure)
+        await coordinator.refresh()
+        XCTAssertEqual(coordinator.state.unread.map(\.id), ["n2", "n1"])
+        XCTAssertFalse(coordinator.state.couldNotUpdate)
+    }
+
+    func test_after_an_expired_sign_in_opening_the_bell_reads_again_and_a_success_brings_it_back() async {
+        var asked = 0
+        let coordinator = NotificationsCoordinator(
+            transport: ScriptedNotifications([
+                .failure(SessionTransportError.reauthenticationRequired),
+                .success(SentiNotificationsPage(notifications: [note("n1")]))
+            ]),
+            marker: nil,
+            sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) },
+            onReauthenticationRequired: { asked += 1 }
+        )
+        await coordinator.refresh()
+        await coordinator.refresh()
+        XCTAssertEqual(coordinator.state.failure, .reauthenticationRequired, "the poll does not keep asking")
+        await coordinator.refresh(force: true)
+        XCTAssertNil(coordinator.state.failure, "opening the bell tries again")
+        XCTAssertEqual(coordinator.state.unread.map(\.id), ["n1"])
+        XCTAssertEqual(asked, 1)
+        coordinator.stopPolling()
+    }
+
+    func test_the_bell_reads_as_often_as_the_web_and_says_how_fresh_it_is() {
+        XCTAssertEqual(NotificationsCoordinator.pollInterval, 30)
+        let now = Date(timeIntervalSince1970: 1_793_300_000)
+        XCTAssertEqual(NotificationsPresentationState.freshness(updatedAt: now.addingTimeInterval(-20), now: now), "Updated just now")
+        XCTAssertEqual(NotificationsPresentationState.freshness(updatedAt: now.addingTimeInterval(-250), now: now), "Updated 4 min ago")
+    }
 }

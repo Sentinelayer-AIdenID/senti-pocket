@@ -70,8 +70,12 @@ final class NotificationsCoordinator: ObservableObject {
     private var isLoading = false
     private var failure: SessionLoadFailure?
     private var pollTask: Task<Void, Never>?
+    private let now: @Sendable () -> Date
+    private var updatedAt: Date?
+    private var couldNotUpdate = false
 
-    static let pollInterval: TimeInterval = 60
+    /// The web polls the bell about this often.
+    static let pollInterval: TimeInterval = 30
 
     init(
         transport: any NotificationsTransport,
@@ -80,22 +84,24 @@ final class NotificationsCoordinator: ObservableObject {
         sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
             try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
         },
+        now: @escaping @Sendable () -> Date = { Date() },
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.transport = transport
         self.marker = marker
         self.roomTitle = roomTitle
         self.sleep = sleep
+        self.now = now
         self.onReauthenticationRequired = onReauthenticationRequired
     }
 
     var unreadCount: Int { state.unreadCount }
 
-    func startPolling() {
+    func startPolling(readNow: Bool = true) {
         guard pollTask == nil else { return }
         pollTask = Task { [weak self] in
             guard let self else { return }
-            await self.refresh()
+            if readNow { await self.refresh() }
             while !Task.isCancelled {
                 await self.sleep(Self.pollInterval)
                 guard !Task.isCancelled else { return }
@@ -109,22 +115,28 @@ final class NotificationsCoordinator: ObservableObject {
         pollTask = nil
     }
 
-    func refresh() async {
-        guard failure != .reauthenticationRequired else { return }
+    /// Reads the bell. The poll skips it after an expired sign-in; opening the side panel or the bell (`force`) tries
+    /// again, and a success brings the poll back. A failed read keeps the list and says it could not update.
+    func refresh(force: Bool = false) async {
+        guard force || failure != .reauthenticationRequired else { return }
         if notifications.isEmpty { isLoading = true; publish() }
         do {
             let page = try await transport.notifications()
             notifications = page.notifications
             // The server's read state wins once it agrees; keep local reads that it has not caught up with.
             locallyRead = locallyRead.filter { id in notifications.contains { $0.id == id && !$0.isRead } }
+            let wasSignedOut = failure == .reauthenticationRequired
             failure = nil
+            couldNotUpdate = false
+            updatedAt = now()
+            if wasSignedOut, pollTask == nil { startPolling(readNow: false) }
         } catch SessionTransportError.reauthenticationRequired {
+            if failure != .reauthenticationRequired { onReauthenticationRequired() }
             failure = .reauthenticationRequired
-            onReauthenticationRequired()
             stopPolling()
         } catch SessionTransportError.cancelled {
         } catch {
-            if notifications.isEmpty { failure = .network }
+            if notifications.isEmpty { failure = .network } else { couldNotUpdate = true }
         }
         isLoading = false
         publish()
@@ -166,7 +178,9 @@ final class NotificationsCoordinator: ObservableObject {
                 )
             },
             isLoading: isLoading,
-            failure: failure
+            failure: failure,
+            updatedAt: updatedAt,
+            couldNotUpdate: couldNotUpdate
         )
     }
 }
