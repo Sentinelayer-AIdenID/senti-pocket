@@ -80,9 +80,11 @@ public struct CallLogState: Equatable, Sendable {
 public enum CallLogIntent: Equatable, Sendable {
     case refresh
     case loadMore
-    /// Open the call in its room, at the message that ended it.
+    /// Open the call in its room, at its card.
     case open(id: String)
     /// Read the call's summaries aloud.
     case listen(id: String)
+    /// The checkpoint briefing and Ask Senti, which this screen used to be.
+    case openBriefing
     case close
 }

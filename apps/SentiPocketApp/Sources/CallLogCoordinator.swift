@@ -12,6 +12,8 @@ final class CallLogCoordinator: ObservableObject {
     private let transport: any CallLogTransport
     private let onReauthenticationRequired: @MainActor () -> Void
     private var calls: [SentiCall] = []
+    /// Every call read this session, so a call opened from a detail still opens after a refresh replaced the list.
+    private var known: [String: SentiCall] = [:]
     private var nextCursor: String?
 
     init(transport: any CallLogTransport, onReauthenticationRequired: @escaping @MainActor () -> Void = {}) {
@@ -31,13 +33,17 @@ final class CallLogCoordinator: ObservableObject {
     private func read(cursor: String?) async {
         state.isLoading = true
         do {
-            let page = try await transport.calls(limit: 50, cursor: cursor)
+            let read = try await transport.calls(limit: 50, cursor: cursor)
+            // The signal model's name never shows, here or read aloud (warden, #272).
+            let page = SentiCallLogPage(calls: read.calls.map(Self.hidden), nextCursor: read.nextCursor)
+            let next = page.nextCursor
+            for call in page.calls { known[call.id] = call }
             if cursor == nil {
                 calls = page.calls
             } else {
                 calls += page.calls.filter { call in !calls.contains { $0.id == call.id && $0.kind == call.kind } }
             }
-            nextCursor = page.nextCursor
+            nextCursor = next
             state.isAvailable = true
             state.notice = nil
         } catch SessionTransportError.accessDenied {
@@ -53,10 +59,16 @@ final class CallLogCoordinator: ObservableObject {
         publish()
     }
 
-    /// The call in its room, at the message that ended it (or started it).
+    /// The call in its room, at its card: the room folds a closed call onto the message that started it, so the end
+    /// message has no row of its own to land on (warden, #272).
     func link(for id: String) -> SentiLink? {
-        guard let call = calls.first(where: { $0.id == id }) else { return nil }
-        return SentiLink(sessionId: call.sessionId, messageSequence: call.endSequenceId ?? call.startSequenceId)
+        guard let call = known[id] else { return nil }
+        return SentiLink(sessionId: call.sessionId, messageSequence: call.startSequenceId ?? call.endSequenceId)
+    }
+
+    /// Something the call log has to say once (Listen could not start).
+    func show(notice: String) {
+        state.notice = notice
     }
 
     /// The call's summaries as one text to read aloud, with its title and room.
@@ -65,6 +77,19 @@ final class CallLogCoordinator: ObservableObject {
               let call = calls.first(where: { $0.id == id }) else { return nil }
         let text = row.summaries.map { "\($0.author): \($0.text)" }.joined(separator: "\n\n")
         return ("Call with \(row.title)", text, call.sessionId)
+    }
+
+    static func hidden(_ call: SentiCall) -> SentiCall {
+        let hide = TicketSignal.hideModelName
+        return SentiCall(kind: call.kind, id: call.id, sessionId: call.sessionId, roomTitle: hide(call.roomTitle),
+                         status: call.status, startedAt: call.startedAt, endedAt: call.endedAt, with: call.with,
+                         isMeeting: call.isMeeting, durationText: call.durationText, turns: call.turns,
+                         timingsText: call.timingsText, transcriptAttachmentId: call.transcriptAttachmentId,
+                         summaries: call.summaries.map { SentiCall.Summary(author: $0.author, text: hide($0.text),
+                                                                           createdAt: $0.createdAt) },
+                         startSequenceId: call.startSequenceId, endSequenceId: call.endSequenceId,
+                         direction: call.direction, callerName: call.callerName, calleeName: call.calleeName,
+                         reason: call.reason.map(hide))
     }
 
     private func publish() {
