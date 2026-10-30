@@ -203,6 +203,14 @@ final class RoomTicketsWorkedOnTests: XCTestCase {
         XCTAssertEqual(state.rows.map(\.stageProgress), [0.45, 0.85, 0.45, nil])
     }
 
+    func test_the_servers_estimate_replaces_the_stage_when_there_is_one() {
+        let estimated = RoomTicketRow(id: "e", title: "E", status: "working", estimate: 0.72, estimateBasis: "stage: working; 4 notes")
+        XCTAssertEqual(estimated.barProgress, 0.72)
+        XCTAssertEqual(estimated.estimateBasis, "stage: working; 4 notes")
+        XCTAssertEqual(RoomTicketRow(id: "s", title: "S", status: "in_review").barProgress, 0.85)
+        XCTAssertNil(RoomTicketRow(id: "d", title: "D", status: "done", estimate: 0.9).barProgress, "a finished ticket has no bar")
+    }
+
     func test_a_finished_or_stale_ticket_has_no_bar() {
         XCTAssertNil(RoomTicketRow(id: "d", title: "D", status: "done").stageProgress)
         XCTAssertNil(RoomTicketRow(id: "s", title: "S", status: "assigned",

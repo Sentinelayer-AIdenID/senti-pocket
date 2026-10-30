@@ -28,6 +28,9 @@ public struct RoomTicketInput: Equatable, Sendable {
     public let sourceSequenceId: Int64?
     public let isVerifiedDone: Bool
     public let lease: Lease?
+    /// The server's progress estimate (API #1052), 0...1, with its short reason; nil until scored.
+    public let estimate: Double?
+    public let estimateBasis: String?
 
     public init(
         id: String,
@@ -41,7 +44,9 @@ public struct RoomTicketInput: Equatable, Sendable {
         priority: Int? = nil,
         sourceSequenceId: Int64? = nil,
         isVerifiedDone: Bool = false,
-        lease: Lease? = nil
+        lease: Lease? = nil,
+        estimate: Double? = nil,
+        estimateBasis: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -55,6 +60,8 @@ public struct RoomTicketInput: Equatable, Sendable {
         self.sourceSequenceId = sourceSequenceId
         self.isVerifiedDone = isVerifiedDone
         self.lease = lease
+        self.estimate = estimate
+        self.estimateBasis = estimateBasis
     }
 }
 
@@ -73,6 +80,9 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
     /// The question the ticket keeper is waiting on, while the ticket is not done.
     public let decision: TicketDecision?
     public let lease: RoomTicketInput.Lease?
+    /// The server's progress estimate and its reason, when scored (API #1052).
+    public let estimate: Double?
+    public let estimateBasis: String?
 
     /// The title and body as a person sees them: the signal model's name hidden, as the web shows them. Edits and
     /// posts keep the ticket's own words.
@@ -92,7 +102,9 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
         sourceSequenceId: Int64? = nil,
         isVerifiedDone: Bool = false,
         decision: TicketDecision? = nil,
-        lease: RoomTicketInput.Lease? = nil
+        lease: RoomTicketInput.Lease? = nil,
+        estimate: Double? = nil,
+        estimateBasis: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -107,6 +119,8 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
         self.isVerifiedDone = isVerifiedDone
         self.decision = decision
         self.lease = lease
+        self.estimate = estimate.map { min(max($0, 0), 1) }
+        self.estimateBasis = estimateBasis.flatMap { $0.isEmpty ? nil : $0 }
     }
 
     /// `done`, or `killed`, the API's other final status.
@@ -124,6 +138,12 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
     public var stageProgress: Double? {
         guard isBeingWorkedOn else { return nil }
         return status == "in_review" ? 0.85 : 0.45
+    }
+
+    /// What the bar shows: the server's estimate when it has one, else the stage.
+    public var barProgress: Double? {
+        guard isBeingWorkedOn else { return nil }
+        return estimate ?? stageProgress
     }
 
     public var statusLabel: String {
@@ -238,7 +258,9 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
                 sourceSequenceId: input.sourceSequenceId,
                 isVerifiedDone: input.isVerifiedDone,
                 decision: input.status == "done" || input.status == "killed" ? nil : TicketDecision.parse(body),
-                lease: input.lease
+                lease: input.lease,
+                estimate: input.estimate,
+                estimateBasis: input.estimateBasis
             )
         }
         let protected = failure?.suppressesProtectedContent == true
