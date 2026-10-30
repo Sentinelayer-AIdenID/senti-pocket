@@ -105,6 +105,46 @@ private final class FakePoster: VoiceRoomPosting, @unchecked Sendable {
     }
 }
 
+/// A room whose posts can stall or fail, for hanging up on a bad network.
+private final class TroubledPoster: VoiceRoomPosting, @unchecked Sendable {
+    private let lock = NSLock()
+    private var released = false
+    private var _endings = 0
+    let failsStart: Bool
+    let failsUpload: Bool
+
+    init(failsStart: Bool = false, failsUpload: Bool = false) {
+        self.failsStart = failsStart
+        self.failsUpload = failsUpload
+    }
+
+    func release() { lock.withLock { released = true } }
+    var endings: Int { lock.withLock { _endings } }
+
+    func postCallStarted(sessionId: String, text: String, clientId: String) async throws {
+        if failsStart { throw RoomSendError.retryable(retryAfterSeconds: nil) }
+    }
+
+    func postVoiceTurn(sessionId: String, text: String, clientId: String) async throws {}
+
+    func uploadTranscript(sessionId: String, filename: String, markdown: String, clientId: String) async throws -> VoiceTranscriptAttachment {
+        while !lock.withLock({ released }) { try await Task.sleep(nanoseconds: 2_000_000) }
+        if failsUpload { throw RoomSendError.retryable(retryAfterSeconds: nil) }
+        return VoiceTranscriptAttachment(attachmentId: "att-9", filename: filename, kind: "text",
+                                         contentType: "text/markdown", sizeBytes: markdown.utf8.count, status: "ready")
+    }
+
+    func postCallEnded(sessionId: String, text: String, transcript: VoiceTranscriptAttachment?, clientId: String) async throws {
+        lock.withLock { _endings += 1 }
+    }
+}
+
+@MainActor
+private final class BusyAudio: VoiceRoomAudioSession {
+    func activate() throws { throw VoiceRoomAudioError.recognizerUnavailable }
+    func deactivate() {}
+}
+
 /// A clock only the test moves.
 private final class TestClock: @unchecked Sendable {
     private let lock = NSLock()
@@ -118,8 +158,9 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
     private let clock = TestClock()
 
     private func room(with agents: [String], handsFree: Bool = true,
-                      listener: FakeListener, speaker: FakeSpeaker, audio: FakeAudio, ringer: FakeRinger? = nil,
-                      poster: FakePoster, onEnded: @escaping @MainActor () -> Void = {}) -> VoiceRoomCoordinator {
+                      listener: FakeListener, speaker: FakeSpeaker, audio: any VoiceRoomAudioSession, ringer: FakeRinger? = nil,
+                      poster: any VoiceRoomPosting, onEnded: @escaping @MainActor () -> Void = {},
+                      onRecordFailed: @escaping @MainActor (String) -> Void = { _ in }) -> VoiceRoomCoordinator {
         let clock = self.clock
         let room = VoiceRoomCoordinator(
             sessionId: "room_1",
@@ -134,7 +175,8 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
             now: { clock.now },
             // Time moves only when a test moves it; the pause watcher just polls.
             sleep: { _ in try? await Task.sleep(nanoseconds: 1_000_000) },
-            onEnded: onEnded
+            onEnded: onEnded,
+            onRecordFailed: onRecordFailed
         )
         if !handsFree { room.send(.setHandsFree(false)) }
         return room
@@ -415,13 +457,70 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         XCTAssertEqual(VoiceRoomCoordinator.pause(after: ""), VoiceRoomCoordinator.pauseEndsTurn)
     }
 
-    func test_hanging_up_a_call_where_nothing_was_said_posts_nothing() async {
+    /// Warden (#267): a call is always closed in the room, so its card ends and no agent says hello into it.
+    func test_hanging_up_a_call_where_nothing_was_said_still_closes_it_without_a_transcript() async {
         let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), poster = FakePoster()
         let room = room(with: ["pocket-forge"], handsFree: false, listener: listener, speaker: speaker, audio: audio, poster: poster)
         room.begin()
         await room.hangUp()
-        XCTAssertTrue(poster.uploads.isEmpty)
-        XCTAssertTrue(poster.endings.isEmpty)
+        XCTAssertTrue(poster.uploads.isEmpty, "nothing said, nothing to attach")
+        XCTAssertEqual(poster.endings.count, 1)
+        XCTAssertTrue(poster.endings.first?.text.hasPrefix("📞 Voice room with pocket-forge ended") == true)
+        XCTAssertFalse(poster.endings.first?.text.contains("summary") == true, "nothing to sum up")
         XCTAssertEqual(room.state.phase, .ended)
+    }
+
+    /// Warden (#267): hanging up locked the app until the transcript saved, up to two minutes on a stalled network.
+    func test_hanging_up_takes_the_call_screen_away_before_the_record_is_saved() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), poster = TroubledPoster()
+        var ended = false
+        let room = room(with: ["pocket-forge"], handsFree: false, listener: listener, speaker: speaker, audio: audio,
+                        poster: poster, onEnded: { ended = true })
+        room.begin()
+        room.send(.toggleTalk)
+        await until("listening") { listener.partial != nil }
+        listener.say("Status please")
+        room.send(.toggleTalk)
+        await until("turn kept") { room.state.turns.count == 1 }
+
+        let hanging = Task { await room.hangUp() }
+        await until("the screen goes at once") { ended }
+        XCTAssertEqual(poster.endings, 0, "the record is still being saved")
+        XCTAssertFalse(audio.active, "the microphone and speaker are given back at once")
+        poster.release()
+        await hanging.value
+        XCTAssertEqual(poster.endings, 1)
+        XCTAssertEqual(room.state.phase, .ended)
+    }
+
+    func test_a_record_that_does_not_save_is_said_in_the_room() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), poster = TroubledPoster(failsUpload: true)
+        var said: [String] = []
+        let room = room(with: ["pocket-forge"], handsFree: false, listener: listener, speaker: speaker, audio: audio,
+                        poster: poster, onRecordFailed: { said.append($0) })
+        room.begin()
+        room.send(.toggleTalk)
+        await until("listening") { listener.partial != nil }
+        listener.say("Status please")
+        room.send(.toggleTalk)
+        await until("turn kept") { room.state.turns.count == 1 }
+        poster.release()
+        await room.hangUp()
+        XCTAssertEqual(said, ["The call's transcript could not be saved to the room."])
+        XCTAssertEqual(poster.endings, 1, "the call is still closed, without its file")
+    }
+
+    func test_a_ring_that_could_not_be_sent_or_without_the_phones_audio_does_not_ring() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), ringer = FakeRinger()
+        let unsent = room(with: ["pocket-forge"], listener: listener, speaker: speaker, audio: FakeAudio(), ringer: ringer,
+                          poster: TroubledPoster(failsStart: true))
+        unsent.begin()
+        await until("the ring stops") { !ringer.ringing && !unsent.state.isRinging }
+        XCTAssertEqual(unsent.state.notice, "The agents could not be rung. Check the connection.")
+
+        let busy = room(with: ["pocket-forge"], listener: FakeListener(), speaker: FakeSpeaker(), audio: BusyAudio(),
+                        poster: FakePoster())
+        busy.begin()
+        XCTAssertFalse(busy.state.isRinging, "no \"Ringing…\" for ever without the phone's audio")
     }
 }

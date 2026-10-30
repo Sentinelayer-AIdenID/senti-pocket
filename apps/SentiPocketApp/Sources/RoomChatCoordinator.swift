@@ -1549,6 +1549,12 @@ final class RoomChatCoordinator: ObservableObject {
         publish()
     }
 
+    /// A note in the room from outside its own work (a call's record that did not save).
+    func show(notice text: String) {
+        notice = text
+        publish()
+    }
+
     private func publish() {
         let work = workLines()
         let inputs = timeline.messages.map { message -> RoomChatMessageInput in
