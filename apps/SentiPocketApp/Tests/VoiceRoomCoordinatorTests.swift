@@ -299,6 +299,9 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         clock.advance(0.5)
         room.send(.toggleTalk)
         await until("posted") { poster.turns.count == 1 }
+        // The room starts timing the answer once the post has returned to it, which on a slow runner comes after the
+        // poster has the turn (warden, 10-30: nil timings on the hosted runner).
+        await until("post timed") { room.timings.percentile(.post, 0.5) != nil }
         clock.advance(3)
         room.receive([message("m1", from: "pocket-forge", "Build 21 is up.", secondsAfterStart: 4)])
         await until("speaking") { room.state.speaker == "pocket-forge" }
