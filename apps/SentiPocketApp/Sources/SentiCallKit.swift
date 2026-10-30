@@ -93,6 +93,8 @@ public final class SentiCallManager: NSObject {
         configuration.maximumCallGroups = 1
         configuration.includesCallsInRecents = false
         configuration.supportedHandleTypes = [.generic]
+        // An agent's call rings with Senti's own ringtone (Carter, 10-30), rendered by scripts/ios/make_sounds.py.
+        configuration.ringtoneSound = "ring.caf"
         let provider = CXProvider(configuration: configuration)
         let pushRegistry = PKPushRegistry(queue: .main)
         self.provider = provider

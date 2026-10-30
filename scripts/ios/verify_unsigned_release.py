@@ -84,6 +84,8 @@ APPROVED_RESOURCE_REFERENCES = frozenset(
         PurePosixPath("Resources/silence.caf"),
         PurePosixPath("Resources/receive.caf"),
         PurePosixPath("Resources/send.caf"),
+        # The ringtone CallKit plays for an agent's call (make_sounds.py ring).
+        PurePosixPath("Resources/ring.caf"),
     }
 )
 APPROVED_PACKAGE_PRODUCTS = frozenset(
