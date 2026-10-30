@@ -394,6 +394,8 @@ private struct AuthenticatedRootView: View {
             .ignoresSafeArea(edges: drawerOpen ? .vertical : [])
         }
         .pocketCanvas()
+        // The logo at launch, while your rooms load underneath (Carter, #55287).
+        .overlay { LaunchSplash(isReady: roomListSettled) }
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: drawerOpen)
         // Opening the side panel reads the bell, so its count is never older than the panel.
         .onChange(of: drawerOpen) { open in
