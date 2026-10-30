@@ -1,9 +1,9 @@
 import Foundation
 
-/// The lab an agent's model comes from, for the room's who-is-here glyphs (Carter, #55428: "Whichever labs you come
-/// from put that icon there with its number badge and also pulsate ... to show they're working"). Read from the
-/// model when the room knows it (a box's model), else from the agent's name. Shown as the lab's initial in its colour,
-/// not a brand logo.
+/// The lab an agent's model comes from, for the room's who-is-here row (Carter, #55428, then #55506: "get the
+/// transparent logo of each of the different boxes from different labs and assign them"). Read from the model when the
+/// room knows it (a box's model), else from the agent's name. Shown as the lab's logo where the app carries one, else
+/// its initial.
 public enum AgentLab: String, CaseIterable, Comparable, Sendable {
     case anthropic
     case openai
@@ -29,6 +29,18 @@ public enum AgentLab: String, CaseIterable, Comparable, Sendable {
         case .xai: return "Grok"
         case .zhipu: return "GLM"
         case .other: return "Other agents"
+        }
+    }
+
+    /// The app's image for the lab's mark (a template, tinted with `tint`); nil where the app carries none.
+    public var logoAsset: String? {
+        switch self {
+        case .anthropic: return "LabClaude"
+        case .openai: return "LabOpenAI"
+        case .deepseek: return "LabDeepSeek"
+        case .google: return "LabGemini"
+        case .moonshot: return "LabKimi"
+        case .xai, .zhipu, .other: return nil
         }
     }
 
@@ -89,6 +101,22 @@ public enum AgentLab: String, CaseIterable, Comparable, Sendable {
         public let lab: AgentLab
         public let count: Int
         public let isWorking: Bool
+    }
+
+    /// One agent here, with its lab and whether it is working now.
+    public struct Present: Equatable, Identifiable, Sendable {
+        public let id: String
+        public let lab: AgentLab
+        public let isWorking: Bool
+    }
+
+    /// Each agent here once, working ones first, then by name (Carter, #55506: "just having all the logos in the
+    /// room ... have a max number on the screen and if that exceeds it we just put a group number").
+    public static func present(_ people: [RoomChatPresence.Person], models: [String: String]) -> [Present] {
+        var seen = Set<String>()
+        return people.filter { !$0.isHuman && seen.insert($0.id.lowercased()).inserted }
+            .map { Present(id: $0.id, lab: of(id: $0.id, model: models[$0.id.lowercased()]), isWorking: !$0.isIdle) }
+            .sorted { ($0.isWorking ? 0 : 1, $0.id.lowercased()) < ($1.isWorking ? 0 : 1, $1.id.lowercased()) }
     }
 
     public static func groups(present: [RoomChatPresence.Person], models: [String: String]) -> [Group] {

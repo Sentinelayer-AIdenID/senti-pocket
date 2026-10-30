@@ -1,11 +1,10 @@
 import SwiftUI
 
-/// Who is here, floating at the top center of the room, under the top bar (Carter, #55354, then #55424: "no
-/// backgrounds ... more transparent ... dead center of the top", then #55428: "Whichever labs you come from put that
-/// icon there with its number badge and also pulsate ... to show they're working. Or idle"): one glyph per lab with
-/// its agents' count, pulsing while any of them is active, and a person glyph with the people's count. Someone
-/// arriving or leaving shows as a note that grows out of the row and fades, and the counts tick over. Tapping opens the
-/// people list.
+/// Who is here, floating at the top center of the room, under the top bar (Carter, #55354, #55424, #55428, then
+/// #55506: "all the logos in the room ... when one is working we can highlight it in the logo ... have a max number on
+/// the screen and if that exceeds it we just put a group number"): each agent here as its lab's logo, solid, pulsing
+/// while it works, at most six and then "+N", then a person glyph with the people's count. Someone arriving or leaving
+/// shows as a note that grows out of the row and fades. Tapping opens the people list.
 struct RoomPeopleAvatars: View {
     let presence: RoomChatPresence
     /// Each agent's model where the room knows it (a box's), lowercased id to model, to tell its lab.
@@ -28,9 +27,15 @@ struct RoomPeopleAvatars: View {
 
     var body: some View {
         Button(action: onOpen) {
-            HStack(spacing: 14) {
-                ForEach(labs) { group in
-                    LabGlyph(group: group, reduceMotion: reduceMotion)
+            HStack(spacing: 10) {
+                ForEach(shownAgents) { agent in
+                    AgentLogo(agent: agent, reduceMotion: reduceMotion)
+                }
+                if hiddenAgents > 0 {
+                    Text("+\(hiddenAgents)")
+                        .font(.caption.weight(.bold))
+                        .monospacedDigit()
+                        .foregroundStyle(PocketPalette.textPrimary)
                 }
                 personGlyph
             }
@@ -51,15 +56,22 @@ struct RoomPeopleAvatars: View {
         .onChange(of: presence) { now in arrive(now) }
     }
 
-    private var labs: [AgentLab.Group] {
-        AgentLab.groups(present: presence.people, models: models)
+    /// How many agents' logos show before the rest become "+N".
+    static let maximumShown = 6
+
+    private var agentsHere: [AgentLab.Present] {
+        AgentLab.present(presence.people, models: models)
     }
+
+    private var shownAgents: [AgentLab.Present] { Array(agentsHere.prefix(Self.maximumShown)) }
+    private var hiddenAgents: Int { max(0, agentsHere.count - Self.maximumShown) }
 
     private var label: String {
         guard presence.isAvailable else { return "Who is here is not known right now" }
-        let agentsLine = labs.map { "\($0.count) \($0.lab.name)\($0.isWorking ? ", working" : "")" }
+        let agents = agentsHere
+        let working = agents.filter(\.isWorking).count
         let people = "\(humans) \(humans == 1 ? "person" : "people")"
-        return (agentsLine + [people]).joined(separator: ", ") + " here"
+        return "\(agents.count) agent\(agents.count == 1 ? "" : "s") (\(working) working) and \(people) here"
     }
 
     /// People: the glyph with its count beside it, no shape behind, quiet (Carter, #55424).
@@ -75,7 +87,6 @@ struct RoomPeopleAvatars: View {
             }
         }
         .foregroundStyle(PocketPalette.textPrimary)
-        .opacity(0.55)
         .accessibilityHidden(true)
     }
 
@@ -123,41 +134,51 @@ struct RoomPeopleAvatars: View {
     }
 }
 
-/// One lab's agents: its initial in its colour (a chip for an unknown lab) and how many, pulsing while any is active
-/// and resting quiet when all are idle.
-private struct LabGlyph: View {
-    let group: AgentLab.Group
+/// One agent here: its lab's logo in the lab's colour, solid (Carter, #55506: "I cannot see them anymore. They're too
+/// damn transparent"), or the lab's initial, or a chip for an unknown lab. While the agent works it pulses, and
+/// Claude's mark turns slowly, as its terminal spinner does; resting, it stays still.
+private struct AgentLogo: View {
+    let agent: AgentLab.Present
     let reduceMotion: Bool
     @State private var lifted = false
+    @State private var turned = false
 
     var body: some View {
-        let (red, green, blue) = group.lab.tint
-        HStack(spacing: 3) {
-            if let initial = group.lab.initial {
-                Text(initial)
-                    .font(.system(size: 14, weight: .heavy, design: .rounded))
-            } else {
-                Image(systemName: "cpu")
-                    .font(.system(size: 13, weight: .semibold))
-            }
-            Text("\(group.count)")
-                .font(.caption.weight(.semibold))
-                .monospacedDigit()
-                .contentTransition(.numericText())
-        }
-        .foregroundStyle(Color(red: red, green: green, blue: blue))
-        .opacity(group.isWorking ? (lifted ? 1 : 0.6) : 0.45)
-        .scaleEffect(group.isWorking && lifted && !reduceMotion ? 1.12 : 1)
-        .onAppear { pulse(group.isWorking) }
-        .onChange(of: group.isWorking) { working in pulse(working) }
-        .accessibilityHidden(true)
+        let (red, green, blue) = agent.lab.tint
+        mark
+            .foregroundStyle(Color(red: red, green: green, blue: blue))
+            .frame(width: 20, height: 20)
+            .rotationEffect(.degrees(agent.lab == .anthropic && turned ? 360 : 0))
+            .scaleEffect(agent.isWorking && lifted && !reduceMotion ? 1.18 : 1)
+            .shadow(color: Color(red: red, green: green, blue: blue).opacity(agent.isWorking && lifted ? 0.7 : 0), radius: 6)
+            .onAppear { animate(agent.isWorking) }
+            .onChange(of: agent.isWorking) { working in animate(working) }
+            .accessibilityHidden(true)
     }
 
-    private func pulse(_ working: Bool) {
+    @ViewBuilder
+    private var mark: some View {
+        if let asset = agent.lab.logoAsset {
+            Image(asset)
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+        } else if let initial = agent.lab.initial {
+            Text(initial).font(.system(size: 15, weight: .heavy, design: .rounded))
+        } else {
+            Image(systemName: "cpu").font(.system(size: 15, weight: .semibold))
+        }
+    }
+
+    private func animate(_ working: Bool) {
         guard working, !reduceMotion else {
             lifted = false
+            turned = false
             return
         }
-        withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) { lifted = true }
+        withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) { lifted = true }
+        if agent.lab == .anthropic {
+            withAnimation(.linear(duration: 4).repeatForever(autoreverses: false)) { turned = true }
+        }
     }
 }

@@ -34,3 +34,22 @@ final class AgentLabTests: XCTestCase {
         XCTAssertEqual(idle, [AgentLab.Group(lab: .deepseek, count: 1, isWorking: false)])
     }
 }
+
+/// Carter, #55506: every agent's own lab logo, working ones first, capped then "+N".
+final class AgentLogoTests: XCTestCase {
+    func test_each_agent_shows_once_working_first_with_its_labs_logo() {
+        let present = [
+            RoomChatPresence.Person(id: "ds-box-1", name: "ds-box-1", isHuman: false, isIdle: true),
+            RoomChatPresence.Person(id: "claude-warden", name: "claude-warden", isHuman: false, isIdle: false),
+            RoomChatPresence.Person(id: "CLAUDE-WARDEN", name: "claude-warden", isHuman: false, isIdle: false),
+            RoomChatPresence.Person(id: "human-carter", name: "carter", isHuman: true, isIdle: false),
+            RoomChatPresence.Person(id: "astra-council", name: "astra-council", isHuman: false, isIdle: false)
+        ]
+        let agents = AgentLab.present(present, models: [:])
+        XCTAssertEqual(agents.map(\.id), ["astra-council", "claude-warden", "ds-box-1"])
+        XCTAssertEqual(agents.map(\.lab), [.openai, .anthropic, .deepseek])
+        XCTAssertEqual(agents.map(\.isWorking), [true, true, false])
+        XCTAssertEqual(AgentLab.anthropic.logoAsset, "LabClaude")
+        XCTAssertNil(AgentLab.xai.logoAsset, "no logo carried: the initial shows")
+    }
+}
