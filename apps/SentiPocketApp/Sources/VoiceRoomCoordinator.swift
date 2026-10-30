@@ -45,6 +45,12 @@ final class VoiceRoomCoordinator: ObservableObject {
     private var lastHeard: Date?
     private var silenceWatch: Task<Void, Never>?
     private var ringWatch: Task<Void, Never>?
+    /// The message that rang the agents: hang-up waits for it, so an end never lands before its start, and a call
+    /// whose ring never went out ends without an end message (warden, #267).
+    private var startPost: Task<Bool, Never>?
+    /// Each room's last call record still being saved: a new call's ring waits for it, so an old end can't close a
+    /// new call's card.
+    private static var closing: [String: Task<Void, Never>] = [:]
     private var listenGeneration = 0
 
     /// How fast the call is, measured as it goes; reported when it ends.
@@ -117,14 +123,19 @@ final class VoiceRoomCoordinator: ObservableObject {
         }
         let ring = VoiceCallMarkers.start(caller: you, agents: invited, meeting: state.with.isEmpty)
         let clientId = "voice-start-" + UUID().uuidString.lowercased()
-        Task { [weak self] in
-            guard let self else { return }
+        let previous = Self.closing[sessionId]
+        startPost = Task { [weak self] in
+            // The room's last call is closed first, so its end lands before this ring.
+            await previous?.value
+            guard let self else { return false }
             do {
                 try await self.poster.postCallStarted(sessionId: self.sessionId, text: ring, clientId: clientId)
+                return true
             } catch {
                 // Nobody was rung, so nothing rings (warden, #267).
                 self.stopRinging()
                 self.state.notice = "The agents could not be rung. Check the connection."
+                return false
             }
         }
         // Nobody to ring (a meeting in a room with no agents): the line is open at once.
@@ -427,6 +438,17 @@ final class VoiceRoomCoordinator: ObservableObject {
         // The call screen goes at once; the call's record is saved after it (warden, #267: a stalled network held
         // every control for up to two minutes).
         onEnded()
+        let saving = Task { [self] in await saveRecord(ended: ended) }
+        Self.closing[sessionId] = saving
+        await saving.value
+        if Self.closing[sessionId] == saving { Self.closing[sessionId] = nil }
+        state.phase = .ended
+    }
+
+    /// The call's record: its transcript and the message that closes it, after the ring went out. A call whose ring
+    /// never went out (no audio, or the post failed) was never opened, so nothing closes it.
+    private func saveRecord(ended: Date) async {
+        guard await startPost?.value == true else { return }
         let clientId = "voice-end-" + UUID().uuidString.lowercased()
         var saved: VoiceTranscriptAttachment?
         var failure: String?
@@ -449,7 +471,6 @@ final class VoiceRoomCoordinator: ObservableObject {
         } catch {
             failure = "The call's end could not be posted to the room. Its card may still show it as live."
         }
-        state.phase = .ended
         if let failure {
             state.notice = failure
             onRecordFailed(failure)

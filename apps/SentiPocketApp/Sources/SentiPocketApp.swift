@@ -382,6 +382,8 @@ private struct AuthenticatedRootView: View {
                     roomScreen(route)
                 }
             }
+            // A sheet or the side panel over the room: its moving parts rest (warden, #269).
+            .environment(\.roomIsCovered, roomCovered)
             // Listening goes on when you leave its room (Carter, 10-30): outside that room the app keeps the player,
             // and its title takes you back to the message.
             .overlay(alignment: .bottom) {
@@ -579,6 +581,10 @@ private struct AuthenticatedRootView: View {
     /// selection Pocket and Activity follow in step, and remembers it for the next launch.
     @MainActor
     private func show(_ route: RoomRoute) {
+        // The room being left reads nothing more, even before its screen goes (warden, #267).
+        if let leaving = (roomPath.last ?? currentRoom)?.sessionId, leaving != route.sessionId {
+            roomReads.gone(leaving)
+        }
         if !UTF8ExactIdentity.matches(sessions.selectedSessionId, route.sessionId) {
             sessions.send(.selectSession(sessionId: route.sessionId))
         }
@@ -714,6 +720,7 @@ private struct AuthenticatedRootView: View {
     /// Something over the room: a sheet, or the side panel.
     private var roomCovered: Bool {
         drawerOpen || presentsNotifications || presentsWaiting || presentsPocket || presentsActivity || presentsSettings
+            || presentsNewRoom
     }
 
     /// The room list has loaded or failed, so a room opened from a link knows its title and your role in it.

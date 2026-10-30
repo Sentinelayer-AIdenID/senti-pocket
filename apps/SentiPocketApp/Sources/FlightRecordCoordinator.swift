@@ -94,6 +94,15 @@ final class FlightRecordCoordinator: ObservableObject {
         publish()
     }
 
+    /// The room's boxes only (one read), for who is here; the full flight record reads each box as well.
+    func refreshBoxes() async {
+        guard let room = try? await mint.roomSnapshot(sessionId: sessionId) else { return }
+        lives = room.lives.filter(\.isActive)
+        let running = Set(lives.map { $0.agentName.lowercased() })
+        endedBoxNames = Set(room.lives.filter { !$0.isActive }.map { $0.agentName.lowercased() }).subtracting(running)
+        publish()
+    }
+
     func refresh() async {
         do {
             let room = try await mint.roomSnapshot(sessionId: sessionId)

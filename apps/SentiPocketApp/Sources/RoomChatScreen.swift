@@ -38,6 +38,8 @@ struct RoomChatScreen: View {
     @State private var showsArtifacts = false
     /// A voice conversation in this room, while one is open.
     @State private var voiceRoom: VoiceRoomCoordinator?
+    /// The app covers the room (a sheet or the side panel).
+    @Environment(\.roomIsCovered) private var coveredFromOutside
     /// The call's waveform: your microphone and the agent's words.
     @State private var voiceMeter = VoiceLevelMeter()
     @State private var choosesVoicePartner = false
@@ -324,19 +326,28 @@ struct RoomChatScreen: View {
             onEnded: { endVoiceRoom() },
             onRecordFailed: { [weak coordinator] failure in coordinator?.show(notice: failure) }
         )
+        // The call fills the screen, over the room and its bars, until you hang up (Carter, 10-30). Without its screen
+        // there would be no way to hang up, so the call does not start, nothing of it is left wired, and you are told
+        // (warden, #267).
+        guard VoiceCallWindow.shared.show(VoiceRoomHost(room: room, meter: meter, partnerLab: partnerLab(of: room))) else {
+            CrashReporter.shared.note("voice call refused: no call screen")
+            if let answeredCall {
+                RoomCallDesk.shared.voiceRoomEnded(answeredCall)
+                self.answeredCall = nil
+            }
+            coordinator.show(notice: "The call screen could not open, so the call did not start. Try again.")
+            return
+        }
         coordinator.onLiveMessages = { [weak room] messages in room?.receive(messages) }
         coordinator.onNewReplies = { [weak room] replies in room?.receive(replies: replies) }
         coordinator.readsRepliesOften = true
-        // The call fills the screen, over the room and its bars, until you hang up (Carter, 10-30). Without its screen
-        // there would be no way to hang up, so the call does not start (warden, #267).
-        guard VoiceCallWindow.shared.show(VoiceRoomHost(room: room, meter: meter, partnerLab: partnerLab(of: room))) else {
-            CrashReporter.shared.note("voice call refused: no call screen")
-            return
-        }
         voiceRoom = room
         CrashReporter.shared.note(agents.isEmpty ? "voice meeting began" : "voice call began")
         room.begin(rings: !answering)
     }
+
+    /// Something covers the room: a sheet or the side panel (from the app), or this room's call.
+    private var isCovered: Bool { coveredFromOutside || voiceRoom != nil }
 
     /// The room's messages have loaded and are on screen.
     private var messagesShown: Bool {
@@ -439,8 +450,9 @@ struct RoomChatScreen: View {
                 coordinator.send(intent)
             }
         }
-        // A call's window covers the room: its moving parts (the presence ring) rest underneath (warden, #265).
-        .environment(\.roomIsCovered, voiceRoom != nil)
+        // A sheet, the side panel or a call's window covers the room: its moving parts (the presence ring) rest
+        // underneath (warden, #265, #269).
+        .environment(\.roomIsCovered, isCovered)
         .toolbar {
             if voicePoster != nil {
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -766,11 +778,13 @@ struct RoomChatScreen: View {
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             offerCrashReports()
         }
-        .task {
+        .task(id: isCovered) {
             // The room's running boxes, for the ring and its count, kept fresh while the room is open (Carter, 10-30:
-            // the count only caught up once the people list was opened).
+            // the count only caught up once the people list was opened): their names only, and only while the room
+            // can be seen (warden, #269).
+            guard !isCovered else { return }
             while !Task.isCancelled {
-                await flight.refresh()
+                await flight.refreshBoxes()
                 try? await Task.sleep(nanoseconds: 60_000_000_000)
             }
         }

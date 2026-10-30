@@ -295,6 +295,7 @@ public struct RoomChatView: View {
                                       working: state.agentsWorking(now: Date()),
                                       boxes: roster.members.filter { $0.kind == .box && $0.status != .ended }.map(\.name),
                                       activeCount: roster.members.isEmpty ? nil : roster.activeCount,
+                                      activeKeys: roster.members.isEmpty ? nil : roster.activeKeys,
                                       isPaused: showsPresence) {
                         showsPresence = true
                     }

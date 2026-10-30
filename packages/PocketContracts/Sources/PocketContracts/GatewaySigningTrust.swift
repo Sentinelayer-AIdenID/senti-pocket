@@ -133,7 +133,14 @@ public enum PocketGatewayTrust {
     /// Whether any compiled key may sign checkpoint bundles. Release pins none yet, so its checkpoints open as the
     /// server holds them.
     public static var verifiesBundles: Bool {
-        PocketGatewaySigningKeyRegistry.production.hasKey(for: .bundle)
+        #if DEBUG
+        // Debug carries demo keys for the fixture briefing, not a signing service: the verified view only on request,
+        // so Xcode and simulator runs open server checkpoints like Release (warden, #266).
+        return ProcessInfo.processInfo.environment["SENTI_VERIFIED_CHECKPOINTS"] == "1"
+            && PocketGatewaySigningKeyRegistry.production.hasKey(for: .bundle)
+        #else
+        return PocketGatewaySigningKeyRegistry.production.hasKey(for: .bundle)
+        #endif
     }
 }
 

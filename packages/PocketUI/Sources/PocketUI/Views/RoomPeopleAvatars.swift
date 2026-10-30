@@ -23,6 +23,9 @@ struct RoomPeopleAvatars: View {
     /// How many are here and active, as the people list counts them (Carter, 10-30: the ring said 2 while the list
     /// said 9 online); nil counts the ring's own logos that are not idle.
     var activeCount: Int?
+    /// Who the people list counts as active, by `RoomRoster.presenceKey`: the coins not greyed. Nil uses the ring's own
+    /// reading of who is idle.
+    var activeKeys: Set<String>?
     /// Something covers the room (the people list, a call): the ring stops turning by itself.
     var isPaused = false
     let onOpen: () -> Void
@@ -70,11 +73,15 @@ struct RoomPeopleAvatars: View {
 
     /// Agents first, then people, each once (warden, #265: a person seen twice was drawn twice).
     private var ringItems: [RingItem] {
-        let agents = agentsHere.map { RingItem(id: "a:" + $0.id.lowercased(), agent: $0, isIdle: $0.isIdle) }
+        // Grey exactly when the count leaves it out, so a coin is never counted but grey (warden, #269).
+        func idle(_ key: String, _ own: Bool) -> Bool { activeKeys.map { !$0.contains(key) } ?? own }
+        let agents = agentsHere.map {
+            RingItem(id: "a:" + $0.id.lowercased(), agent: $0, isIdle: idle($0.id.lowercased(), $0.isIdle))
+        }
         var seen = Set<String>()
         let people = presence.people.filter(\.isHuman)
-            .filter { seen.insert($0.id.lowercased()).inserted }
-            .map { RingItem(id: "p:" + $0.id.lowercased(), agent: nil, isIdle: $0.isIdle) }
+            .filter { seen.insert(RoomRoster.presenceKey($0)).inserted }
+            .map { RingItem(id: "p:" + RoomRoster.presenceKey($0), agent: nil, isIdle: idle(RoomRoster.presenceKey($0), $0.isIdle)) }
         return agents + people
     }
 

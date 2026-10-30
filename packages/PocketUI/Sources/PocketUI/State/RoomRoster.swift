@@ -158,6 +158,15 @@ public struct RoomRoster: Equatable, Sendable {
     /// How many are in the room and active: the ring's number, the same as the people list's.
     public var activeCount: Int { members.filter(\.isActive).count }
 
+    /// Who is in the room and active, by `presenceKey`: the ring colours exactly these (warden, #269).
+    public var activeKeys: Set<String> { Set(members.filter(\.isActive).map { $0.id.lowercased() }) }
+
+    /// One member's key: a person by their login (the handle their posts carry), anyone else by their id.
+    public static func presenceKey(_ person: RoomChatPresence.Person) -> String {
+        if person.isHuman, let login = person.login?.lowercased(), !login.isEmpty { return "human-\(login)" }
+        return person.id.lowercased()
+    }
+
     public var sides: [Side] {
         let agents = members.filter { $0.kind != .person }
         let people = members.filter { $0.kind == .person }
@@ -195,11 +204,7 @@ public struct RoomRoster: Equatable, Sendable {
         // Presence names a person by their account (`human-<user id>`, the server's unique key), and gives their login,
         // the handle their posts carry (`human-<login>`, API #1055): a person here is one member with their posts, not
         // one here and one idle (Carter, #55524: "it kept my name in idle still").
-        func key(_ person: RoomChatPresence.Person) -> String {
-            if person.isHuman, let login = person.login?.lowercased(), !login.isEmpty { return "human-\(login)" }
-            return person.id.lowercased()
-        }
-        let keyed = present.map { (key($0), $0) }
+        let keyed = present.map { (presenceKey($0), $0) }
         // One person on two devices or tabs is here if either is (as the server merges them).
         let presence = Dictionary(keyed, uniquingKeysWith: { first, second in first.isIdle ? second : first })
         for (key, person) in keyed where seen[key] == nil && !RoomChatQuiet.systemAuthors.contains(key) {
