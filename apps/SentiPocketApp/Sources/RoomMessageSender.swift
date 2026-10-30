@@ -725,7 +725,7 @@ extension HTTPRoomMessageSender: VoiceEndpointing {
         switch (response as? HTTPURLResponse)?.statusCode ?? 0 {
         case 200: break
         case 503, 404: throw VoiceLineError.unavailable
-        case 429: throw VoiceLineError.rateLimited
+        case 429: throw VoiceLineError.rateLimited(retryAfter: nil)
         case 401, 403: throw VoiceLineError.notAllowed
         default: throw VoiceLineError.failed
         }
