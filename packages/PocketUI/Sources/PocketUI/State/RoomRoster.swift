@@ -139,7 +139,8 @@ public struct RoomRoster: Equatable, Sendable {
     }
 
     /// One side of the people list (Carter, 10-30: "I need agents and humans separated and a total number of online and
-    /// offline"): agents (boxes with them) or people, online ones first, with how many are online and offline.
+    /// offline", then "separation of humans, live agents and agents in boxes"): people, live agents, or agents in
+    /// boxes, online ones first, with how many are active, idle and offline.
     public struct Side: Equatable, Sendable {
         public let title: String
         public let members: [Member]
@@ -167,16 +168,25 @@ public struct RoomRoster: Equatable, Sendable {
         return person.id.lowercased()
     }
 
+    /// "4 active · 6 idle · 3 offline": the whole room, the ring's number first.
+    public var summary: String {
+        let online = members.filter(\.isOnline).count
+        return "\(activeCount) active · \(online - activeCount) idle · \(members.count - online) offline"
+    }
+
     public var sides: [Side] {
-        let agents = members.filter { $0.kind != .person }
         let people = members.filter { $0.kind == .person }
+        let agents = members.filter { $0.kind == .agent }
+        let boxes = members.filter { $0.kind == .box }
         func ordered(_ list: [Member]) -> [Member] {
             list.enumerated().sorted { a, b in
                 if a.element.isOnline != b.element.isOnline { return a.element.isOnline }
                 return a.offset < b.offset
             }.map(\.element)
         }
-        return [Side(title: "Agents", members: ordered(agents)), Side(title: "People", members: ordered(people))]
+        // The web's names for the same three (warden, 10-30), so both read alike.
+        return [Side(title: "Humans", members: ordered(people)), Side(title: "Live agents", members: ordered(agents)),
+                Side(title: "Agents in boxes", members: ordered(boxes))]
             .filter { !$0.members.isEmpty }
     }
 

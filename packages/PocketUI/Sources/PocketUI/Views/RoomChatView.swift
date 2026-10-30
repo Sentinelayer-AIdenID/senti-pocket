@@ -2563,7 +2563,12 @@ private struct RoomPresenceSheet: View {
                     .accessibilityIdentifier("pocket.room.presence.connection")
                 }
                 if !roster.members.isEmpty {
-                    // Agents and people apart, each with how many are online and offline (Carter, 10-30).
+                    // The whole room first, the same active number as the ring outside (Carter, 10-30: "which I want to
+                    // match the outside room online indicator").
+                    Text(roster.summary)
+                        .font(.subheadline.weight(.semibold))
+                        .accessibilityIdentifier("pocket.room.people.summary")
+                    // People, live agents and agents in boxes apart, each with its counts (Carter, 10-30).
                     ForEach(roster.sides, id: \.title) { side in
                         Section {
                             ForEach(side.members) { member in

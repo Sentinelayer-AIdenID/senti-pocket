@@ -90,14 +90,20 @@ final class RoomRosterTests: XCTestCase {
             endedBoxes: [], now: now
         )
         let sides = roster.sides
-        XCTAssertEqual(sides.map(\.title), ["Agents", "People"])
-        let agents = try XCTUnwrap(sides.first)
-        XCTAssertEqual(agents.online, 2, "pocket-forge here but idle, and the running box")
-        XCTAssertEqual(agents.offline, 2, "claude-warden heard from within the hour but not here, and old-agent")
-        XCTAssertTrue(agents.members.prefix(2).allSatisfy(\.isOnline), "online first")
-        let people = try XCTUnwrap(sides.last)
+        // Carter, 10-30: "separation of humans, live agents and agents in boxes".
+        XCTAssertEqual(sides.map(\.title), ["Humans", "Live agents", "Agents in boxes"])
+        let people = try XCTUnwrap(sides.first)
         XCTAssertEqual(people.online, 1)
         XCTAssertEqual(people.offline, 1)
+        let agents = sides[1]
+        XCTAssertEqual(agents.online, 1, "pocket-forge here but idle")
+        XCTAssertEqual(agents.offline, 2, "claude-warden heard from within the hour but not here, and old-agent")
+        XCTAssertTrue(agents.members.first?.isOnline == true, "online first")
+        let boxes = sides[2]
+        XCTAssertEqual(boxes.members.map(\.name), ["astra-brand-s"])
+        XCTAssertEqual(boxes.online, 1)
+        XCTAssertEqual(roster.summary, "\(roster.activeCount) active · \(3 - roster.activeCount) idle · 3 offline",
+                       "the whole room's line leads with the ring's number")
     }
 
     func test_a_box_that_ended_but_runs_again_under_its_name_is_listed_once_as_running() {
@@ -121,10 +127,10 @@ final class RoomRosterTests: XCTestCase {
         ]
         let roster = RoomRoster.build(posts: [], present: present, runningBoxes: [], endedBoxes: [], now: now)
         XCTAssertEqual(roster.activeCount, 2)
-        let agents = roster.sides.first { $0.title == "Agents" }
+        let agents = roster.sides.first { $0.title == "Live agents" }
         XCTAssertEqual(agents?.active, 1)
         XCTAssertEqual(agents?.idle, 1)
-        XCTAssertEqual(agents?.header, "Agents · 1 active · 1 idle · 0 offline")
+        XCTAssertEqual(agents?.header, "Live agents · 1 active · 1 idle · 0 offline")
         // Warden (#269): the ring colours exactly what the count counts, by the same keys.
         XCTAssertEqual(roster.activeKeys, ["claude-warden", RoomRoster.presenceKey(present[2])])
         let withLogin = RoomChatPresence.Person(id: "human-8f2c", name: "Carter", isHuman: true, isIdle: false,
