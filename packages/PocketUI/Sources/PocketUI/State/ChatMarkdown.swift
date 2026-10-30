@@ -309,13 +309,16 @@ public enum ChatReferences {
         public let url: URL
     }
 
+    /// Compiled once: a row's paragraphs are checked for ticket links on every redraw.
+    private static let ticketLinkExpression = try? NSRegularExpression(
+        pattern: #"\[([^\]\n]{1,300})\]\(((?:https://(?:www\.)?sentinelayer\.com)?/dashboard/sessions/[^)\s]+)\)"#
+    )
+
     /// Pulls a paragraph's ticket links (`[Ticket: title](/dashboard/sessions/<room>?ticket=<id>)`, also with
     /// `https://sentinelayer.com` in front) out of the text, with the "·" between them: the ticket keeper writes
     /// several on one line, and they read better one per row. Returns the text that is left and the links, in order.
     public static func ticketLinks(in paragraph: String) -> (prose: String, tickets: [TicketLink]) {
-        guard paragraph.contains("?ticket=") else { return (paragraph, []) }
-        let pattern = #"\[([^\]\n]{1,300})\]\(((?:https://(?:www\.)?sentinelayer\.com)?/dashboard/sessions/[^)\s]+)\)"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return (paragraph, []) }
+        guard paragraph.contains("?ticket="), let regex = ticketLinkExpression else { return (paragraph, []) }
         let whole = NSRange(paragraph.startIndex..., in: paragraph)
         var tickets: [TicketLink] = []
         var removed: [Range<String.Index>] = []

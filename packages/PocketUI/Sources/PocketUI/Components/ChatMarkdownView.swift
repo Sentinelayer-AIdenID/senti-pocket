@@ -195,7 +195,32 @@ private struct ChatMarkdownBlocksView: View {
 /// - `@handle` mentions are highlighted, and mentions of you stand out more;
 /// - code spans are left alone.
 enum ChatInlineMarkdown {
+    /// Every paragraph of every row on screen asks for this on every redraw, and building it parses Markdown and
+    /// scans for links and mentions, so each answer is kept per text and handles (with the expressions compiled once,
+    /// as for the room's other per-redraw helpers).
     static func attributed(_ text: String, ownHandles: Set<String> = []) -> AttributedString {
+        let key = (ownHandles.sorted().joined(separator: ",") + "\u{1}" + text) as NSString
+        if let known = memo.object(forKey: key) { return known.value }
+        let value = build(text, ownHandles: ownHandles)
+        memo.setObject(Built(value), forKey: key)
+        return value
+    }
+
+    private final class Built {
+        let value: AttributedString
+        init(_ value: AttributedString) { self.value = value }
+    }
+
+    private static let memo: NSCache<NSString, Built> = {
+        let cache = NSCache<NSString, Built>()
+        cache.countLimit = 4_000
+        return cache
+    }()
+
+    private static let linkExpression = try? NSRegularExpression(pattern: #"https?://[^\s<>()\[\]]+"#)
+    private static let mentionExpression = try? NSRegularExpression(pattern: #"(?:^|(?<=\s))@([A-Za-z0-9_-]+)"#)
+
+    private static func build(_ text: String, ownHandles: Set<String>) -> AttributedString {
         let options = AttributedString.MarkdownParsingOptions(
             interpretedSyntax: .inlineOnlyPreservingWhitespace,
             failurePolicy: .returnPartiallyParsedIfPossible
@@ -240,7 +265,7 @@ enum ChatInlineMarkdown {
     }
 
     private static func autolink(_ attributed: inout AttributedString) {
-        guard let regex = try? NSRegularExpression(pattern: #"https?://[^\s<>()\[\]]+"#) else { return }
+        guard let regex = linkExpression else { return }
         var additions: [(Range<AttributedString.Index>, URL)] = []
         for run in attributed.runs where run.link == nil && !isCode(run) {
             let segment = String(attributed[run.range].characters)
@@ -260,7 +285,7 @@ enum ChatInlineMarkdown {
     }
 
     private static func highlightMentions(_ attributed: inout AttributedString, ownHandles: Set<String>) {
-        guard let regex = try? NSRegularExpression(pattern: #"(?:^|(?<=\s))@([A-Za-z0-9_-]+)"#) else { return }
+        guard let regex = mentionExpression else { return }
         var marks: [(Range<AttributedString.Index>, Bool)] = []
         for run in attributed.runs where run.link == nil && !isCode(run) {
             let segment = String(attributed[run.range].characters)

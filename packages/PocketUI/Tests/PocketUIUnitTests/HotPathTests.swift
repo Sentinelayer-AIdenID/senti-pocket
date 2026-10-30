@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import XCTest
 @testable import PocketUI
 
@@ -22,5 +23,28 @@ final class HotPathTests: XCTestCase {
         XCTAssertEqual(RoomChatQuiet.line(text), "READY for carry", "remembered")
         XCTAssertEqual(RoomChatQuiet.line("> # Heading `code`"), "Heading code")
         XCTAssertEqual(ChatReferences.mentionHandles(in: "no mention here"), [])
+    }
+
+    /// Carter's 08:06 freeze (2026103005) stopped inside a long row's body, in `LongMessage.preview`.
+    func test_a_long_rows_preview_and_length_are_kept_and_match() {
+        let long = (1...60).map { "line \($0) of a long report" }.joined(separator: "\n")
+        let shown = LongMessage.shown(long)
+        XCTAssertEqual(shown?.preview, LongMessage.preview(long))
+        XCTAssertEqual(shown?.characters, long.count)
+        XCTAssertEqual(LongMessage.shown(long)?.preview, shown?.preview, "the same the second time")
+        XCTAssertNil(LongMessage.shown("short"))
+        XCTAssertNil(LongMessage.shown("short"), "a short message is remembered as short")
+    }
+
+    func test_inline_markdown_is_the_same_kept_or_built_and_follows_the_handles() {
+        let text = "@pocket-forge see https://github.com/a/b/pull/9 and **bold**"
+        let first = ChatInlineMarkdown.attributed(text, ownHandles: ["pocket-forge"])
+        XCTAssertEqual(ChatInlineMarkdown.attributed(text, ownHandles: ["pocket-forge"]), first)
+        XCTAssertTrue(String(first.characters).contains("a/b#9"))
+        let other = ChatInlineMarkdown.attributed(text, ownHandles: [])
+        let mention = first.runs.first { String(first[$0.range].characters) == "@pocket-forge" }
+        let otherMention = other.runs.first { String(other[$0.range].characters) == "@pocket-forge" }
+        XCTAssertNotNil(mention?.swiftUI.backgroundColor, "a mention of you stands out")
+        XCTAssertNil(otherMention?.swiftUI.backgroundColor, "with other handles it is a different answer")
     }
 }

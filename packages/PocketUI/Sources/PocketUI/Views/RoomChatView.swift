@@ -809,10 +809,10 @@ private struct RoomMessageRowView: View {
     /// The message's words; a very long one shows its start and a card that opens all of it (Carter, #55006).
     @ViewBuilder
     private var messageText: some View {
-        if LongMessage.isLong(row.text) {
+        if let long = LongMessage.shown(row.text) {
             VStack(alignment: .leading, spacing: 8) {
-                ChatMarkdownView(text: LongMessage.preview(row.text), ownHandles: ownHandles)
-                LongMessageCard(characters: row.text.count) { onOpenLong(row) }
+                ChatMarkdownView(text: long.preview, ownHandles: ownHandles)
+                LongMessageCard(characters: long.characters) { onOpenLong(row) }
             }
         } else {
             ChatMarkdownView(text: row.text, ownHandles: ownHandles)
