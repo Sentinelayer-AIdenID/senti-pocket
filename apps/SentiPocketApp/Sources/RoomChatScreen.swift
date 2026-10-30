@@ -323,6 +323,8 @@ struct RoomChatScreen: View {
         coordinator.onNewReplies = { [weak room] replies in room?.receive(replies: replies) }
         coordinator.readsRepliesOften = true
         voiceRoom = room
+        // The call fills the screen, over the room and its bars, until you hang up (Carter, 10-30).
+        VoiceCallWindow.shared.show(VoiceRoomHost(room: room, meter: meter, partnerLab: partnerLab(of: room)))
         CrashReporter.shared.note(agents.isEmpty ? "voice meeting began" : "voice call began")
         room.begin(rings: !answering)
     }
@@ -340,6 +342,7 @@ struct RoomChatScreen: View {
         coordinator.onNewReplies = nil
         coordinator.readsRepliesOften = false
         voiceRoom = nil
+        VoiceCallWindow.shared.hide()
         voiceMeter.reset()
         if let answeredCall {
             RoomCallDesk.shared.voiceRoomEnded(answeredCall)
@@ -558,12 +561,6 @@ struct RoomChatScreen: View {
             }
         }
         .animation(.spring(response: 0.32, dampingFraction: 0.9), value: showsArtifacts)
-        // The call fills the screen, over the room and its bars, until you hang up (Carter, 10-30).
-        .fullScreenCover(isPresented: Binding(get: { voiceRoom != nil }, set: { _ in })) {
-            if let voiceRoom {
-                VoiceRoomHost(room: voiceRoom, meter: voiceMeter, partnerLab: partnerLab(of: voiceRoom))
-            }
-        }
         .overlay(alignment: .bottom) {
             // The Listen player: above the composer while this room's message is read (a voice room speaks on its
             // own). Reading from another room, the app's own player shows instead, over every screen.
@@ -936,7 +933,7 @@ private struct RoomSearchSheet: View {
 }
 
 /// Watches the voice room so its panel follows every change.
-private struct VoiceRoomHost: View {
+struct VoiceRoomHost: View {
     @ObservedObject var room: VoiceRoomCoordinator
     let meter: VoiceLevelMeter
     let partnerLab: AgentLab?
