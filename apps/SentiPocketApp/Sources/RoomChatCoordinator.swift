@@ -278,6 +278,12 @@ final class RoomChatCoordinator: ObservableObject {
             loadNewer()
         case .jumpToLatest:
             jumpToLatest()
+        case .keepLatestForJumpDown:
+            if !timeline.hasMoreNewer, timeline.messages.count > Self.historyTooLongToJumpDown {
+                readerAtBottom = false
+                keepLatestForTheJumpDown()
+                publish()
+            }
         case .readerAtBottom(let atBottom):
             readerAtBottom = atBottom
             if atBottom, unread.unreadCount > 0 || unread.dividerSequence != nil {
@@ -1027,11 +1033,30 @@ final class RoomChatCoordinator: ObservableObject {
         let clientId = Self.makeClientId()
         // Sending from a window further back returns to the live room, where the message appears.
         jumpToLatest()
+        keepLatestForTheJumpDown()
         pending.append(PendingSend(clientId: clientId, text: text, status: .sending))
         readerAtBottom = true
         unread.readerReachedBottom()
         publish()
         deliver(clientId)
+    }
+
+    /// Rows kept when the reader goes back down from far up a long history, and how long that history must be.
+    static let rowsKeptForTheJumpDown = 80
+    static let historyTooLongToJumpDown = 120
+
+    /// Going to the bottom of a long loaded history (a send, or Jump to latest) made iOS measure every row in between on
+    /// the main thread: Carter's freezes on 10-30 (07:39, 08:06, 13:43) all came after loading older messages and then
+    /// sending, and the freeze recorder caught the last one "right after sendMessage (497 rows)", stuck 16.9 s. Before
+    /// that jump, only the newest rows are kept; older ones load again when the reader scrolls up.
+    private func keepLatestForTheJumpDown() {
+        guard !timeline.hasMoreNewer, !readerAtBottom,
+              timeline.messages.count > Self.historyTooLongToJumpDown else { return }
+        let oldest = timeline.oldestSequence
+        if timeline.keepNewest(Self.rowsKeptForTheJumpDown) {
+            noteOldestTrimmed(was: oldest)
+            CrashReporter.shared.note("kept the newest \(Self.rowsKeptForTheJumpDown) rows before jumping down")
+        }
     }
 
     /// Posts (or re-posts, with the same client id) one pending message.

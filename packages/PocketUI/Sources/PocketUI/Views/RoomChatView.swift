@@ -461,6 +461,13 @@ public struct RoomChatView: View {
                 send(.jumpToLatest)
                 return
             }
+            // From far up a long history, measuring every row on the way down froze the app (10-30): the room keeps
+            // only its newest rows, then the jump is at once.
+            if state.rows.count > Self.longHistoryRows {
+                send(.keepLatestForJumpDown)
+                DispatchQueue.main.async { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
+                return
+            }
             withAnimation(.easeOut(duration: 0.25)) {
                 proxy.scrollTo(Self.bottomId, anchor: .bottom)
             }
@@ -604,6 +611,8 @@ public struct RoomChatView: View {
     }
 
     private static let bottomId = "room-bottom"
+    /// A history this long is trimmed to its newest rows before a jump to the bottom.
+    static let longHistoryRows = 150
 }
 
 private struct RoomMessageRowView: View {

@@ -242,6 +242,23 @@ final class RoomChatCoordinatorTests: XCTestCase {
         coordinator.pause()
     }
 
+    /// Carter's freezes on 10-30: going to the bottom of a long loaded history measured every row in between. The
+    /// room keeps only its newest rows before the jump; older ones load again on demand.
+    func test_a_long_history_keeps_only_its_newest_rows_before_the_jump_down() async {
+        let transport = ScriptedRoomTransport(before: [.success(page(Array(1...130), hasMore: true))])
+        let coordinator = makeCoordinator(transport)
+        coordinator.resume()
+        await waitUntil("loaded") { messageSequences(coordinator).count == 130 }
+
+        coordinator.send(.keepLatestForJumpDown)
+        XCTAssertEqual(messageSequences(coordinator), Array(51...130), "the newest 80 stay")
+        XCTAssertTrue(coordinator.state.canLoadOlder, "and the rest can load again")
+
+        coordinator.send(.keepLatestForJumpDown)
+        XCTAssertEqual(messageSequences(coordinator).count, 80, "a short history is left alone")
+        coordinator.pause()
+    }
+
     func test_access_denied_stops_the_room_and_shows_no_rows() async {
         let transport = ScriptedRoomTransport(
             before: [.success(page([1, 2]))],

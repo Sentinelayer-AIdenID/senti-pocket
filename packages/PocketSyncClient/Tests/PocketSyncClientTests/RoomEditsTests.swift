@@ -93,3 +93,17 @@ final class RoomEditsTests: XCTestCase {
         XCTAssertEqual(RoomStreamFrame.decode(envelope(innerId: "someone-else")), .nonDisplayable(sequenceId: 55373))
     }
 }
+
+/// The jump down from a long history keeps only the newest rows (Carter's freezes on 10-30).
+final class RoomTimelineKeepNewestTests: XCTestCase {
+    func test_keeping_the_newest_drops_the_oldest_and_says_more_is_older() {
+        var timeline = RoomTimeline(capacity: 3_000, hasMoreOlder: false)
+        timeline.merge((1...200).map { RoomMessage(id: "m\($0)", sequenceId: Int64($0), kind: .message, authorId: "a",
+                                                   authorName: "a", isHuman: false, text: "t", timestamp: "") })
+        XCTAssertTrue(timeline.keepNewest(80))
+        XCTAssertEqual(timeline.messages.first?.sequenceId, 121)
+        XCTAssertEqual(timeline.messages.count, 80)
+        XCTAssertTrue(timeline.hasMoreOlder)
+        XCTAssertFalse(timeline.keepNewest(80), "already short enough")
+    }
+}

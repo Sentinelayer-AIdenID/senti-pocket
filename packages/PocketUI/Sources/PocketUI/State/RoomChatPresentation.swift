@@ -1249,6 +1249,8 @@ public enum RoomChatIntent: Equatable, Sendable {
     case renameRoom(title: String)
     /// Open the invite sheet (a share link, or an invite by email or username).
     case openInvite
+    /// The reader is about to jump to the bottom of a long loaded history: keep only the newest rows first.
+    case keepLatestForJumpDown
 }
 
 /// A room's name as the API takes it (`SessionTitlePayload`, `_normalize_session_title`): control characters out,
