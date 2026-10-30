@@ -412,7 +412,7 @@ public struct RoomChatView: View {
                 isReadingAloud: readingAloudId == message.readAloudId,
                 isExpanded: expandedQuiet.contains(message.id),
                 threadSummary: message.summaryThreadId.flatMap { state.threadSummaries[$0] },
-                isReadingSummary: message.summaryThreadId.map { readingAloudId == RoomReadAloud.summary($0) } ?? false,
+                isReadingSummary: message.summaryReadAloudId.map { readingAloudId == $0 } ?? false,
                 onOpenReplyTarget: { jump(to: $0, proxy: proxy) },
                 onOpenCheckpoint: { openCheckpoint = $0 },
                 onEdit: { editingRow = $0 },
@@ -891,8 +891,8 @@ private struct RoomMessageRowView: View {
     private func listenToSummary() {
         if isReadingSummary {
             send(.stopReadingAloud)
-        } else if let threadSummary, let thread = row.summaryThreadId {
-            send(.readAloud(id: RoomReadAloud.summary(thread), text: threadSummary))
+        } else if let threadSummary, let id = row.summaryReadAloudId {
+            send(.readAloud(id: id, text: threadSummary))
         }
     }
 

@@ -255,6 +255,9 @@ struct RoomChatScreen: View {
             if let parent = shown ?? coordinator.state.thread?.parent.sequenceId {
                 coordinator.send(.openThread(sequenceId: parent))
             }
+        } else if let thread = RoomReadAloud.summaryThread(id) {
+            // A thread's summary: its thread (warden, #257).
+            coordinator.send(.openThread(sequenceId: thread))
         }
     }
 
