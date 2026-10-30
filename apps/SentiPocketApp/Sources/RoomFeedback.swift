@@ -42,10 +42,15 @@ final class RoomFeedback {
     }
 
     func play(_ event: RoomFeedbackEvent, now: Date = Date()) {
+        play(event, sound: sounds, haptic: haptics, now: now)
+    }
+
+    /// The same, with whether to sound and tap decided by the caller (a notification follows its own settings).
+    func play(_ event: RoomFeedbackEvent, sound: Bool, haptic: Bool, now: Date = Date()) {
         guard Self.shouldPlay(event, last: lastPlayed[event], now: now) else { return }
         lastPlayed[event] = now
-        if sounds, let id = soundId(for: event) { AudioServicesPlaySystemSound(id) }
-        guard haptics else { return }
+        if sound, let id = soundId(for: event) { AudioServicesPlaySystemSound(id) }
+        guard haptic else { return }
         switch event {
         case .sent:
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
