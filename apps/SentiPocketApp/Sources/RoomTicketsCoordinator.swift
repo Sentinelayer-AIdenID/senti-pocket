@@ -171,6 +171,8 @@ final class RoomTicketsCoordinator: ObservableObject {
                     progress: "Saving…")
         case .loadComments(let ticketId):
             Task { await loadComments(ticketId) }
+        case .chatAboutIt(let ticketId, let note):
+            chatAboutIt(ticketId: ticketId, note: note)
         case .comment(let ticketId, let body):
             let key = pendingComment[ticketId].flatMap { $0.body == body ? $0.key : nil } ?? Self.newKey()
             pendingComment[ticketId] = (body, key)
@@ -425,6 +427,28 @@ final class RoomTicketsCoordinator: ObservableObject {
     }
 
     private static func newKey() -> String { "tk_" + UUID().uuidString.lowercased() }
+
+    /// "Chat about it" (web `ticketChatMessage`): the ticket's card, who raised it when that was a person, and the note,
+    /// posted to the room as you. The ticket says whether it went.
+    private func chatAboutIt(ticketId: String, note: String) {
+        guard let sender, let ticket = board?.tickets[ticketId] else { return }
+        let raiser = ticket.createdBy.lowercased().hasPrefix("human-") ? String(ticket.createdBy.dropFirst("human-".count)) : nil
+        let text = TicketDecision.chatAboutIt(sessionId: sessionId, ticketId: ticket.id, title: ticket.title,
+                                              note: note, raisedBy: raiser)
+        let sessionId = self.sessionId
+        let clientId = "hm_" + UUID().uuidString.lowercased()
+        ticketWriteStatus[ticketId] = "Posting to the room…"
+        publish()
+        Task { [weak self] in
+            do {
+                try await sender.sendHumanMessage(sessionId: sessionId, text: text, clientId: clientId)
+                self?.ticketWriteStatus[ticketId] = "Posted to the room."
+            } catch {
+                self?.ticketWriteStatus[ticketId] = "It did not post to the room. Try again."
+            }
+            self?.publish()
+        }
+    }
 
     /// Posts the web's decision line to the room as you: one message that @-mentions the ticket's assignee.
     private func answerDecision(ticketId: String, answer: String, detail: String) {

@@ -9,19 +9,24 @@ public struct RoomArtifactSource: Equatable, Sendable {
     public let date: Date?
     /// Files on the message: id and name.
     public let files: [(id: String, name: String)]
+    /// A checkpoint (its text is the title).
+    public let isCheckpoint: Bool
 
-    public init(id: String, sequenceId: Int64, author: String, text: String, date: Date?, files: [(id: String, name: String)] = []) {
+    public init(id: String, sequenceId: Int64, author: String, text: String, date: Date?,
+                files: [(id: String, name: String)] = [], isCheckpoint: Bool = false) {
         self.id = id
         self.sequenceId = sequenceId
         self.author = author
         self.text = text
         self.date = date
         self.files = files
+        self.isCheckpoint = isCheckpoint
     }
 
     public static func == (lhs: RoomArtifactSource, rhs: RoomArtifactSource) -> Bool {
         lhs.id == rhs.id && lhs.sequenceId == rhs.sequenceId && lhs.author == rhs.author && lhs.text == rhs.text
             && lhs.date == rhs.date && lhs.files.map(\.id) == rhs.files.map(\.id) && lhs.files.map(\.name) == rhs.files.map(\.name)
+            && lhs.isCheckpoint == rhs.isCheckpoint
     }
 }
 
@@ -29,10 +34,11 @@ public struct RoomArtifactSource: Equatable, Sendable {
 /// link or a code block, each tied back to the message it came from (the newest mention).
 public struct RoomArtifact: Equatable, Identifiable, Sendable {
     public enum Kind: String, CaseIterable, Sendable {
-        case pullRequest, ticket, file, link, code
+        case checkpoint, pullRequest, ticket, file, link, code
 
         public var title: String {
             switch self {
+            case .checkpoint: return "Checkpoints"
             case .pullRequest: return "Pull requests"
             case .ticket: return "Tickets"
             case .file: return "Files"
@@ -43,6 +49,7 @@ public struct RoomArtifact: Equatable, Identifiable, Sendable {
 
         public var symbol: String {
             switch self {
+            case .checkpoint: return "flag.checkered"
             case .pullRequest: return "arrow.triangle.pull"
             case .ticket: return "ticket"
             case .file: return "doc"
@@ -83,6 +90,14 @@ public enum RoomArtifacts {
             }
         }
         for message in messages {
+            if message.isCheckpoint {
+                let key = "checkpoint:\(message.id)"
+                note(key, { count in
+                    RoomArtifact(id: key, kind: .checkpoint, title: message.text, detail: nil, url: nil,
+                                 sequenceId: message.sequenceId, author: message.author, date: message.date, mentions: count)
+                }, at: message)
+                continue
+            }
             // Tickets (the keeper's links), then the rest of the text's links.
             let split = ChatReferences.ticketLinks(in: message.text)
             for ticket in split.tickets {

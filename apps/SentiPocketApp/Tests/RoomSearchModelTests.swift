@@ -53,6 +53,28 @@ private final class ScriptedSearch: RoomSearching, @unchecked Sendable {
 
 @MainActor
 final class RoomSearchModelTests: XCTestCase {
+    /// Carter (#54900): matches should come as you type, once you pause, without a search per keystroke.
+    func test_typing_searches_once_after_a_pause_and_short_words_clear_quietly() async {
+        let search = ScriptedSearch()
+        let model = RoomSearchModel(
+            sessionId: "room_1",
+            searcher: search,
+            sleep: { _ in try? await Task.sleep(nanoseconds: 40_000_000) },
+            onReauthenticationRequired: {}
+        )
+        model.send(.typed("ch"))
+        model.send(.typed("che"))
+        model.send(.typed("chec"))
+        for _ in 0..<200 where search.recorded().isEmpty { try? await Task.sleep(nanoseconds: 5_000_000) }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(search.recorded().map(\.query), ["chec"], "one search, for the words at the pause")
+        model.send(.typed("c"))
+        XCTAssertTrue(model.state.rows.isEmpty)
+        XCTAssertTrue(model.state.query.isEmpty, "fewer than 2 characters clears without an error")
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(search.recorded().count, 1)
+    }
+
     private func result(_ seq: Int64, _ snippet: String) -> RoomSearchResult {
         RoomSearchResult(sequenceId: seq, snippet: snippet, message: RoomMessage(
             id: "e\(seq)", sequenceId: seq, kind: .message, authorId: "review-agent", authorName: "review-agent",
