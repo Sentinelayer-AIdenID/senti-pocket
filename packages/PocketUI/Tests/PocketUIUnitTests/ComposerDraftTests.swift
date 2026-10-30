@@ -5,11 +5,11 @@ import XCTest
 final class ComposerDraftTests: XCTestCase {
     /// Carter (#54997 reply): the same "Chat about it" as the web, so the room shows the ticket card.
     func test_chat_about_it_posts_the_webs_card_raiser_and_note() {
-        let room = "e9e8dc5e-8d57-4603-975f-09156e3b4473"
+        let room = "00000000-0000-4000-8000-00000000a215"
         XCTAssertEqual(
-            TicketDecision.chatAboutIt(sessionId: room, ticketId: "ba811458", title: "Lower [the] box",
+            TicketDecision.chatAboutIt(sessionId: room, ticketId: "0000c215", title: "Lower [the] box",
                                        note: "  can someone take this?  ", raisedBy: "mrrcarter"),
-            "[Ticket: Lower the box](/dashboard/sessions/\(room)?ticket=ba811458) — raised by mrrcarter\n\ncan someone take this?"
+            "[Ticket: Lower the box](/dashboard/sessions/\(room)?ticket=0000c215) — raised by mrrcarter\n\ncan someone take this?"
         )
         XCTAssertEqual(
             TicketDecision.chatAboutIt(sessionId: room, ticketId: "t1", title: "Fix", note: "", raisedBy: nil),

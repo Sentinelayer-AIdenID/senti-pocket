@@ -13,11 +13,11 @@ final class RoomArtifactsTests: XCTestCase {
 
     /// Carter (#54955): the room's artifacts in one place, each tied back to the message it came from.
     func test_each_thing_is_listed_once_tied_to_its_newest_mention() {
-        let room = "e9e8dc5e-8d57-4603-975f-09156e3b4473"
+        let room = "00000000-0000-4000-8000-00000000a214"
         let messages = [
             message(1, "pocket-forge", "Opened https://github.com/Sentinelayer-AIdenID/senti-pocket/pull/210 for review.", minutes: 0),
             message(2, "claude-warden", "Reviewing [the voice room](https://github.com/Sentinelayer-AIdenID/senti-pocket/pull/210) now; docs at https://developer.apple.com/documentation/pushkit.", minutes: 5),
-            message(3, "ticket-keeper", "🎫 Ticket for this message: [Ticket: Lower the text box](/dashboard/sessions/\(room)?ticket=ba811458)", minutes: 6),
+            message(3, "ticket-keeper", "🎫 Ticket for this message: [Ticket: Lower the text box](/dashboard/sessions/\(room)?ticket=0000c214)", minutes: 6),
             message(4, "pocket-forge", "Here is the fold:\n```swift\nlet trails = RoomChatTrail.fold(inputs)\n```", minutes: 7),
             message(5, "human-mrrcarter", "the transcript", minutes: 8, files: [(id: "att-12345678", name: "voice-call.md")])
         ]
@@ -51,7 +51,7 @@ final class RoomArtifactsTests: XCTestCase {
     }
 
     func test_a_senti_ticket_link_is_a_ticket_not_a_link_and_plain_text_has_nothing() {
-        let absolute = "[Ticket: Fix the bell](https://sentinelayer.com/dashboard/sessions/e9e8dc5e?ticket=c2e3430f)"
+        let absolute = "[Ticket: Fix the bell](https://sentinelayer.com/dashboard/sessions/0000a214?ticket=0000b214)"
         let artifacts = RoomArtifacts.extract(from: [message(1, "ticket-keeper", absolute, minutes: 0)])
         XCTAssertEqual(artifacts.map(\.kind), [.ticket])
         XCTAssertTrue(RoomArtifacts.extract(from: [message(2, "a", "nothing to see here", minutes: 1)]).isEmpty)
