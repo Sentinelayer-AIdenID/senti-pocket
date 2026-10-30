@@ -131,43 +131,75 @@ private struct ChatMarkdownBlocksView: View {
         }
     }
 
-    /// A table as a grid with a shaded header row and lines between rows (Carter, #55366). Each column is as wide as
-    /// its longest cell up to a cap, so long cells wrap, and a table wider than the screen scrolls inside itself.
     private func tableView(_ table: ChatMarkdownTable) -> some View {
-        let widths = table.columnWidths()
-        return ScrollView(.horizontal, showsIndicators: false) {
-            Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
-                GridRow {
-                    ForEach(Array(table.header.enumerated()), id: \.offset) { column, text in
-                        tableCell(text, width: widths[column], alignment: table.alignments[column])
-                            .font(.subheadline.weight(.semibold))
-                    }
-                }
-                .background(PocketPalette.inset)
-                ForEach(Array(table.rows.prefix(Self.maximumTableRows).enumerated()), id: \.offset) { _, row in
-                    Divider()
-                    GridRow {
-                        ForEach(Array(row.enumerated()), id: \.offset) { column, text in
-                            tableCell(text, width: widths[column], alignment: table.alignments[column])
-                                .font(.subheadline)
-                        }
-                    }
-                }
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(PocketPalette.separator, lineWidth: 0.5)
-            )
-            .padding(.vertical, 2)
-        }
-        .accessibilityElement(children: .contain)
+        ChatMarkdownTableView(table: table, ownHandles: ownHandles)
     }
+
+    private func inline(_ text: String) -> some View {
+        Text(ChatInlineMarkdown.attributed(text, ownHandles: ownHandles))
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// A table as a grid with a shaded header row and lines between rows (Carter, #55366). A narrow table fits the width
+/// it is given, its cells wrapping; a wide one keeps its columns readable and scrolls sideways, with its scroll bar
+/// showing (Carter, #55517).
+private struct ChatMarkdownTableView: View {
+    let table: ChatMarkdownTable
+    let ownHandles: Set<String>
+    /// The width the message gives the table, once measured; a phone's until then.
+    @State private var available: Double = 330
 
     /// More rows than this are left out on the phone; the whole message is in its long view and on the web.
     private static let maximumTableRows = 200
 
-    private func tableCell(_ text: String, width: Double, alignment: ChatMarkdownTable.Alignment) -> some View {
+    var body: some View {
+        let fit = table.fittedWidths(available: available)
+        Group {
+            if fit.scrolls {
+                ScrollView(.horizontal, showsIndicators: true) { grid(fit.widths) }
+            } else {
+                grid(fit.widths)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(GeometryReader { proxy in
+            Color.clear
+                .onAppear { available = proxy.size.width }
+                .onChange(of: proxy.size.width) { available = $0 }
+        })
+        .accessibilityElement(children: .contain)
+    }
+
+    private func grid(_ widths: [Double]) -> some View {
+        Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
+            GridRow {
+                ForEach(Array(table.header.enumerated()), id: \.offset) { column, text in
+                    cell(text, width: widths[column], alignment: table.alignments[column])
+                        .font(.subheadline.weight(.semibold))
+                }
+            }
+            .background(PocketPalette.inset)
+            ForEach(Array(table.rows.prefix(Self.maximumTableRows).enumerated()), id: \.offset) { _, row in
+                Divider()
+                GridRow {
+                    ForEach(Array(row.enumerated()), id: \.offset) { column, text in
+                        cell(text, width: widths[column], alignment: table.alignments[column])
+                            .font(.subheadline)
+                    }
+                }
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(PocketPalette.separator, lineWidth: 0.5)
+        )
+        .padding(.vertical, 2)
+    }
+
+    private func cell(_ text: String, width: Double, alignment: ChatMarkdownTable.Alignment) -> some View {
         let frameAlignment: Alignment
         let textAlignment: TextAlignment
         switch alignment {
@@ -175,17 +207,13 @@ private struct ChatMarkdownBlocksView: View {
         case .center: (frameAlignment, textAlignment) = (.center, .center)
         case .trailing: (frameAlignment, textAlignment) = (.trailing, .trailing)
         }
-        return inline(text)
+        return Text(ChatInlineMarkdown.attributed(text, ownHandles: ownHandles))
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
             .multilineTextAlignment(textAlignment)
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
             .frame(width: width, alignment: frameAlignment)
-    }
-
-    private func inline(_ text: String) -> some View {
-        Text(ChatInlineMarkdown.attributed(text, ownHandles: ownHandles))
-            .textSelection(.enabled)
-            .fixedSize(horizontal: false, vertical: true)
     }
 }
 
