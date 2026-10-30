@@ -19,6 +19,14 @@ public struct CallLogView: View {
     public var body: some View {
         NavigationStack {
             List {
+                Section {
+                    Button { send(.openBriefing) } label: {
+                        Label("Briefing and Ask Senti", systemImage: "person.wave.2")
+                    }
+                    .accessibilityIdentifier("pocket.calls.briefing")
+                }
+                .listRowBackground(PocketPalette.raised)
+
                 Section("Coming up") {
                     Text("Calls scheduled in your rooms will show here once room calendars are live.")
                         .font(.footnote)

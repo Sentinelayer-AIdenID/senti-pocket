@@ -665,10 +665,13 @@ extension HTTPRoomMessageSender: VoiceLining {
                     request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
                     let (bytes, response) = try await urlSession.bytes(for: request)
-                    switch (response as? HTTPURLResponse)?.statusCode ?? 0 {
+                    let http = response as? HTTPURLResponse
+                    switch http?.statusCode ?? 0 {
                     case 200: break
                     case 503, 404: throw VoiceLineError.unavailable
-                    case 429: throw VoiceLineError.rateLimited
+                    case 429:
+                        throw VoiceLineError.rateLimited(
+                            retryAfter: http?.value(forHTTPHeaderField: "Retry-After").flatMap(TimeInterval.init))
                     case 401, 403: throw VoiceLineError.notAllowed
                     default: throw VoiceLineError.failed
                     }

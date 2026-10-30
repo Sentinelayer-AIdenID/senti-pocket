@@ -47,6 +47,8 @@ final class InAppBanner: ObservableObject {
         let title: String
         let body: String
         let link: SentiLink?
+        /// The bell notification this is, when the push says.
+        var notificationId: String?
     }
 
     @Published private(set) var current: Notice?
@@ -54,6 +56,8 @@ final class InAppBanner: ObservableObject {
     var isHosted = false
     /// Opens what a tapped banner is about (the signed-in app sets it).
     var onOpen: ((SentiLink) -> Void)?
+    /// A tapped banner's notification, to read it (the signed-in app sets it).
+    var onOpenedNotification: ((SentiLink, String?) -> Void)?
     let lifetime: TimeInterval
     private let window: InAppBannerWindow?
 
@@ -62,8 +66,8 @@ final class InAppBanner: ObservableObject {
         self.window = window
     }
 
-    func show(title: String, body: String, link: SentiLink?) {
-        let notice = Notice(title: title.isEmpty ? "Senti" : title, body: body, link: link)
+    func show(title: String, body: String, link: SentiLink?, notificationId: String? = nil) {
+        let notice = Notice(title: title.isEmpty ? "Senti" : title, body: body, link: link, notificationId: notificationId)
         window?.show(self)
         withAnimation(.spring(response: 0.4, dampingFraction: 0.82)) { current = notice }
         UIAccessibility.post(notification: .announcement, argument: "\(notice.title): \(notice.body)")
@@ -89,7 +93,9 @@ final class InAppBanner: ObservableObject {
     /// A tap on the card: put it away and open what it is about.
     func open(_ notice: Notice) {
         dismiss()
-        if let link = notice.link { onOpen?(link) }
+        guard let link = notice.link else { return }
+        onOpenedNotification?(link, notice.notificationId)
+        onOpen?(link)
     }
 }
 

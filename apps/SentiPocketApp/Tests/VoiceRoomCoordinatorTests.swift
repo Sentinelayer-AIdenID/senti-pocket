@@ -325,6 +325,22 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         XCTAssertEqual(ringer.rings, 1)
     }
 
+    /// Warden (#275): the ring sounds once the ring message has gone out, not while it waits.
+    func test_the_ring_waits_for_the_ring_message() async {
+        let log = OrderedPoster.Log()
+        let held = OrderedPoster("held", log: log, holdStart: true)
+        let ringer = FakeRinger()
+        let room = room(with: ["pocket-forge"], listener: FakeListener(), speaker: FakeSpeaker(), audio: FakeAudio(),
+                        ringer: ringer, poster: held)
+        room.begin()
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertFalse(ringer.ringing, "silent while the ring message is on its way")
+        XCTAssertTrue(room.state.isRinging, "the screen still says it is calling")
+        held.release()
+        await until("rings once the agents are rung") { ringer.ringing }
+        await room.hangUp()
+    }
+
     func test_with_no_answer_the_ring_stops_and_the_line_opens() async {
         let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), ringer = FakeRinger(), poster = FakePoster()
         let room = room(with: ["pocket-forge"], listener: listener, speaker: speaker, audio: audio, ringer: ringer, poster: poster)

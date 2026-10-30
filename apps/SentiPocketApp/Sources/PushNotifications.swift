@@ -79,6 +79,12 @@ enum PushRoute {
         if let reply = userInfo["replyId"] as? String, UUID(uuidString: reply) != nil { query.append("reply=\(reply.lowercased())") }
         return SentiLink(string: "/dashboard/sessions/\(encoded)" + (query.isEmpty ? "" : "?" + query.joined(separator: "&")))
     }
+
+    /// The bell notification a push is, when the server says (an opaque id, nothing governed).
+    static func notificationId(from userInfo: [AnyHashable: Any]) -> String? {
+        guard let id = userInfo["notificationId"] as? String, UUID(uuidString: id) != nil else { return nil }
+        return id.lowercased()
+    }
 }
 
 /// The bell's Apple push on this phone: asks once, registers the phone for the signed-in person, signs it out on
@@ -102,6 +108,8 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
     weak var inbox: IncomingLinkInbox?
     /// The room on screen, if any.
     var currentRoomId: () -> String? = { nil }
+    /// A tapped push's notification, to read it (the signed-in app sets it).
+    var onOpened: ((SentiLink, String?) -> Void)?
     private var client = PushDeviceClient(apiBaseURL: GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_API_URL", "SENTI_GATEWAY_URL"]))
     private var isRegistered = false
 
@@ -254,6 +262,7 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
         let content = notification.request.content
         let sessionId = content.userInfo["sessionId"] as? String
         let link = PushRoute.link(from: content.userInfo)
+        let notificationId = PushRoute.notificationId(from: content.userInfo)
         let title = content.title
         let body = content.body
         Task { @MainActor in
@@ -263,7 +272,7 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
                 : ForegroundPush.presentation(sessionId: sessionId, roomOnScreen: self.currentRoomId(),
                                               bannerHosted: InAppBanner.shared.isHosted)
             guard presentation == .inApp else { return completionHandler(presentation.options) }
-            InAppBanner.shared.show(title: title, body: body, link: link)
+            InAppBanner.shared.show(title: title, body: body, link: link, notificationId: notificationId)
             completionHandler(presentation.options)
             // It sounds and taps as the notification settings say, Pocket's and the phone's (warden, #255).
             let systemSounds = await UNUserNotificationCenter.current().notificationSettings().soundSetting == .enabled
@@ -281,7 +290,10 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
         let userInfo = response.notification.request.content.userInfo
         Task { @MainActor in
             LaunchUrgency.shared.raise()
-            if let link = PushRoute.link(from: userInfo) { self.inbox?.receive(link) }
+            if let link = PushRoute.link(from: userInfo) {
+                self.onOpened?(link, PushRoute.notificationId(from: userInfo))
+                self.inbox?.receive(link)
+            }
             completionHandler()
         }
     }
