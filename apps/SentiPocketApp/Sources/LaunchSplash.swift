@@ -21,15 +21,15 @@ struct LaunchSplash: View {
     var body: some View {
         if !gone {
             ZStack {
-                Color(red: 0.035, green: 0.05, blue: 0.16)
+                Color(red: 0.02, green: 0.045, blue: 0.05)
                     .ignoresSafeArea()
                 VStack(spacing: 22) {
+                    // SentinelLayer's shield, as on sentinelayer.com (Carter, 08:08: "this is not my logo").
                     Image("Logo")
                         .resizable()
                         .scaledToFit()
-                        .frame(width: 128, height: 128)
-                        .clipShape(RoundedRectangle(cornerRadius: 30, style: .continuous))
-                        .shadow(color: Color(red: 0.3, green: 0.4, blue: 1).opacity(appeared ? 0.55 : 0), radius: 28)
+                        .frame(height: 150)
+                        .shadow(color: Color(red: 0.2, green: 0.95, blue: 0.55).opacity(appeared ? 0.45 : 0), radius: 28)
                         .scaleEffect(reduceMotion ? 1 : (leaving ? 1.3 : (appeared ? 1 : 0.55)))
                     Text(Self.motto)
                         .font(.subheadline.weight(.semibold))
