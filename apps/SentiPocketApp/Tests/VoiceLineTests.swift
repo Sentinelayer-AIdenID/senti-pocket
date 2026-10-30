@@ -270,6 +270,26 @@ final class VoiceEndpointingTests: XCTestCase {
         await room.hangUp()
     }
 
+    /// Warden (#276): the recognizer can lag the voice; a sure 'finished' never ends a turn while the microphone still
+    /// hears speech.
+    func test_a_finished_answer_waits_while_the_microphone_still_hears_speech() async {
+        let endpointer = FakeEndpointer(.success(0.95)), listener = LineListener(), poster = TurnPoster()
+        let room = await listening(endpointer, listener, poster)
+        listener.say("I want to")
+        let loud = Task { @MainActor in
+            for _ in 0..<8 {
+                room.hear(level: 0.8)
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        XCTAssertTrue(poster.turns.isEmpty, "still talking: not ended early")
+        await loud.value
+        for _ in 0..<400 where poster.turns.isEmpty { try? await Task.sleep(nanoseconds: 5_000_000) }
+        XCTAssertEqual(poster.turns.count, 1, "the normal pause ends it")
+        await room.hangUp()
+    }
+
     func test_an_unsure_answer_leaves_the_normal_pause_in_charge() async {
         let endpointer = FakeEndpointer(.success(0.4)), listener = LineListener(), poster = TurnPoster()
         let room = await listening(endpointer, listener, poster)
