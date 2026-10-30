@@ -546,13 +546,20 @@ final class MainThreadWatch: @unchecked Sendable {
         /// Message rows drawn while it lasted, and the last one drawn (`RenderTrace`); nil in older records.
         var rowDraws: Int?
         var lastRow: Int64?
+        /// The parts that updated most while it lasted ("room 58,940, room screen 58,940"), and the room's last action.
+        var busiest: String?
+        var lastIntent: String?
 
-        /// "1,240 row draws, the last #55578", or nil when none were counted.
+        /// "1,240 row draws, the last #55578; busiest: room 1,240; last action: loadOlder", or nil when none were
+        /// counted.
         var drawsText: String? {
             guard let rowDraws else { return nil }
             let count = rowDraws.formatted(.number.locale(Locale(identifier: "en_US")))
             let last = (lastRow ?? 0) > 0 ? ", the last #\(lastRow ?? 0)" : ""
-            return "\(count) row \(rowDraws == 1 ? "draw" : "draws")\(last)"
+            var text = "\(count) row \(rowDraws == 1 ? "draw" : "draws")\(last)"
+            if let busiest { text += "; busiest: \(busiest)" }
+            if let lastIntent, !lastIntent.isEmpty { text += "; last action: \(lastIntent)" }
+            return text
         }
     }
 
@@ -568,6 +575,8 @@ final class MainThreadWatch: @unchecked Sendable {
     private var stall: Stall?
     /// Row draws counted when the current stall began.
     private var drawsAtStart = 0
+    /// Updates by part when the current stall began.
+    private var ticksAtStart: [String: Int] = [:]
     /// Only an app on screen is watched: a suspended app's threads all stop, and its first moments back are no stall.
     private var isActive = true
 
@@ -621,11 +630,17 @@ final class MainThreadWatch: @unchecked Sendable {
             lastBeat = now
         } else if gap > Self.threshold {
             let trace = RenderTrace.snapshot()
-            if stall == nil { drawsAtStart = trace.draws }
+            let sources = RenderTrace.sources()
+            if stall == nil {
+                drawsAtStart = trace.draws
+                ticksAtStart = sources.ticks
+            }
             var current = stall ?? Stall(startedAt: lastBeat, afterStep: lastStep, seconds: 0, recovered: false)
             current.seconds = gap
             current.rowDraws = trace.draws - drawsAtStart
             current.lastRow = trace.lastRow
+            current.busiest = RenderTrace.busiest(from: ticksAtStart, to: sources.ticks)
+            current.lastIntent = sources.lastIntent
             stall = current
             written = current
         }
@@ -639,7 +654,7 @@ final class MainThreadWatch: @unchecked Sendable {
         lastBeat = Date()
         let ended = stall.map {
             Stall(startedAt: $0.startedAt, afterStep: $0.afterStep, seconds: $0.seconds, recovered: true,
-                  rowDraws: $0.rowDraws, lastRow: $0.lastRow)
+                  rowDraws: $0.rowDraws, lastRow: $0.lastRow, busiest: $0.busiest, lastIntent: $0.lastIntent)
         }
         stall = nil
         lock.unlock()
