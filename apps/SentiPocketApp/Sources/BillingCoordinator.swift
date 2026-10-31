@@ -125,8 +125,8 @@ struct BillingClient: BillingAPI {
     }
 }
 
-/// "Plan & billing" (Carter, 10-31: "Pocket and web should use same stripe billing key. Everything should be the
-/// same"): the same reads as the web's Billing page, and its links. Upgrading opens the web's Billing page with the
+/// "Plan & billing" works as the web's does, on the same Stripe account: the same reads as the web's Billing page,
+/// and its links. Upgrading opens the web's Billing page with the
 /// plan chosen, and Manage opens Stripe's portal, both in Safari: Pocket never takes a payment itself (the App Store
 /// allows a link out to web checkout in the US).
 @MainActor

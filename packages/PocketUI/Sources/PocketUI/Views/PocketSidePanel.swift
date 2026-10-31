@@ -62,7 +62,7 @@ public struct PocketSidePanel: View {
     private let onSettings: () -> Void
     /// Start a new room of a type (Carter, #55287); nil where rooms cannot be made.
     private let onNewRoom: (() -> Void)?
-    /// Plan & billing (Carter, 10-31); nil where it isn't offered.
+    /// Plan & billing; nil where it isn't offered.
     private let onBilling: (() -> Void)?
     @State private var query = ""
 

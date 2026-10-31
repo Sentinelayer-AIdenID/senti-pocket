@@ -2,8 +2,8 @@ import Foundation
 import XCTest
 @testable import PocketUI
 
-/// Carter (10-31): "Pocket and web should use same stripe billing key. Everything should be the same." The plan and
-/// usage are worked out the way the web's Billing page works them out.
+/// Pocket and the web bill through the same Stripe account and show the same plan: the plan and usage are worked
+/// out the way the web's Billing page works them out.
 final class BillingPresentationTests: XCTestCase {
     func test_the_plan_in_force_follows_the_webs_rule() {
         XCTAssertEqual(BillingPlans.activePlanCode(subscriptionPlan: "max", subscriptionStatus: "active",

@@ -2,7 +2,7 @@
 import SwiftUI
 
 /// "Plan & billing": your plan, this period's usage and what's left, as the web's Billing page shows them. Upgrading
-/// and managing the subscription happen on sentinelayer.com, on the same account as the web (Carter, 10-31).
+/// and managing the subscription happen on sentinelayer.com, on the same account as the web.
 public struct BillingView: View {
     private let state: BillingState
     private let send: (BillingIntent) -> Void

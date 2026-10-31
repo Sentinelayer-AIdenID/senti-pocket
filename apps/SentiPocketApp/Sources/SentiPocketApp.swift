@@ -322,7 +322,7 @@ private struct AuthenticatedRootView: View {
             transport: transport,
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
         ))
-        // Plan & billing reads the same API as the web and opens its payment pages in Safari (Carter, 10-31).
+        // Plan & billing reads the same API as the web and opens its payment pages in Safari.
         _billing = StateObject(wrappedValue: BillingCoordinator(
             api: BillingClient(apiBaseURL: apiURL),
             openExternally: { url in UIApplication.shared.open(url) },

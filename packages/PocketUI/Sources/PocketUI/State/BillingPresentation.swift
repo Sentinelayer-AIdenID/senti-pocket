@@ -1,8 +1,8 @@
 import Foundation
 
-/// "Plan & billing" (Carter, 10-31: "Pocket and web should use same stripe billing key. Everything should be the
-/// same"): the plan, usage and balance the web's Billing page shows, worked out the way it works them out. Payment
-/// happens on sentinelayer.com, on the same Stripe account; Pocket never holds a payment key.
+/// "Plan & billing", the same as the web's: the plan, usage and balance the web's Billing page shows, worked out the
+/// way it works them out. Payment happens on sentinelayer.com, on the same Stripe account; Pocket never holds a
+/// payment key.
 public struct BillingState: Equatable, Sendable {
     /// The plan in force, as the web's `activePlanCode()` picks it: free, trial, pro, max, team or enterprise.
     public var planCode: String

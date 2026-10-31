@@ -18,8 +18,8 @@ private final class FakeBilling: BillingAPI, @unchecked Sendable {
     func portalURL() async throws -> URL { try portal.get() }
 }
 
-/// Carter (10-31): "Pocket and web should use same stripe billing key. Everything should be the same." Pocket reads
-/// the web Billing page's two answers and opens the web's payment pages in Safari; it never takes a payment itself.
+/// Pocket and the web bill through the same Stripe account and work the same way: Pocket reads the web Billing
+/// page's two answers and opens the web's payment pages in Safari; it never takes a payment itself.
 @MainActor
 final class BillingCoordinatorTests: XCTestCase {
     /// The two answers as the API shapes them (`schemas/billing.py`): v2 for plan, usage and balances, v1 for the
