@@ -1,8 +1,8 @@
 import XCTest
 @testable import PocketUI
 
-/// Carter's freezes on build 17 (#56316, #56340): the bottom marker wrote the reader's place during layout, the redraw
-/// moved the marker, and the room never stopped redrawing. The place now settles outside layout.
+/// The freezes on build 17: the bottom marker wrote the reader's place during layout, the redraw moved the marker, and
+/// the room never stopped redrawing. The place now settles outside layout.
 final class RoomBottomSettleTests: XCTestCase {
     func test_a_report_during_layout_changes_nothing_until_it_lands() throws {
         var settle = RoomBottomSettle()
