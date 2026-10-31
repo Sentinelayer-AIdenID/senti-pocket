@@ -384,7 +384,7 @@ struct RoomChatScreen: View {
     }
 
     /// An agent's call answered on the call screen: once this room has it and CallKit has given it audio, the voice
-    /// room starts with the caller inside the system call, with Pocket in front or not (Carter, 10-30).
+    /// room starts with the caller inside the system call, with Pocket in front or not.
     private func takeAnsweredCall() {
         guard voiceRoom == nil, voicePoster != nil, let call = callDesk.takeWaiting(for: route.sessionId) else { return }
         answeredCall = call
