@@ -312,7 +312,7 @@ final class SelectedSessionDetailCoordinatorTests: XCTestCase {
         XCTAssertEqual(opened.values.count, 1)
     }
 
-    /// Carter (10-30): "Verified checkpoint · Connection unavailable". The signing gateway is not deployed, so until
+    /// A checkpoint said "Verified checkpoint · Connection unavailable". The signing gateway is not deployed, so until
     /// it is a checkpoint opens as the server holds it, and only the exact visible row, never the verified view.
     func test_without_signing_a_checkpoint_opens_as_the_server_holds_it() async throws {
         let transport = ControlledSessionDetailTransport()

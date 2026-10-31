@@ -116,7 +116,7 @@ final class VoiceCallCardTests: XCTestCase {
         XCTAssertEqual(VoiceCallCard.longestCall, 30 * 60)
     }
 
-    /// Carter (10-30): bring warden into a call that is already going.
+    /// Bring an agent into a call that is already going.
     func test_an_agent_added_mid_call_is_rung_by_mention_and_its_answers_fold_into_the_card() {
         let add = VoiceCallMarkers.added(caller: "mrrcarter", agent: "claude-warden", joining: ["pocket-forge"])
         XCTAssertTrue(add.hasPrefix("📞 Adding @claude-warden: mrrcarter added you to a voice room already going with pocket-forge."))
@@ -128,7 +128,7 @@ final class VoiceCallCardTests: XCTestCase {
         let start = VoiceCallMarkers.start(caller: "mrrcarter", agents: ["pocket-forge"], meeting: false)
         let inputs = [
             input("m1", seq: 1, "human-mrrcarter", start, at: 0),
-            input("m2", seq: 2, "pocket-forge", "Hi Carter.", at: 0.1),
+            input("m2", seq: 2, "pocket-forge", "Hi Sam.", at: 0.1),
             input("m3", seq: 3, "claude-warden", "Before I was added, not the call's.", at: 0.15),
             input("m4", seq: 4, "human-mrrcarter", add, at: 0.2),
             input("m5", seq: 5, "claude-warden", "Warden here.", at: 0.3),
@@ -147,7 +147,7 @@ final class VoiceCallCardTests: XCTestCase {
         XCTAssertEqual(unclosed.cards["m1"]?.turns.map(\.id), ["m2", "m5"])
     }
 
-    /// Carter (10-30): tick several agents and call them together.
+    /// Tick several agents and call them together.
     func test_the_picker_rings_the_ticked_agents_in_the_lists_order() {
         let partners = ["pocket-forge", "claude-warden", "review-agent"]
         var pick = VoiceCallPick()
