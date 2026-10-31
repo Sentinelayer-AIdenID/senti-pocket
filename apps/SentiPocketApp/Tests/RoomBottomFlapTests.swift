@@ -38,9 +38,10 @@ final class RoomBottomFlapTests: XCTestCase {
         private(set) var placeReports = 0
         static let own: Set<String> = ["human-mrrcarter"]
 
-        init(_ inputs: [RoomChatMessageInput], openedAt: Int64? = nil) {
+        init(_ inputs: [RoomChatMessageInput], openedAt: Int64? = nil, loading: Bool = false) {
             self.inputs = inputs
             self.openedAt = openedAt
+            self.loading = loading
             // Opened at the line, the coordinator starts away from the bottom, as `RoomChatCoordinator` does.
             atBottom = openedAt == nil
             state = RoomChatPresentationState(sessionId: "flap", title: "Review room", messages: [])
@@ -350,10 +351,11 @@ final class RoomBottomFlapTests: XCTestCase {
     /// stays well up from the bottom: nothing pulls the reader down.
     func test_a_room_opened_at_its_unread_line_settles_there() throws {
         let rows = Self.reviewRoom()
-        let room = Room(rows, openedAt: rows[rows.count - 40].sequenceId)
+        // Loading first, then its rows, the way the app opens a room.
+        let room = Room(rows, openedAt: rows[rows.count - 40].sequenceId, loading: true)
         try host(room)
         defer { close() }
-        settles("open at the line") {}
+        settles("open at the line") { room.finishLoading() }
         let scroll = try XCTUnwrap(window.flatMap { Self.list(in: $0) }, "the room's list")
         XCTAssertFalse(room.isAtBottom, "away from the bottom")
         XCTAssertLessThanOrEqual(room.placeChanges, 2, "said at most once each way, never flapping")
@@ -369,10 +371,10 @@ final class RoomBottomFlapTests: XCTestCase {
     /// reader counts as at the bottom (no Jump to latest over the last message), once.
     func test_a_room_opened_at_a_short_unread_line_counts_the_reader_at_the_bottom() throws {
         let rows = Self.reviewRoom()
-        let room = Room(rows, openedAt: rows[rows.count - 1].sequenceId)
+        let room = Room(rows, openedAt: rows[rows.count - 1].sequenceId, loading: true)
         try host(room)
         defer { close() }
-        settles("open at the line") {}
+        settles("open at the line") { room.finishLoading() }
         // A slow machine lays out later: give it time to land, rather than a fixed moment.
         let deadline = Date().addingTimeInterval(2)
         while !room.isAtBottom, Date() < deadline { pump(0.05) }
