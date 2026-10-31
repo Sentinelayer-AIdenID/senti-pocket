@@ -35,7 +35,7 @@ final class PresenceRingTests: XCTestCase {
         XCTAssertNil(PresenceRingLayout.frontIndex(count: 5, rotation: 0), "the arc has no front to pass")
     }
 
-    /// Carter (10-30): "whenever each one sends a message it scrolls to that one".
+    /// Whoever just posted is brought to the front of the ring.
     func test_an_agent_that_just_posted_is_brought_to_the_front_the_short_way_round() {
         let count = 8
         let step = 2 * Double.pi / Double(count)

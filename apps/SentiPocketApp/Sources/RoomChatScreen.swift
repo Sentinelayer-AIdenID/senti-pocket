@@ -767,8 +767,8 @@ struct RoomChatScreen: View {
             offerCrashReports()
         }
         .task {
-            // The room's running boxes, for the ring and its count, kept fresh while the room is open (Carter, 10-30:
-            // the count only caught up once the people list was opened).
+            // The room's running boxes, for the ring and its count, kept fresh while the room is open (the count once
+            // caught up only when the people list was opened).
             while !Task.isCancelled {
                 await flight.refresh()
                 try? await Task.sleep(nanoseconds: 60_000_000_000)

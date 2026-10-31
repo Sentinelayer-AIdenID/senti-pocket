@@ -145,8 +145,7 @@ public struct RoomRoster: Equatable, Sendable {
         public let members: [Member]
         public var online: Int { members.filter(\.isOnline).count }
         public var offline: Int { members.count - online }
-        /// Online and doing something now: the number the room's ring shows (Carter, 10-30: "If one idles that number
-        /// drops").
+        /// Online and doing something now: the number the room's ring shows, which drops when one idles.
         public var active: Int { members.filter(\.isActive).count }
         public var idle: Int { online - active }
 

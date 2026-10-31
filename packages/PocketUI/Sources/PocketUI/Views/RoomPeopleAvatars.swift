@@ -19,8 +19,8 @@ struct RoomPeopleAvatars: View {
     var working: Set<String> = []
     /// The room's running boxes, by name: shown even when not in presence, with a box badge.
     var boxes: [String] = []
-    /// How many are here and active, as the people list counts them (Carter, 10-30: the ring said 2 while the list
-    /// said 9 online); nil counts the ring's own logos that are not idle.
+    /// How many are here and active, as the people list counts them (the ring once said 2 while the list said 9
+    /// online); nil counts the ring's own logos that are not idle.
     var activeCount: Int?
     /// Something covers the room (the people list, a call): the ring stops turning by itself.
     var isPaused = false
@@ -95,7 +95,7 @@ struct RoomPeopleAvatars: View {
         let items = ringItems
         let isRing = PresenceRingLayout.isRing(items.count)
         let online = presence.isAvailable ? String(activeCount ?? items.filter { !$0.isIdle }.count) : "?"
-        // Past six it turns by itself, slowly, unless a hand is on it (Carter, 10-30: "or it scrolls by itself"); the
+        // Past six it turns by itself, slowly, unless a hand is on it; the
         // clock stops for an arc, with Reduce Motion, under a hand, or while the room is covered (warden, #265).
         TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !isRing || reduceMotion || dragFrom != nil || resting)) { context in
             let turned = turn(at: context.date, isRing: isRing)
@@ -156,8 +156,8 @@ struct RoomPeopleAvatars: View {
             seenSignals = signals
         }
         .onChange(of: presence) { now in arrive(now) }
-        // Whoever just posted comes to the front of the ring, and the ring holds there a while (Carter, 10-30:
-        // "whenever each one sends a message it scrolls to that one. An indication of who's interacting now").
+        // Whoever just posted comes to the front of the ring, and the ring holds there a while: it shows who is
+        // talking now.
         .onChange(of: signals) { now in bringForward(now, items: items) }
     }
 
@@ -174,8 +174,7 @@ struct RoomPeopleAvatars: View {
                     .modifier(PresenceCoin(shape: Circle()))
             }
         }
-        // Idle but not gone: still on the ring, greyed (Carter, 10-30), and still easy to see ("I can barely see the
-        // logos").
+        // Idle but not gone: still on the ring, greyed, and still easy to see.
         .saturation(item.isIdle ? 0.3 : 1)
         .opacity(item.isIdle ? 0.78 : 1)
     }
@@ -323,8 +322,7 @@ private struct RingPlacement: ViewModifier, Animatable {
 }
 
 /// A coin under each presence logo: a little see-through glass, lit from above, ringed and shadowed, so the logo
-/// stands out over any message behind it in light and dark (Carter, 10-30: "Make them more prominent and slight
-/// transparent. Same for dark theme").
+/// stands out over any message behind it, in light and dark.
 private struct PresenceCoin<S: InsettableShape>: ViewModifier {
     let shape: S
     var fixedWidth = true

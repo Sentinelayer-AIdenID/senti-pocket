@@ -110,8 +110,8 @@ final class RoomRosterTests: XCTestCase {
         XCTAssertEqual(roster.members.first?.status, .idle, "running, quiet for now")
     }
 
-    /// Carter (10-30): the ring said 2 while the people list said 9 online. Both now count the active ones the same
-    /// way, and the list says how many are idle.
+    /// The ring once said 2 while the people list said 9 online. Both now count the active ones the same way, and the
+    /// list says how many are idle.
     func test_the_ring_and_the_people_list_count_active_the_same_way() {
         let now = Date()
         let present = [
