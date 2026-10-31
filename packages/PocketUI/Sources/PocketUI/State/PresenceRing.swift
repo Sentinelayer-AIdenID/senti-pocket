@@ -1,8 +1,7 @@
 import Foundation
 
-/// Where each logo sits in who is here (Carter, 10-30: "Make it start curving around 6 and allow it to for a full
-/// circumference from there that goes all the way to the back ... you can scroll that circle to see who's here or it
-/// scrolls by itself, it's endless and can add as many as possible"). Up to `arcLimit` logos sit on a gentle arc under
+/// Where each logo sits in who is here: past six, a full ring that goes all the way round, that you can scroll or that
+/// turns by itself, and that holds as many as there are. Up to `arcLimit` logos sit on a gentle arc under
 /// the online count; past that they go round a full ring that turns, the front ones large and bright, the back ones
 /// small and dim. The count sits above them all (Carter, 10-30: "the logos are hiding it").
 public enum PresenceRingLayout {

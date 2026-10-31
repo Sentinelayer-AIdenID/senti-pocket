@@ -1,8 +1,7 @@
 import XCTest
 @testable import PocketUI
 
-/// Carter (10-30): "Make it start curving around 6 and allow it to for a full circumference from there that goes all
-/// the way to the back ... you can scroll that circle ... it's endless and can add as many as possible".
+/// Past six, who is here goes round a full ring that you can scroll, endless, with room for as many as there are.
 final class PresenceRingTests: XCTestCase {
     func test_up_to_six_sit_on_an_arc_centred_under_the_count_and_more_go_round_a_ring() {
         XCTAssertFalse(PresenceRingLayout.isRing(6))
@@ -38,7 +37,7 @@ final class PresenceRingTests: XCTestCase {
         XCTAssertNil(PresenceRingLayout.frontIndex(count: 5, rotation: 0), "the arc has no front to pass")
     }
 
-    /// Carter (10-30): "whenever each one sends a message it scrolls to that one".
+    /// Whoever just posted is brought to the front of the ring.
     func test_an_agent_that_just_posted_is_brought_to_the_front_the_short_way_round() {
         let count = 8
         let step = 2 * Double.pi / Double(count)
@@ -53,7 +52,7 @@ final class PresenceRingTests: XCTestCase {
                        "one step back, not seven forward")
     }
 
-    /// Carter (10-30): idle but not destroyed stays on the ring, greyed; a working agent is never greyed.
+    /// Idle but not destroyed stays on the ring, greyed; a working agent is never greyed.
     func test_an_idle_agent_is_greyed_unless_it_is_working() {
         let present = [
             RoomChatPresence.Person(id: "pocket-forge", name: "pocket-forge", isHuman: false, isIdle: true),

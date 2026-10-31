@@ -20,7 +20,7 @@ private final class ScriptedCalls: CallLogTransport, @unchecked Sendable {
     }
 }
 
-/// Carter (10-30): "there should be ... past ones like when I called yall and the details I asked for".
+/// Your past calls: whom you talked with, and what was decided.
 @MainActor
 final class CallLogCoordinatorTests: XCTestCase {
     private func voiceRoom(_ id: String, with agents: [String] = ["pocket-forge"], meeting: Bool = false,
@@ -37,7 +37,7 @@ final class CallLogCoordinatorTests: XCTestCase {
                                startedAt: "2026-10-30T12:00:00Z", direction: "incoming", callerName: "claude-warden",
                                reason: "Review is ready")
         let outgoing = SentiCall(kind: .ring, id: "r-2", sessionId: "room-2", status: "answered",
-                                 startedAt: "2026-10-30T11:00:00Z", direction: "outgoing", calleeName: "mrrCarter")
+                                 startedAt: "2026-10-30T11:00:00Z", direction: "outgoing", calleeName: "sam")
         let log = CallLogCoordinator(transport: ScriptedCalls([.success(SentiCallLogPage(calls: [
             voiceRoom("v1"), voiceRoom("v2", with: ["pocket-forge", "claude-warden"]),
             voiceRoom("v3", with: [], meeting: true, status: "ongoing"), missed, outgoing
@@ -45,7 +45,7 @@ final class CallLogCoordinatorTests: XCTestCase {
         await log.refresh()
         let rows = log.state.rows
         XCTAssertEqual(rows.map(\.title), ["pocket-forge", "pocket-forge and claude-warden", "Meeting",
-                                           "claude-warden called you", "You called mrrCarter"])
+                                           "claude-warden called you", "You called sam"])
         XCTAssertEqual(rows[0].detail, "2 min 40 s · 7 turns")
         XCTAssertEqual(rows[0].summaries.first?.text, "Next build rings first.")
         XCTAssertEqual(rows[2].detail, "In progress · 2 min 40 s · 7 turns")
@@ -74,7 +74,7 @@ final class CallLogCoordinatorTests: XCTestCase {
         }
         let folded = VoiceCallCard.fold([
             input(55589, "human-mrrcarter", start, 0),
-            input(55590, "pocket-forge", "Hi Carter, forge here.", 10),
+            input(55590, "pocket-forge", "Hi Sam, forge here.", 10),
             input(55598, "human-mrrcarter", "📞 Voice room with pocket-forge ended · 2 min 40 s · 7 turns.", 160)
         ])
         let rows = Set(folded.kept.map(\.sequenceId))
