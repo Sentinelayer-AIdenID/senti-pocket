@@ -199,7 +199,7 @@ public struct RoomChatView: View {
                         }
                     } label: {
                         // A long name (the server's auto-titles can run long) ends in "…" instead of pushing Talk into
-                        // the overflow menu and running under the bar's buttons (10-30).
+                        // the overflow menu and running under the bar's buttons.
                         Text(state.title)
                             .font(.headline)
                             .foregroundStyle(PocketPalette.textPrimary)
