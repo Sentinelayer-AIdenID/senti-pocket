@@ -977,6 +977,13 @@ public enum RoomChatRepeats {
 public enum RoomChatQuiet {
     /// The room's own voices: costs, mints, relay notices, ticket filing and "working on" lines.
     static let systemAuthors: Set<String> = ["respawn-orchestrator", "ticket-keeper"]
+
+    /// The room's own voices, which never answer a call: the orchestrator's costs and mints, the ticket keeper, and
+    /// Senti's own notices ("mrrCarter answered pocket-forge's call").
+    public static func isRoomVoice(_ authorId: String) -> Bool {
+        let key = authorId.lowercased()
+        return systemAuthors.contains(key) || key == "senti"
+    }
     /// The signature a box's relayed speech ends with.
     static let boxSignature = "⟂ speech"
 

@@ -331,7 +331,9 @@ final class VoiceRoomCoordinator: ObservableObject {
     private func take(id: String, author: String, isHuman: Bool, text: String, timestamp: String) {
         guard state.phase != .ending, state.phase != .ended, !taken.contains(id) else { return }
         let lowered = author.lowercased()
-        guard !lowered.isEmpty, !ownAuthorIds.contains(lowered),
+        // The room's own voices never answer: in a meeting, a cost line would otherwise be read and take the floor
+        // from the agents (found porting calls to the web, #702).
+        guard !lowered.isEmpty, !ownAuthorIds.contains(lowered), !RoomChatQuiet.isRoomVoice(lowered),
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let at = ParsedSessionTimestamp(timestamp).date ?? now()
         guard at >= state.startedAt.addingTimeInterval(-Self.clockSlack) else { return }

@@ -833,4 +833,28 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         room.send(.setMuted(false))
         await until("listening again once unmuted") { listener.starts == 2 && room.state.isListening }
     }
+
+    /// Found porting calls to the web (#702): in a meeting the room's own voices (cost lines, the ticket keeper,
+    /// Senti's notices) are never read, and never take the floor from the agents.
+    func test_a_meeting_never_reads_the_rooms_own_voices() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), poster = FakePoster()
+        let room = room(with: [], handsFree: false, listener: listener, speaker: speaker, audio: FakeAudio(), poster: poster)
+        room.begin()
+        room.send(.toggleTalk)
+        await until("listening") { listener.partial != nil }
+        listener.say("Who has the release?")
+        room.send(.toggleTalk)
+        await until("posted") { poster.turns.count == 1 }
+
+        room.receive([
+            message("o1", from: "respawn-orchestrator", "[cost] astra-web: $15.26 est over 101 calls", secondsAfterStart: 3),
+            message("k1", from: "ticket-keeper", "1 asks: R1: no action", secondsAfterStart: 3),
+            message("s1", from: "senti", "📞 mrrCarter answered pocket-forge's call", secondsAfterStart: 3),
+            message("a1", from: "claude-warden", "I have it.", secondsAfterStart: 4)
+        ])
+        await until("the agent is read") { room.state.speaker == "claude-warden" }
+        XCTAssertEqual(speaker.spoken.map(\.speaker), ["claude-warden"], "only the agent is read")
+        XCTAssertEqual(room.state.turns.filter { !$0.isYou }.map(\.speaker), ["claude-warden"])
+        XCTAssertTrue(room.state.turns.filter(\.isHeld).isEmpty, "no cost line took the floor")
+    }
 }
