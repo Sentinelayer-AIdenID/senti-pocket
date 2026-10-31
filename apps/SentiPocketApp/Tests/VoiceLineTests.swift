@@ -144,9 +144,9 @@ final class VoiceLineCallTests: XCTestCase {
         XCTAssertTrue(poster.uploads.first?.contains("Turns marked (voice) are the fast voice line") == true)
     }
 
-    /// Carter (10-30): "send an agent with your intentions and everything that you need, and the agent will call me
-    /// and talk to me". Answering an agent's call, the quick answers are asked with that call, whose reason and brief
-    /// the server reads; the screen says what it is about until someone speaks.
+    /// An agent can call you with its reason and what it needs, and talk you through it. Answering an agent's call, the
+    /// quick answers are asked with that call, whose reason and brief the server reads; the screen says what it is
+    /// about until someone speaks.
     func test_answering_an_agents_call_asks_the_voice_line_with_that_call() async {
         let line = FakeVoiceLine([.success(["I need your yes on the release."])])
         let listener = LineListener(), speaker = LineSpeaker(), poster = LinePoster()
