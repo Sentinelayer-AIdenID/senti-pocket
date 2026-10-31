@@ -1,7 +1,7 @@
 import Foundation
 
-/// Everything waiting on your decision, across your rooms (Carter, 10-30: "Where do you find 'waiting on you' thing
-/// list for decisions?"; ticket 931e1d2e). The same list and count as the web, oldest first so nothing rots; one tap
+/// Everything waiting on your decision, across your rooms, in one place. The same list and count as the web, oldest
+/// first so nothing rots; one tap
 /// answers where the ask offers choices, and an answer anywhere clears it everywhere.
 public struct WaitingOnYouRow: Identifiable, Equatable, Sendable {
     /// The ticket the decision is asked in.

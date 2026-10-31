@@ -3,7 +3,7 @@ import PocketContracts
 import PocketSyncClient
 import PocketUI
 
-/// "Calls & briefings" (Carter, 10-30): your calls across your rooms from the server's one log (`GET /me/calls`),
+/// "Calls & briefings": your calls across your rooms from the server's one log (`GET /me/calls`),
 /// newest first, each with what the agents said it decided, and the way back to it in its room.
 @MainActor
 final class CallLogCoordinator: ObservableObject {
