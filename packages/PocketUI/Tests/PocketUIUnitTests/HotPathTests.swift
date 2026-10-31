@@ -25,7 +25,7 @@ final class HotPathTests: XCTestCase {
         XCTAssertEqual(ChatReferences.mentionHandles(in: "no mention here"), [])
     }
 
-    /// Carter's freeze (#56316): the review packets were quiet rows whose first line was a 700-character JSON header,
+    /// The build-17 freeze: the review packets were quiet rows whose first line was a 700-character JSON header,
     /// measured on every draw. The line is cut; a short line is kept whole.
     func test_a_quiet_line_from_a_giant_first_line_is_cut() {
         let header = "@aneta-claude REVIEW_PACKET {" + (1...60).map { "\"key\($0)\":\"value\"" }.joined(separator: ",")

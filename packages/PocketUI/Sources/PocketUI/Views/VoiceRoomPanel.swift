@@ -252,7 +252,7 @@ public struct VoiceRoomPanel: View {
         }
     }
 
-    /// Mute (Carter, Voice Lab #56359: "I don't see a mute button in this when I call you"). As on the phone's own
+    /// Mute, on the panel of every call. As on the phone's own
     /// call screen it always shows a crossed-out mic, so it never reads as a second Talk button, and it is filled
     /// while on. In a call the phone's call screen also shows, it mutes that call too.
     private var muteButton: some View {
