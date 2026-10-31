@@ -25,7 +25,9 @@ let package = Package(
                 "PocketSyncClient",
                 .product(name: "PocketContracts", package: "PocketContracts"),
                 .product(name: "PocketCall", package: "PocketCall")
-            ]
+            ],
+            // Synthetic files sent as base64 parts, with outcomes known by construction (no room content).
+            resources: [.copy("Fixtures")]
         )
     ]
 )

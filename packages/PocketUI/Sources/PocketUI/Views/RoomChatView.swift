@@ -44,6 +44,8 @@ public struct RoomChatView: View {
     @State private var highlightedRowId: String?
     /// Background lines opened in place.
     @State private var expandedQuiet: Set<String> = []
+    /// Threads whose file parts are shown (by the thread's root sequence); otherwise they fold behind the file's card.
+    @State private var shownFileParts: Set<Int64> = []
     @State private var showsPresence = false
     /// The owner is renaming the room, and the name as typed.
     @State private var renaming = false
@@ -449,42 +451,60 @@ public struct RoomChatView: View {
             .padding(.vertical, 8)
             .accessibilityIdentifier("pocket.room.unreadDivider")
         case .message(let message):
-            if message.startsTurn {
-                RoomTurnBreak(date: message.date)
+            // A part of a file posted as base64 folds behind the file's card, unless its thread's parts are shown.
+            if message.filePartOf.map(shownFileParts.contains) ?? true {
+                messageRow(message, proxy: proxy)
             }
-            RoomMessageRowView(
-                row: message,
-                ownHandles: state.ownMentionHandles,
-                isHighlighted: highlightedRowId == row.id,
-                canReact: state.canReact,
-                canReply: state.composer.canPost,
-                canPin: state.canPin,
-                isPinned: state.isPinned(message),
-                pinsFull: state.pinned.count >= state.pinLimit,
-                breakouts: state.breakouts,
-                attachmentPreviews: state.attachmentPreviews,
-                isReadingAloud: readingAloudId == message.readAloudId,
-                isExpanded: expandedQuiet.contains(message.id),
-                threadSummary: message.summaryThreadId.flatMap { state.threadSummaries[$0] },
-                isReadingSummary: message.summaryReadAloudId.map { readingAloudId == $0 } ?? false,
-                onOpenSummary: { summary, id in openSummary = OpenThreadSummary(id: id, summary: summary) },
-                onOpenReplyTarget: { jump(to: $0, proxy: proxy) },
-                onOpenCheckpoint: { openCheckpoint = $0 },
-                onEdit: { editingRow = $0 },
-                onToggleQuiet: {
-                    if expandedQuiet.contains(message.id) {
-                        expandedQuiet.remove(message.id)
+            ForEach(message.files) { card in
+                RoomFileCardView(card: card, showsParts: shownFileParts.contains(card.thread)) {
+                    if shownFileParts.contains(card.thread) {
+                        shownFileParts.remove(card.thread)
                     } else {
-                        expandedQuiet.insert(message.id)
+                        shownFileParts.insert(card.thread)
                     }
-                },
-                onOpenLong: { longRow = $0 },
-                onReply: { replyTarget = $0 },
-                send: send
-            )
-            .onAppear { send(.messageOnScreen(id: message.id, isOnScreen: true)) }
-            .onDisappear { send(.messageOnScreen(id: message.id, isOnScreen: false)) }
+                }
+                .padding(.vertical, 6)
+            }
         }
+    }
+
+    @ViewBuilder
+    private func messageRow(_ message: RoomChatMessageRow, proxy: ScrollViewProxy) -> some View {
+        if message.startsTurn {
+            RoomTurnBreak(date: message.date)
+        }
+        RoomMessageRowView(
+            row: message,
+            ownHandles: state.ownMentionHandles,
+            isHighlighted: highlightedRowId == RoomChatRow.message(message).id,
+            canReact: state.canReact,
+            canReply: state.composer.canPost,
+            canPin: state.canPin,
+            isPinned: state.isPinned(message),
+            pinsFull: state.pinned.count >= state.pinLimit,
+            breakouts: state.breakouts,
+            attachmentPreviews: state.attachmentPreviews,
+            isReadingAloud: readingAloudId == message.readAloudId,
+            isExpanded: expandedQuiet.contains(message.id),
+            threadSummary: message.summaryThreadId.flatMap { state.threadSummaries[$0] },
+            isReadingSummary: message.summaryReadAloudId.map { readingAloudId == $0 } ?? false,
+            onOpenSummary: { summary, id in openSummary = OpenThreadSummary(id: id, summary: summary) },
+            onOpenReplyTarget: { jump(to: $0, proxy: proxy) },
+            onOpenCheckpoint: { openCheckpoint = $0 },
+            onEdit: { editingRow = $0 },
+            onToggleQuiet: {
+                if expandedQuiet.contains(message.id) {
+                    expandedQuiet.remove(message.id)
+                } else {
+                    expandedQuiet.insert(message.id)
+                }
+            },
+            onOpenLong: { longRow = $0 },
+            onReply: { replyTarget = $0 },
+            send: send
+        )
+        .onAppear { send(.messageOnScreen(id: message.id, isOnScreen: true)) }
+        .onDisappear { send(.messageOnScreen(id: message.id, isOnScreen: false)) }
     }
 
     /// Below a window further back: the next newer page loads when this comes into view (its identity follows the
@@ -1488,6 +1508,8 @@ private struct RoomThreadSheet: View {
     /// Where the reply text last changed (the field does not say where the caret is), for an @ anywhere in it.
     @State private var editOffset: Int?
     @State private var lastDraft = ""
+    /// The thread's file parts are shown; otherwise they fold behind the file's card.
+    @State private var showsFileParts = false
 
     private var suggestions: [MentionCandidate] {
         guard let active = MentionSuggester.activeQuery(in: draft, at: editOffset ?? draft.count) else { return [] }
@@ -1508,11 +1530,16 @@ private struct RoomThreadSheet: View {
                         Text(thread.parent.authorName)
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(thread.parent.isHuman ? PocketPalette.listening : PocketPalette.textPrimary)
-                        ChatMarkdownView(text: thread.parent.text, ownHandles: ownHandles)
+                        if thread.parent.filePartOf == nil || showsFileParts {
+                            ChatMarkdownView(text: thread.parent.text, ownHandles: ownHandles)
+                        }
                     }
                     .padding(12)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    ForEach(thread.parent.files) { card in
+                        RoomFileCardView(card: card, showsParts: showsFileParts) { showsFileParts.toggle() }
+                    }
 
                     if thread.isLoading && thread.replies.isEmpty {
                         ProgressView("Loading replies").frame(maxWidth: .infinity)
@@ -1520,7 +1547,7 @@ private struct RoomThreadSheet: View {
                     if let failure = thread.failureText {
                         Text(failure).font(.footnote).foregroundStyle(PocketPalette.warning)
                     }
-                    ForEach(thread.replies) { reply in
+                    ForEach(thread.replies.filter { showsFileParts || $0.filePartOf == nil }) { reply in
                         VStack(alignment: .leading, spacing: 3) {
                             HStack(spacing: 6) {
                                 Text(reply.authorName)

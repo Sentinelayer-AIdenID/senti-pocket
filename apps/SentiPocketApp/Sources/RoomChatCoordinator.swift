@@ -80,6 +80,13 @@ final class RoomChatCoordinator: ObservableObject {
     private var ownLogin: String?
     /// Read receipts and presence, when the room is wired for them.
     private var receiptsTracker: RoomReceiptsTracker?
+    /// Files posted as base64 parts, by thread: the posts they were put together from (each post's id and revision),
+    /// their cards, and the posts that are parts. Put together off the main thread when a thread's posts change.
+    private var fileThreads: [Int64: (posts: [String], cards: [RoomChatFileCard], parts: [String])] = [:]
+    /// The threads being put together now, with the posts they are being put together from.
+    private var fileThreadsWorking: [Int64: [String]] = [:]
+    /// Whether each post, at its revision, is shaped like a part: asked once per revision.
+    private var partShaped: [String: (revision: Int64, isPart: Bool)] = [:]
     /// The room's pinned messages (newest first) and how many it may hold.
     private var pinned: [RoomPinnedMessage] = []
     private var pinLimit = 10
@@ -1559,6 +1566,7 @@ final class RoomChatCoordinator: ObservableObject {
     }
 
     private func publish() {
+        refreshFiles()
         let work = workLines()
         let inputs = timeline.messages.map { message -> RoomChatMessageInput in
             let date: Date?
@@ -1673,9 +1681,86 @@ final class RoomChatCoordinator: ObservableObject {
             canInvite: canInvite,
             threadSummaries: threadSummaries.compactMapValues { $0.text.isEmpty ? nil : $0.text },
             replies: replyInputs,
-            expandedRepeats: expandedRepeats
+            expandedRepeats: expandedRepeats,
+            files: fileThreads.mapValues(\.cards).filter { !$0.value.isEmpty },
+            fileParts: Dictionary(fileThreads.flatMap { thread, files in files.parts.map { ($0, thread) } },
+                                  uniquingKeysWith: { first, _ in first })
         )
         summarizeNextThread(replyInputs)
+    }
+
+    // MARK: - Files posted as base64 parts
+
+    private struct FilePost {
+        let thread: Int64
+        let id: String
+        let revision: Int64
+        let body: String
+    }
+
+    /// Every post the room holds, in a fixed order: its messages by sequence (a reply to a message belongs to that
+    /// message's thread), then the threaded replies by time.
+    private func filePosts() -> [FilePost] {
+        var posts = timeline.messages.filter { $0.kind == .message }.map {
+            FilePost(thread: $0.replyToSequenceId ?? $0.sequenceId, id: $0.id, revision: $0.revision, body: $0.text)
+        }
+        var replies = inlineReplies
+        for reply in threadReplies where (replies[reply.id]?.revision ?? 0) < reply.revision {
+            replies[reply.id] = reply
+        }
+        posts += replies.values.sorted { ($0.createdAt, $0.id) < ($1.createdAt, $1.id) }.map {
+            FilePost(thread: $0.targetSequenceId, id: $0.id, revision: $0.revision, body: $0.text)
+        }
+        return posts
+    }
+
+    /// Puts together the files of each thread whose posts changed since, off the main thread (decoding and hashing
+    /// a file of many megabytes takes a moment); a thread with no part any more lets its files go.
+    private func refreshFiles() {
+        let posts = filePosts()
+        var threads = Set<Int64>()
+        for post in posts {
+            let isPart: Bool
+            if let known = partShaped[post.id], known.revision == post.revision {
+                isPart = known.isPart
+            } else {
+                isPart = RoomBase64Files.mayBePart(post.body)
+                partShaped[post.id] = (post.revision, isPart)
+            }
+            if isPart { threads.insert(post.thread) }
+        }
+        for thread in fileThreads.keys where !threads.contains(thread) { fileThreads[thread] = nil }
+        for (thread, threadPosts) in Dictionary(grouping: posts.filter { threads.contains($0.thread) }, by: \.thread) {
+            let key = threadPosts.map { "\($0.id)#\($0.revision)" }
+            guard fileThreads[thread]?.posts != key, fileThreadsWorking[thread] != key else { continue }
+            fileThreadsWorking[thread] = key
+            let input = threadPosts.map { RoomFilePost(thread: $0.thread, id: $0.id, body: $0.body) }
+            Task { [weak self] in
+                let files = await Task.detached(priority: .userInitiated) { RoomBase64Files.reassemble(input) }.value
+                guard let self, self.fileThreadsWorking[thread] == key else { return }
+                self.fileThreadsWorking[thread] = nil
+                self.fileThreads[thread] = (key, files.map(Self.card), files.flatMap(\.partPostIds))
+                self.publish()
+            }
+        }
+    }
+
+    private static func card(_ file: RoomBase64File) -> RoomChatFileCard {
+        var hashes: [String] = []
+        if case .hashMismatch(let decoded, let gunzipped) = file.status {
+            hashes = [decoded] + (gunzipped.map { [$0] } ?? [])
+        }
+        return RoomChatFileCard(
+            thread: file.thread,
+            name: file.name,
+            sha256: file.declaredSHA256,
+            verified: file.data,
+            status: file.isVerified ? nil : file.status.line,
+            partsTotal: file.partsTotal,
+            partPosts: file.partPostIds.count,
+            computedHashes: hashes,
+            previewable: RoomBase64Files.isPreviewable(file.name)
+        )
     }
 
     /// Each message's "working on" lines, oldest first, with whether each is still live (not done, and newer than

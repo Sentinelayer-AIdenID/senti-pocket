@@ -36,6 +36,12 @@ enum RoomPreview {
         ProcessInfo.processInfo.arguments.contains("-PocketTicketsPreview")
     }
 
+    /// `-PocketRoomFilesPreview` adds two files posted as base64 parts in replies: one whose parts are all there and
+    /// match its declared hash, and one with a part missing.
+    static var isFilesRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-PocketRoomFilesPreview")
+    }
+
     @MainActor
     @ViewBuilder
     static var rootView: some View {
@@ -432,7 +438,41 @@ private struct RoomPreviewTransport: RoomTransport {
             "Earlier note \(seq): checking the onboarding copy, step \(seq).")
     }
 
-    private var allHistory: [RoomMessage] { anchorScenario ? Self.earlier + Self.history : Self.history }
+    private var allHistory: [RoomMessage] {
+        let files = RoomPreview.isFilesRequested ? Self.fileRoots : []
+        return (anchorScenario ? Self.earlier + Self.history : Self.history) + files
+    }
+
+    /// The files' messages: each says what its replies hold.
+    private static let fileRoots = [
+        row(124, "review-agent", minutesAgo: 3, "The onboarding checks as CSV, in 3 parts below."),
+        row(125, "build-agent", minutesAgo: 2, "The fixture pack, in 3 parts below.")
+    ]
+
+    /// Each file in envelope parts, as replies to its message: every part of the checks, and two of the pack's three.
+    private static let fileParts: [RoomReply] = {
+        let checks = Data((["step,check,result"] + (1...24).map { "\($0),field \($0) validates on paste,pass" })
+            .joined(separator: "\n").utf8)
+        let pack = Data([0x50, 0x4b, 0x03, 0x04] + (0..<3_000).map { UInt8(($0 * 37 + 11) % 256) })
+        func parts(_ file: Data, name: String, to root: Int64, keep: [Int]) -> [RoomReply] {
+            let encoded = file.base64EncodedString()
+            let size = (encoded.count + 2) / 3
+            return keep.map { index in
+                let chunk = String(encoded.dropFirst(index * size).prefix(size))
+                let body = (try? JSONSerialization.data(withJSONObject: [
+                    "artifact": name, "sha256": RoomBase64Files.sha256Hex(file), "bytes": file.count,
+                    "part": index + 1, "parts": 3, "data": chunk
+                ], options: [.sortedKeys])).map { String(decoding: $0, as: UTF8.self) } ?? ""
+                // A few seconds apart, after the message they answer.
+                let posted = base.addingTimeInterval((root == 124 ? -180 : -120) + Double(index + 1) * 10)
+                let stamp = ISO8601DateFormatter().string(from: posted)
+                return RoomReply(id: "file-\(root)-\(index + 1)", targetSequenceId: root, authorId: "review-agent",
+                                 text: body, createdAt: stamp)
+            }
+        }
+        return parts(checks, name: "onboarding-checks.csv", to: 124, keep: [0, 1, 2])
+            + parts(pack, name: "fixture-pack.zip", to: 125, keep: [0, 2])
+    }()
 
     func roomEventsBefore(sessionId: String, beforeSequence: Int64?, limit: Int) async throws -> RoomEventPage {
         try? await Task.sleep(nanoseconds: 300_000_000)
@@ -447,6 +487,10 @@ private struct RoomPreviewTransport: RoomTransport {
 
     func roomActions(sessionId: String, targetSequenceId: Int64?, limit: Int) async throws -> RoomActionsPage {
         if targetSequenceId == 111 { return RoomActionsPage(replies: Self.threadReplies) }
+        let files = RoomPreview.isFilesRequested ? Self.fileParts : []
+        if let targetSequenceId, targetSequenceId == 124 || targetSequenceId == 125 {
+            return RoomActionsPage(replies: files.filter { $0.targetSequenceId == targetSequenceId })
+        }
         return RoomActionsPage(byTarget: [
             111: RoomReactionSummary(
                 targetSequenceId: 111,
@@ -463,7 +507,7 @@ private struct RoomPreviewTransport: RoomTransport {
                 actorsByType: ["ack": ["review-agent"]],
                 activeOwners: ["review-agent"]
             )
-        ], pinned: [
+        ], replies: files, pinned: [
             RoomPinnedMessage(id: "preview-pin-2", targetSequenceId: 120, pinnedBy: "human-alex"),
             RoomPinnedMessage(id: "preview-pin-1", targetSequenceId: 111, pinnedBy: "review-agent")
         ])

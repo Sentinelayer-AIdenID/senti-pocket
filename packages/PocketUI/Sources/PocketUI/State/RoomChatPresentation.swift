@@ -253,6 +253,11 @@ public struct RoomChatMessageRow: Equatable, Identifiable, Sendable {
     public var isQuiet: Bool = false
     /// A box's launch line, collapsed to the box's name and status; its thread holds what the box said.
     public var box: RoomBoxThread?
+    /// Files posted as base64 parts in this message's thread, shown with it: on the thread's root, or on its newest
+    /// part when the root is not loaded.
+    public var files: [RoomChatFileCard] = []
+    /// This post is a part of a file posted as base64 (the thread's root sequence): folded behind the file's card.
+    public var filePartOf: Int64?
 }
 
 public enum RoomChatRow: Equatable, Identifiable, Sendable {
@@ -315,6 +320,8 @@ public struct RoomChatReplyRow: Equatable, Identifiable, Sendable {
     public var depth: Int = 0
     /// Reactions on this reply: like, dislike and acknowledge counts and whether they are yours.
     public let reactions: RoomChatReactions?
+    /// This reply is a part of a file posted as base64 (the thread's root sequence): folded behind the file's card.
+    public var filePartOf: Int64?
 
     public init(
         id: String,
@@ -570,6 +577,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         threadSummaries: [Int64: String] = [:],
         replies: [RoomChatMessageInput] = [],
         expandedRepeats: Set<String> = [],
+        files: [Int64: [RoomChatFileCard]] = [:],
+        fileParts: [String: Int64] = [:],
         calendar: Calendar = .current
     ) {
         self.sessionId = sessionId
@@ -741,12 +750,19 @@ public struct RoomChatPresentationState: Equatable, Sendable {
             }
             lastIsHuman = current.isHuman
         }
+        if !protectedFailure, !files.isEmpty || !fileParts.isEmpty {
+            rows = Self.placingFiles(files, parts: fileParts, in: rows)
+        }
         self.rows = rows
         if let threadInput, !protectedFailure,
            case .message(let parent)? = Self.messageRow(in: rows, for: threadInput.sequenceId) {
             self.thread = RoomChatThreadState(
                 parent: parent,
-                replies: RoomChatReplyRow.nested(threadInput.replies),
+                replies: RoomChatReplyRow.nested(threadInput.replies).map { reply in
+                    var reply = reply
+                    reply.filePartOf = fileParts[reply.id]
+                    return reply
+                },
                 pending: threadInput.pending,
                 isLoading: threadInput.isLoading,
                 failureText: threadInput.failureText,
@@ -756,6 +772,33 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         } else {
             self.thread = nil
         }
+    }
+
+    /// Files posted as base64 parts: each part is marked (a message by its id, a reply by its own), and each thread's
+    /// cards go on its root message, or, when the root is not loaded, on its newest part shown.
+    static func placingFiles(_ files: [Int64: [RoomChatFileCard]], parts: [String: Int64],
+                             in rows: [RoomChatRow]) -> [RoomChatRow] {
+        var rows = rows
+        var placed = Set<Int64>()
+        var newestPart: [Int64: Int] = [:]
+        for index in rows.indices {
+            guard case .message(var row) = rows[index] else { continue }
+            if let thread = parts[row.inlineReplyId ?? row.id] {
+                row.filePartOf = thread
+                newestPart[thread] = index
+            }
+            if !row.isInlineReply, let cards = files[row.sequenceId] {
+                row.files = cards
+                placed.insert(row.sequenceId)
+            }
+            rows[index] = .message(row)
+        }
+        for (thread, index) in newestPart where !placed.contains(thread) {
+            guard let cards = files[thread], case .message(var row) = rows[index] else { continue }
+            row.files = cards
+            rows[index] = .message(row)
+        }
+        return rows
     }
 
     /// Messages in sequence order with replies placed at their own time: each reply goes after the messages that
