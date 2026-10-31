@@ -18,6 +18,9 @@ public struct RoomChatView: View {
     /// The reply being typed in each thread, kept while the room is open: closing the sheet does not lose it.
     @State private var threadDrafts: [Int64: String] = [:]
     @State private var readerAtBottom = true
+    /// The reader's place as the bottom marker reports it, settled outside layout, and whether the room is on screen
+    /// to take it (Carter's freezes, #56316, #56340). A reference, so keeping it never redraws the room.
+    @State private var bottomWatch = RoomBottomWatch()
     @State private var didInitialScroll = false
     /// A new list each time the room is put back at its newest rows (see `reopenAtLatest()`).
     @State private var listEpoch = 0
@@ -232,6 +235,11 @@ public struct RoomChatView: View {
             )
             .onAppear { send(.peopleOpened) }
         }
+        // A room on its way off screen never writes the reader's place or tells the coordinator: its list is being
+        // taken down, and the marker leaving with it is not the reader scrolling (Carter's freeze, #56340, came right
+        // after "room closed").
+        .onAppear { bottomWatch.isActive = true }
+        .onDisappear { bottomWatch.isActive = false }
         // A container, so the composer, the send button and every row keep their own identifiers and labels
         // (without it the screen's identifier replaced theirs).
         .accessibilityElement(children: .contain)
@@ -268,9 +276,10 @@ public struct RoomChatView: View {
                     Color.clear
                         .frame(height: 1)
                         .id(Self.bottomId)
-                        // The bottom of a window further back is not the live room's bottom.
-                        .onAppear { if !state.canLoadNewer, heldAnchor == nil { setReaderAtBottom(true) } }
-                        .onDisappear { setReaderAtBottom(false) }
+                        // The bottom of a window further back is not the live room's bottom. The marker only reports:
+                        // the reader's place changes after layout (`markerSeen`).
+                        .onAppear { if !state.canLoadNewer, heldAnchor == nil { markerSeen(true) } }
+                        .onDisappear { markerSeen(false) }
                 }
                 .padding(.horizontal, 12)
                 .padding(.bottom, 8)
@@ -588,11 +597,50 @@ public struct RoomChatView: View {
         }
     }
 
-    /// The reader's place, kept in step with the coordinator (which counts arrivals as unread while away).
+    /// The room's own decision about the reader's place (it opened at the unread line, the reader was taken to a
+    /// message, the latest is shown), at once and kept in step with the coordinator, which counts arrivals as unread
+    /// while away. A marker report still waiting no longer lands, and a closing room decides nothing.
     private func setReaderAtBottom(_ atBottom: Bool) {
+        guard bottomWatch.isActive else { return }
+        bottomWatch.settle.set(atBottom)
         guard readerAtBottom != atBottom else { return }
         readerAtBottom = atBottom
         send(.readerAtBottom(atBottom))
+    }
+
+    /// The bottom marker came into view or left it. This runs during layout, where writing the reader's place redrew
+    /// the room, the redraw moved the marker, and the marker wrote the place back, until iOS ended the app (Carter,
+    /// #56316: 664,848 row draws in 40 s). So it only reports, and the place lands on a later turn of the run loop once
+    /// the report has held (`RoomBottomSettle`).
+    private func markerSeen(_ shown: Bool) {
+        guard bottomWatch.isActive, let check = bottomWatch.settle.marker(shown: shown) else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + check.after) { landBottom(check) }
+    }
+
+    /// A marker report lands, or, when a hold ends (`check` nil), the marker's latest one.
+    private func landBottom(_ check: RoomBottomSettle.Check?) {
+        guard bottomWatch.isActive else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        let landing = check.map { bottomWatch.settle.land($0, at: now) } ?? bottomWatch.settle.landLatest(at: now)
+        switch landing {
+        case .none:
+            break
+        case .changed(let atBottom):
+            readerAtBottom = atBottom
+            send(.readerAtBottom(atBottom))
+        case .held(let until):
+            // Once a hold, for the freeze recorder: how many rows the room had and how long its longest message was.
+            send(.bottomFlapHeld(rows: state.rows.count, longestText: longestText))
+            DispatchQueue.main.asyncAfter(deadline: .now() + max(until - now, 0)) { landBottom(nil) }
+        }
+    }
+
+    /// The longest message loaded, in characters, for the freeze recorder.
+    private var longestText: Int {
+        state.rows.reduce(0) { longest, row in
+            guard case .message(let message) = row else { return longest }
+            return max(longest, message.text.count)
+        }
     }
 
     /// A linked message could not be loaded: open as the room normally opens (the latest messages, or the unread
@@ -659,6 +707,13 @@ public struct RoomChatView: View {
     }
 
     private static let bottomId = "room-bottom"
+}
+
+/// What the room keeps about its bottom marker without redrawing for it: the settled place, and whether the room is on
+/// screen to take it.
+private final class RoomBottomWatch {
+    var settle = RoomBottomSettle()
+    var isActive = true
 }
 
 /// A thread summary opened whole: its read-aloud id (so the sheet shows Stop while it is read) and its text.

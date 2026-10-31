@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import PocketContracts
 import PocketSyncClient
@@ -216,6 +217,34 @@ final class RoomChatCoordinatorTests: XCTestCase {
         coordinator.send(.readerAtBottom(true))
         XCTAssertEqual(coordinator.state.unreadCount, 0)
         XCTAssertFalse(coordinator.state.rows.contains(.unreadDivider))
+        coordinator.pause()
+    }
+
+    /// Carter's freeze (#56316) ended with the room telling its place over and over: the same place again is never
+    /// news, and only coming back with something unread publishes, once.
+    func test_the_readers_place_told_again_never_publishes() async {
+        let transport = ScriptedRoomTransport(before: [.success(page([1]))])
+        let coordinator = makeCoordinator(transport)
+        coordinator.resume()
+        await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
+        coordinator.send(.readerAtBottom(false))
+        coordinator.handle(.message(message(7)))
+        XCTAssertEqual(coordinator.state.unreadCount, 1)
+
+        var publishes = 0
+        let watching = coordinator.$state.dropFirst().sink { _ in publishes += 1 }
+        coordinator.send(.readerAtBottom(false))
+        coordinator.send(.readerAtBottom(false))
+        XCTAssertEqual(publishes, 0, "the same place again")
+        coordinator.send(.readerAtBottom(true))
+        XCTAssertEqual(publishes, 1, "back at the bottom: the unread line goes")
+        coordinator.send(.readerAtBottom(true))
+        coordinator.send(.readerAtBottom(true))
+        XCTAssertEqual(publishes, 1)
+        XCTAssertEqual(coordinator.state.unreadCount, 0)
+        coordinator.send(.bottomFlapHeld(rows: 12, longestText: 9_700))
+        XCTAssertEqual(publishes, 1, "the freeze recorder's note is the screen's, never the room's")
+        watching.cancel()
         coordinator.pause()
     }
 
