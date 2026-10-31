@@ -73,7 +73,7 @@ targets:
           - audio
           - voip
         # Required or iOS SIGABRTs on the first permission request (on-device Speech STT + mic barge-in/PTT).
-        NSMicrophoneUsageDescription: "Senti Pocket uses the microphone so you can barge in and answer the briefing by voice."
+        NSMicrophoneUsageDescription: "Senti Pocket uses the microphone so you can talk on calls and answer briefings by voice, and to record sound with a video you take for a room."
         NSSpeechRecognitionUsageDescription: "Senti Pocket transcribes your speech on-device so you can interrupt a briefing and dictate a proposed action."
         # The attach sheet's Camera: a photo or video taken to share in a room. Photos and videos from the library come
         # through the system picker, which needs no library access.

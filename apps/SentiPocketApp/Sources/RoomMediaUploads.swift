@@ -3,13 +3,13 @@ import PocketSyncClient
 import PocketUI
 import UIKit
 
-/// Why a file's bytes did not reach storage.
+/// Why a file's bytes did not reach storage, or the API refused a step.
 enum RoomMediaUploadError: Error, Equatable {
     /// Storage answered the PUT with this status (an expired link, a checksum that did not match).
     case storageRefused(status: Int)
     case network
-    /// The room or its owner has used the storage they have (413).
-    case quotaFull
+    /// The API refused a step; it says why (a storage limit and whose, a failed check).
+    case refused(RoomMediaAPIRefusal)
 }
 
 /// The calls one upload makes: init, the PUT straight to storage, complete, then the message that names the files.
@@ -20,6 +20,8 @@ protocol RoomMediaUploading: Sendable {
     func put(file: URL, to target: RoomMediaUploadTarget, progress: @escaping @Sendable (Int64, Int64) -> Void) async throws
     func completeUpload(sessionId: String, attachmentId: String) async throws -> RoomMediaAttachment
     func postMessage(sessionId: String, text: String, attachments: [RoomMediaAttachment], clientId: String) async throws
+    /// Takes back an upload that was never sent in a message. Best effort: an unsent upload also expires on its own.
+    func deleteUpload(sessionId: String, attachmentId: String) async
 }
 
 /// The API half goes through the room's own authenticated sender; the bytes go through `RoomMediaPutSession`, which
@@ -51,17 +53,21 @@ struct HTTPRoomMediaUploader: RoomMediaUploading {
         ])
     }
 
-    /// The sender's POST, with a full room storage told apart from a refused file.
+    /// `DELETE /api/v1/sessions/{id}/attachments/{attachmentId}`: the uploader takes back an attachment no message has
+    /// named. An API without the route answers 404 or 405, which is fine: the upload expires on its own.
+    func deleteUpload(sessionId: String, attachmentId: String) async {
+        guard RoomMediaRules.isValidClientId(attachmentId) else { return }
+        _ = try? await api.deleteAnswer(sessionId: sessionId, path: "attachments/\(attachmentId)")
+    }
+
+    /// The sender's POST, with the API's own reason kept for a refusal (whose storage limit, a failed check).
     private func post(sessionId: String, path: String, key: String, body: [String: Any]) async throws -> Data {
         let (data, http) = try await api.postAnswer(sessionId: sessionId, path: path, idempotencyKey: key, body: body)
         switch http.statusCode {
         case 200..<300: return data
         case 401: throw RoomSendError.reauthenticationRequired
         case 403, 404: throw RoomSendError.notAllowed
-        case 413: throw RoomMediaUploadError.quotaFull
-        case 409, 425, 429, 500..<600:
-            throw RoomSendError.retryable(retryAfterSeconds: http.value(forHTTPHeaderField: "Retry-After").flatMap(Int.init))
-        default: throw RoomSendError.rejected
+        default: throw RoomMediaUploadError.refused(RoomMediaAPIRefusal(status: http.statusCode, body: data))
         }
     }
 }
@@ -173,18 +179,22 @@ final class RoomMediaPutSession: NSObject, URLSessionTaskDelegate, @unchecked Se
 
 /// Keeps the app running for a little while after it goes to the background, while files upload or their message posts.
 protocol RoomMediaKeepingAlive {
-    func begin() -> Int
+    /// Asks for background time. `onExpire` runs when iOS ends it early (its deadline), after it has been ended: the
+    /// grant is gone, and asking again later is right. Nil when iOS gives none.
+    func begin(onExpire: @escaping @MainActor () -> Void) -> Int?
     func end(_ token: Int)
 }
 
 struct RoomMediaBackgroundTask: RoomMediaKeepingAlive {
-    func begin() -> Int {
+    func begin(onExpire: @escaping @MainActor () -> Void) -> Int? {
         var identifier = UIBackgroundTaskIdentifier.invalid
-        // Ended by iOS's deadline if the uploads outlast it (the background session carries on with the bytes).
         identifier = UIApplication.shared.beginBackgroundTask(withName: "Room media upload") {
+            // iOS's deadline: the grant ends here (the background session carries on with the bytes), and the
+            // coordinator forgets it, so the next time the app goes to the background it asks again.
             UIApplication.shared.endBackgroundTask(identifier)
+            Task { @MainActor in onExpire() }
         }
-        return identifier.rawValue
+        return identifier == .invalid ? nil : identifier.rawValue
     }
 
     func end(_ token: Int) {
@@ -202,7 +212,8 @@ final class RoomMediaPickerRequests: ObservableObject {
 /// shows at once (a downsampled thumbnail), location is removed, it is hashed, and its bytes stream from disk with real
 /// progress. Send makes them one message, shown at once with each file's picture; the message posts when every file is
 /// stored. A failed file keeps its place and retries with the same client attachment id, so the room never gets it
-/// twice; a failed message retries with the same client id.
+/// twice; a failed message retries with the same client id. Every file's ids and progress are kept in the outbox
+/// (`RoomMediaOutbox`), so they survive the app being closed: the room shows them again, ready to retry.
 @MainActor
 final class RoomMediaUploadCoordinator: ObservableObject {
     let board: RoomMediaBoard
@@ -211,10 +222,14 @@ final class RoomMediaUploadCoordinator: ObservableObject {
     var onPreviewReady: (@MainActor (_ attachmentId: String, _ data: Data) -> Void)?
     /// The message posted: read the room now.
     var onPosted: (@MainActor () -> Void)?
+    /// The sign-in was refused (it expired): the app asks for it again. The file keeps its place for a retry.
+    var onReauthenticationRequired: (@MainActor () -> Void)?
 
     static let progressInterval: TimeInterval = 0.1
     /// How long a posted message waits for the room to show it before its card goes anyway.
     static let echoGrace: TimeInterval = 20
+    /// What a file or message restored after the app was closed says until it is retried.
+    static let interruptedReason = "Not sent: Pocket closed before it finished. Retry to send it."
 
     @MainActor
     private final class Item {
@@ -226,7 +241,12 @@ final class RoomMediaUploadCoordinator: ObservableObject {
         var thumbnail: Data?
         var prepared: RoomPreparedMedia?
         var stored: RoomMediaAttachment?
+        /// Init was called: the server has a row for it.
+        var initiated = false
         var previewDone = false
+        /// Restored from the outbox after the app was closed: its bytes may already be stored.
+        var restored = false
+        var createdAt = Date()
         var phase: RoomMediaItemRow.Phase = .preparing
         let progress = RoomMediaProgress()
         var task: Task<Void, Never>?
@@ -266,16 +286,18 @@ final class RoomMediaUploadCoordinator: ObservableObject {
     }
 
     private let sessionId: String
-    private let uploader: (any RoomMediaUploading)?
+    private(set) var uploader: (any RoomMediaUploading)?
     private let preparer: any RoomMediaPreparing
     private let keepAlive: any RoomMediaKeepingAlive
     private let sleep: @Sendable (TimeInterval) async -> Void
     private let makeId: () -> String
     private let discard: (RoomMediaSource) -> Void
+    private let outboxRoot: URL
     private var items: [String: Item] = [:]
     private var tray: [String] = []
     private var outgoing: [Outgoing] = []
     private var keepAliveToken: Int?
+    private var keepAliveGeneration = 0
 
     init(
         sessionId: String,
@@ -288,7 +310,8 @@ final class RoomMediaUploadCoordinator: ObservableObject {
             try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
         },
         makeId: @escaping () -> String = RoomMediaUploadCoordinator.newClientAttachmentId,
-        discard: @escaping (RoomMediaSource) -> Void = { RoomMediaFiles.discard($0) }
+        discard: @escaping (RoomMediaSource) -> Void = { RoomMediaFiles.discard($0) },
+        outboxRoot: URL = RoomMediaFiles.outbox
     ) {
         self.sessionId = sessionId
         self.uploader = uploader
@@ -297,20 +320,37 @@ final class RoomMediaUploadCoordinator: ObservableObject {
         self.sleep = sleep
         self.makeId = makeId
         self.discard = discard
+        self.outboxRoot = outboxRoot
         self.board = RoomMediaBoard(perMessageLimit: RoomMediaRules.attachmentsPerMessage, canUseCamera: canUseCamera,
                                     canPaste: canPaste)
         board.perform = { [weak self] intent in self?.perform(intent) }
+        // Going to the background with uploads on their way asks for time again (a grant that ran out is gone).
+        _ = NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.updateKeepAlive() }
+        }
+        restore()
     }
 
     /// Whether this room can take files from this phone.
     var canUpload: Bool { uploader != nil }
 
+    /// The room's posting rights as they are now: a viewer made a contributor can upload without relaunching.
+    func updateUploader(_ uploader: (any RoomMediaUploading)?) {
+        self.uploader = uploader
+    }
+
     /// One coordinator per room for as long as the app runs: leaving the room never drops a message on its way, and
-    /// coming back shows it still uploading.
+    /// coming back shows it still uploading. Its uploader follows the room's current posting rights.
     private static var rooms: [String: RoomMediaUploadCoordinator] = [:]
 
-    static func forRoom(_ sessionId: String, make: () -> RoomMediaUploadCoordinator) -> RoomMediaUploadCoordinator {
-        if let existing = rooms[sessionId] { return existing }
+    static func forRoom(_ sessionId: String, uploader: (any RoomMediaUploading)?,
+                        make: () -> RoomMediaUploadCoordinator) -> RoomMediaUploadCoordinator {
+        if let existing = rooms[sessionId] {
+            existing.updateUploader(uploader)
+            return existing
+        }
         let created = make()
         rooms[sessionId] = created
         return created
@@ -376,9 +416,11 @@ final class RoomMediaUploadCoordinator: ObservableObject {
                 discard(source)
                 continue
             }
+            RoomMediaFiles.protect(source.file)
             let item = Item(id: makeId(), source: source, kind: kind, sizeBytes: size)
             items[item.id] = item
             tray.append(item.id)
+            persist(item)
             start(item)
         }
         board.setNotice(Self.notice(refusals))
@@ -436,7 +478,7 @@ final class RoomMediaUploadCoordinator: ObservableObject {
     private func run(_ id: String) async {
         guard let item = items[id] else { return }
         do {
-            if item.thumbnail == nil, item.kind != .file {
+            if item.thumbnail == nil, item.kind != .file, item.prepared == nil {
                 item.thumbnail = await preparer.thumbnail(for: item.source)
                 publish()
             }
@@ -447,16 +489,30 @@ final class RoomMediaUploadCoordinator: ObservableObject {
                 item.filename = prepared.filename
                 item.sizeBytes = prepared.sizeBytes
                 item.progress.update(sent: 0, total: prepared.sizeBytes)
+                persist(item)
             }
             guard let prepared = item.prepared, let uploader else { throw RoomSendError.notConfigured }
             item.phase = .uploading
             publish()
+            if item.stored == nil, item.restored, item.initiated {
+                // Back after the app was closed: the background session may have finished the bytes meanwhile, so
+                // completing is tried before uploading them again.
+                item.restored = false
+                if let stored = try? await uploader.completeUpload(sessionId: sessionId, attachmentId: item.id) {
+                    item.stored = stored
+                    persist(item)
+                }
+            }
             if item.stored == nil {
                 // The client attachment id becomes the attachment's id: a retry is the same upload, never a second one.
                 let answer = try await uploader.initUpload(sessionId: sessionId, request: RoomMediaInitRequest(
                     filename: prepared.filename, contentType: prepared.type.contentType, sizeBytes: prepared.sizeBytes,
                     sha256: prepared.sha256, clientAttachmentId: item.id
                 ))
+                if !item.initiated {
+                    item.initiated = true
+                    persist(item)
+                }
                 let parentId = answer.attachment.attachmentId
                 if let preview = prepared.preview, !item.previewDone {
                     item.previewDone = await sendPreview(preview, of: parentId, uploader: uploader)
@@ -468,6 +524,7 @@ final class RoomMediaUploadCoordinator: ObservableObject {
                 }
                 try Task.checkCancellation()
                 item.stored = try await uploader.completeUpload(sessionId: sessionId, attachmentId: parentId)
+                persist(item)
             }
             try Task.checkCancellation()
             item.progress.update(sent: prepared.sizeBytes, total: prepared.sizeBytes)
@@ -481,15 +538,15 @@ final class RoomMediaUploadCoordinator: ObservableObject {
         } catch {
             guard items[id] === item, !Task.isCancelled, !(error is CancellationError) else { return }
             if let index = tray.firstIndex(of: id), let refusal = Self.refusal(for: error, filename: item.source.filename) {
-                // Refused by the room's rules (too large once converted), or not a picture the phone could read: out of
-                // the tray, with why.
+                // Refused by the room's rules (too large once converted), or not a picture the phone could read or
+                // clean: out of the tray, with why.
                 tray.remove(at: index)
-                items[id] = nil
-                discard(item.source)
+                drop(item)
                 board.setNotice(refusal.message)
                 publish()
                 return
             }
+            noteReauthentication(error)
             item.phase = .failed(reason: Self.reason(for: error), canRetry: Self.canRetry(error))
             publish()
             postReadyMessages()
@@ -499,7 +556,8 @@ final class RoomMediaUploadCoordinator: ObservableObject {
     /// Why a file leaves the tray instead of waiting there for a retry that cannot help.
     private static func refusal(for error: Error, filename: String) -> RoomMediaRefusal? {
         if let refusal = error as? RoomMediaRefusal { return refusal }
-        guard error is RoomMediaPreparationError else { return nil }
+        guard let preparation = error as? RoomMediaPreparationError else { return nil }
+        if preparation == .locationRemains { return .locationRemains(filename: filename) }
         return RoomMediaRules.type(forExtension: (filename as NSString).pathExtension) == nil
             ? .unsupported(filename: filename)
             : .unreadable(filename: filename)
@@ -552,8 +610,20 @@ final class RoomMediaUploadCoordinator: ObservableObject {
     private func removeFromTray(_ id: String) {
         guard let index = tray.firstIndex(of: id), let item = items[id] else { return }
         tray.remove(at: index)
+        takeBack(item)
         drop(item)
         publish()
+    }
+
+    /// An upload that will never be sent: the server is asked to delete it (and its preview) now rather than let it
+    /// expire. Only once init has made a row, and never for a file a message has named.
+    private func takeBack(_ item: Item) {
+        guard item.initiated, let uploader else { return }
+        let sessionId = self.sessionId
+        let ids = [item.id, RoomMediaRules.previewClientId(for: item.id)]
+        Task {
+            for id in ids { await uploader.deleteUpload(sessionId: sessionId, attachmentId: id) }
+        }
     }
 
     private func drop(_ item: Item) {
@@ -573,7 +643,9 @@ final class RoomMediaUploadCoordinator: ObservableObject {
         tray = []
         outgoing.append(message)
         for id in message.itemIds {
-            if let item = items[id], case .failed(_, true) = item.phase { start(item) }
+            guard let item = items[id] else { continue }
+            persist(item)
+            if case .failed(_, true) = item.phase { start(item) }
         }
         board.setNotice(nil)
         updateMessageProgress()
@@ -617,6 +689,7 @@ final class RoomMediaUploadCoordinator: ObservableObject {
                 if self.outgoing.contains(where: { $0.clientId == clientId && $0.status == .sent }) { self.finish(clientId) }
             } catch {
                 guard let self, !Task.isCancelled else { return }
+                self.noteReauthentication(error)
                 self.setStatus(clientId, .failed(reason: Self.reason(for: error), canRetry: Self.canRetry(error)))
             }
         }
@@ -640,12 +713,18 @@ final class RoomMediaUploadCoordinator: ObservableObject {
         postReadyMessages()
     }
 
-    /// Stops a message: its uploads end and its card goes. Nothing reaches the room.
+    /// Stops a message: its uploads end and its card goes. Nothing reaches the room, and the server is asked to delete
+    /// what was uploaded for it.
     private func cancel(_ clientId: String) {
         guard let index = outgoing.firstIndex(where: { $0.clientId == clientId }) else { return }
         let message = outgoing.remove(at: index)
         message.postTask?.cancel()
-        for id in message.itemIds { if let item = items[id] { drop(item) } }
+        for id in message.itemIds {
+            guard let item = items[id] else { continue }
+            // A message that may have posted (it was posting or sent) keeps its files: they belong to it now.
+            if message.status != .posting, message.status != .sent { takeBack(item) }
+            drop(item)
+        }
         publish()
     }
 
@@ -662,6 +741,112 @@ final class RoomMediaUploadCoordinator: ObservableObject {
         let message = outgoing.remove(at: index)
         for id in message.itemIds { if let item = items[id] { drop(item) } }
         publish()
+    }
+
+    // MARK: - Keeping it across launches
+
+    /// Writes a file's record beside it: its ids, its message, how far it got.
+    private func persist(_ item: Item) {
+        var entry = RoomMediaOutboxEntry(
+            sessionId: sessionId,
+            itemId: item.id,
+            filename: item.filename,
+            kind: Self.kindName(item.kind),
+            sizeBytes: item.sizeBytes,
+            createdAt: item.createdAt,
+            initiated: item.initiated,
+            previewDone: item.previewDone
+        )
+        if let prepared = item.prepared {
+            entry.prepared = RoomMediaOutboxEntry.Prepared(
+                file: prepared.file.lastPathComponent, filename: prepared.filename,
+                contentType: prepared.type.contentType, fileExtension: prepared.type.fileExtension,
+                sizeBytes: prepared.sizeBytes, sha256: prepared.sha256,
+                preview: prepared.preview.map {
+                    RoomMediaOutboxEntry.Preview(file: $0.file.lastPathComponent, filename: $0.filename,
+                                                 sizeBytes: $0.sizeBytes, sha256: $0.sha256)
+                }
+            )
+        }
+        if let stored = item.stored {
+            entry.stored = RoomMediaOutboxEntry.Stored(
+                attachmentId: stored.attachmentId, filename: stored.filename, kind: stored.kind,
+                contentType: stored.contentType, sizeBytes: stored.sizeBytes, sha256: stored.sha256, status: stored.status
+            )
+        }
+        if let message = outgoing.first(where: { $0.itemIds.contains(item.id) }),
+           let position = message.itemIds.firstIndex(of: item.id) {
+            entry.message = RoomMediaOutboxEntry.Message(clientId: message.clientId, text: message.text, position: position)
+        }
+        RoomMediaOutbox.write(entry, in: item.source.folder)
+    }
+
+    /// The room's files from before the app was closed, back where they were: a message's files in its card, the
+    /// rest in the tray. Each keeps its ids; nothing is sent until Retry (or Send).
+    private func restore() {
+        var messages: [String: (text: String?, parts: [(position: Int, id: String)], createdAt: Date)] = [:]
+        for (folder, entry) in RoomMediaOutbox.entries(for: sessionId, root: outboxRoot) {
+            guard let saved = entry.prepared, let type = RoomMediaRules.type(forExtension: saved.fileExtension),
+                  RoomMediaRules.isValidClientId(entry.itemId), items[entry.itemId] == nil else { continue }
+            let file = folder.appendingPathComponent(saved.file)
+            guard FileManager.default.fileExists(atPath: file.path) else { continue }
+            let kind = Self.kind(named: entry.kind)
+            let item = Item(id: entry.itemId, source: RoomMediaSource(file: file, filename: entry.filename), kind: kind,
+                            sizeBytes: entry.sizeBytes)
+            item.createdAt = entry.createdAt
+            item.prepared = RoomPreparedMedia(
+                file: file, filename: saved.filename, type: type, sizeBytes: saved.sizeBytes, sha256: saved.sha256,
+                preview: saved.preview.map {
+                    RoomPreparedPreview(file: folder.appendingPathComponent($0.file), filename: $0.filename,
+                                        sizeBytes: $0.sizeBytes, sha256: $0.sha256)
+                }
+            )
+            item.filename = saved.filename
+            item.thumbnail = saved.preview.flatMap { try? Data(contentsOf: folder.appendingPathComponent($0.file)) }
+            item.initiated = entry.initiated
+            item.previewDone = entry.previewDone
+            item.restored = true
+            item.stored = entry.stored.map {
+                RoomMediaAttachment(attachmentId: $0.attachmentId, filename: $0.filename, kind: $0.kind,
+                                    contentType: $0.contentType, sizeBytes: $0.sizeBytes, sha256: $0.sha256, status: $0.status)
+            }
+            item.progress.update(sent: item.stored == nil ? 0 : saved.sizeBytes, total: saved.sizeBytes)
+            item.phase = item.stored == nil ? .failed(reason: Self.interruptedReason, canRetry: true) : .uploaded
+            items[item.id] = item
+            if let message = entry.message {
+                var group = messages[message.clientId] ?? (text: message.text, parts: [], createdAt: entry.createdAt)
+                group.parts.append((position: message.position, id: item.id))
+                messages[message.clientId] = group
+            } else if tray.count < RoomMediaRules.attachmentsPerMessage {
+                tray.append(item.id)
+            } else {
+                items[item.id] = nil
+            }
+        }
+        for (clientId, group) in messages.sorted(by: { $0.value.createdAt < $1.value.createdAt }) {
+            let ids = group.parts.sorted { $0.position < $1.position }.map(\.id)
+            // Posted or not, Pocket cannot tell: a retry posts it with the same client id, which the room de-duplicates.
+            outgoing.append(Outgoing(clientId: clientId, text: group.text, itemIds: ids,
+                                     status: .failed(reason: Self.interruptedReason, canRetry: true)))
+        }
+        updateMessageProgress()
+        publish()
+    }
+
+    private static func kindName(_ kind: RoomMediaItemRow.Kind) -> String {
+        switch kind {
+        case .image: return "image"
+        case .video: return "video"
+        case .file: return "file"
+        }
+    }
+
+    private static func kind(named name: String) -> RoomMediaItemRow.Kind {
+        switch name {
+        case "image": return .image
+        case "video": return .video
+        default: return .file
+        }
     }
 
     // MARK: - Showing
@@ -681,24 +866,44 @@ final class RoomMediaUploadCoordinator: ObservableObject {
                          thumbnail: item.thumbnail, phase: item.phase, progress: item.progress)
     }
 
-    /// While anything uploads or posts, the app asks for time to finish in the background.
+    /// While anything uploads or posts, the app asks for time to finish in the background. A grant iOS ended at its
+    /// deadline is forgotten (never ended twice), so the next time the app goes to the background it asks again.
     private func updateKeepAlive() {
         let busy = items.values.contains { $0.phase == .preparing || $0.phase == .uploading }
             || outgoing.contains { $0.status == .posting }
         if busy, keepAliveToken == nil {
-            keepAliveToken = keepAlive.begin()
+            keepAliveGeneration += 1
+            let generation = keepAliveGeneration
+            keepAliveToken = keepAlive.begin(onExpire: { [weak self] in
+                guard let self, self.keepAliveGeneration == generation else { return }
+                self.keepAliveToken = nil
+            })
         } else if !busy, let token = keepAliveToken {
             keepAliveToken = nil
+            keepAliveGeneration += 1
             keepAlive.end(token)
         }
     }
 
     // MARK: - Errors
 
+    /// A refused sign-in: the app asks for it again, and the file or message keeps its place for a retry after.
+    private func noteReauthentication(_ error: Error) {
+        if let send = error as? RoomSendError, send == .reauthenticationRequired { onReauthenticationRequired?() }
+    }
+
     static func reason(for error: Error) -> String {
         if let refusal = error as? RoomMediaRefusal { return refusal.message }
-        if let upload = error as? RoomMediaUploadError, upload == .quotaFull {
-            return "The room's storage is full. Ask its owner to make room, then try again."
+        if let upload = error as? RoomMediaUploadError, case .refused(let refusal) = upload {
+            switch refusal.quotaScope {
+            case .room: return "This room's storage for photos and files is full."
+            case .owner: return "The room owner's storage for photos and files is full."
+            case .uploader: return "Too many of your uploads are still unfinished here. Let them finish, then retry."
+            case .unknown: return "This file is over a storage limit."
+            case nil: break
+            }
+            if refusal.code == "ATTACHMENT_VERIFICATION_FAILED" { return "The upload didn't check out. Retry to send it again." }
+            return refusal.isRetryable ? "Not sent. Check your connection and retry." : "Senti did not accept this file."
         }
         if let send = error as? RoomSendError {
             switch send {
@@ -707,13 +912,17 @@ final class RoomMediaUploadCoordinator: ObservableObject {
             case .retryable: break
             }
         }
-        if error is RoomMediaPreparationError { return "This file couldn't be read." }
+        if let preparation = error as? RoomMediaPreparationError {
+            return preparation == .locationRemains
+                ? "Pocket couldn't remove this video's location, so it wasn't sent."
+                : "This file couldn't be read."
+        }
         return "Not sent. Check your connection and retry."
     }
 
     static func canRetry(_ error: Error) -> Bool {
         if error is RoomMediaRefusal || error is RoomMediaPreparationError { return false }
-        if let upload = error as? RoomMediaUploadError { return upload != .quotaFull }
+        if let upload = error as? RoomMediaUploadError, case .refused(let refusal) = upload { return refusal.isRetryable }
         if let send = error as? RoomSendError {
             switch send {
             case .notAllowed, .notConfigured, .rejected: return false

@@ -320,6 +320,8 @@ final class PocketAppDelegate: NSObject, UIApplicationDelegate {
         UNUserNotificationCenter.current().delegate = PushRegistrar.shared
         // First, so the last run's end and iOS's crash records are read before anything else can fail.
         CrashReporter.shared.start()
+        // Before any room opens: the outbox keeps only what can still be sent, never an original left mid-way.
+        RoomMediaOutbox.sweep()
         return true
     }
 

@@ -741,11 +741,13 @@ final class RoomChatCoordinator: ObservableObject {
     }
 
     /// A storage link for one of this room's attachments, reused until five minutes before it expires. `asDownload`
-    /// asks for the file with a safe name, for saving and sharing.
-    func mediaLink(_ attachmentId: String, asDownload: Bool = false) async throws -> RoomAttachmentDownload {
+    /// asks for the file with a safe name, for saving and sharing; `fresh` asks the API for a new one (a video about to
+    /// play, or a link that stopped working), which is then the one reused.
+    func mediaLink(_ attachmentId: String, asDownload: Bool = false, fresh: Bool = false) async throws -> RoomAttachmentDownload {
         guard attachment(attachmentId) != nil else { throw AttachmentFetchError.failed }
         let transport = self.transport
         let sessionId = self.sessionId
+        if fresh { linkCache.forget(sessionId: sessionId, attachmentId: attachmentId) }
         do {
             return try await linkCache.link(sessionId: sessionId, attachmentId: attachmentId, asDownload: asDownload) {
                 try await transport.attachmentDownload(sessionId: sessionId, attachmentId: attachmentId, asDownload: asDownload)

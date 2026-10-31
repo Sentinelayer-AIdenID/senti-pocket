@@ -158,34 +158,85 @@ struct RoomZoomableImage: UIViewRepresentable {
 }
 
 /// A video played straight from its storage link: AVPlayer streams it with range requests, so it starts in moments
-/// and is never downloaded whole first.
+/// and is never downloaded whole first. If the link stops working mid-play (it expired, or storage refused it), a new
+/// one is asked for and playing goes on from the same moment (twice at most).
 struct RoomVideoPlayer: UIViewControllerRepresentable {
     let url: URL
+    let refresh: () async throws -> URL
+
+    func makeCoordinator() -> Coordinator { Coordinator(refresh: refresh) }
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
         let controller = AVPlayerViewController()
         let player = AVPlayer(url: url)
         controller.player = player
         controller.allowsPictureInPicturePlayback = false
+        context.coordinator.watch(player)
         player.play()
         return controller
     }
 
     func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {}
 
-    static func dismantleUIViewController(_ controller: AVPlayerViewController, coordinator: ()) {
+    static func dismantleUIViewController(_ controller: AVPlayerViewController, coordinator: Coordinator) {
+        coordinator.stop()
         controller.player?.pause()
         controller.player = nil
+    }
+
+    final class Coordinator: NSObject {
+        let refresh: () async throws -> URL
+        private var status: NSKeyValueObservation?
+        private var failure: NSObjectProtocol?
+        private var refreshes = 0
+        private weak var player: AVPlayer?
+
+        init(refresh: @escaping () async throws -> URL) {
+            self.refresh = refresh
+        }
+
+        func watch(_ player: AVPlayer) {
+            self.player = player
+            status = player.observe(\.currentItem?.status, options: [.new]) { [weak self] player, _ in
+                guard player.currentItem?.status == .failed else { return }
+                DispatchQueue.main.async { self?.recover() }
+            }
+            failure = NotificationCenter.default.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: nil,
+                                                             queue: .main) { [weak self] note in
+                guard let self, let item = note.object as? AVPlayerItem, item === self.player?.currentItem else { return }
+                self.recover()
+            }
+        }
+
+        func stop() {
+            status = nil
+            if let failure { NotificationCenter.default.removeObserver(failure) }
+            failure = nil
+        }
+
+        private func recover() {
+            guard refreshes < 2, let player else { return }
+            refreshes += 1
+            let time = player.currentTime()
+            let refresh = self.refresh
+            Task { @MainActor [weak player] in
+                guard let url = try? await refresh(), let player else { return }
+                player.replaceCurrentItem(with: AVPlayerItem(url: url))
+                await player.seek(to: time)
+                player.play()
+            }
+        }
     }
 }
 
 struct RoomVideoViewer: View {
     let url: URL
+    let refresh: () async throws -> URL
     let onClose: () -> Void
 
     var body: some View {
         NavigationStack {
-            RoomVideoPlayer(url: url)
+            RoomVideoPlayer(url: url, refresh: refresh)
                 .ignoresSafeArea()
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {

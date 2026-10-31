@@ -15,7 +15,8 @@ struct RoomMediaSource: Equatable, Sendable {
     var folder: URL { file.deletingLastPathComponent() }
 }
 
-/// A file as it will be stored: location removed from photos, HEIC turned into JPEG, hashed, with its preview.
+/// A file as it will be stored: location removed from photos and videos, HEIC turned into JPEG, hashed, with its
+/// preview.
 struct RoomPreparedMedia: Equatable, Sendable {
     let file: URL
     let filename: String
@@ -36,6 +37,8 @@ struct RoomPreparedPreview: Equatable, Sendable {
 
 enum RoomMediaPreparationError: Error, Equatable {
     case unreadable
+    /// A video's location could not be removed: it is not sent.
+    case locationRemains
 }
 
 /// Turns a picked file into what is uploaded. A protocol so the upload coordinator is testable without ImageIO.
@@ -46,8 +49,9 @@ protocol RoomMediaPreparing: Sendable {
     func prepare(_ source: RoomMediaSource, thumbnail: Data?) async throws -> RoomPreparedMedia
 }
 
-/// The phone's own preparation: ImageIO for photos (never a full-size UIImage), AVFoundation for a video's poster, and
-/// a streamed SHA-256. Runs off the main thread.
+/// The phone's own preparation: ImageIO for photos (never a full-size UIImage), AVFoundation for a video's poster and
+/// its location, and a streamed SHA-256. Runs off the main thread. A photo's or video's original is deleted as soon
+/// as its copy without location exists, so only that copy waits in the outbox.
 struct RoomMediaPreparer: RoomMediaPreparing {
     func thumbnail(for source: RoomMediaSource) async -> Data? {
         let file = source.file
@@ -65,20 +69,35 @@ struct RoomMediaPreparer: RoomMediaPreparing {
     }
 
     func prepare(_ source: RoomMediaSource, thumbnail: Data?) async throws -> RoomPreparedMedia {
-        try await Task.detached(priority: .userInitiated) {
-            try Self.prepareNow(source, thumbnail: thumbnail)
+        // A video is re-wrapped without its location first (AVFoundation is asynchronous); then the rest, off the main
+        // thread.
+        var video: URL?
+        if RoomMediaFiles.kind(of: source.file) == .video {
+            video = try await RoomMediaVideo.removingLocation(from: source.file, in: source.folder, baseName: "stored")
+        }
+        let stripped = video
+        return try await Task.detached(priority: .userInitiated) {
+            try Self.prepareNow(source, thumbnail: thumbnail, strippedVideo: stripped)
         }.value
     }
 
-    static func prepareNow(_ source: RoomMediaSource, thumbnail: Data?) throws -> RoomPreparedMedia {
+    static func prepareNow(_ source: RoomMediaSource, thumbnail: Data?, strippedVideo: URL? = nil) throws -> RoomPreparedMedia {
         var file = source.file
         let filename: String
         if RoomMediaFiles.kind(of: file) == .image {
             // Location never leaves the phone: the photo is rewritten without it before anything is hashed or sent.
             file = try RoomMediaImages.removingLocation(from: file, in: source.folder, baseName: "stored")
             filename = RoomMediaRules.safeFilename(source.filename, fileExtension: file.pathExtension)
+        } else if let strippedVideo {
+            file = strippedVideo
+            filename = RoomMediaRules.safeFilename(source.filename, fileExtension: file.pathExtension)
         } else {
             filename = RoomMediaRules.safeFilename(source.filename, fileExtension: (source.filename as NSString).pathExtension)
+        }
+        if file != source.file {
+            // Only the copy without location stays: the original, with whatever it says, goes now.
+            try? FileManager.default.removeItem(at: source.file)
+            RoomMediaFiles.protect(file)
         }
         let base = (filename as NSString).deletingPathExtension
         let size = try RoomMediaFiles.size(of: file)
@@ -91,7 +110,7 @@ struct RoomMediaPreparer: RoomMediaPreparing {
         var preview: RoomPreparedPreview?
         if let data = thumbnail, data.count <= RoomMediaRules.previewMaximumBytes, type.kind == .image || type.isVideo {
             let previewFile = source.folder.appendingPathComponent("preview.jpg")
-            try data.write(to: previewFile, options: .atomic)
+            try data.write(to: previewFile, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
             preview = RoomPreparedPreview(
                 file: previewFile,
                 filename: RoomMediaRules.safeFilename(base + ".preview.jpg", fileExtension: "jpg"),
@@ -119,17 +138,30 @@ enum RoomMediaFiles {
         return Int64(values.fileSize ?? 0)
     }
 
-    /// The folder picked files are copied into, one folder per file; emptied as files are sent or discarded.
+    /// The folder picked files are copied into, one folder per file; emptied as files are sent or discarded, and swept
+    /// at launch (`RoomMediaOutbox.sweep`).
     static var outbox: URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("room-media-outbox", isDirectory: true)
     }
 
-    /// A new, empty folder for one picked file.
+    /// The outbox's data protection. Not `.complete`: the background upload reads the file while the phone may be
+    /// locked, and a file under `.complete` cannot be read then, so the upload would stop when the phone locks. Until
+    /// the phone is first unlocked after a restart, nothing can read it.
+    static let protection = FileProtectionType.completeUntilFirstUserAuthentication
+
+    /// A new, empty folder for one picked file, under the outbox's protection (files made in it take it too).
     static func newFolder(in root: URL = outbox) throws -> URL {
+        let attributes: [FileAttributeKey: Any] = [.protectionKey: protection]
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: attributes)
         let folder = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: attributes)
         return folder
+    }
+
+    /// Puts a file copied or moved into the outbox under the outbox's protection.
+    static func protect(_ file: URL) {
+        try? FileManager.default.setAttributes([.protectionKey: protection], ofItemAtPath: file.path)
     }
 
     /// Removes a picked file's folder, and only a folder inside the outbox.
@@ -238,19 +270,21 @@ enum RoomMediaImages {
                                to: target) {
                 output = target
             }
-        } else if type.conforms(to: .gif) || type.conforms(to: .webP), !hasMetadata(properties) {
+        } else if type.conforms(to: .gif) || type.conforms(to: .webP),
+                  carriesNoMetadata(properties, metadata: CGImageSourceCopyMetadataAtIndex(source, 0, nil)) {
             let target = folder.appendingPathComponent("\(baseName).\(type.conforms(to: .gif) ? "gif" : "webp")")
             try? FileManager.default.removeItem(at: target)
             try FileManager.default.copyItem(at: url, to: target)
             output = target
         }
-        let keepsPNG = type.conforms(to: .png)
+        // A PNG stays a PNG, and so does a GIF or WebP that had to be rewritten (they may be transparent).
+        let keepsPNG = type.conforms(to: .png) || type.conforms(to: .gif) || type.conforms(to: .webP)
         if output == nil {
             let target = folder.appendingPathComponent("\(baseName).\(keepsPNG ? "png" : "jpg")")
             if reencode(source, as: keepsPNG ? .png : .jpeg, to: target) { output = target }
         }
         guard let written = output else { throw RoomMediaPreparationError.unreadable }
-        if hasLocation(at: written) {
+        if hasLocation(at: written) || !privateMetadata(at: written).isEmpty {
             // Belt and braces: pixels only, upright, nothing else.
             let target = folder.appendingPathComponent("\(baseName)-pixels.\(keepsPNG ? "png" : "jpg")")
             guard let pixelSize = pixelSize(properties), let image = thumbnail(at: url, maxPixels: pixelSize),
@@ -300,9 +334,41 @@ enum RoomMediaImages {
         return CGImageDestinationFinalize(destination)
     }
 
-    private static func hasMetadata(_ properties: [CFString: Any]) -> Bool {
-        [kCGImagePropertyGPSDictionary, kCGImagePropertyExifDictionary, kCGImagePropertyTIFFDictionary,
-         kCGImagePropertyIPTCDictionary].contains { properties[$0] != nil }
+    /// A GIF or WebP that can go as it is: no EXIF, TIFF, GPS or IPTC dictionary, and no XMP at all (XMP can carry a
+    /// location too).
+    static func carriesNoMetadata(_ properties: [CFString: Any], metadata: CGImageMetadata?) -> Bool {
+        let dictionaries = [kCGImagePropertyGPSDictionary, kCGImagePropertyExifDictionary, kCGImagePropertyTIFFDictionary,
+                            kCGImagePropertyIPTCDictionary]
+        guard !dictionaries.contains(where: { properties[$0] != nil }) else { return false }
+        guard let metadata, let tags = CGImageMetadataCopyTags(metadata) as? [CGImageMetadataTag] else { return true }
+        return tags.isEmpty
+    }
+
+    /// TIFF and EXIF fields that say who took a photo, when, or with what; maker notes; IPTC.
+    static let privateTIFFKeys = ["Make", "Model", "Software", "DateTime", "Artist", "HostComputer", "Copyright",
+                                  "ImageDescription"]
+    static let privateExifKeys = ["DateTimeOriginal", "DateTimeDigitized", "SubsecTime", "SubsecTimeOriginal",
+                                  "SubsecTimeDigitized", "OffsetTime", "OffsetTimeOriginal", "OffsetTimeDigitized",
+                                  "LensMake", "LensModel", "LensSerialNumber", "LensSpecification", "BodySerialNumber",
+                                  "CameraOwnerName", "UserComment", "MakerNote", "ImageUniqueID"]
+
+    /// What a stored photo still says about its camera, owner or capture (empty when nothing): maker notes, make,
+    /// model, software, lens, serials, capture times, IPTC. Location is `hasLocation`.
+    static func privateMetadata(at url: URL) -> [String] {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions as CFDictionary),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else { return [] }
+        var found: [String] = []
+        let makers = [kCGImagePropertyMakerAppleDictionary, kCGImagePropertyMakerCanonDictionary,
+                      kCGImagePropertyMakerNikonDictionary, kCGImagePropertyMakerFujiDictionary,
+                      kCGImagePropertyMakerOlympusDictionary, kCGImagePropertyMakerPentaxDictionary,
+                      kCGImagePropertyMakerMinoltaDictionary]
+        if makers.contains(where: { properties[$0] != nil }) { found.append("maker notes") }
+        if let iptc = properties[kCGImagePropertyIPTCDictionary] as? [String: Any], !iptc.isEmpty { found.append("IPTC") }
+        let tiff = properties[kCGImagePropertyTIFFDictionary] as? [String: Any] ?? [:]
+        found += privateTIFFKeys.filter { tiff[$0] != nil }
+        let exif = properties[kCGImagePropertyExifDictionary] as? [String: Any] ?? [:]
+        found += privateExifKeys.filter { exif[$0] != nil }
+        return found
     }
 
     private static func pixelSize(_ properties: [CFString: Any]) -> Int? {
@@ -324,6 +390,64 @@ enum RoomMediaImages {
 }
 
 enum RoomMediaVideo {
+    /// The video as it will be stored: re-wrapped without re-encoding (passthrough) and without the metadata that is not
+    /// for sharing, location first (`AVMetadataItemFilter.forSharing()`). The moov box goes first, so it streams as
+    /// soon as it starts arriving. Read back: if any location survived, the video is not sent.
+    static func removingLocation(from url: URL, in folder: URL, baseName: String) async throws -> URL {
+        let asset = AVURLAsset(url: url)
+        let isMP4 = url.pathExtension.lowercased() == "mp4" || url.pathExtension.lowercased() == "m4v"
+        let target = folder.appendingPathComponent("\(baseName).\(isMP4 ? "mp4" : "mov")")
+        try? FileManager.default.removeItem(at: target)
+        guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) else {
+            throw RoomMediaPreparationError.unreadable
+        }
+        session.outputURL = target
+        session.outputFileType = isMP4 ? .mp4 : .mov
+        session.metadataItemFilter = .forSharing()
+        session.shouldOptimizeForNetworkUse = true
+        try await export(session)
+        guard await !hasLocation(at: target) else {
+            try? FileManager.default.removeItem(at: target)
+            throw RoomMediaPreparationError.locationRemains
+        }
+        return target
+    }
+
+    private final class ExportBox: @unchecked Sendable {
+        let session: AVAssetExportSession
+        init(_ session: AVAssetExportSession) { self.session = session }
+    }
+
+    private static func export(_ session: AVAssetExportSession) async throws {
+        let box = ExportBox(session)
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                box.session.exportAsynchronously { continuation.resume() }
+            }
+        } onCancel: {
+            box.session.cancelExport()
+        }
+        try Task.checkCancellation()
+        guard box.session.status == .completed else { throw RoomMediaPreparationError.unreadable }
+    }
+
+    /// Whether a video still says where it was taken: a location item in its metadata (any format) or a track's.
+    static func hasLocation(at url: URL) async -> Bool {
+        let asset = AVURLAsset(url: url)
+        var items = (try? await asset.load(.metadata)) ?? []
+        for format in (try? await asset.load(.availableMetadataFormats)) ?? [] {
+            items += (try? await asset.loadMetadata(for: format)) ?? []
+        }
+        for track in (try? await asset.load(.tracks)) ?? [] {
+            items += (try? await track.load(.metadata)) ?? []
+        }
+        return items.contains { item in
+            if item.commonKey == .commonKeyLocation { return true }
+            if item.identifier == .quickTimeUserDataLocationISO6709 { return true }
+            return item.identifier?.rawValue.lowercased().contains("location") == true
+        }
+    }
+
     /// A video's poster frame, at most `maxPixels` on its longest side and upright, taken half a second in (the very
     /// first frame of a short clip). AVAssetImageGenerator decodes that one frame, never the whole video.
     static func poster(at url: URL, maxPixels: Int) async -> CGImage? {

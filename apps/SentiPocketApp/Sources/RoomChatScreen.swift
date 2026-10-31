@@ -170,7 +170,7 @@ struct RoomChatScreen: View {
         let mediaUploader: (any RoomMediaUploading)? = route.membershipRole.lowercased() == "viewer"
             ? nil
             : (sender as? HTTPRoomMessageSender).map { HTTPRoomMediaUploader(api: $0) }
-        _media = StateObject(wrappedValue: RoomMediaUploadCoordinator.forRoom(route.sessionId) {
+        _media = StateObject(wrappedValue: RoomMediaUploadCoordinator.forRoom(route.sessionId, uploader: mediaUploader) {
             RoomMediaUploadCoordinator(
                 sessionId: route.sessionId,
                 uploader: mediaUploader,
@@ -793,8 +793,13 @@ struct RoomChatScreen: View {
                     loadOriginal: { try await coordinator.prepareAttachment(attachmentId) },
                     onClose: { mediaViewer = nil }
                 )
-            case .video(_, let url):
-                RoomVideoViewer(url: url, onClose: { mediaViewer = nil })
+            case .video(let attachmentId, let url):
+                RoomVideoViewer(
+                    url: url,
+                    // A link that stops working mid-play (it expired, or storage refused it) is asked for again.
+                    refresh: { try await coordinator.mediaLink(attachmentId, fresh: true).url },
+                    onClose: { mediaViewer = nil }
+                )
             }
         }
         .sheet(item: $shareItem) { item in
@@ -945,6 +950,7 @@ struct RoomChatScreen: View {
         room.onOwnEcho = { [weak outgoing] clientIds in outgoing?.echoed(clientIds) }
         outgoing.onPosted = { [weak room] in room?.pullLatest() }
         outgoing.onPreviewReady = { [weak room] attachmentId, data in room?.seedPreview(data, for: attachmentId) }
+        outgoing.onReauthenticationRequired = onReauthenticationRequired
     }
 
     /// A photo opens in the zoomable viewer (its preview at once), a video plays from its storage link, and any other
@@ -962,7 +968,8 @@ struct RoomChatScreen: View {
                 Task {
                     defer { openingAttachment = false }
                     do {
-                        let link = try await coordinator.mediaLink(attachmentId)
+                        // A fresh link, so the whole hour is ahead of the player.
+                        let link = try await coordinator.mediaLink(attachmentId, fresh: true)
                         mediaViewer = .video(attachmentId: attachmentId, url: link.url)
                     } catch {
                         attachmentProblem = Self.openProblem(error)

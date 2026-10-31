@@ -1,8 +1,8 @@
 import Foundation
 import PocketContracts
 
-// Photos, videos and files sent from the phone, source-bound to sentinelayer-api `session_attachment_kinds.py` and
-// the session attachment routes: init (`POST .../attachments/init`), a presigned PUT straight to storage, complete
+// Photos, videos and files sent from the phone, bound to the API's room media kinds and its session attachment
+// routes: init (`POST .../attachments/init`), a presigned PUT straight to storage, complete
 // (`POST .../attachments/{id}/complete`), then the message that names the attachments. The bytes never pass through
 // the API, and the PUT never carries the user's token.
 
@@ -46,6 +46,8 @@ public enum RoomMediaRefusal: Error, Equatable, Sendable {
     case empty(filename: String)
     case tooMany(limit: Int)
     case unreadable(filename: String)
+    /// A video whose location could not be removed: it is never sent with it.
+    case locationRemains(filename: String)
 
     public var message: String {
         switch self {
@@ -68,21 +70,23 @@ public enum RoomMediaRefusal: Error, Equatable, Sendable {
             return "A message can carry up to \(limit) files. Send these, then add more."
         case .unreadable(let name):
             return "\u{201C}\(name)\u{201D} couldn't be read. Try choosing it again."
+        case .locationRemains(let name):
+            return "\u{201C}\(name)\u{201D} wasn't added: Pocket couldn't remove where it was taken."
         }
     }
 }
 
 public enum RoomMediaRules {
-    /// 50 MiB, the API's `IMAGE_MAX_BYTES`.
+    /// 50 MiB, the API's photo limit.
     public static let imageMaximumBytes: Int64 = 52_428_800
-    /// 250 MiB, the API's `FILE_MAX_BYTES` (videos are files).
+    /// 250 MiB, the API's file limit (videos are files).
     public static let fileMaximumBytes: Int64 = 262_144_000
     /// 256 KiB, the original Markdown/JSON limit.
     public static let textMaximumBytes: Int64 = 262_144
-    /// A preview image: at most 512 KiB (the API's `PREVIEW_MAX_BYTES`) and 640 px on its longest side.
+    /// A preview image: at most 512 KiB (the API's preview limit) and 640 px on its longest side.
     public static let previewMaximumBytes = 524_288
     public static let previewMaximumPixels = 640
-    /// The API's `SESSION_MESSAGE_ATTACHMENT_REF_LIMIT`.
+    /// How many attachments the API lets one message name.
     public static let attachmentsPerMessage = 5
 
     /// Plain-text and source files: stored and served as text/plain.
@@ -297,5 +301,55 @@ public struct RoomMediaInitAnswer: Equatable, Sendable {
         let root = try JSONDecoder().decode(JSONValue.self, from: data)
         guard let attachment = RoomMediaAttachment(json: root["attachment"]) else { throw SessionTransportError.invalidResponse }
         return attachment
+    }
+}
+
+/// Why the API refused an upload step, from its `{"error": {"code", "message"}}` body. It says whether trying again
+/// can help and, for a storage limit (413), whose limit it is.
+public struct RoomMediaAPIRefusal: Equatable, Sendable {
+    public enum QuotaScope: Equatable, Sendable {
+        /// The room's storage for photos and files is full.
+        case room
+        /// The room owner's storage, across their rooms, is full.
+        case owner
+        /// Too many of this person's uploads are unfinished in the owner's rooms; they free up as uploads finish.
+        case uploader
+        case unknown
+    }
+
+    public let status: Int
+    public let code: String?
+    public let message: String?
+
+    public init(status: Int, code: String? = nil, message: String? = nil) {
+        self.status = status
+        self.code = code
+        self.message = message
+    }
+
+    public init(status: Int, body: Data) {
+        let root = try? JSONDecoder().decode(JSONValue.self, from: body)
+        let error = root?["error"]
+        self.init(status: status, code: error?["code"]?.stringValue, message: error?["message"]?.stringValue)
+    }
+
+    /// Whose storage limit a 413 names. The API says it in its message (and may say it as `scope`).
+    public var quotaScope: QuotaScope? {
+        guard status == 413 else { return nil }
+        let text = (message ?? "").lowercased()
+        if text.contains("your limit") || text.contains("unfinished") { return .uploader }
+        if text.contains("room owner") { return .owner }
+        if text.contains("room attachment") { return .room }
+        return .unknown
+    }
+
+    /// Trying again with the same ids can help: storage verification (re-init gives a fresh link), an upload still
+    /// landing, too many unfinished uploads, a busy or unavailable server.
+    public var isRetryable: Bool {
+        if code == "ATTACHMENT_VERIFICATION_FAILED" || code == "ATTACHMENT_UPLOAD_PENDING" { return true }
+        // An unfinished upload the server let expire: init again (the same id) makes it anew.
+        if status == 404, code?.hasPrefix("ATTACHMENT") == true { return true }
+        if quotaScope == .uploader { return true }
+        return [409, 425, 429].contains(status) || (500..<600).contains(status)
     }
 }

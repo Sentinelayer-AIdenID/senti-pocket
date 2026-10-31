@@ -13,6 +13,9 @@ private final class FakeUploader: RoomMediaUploading, @unchecked Sendable {
     private var _posts: [(text: String, ids: [String], clientId: String)] = []
     private var _cancelledPuts = 0
     private var _released = false
+    private var _deletes: [String] = []
+    /// Init answers with this error (a sign-in that expired, a full storage).
+    var initError: Error?
     /// The API links previews (`previewOf` echoed); an older API would not.
     var linksPreviews = true
     /// Original PUTs hold at half way until `release()`.
@@ -33,10 +36,12 @@ private final class FakeUploader: RoomMediaUploading, @unchecked Sendable {
     var completes: [String] { locked { _completes } }
     var posts: [(text: String, ids: [String], clientId: String)] { locked { _posts } }
     var cancelledPuts: Int { locked { _cancelledPuts } }
+    var deletes: [String] { locked { _deletes } }
     func release() { locked { _released = true } }
 
     func initUpload(sessionId: String, request: RoomMediaInitRequest) async throws -> RoomMediaInitAnswer {
         locked { _inits.append(request) }
+        if let initError { throw initError }
         return RoomMediaInitAnswer(
             attachment: RoomMediaAttachment(attachmentId: request.clientAttachmentId, filename: request.filename,
                                             contentType: request.contentType, sizeBytes: request.sizeBytes,
@@ -68,6 +73,10 @@ private final class FakeUploader: RoomMediaUploading, @unchecked Sendable {
         }
         if fails { throw RoomMediaUploadError.network }
         progress(total, total)
+    }
+
+    func deleteUpload(sessionId: String, attachmentId: String) async {
+        locked { _deletes.append(attachmentId) }
     }
 
     func completeUpload(sessionId: String, attachmentId: String) async throws -> RoomMediaAttachment {
@@ -112,8 +121,28 @@ private struct FakePreparer: RoomMediaPreparing {
 }
 
 private struct NoKeepAlive: RoomMediaKeepingAlive {
-    func begin() -> Int { 1 }
+    func begin(onExpire: @escaping @MainActor () -> Void) -> Int? { 1 }
     func end(_ token: Int) {}
+}
+
+/// Background time on demand: counts what was asked for and ended, and lets the test run iOS's deadline.
+private final class ScriptedKeepAlive: RoomMediaKeepingAlive {
+    private(set) var begun: [Int] = []
+    private(set) var ended: [Int] = []
+    private var expirations: [Int: @MainActor () -> Void] = [:]
+
+    func begin(onExpire: @escaping @MainActor () -> Void) -> Int? {
+        let token = begun.count + 1
+        begun.append(token)
+        expirations[token] = onExpire
+        return token
+    }
+
+    func end(_ token: Int) { ended.append(token) }
+
+    /// iOS ends the grant at its deadline (and ends it itself).
+    @MainActor
+    func expire(_ token: Int) { expirations[token]?() }
 }
 
 @MainActor
@@ -149,12 +178,13 @@ final class RoomMediaUploadCoordinatorTests: XCTestCase {
         return RoomMediaSource(file: file, filename: name)
     }
 
-    private func coordinator(_ uploader: FakeUploader) -> RoomMediaUploadCoordinator {
+    private func coordinator(_ uploader: FakeUploader?, keepAlive: any RoomMediaKeepingAlive = NoKeepAlive())
+        -> RoomMediaUploadCoordinator {
         RoomMediaUploadCoordinator(
             sessionId: "room_1",
             uploader: uploader,
             preparer: FakePreparer(),
-            keepAlive: NoKeepAlive(),
+            keepAlive: keepAlive,
             sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) },
             makeId: { [unowned self] in
                 self.counter += 1
@@ -163,7 +193,8 @@ final class RoomMediaUploadCoordinatorTests: XCTestCase {
             discard: { [unowned self] source in
                 self.discarded.append(source.filename)
                 RoomMediaFiles.discard(source, root: self.root)
-            }
+            },
+            outboxRoot: root
         )
     }
 
@@ -293,6 +324,119 @@ final class RoomMediaUploadCoordinatorTests: XCTestCase {
         await waitUntil("refused") { media.board.tray.isEmpty }
         XCTAssertNotNil(media.board.notice)
         XCTAssertEqual(Set(discarded), ["broken.jpg", "broken.svg"])
+    }
+
+    func test_a_file_taken_out_or_a_message_cancelled_is_taken_back_on_the_server() async throws {
+        let uploader = FakeUploader()
+        let media = coordinator(uploader)
+        media.add([try source("IMG_0001.jpg")])
+        await waitUntil("uploaded") { media.board.tray.first?.phase == .uploaded }
+        media.perform(.remove(itemId: "pm_test_000001"))
+        await waitUntil("deleted") { uploader.deletes.count == 2 }
+        XCTAssertEqual(uploader.deletes, ["pm_test_000001", "pm_test_000001.pv"], "the file and its preview")
+
+        uploader.holdsPuts = true
+        media.add([try source("clip.mov")])
+        media.perform(.send(text: ""))
+        let clientId = try XCTUnwrap(media.board.outgoing.first?.id)
+        await waitUntil("initiated") { uploader.inits.contains { $0.clientAttachmentId == "pm_test_000002" } }
+        media.perform(.cancel(clientId: clientId))
+        await waitUntil("cancelled upload deleted") { uploader.deletes.contains("pm_test_000002") }
+
+        // Taken out before its upload began: the server never heard of it, so nothing is deleted.
+        let untouched = FakeUploader()
+        let other = coordinator(untouched)
+        other.add([try source("notes.txt")])
+        let id = try XCTUnwrap(other.board.tray.first?.id)
+        other.perform(.remove(itemId: id))
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertTrue(untouched.inits.isEmpty)
+        XCTAssertTrue(untouched.deletes.isEmpty, "nothing is deleted for a file the server never heard of")
+    }
+
+    func test_ids_and_messages_survive_the_app_closing() async throws {
+        let uploader = FakeUploader()
+        uploader.failingPuts = 1
+        let media = coordinator(uploader)
+        media.add([try source("IMG_0001.jpg")])
+        media.perform(.send(text: "Hi"))
+        let clientId = try XCTUnwrap(media.board.outgoing.first?.id)
+        await waitUntil("failed") { media.board.outgoing.first?.isFailed == true }
+
+        // The app closes; at the next launch the room opens again.
+        let again = FakeUploader()
+        let reopened = coordinator(again)
+        XCTAssertEqual(reopened.board.outgoing.map(\.id), [clientId], "the message is back, with its client id")
+        XCTAssertEqual(reopened.board.outgoing.first?.items.map(\.id), ["pm_test_000001"], "its file, with its id")
+        XCTAssertEqual(reopened.board.outgoing.first?.text, "Hi")
+        XCTAssertEqual(reopened.board.outgoing.first?.canRetry, true)
+        XCTAssertNotNil(reopened.board.outgoing.first?.items.first?.thumbnail, "its preview shows again")
+
+        reopened.perform(.retry(clientId: clientId))
+        await waitUntil("posted") { again.posts.count == 1 }
+        XCTAssertEqual(again.posts.first?.clientId, clientId, "the same message")
+        XCTAssertEqual(again.posts.first?.ids, ["pm_test_000001"], "the same upload")
+        XCTAssertTrue(again.inits.allSatisfy { $0.clientAttachmentId.hasPrefix("pm_test_000001") })
+        XCTAssertEqual(again.completes.first, "pm_test_000001", "completing is tried first: the bytes may have landed")
+    }
+
+    func test_a_grant_iOS_ended_is_asked_for_again_and_never_ended_twice() async throws {
+        let keepAlive = ScriptedKeepAlive()
+        let uploader = FakeUploader()
+        uploader.holdsPuts = true
+        let media = coordinator(uploader, keepAlive: keepAlive)
+        media.add([try source("clip.mov")])
+        XCTAssertEqual(keepAlive.begun, [1])
+        keepAlive.expire(1)
+        media.add([try source("other.mov")])
+        XCTAssertEqual(keepAlive.begun, [1, 2], "asked for again while uploads go on")
+        uploader.release()
+        await waitUntil("idle") { media.board.tray.allSatisfy { $0.phase == .uploaded } }
+        XCTAssertEqual(keepAlive.ended, [2], "the grant iOS ended is never ended again")
+    }
+
+    func test_an_expired_sign_in_asks_for_it_again_and_the_file_waits() async throws {
+        let uploader = FakeUploader()
+        uploader.initError = RoomSendError.reauthenticationRequired
+        let media = coordinator(uploader)
+        var asked = 0
+        media.onReauthenticationRequired = { asked += 1 }
+        media.add([try source("IMG_0001.jpg")])
+        await waitUntil("failed") { media.board.tray.first?.isFailed == true }
+        XCTAssertEqual(asked, 1)
+        XCTAssertEqual(media.board.tray.first?.phase, .failed(reason: RoomSendError.reauthenticationRequired.userMessage,
+                                                              canRetry: true))
+    }
+
+    func test_a_viewer_made_a_contributor_can_upload_without_relaunching() {
+        let room = "room_promoted_" + UUID().uuidString
+        let asViewer = RoomMediaUploadCoordinator.forRoom(room, uploader: nil) {
+            RoomMediaUploadCoordinator(sessionId: room, uploader: nil, keepAlive: NoKeepAlive(), outboxRoot: root)
+        }
+        XCTAssertFalse(asViewer.canUpload)
+        let promoted = RoomMediaUploadCoordinator.forRoom(room, uploader: FakeUploader()) {
+            XCTFail("the room keeps its coordinator")
+            return asViewer
+        }
+        XCTAssertTrue(promoted === asViewer)
+        XCTAssertTrue(promoted.canUpload)
+    }
+
+    func test_a_storage_limit_says_whose_it_is() {
+        func reason(_ status: Int, _ code: String, _ message: String) -> (String, Bool) {
+            let error = RoomMediaUploadError.refused(RoomMediaAPIRefusal(status: status, code: code, message: message))
+            return (RoomMediaUploadCoordinator.reason(for: error), RoomMediaUploadCoordinator.canRetry(error))
+        }
+        let room = reason(413, "ATTACHMENT_QUOTA_EXCEEDED", "would exceed the room attachment storage limit of 1 bytes")
+        XCTAssertEqual(room.0, "This room's storage for photos and files is full.")
+        XCTAssertFalse(room.1)
+        let owner = reason(413, "ATTACHMENT_QUOTA_EXCEEDED", "would exceed the room owner's attachment storage limit of 1 bytes")
+        XCTAssertEqual(owner.0, "The room owner's storage for photos and files is full.")
+        let mine = reason(413, "ATTACHMENT_QUOTA_EXCEEDED", "would exceed your limit of 1 bytes of unfinished image and file uploads")
+        XCTAssertTrue(mine.0.contains("unfinished"))
+        XCTAssertTrue(mine.1)
+        let checked = reason(400, "ATTACHMENT_VERIFICATION_FAILED", "checksum mismatch")
+        XCTAssertTrue(checked.1, "a failed check is uploaded again with the same id")
     }
 
     func test_a_preview_goes_up_linked_to_its_file() async throws {

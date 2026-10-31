@@ -231,6 +231,10 @@ final class RoomAttachmentsCoordinatorTests: XCTestCase {
         room.forgetLink("pm_video_0001")
         _ = try await room.mediaLink("pm_video_0001")
         XCTAssertEqual(transport.requestedLinks().count, 4, "a link storage refused is asked for again")
+        _ = try await room.mediaLink("pm_video_0001", fresh: true)
+        XCTAssertEqual(transport.requestedLinks().count, 5, "a video about to play gets a fresh hour")
+        _ = try await room.mediaLink("pm_video_0001")
+        XCTAssertEqual(transport.requestedLinks().count, 5, "and that fresh link is the one reused")
         room.pause()
     }
 

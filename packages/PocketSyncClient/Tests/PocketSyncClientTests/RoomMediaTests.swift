@@ -106,6 +106,31 @@ final class RoomMediaTests: XCTestCase {
         """.utf8))
         XCTAssertNotNil(flat.expiresAt)
     }
+
+    func test_a_refusal_says_whose_storage_is_full_and_whether_a_retry_can_help() {
+        func refusal(_ status: Int, _ code: String, _ message: String) -> RoomMediaAPIRefusal {
+            RoomMediaAPIRefusal(status: status, body: Data("""
+            {"error": {"code": "\(code)", "message": "\(message)", "request_id": "r1"}}
+            """.utf8))
+        }
+        let room = refusal(413, "ATTACHMENT_QUOTA_EXCEEDED",
+                           "this upload would exceed the room attachment storage limit of 10 bytes for images and files")
+        XCTAssertEqual(room.quotaScope, .room)
+        XCTAssertFalse(room.isRetryable)
+        let owner = refusal(413, "ATTACHMENT_QUOTA_EXCEEDED",
+                            "this upload would exceed the room owner's attachment storage limit of 10 bytes for images and files")
+        XCTAssertEqual(owner.quotaScope, .owner)
+        let mine = refusal(413, "ATTACHMENT_QUOTA_EXCEEDED",
+                           "this upload would exceed your limit of 10 bytes of unfinished image and file uploads in this owner's rooms")
+        XCTAssertEqual(mine.quotaScope, .uploader)
+        XCTAssertTrue(mine.isRetryable, "unfinished uploads free up as they finish")
+        let checked = refusal(400, "ATTACHMENT_VERIFICATION_FAILED", "checksum mismatch")
+        XCTAssertNil(checked.quotaScope)
+        XCTAssertTrue(checked.isRetryable, "init again with the same id gives a fresh upload link")
+        XCTAssertFalse(refusal(400, "INVALID_REQUEST", "unsupported").isRetryable)
+        XCTAssertTrue(RoomMediaAPIRefusal(status: 503, body: Data()).isRetryable)
+        XCTAssertEqual(RoomMediaAPIRefusal(status: 413, body: Data("not json".utf8)).quotaScope, .unknown)
+    }
 }
 
 private extension Result where Failure == RoomMediaRefusal {

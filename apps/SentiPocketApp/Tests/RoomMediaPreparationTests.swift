@@ -117,8 +117,13 @@ final class RoomMediaPreparationTests: XCTestCase {
         let stored = try RoomMediaImages.removingLocation(from: original, in: folder, baseName: "stored")
         XCTAssertEqual(stored.pathExtension, "jpg")
         XCTAssertFalse(RoomMediaImages.hasLocation(at: stored), "no location leaves the phone")
+        XCTAssertEqual(RoomMediaImages.privateMetadata(at: original).sorted(),
+                       ["DateTimeOriginal", "LensModel", "Make", "Model"], "the test photo says when and with what")
+        XCTAssertEqual(RoomMediaImages.privateMetadata(at: stored), [], "nor the camera, the lens or the time")
         let properties = Self.properties(at: stored)
         XCTAssertNil(properties[kCGImagePropertyGPSDictionary])
+        XCTAssertNil((properties[kCGImagePropertyTIFFDictionary] as? [String: Any])?["Model"])
+        XCTAssertNil((properties[kCGImagePropertyExifDictionary] as? [String: Any])?["LensModel"])
         XCTAssertTrue(Self.shownSize(properties) == (200, 300), "it still shows upright, as it was taken")
 
         // A format the room does not take (TIFF here, HEIC from a camera) becomes a JPEG, also without location.
@@ -128,6 +133,7 @@ final class RoomMediaPreparationTests: XCTestCase {
         let converted = try RoomMediaImages.removingLocation(from: scan, in: folder, baseName: "converted")
         XCTAssertEqual(converted.pathExtension, "jpg")
         XCTAssertFalse(RoomMediaImages.hasLocation(at: converted))
+        XCTAssertEqual(RoomMediaImages.privateMetadata(at: converted), [])
         XCTAssertTrue(Self.shownSize(Self.properties(at: converted)) == (200, 300))
 
         // A screenshot stays a PNG: lossless, so its text stays sharp.
@@ -136,6 +142,17 @@ final class RoomMediaPreparationTests: XCTestCase {
         let kept = try RoomMediaImages.removingLocation(from: screenshot, in: folder, baseName: "screenshot")
         XCTAssertEqual(kept.pathExtension, "png")
         XCTAssertFalse(RoomMediaImages.hasLocation(at: kept))
+        XCTAssertEqual(RoomMediaImages.privateMetadata(at: kept), [])
+    }
+
+    func test_a_gif_or_webp_goes_as_it_is_only_with_no_metadata_at_all_xmp_included() {
+        XCTAssertTrue(RoomMediaImages.carriesNoMetadata([:], metadata: nil))
+        XCTAssertTrue(RoomMediaImages.carriesNoMetadata([:], metadata: CGImageMetadataCreateMutable()))
+        let xmp = CGImageMetadataCreateMutable()
+        XCTAssertTrue(CGImageMetadataSetValueMatchingImageProperty(xmp, kCGImagePropertyGPSDictionary,
+                                                                  kCGImagePropertyGPSLatitude, 40.7128 as CFNumber))
+        XCTAssertFalse(RoomMediaImages.carriesNoMetadata([:], metadata: xmp), "a location in XMP is metadata too")
+        XCTAssertFalse(RoomMediaImages.carriesNoMetadata([kCGImagePropertyTIFFDictionary: [String: Any]()], metadata: nil))
     }
 
     func test_the_hash_is_streamed_and_matches_the_bytes() throws {
@@ -167,6 +184,25 @@ final class RoomMediaPreparationTests: XCTestCase {
         XCTAssertLessThanOrEqual(preview.sizeBytes, Int64(RoomMediaRules.previewMaximumBytes))
         XCTAssertEqual(preview.filename, "Receipt scan.preview.jpg")
         XCTAssertEqual(preview.sha256, RoomMediaHashing.sha256(of: try Data(contentsOf: preview.file)))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path), "the original, location and all, is gone")
+    }
+
+    func test_a_video_loses_its_location_before_it_leaves_the_phone() async throws {
+        let picked = try RoomMediaFiles.newFolder(in: folder)
+        let movie = picked.appendingPathComponent("original.mov")
+        try await Self.writeVideo(to: movie, width: 640, height: 360, frames: 10, location: "+40.7128-074.0060/")
+        let hadLocation = await RoomMediaVideo.hasLocation(at: movie)
+        XCTAssertTrue(hadLocation, "the test video says where it was taken")
+        let source = RoomMediaSource(file: movie, filename: "Walkthrough.mov")
+        let prepared = try await RoomMediaPreparer().prepare(source, thumbnail: nil)
+        let stillThere = await RoomMediaVideo.hasLocation(at: prepared.file)
+        XCTAssertFalse(stillThere, "the bytes uploaded say nothing about where")
+        XCTAssertEqual(prepared.filename, "Walkthrough.mov")
+        XCTAssertEqual(prepared.type.contentType, "video/quicktime")
+        XCTAssertEqual(prepared.sha256, try RoomMediaHashing.sha256(of: prepared.file))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: movie.path), "the original is gone")
+        let tracks = try await AVURLAsset(url: prepared.file).loadTracks(withMediaType: .video)
+        XCTAssertEqual(tracks.count, 1, "still the same video")
     }
 
     func test_a_video_poster_is_one_small_upright_frame() async throws {
@@ -180,9 +216,16 @@ final class RoomMediaPreparationTests: XCTestCase {
         XCTAssertLessThanOrEqual(jpeg.count, RoomMediaRules.previewMaximumBytes)
     }
 
-    /// A short H.264 video, written frame by frame.
-    private static func writeVideo(to url: URL, width: Int, height: Int, frames: Int) async throws {
+    /// A short H.264 video, written frame by frame, saying where it was taken when given a location (ISO 6709).
+    private static func writeVideo(to url: URL, width: Int, height: Int, frames: Int, location: String? = nil) async throws {
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        if let location {
+            let item = AVMutableMetadataItem()
+            item.identifier = .quickTimeMetadataLocationISO6709
+            item.dataType = kCMMetadataBaseDataType_UTF8 as String
+            item.value = location as NSString
+            writer.metadata = [item]
+        }
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
             AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: width, AVVideoHeightKey: height
         ])
