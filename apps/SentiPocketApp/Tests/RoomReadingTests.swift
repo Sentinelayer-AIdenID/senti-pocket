@@ -526,6 +526,7 @@ final class RoomReadingTests: XCTestCase {
 
         room.send(.readerAtBottom(false))
         room.send(.readerAtBottom(true))
+        await settle()
         clock.advance(by: 5)
         await settle()
         XCTAssertEqual(marks.sent, [10], "caught up: nothing more for the replies")
@@ -545,11 +546,13 @@ final class RoomReadingTests: XCTestCase {
         let room = makeRoom(transport, mark: mark(0, first: nil, lastRead: 10), marks: marks)
         await open(room)
         await waitUntil("the replies read once") { transport.repliesRead == 1 }
+        await settle()
         clock.advance(by: 5)
         await settle()
         XCTAssertEqual(marks.sent, [], "nothing unread and nothing new")
 
         await room.refreshActions(force: true)
+        await settle()
         clock.advance(by: 5)
         await settle()
         XCTAssertEqual(marks.sent, [], "your own reply is never unread")
@@ -561,6 +564,7 @@ final class RoomReadingTests: XCTestCase {
 
         room.send(.readerAtBottom(false))
         await room.refreshActions(force: true)
+        await settle()
         clock.advance(by: 5)
         await settle()
         XCTAssertEqual(marks.sent, [10], "up the room, a reply waits")
@@ -586,6 +590,7 @@ final class RoomReadingTests: XCTestCase {
         await waitUntil("the room list hears what the server holds") { heard == ["12"] }
 
         room.send(.messageOnScreen(id: "evt-10", isOnScreen: true))
+        await settle()
         clock.advance(by: 5)
         await settle()
         XCTAssertEqual(marks.sent, [9], "10 is behind what the server holds")
@@ -609,6 +614,7 @@ final class RoomReadingTests: XCTestCase {
 
         room.send(.messageOnScreen(id: "evt-10", isOnScreen: true))
         room.send(.readerAtBottom(true))
+        await settle()
         clock.advance(by: 5)
         await settle()
         room.pause()
