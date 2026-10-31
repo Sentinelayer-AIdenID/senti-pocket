@@ -90,8 +90,8 @@ final class NotificationsCoordinatorTests: XCTestCase {
         XCTFail("timed out waiting for: \(description)")
     }
 
-    /// Carter (10-30): "Notification numbers don't go down or the notification marked as read as I click and open
-    /// them". A room on screen, however it was opened (a push, a banner, the side panel), reads its notifications.
+    /// Opening a notification lowers the count and marks it read. A room on screen, however it was opened (a push, a
+    /// banner, the side panel), reads its notifications.
     func test_a_room_on_screen_reads_its_notifications_and_leaves_other_rooms_alone() async {
         let marker = RecordingMarker()
         let coordinator = NotificationsCoordinator(

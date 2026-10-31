@@ -77,13 +77,13 @@ final class RoomRosterTests: XCTestCase {
         XCTAssertEqual(roster.members.first?.posts, 1)
     }
 
-    /// Carter, 10-30: "I need agents and humans separated and a total number of online and offline".
+    /// Agents and people apart, with how many are online and offline.
     func test_the_people_list_has_agents_and_people_apart_with_online_and_offline_counts() throws {
         let roster = RoomRoster.build(
             posts: [post("human-mrrcarter", 2, human: true), post("human-griff", 300, human: true),
                     post("claude-warden", 30), post("old-agent", 300)],
             present: [
-                RoomChatPresence.Person(id: "human-6c1f", name: "mrrCarter", isHuman: true, isIdle: false, login: "mrrcarter"),
+                RoomChatPresence.Person(id: "human-6c1f", name: "Sam", isHuman: true, isIdle: false, login: "mrrcarter"),
                 RoomChatPresence.Person(id: "pocket-forge", name: "pocket-forge", isHuman: false, isIdle: true)
             ],
             runningBoxes: [RoomRoster.Box(name: "astra-brand-s", model: "m", phase: "ready", lastActivity: nil)],
@@ -110,8 +110,8 @@ final class RoomRosterTests: XCTestCase {
         XCTAssertEqual(roster.members.first?.status, .idle, "running, quiet for now")
     }
 
-    /// Carter (10-30): the ring said 2 while the people list said 9 online. Both now count the active ones the same
-    /// way, and the list says how many are idle.
+    /// The ring once said 2 while the people list said 9 online. Both now count the active ones the same way, and the
+    /// list says how many are idle.
     func test_the_ring_and_the_people_list_count_active_the_same_way() {
         let now = Date()
         let present = [
@@ -127,8 +127,8 @@ final class RoomRosterTests: XCTestCase {
         XCTAssertEqual(agents?.header, "Agents · 1 active · 1 idle · 0 offline")
         // Warden (#269): the ring colours exactly what the count counts, by the same keys.
         XCTAssertEqual(roster.activeKeys, ["claude-warden", RoomRoster.presenceKey(present[2])])
-        let withLogin = RoomChatPresence.Person(id: "human-8f2c", name: "Carter", isHuman: true, isIdle: false,
-                                                login: "mrrCarter")
-        XCTAssertEqual(RoomRoster.presenceKey(withLogin), "human-mrrcarter", "a person by the handle their posts carry")
+        let withLogin = RoomChatPresence.Person(id: "human-8f2c", name: "Sam", isHuman: true, isIdle: false,
+                                                login: "SamR")
+        XCTAssertEqual(RoomRoster.presenceKey(withLogin), "human-samr", "a person by the handle their posts carry")
     }
 }

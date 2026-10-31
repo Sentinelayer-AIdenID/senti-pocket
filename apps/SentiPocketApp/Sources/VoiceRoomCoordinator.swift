@@ -10,8 +10,7 @@ import PocketVoice
 /// mention it so it knows they are for it; with everyone, it is a meeting and every agent's answer is read.
 ///
 /// It rings like a call: a ringback tone plays and the phone does not listen until the agent picks up by answering, so
-/// its hello is heard before you say anything (Carter, 10-30: "when I call there should be a ring calling and when
-/// picked up there should be me hearing the hi Carter part"). After a while with no answer the ring stops and the
+/// its hello is heard before you say anything. After a while with no answer the ring stops and the
 /// line is open.
 ///
 /// One thing at a time: while you talk, answers wait; while an answer is read, the next waits. An answer that lands
