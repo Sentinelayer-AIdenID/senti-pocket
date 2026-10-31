@@ -62,6 +62,8 @@ public struct PocketSidePanel: View {
     private let onSettings: () -> Void
     /// Start a new room of a type (Carter, #55287); nil where rooms cannot be made.
     private let onNewRoom: (() -> Void)?
+    /// Plan & billing (Carter, 10-31); nil where it isn't offered.
+    private let onBilling: (() -> Void)?
     @State private var query = ""
 
     public init(
@@ -78,7 +80,8 @@ public struct PocketSidePanel: View {
         onCalls: @escaping () -> Void,
         onActivity: @escaping () -> Void,
         onSettings: @escaping () -> Void,
-        onNewRoom: (() -> Void)? = nil
+        onNewRoom: (() -> Void)? = nil,
+        onBilling: (() -> Void)? = nil
     ) {
         self.rooms = rooms
         self.currentRoomId = currentRoomId
@@ -94,6 +97,7 @@ public struct PocketSidePanel: View {
         self.onActivity = onActivity
         self.onSettings = onSettings
         self.onNewRoom = onNewRoom
+        self.onBilling = onBilling
     }
 
     /// How long ago, in the fewest characters: "now", "12m", "7h", "3d", "5w".
@@ -156,6 +160,9 @@ public struct PocketSidePanel: View {
                 shortcut("Notifications", icon: "bell", badge: unreadNotifications, id: "notifications", action: onNotifications)
                 shortcut("Calls & briefings", icon: "phone", id: "calls", action: onCalls)
                 shortcut("Activity", icon: "waveform.path.ecg", id: "activity", action: onActivity)
+                if let onBilling {
+                    shortcut("Plan & billing", icon: "creditcard", id: "billing", action: onBilling)
+                }
             }
             .padding(.top, 10)
 
