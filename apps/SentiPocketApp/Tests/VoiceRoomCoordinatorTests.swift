@@ -327,8 +327,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         XCTAssertEqual(listener.starts, 2, "hands-free: listening comes back after the answers")
     }
 
-    /// Carter (10-30): "when I call there should be a ring calling and when picked up there should be me hearing the
-    /// hi Carter part. These only come or came after I spoke".
+    /// A call rings, and once the agent picks up, its hello is heard before you say anything.
     func test_a_call_rings_until_the_agent_picks_up_and_its_hello_is_heard_before_you_say_anything() async {
         let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), ringer = FakeRinger(), poster = FakePoster()
         let room = room(with: ["pocket-forge"], listener: listener, speaker: speaker, audio: audio, ringer: ringer, poster: poster)
@@ -338,11 +337,11 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 20_000_000)
         XCTAssertEqual(listener.starts, 0, "hands-free does not listen while it rings")
 
-        room.receive([message("hi", from: "pocket-forge", "Hi Carter, forge here.")])
+        room.receive([message("hi", from: "pocket-forge", "Hi Sam, forge here.")])
         XCTAssertFalse(ringer.ringing, "picked up: the ring stops")
         XCTAssertFalse(room.state.isRinging)
         await until("the hello is read") { room.state.speaker == "pocket-forge" }
-        XCTAssertEqual(speaker.spoken.map(\.text), ["Hi Carter, forge here."])
+        XCTAssertEqual(speaker.spoken.map(\.text), ["Hi Sam, forge here."])
         speaker.finish()
         await until("then it listens") { listener.starts == 1 && room.state.isListening }
         XCTAssertEqual(ringer.rings, 1)
@@ -386,7 +385,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         let room = room(with: ["pocket-forge"], listener: listener, speaker: speaker, audio: audio, poster: poster)
         room.begin(rings: false)
         await until("listening") { listener.partial != nil }
-        room.receive([message("m1", from: "pocket-forge", "Hi Carter.")])
+        room.receive([message("m1", from: "pocket-forge", "Hi Sam.")])
         await until("read at once") { room.state.speaker == "pocket-forge" }
         XCTAssertEqual(listener.cancels, 1, "the microphone gave way")
         speaker.finish()

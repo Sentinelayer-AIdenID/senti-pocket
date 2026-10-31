@@ -1,7 +1,7 @@
 #if canImport(SwiftUI)
 import SwiftUI
 
-/// The voice room as a call, filling the screen (Carter, 10-30: "it should be in the actual voice room with you"): who
+/// The voice room as a call, filling the screen: who
 /// you are talking with, large, ringing until it picks up; a live waveform of whoever is talking; what is being said
 /// now as captions (yours as it is recognized, or the agent's as it is read aloud); and one big button. Tap it to talk
 /// and tap again to send, or hold it while you talk and let go to send. In hands-free, a pause sends and listening

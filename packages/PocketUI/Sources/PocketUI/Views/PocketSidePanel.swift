@@ -149,7 +149,7 @@ public struct PocketSidePanel: View {
                 if let onNewRoom {
                     shortcut("New room", icon: "plus.bubble", id: "newRoom", action: onNewRoom)
                 }
-                // Decisions first: what is waiting on you, across every room (Carter, 10-30).
+                // Decisions first: what is waiting on you, across every room.
                 if let waitingOnYou {
                     shortcut("Waiting on you", icon: "hand.raised", badge: waitingOnYou, id: "waiting", action: onWaitingOnYou)
                 }
