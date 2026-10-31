@@ -2,7 +2,7 @@ import PocketUI
 import PocketVoice
 import SwiftUI
 
-/// A room checkpoint as the server holds it (warden, 10-30, option (a)): its title, what it covers, who wrote it and
+/// A room checkpoint as the server holds it: its title, what it covers, who wrote it and
 /// when, and its summary, with Listen. Said plainly that it is not a signed copy: the signing service that Pocket's
 /// verified view needs is not live yet, and this view never claims to be that.
 struct ServerCheckpointView: View {

@@ -1,8 +1,8 @@
 import SwiftUI
 import UIKit
 
-/// The call screen's own window, over the whole app: the room's bars and the side panel included (Carter, 10-30: "it
-/// should be in the actual voice room with you"). A window rather than a full-screen cover, because a cover takes the
+/// The call screen's own window, over the whole app: the room's bars and the side panel included, so you are in the
+/// call. A window rather than a full-screen cover, because a cover takes the
 /// room off screen, and the room underneath must stay live to hear the answers. Banners still show above it.
 @MainActor
 final class VoiceCallWindow {

@@ -186,7 +186,7 @@ private struct AuthenticatedRootView: View {
     @StateObject private var revocationRelay: AuthenticatedSessionRevocationRelay
     @StateObject private var notifications: NotificationsCoordinator
     @State private var presentsNotifications = false
-    /// Your calls across your rooms: "Calls & briefings" (Carter, 10-30).
+    /// Your calls across your rooms: "Calls & briefings".
     @StateObject private var callLog: CallLogCoordinator
     @State private var presentsCallLog = false
     /// What waits on your decision across your rooms (ticket 931e1d2e).
@@ -268,7 +268,7 @@ private struct AuthenticatedRootView: View {
         )
         let details = SelectedSessionDetailCoordinator(
             transport: transport,
-            // The signing gateway is not deployed and Release pins no signing key yet (warden, 10-30): checkpoints
+            // The signing gateway is not deployed and Release pins no signing key yet: checkpoints
             // open as the server holds them until it is.
             opensVerifiedCheckpoints: PocketGatewayTrust.verifiesBundles,
             onReauthenticationRequired: {
