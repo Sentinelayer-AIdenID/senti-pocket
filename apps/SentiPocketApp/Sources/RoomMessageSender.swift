@@ -449,6 +449,38 @@ extension HTTPRoomMessageSender: VoiceRoomPosting {
     }
 }
 
+extension HTTPRoomMessageSender {
+    /// A DELETE under the room, answered as it came back: an upload taken back before any message named it.
+    func deleteAnswer(sessionId: String, path: String) async throws -> HTTPURLResponse {
+        guard let apiBaseURL,
+              var components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false) else {
+            throw RoomSendError.notConfigured
+        }
+        guard let token = tokenProvider(), !token.isEmpty else { throw RoomSendError.reauthenticationRequired }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        guard !sessionId.isEmpty, sessionId.utf8.count <= 256,
+              let encodedSession = sessionId.addingPercentEncoding(withAllowedCharacters: allowed) else {
+            throw RoomSendError.rejected
+        }
+        components.percentEncodedPath = "/api/v1/sessions/\(encodedSession)/\(path)"
+        components.query = nil
+        guard let url = components.url else { throw RoomSendError.notConfigured }
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue(UUID().uuidString.lowercased(), forHTTPHeaderField: "X-Request-Id")
+        let response: URLResponse
+        do {
+            (_, response) = try await urlSession.data(for: request)
+        } catch {
+            throw RoomSendError.retryable(retryAfterSeconds: nil)
+        }
+        guard let http = response as? HTTPURLResponse else { throw RoomSendError.retryable(retryAfterSeconds: nil) }
+        return http
+    }
+}
+
 /// Editing your own message or reply (web `editSessionMessage`).
 protocol RoomMessageEditing: Sendable {
     func editMessage(sessionId: String, messageId: String, isReply: Bool, text: String, expectedRevision: Int64) async throws

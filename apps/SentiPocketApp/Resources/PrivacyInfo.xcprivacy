@@ -11,10 +11,37 @@
     <false/>
     <key>NSPrivacyTrackingDomains</key>
     <array/>
-    <!-- Provisional until the backend-retention inventory is approved; never infer App Store privacy answers from this
-         empty array. The release gate must update this declaration if retained account/device/content fields qualify. -->
+    <!-- What people send to their rooms, which Senti stores so the room can show it: photos and videos, and other user
+         content (files, and the messages they are sent with). Linked to the account, used only to run the room, never
+         for tracking. Other retained account or device fields still await the backend-retention inventory; the release
+         gate must add any that qualify. -->
     <key>NSPrivacyCollectedDataTypes</key>
-    <array/>
+    <array>
+        <dict>
+            <key>NSPrivacyCollectedDataType</key>
+            <string>NSPrivacyCollectedDataTypePhotosorVideos</string>
+            <key>NSPrivacyCollectedDataTypeLinked</key>
+            <true/>
+            <key>NSPrivacyCollectedDataTypeTracking</key>
+            <false/>
+            <key>NSPrivacyCollectedDataTypePurposes</key>
+            <array>
+                <string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+            </array>
+        </dict>
+        <dict>
+            <key>NSPrivacyCollectedDataType</key>
+            <string>NSPrivacyCollectedDataTypeOtherUserContent</string>
+            <key>NSPrivacyCollectedDataTypeLinked</key>
+            <true/>
+            <key>NSPrivacyCollectedDataTypeTracking</key>
+            <false/>
+            <key>NSPrivacyCollectedDataTypePurposes</key>
+            <array>
+                <string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+            </array>
+        </dict>
+    </array>
     <!-- Required-reason APIs actually used. -->
     <key>NSPrivacyAccessedAPITypes</key>
     <array>

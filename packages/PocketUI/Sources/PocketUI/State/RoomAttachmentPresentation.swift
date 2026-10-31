@@ -7,6 +7,7 @@ public struct RoomAttachmentChip: Equatable, Identifiable, Sendable {
         case json
         case image
         case pdf
+        case video
         case other
     }
 
@@ -41,6 +42,7 @@ public struct RoomAttachmentChip: Equatable, Identifiable, Sendable {
         case .json: return "JSON"
         case .image: return "Image"
         case .pdf: return "PDF"
+        case .video: return "Video"
         case .other: return "File"
         }
     }
@@ -51,7 +53,24 @@ public struct RoomAttachmentChip: Equatable, Identifiable, Sendable {
         case .json: return "curlybraces"
         case .image: return "photo"
         case .pdf: return "doc.text"
+        case .video: return "play.rectangle"
         case .other: return "doc"
+        }
+    }
+
+    /// Shown as a picture (a photo, or a video's poster frame), not as a file card.
+    public var isVisual: Bool { kind == .image || kind == .video }
+
+    /// What VoiceOver says: the kind, the name and the size, then what a tap does.
+    public var accessibilityLabel: String {
+        [kind == .image ? "Photo" : kindLabel, filename, sizeLabel, statusLabel].compactMap { $0 }.joined(separator: ", ")
+    }
+
+    public var accessibilityHint: String {
+        switch kind {
+        case .image: return "Opens it full size"
+        case .video: return "Plays it"
+        default: return "Opens it"
         }
     }
 

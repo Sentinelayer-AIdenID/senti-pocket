@@ -1285,11 +1285,13 @@ public enum RoomChatIntent: Equatable, Sendable {
     case openBreakout(childSessionId: String)
     /// Open a file attached to a message, full size.
     case openAttachment(attachmentId: String)
+    /// Share a file attached to a message (save it to Files, or send it to another app).
+    case shareAttachment(attachmentId: String)
     /// Read a message or reply aloud from the start, the text its row shows. The room screen reads.
     case readAloud(id: String, text: String)
     /// Stop reading aloud.
     case stopReadingAloud
-    /// An image attachment came into view: load its small preview if it has none.
+    /// A photo or video attachment came into view: load its small preview if it has none.
     case attachmentAppeared(attachmentId: String)
     /// A message (by event id) or a reply (by action id) came on screen or left it, for read receipts.
     case messageOnScreen(id: String, isOnScreen: Bool)

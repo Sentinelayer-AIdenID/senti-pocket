@@ -13,6 +13,8 @@ public struct RoomAttachment: Equatable, Identifiable, Sendable {
         case json
         case image
         case pdf
+        /// A video file (mp4 or mov): the API files it as a `file`, and its content type says video.
+        case video
         case other
     }
 
@@ -77,6 +79,7 @@ public struct RoomAttachment: Equatable, Identifiable, Sendable {
     static func kind(declared: String?, contentType: String?, filename: String) -> Kind {
         if let type = contentType {
             if type.hasPrefix("image/") { return .image }
+            if type.hasPrefix("video/") { return .video }
             if type == "application/pdf" { return .pdf }
             if type == "application/json" || type == "text/json" { return .json }
             if type == "text/markdown" || type == "text/x-markdown" { return .markdown }
@@ -85,6 +88,7 @@ public struct RoomAttachment: Equatable, Identifiable, Sendable {
         switch (filename as NSString).pathExtension.lowercased() {
         case "png", "jpg", "jpeg", "gif", "heic", "webp": return .image
         case "pdf": return .pdf
+        case "mp4", "mov", "m4v": return .video
         case "md", "markdown": return .markdown
         case "json": return .json
         default: return .other
@@ -96,42 +100,81 @@ public struct RoomAttachment: Equatable, Identifiable, Sendable {
     }
 }
 
-/// A short-lived link to an attachment's bytes. It needs no Authorization header and must never be cached past
-/// its lifetime; open it promptly and ask again later.
+/// A short-lived link to an attachment's bytes, and to its small preview when it has one. It needs no Authorization
+/// header. It may be reused until a few minutes before it expires (`RoomMediaLinkCache`), never after.
 public struct RoomAttachmentDownload: Decodable, Equatable, Sendable {
     public let url: URL
     public let expiresIn: Int
+    /// When the link stops working (the API's `expiresAt`, ISO 8601 UTC); nil from an API that only says `expiresIn`.
+    public let expiresAt: Date?
+    /// The preview image (at most 640 px, 512 KiB; a poster frame for a video), when one was uploaded.
+    public let previewURL: URL?
+    public let previewContentType: String?
 
     enum CodingKeys: String, CodingKey { case download }
-    enum DownloadKeys: String, CodingKey { case url, expiresIn }
+    enum DownloadKeys: String, CodingKey { case url, expiresIn, expiresAt, previewUrl, previewContentType }
 
-    public init(url: URL, expiresIn: Int) {
+    public init(url: URL, expiresIn: Int, expiresAt: Date? = nil, previewURL: URL? = nil, previewContentType: String? = nil) {
         self.url = url
         self.expiresIn = expiresIn
+        self.expiresAt = expiresAt
+        self.previewURL = previewURL
+        self.previewContentType = previewContentType
     }
 
     public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let download = try container.nestedContainer(keyedBy: DownloadKeys.self, forKey: .download)
+        // The link sits under `download`; a flatter answer (`url` at the top) is read the same way.
+        let root = try decoder.container(keyedBy: CodingKeys.self)
+        let download = root.contains(.download)
+            ? try root.nestedContainer(keyedBy: DownloadKeys.self, forKey: .download)
+            : try decoder.container(keyedBy: DownloadKeys.self)
         let raw = try download.decode(String.self, forKey: .url)
         // Only an https link is ever opened.
-        guard let url = URL(string: raw), url.scheme?.lowercased() == "https", url.host?.isEmpty == false else {
+        guard let url = Self.httpsURL(raw) else {
             throw DecodingError.dataCorruptedError(forKey: .url, in: download, debugDescription: "not an https link")
         }
         self.url = url
         self.expiresIn = (try? download.decode(Int.self, forKey: .expiresIn)) ?? 300
+        self.expiresAt = (try? download.decode(String.self, forKey: .expiresAt)).flatMap(Self.date)
+        // A preview that is not an https link is ignored; the file itself still opens.
+        self.previewURL = (try? download.decode(String.self, forKey: .previewUrl)).flatMap(Self.httpsURL)
+        self.previewContentType = previewURL == nil ? nil : (try? download.decode(String.self, forKey: .previewContentType))
+    }
+
+    /// When the link stops working: `expiresAt`, else `expiresIn` from when it was received.
+    public func expiry(receivedAt: Date) -> Date {
+        expiresAt ?? receivedAt.addingTimeInterval(TimeInterval(expiresIn))
+    }
+
+    static func httpsURL(_ raw: String) -> URL? {
+        guard let url = URL(string: raw), url.scheme?.lowercased() == "https", url.host?.isEmpty == false else { return nil }
+        return url
+    }
+
+    static func date(_ text: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: text) { return date }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: text)
     }
 }
 
 extension HTTPSessionTransport {
     public func attachmentDownload(sessionId: String, attachmentId: String) async throws -> RoomAttachmentDownload {
+        try await attachmentDownload(sessionId: sessionId, attachmentId: attachmentId, asDownload: false)
+    }
+
+    /// `asDownload` asks for the file as a download with a safe name (`?download=true`), for saving and sharing;
+    /// otherwise images and videos come inline, so a player can stream them.
+    public func attachmentDownload(sessionId: String, attachmentId: String, asDownload: Bool) async throws -> RoomAttachmentDownload {
         guard SessionIdentifier.isValid(sessionId), RoomAttachment.isValidId(attachmentId) else {
             throw SessionTransportError.invalidRequest
         }
         return try await getDecodable(
             RoomAttachmentDownload.self,
             path: ["api", "v1", "sessions", sessionId, "attachments", attachmentId],
-            query: []
+            query: asDownload ? [URLQueryItem(name: "download", value: "true")] : []
         )
     }
 }
