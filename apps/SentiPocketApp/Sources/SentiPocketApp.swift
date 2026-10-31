@@ -186,7 +186,7 @@ private struct AuthenticatedRootView: View {
     @StateObject private var revocationRelay: AuthenticatedSessionRevocationRelay
     @StateObject private var notifications: NotificationsCoordinator
     @State private var presentsNotifications = false
-    /// Your calls across your rooms: "Calls & briefings" (Carter, 10-30).
+    /// Your calls across your rooms: "Calls & briefings".
     @StateObject private var callLog: CallLogCoordinator
     @State private var presentsCallLog = false
     /// What waits on your decision across your rooms (ticket 931e1d2e).
