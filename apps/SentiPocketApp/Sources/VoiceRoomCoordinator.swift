@@ -283,7 +283,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         pendingAdds.append(posting)
     }
 
-    /// The panel's Mute (Carter, Voice Lab #56359: "I don't see a mute button in this when I call you"). In a call on
+    /// The panel's Mute, so a call always has one in the app. In a call on
     /// the phone's call screen it is asked of the call screen, and the call screen's own mute comes back through
     /// `callScreenMuted(_:)` as a tap there does: one mute, applied once, the same on both screens. A call made here
     /// mutes at once.

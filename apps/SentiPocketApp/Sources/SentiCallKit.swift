@@ -241,7 +241,7 @@ public final class SentiCallManager: NSObject {
         }
     }
 
-    /// The app's own Mute (Carter, Voice Lab #56359): CallKit is asked to mute the call as if on its screen, so the
+    /// The app's own Mute: CallKit is asked to mute the call as if on its screen, so the
     /// call screen shows it too, and then performs it through `CXSetMutedCallAction`, which reaches `onMuted` like a
     /// tap there. `completion(false)` when the call is not live here or CallKit refused.
     func requestMuted(_ id: UUID, _ isMuted: Bool, completion: @escaping @MainActor (Bool) -> Void) {

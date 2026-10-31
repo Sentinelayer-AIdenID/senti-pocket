@@ -325,7 +325,7 @@ struct RoomChatScreen: View {
             // An agent's call you answered talks inside the system call, whose audio CallKit owns.
             audio: call == nil ? PhoneVoiceRoomAudioSession() : CallKitVoiceRoomAudioSession(),
             ringer: RingbackTone(),
-            // Its Mute is the call screen's (Carter, Voice Lab #56359).
+            // Its Mute is the call screen's.
             callScreen: call.map { RoomCallScreen(desk: .shared, uuid: $0.uuid) },
             poster: voicePoster,
             voiceLine: voicePoster as? any VoiceLining,

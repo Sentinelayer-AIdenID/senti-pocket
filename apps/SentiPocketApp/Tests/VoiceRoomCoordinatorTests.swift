@@ -859,7 +859,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         await until("listening again once unmuted") { listener.starts == 2 && room.state.isListening }
     }
 
-    /// Carter (Voice Lab #56359): "I don't see a mute button in this when I call you". In a call made in the app the
+    /// A call in the app has a Mute button. In a call made in the app the
     /// panel's Mute mutes at once: listening stops, words the recognizer still delivers are dropped, holding or tapping
     /// Talk does nothing, answers are still read, and unmuting brings hands-free listening back.
     func test_the_panels_mute_stops_the_room_hearing_you_until_unmuted() async {
@@ -903,7 +903,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         XCTAssertEqual(poster.turns, ["@pocket-forge Now you can hear me"], "only what was said unmuted reaches the room")
     }
 
-    /// Carter (Voice Lab #56359): in an agent's call answered on the phone's call screen, the panel's Mute is asked of
+    /// In an agent's call answered on the phone's call screen, the panel's Mute is asked of
     /// the call screen and only its answer mutes the room, so the two always agree. A mute made on the call screen and
     /// the panel's own converge on one state, each applied once.
     func test_on_the_call_screen_the_panels_mute_and_the_call_screens_are_one_mute() async {
@@ -974,7 +974,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         XCTAssertEqual(listener.starts, 0)
 
         room.send(.setMuted(true))
-        room.receive([message("hi", from: "pocket-forge", "Hi Carter.")])
+        room.receive([message("hi", from: "pocket-forge", "Hi Sam.")])
         await until("the hello is read") { room.state.speaker == "pocket-forge" }
         speaker.finish()
         try? await Task.sleep(nanoseconds: 20_000_000)

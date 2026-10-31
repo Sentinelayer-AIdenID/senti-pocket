@@ -43,7 +43,7 @@ protocol VoiceRoomRinging: AnyObject {
 
 /// The phone's own call (CallKit) a voice room talks inside, when it answers an agent's call. Its call screen has a
 /// Mute of its own, so the panel's Mute is asked of it, and its answer mutes the voice room the way a tap there does:
-/// one mute, the same on both screens (Carter, Voice Lab #56359).
+/// one mute, the same on both screens.
 @MainActor
 protocol VoiceRoomCallScreen: AnyObject {
     /// Mutes or unmutes the call as if on its screen; `done(false)` when the call screen could not.
