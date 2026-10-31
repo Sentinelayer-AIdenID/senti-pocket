@@ -55,8 +55,8 @@ final class HTTPNotificationReadMarker: NotificationReadMarking, @unchecked Send
 
 /// The bell: the newest notifications, refreshed every minute while the app is active, with the unread count for
 /// the badge. Opening one marks it read (optimistically) and returns where to go. A room on screen has its
-/// notifications read, however it was opened: from the bell, a push, a banner or the side panel (Carter, 10-30:
-/// "Notification numbers don't go down or the notification marked as read as I click and open them").
+/// notifications read, however it was opened: from the bell, a push, a banner or the side panel, so the numbers go
+/// down as you open them.
 @MainActor
 final class NotificationsCoordinator: ObservableObject {
     @Published private(set) var state = NotificationsPresentationState(rows: [], isLoading: true)

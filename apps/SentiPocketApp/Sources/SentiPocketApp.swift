@@ -267,7 +267,7 @@ private struct AuthenticatedRootView: View {
         )
         let details = SelectedSessionDetailCoordinator(
             transport: transport,
-            // The signing gateway is not deployed and Release pins no signing key yet (warden, 10-30): checkpoints
+            // The signing gateway is not deployed and Release pins no signing key yet: checkpoints
             // open as the server holds them until it is.
             opensVerifiedCheckpoints: PocketGatewayTrust.verifiesBundles,
             onReauthenticationRequired: {

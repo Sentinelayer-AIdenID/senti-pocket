@@ -58,7 +58,7 @@ final class WaitingOnYouCoordinatorTests: XCTestCase {
         XCTFail("timed out waiting for: \(description)")
     }
 
-    /// Carter (10-30): "if ... I take care of it, it disappears from that list".
+    /// Once you take care of it, it leaves the list.
     func test_an_answer_posts_the_webs_line_to_the_tickets_room_and_leaves_the_list_at_once() async {
         let sender = RecordingSender()
         let waiting = WaitingOnYouCoordinator(

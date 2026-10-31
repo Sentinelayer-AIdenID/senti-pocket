@@ -138,15 +138,14 @@ public struct RoomRoster: Equatable, Sendable {
         return models
     }
 
-    /// One side of the people list (Carter, 10-30: "I need agents and humans separated and a total number of online and
-    /// offline"): agents (boxes with them) or people, online ones first, with how many are online and offline.
+    /// One side of the people list, which keeps agents and people apart with their online and offline totals: agents
+    /// (boxes with them) or people, online ones first, with how many are online and offline.
     public struct Side: Equatable, Sendable {
         public let title: String
         public let members: [Member]
         public var online: Int { members.filter(\.isOnline).count }
         public var offline: Int { members.count - online }
-        /// Online and doing something now: the number the room's ring shows (Carter, 10-30: "If one idles that number
-        /// drops").
+        /// Online and doing something now: the number the room's ring shows, which drops when one idles.
         public var active: Int { members.filter(\.isActive).count }
         public var idle: Int { online - active }
 
