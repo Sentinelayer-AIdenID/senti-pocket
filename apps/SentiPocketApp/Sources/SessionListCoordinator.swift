@@ -20,6 +20,9 @@ final class SessionListCoordinator: ObservableObject {
     private var operation: Task<Void, Never>?
     private var revision: UInt64 = 0
     private var hasStarted = false
+    /// How far this phone has read each room since it was listed, as the server confirmed it (by session id): a count
+    /// the server made before that read shows no badge (`SessionRowPresentation`).
+    private var readThrough: [String: Int64] = [:]
 
     init(
         repository: SessionRepository,
@@ -84,6 +87,16 @@ final class SessionListCoordinator: ObservableObject {
         setSelectedSession(nil)
     }
 
+    /// The server took your read of a room through `sequence` (Carter, 10-31: the badge follows your reading). The
+    /// list draws again only when that clears a badge it shows, once a visit, never at every read.
+    func noteRead(sessionId: String, through sequence: Int64) {
+        guard sequence > (readThrough[sessionId] ?? 0) else { return }
+        readThrough[sessionId] = sequence
+        guard let row = state.rows.first(where: { UTF8ExactIdentity.matches($0.sessionId, sessionId) }),
+              row.activity.unread > 0, let first = row.firstUnreadSequenceId, first <= sequence else { return }
+        state = render(snapshot: snapshot, provenance: provenance, isRefreshing: state.isRefreshing, failure: state.failure)
+    }
+
     /// A protected sibling client (reasoning/write) observed an expired bearer. Clear rows and selection
     /// synchronously before the outer sign-in gate transitions, then fence/reset the actor-owned repository.
     @discardableResult
@@ -91,6 +104,7 @@ final class SessionListCoordinator: ObservableObject {
         operation?.cancel()
         revision &+= 1
         snapshot = nil
+        readThrough = [:]
         provenance = .unavailable
         setSelectedSession(nil)
         state = render(
@@ -230,6 +244,7 @@ final class SessionListCoordinator: ObservableObject {
     private func clearProtectedState() async {
         await repository.reset()
         snapshot = nil
+        readThrough = [:]
         provenance = .unavailable
         setSelectedSession(nil)
     }
@@ -253,7 +268,8 @@ final class SessionListCoordinator: ObservableObject {
             hasMore: snapshot?.hasMore ?? false,
             provenance: provenance,
             isRefreshing: isRefreshing,
-            failure: failure
+            failure: failure,
+            readThrough: readThrough
         )
     }
 }

@@ -31,16 +31,24 @@ final class RoomBottomFlapTests: XCTestCase {
         private var atBottom = true
         private var unread = 0
         private var divider: Int64?
+        /// The first unread message the room opened at (Carter, 10-31): its line stays while the room is open.
+        private var openedAt: Int64?
         private(set) var placeChanges = 0
         /// Every time the room told its place, changed or not.
         private(set) var placeReports = 0
         static let own: Set<String> = ["human-mrrcarter"]
 
-        init(_ inputs: [RoomChatMessageInput]) {
+        init(_ inputs: [RoomChatMessageInput], openedAt: Int64? = nil, loading: Bool = false) {
             self.inputs = inputs
+            self.openedAt = openedAt
+            self.loading = loading
+            // Opened at the line, the coordinator starts away from the bottom, as `RoomChatCoordinator` does.
+            atBottom = openedAt == nil
             state = RoomChatPresentationState(sessionId: "flap", title: "Review room", messages: [])
             publish()
         }
+
+        var isAtBottom: Bool { atBottom }
 
         func send(_ intent: RoomChatIntent) {
             guard case .readerAtBottom(let value) = intent else { return }
@@ -72,6 +80,7 @@ final class RoomBottomFlapTests: XCTestCase {
             atBottom = true
             unread = 0
             divider = nil
+            openedAt = nil
             loading = true
             publish()
         }
@@ -87,7 +96,7 @@ final class RoomBottomFlapTests: XCTestCase {
                 title: "Review room",
                 messages: loading ? [] : inputs,
                 ownAuthorIds: Self.own,
-                unreadDividerSequence: divider,
+                unreadDividerSequence: [openedAt, divider].compactMap { $0 }.min(),
                 unreadCount: unread,
                 isLoadingInitial: loading,
                 canLoadOlder: true,
@@ -334,6 +343,73 @@ final class RoomBottomFlapTests: XCTestCase {
         let deadline = Date().addingTimeInterval(2)
         while room.placeChanges == changes, Date() < deadline { pump(0.05) }
         XCTAssertEqual(room.placeChanges, changes + 1, "once it has stayed gone, the reader is away from the bottom")
+    }
+
+    /// Carter, 10-31: a room opened from the room list with unread messages opens at the first of them, behind the
+    /// "New messages" line, here far up a room of review packets. Opening there must settle like any open (#56316):
+    /// rows drawn a bounded number of times, no stall, the place said at most once each way and then still. The list
+    /// stays well up from the bottom: nothing pulls the reader down.
+    func test_a_room_opened_at_its_unread_line_settles_there() throws {
+        let rows = Self.reviewRoom()
+        // Loading first, then its rows, the way the app opens a room.
+        let room = Room(rows, openedAt: rows[rows.count - 40].sequenceId, loading: true)
+        try host(room)
+        defer { close() }
+        settles("open at the line") { room.finishLoading() }
+        let scroll = try XCTUnwrap(window.flatMap { Self.list(in: $0) }, "the room's list")
+        XCTAssertFalse(room.isAtBottom, "away from the bottom")
+        XCTAssertLessThanOrEqual(room.placeChanges, 2, "said at most once each way, never flapping")
+        let changes = room.placeChanges
+        XCTAssertLessThan(scroll.contentOffset.y, Self.bottomOffset(of: scroll) - 300, "opened well up from the bottom")
+        settles("it stays") {}
+        XCTAssertEqual(room.placeChanges, changes, "and then still")
+        XCTAssertLessThan(scroll.contentOffset.y, Self.bottomOffset(of: scroll) - 300)
+    }
+
+    /// With little below the line the room opens with its bottom in view, and the marker never left view to say so.
+    /// Once the opening scroll has landed its last report is checked, outside layout and through the settle: the
+    /// reader counts as at the bottom (no Jump to latest over the last message), once.
+    func test_a_room_opened_at_a_short_unread_line_counts_the_reader_at_the_bottom() throws {
+        let rows = Self.reviewRoom()
+        let room = Room(rows, openedAt: rows[rows.count - 1].sequenceId, loading: true)
+        try host(room)
+        defer { close() }
+        settles("open at the line") { room.finishLoading() }
+        // A slow machine lays out later: give it time to land, rather than a fixed moment.
+        let deadline = Date().addingTimeInterval(2)
+        while !room.isAtBottom, Date() < deadline { pump(0.05) }
+        XCTAssertTrue(room.isAtBottom, "the bottom is in view")
+        XCTAssertLessThanOrEqual(room.placeChanges, 2)
+        let changes = room.placeChanges
+        settles("it stays") {}
+        XCTAssertEqual(room.placeChanges, changes, "then still")
+        XCTAssertTrue(room.isAtBottom)
+    }
+
+    /// A room short enough to fit on the screen cannot scroll, so opening at its line moves nothing, with its rows there
+    /// from the window's first frame: the reader still counts as at the bottom, once, and stays so.
+    func test_a_room_that_fits_on_the_screen_opened_at_its_line_counts_the_reader_at_the_bottom() throws {
+        var rows: [RoomChatMessageInput] = []
+        for index in 1...5 {
+            let author = index % 2 == 0 ? "human-sam" : "ada-agent"
+            rows.append(Self.input(Int64(57_000 + index), author, "A short note \(index)."))
+        }
+        let room = Room(rows, openedAt: rows[3].sequenceId)
+        try host(room)
+        defer { close() }
+        settles("open at the line") {}
+        let deadline = Date().addingTimeInterval(2)
+        while !room.isAtBottom, Date() < deadline { pump(0.05) }
+        XCTAssertTrue(room.isAtBottom, "the whole room is in view")
+        XCTAssertLessThanOrEqual(room.placeChanges, 2)
+        let changes = room.placeChanges
+        settles("it stays") {}
+        XCTAssertEqual(room.placeChanges, changes, "then still")
+    }
+
+    /// The content offset at which the list shows its last row.
+    private static func bottomOffset(of scroll: UIScrollView) -> CGFloat {
+        scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom
     }
 
     /// The room's list: the tallest scroll view in the window.

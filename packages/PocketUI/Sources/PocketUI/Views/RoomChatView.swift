@@ -286,8 +286,9 @@ public struct RoomChatView: View {
             }
             // Dragging the messages lowers the keyboard with the finger, as in Messages.
             .scrollDismissesKeyboard(.interactively)
-            // The reader scrolling lets go of a message they were taken to.
+            // The reader scrolling lets go of a message they were taken to, and of the unread line being placed.
             .simultaneousGesture(DragGesture(minimumDistance: 8).onChanged { _ in
+                bottomWatch.readerScrolled = true
                 if heldAnchor != nil { heldAnchor = nil }
             })
             .overlay(alignment: .bottomTrailing) {
@@ -580,22 +581,44 @@ public struct RoomChatView: View {
     private func scrollToInitialPosition(_ proxy: ScrollViewProxy) {
         guard !didInitialScroll, !state.isEmpty else { return }
         // A room opened at a message (a link or notification) is positioned by `focus(onRow:proxy:)` instead.
-        guard state.focusSequenceId == nil else { return }
+        let position = state.openPosition(reopening: listEpoch > 0)
+        guard position == .latest || position == .unreadLine else { return }
         didInitialScroll = true
         // Say where the reader is now: the bottom marker may never render when the first scroll lands elsewhere,
         // and a reader who is not at the bottom must not be pulled down by the next message.
-        let opensAtDivider = state.rows.contains(.unreadDivider)
-        setReaderAtBottom(!opensAtDivider)
+        let opensAtLine = position == .unreadLine
+        setReaderAtBottom(!opensAtLine)
         DispatchQueue.main.async {
-            if opensAtDivider {
-                proxy.scrollTo(RoomChatRow.unreadDivider.id, anchor: .top)
+            if opensAtLine {
+                proxy.scrollTo(RoomChatRow.unreadDivider.id, anchor: Self.unreadLineAnchor)
             } else {
                 proxy.scrollTo(Self.bottomId, anchor: .bottom)
             }
             // The list has left its top: from now on the header showing means the reader scrolled up to it.
             DispatchQueue.main.async { holdsOlderLoads = false }
+            if opensAtLine {
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.openLanding) { placeLineAgain(proxy) }
+            }
         }
     }
+
+    /// Rows are measured only as they come into view, so the first scroll places the line from estimated heights, and
+    /// in a room of rows of very different heights (review packets, a long contract) those estimates move as soon as
+    /// the rows are measured: on the 375-point simulator the line once ended below the fold, the bottom out of view.
+    /// Once the rows around it are measured, the line is placed again, unless the reader has moved the list. With
+    /// little below the line, that placement ends at the room's end, and the bottom marker reports from it as from any
+    /// scroll, so the reader counts as at the bottom (the hosted tests check both, on the 375-point SE too).
+    private func placeLineAgain(_ proxy: ScrollViewProxy) {
+        guard bottomWatch.isActive, !bottomWatch.readerScrolled, heldAnchor == nil,
+              state.rows.contains(.unreadDivider) else { return }
+        proxy.scrollTo(RoomChatRow.unreadDivider.id, anchor: Self.unreadLineAnchor)
+    }
+
+    /// Where the unread line sits when the room opens at it: a little below the top, under the people floating there,
+    /// with the end of what was read just above it.
+    static let unreadLineAnchor = UnitPoint(x: 0.5, y: 0.15)
+    /// Long enough for the scroll that opened the room to have been laid out.
+    static let openLanding: TimeInterval = 0.3
 
     /// The room's own decision about the reader's place (it opened at the unread line, the reader was taken to a
     /// message, the latest is shown), at once and kept in step with the coordinator, which counts arrivals as unread
@@ -714,6 +737,8 @@ public struct RoomChatView: View {
 private final class RoomBottomWatch {
     var settle = RoomBottomSettle()
     var isActive = true
+    /// The reader has dragged the list since it opened.
+    var readerScrolled = false
 }
 
 /// A thread summary opened whole: its read-aloud id (so the sheet shows Stop while it is read) and its text.

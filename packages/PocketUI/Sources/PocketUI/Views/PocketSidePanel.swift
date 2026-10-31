@@ -36,13 +36,17 @@ public struct PocketSidePanel: View {
         public let lastActivity: Date?
         /// The room's kind when it isn't general ("Study together", "Research", "Meetings").
         public let kind: String?
+        /// Who is in the room now and your unread messages (Carter, 10-31).
+        public let activity: RoomListActivity
 
-        public init(id: String, title: String, subtitle: String?, lastActivity: Date?, kind: String? = nil) {
+        public init(id: String, title: String, subtitle: String?, lastActivity: Date?, kind: String? = nil,
+                    activity: RoomListActivity = .none) {
             self.id = id
             self.title = title
             self.subtitle = subtitle
             self.lastActivity = lastActivity
             self.kind = kind
+            self.activity = activity
         }
     }
 
@@ -63,6 +67,8 @@ public struct PocketSidePanel: View {
     /// Start a new room of a type (Carter, #55287); nil where rooms cannot be made.
     private let onNewRoom: (() -> Void)?
     @State private var query = ""
+    /// At the largest text sizes a room's age and who is online go under its name, so the name keeps its line.
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     public init(
         rooms: [Room],
@@ -106,6 +112,17 @@ public struct PocketSidePanel: View {
         case ..<(7 * 86_400): return "\(Int(seconds / 86_400))d"
         default: return "\(Int(seconds / (7 * 86_400)))w"
         }
+    }
+
+    /// What VoiceOver says for a room's row: "Design review, open now", or with who is online and what is unread,
+    /// "Weekly sync, 3 people and 2 agents online, 5 unread".
+    static func accessibilityLabel(title: String, isCurrent: Bool, activity: RoomListActivity) -> String {
+        [title, isCurrent ? "open now" : nil, activity.accessibilityDescription].compactMap { $0 }.joined(separator: ", ")
+    }
+
+    /// The room you are in shows no badge: what it shows is being read, and its count was made before you opened it.
+    static func shownActivity(of room: Room, currentRoomId: String?) -> RoomListActivity {
+        room.id == currentRoomId ? room.activity.whileReading : room.activity
     }
 
     /// Rooms whose title or summary contains the search, in the order given (most recent activity first).
@@ -212,14 +229,7 @@ public struct PocketSidePanel: View {
                     .font(.body)
                     .foregroundStyle(PocketPalette.textPrimary)
                 Spacer(minLength: 0)
-                if badge > 0 {
-                    Text(badge > 99 ? "99+" : "\(badge)")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 2)
-                        .background(PocketPalette.accent, in: Capsule())
-                }
+                PocketCountBadge(count: badge)
             }
             .padding(.horizontal, 18)
             .padding(.vertical, 10)
@@ -232,6 +242,8 @@ public struct PocketSidePanel: View {
 
     private func roomRow(_ room: Room) -> some View {
         let isCurrent = room.id == currentRoomId
+        let activity = Self.shownActivity(of: room, currentRoomId: currentRoomId)
+        let largeText = dynamicTypeSize.isAccessibilitySize
         return Button {
             onSelectRoom(room.id)
         } label: {
@@ -240,10 +252,18 @@ public struct PocketSidePanel: View {
                     .fill(isCurrent ? PocketPalette.accent : Color.clear)
                     .frame(width: 3)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(room.title)
-                        .font(.subheadline.weight(isCurrent ? .semibold : .regular))
-                        .foregroundStyle(PocketPalette.textPrimary)
-                        .lineLimit(1)
+                    // The name, then how long ago and who is online, then the unread badge on the right, as Discord
+                    // lists channels (Carter, 10-31). A room with unread messages has its name in bold.
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(room.title)
+                            .font(.subheadline.weight(isCurrent || activity.unread > 0 ? .semibold : .regular))
+                            .foregroundStyle(PocketPalette.textPrimary)
+                            .lineLimit(largeText ? 2 : 1)
+                        Spacer(minLength: 0)
+                        if !largeText { roomMeta(room, activity) }
+                        PocketCountBadge(count: activity.unread)
+                    }
+                    if largeText { roomMeta(room, activity) }
                     if let kind = room.kind {
                         Text(kind)
                             .font(.caption2.weight(.semibold))
@@ -257,13 +277,6 @@ public struct PocketSidePanel: View {
                             .lineLimit(1)
                     }
                 }
-                Spacer(minLength: 0)
-                if let date = room.lastActivity {
-                    Text(Self.compactAge(of: date))
-                        .font(.caption2)
-                        .foregroundStyle(PocketPalette.textSecondary)
-                        .lineLimit(1)
-                }
             }
             .padding(.leading, 12)
             .padding(.trailing, 16)
@@ -273,8 +286,22 @@ public struct PocketSidePanel: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(isCurrent ? "\(room.title), open now" : room.title)
+        .accessibilityLabel(Self.accessibilityLabel(title: room.title, isCurrent: isCurrent, activity: activity))
         .accessibilityIdentifier("pocket.drawer.room.\(room.id)")
+    }
+
+    /// How long ago the room was active ("5m"), then who is in it now.
+    private func roomMeta(_ room: Room, _ activity: RoomListActivity) -> some View {
+        HStack(spacing: 6) {
+            if let date = room.lastActivity {
+                Text(Self.compactAge(of: date))
+            }
+            RoomOnlineCounts(activity: activity)
+        }
+        .font(.caption2)
+        .foregroundStyle(PocketPalette.textSecondary)
+        .lineLimit(1)
+        .fixedSize()
     }
 
     private var footer: some View {
