@@ -418,11 +418,31 @@ public struct RoomTimeline: Equatable, Sendable {
 /// Unread tracking for one open room, mirroring the web's client-only divider: while the reader is away from the
 /// bottom, arriving rows from OTHER people count as unread and the divider sits at the first of them. Reaching
 /// the bottom clears both.
+///
+/// A room opened from the room list with messages you had not read opens at the first of them (Carter, 10-31, "like
+/// discord"): that line stays while the room is open, wherever you scroll, as Discord's does. Only a send, which takes
+/// you to your own message at the bottom, lets it go.
 public struct RoomUnreadState: Equatable, Sendable {
     public private(set) var unreadCount = 0
-    public private(set) var dividerSequence: Int64?
+    /// The first message you had not read when the room opened.
+    public private(set) var openedAt: Int64?
+    /// The first message from others that arrived while you were away from the bottom.
+    private var arrivedAt: Int64?
 
     public init() {}
+
+    /// Where the unread line sits: the earlier of where the room opened and the first arrival while you were away.
+    public var dividerSequence: Int64? {
+        switch (openedAt, arrivedAt) {
+        case let (opened?, arrived?): return min(opened, arrived)
+        case let (opened, arrived): return opened ?? arrived
+        }
+    }
+
+    /// The room opened at the first message you had not read.
+    public mutating func opened(at sequence: Int64) {
+        openedAt = sequence
+    }
 
     public mutating func noteArrivals(_ inserted: [RoomMessage], readerIsAtBottom: Bool, selfAuthorIds: Set<String>) {
         guard !readerIsAtBottom else { return }
@@ -430,12 +450,24 @@ public struct RoomUnreadState: Equatable, Sendable {
         guard !fromOthers.isEmpty else { return }
         unreadCount += fromOthers.count
         let first = fromOthers.map(\.sequenceId).min()!
-        dividerSequence = min(dividerSequence ?? first, first)
+        arrivedAt = min(arrivedAt ?? first, first)
     }
 
-    public mutating func readerReachedBottom() {
+    /// The reader came back to the bottom: arrivals are read. The line the room opened at stays. Whether anything
+    /// changed, so the same place told again never redraws the room (Carter's freeze, #56316).
+    @discardableResult
+    public mutating func readerReachedBottom() -> Bool {
+        guard unreadCount != 0 || arrivedAt != nil else { return false }
         unreadCount = 0
-        dividerSequence = nil
+        arrivedAt = nil
+        return true
+    }
+
+    /// You sent a message: you are at the newest, and every line goes.
+    public mutating func caughtUp() {
+        unreadCount = 0
+        arrivedAt = nil
+        openedAt = nil
     }
 }
 

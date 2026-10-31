@@ -580,21 +580,40 @@ public struct RoomChatView: View {
     private func scrollToInitialPosition(_ proxy: ScrollViewProxy) {
         guard !didInitialScroll, !state.isEmpty else { return }
         // A room opened at a message (a link or notification) is positioned by `focus(onRow:proxy:)` instead.
-        guard state.focusSequenceId == nil else { return }
+        let position = state.openPosition(reopening: listEpoch > 0)
+        guard position == .latest || position == .unreadLine else { return }
         didInitialScroll = true
         // Say where the reader is now: the bottom marker may never render when the first scroll lands elsewhere,
         // and a reader who is not at the bottom must not be pulled down by the next message.
-        let opensAtDivider = state.rows.contains(.unreadDivider)
-        setReaderAtBottom(!opensAtDivider)
+        let opensAtLine = position == .unreadLine
+        setReaderAtBottom(!opensAtLine)
         DispatchQueue.main.async {
-            if opensAtDivider {
-                proxy.scrollTo(RoomChatRow.unreadDivider.id, anchor: .top)
+            if opensAtLine {
+                proxy.scrollTo(RoomChatRow.unreadDivider.id, anchor: Self.unreadLineAnchor)
             } else {
                 proxy.scrollTo(Self.bottomId, anchor: .bottom)
             }
             // The list has left its top: from now on the header showing means the reader scrolled up to it.
             DispatchQueue.main.async { holdsOlderLoads = false }
+            // With little below the line, the bottom is in view after that scroll without the marker ever leaving
+            // view, so it never said so again: once the scroll has landed, what it last said is checked, outside
+            // layout and through the settle like any report (Carter's freezes, #56316).
+            if opensAtLine {
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.openLanding) { recheckBottomAfterOpen() }
+            }
         }
+    }
+
+    /// Where the unread line sits when the room opens at it: a little below the top, under the people floating there,
+    /// with the end of what was read just above it.
+    static let unreadLineAnchor = UnitPoint(x: 0.5, y: 0.15)
+    /// Long enough for the scroll that opened the room to have been laid out.
+    static let openLanding: TimeInterval = 0.3
+
+    private func recheckBottomAfterOpen() {
+        guard bottomWatch.isActive, bottomWatch.markerOnScreen, !readerAtBottom, !state.canLoadNewer,
+              heldAnchor == nil else { return }
+        markerSeen(true)
     }
 
     /// The room's own decision about the reader's place (it opened at the unread line, the reader was taken to a
@@ -613,6 +632,7 @@ public struct RoomChatView: View {
     /// #56316: 664,848 row draws in 40 s). So it only reports, and the place lands on a later turn of the run loop once
     /// the report has held (`RoomBottomSettle`).
     private func markerSeen(_ shown: Bool) {
+        bottomWatch.markerOnScreen = shown
         guard bottomWatch.isActive, let check = bottomWatch.settle.marker(shown: shown) else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + check.after) { landBottom(check) }
     }
@@ -714,6 +734,8 @@ public struct RoomChatView: View {
 private final class RoomBottomWatch {
     var settle = RoomBottomSettle()
     var isActive = true
+    /// What the marker last said: in view or not.
+    var markerOnScreen = false
 }
 
 /// A thread summary opened whole: its read-aloud id (so the sheet shows Stop while it is read) and its text.

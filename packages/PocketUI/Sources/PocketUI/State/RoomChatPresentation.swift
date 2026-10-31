@@ -269,6 +269,16 @@ public enum RoomChatRow: Equatable, Identifiable, Sendable {
     }
 }
 
+/// Where a room's list opens (`RoomChatPresentationState.openPosition(reopening:)`).
+public enum RoomOpenPosition: Equatable, Sendable {
+    /// At its newest messages.
+    case latest
+    /// At the unread line, with a little of what came before it above.
+    case unreadLine
+    /// At a message it was opened for (a link or a notification), which the room brings into view itself.
+    case message(Int64)
+}
+
 /// A message you sent that the room has not echoed back yet.
 public struct RoomChatPendingRow: Equatable, Identifiable, Sendable {
     public enum Status: Equatable, Sendable {
@@ -635,6 +645,10 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         // An agent's notice that repeats with only its numbers changing (a retry counter) is one row.
         let repeated = RoomChatRepeats.fold(trails.kept, expanded: expandedRepeats, keep: focusSequenceId)
         let ordered = repeated.kept
+        let unreadLineRow = unreadDividerSequence.flatMap { line in
+            Self.unreadLineRowId(line: line, shown: ordered, messages: messages, cards: folded.cards,
+                                 canLoadOlder: canLoadOlder)
+        }
         let parents = Dictionary(
             messages.map { ($0.sequenceId, $0) },
             uniquingKeysWith: { first, _ in first }
@@ -657,7 +671,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                     run = nil   // a new day always repeats the author header
                 }
             }
-            if let divider = unreadDividerSequence, !placedDivider, input.sequenceId >= divider {
+            if let unreadLineRow, !placedDivider, input.id == unreadLineRow {
                 rows.append(.unreadDivider)
                 placedDivider = true
                 run = nil
@@ -756,6 +770,40 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         } else {
             self.thread = nil
         }
+    }
+
+    /// Which shown row the unread line goes before: the first that holds a message at or after the line. A call's
+    /// card holds the turns folded into it, so a first unread spoken in a call puts the line before its card, as the
+    /// web does (the line would otherwise land after the call, or nowhere when the call is the room's last row). A line
+    /// before every row loaded, while older messages are not loaded, has no place among these rows yet: none.
+    static func unreadLineRowId(
+        line: Int64,
+        shown: [RoomChatMessageInput],
+        messages: [RoomChatMessageInput],
+        cards: [String: VoiceCallCard],
+        canLoadOlder: Bool
+    ) -> String? {
+        var cardsHoldingUnread: Set<String> = []
+        if !cards.isEmpty {
+            let unread = Set(messages.lazy.filter { $0.sequenceId >= line }.map(\.id))
+            for (id, card) in cards where card.turns.contains(where: { unread.contains($0.id) }) {
+                cardsHoldingUnread.insert(id)
+            }
+        }
+        guard let index = shown.firstIndex(where: { $0.sequenceId >= line || cardsHoldingUnread.contains($0.id) })
+        else { return nil }
+        if index == 0, canLoadOlder, line < shown[index].sequenceId { return nil }
+        return shown[index].id
+    }
+
+    /// Where the room opens (`RoomChatView`): at the message it was opened for (a link or a notification); else at
+    /// the unread line when its rows hold one (Carter, 10-31: "when you click you scroll back to last time you read
+    /// anything … like discord"); else at its newest messages, as it always has. Put back at its newest rows (a send,
+    /// or Jump to latest, from up a long history), it opens at the newest whatever the line: that is what was asked.
+    public func openPosition(reopening: Bool) -> RoomOpenPosition {
+        if let focusSequenceId { return .message(focusSequenceId) }
+        if !reopening, rows.contains(.unreadDivider) { return .unreadLine }
+        return .latest
     }
 
     /// Messages in sequence order with replies placed at their own time: each reply goes after the messages that

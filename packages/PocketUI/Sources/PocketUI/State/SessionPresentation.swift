@@ -82,6 +82,8 @@ public struct SessionListPresentationState: Equatable, Sendable {
     }
 
     /// Projects an already validated repository snapshot without manufacturing a wire response.
+    /// - Parameter readThrough: how far this phone has read each room since, as the server confirmed it (by session
+    ///   id). A count the server made before that read is stale and shows no badge (`SessionRowPresentation`).
     public init(
         sessions: [SessionSummary],
         resultCount: Int? = nil,
@@ -89,7 +91,8 @@ public struct SessionListPresentationState: Equatable, Sendable {
         hasMore: Bool,
         provenance: SessionPresentationProvenance,
         isRefreshing: Bool = false,
-        failure: SessionLoadFailure? = nil
+        failure: SessionLoadFailure? = nil,
+        readThrough: [String: Int64] = [:]
     ) {
         let reportedCount = resultCount ?? sessions.count
         let ids = sessions.map(\.sessionId)
@@ -105,7 +108,9 @@ public struct SessionListPresentationState: Equatable, Sendable {
         let failureAllowsContent = failure?.suppressesProtectedContent != true
         let canPresentRows = identitiesAreValid && countIsValid && sourceAllowsContent && failureAllowsContent
 
-        self.rows = canPresentRows ? sessions.map(SessionRowPresentation.init) : []
+        self.rows = canPresentRows
+            ? sessions.map { SessionRowPresentation($0, readThrough: readThrough[$0.sessionId]) }
+            : []
         self.resultCount = canPresentRows ? reportedCount : 0
         self.includesArchived = includesArchived
         self.hasMore = canPresentRows && hasMore
@@ -128,8 +133,18 @@ public struct SessionRowPresentation: Equatable, Identifiable, Sendable {
     public let lastActivity: ParsedSessionTimestamp?
     /// The room's kind when it isn't a general room: "Study together", "Research" or "Meetings".
     public let roomTypeLabel: String?
+    /// Who is in the room now and your unread messages, for the row's counts and badge (Carter, 10-31).
+    public let activity: RoomListActivity
+    /// The first message you have not read, where the room opens; nil with nothing unread.
+    public let firstUnreadSequenceId: Int64?
+    /// How far you have read the room: the server's mark, or further where this phone has read since.
+    public let lastReadSequenceId: Int64?
 
-    fileprivate init(_ session: SessionSummary) {
+    /// - Parameter readThrough: how far this phone has read the room since the list was counted, as the server
+    ///   confirmed it. The server's unread messages all come at or after its first unread, so a first unread at or
+    ///   behind that point means the count was made before the read: no badge until the server counts again. One
+    ///   after it is news the read did not cover, and shows.
+    fileprivate init(_ session: SessionSummary, readThrough: Int64?) {
         self.id = OpaqueUTF8Identity(session.sessionId)
         self.sessionId = session.sessionId
         self.title = session.title.pocketNonblank ?? "Untitled session"
@@ -141,6 +156,18 @@ public struct SessionRowPresentation: Equatable, Identifiable, Sendable {
         self.eventCount = session.eventCount
         self.lastActivity = ParsedSessionTimestamp(session.lastActivityAt)
         self.roomTypeLabel = Self.roomTypeLabel(session.roomType)
+        let readHere = readThrough ?? 0
+        let first = session.unread?.firstUnreadSequenceId
+        let staleCount = first.map { $0 <= readHere } ?? false
+        let unread = staleCount ? 0 : (session.unread?.count ?? 0)
+        self.activity = RoomListActivity(
+            humansOnline: session.online?.humans,
+            agentsOnline: session.online?.agents,
+            unread: unread
+        )
+        self.firstUnreadSequenceId = unread > 0 ? first : nil
+        let lastRead = max(session.lastReadSequenceId ?? 0, readHere)
+        self.lastReadSequenceId = lastRead > 0 ? lastRead : nil
     }
 
     /// The label a room kind shows, the phone's New room names; nil for general rooms and kinds this build doesn't know.

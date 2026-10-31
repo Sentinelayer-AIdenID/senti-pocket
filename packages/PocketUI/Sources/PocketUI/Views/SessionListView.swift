@@ -143,18 +143,25 @@ public struct SessionListView: View {
 
 private struct SessionRow: View {
     let row: SessionRowPresentation
+    /// At the largest text sizes when and who go on their own line, under the role.
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
+            // The unread badge sits on the right of the name's line, as Discord shows it (Carter, 10-31).
             ViewThatFits(in: .horizontal) {
                 HStack(alignment: .firstTextBaseline) {
                     title
                     Spacer(minLength: 10)
                     status
+                    PocketCountBadge(count: row.activity.unread)
                 }
                 VStack(alignment: .leading, spacing: 5) {
                     title
-                    status
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        status
+                        PocketCountBadge(count: row.activity.unread)
+                    }
                 }
             }
 
@@ -176,13 +183,24 @@ private struct SessionRow: View {
             .font(.caption)
             .foregroundStyle(PocketPalette.textSecondary)
 
-            HStack {
-                Text(row.membershipRoleLabel)
-                if let kind = row.roomTypeLabel {
-                    Text("· \(kind)")
+            // When it was last active, then who is in it now (Carter, 10-31).
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: 4) {
+                        roleAndKind
+                        HStack(spacing: 6) {
+                            timestamp(row.lastActivity)
+                            RoomOnlineCounts(activity: row.activity)
+                        }
+                    }
+                } else {
+                    HStack(spacing: 6) {
+                        roleAndKind
+                        Spacer(minLength: 8)
+                        timestamp(row.lastActivity)
+                        RoomOnlineCounts(activity: row.activity)
+                    }
                 }
-                Spacer(minLength: 8)
-                timestamp(row.lastActivity)
             }
             .font(.caption)
             .foregroundStyle(PocketPalette.textSecondary)
@@ -208,6 +226,15 @@ private struct SessionRow: View {
         Text(row.statusLabel)
             .font(.caption.weight(.semibold))
             .foregroundStyle(PocketPalette.accent)
+    }
+
+    private var roleAndKind: some View {
+        HStack(spacing: 4) {
+            Text(row.membershipRoleLabel)
+            if let kind = row.roomTypeLabel {
+                Text("· \(kind)")
+            }
+        }
     }
 
     @ViewBuilder
