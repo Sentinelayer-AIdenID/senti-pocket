@@ -1,7 +1,7 @@
 #if canImport(SwiftUI)
 import SwiftUI
 
-/// Whom to talk with (Carter, 10-30: pick several agents): tick one or more and call them together, or call everyone
+/// Whom to talk with: tick one or more agents and call them together, or call everyone
 /// here as a meeting. With more than one agent, the first to answer each turn has the floor.
 public struct VoiceCallPicker: View {
     private let partners: [String]
