@@ -452,8 +452,8 @@ final class RoomReadingTests: XCTestCase {
         let room = makeRoom(PagedRoom(before: [page(1...10, hasMore: true)]), mark: nil, marks: marks, membershipRole: nil)
         await open(room)
         room.send(.messageOnScreen(id: "evt-9", isOnScreen: true))
-        room.send(.readerAtBottom(false))
-        room.send(.readerAtBottom(true))
+        // Whatever the room meant to wait out (the bottom it opened at, the row on screen) is waiting now.
+        await settle()
         clock.advance(by: 5)
         await settle()
         room.pause()

@@ -386,6 +386,28 @@ final class RoomBottomFlapTests: XCTestCase {
         XCTAssertTrue(room.isAtBottom)
     }
 
+    /// A room short enough to fit on the screen cannot scroll, so opening at its line moves nothing. With its rows there
+    /// from the window's first frame, the marker says it is in view before the room decides to open at the line, and
+    /// never says so again: only the check after the open lands it, once.
+    func test_a_room_that_fits_on_the_screen_opened_at_its_line_counts_the_reader_at_the_bottom() throws {
+        var rows: [RoomChatMessageInput] = []
+        for index in 1...5 {
+            let author = index % 2 == 0 ? "human-mrrcarter" : "pocket-forge"
+            rows.append(Self.input(Int64(57_000 + index), author, "A short note \(index)."))
+        }
+        let room = Room(rows, openedAt: rows[3].sequenceId)
+        try host(room)
+        defer { close() }
+        settles("open at the line") {}
+        let deadline = Date().addingTimeInterval(2)
+        while !room.isAtBottom, Date() < deadline { pump(0.05) }
+        XCTAssertTrue(room.isAtBottom, "the whole room is in view")
+        XCTAssertLessThanOrEqual(room.placeChanges, 2)
+        let changes = room.placeChanges
+        settles("it stays") {}
+        XCTAssertEqual(room.placeChanges, changes, "then still")
+    }
+
     /// The content offset at which the list shows its last row.
     private static func bottomOffset(of scroll: UIScrollView) -> CGFloat {
         scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom
