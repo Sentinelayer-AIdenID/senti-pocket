@@ -173,7 +173,7 @@ final class VoiceCallCardTests: XCTestCase {
         XCTAssertEqual(VoiceRoomState(with: ["a", "b", "c"]).title, "a, b and c")
     }
 
-    /// Carter (Voice Lab #56359): "I don't see a mute button in this when I call you". The button says what a tap does,
+    /// A call has a Mute button. The button says what a tap does,
     /// Talk takes no turn while muted, and the panel says where the call is muted.
     func test_the_mute_button_says_what_a_tap_does_and_the_panel_says_where_it_is_muted() {
         for agents in [["pocket-forge"], []] {
@@ -203,7 +203,7 @@ final class VoiceCallCardTests: XCTestCase {
                                        date: base.addingTimeInterval(60), attachments: [file])
         let inputs = [
             input("m1", seq: 1, "human-mrrcarter", start, at: 0),
-            input("m2", seq: 2, "pocket-forge", "Hi Carter.", at: 0.2),
+            input("m2", seq: 2, "pocket-forge", "Hi Sam.", at: 0.2),
             end
         ]
         let folded = VoiceCallCard.fold(inputs)
