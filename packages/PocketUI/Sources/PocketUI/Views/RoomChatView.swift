@@ -2553,7 +2553,7 @@ private struct RoomPresenceSheet: View {
                     .accessibilityIdentifier("pocket.room.presence.connection")
                 }
                 if !roster.members.isEmpty {
-                    // Agents and people apart, each with how many are online and offline (Carter, 10-30).
+                    // Agents and people apart, each with how many are online and offline.
                     ForEach(roster.sides, id: \.title) { side in
                         Section {
                             ForEach(side.members) { member in
