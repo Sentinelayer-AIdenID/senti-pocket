@@ -330,8 +330,9 @@ final class VoiceEndpointingTests: XCTestCase {
         listener.say("Status please")
         for _ in 0..<400 where poster.turns.isEmpty { try? await Task.sleep(nanoseconds: 5_000_000) }
         XCTAssertEqual(endpointer.asked.count, 1)
-        room.send(.toggleTalk)
+        // Hands-free, listening stays on a moment after the turn: the next words are heard there.
         for _ in 0..<200 where listener.partial == nil { try? await Task.sleep(nanoseconds: 2_000_000) }
+        XCTAssertNotNil(listener.partial, "listening again after the turn")
         listener.say("And one more thing")
         try? await Task.sleep(nanoseconds: 700_000_000)
         XCTAssertEqual(endpointer.asked.count, 1, "asked once, then never again in this call")

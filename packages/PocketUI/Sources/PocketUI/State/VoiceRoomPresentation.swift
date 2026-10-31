@@ -24,8 +24,13 @@ public struct VoiceRoomTurn: Equatable, Identifiable, Sendable {
 /// STT"). Each measure keeps every sample; the call's end reports the middle (p50) and the slow end (p95).
 public struct VoiceCallTimings: Equatable, Sendable {
     public enum Measure: String, CaseIterable, Sendable {
-        /// You stopped talking (the last word heard) to the first sound of the answer: the gap people feel.
+        /// You stopped talking to the first sound of the answer: the gap people feel. "You stop" is the last sound
+        /// loud enough to be you talking, not the recognizer's last word, which comes a beat later (the voice
+        /// comparison, 10-31: the old clock hid that lag); without the microphone's level it is the last word.
         case gap
+        /// You stopped talking (as for `gap`) to the room accepting your turn: the pause that ends it, the recognizer's
+        /// last words and the post. It shows what ending turns on sound saves.
+        case endpoint
         /// Your turn accepted by the room to the first answer arriving on the phone.
         case answer
         /// Ending your turn to the phone's recognizer handing over its words.
@@ -38,6 +43,7 @@ public struct VoiceCallTimings: Equatable, Sendable {
         public var label: String {
             switch self {
             case .gap: return "you stop → answer heard"
+            case .endpoint: return "end of sound → turn posted"
             case .answer: return "turn posted → answer arrives"
             case .recognition: return "speech recognized"
             case .post: return "turn posted"
@@ -51,6 +57,8 @@ public struct VoiceCallTimings: Equatable, Sendable {
     public private(set) var held = 0
     /// Turns ended early because the signal model said they were finished.
     public private(set) var endedEarly = 0
+    /// Turns you went on with just after they were sent: a pause mid-thought had ended them, and the words joined them.
+    public private(set) var continued = 0
 
     public init() {}
 
@@ -59,6 +67,11 @@ public struct VoiceCallTimings: Equatable, Sendable {
     /// A turn ended on a short pause, the signal model having said it was finished.
     public mutating func noteEarlyEnd() {
         endedEarly += 1
+    }
+
+    /// You went on talking just after a turn was sent, and the words joined it.
+    public mutating func noteContinued() {
+        continued += 1
     }
 
     public mutating func record(_ measure: Measure, _ seconds: TimeInterval) {
@@ -88,6 +101,7 @@ public struct VoiceCallTimings: Equatable, Sendable {
         var line = parts.joined(separator: " · ")
         if held > 0 { line += (line.isEmpty ? "" : " · ") + "\(held) held for the floor" }
         if endedEarly > 0 { line += (line.isEmpty ? "" : " · ") + "\(endedEarly) ended on a short pause" }
+        if continued > 0 { line += (line.isEmpty ? "" : " · ") + "\(continued) continued after a pause" }
         return line.isEmpty ? nil : "Timings: " + line + "."
     }
 
@@ -100,6 +114,7 @@ public struct VoiceCallTimings: Equatable, Sendable {
         }
         if held > 0 { lines.append("| answers held for the floor | | | \(held) |") }
         if endedEarly > 0 { lines.append("| turns ended on a short pause | | | \(endedEarly) |") }
+        if continued > 0 { lines.append("| turns continued after a pause | | | \(continued) |") }
         return lines.count > 2 ? lines : []
     }
 
