@@ -1556,6 +1556,7 @@ final class RoomChatCoordinator: ObservableObject {
     }
 
     private func publish() {
+        RenderTrace.tick("room")
         let work = workLines()
         let inputs = timeline.messages.map { message -> RoomChatMessageInput in
             let date: Date?

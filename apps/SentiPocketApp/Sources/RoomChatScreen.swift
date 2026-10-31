@@ -413,6 +413,7 @@ struct RoomChatScreen: View {
     }
 
     var body: some View {
+        let _ = RenderTrace.tick("room screen")
         RoomChatView(
             state: coordinator.state,
             readingAloudId: reader.readingId,
@@ -445,6 +446,8 @@ struct RoomChatScreen: View {
                 // Which boxes still run, so the people list shows them as here or ended.
                 Task { await flight.refresh() }
             } else {
+                // The action's name only, for the freeze recorder: never what it carries.
+                RenderTrace.intent(String(String(describing: intent).prefix { $0 != "(" }))
                 coordinator.send(intent)
             }
         }

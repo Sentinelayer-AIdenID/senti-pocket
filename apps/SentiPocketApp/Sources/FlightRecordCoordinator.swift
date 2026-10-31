@@ -140,6 +140,7 @@ final class FlightRecordCoordinator: ObservableObject {
     }
 
     private func publish() {
+        RenderTrace.tick("flight")
         let boxes = lives.map { life -> FlightRecordState.Box in
             let record = flights[life.id]
             let lines = FlightRecordState.lines(
