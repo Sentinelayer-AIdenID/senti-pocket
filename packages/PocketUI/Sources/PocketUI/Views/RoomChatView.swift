@@ -286,8 +286,9 @@ public struct RoomChatView: View {
             }
             // Dragging the messages lowers the keyboard with the finger, as in Messages.
             .scrollDismissesKeyboard(.interactively)
-            // The reader scrolling lets go of a message they were taken to.
+            // The reader scrolling lets go of a message they were taken to, and of the unread line being placed.
             .simultaneousGesture(DragGesture(minimumDistance: 8).onChanged { _ in
+                bottomWatch.readerScrolled = true
                 if heldAnchor != nil { heldAnchor = nil }
             })
             .overlay(alignment: .bottomTrailing) {
@@ -595,13 +596,24 @@ public struct RoomChatView: View {
             }
             // The list has left its top: from now on the header showing means the reader scrolled up to it.
             DispatchQueue.main.async { holdsOlderLoads = false }
-            // With little below the line, the bottom is in view after that scroll without the marker ever leaving
-            // view, so it never said so again: once the scroll has landed, what it last said is checked, outside
-            // layout and through the settle like any report (Carter's freezes, #56316).
             if opensAtLine {
-                DispatchQueue.main.asyncAfter(deadline: .now() + Self.openLanding) { recheckBottomAfterOpen() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.openLanding) { placeLineAgain(proxy) }
             }
         }
+    }
+
+    /// Rows are measured only as they come into view, so the first scroll places the line from estimated heights, and
+    /// in a room of rows of very different heights (review packets, a long contract) those estimates move as soon as
+    /// the rows are measured: on the 375-point simulator the line once ended below the fold, the bottom out of view.
+    /// Once the rows around it are measured, the line is placed again, unless the reader has moved the list.
+    private func placeLineAgain(_ proxy: ScrollViewProxy) {
+        guard bottomWatch.isActive, !bottomWatch.readerScrolled, heldAnchor == nil,
+              state.rows.contains(.unreadDivider) else { return }
+        proxy.scrollTo(RoomChatRow.unreadDivider.id, anchor: Self.unreadLineAnchor)
+        // With little below the line, the bottom is in view after that scroll without the marker ever leaving view,
+        // so it never said so again: once the scroll has landed, what it last said is checked, outside layout and
+        // through the settle like any report (Carter's freezes, #56316).
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.openLanding) { recheckBottomAfterOpen() }
     }
 
     /// Where the unread line sits when the room opens at it: a little below the top, under the people floating there,
@@ -736,6 +748,8 @@ private final class RoomBottomWatch {
     var isActive = true
     /// What the marker last said: in view or not.
     var markerOnScreen = false
+    /// The reader has dragged the list since it opened.
+    var readerScrolled = false
 }
 
 /// A thread summary opened whole: its read-aloud id (so the sheet shows Stop while it is read) and its text.
