@@ -21,7 +21,7 @@ public enum VoiceCallMarkers {
             + "top-level post: 1–3 spoken sentences, no markdown. The phone reads it aloud in your own voice." + floor
     }
 
-    /// "📞 Adding @claude-warden: …", an agent brought into a call already going (Carter, 10-30). The others in the
+    /// "📞 Adding @claude-warden: …", an agent brought into a call already going. The others in the
     /// call are named without a mention, so only the added agent is rung.
     public static func added(caller: String, agent: String, joining others: [String]) -> String {
         let with = others.isEmpty ? "" : " with " + others.joined(separator: ", ")

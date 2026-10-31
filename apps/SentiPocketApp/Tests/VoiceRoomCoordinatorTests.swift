@@ -657,7 +657,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         XCTAssertFalse(busy.state.isRinging, "no \"Ringing…\" for ever without the phone's audio")
     }
 
-    /// Carter (10-30): call several agents at once. Each turn mentions them all, and the first to answer has the floor.
+    /// Call several agents at once. Each turn mentions them all, and the first to answer has the floor.
     func test_a_call_with_several_agents_mentions_them_all_and_the_first_answer_has_the_floor() async {
         let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), poster = FakePoster()
         let room = room(with: ["pocket-forge", "claude-warden"], handsFree: false, listener: listener, speaker: speaker,
@@ -685,7 +685,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         XCTAssertTrue(poster.endings.first?.text.contains("@pocket-forge @claude-warden please post") == true)
     }
 
-    /// Carter (10-30): add warden mid-call. One message rings it; from then on its answers are read, and your turns
+    /// Add an agent mid-call. One message rings it; from then on its answers are read, and your turns
     /// mention it too.
     func test_adding_an_agent_mid_call_rings_it_and_its_answers_are_read() async {
         let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), poster = FakePoster()
@@ -693,7 +693,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
                         poster: poster)
         room.begin()
         await until("rang") { poster.starts.count == 1 }
-        room.receive([message("hi", from: "pocket-forge", "Hi Carter.")])
+        room.receive([message("hi", from: "pocket-forge", "Hi Sam.")])
         await until("hello") { room.state.speaker == "pocket-forge" }
         speaker.finish()
 
@@ -753,7 +753,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
                         audio: FakeAudio(), poster: poster)
         room.begin()
         await until("rang") { poster.starts.count == 1 }
-        room.receive([message("a1", from: "pocket-forge", "Hi Carter.")])
+        room.receive([message("a1", from: "pocket-forge", "Hi Sam.")])
         await until("pocket-forge has the floor") { room.state.speaker == "pocket-forge" }
         speaker.finish()
 

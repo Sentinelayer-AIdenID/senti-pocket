@@ -21,7 +21,7 @@ public struct VoiceRoomPanel: View {
     @State private var candidates: [String] = []
 
     /// `partnerLab` is the called agent's lab, for its logo and colour; nil in a meeting. `addable` is who could be
-    /// brought into the call now (Carter, 10-30: "add warden mid-call"), asked when Add is tapped.
+    /// brought into the call now, asked when Add is tapped.
     public init(state: VoiceRoomState, meter: VoiceLevelMeter, partnerLab: AgentLab?,
                 addable: @escaping () -> [String] = { [] }, send: @escaping (VoiceRoomIntent) -> Void) {
         self.state = state

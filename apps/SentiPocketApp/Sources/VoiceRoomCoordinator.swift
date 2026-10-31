@@ -229,7 +229,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         }
     }
 
-    /// Brings another agent into the call (Carter, 10-30: "add warden mid-call"): one message rings it by mention and
+    /// Brings another agent into the call while it is going: one message rings it by mention and
     /// adds it to the call's card, and from then on its answers are read like the others'. With two or more agents the
     /// first to answer a turn has the floor. A meeting already has everyone.
     private func add(_ agent: String) {
@@ -326,7 +326,7 @@ final class VoiceRoomCoordinator: ObservableObject {
             self.addingNotice = nil
         }
         // With more than one agent (a meeting, or several picked or added) the first to answer a turn has the floor;
-        // the others are kept, not read (Carter, 10-30).
+        // the others are kept, not read.
         if state.sharesFloor, !isHuman, !isAddedHello {
             if let holder = floorHolder, holder.id != lowered {
                 state.turns.append(VoiceRoomTurn(id: id, speaker: name, isYou: false, text: text, at: at, isHeld: true))

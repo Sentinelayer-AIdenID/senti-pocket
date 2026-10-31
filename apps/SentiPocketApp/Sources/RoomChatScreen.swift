@@ -599,7 +599,7 @@ struct RoomChatScreen: View {
             }
         }
         .animation(.spring(response: 0.3, dampingFraction: 0.9), value: reader.playback == nil)
-        // Tick one agent or several (Carter, 10-30), or call everyone as a meeting.
+        // Tick one agent or several, or call everyone as a meeting.
         .sheet(isPresented: $choosesVoicePartner) {
             VoiceCallPicker(partners: voicePartners, onCall: { agents in
                 choosesVoicePartner = false
