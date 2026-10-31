@@ -150,9 +150,9 @@ final class CrashReportsTests: XCTestCase {
         var run = LastRun(build: "2026103016", launchedAt: start, updatedAt: start, isActive: true)
         run.availableMB = 3_256
         let stall = MainThreadWatch.Stall(startedAt: start.addingTimeInterval(5), afterStep: "drawerOpened", seconds: 8.5,
-                                          recovered: false, rowDraws: 12_480, lastRow: 55_578)
+                                          recovered: false, rowDraws: 12_480, lastRow: 12_345)
         let reason = run.closedReport(system: "iOS 26.5.1", device: "iPhone18,2", stall: stall)?.reason ?? ""
-        XCTAssertTrue(reason.contains("While it was stuck: 12,480 row draws, the last #55578."), reason)
+        XCTAssertTrue(reason.contains("While it was stuck: 12,480 row draws, the last #12345."), reason)
 
         XCTAssertEqual(MainThreadWatch.Stall(startedAt: start, afterStep: "x", seconds: 2, recovered: true,
                                              rowDraws: 1, lastRow: 0).drawsText, "1 row draw")

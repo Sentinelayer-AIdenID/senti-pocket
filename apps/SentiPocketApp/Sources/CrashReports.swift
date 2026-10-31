@@ -550,7 +550,7 @@ final class MainThreadWatch: @unchecked Sendable {
         var busiest: String?
         var lastIntent: String?
 
-        /// "1,240 row draws, the last #55578; busiest: room 1,240; last action: loadOlder", or nil when none were
+        /// "1,240 row draws, the last #12345; busiest: room 1,240; last action: loadOlder", or nil when none were
         /// counted.
         var drawsText: String? {
             guard let rowDraws else { return nil }
