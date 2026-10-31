@@ -783,7 +783,8 @@ private struct RoomMessageRowView: View {
                 // The call's card answers like a message (Carter, #55058): swipe to reply, its menu, a like, a thread.
                 messageChrome(
                     VStack(alignment: .leading, spacing: 4) {
-                        VoiceCallCardView(card: call, ownHandles: ownHandles)
+                        VoiceCallCardView(card: call, ownHandles: ownHandles,
+                                          openAttachment: { send(.openAttachment(attachmentId: $0)) })
                             .accessibilityIdentifier("pocket.room.call.\(row.id)")
                         messageFooter
                         if canReply || canReact { actionRow }

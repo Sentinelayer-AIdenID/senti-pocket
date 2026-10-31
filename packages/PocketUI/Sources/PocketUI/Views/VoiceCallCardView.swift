@@ -6,6 +6,8 @@ import SwiftUI
 struct VoiceCallCardView: View {
     let card: VoiceCallCard
     let ownHandles: Set<String>
+    /// Opens an attachment by id: the call's transcript.
+    var openAttachment: (String) -> Void = { _ in }
     @State private var isOpen = false
 
     var body: some View {
@@ -68,6 +70,18 @@ struct VoiceCallCardView: View {
                             }
                         }
                         .accessibilityElement(children: .combine)
+                    }
+                    if let transcript = card.transcript {
+                        Button {
+                            openAttachment(transcript.attachmentId)
+                        } label: {
+                            Label("Transcript", systemImage: "doc.text")
+                                .font(.caption.weight(.semibold))
+                        }
+                        .buttonStyle(.borderless)
+                        .padding(.top, 2)
+                        .accessibilityHint("Opens the call's whole transcript")
+                        .accessibilityIdentifier("pocket.room.call.transcript")
                     }
                 }
                 .padding(.leading, 46)
