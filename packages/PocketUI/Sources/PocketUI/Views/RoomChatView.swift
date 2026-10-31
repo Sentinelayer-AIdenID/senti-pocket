@@ -605,15 +605,13 @@ public struct RoomChatView: View {
     /// Rows are measured only as they come into view, so the first scroll places the line from estimated heights, and
     /// in a room of rows of very different heights (review packets, a long contract) those estimates move as soon as
     /// the rows are measured: on the 375-point simulator the line once ended below the fold, the bottom out of view.
-    /// Once the rows around it are measured, the line is placed again, unless the reader has moved the list.
+    /// Once the rows around it are measured, the line is placed again, unless the reader has moved the list. With
+    /// little below the line, that placement ends at the room's end, and the bottom marker reports from it as from any
+    /// scroll, so the reader counts as at the bottom (the hosted tests check both, on the 375-point SE too).
     private func placeLineAgain(_ proxy: ScrollViewProxy) {
         guard bottomWatch.isActive, !bottomWatch.readerScrolled, heldAnchor == nil,
               state.rows.contains(.unreadDivider) else { return }
         proxy.scrollTo(RoomChatRow.unreadDivider.id, anchor: Self.unreadLineAnchor)
-        // With little below the line, the bottom is in view after that scroll without the marker ever leaving view,
-        // so it never said so again: once the scroll has landed, what it last said is checked, outside layout and
-        // through the settle like any report (Carter's freezes, #56316).
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.openLanding) { recheckBottomAfterOpen() }
     }
 
     /// Where the unread line sits when the room opens at it: a little below the top, under the people floating there,
@@ -621,12 +619,6 @@ public struct RoomChatView: View {
     static let unreadLineAnchor = UnitPoint(x: 0.5, y: 0.15)
     /// Long enough for the scroll that opened the room to have been laid out.
     static let openLanding: TimeInterval = 0.3
-
-    private func recheckBottomAfterOpen() {
-        guard bottomWatch.isActive, bottomWatch.markerOnScreen, !readerAtBottom, !state.canLoadNewer,
-              heldAnchor == nil else { return }
-        markerSeen(true)
-    }
 
     /// The room's own decision about the reader's place (it opened at the unread line, the reader was taken to a
     /// message, the latest is shown), at once and kept in step with the coordinator, which counts arrivals as unread
@@ -644,7 +636,6 @@ public struct RoomChatView: View {
     /// #56316: 664,848 row draws in 40 s). So it only reports, and the place lands on a later turn of the run loop once
     /// the report has held (`RoomBottomSettle`).
     private func markerSeen(_ shown: Bool) {
-        bottomWatch.markerOnScreen = shown
         guard bottomWatch.isActive, let check = bottomWatch.settle.marker(shown: shown) else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + check.after) { landBottom(check) }
     }
@@ -746,8 +737,6 @@ public struct RoomChatView: View {
 private final class RoomBottomWatch {
     var settle = RoomBottomSettle()
     var isActive = true
-    /// What the marker last said: in view or not.
-    var markerOnScreen = false
     /// The reader has dragged the list since it opened.
     var readerScrolled = false
 }
