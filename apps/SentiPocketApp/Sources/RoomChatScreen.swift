@@ -332,7 +332,7 @@ struct RoomChatScreen: View {
             onEnded: { endVoiceRoom() },
             onRecordFailed: { [weak coordinator] failure in coordinator?.show(notice: failure) }
         )
-        // The call fills the screen, over the room and its bars, until you hang up (Carter, 10-30). Without its screen
+        // The call fills the screen, over the room and its bars, until you hang up. Without its screen
         // there would be no way to hang up, so the call does not start, nothing of it is left wired, and you are told
         // (warden, #267).
         let host = VoiceRoomHost(room: room, meter: meter, partnerLab: partnerLab(of: room), addable: { voicePartners })
@@ -603,7 +603,7 @@ struct RoomChatScreen: View {
             }
         }
         .animation(.spring(response: 0.3, dampingFraction: 0.9), value: reader.playback == nil)
-        // Tick one agent or several (Carter, 10-30), or call everyone as a meeting.
+        // Tick one agent or several, or call everyone as a meeting.
         .sheet(isPresented: $choosesVoicePartner) {
             VoiceCallPicker(partners: voicePartners, onCall: { agents in
                 choosesVoicePartner = false
@@ -783,8 +783,8 @@ struct RoomChatScreen: View {
             offerCrashReports()
         }
         .task(id: isCovered) {
-            // The room's running boxes, for the ring and its count, kept fresh while the room is open (Carter, 10-30:
-            // the count only caught up once the people list was opened): their names only, and only while the room
+            // The room's running boxes, for the ring and its count, kept fresh while the room is open (the count once
+            // caught up only when the people list was opened): their names only, and only while the room
             // can be seen (warden, #269).
             guard !isCovered else { return }
             while !Task.isCancelled {

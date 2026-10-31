@@ -10,8 +10,7 @@ import PocketVoice
 /// mention it so it knows they are for it; with everyone, it is a meeting and every agent's answer is read.
 ///
 /// It rings like a call: a ringback tone plays and the phone does not listen until the agent picks up by answering, so
-/// its hello is heard before you say anything (Carter, 10-30: "when I call there should be a ring calling and when
-/// picked up there should be me hearing the hi Carter part"). After a while with no answer the ring stops and the
+/// its hello is heard before you say anything. After a while with no answer the ring stops and the
 /// line is open.
 ///
 /// One thing at a time: while you talk, answers wait; while an answer is read, the next waits. An answer that lands
@@ -236,7 +235,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         }
     }
 
-    /// Brings another agent into the call (Carter, 10-30: "add warden mid-call"): one message rings it by mention and
+    /// Brings another agent into the call while it is going: one message rings it by mention and
     /// adds it to the call's card, and from then on its answers are read like the others'. With two or more agents the
     /// first to answer a turn has the floor. A meeting already has everyone.
     private func add(_ agent: String) {
@@ -333,7 +332,7 @@ final class VoiceRoomCoordinator: ObservableObject {
             self.addingNotice = nil
         }
         // With more than one agent (a meeting, or several picked or added) the first to answer a turn has the floor;
-        // the others are kept, not read (Carter, 10-30).
+        // the others are kept, not read.
         if state.sharesFloor, !isHuman, !isAddedHello {
             if let holder = floorHolder, holder.id != lowered {
                 state.turns.append(VoiceRoomTurn(id: id, speaker: name, isYou: false, text: text, at: at, isHeld: true))
@@ -467,8 +466,8 @@ final class VoiceRoomCoordinator: ObservableObject {
     }
 
     /// A short pause: asks whether the words so far are a finished turn, and ends it at once if they are and nothing
-    /// has been said since (Carter, 10-30: "I thought jev would help us finish everything by 600ms"). Unsure, slow or
-    /// unavailable, the normal pause still ends it.
+    /// has been said since, so a finished turn goes within about 600 ms. Unsure, slow or unavailable, the normal pause
+    /// still ends it.
     private func askIfFinished(_ generation: Int) {
         let words = state.partial
         guard let endpointer, !endpointerOff, askedAbout != words,

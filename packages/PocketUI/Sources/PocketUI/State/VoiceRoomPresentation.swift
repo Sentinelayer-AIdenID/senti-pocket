@@ -202,7 +202,7 @@ public enum VoiceRoomIntent: Equatable, Sendable {
     case hangUp
 }
 
-/// The agents ticked in the call picker (Carter, 10-30: call several at once). The call rings them in the list's
+/// The agents ticked in the call picker, to call several at once. The call rings them in the list's
 /// order, so its title reads the way the list does; one that drops off the list is not rung.
 public struct VoiceCallPick: Equatable, Sendable {
     public private(set) var picked: Set<String> = []
