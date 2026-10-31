@@ -83,6 +83,12 @@ final class RoomChatCoordinator: ObservableObject {
     /// The room's pinned messages (newest first) and how many it may hold.
     private var pinned: [RoomPinnedMessage] = []
     private var pinLimit = 10
+    /// Each pinned message at its newest edit, kept apart from the loaded rows: one the rows don't hold is read once at
+    /// its place, and one they drop keeps its text. A pin far up the room still shows its line, and one starting with
+    /// the trophy is the room's leaderboard.
+    private var pinnedMessages: [Int64: RoomMessage] = [:]
+    /// Pinned messages asked for, each once (again only after a read that failed).
+    private var pinnedAsked: Set<Int64> = []
     /// A message to bring into view once (opened from a notification or link); cleared when the view shows it.
     private var focusTarget: Int64?
     /// Links whose message could not be loaded; each one sends the reader to the latest messages.
@@ -506,7 +512,7 @@ final class RoomChatCoordinator: ObservableObject {
                     guard current == self.generation, self.timeline.hasMoreNewer else { return }
                     let oldest = self.timeline.oldestSequence
                     self.timeline.merge(page.messages, trimming: .oldest)
-                    self.timeline.applyEdits(page.edits)
+                    self.applyEdits(page.edits)
                     self.noteOldestTrimmed(was: oldest)
                     self.reconcilePending(with: page.messages)
                     from = max(from, page.maxSequence ?? from)
@@ -794,7 +800,56 @@ final class RoomChatCoordinator: ObservableObject {
         // The pinned list is the room's whole current list.
         pinned = page.pinned
         pinLimit = page.pinLimit
+        readPinnedOutsideRows()
         publish()
+    }
+
+    /// Keeps every pinned message's text: the loaded rows' copies, and for one the rows don't hold, the one message at
+    /// its place, read through the room's own page read (no other request). A message that is unpinned is let go.
+    private func readPinnedOutsideRows() {
+        let sequences = Set(pinned.map(\.targetSequenceId))
+        pinnedMessages = pinnedMessages.filter { sequences.contains($0.key) }
+        pinnedAsked.formIntersection(sequences)
+        _ = notePinned(timeline.messages.filter { sequences.contains($0.sequenceId) })
+        for sequence in sequences.sorted() where pinnedMessages[sequence] == nil && !pinnedAsked.contains(sequence) {
+            pinnedAsked.insert(sequence)
+            let current = generation
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    let page = try await self.transport.roomEventsBefore(
+                        sessionId: self.sessionId, beforeSequence: sequence + 1, limit: 1
+                    )
+                    guard current == self.generation else {
+                        self.pinnedAsked.remove(sequence)
+                        return
+                    }
+                    // Nothing at that place (gone, or not a message): asked, and not asked again.
+                    let message = page.messages.first { $0.sequenceId == sequence }
+                    if let message, self.notePinned([message]) { self.publish() }
+                } catch {
+                    self.pinnedAsked.remove(sequence)
+                }
+            }
+        }
+    }
+
+    /// Keeps a pinned message's newest revision. Whether one changed.
+    private func notePinned(_ messages: [RoomMessage]) -> Bool {
+        var changed = false
+        for message in messages where pinned.contains(where: { $0.targetSequenceId == message.sequenceId }) {
+            guard message.revision > (pinnedMessages[message.sequenceId]?.revision ?? 0) else { continue }
+            pinnedMessages[message.sequenceId] = message
+            changed = true
+        }
+        return changed
+    }
+
+    /// Edits land on the loaded rows and on the pinned messages kept outside them. Whether anything shown changed.
+    @discardableResult
+    private func applyEdits(_ edits: [RoomMessage]) -> Bool {
+        let replaced = !timeline.applyEdits(edits).isEmpty
+        return notePinned(edits) || replaced
     }
 
     private func react(_ type: String, on sequenceId: Int64) {
@@ -1325,7 +1380,7 @@ final class RoomChatCoordinator: ObservableObject {
         case .edited(let message, let sequenceId):
             connection = .live
             lastAppliedSequence = max(lastAppliedSequence, sequenceId)
-            if !timeline.applyEdits([message]).isEmpty { publish() }
+            if applyEdits([message]) { publish() }
             return true
         case .nonDisplayable(let sequenceId):
             connection = .live
@@ -1364,7 +1419,7 @@ final class RoomChatCoordinator: ObservableObject {
         }
         // After the page's own rows, so an edit of a message in the same page lands on it (Carter, #55371: an edit
         // made elsewhere showed neither its text nor "edited" until the room was reopened).
-        timeline.applyEdits(page.edits)
+        applyEdits(page.edits)
         if let maxSequence = page.maxSequence {
             lastAppliedSequence = max(lastAppliedSequence, maxSequence)
         }
@@ -1659,7 +1714,10 @@ final class RoomChatCoordinator: ObservableObject {
             attachmentPreviews: previews,
             presence: presenceState,
             pinned: pinned.map { pin in
-                let message = timeline.messages.first { $0.sequenceId == pin.targetSequenceId }
+                // The loaded row or the copy kept apart, whichever has the newer edit.
+                let message = [timeline.messages.first { $0.sequenceId == pin.targetSequenceId },
+                               pinnedMessages[pin.targetSequenceId]]
+                    .compactMap { $0 }.max { $0.revision < $1.revision }
                 let by = pin.pinnedBy.lowercased().hasPrefix("human-") ? String(pin.pinnedBy.dropFirst("human-".count)) : pin.pinnedBy
                 return RoomChatPinned(
                     sequenceId: pin.targetSequenceId,

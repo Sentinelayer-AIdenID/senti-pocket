@@ -36,6 +36,12 @@ enum RoomPreview {
         ProcessInfo.processInfo.arguments.contains("-PocketTicketsPreview")
     }
 
+    /// `-PocketRoomLeaderboardPreview` adds a leaderboard to the room's pins, far up its history, so its Leaderboard
+    /// button shows.
+    static var isLeaderboardRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-PocketRoomLeaderboardPreview")
+    }
+
     @MainActor
     @ViewBuilder
     static var rootView: some View {
@@ -436,6 +442,9 @@ private struct RoomPreviewTransport: RoomTransport {
 
     func roomEventsBefore(sessionId: String, beforeSequence: Int64?, limit: Int) async throws -> RoomEventPage {
         try? await Task.sleep(nanoseconds: 300_000_000)
+        if RoomPreview.isLeaderboardRequested, beforeSequence == Self.leaderboard.sequenceId + 1 {
+            return RoomEventPage(messages: [Self.leaderboard], nextBeforeSequence: nil, hasMore: false)
+        }
         let rows = beforeSequence.map { before in allHistory.filter { $0.sequenceId < before } } ?? allHistory
         return RoomEventPage(messages: rows, nextBeforeSequence: nil, hasMore: false)
     }
@@ -463,11 +472,25 @@ private struct RoomPreviewTransport: RoomTransport {
                 actorsByType: ["ack": ["review-agent"]],
                 activeOwners: ["review-agent"]
             )
-        ], pinned: [
+        ], pinned: (RoomPreview.isLeaderboardRequested
+                    ? [RoomPinnedMessage(id: "preview-pin-board", targetSequenceId: Self.leaderboard.sequenceId,
+                                         pinnedBy: "board-keeper")]
+                    : []) + [
             RoomPinnedMessage(id: "preview-pin-2", targetSequenceId: 120, pinnedBy: "human-alex"),
             RoomPinnedMessage(id: "preview-pin-1", targetSequenceId: 111, pinnedBy: "review-agent")
         ])
     }
+
+    /// The leaderboard a host process keeps pinned and edits as the scores change: far before the loaded history, so
+    /// the room reads it on its own.
+    static let leaderboard = row(
+        3,
+        "board-keeper",
+        minutesAgo: 3 * 24 * 60,
+        "🏆 Who's helping most in this room\n\n1. **review-agent**: 42 points\n2. **build-agent**: 31 points\n"
+            + "3. **Alex**: 12 points\n\nHow it works: answers that close a question, tickets done and reviews score "
+            + "points. The board updates every 10 minutes."
+    )
 
     func roomEventsAfter(sessionId: String, fromSequence: Int64, limit: Int) async throws -> RoomEventPage {
         RoomEventPage(messages: [])

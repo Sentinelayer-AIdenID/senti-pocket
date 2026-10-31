@@ -802,6 +802,11 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         !row.isInlineReply && pinned.contains { $0.sequenceId == row.sequenceId }
     }
 
+    /// The room's leaderboard: the newest pin whose text starts with the trophy. Rooms that keep one (a scoreboard
+    /// of who is helping most, pinned and edited as the scores change) show a Leaderboard button under the room's
+    /// title that opens it; any other room shows none.
+    public var leaderboard: RoomChatPinned? { pinned.first(where: \.isLeaderboard) }
+
     public var lastMessageId: String? {
         for row in rows.reversed() {
             if case .message(let message) = row { return message.id }
@@ -1330,7 +1335,7 @@ public enum RoomTitle {
 public struct RoomChatPinned: Equatable, Identifiable, Sendable {
     public var id: Int64 { sequenceId }
     public let sequenceId: Int64
-    /// The message's first line, or "Message #N" when it is not loaded.
+    /// The message's first line, or "Message #N" when its text is not known yet.
     public let snippet: String
     public let pinnedBy: String
 
@@ -1339,6 +1344,13 @@ public struct RoomChatPinned: Equatable, Identifiable, Sendable {
         self.snippet = snippet
         self.pinnedBy = pinnedBy
     }
+
+    /// The mark a leaderboard's text starts with.
+    public static let leaderboardMark: Unicode.Scalar = "🏆"
+
+    /// A pin whose text starts with the trophy: the room's leaderboard. Compared by its first scalar, so the mark
+    /// followed by an emoji variation selector counts too.
+    public var isLeaderboard: Bool { snippet.unicodeScalars.first == Self.leaderboardMark }
 }
 
 /// A request to put a failed message's text back into the composer. Each request is distinct, so editing the same

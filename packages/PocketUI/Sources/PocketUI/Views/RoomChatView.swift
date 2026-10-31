@@ -317,6 +317,7 @@ public struct RoomChatView: View {
                         pinned: state.pinned,
                         limit: state.pinLimit,
                         canUnpin: state.canPin,
+                        leaderboard: state.leaderboard,
                         onOpen: { jump(to: $0, proxy: proxy) },
                         onUnpin: { send(.setPinned(sequenceId: $0, isPinned: false)) }
                     )
@@ -2772,6 +2773,8 @@ private struct RoomPinnedStrip: View {
     let pinned: [RoomChatPinned]
     let limit: Int
     let canUnpin: Bool
+    /// The room's leaderboard among the pins, if it keeps one.
+    let leaderboard: RoomChatPinned?
     let onOpen: (Int64) -> Void
     let onUnpin: (Int64) -> Void
 
@@ -2784,6 +2787,10 @@ private struct RoomPinnedStrip: View {
                 Text("\(min(pinned.count, limit))/\(limit)")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(PocketPalette.textSecondary)
+                Spacer(minLength: 8)
+                if let leaderboard {
+                    leaderboardButton(leaderboard)
+                }
             }
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
@@ -2832,6 +2839,27 @@ private struct RoomPinnedStrip: View {
             }
         }
         .accessibilityIdentifier("pocket.room.pinned")
+    }
+
+    /// The room's leaderboard, in the strip's first row, right under the room's title: the navigation bar of a
+    /// 375-point phone shows two buttons and folds the rest into its overflow menu, where a trophy would be lost. It
+    /// opens the message as its pin does.
+    private func leaderboardButton(_ board: RoomChatPinned) -> some View {
+        Button {
+            onOpen(board.sequenceId)
+        } label: {
+            Label("Leaderboard", systemImage: "trophy.fill")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(PocketPalette.warning)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(PocketPalette.raised, in: Capsule())
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Leaderboard")
+        .accessibilityHint("Shows who is helping most in this room")
+        .accessibilityIdentifier("pocket.room.leaderboard")
     }
 }
 
