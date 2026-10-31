@@ -1,15 +1,19 @@
 import Foundation
+import PocketSyncClient
 
 /// Tells the server how far you have read a room, so the room list's unread badge follows your reading. A protocol so
 /// the room is testable without a network.
 protocol RoomReadMarking: Sendable {
-    /// You have read the room through the message at `sequenceId`.
-    func markRead(sessionId: String, through sequenceId: Int64) async throws
+    /// You have read the room through the message at `sequenceId`; the server's answer says whether that moved your
+    /// badge (only your own signed-in session can).
+    func markRead(sessionId: String, through sequenceId: Int64) async throws -> RoomReadReceipt
 }
 
 /// `PUT /api/v1/sessions/{session_id}/read-cursor` with `{"targetSequenceId": n}`, as yourself (no agentId: the API
-/// names you from the token). The server keeps the furthest position it is told and never moves it back, so a late,
-/// repeated or out-of-order request changes nothing; it writes no message or action into the room.
+/// names you from the token). The server keeps the furthest position it is told and never moves it back, so a late or
+/// out-of-order request changes nothing; it writes no message or action into the room. The token is the app's own
+/// sign-in (`SessionTokenStore`), never an agent's or the CLI's: only the person's signed-in web or app session moves
+/// the badge, and any other credential is answered `updated: false` (`RoomReadReceipt.Outcome.notRecorded`).
 final class HTTPRoomReadMarker: RoomReadMarking, @unchecked Sendable {
     private let apiBaseURL: URL?
     private let session: URLSession
@@ -25,7 +29,7 @@ final class HTTPRoomReadMarker: RoomReadMarking, @unchecked Sendable {
         self.tokenProvider = tokenProvider
     }
 
-    func markRead(sessionId: String, through sequenceId: Int64) async throws {
+    func markRead(sessionId: String, through sequenceId: Int64) async throws -> RoomReadReceipt {
         guard sequenceId > 0 else { throw RoomSendError.rejected }
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
         guard let apiBaseURL,
@@ -43,15 +47,16 @@ final class HTTPRoomReadMarker: RoomReadMarking, @unchecked Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONSerialization.data(withJSONObject: ["targetSequenceId": sequenceId])
+        let data: Data
         let response: URLResponse
         do {
-            (_, response) = try await session.data(for: request)
+            (data, response) = try await session.data(for: request)
         } catch {
             throw RoomSendError.retryable(retryAfterSeconds: nil)
         }
         guard let http = response as? HTTPURLResponse else { throw RoomSendError.retryable(retryAfterSeconds: nil) }
         switch http.statusCode {
-        case 200..<300: return
+        case 200..<300: return RoomReadReceipt(body: data)
         case 401: throw RoomSendError.reauthenticationRequired
         case 403, 404: throw RoomSendError.notAllowed
         case 409, 425, 429, 500..<600:

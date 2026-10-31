@@ -19,6 +19,15 @@ final class RoomOpeningTests: XCTestCase {
         XCTAssertEqual(mark(3, first: 41, lastRead: 40).opensAt, 41)
     }
 
+    /// sentinelayer-api #1078: the count includes thread replies, which have no place in the room. With only replies
+    /// unread there is no first unread message (null with a count above zero), and the room opens at its latest.
+    func test_only_thread_replies_unread_opens_at_the_latest() {
+        let replies = mark(4, first: nil, lastRead: 150)
+        XCTAssertNil(replies.opensAt)
+        XCTAssertEqual(RoomOpening.choose(mark: replies, focus: nil, oldestLoaded: 100, newestLoaded: 150,
+                                          hasMoreOlder: true), .latest)
+    }
+
     func test_the_first_unread_among_the_loaded_rows_opens_at_its_line() {
         XCTAssertEqual(RoomOpening.choose(mark: mark(3, first: 120), focus: nil, oldestLoaded: 100, newestLoaded: 150,
                                           hasMoreOlder: true), .unreadLine(120))
@@ -143,6 +152,48 @@ final class RoomReadCursorTests: XCTestCase {
         XCTAssertEqual(cursor.furthest, 9)
     }
 
+    /// Thread replies are read by telling the server a position with nothing unread after it, the same one again
+    /// included: once, never behind what it holds, and on the same interval as any other request.
+    func test_reading_again_sends_the_same_position_once_on_the_same_interval() {
+        var cursor = RoomReadCursor(confirmed: 50)
+        XCTAssertFalse(cursor.read(through: 50), "forward only")
+        XCTAssertEqual(cursor.next(at: 0), .idle)
+
+        cursor.readAgain(through: 50)
+        XCTAssertEqual(cursor.next(at: 0), .send(50), "the same position again, for the replies")
+        cursor.sent(50)
+        XCTAssertEqual(cursor.next(at: 0.1), .idle, "once")
+
+        cursor.readAgain(through: 40)
+        XCTAssertEqual(cursor.next(at: 1), .wait(0.5), "on the same interval as any other")
+        XCTAssertEqual(cursor.next(at: 1.5), .send(50), "never behind what the server holds")
+
+        // Asked again while that one is on its way: it goes once the answer is in, not dropped as already held.
+        cursor.readAgain(through: 50)
+        cursor.sent(50)
+        XCTAssertEqual(cursor.next(at: 3), .send(50))
+    }
+
+    func test_a_repeat_worth_retrying_goes_again_and_any_other_failure_drops_it() {
+        var cursor = RoomReadCursor(confirmed: 50)
+        cursor.readAgain(through: 50)
+        XCTAssertEqual(cursor.next(at: 0), .send(50))
+        cursor.failed(50, retryable: true)
+        XCTAssertEqual(cursor.next(at: 1), .wait(2), "a longer wait, as after any failure")
+        XCTAssertEqual(cursor.next(at: 3), .send(50))
+        cursor.failed(50, retryable: false)
+        XCTAssertEqual(cursor.next(at: 10), .idle)
+    }
+
+    func test_what_the_server_holds_counts_as_read() {
+        var cursor = RoomReadCursor(confirmed: 10)
+        cursor.read(through: 12)
+        XCTAssertEqual(cursor.next(at: 0), .send(12))
+        cursor.sent(12, serverHolds: 20)
+        XCTAssertEqual(cursor.confirmed, 20)
+        XCTAssertFalse(cursor.read(through: 18), "behind what the server holds")
+    }
+
     func test_closing_the_room_sends_what_was_read_whatever_the_interval() {
         var cursor = RoomReadCursor()
         XCTAssertNil(cursor.flush(at: 0), "nothing read")
@@ -160,6 +211,36 @@ final class RoomReadCursorTests: XCTestCase {
         cursor.sent(5)
         cursor.read(through: 6)
         XCTAssertEqual(cursor.next(at: 400), .send(6))
+    }
+}
+
+/// What the server answers to a read (sentinelayer-api #1078 at 70e7bab8).
+final class RoomReadReceiptTests: XCTestCase {
+    private func receipt(_ json: String) -> RoomReadReceipt { RoomReadReceipt(body: Data(json.utf8)) }
+
+    func test_the_answer_says_recorded_unchanged_or_not_recorded() {
+        XCTAssertEqual(receipt(#"{"ok":true,"updated":true,"lastReadSequenceId":120,"actorKind":"reader","#
+                               + #""actorId":"r-1","caughtUp":true}"#),
+                       RoomReadReceipt(outcome: .recorded, lastReadSequenceId: 120, caughtUp: true))
+        XCTAssertEqual(receipt(#"{"ok":true,"updated":false,"lastReadSequenceId":130,"actorKind":"reader","#
+                               + #""actorId":"r-1","caughtUp":false}"#),
+                       RoomReadReceipt(outcome: .unchanged, lastReadSequenceId: 130),
+                       "a no-op: the server already holds 130")
+        XCTAssertEqual(receipt(#"{"ok":true,"updated":false,"lastReadSequenceId":null,"actorKind":null,"#
+                               + #""actorId":null,"reason":"read_cursor_requires_signed_in_session"}"#),
+                       RoomReadReceipt(outcome: .notRecorded), "not the person's own signed-in session")
+    }
+
+    func test_an_older_server_or_an_unreadable_answer_counts_as_recorded() {
+        XCTAssertEqual(RoomReadReceipt(body: nil).outcome, .recorded)
+        XCTAssertEqual(RoomReadReceipt(body: Data()).outcome, .recorded)
+        XCTAssertEqual(receipt(#"{"ok":true}"#).outcome, .recorded)
+        XCTAssertEqual(receipt("not json").outcome, .recorded)
+        XCTAssertEqual(receipt(#"{"ok":true,"updated":false,"reason":"another_reason"}"#).outcome, .notRecorded,
+                       "no reader and a reason: nothing moved")
+        XCTAssertFalse(receipt(#"{"ok":true,"updated":false,"actorKind":null,"caughtUp":true,"#
+                               + #""reason":"read_cursor_requires_signed_in_session"}"#).caughtUp,
+                       "nothing recorded is never caught up")
     }
 }
 

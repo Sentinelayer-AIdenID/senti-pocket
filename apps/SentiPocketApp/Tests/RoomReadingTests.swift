@@ -61,20 +61,32 @@ private final class TestClock: @unchecked Sendable {
     }
 }
 
-/// Pages for the room's opening reads; the live stream stays open and quiet.
+/// Pages for the room's opening reads, and its reads of replies; the live stream stays open and quiet.
 private final class PagedRoom: RoomTransport, @unchecked Sendable {
     private let lock = NSLock()
     private var before: [RoomEventPage]
     private var after: [RoomEventPage]
+    private var actions: [RoomActionsPage]
     private var beforeCalls: [Int64?] = []
     private var afterCalls: [Int64] = []
+    private var actionReads = 0
 
-    init(before: [RoomEventPage], after: [RoomEventPage] = []) {
+    init(before: [RoomEventPage], after: [RoomEventPage] = [], actions: [RoomActionsPage] = []) {
         self.before = before
         self.after = after
+        self.actions = actions
     }
 
     var calls: (before: [Int64?], after: [Int64]) { locked { (beforeCalls, afterCalls) } }
+    var repliesRead: Int { locked { actionReads } }
+
+    /// Each read of the replies answers the next page given; the last one stays.
+    func roomActions(sessionId: String, targetSequenceId: Int64?, limit: Int) async throws -> RoomActionsPage {
+        locked {
+            actionReads += 1
+            return actions.count > 1 ? actions.removeFirst() : (actions.first ?? RoomActionsPage())
+        }
+    }
 
     func roomEventsBefore(sessionId: String, beforeSequence: Int64?, limit: Int) async throws -> RoomEventPage {
         locked {
@@ -101,11 +113,13 @@ private final class PagedRoom: RoomTransport, @unchecked Sendable {
     }
 }
 
-/// Records each read told to the server; can refuse the next ones.
+/// Records each read told to the server, which takes it (recorded, holding that position) unless told to refuse the
+/// next ones or to answer them otherwise.
 private final class ReadMarks: RoomReadMarking, @unchecked Sendable {
     private let lock = NSLock()
     private var marks: [Int64] = []
     private var refusals: [RoomSendError] = []
+    private var answers: [RoomReadReceipt] = []
 
     var sent: [Int64] {
         lock.lock()
@@ -119,12 +133,20 @@ private final class ReadMarks: RoomReadMarking, @unchecked Sendable {
         lock.unlock()
     }
 
-    func markRead(sessionId: String, through sequenceId: Int64) async throws {
+    func answerNext(_ receipt: RoomReadReceipt) {
+        lock.lock()
+        answers.append(receipt)
+        lock.unlock()
+    }
+
+    func markRead(sessionId: String, through sequenceId: Int64) async throws -> RoomReadReceipt {
         lock.lock()
         marks.append(sequenceId)
         let refusal = refusals.isEmpty ? nil : refusals.removeFirst()
+        let answer = refusal != nil || answers.isEmpty ? nil : answers.removeFirst()
         lock.unlock()
         if let refusal { throw refusal }
+        return answer ?? RoomReadReceipt(outcome: .recorded, lastReadSequenceId: sequenceId)
     }
 }
 
@@ -163,7 +185,7 @@ final class RoomReadingTests: XCTestCase {
         marks: ReadMarks? = nil,
         sender: (any RoomMessageSending)? = nil,
         membershipRole: String? = "contributor",
-        onRead: @escaping @MainActor (Int64) -> Void = { _ in }
+        onRead: @escaping @MainActor (Int64, Bool) -> Void = { _, _ in }
     ) -> RoomChatCoordinator {
         RoomChatCoordinator(
             sessionId: "room_1",
@@ -316,7 +338,7 @@ final class RoomReadingTests: XCTestCase {
     // MARK: - Reading
 
     /// Opens the room at the line after 7 (so nothing is read for being at the bottom).
-    private func openAtTheLine(_ marks: ReadMarks, onRead: @escaping @MainActor (Int64) -> Void = { _ in })
+    private func openAtTheLine(_ marks: ReadMarks, onRead: @escaping @MainActor (Int64, Bool) -> Void = { _, _ in })
         async -> RoomChatCoordinator {
         let room = makeRoom(PagedRoom(before: [page(1...10, hasMore: true)]), mark: mark(3, first: 8, lastRead: 7),
                             marks: marks, onRead: onRead)
@@ -435,7 +457,7 @@ final class RoomReadingTests: XCTestCase {
         let marks = ReadMarks()
         marks.refuseNext(.retryable(retryAfterSeconds: nil))
         var heard: [Int64] = []
-        let room = await openAtTheLine(marks) { heard.append($0) }
+        let room = await openAtTheLine(marks) { through, _ in heard.append(through) }
         await onScreen(room, 9)
         clock.advance(by: RoomChatCoordinator.readDwell)
         await waitUntil("tried once") { marks.sent == [9] }
@@ -476,6 +498,125 @@ final class RoomReadingTests: XCTestCase {
         XCTAssertEqual(marks.sent, [9], "closing does not send it either")
     }
 
+    // MARK: - What the server answers (sentinelayer-api #1078)
+
+    private func reply(_ id: String, to seq: Int64 = 9, author: String = "lin-agent") -> RoomReply {
+        RoomReply(id: id, targetSequenceId: seq, authorId: author, text: "On it.",
+                  createdAt: "2026-10-31T14:05:00.000000+00:00")
+    }
+
+    /// The count includes thread replies. With only replies unread (no first unread message) the room opens at its
+    /// latest, and once the reader has stayed there the same position goes again, which reads the replies; caught
+    /// up, nothing more goes for them.
+    func test_a_room_with_only_replies_unread_opens_at_the_bottom_and_reads_them_with_the_same_position() async {
+        let marks = ReadMarks()
+        marks.answerNext(RoomReadReceipt(outcome: .recorded, lastReadSequenceId: 10, caughtUp: true))
+        var heard: [String] = []
+        let room = makeRoom(PagedRoom(before: [page(1...10, hasMore: true)]), mark: mark(4, first: nil, lastRead: 10),
+                            marks: marks) { through, caughtUp in
+            heard.append("\(through)\(caughtUp ? " caught up" : "")")
+        }
+        room.resume()
+        await waitUntil("the dwell at the bottom started") { clock.waiting > 0 }
+        XCTAssertNil(underTheLine(room.state), "no unread message: no line")
+        XCTAssertEqual(room.state.openPosition(reopening: false), .latest)
+        clock.advance(by: RoomChatCoordinator.readDwell)
+        await waitUntil("the same position again") { marks.sent == [10] }
+        await waitUntil("the room list hears it caught up") { heard == ["10 caught up"] }
+
+        room.send(.readerAtBottom(false))
+        room.send(.readerAtBottom(true))
+        clock.advance(by: 5)
+        await settle()
+        XCTAssertEqual(marks.sent, [10], "caught up: nothing more for the replies")
+        room.pause()
+    }
+
+    /// A reply from someone else, while the reader is at the bottom, goes as the same position again; not the first
+    /// read of the replies (that is history), not your own reply, and not while the reader is up the room.
+    func test_a_new_reply_at_the_bottom_sends_the_same_position_again() async {
+        let marks = ReadMarks()
+        let transport = PagedRoom(before: [page(1...10, hasMore: true)], actions: [
+            RoomActionsPage(replies: [reply("r1")]),
+            RoomActionsPage(replies: [reply("r1"), reply("r2", author: "human-sam")]),
+            RoomActionsPage(replies: [reply("r1"), reply("r2", author: "human-sam"), reply("r3")]),
+            RoomActionsPage(replies: [reply("r1"), reply("r2", author: "human-sam"), reply("r3"), reply("r4")])
+        ])
+        let room = makeRoom(transport, mark: mark(0, first: nil, lastRead: 10), marks: marks)
+        await open(room)
+        await waitUntil("the replies read once") { transport.repliesRead == 1 }
+        clock.advance(by: 5)
+        await settle()
+        XCTAssertEqual(marks.sent, [], "nothing unread and nothing new")
+
+        await room.refreshActions(force: true)
+        clock.advance(by: 5)
+        await settle()
+        XCTAssertEqual(marks.sent, [], "your own reply is never unread")
+
+        await room.refreshActions(force: true)
+        await waitUntil("the dwell at the bottom started") { clock.waiting > 0 }
+        clock.advance(by: RoomChatCoordinator.readDwell)
+        await waitUntil("the same position again") { marks.sent == [10] }
+
+        room.send(.readerAtBottom(false))
+        await room.refreshActions(force: true)
+        clock.advance(by: 5)
+        await settle()
+        XCTAssertEqual(marks.sent, [10], "up the room, a reply waits")
+        room.send(.readerAtBottom(true))
+        await waitUntil("the dwell at the bottom started") { clock.waiting > 0 }
+        clock.advance(by: RoomChatCoordinator.readDwell)
+        await waitUntil("back at the bottom, it goes") { marks.sent == [10, 10] }
+        room.pause()
+    }
+
+    /// A no-op answer (`updated: false` from your own cursor): nothing moved, and the server holds a position past
+    /// the one told. That is what counts as read from then on.
+    func test_a_no_op_answer_moves_nothing_but_counts_what_the_server_holds() async {
+        let marks = ReadMarks()
+        marks.answerNext(RoomReadReceipt(outcome: .unchanged, lastReadSequenceId: 12))
+        var heard: [String] = []
+        let room = await openAtTheLine(marks) { through, caughtUp in
+            heard.append("\(through)\(caughtUp ? " caught up" : "")")
+        }
+        await onScreen(room, 9)
+        clock.advance(by: RoomChatCoordinator.readDwell)
+        await waitUntil("told") { marks.sent == [9] }
+        await waitUntil("the room list hears what the server holds") { heard == ["12"] }
+
+        room.send(.messageOnScreen(id: "evt-10", isOnScreen: true))
+        clock.advance(by: 5)
+        await settle()
+        XCTAssertEqual(marks.sent, [9], "10 is behind what the server holds")
+        room.pause()
+    }
+
+    /// Only your own signed-in session moves your badge. Any other credential is answered `updated: false` with
+    /// `read_cursor_requires_signed_in_session`: not recorded, so the room list keeps its count, and the room tells the
+    /// server nothing more while it is open, nor as it closes.
+    func test_a_read_the_server_does_not_record_is_not_news_and_nothing_more_is_sent() async {
+        let marks = ReadMarks()
+        marks.answerNext(RoomReadReceipt(body: Data(
+            (#"{"ok":true,"updated":false,"lastReadSequenceId":null,"actorKind":null,"actorId":null,"#
+             + #""reason":"read_cursor_requires_signed_in_session"}"#).utf8)))
+        var heard: [Int64] = []
+        let room = await openAtTheLine(marks) { through, _ in heard.append(through) }
+        await onScreen(room, 9)
+        clock.advance(by: RoomChatCoordinator.readDwell)
+        await waitUntil("told once") { marks.sent == [9] }
+        await settle()
+
+        room.send(.messageOnScreen(id: "evt-10", isOnScreen: true))
+        room.send(.readerAtBottom(true))
+        clock.advance(by: 5)
+        await settle()
+        room.pause()
+        await settle()
+        XCTAssertEqual(marks.sent, [9])
+        XCTAssertEqual(heard, [], "the room list keeps its count")
+    }
+
     // MARK: - Opening the room that is already open
 
     func test_picking_the_open_room_again_keeps_it_where_you_are() {
@@ -491,13 +632,19 @@ final class RoomReadingTests: XCTestCase {
 }
 
 private actor BadgedRooms: SessionTransport {
+    private let unread: String
+
+    init(unread: String = #"{"count":5,"firstUnreadSequenceId":4811}"#) {
+        self.unread = unread
+    }
+
     func listSessions(includeArchived: Bool, limit: Int, cursor: String?) async throws -> SessionListPage {
         let json = """
         {"sessions":[{"sessionId":"room-a","status":"active","archiveStatus":"active","visibility":"private",
         "membershipRole":"owner","title":"Room A","summaryText":null,"summaryGeneratedAt":null,"summaryModel":null,
         "agentCount":2,"eventCount":41,"totalCostUsd":0,"createdAt":null,"lastActivityAt":null,"expiresAt":null,
         "killedAt":null,"templateName":null,"codebasePath":null,"s3ArchivePath":null,
-        "online":{"humans":1,"agents":2},"lastReadSequenceId":4810,"unread":{"count":5,"firstUnreadSequenceId":4811}}],
+        "online":{"humans":1,"agents":2},"lastReadSequenceId":4810,"unread":\(unread)}],
         "count":1,"include_archived":false,"next_cursor":null,"has_more":false}
         """
         return try JSONDecoder().decode(SessionListPage.self, from: Data(json.utf8))
@@ -545,5 +692,22 @@ final class SessionListReadTests: XCTestCase {
         XCTAssertEqual(sessions.state.rows.first?.activity.unread, 0,
                        "a count the server made before your read stays cleared when the list is read again")
         watching.cancel()
+    }
+
+    /// Thread replies alone (a count with no first unread message) clear when a read caught up on the room, not for a
+    /// read further on. The list's next read counts again: replies posted since show.
+    func test_a_badge_of_replies_alone_clears_when_the_read_caught_up() async throws {
+        let sessions = SessionListCoordinator(repository: SessionRepository(
+            transport: BadgedRooms(unread: #"{"count":3,"firstUnreadSequenceId":null}"#)))
+        await sessions.refreshSessions().value
+        XCTAssertEqual(sessions.state.rows.first?.activity.unread, 3)
+
+        sessions.noteRead(sessionId: "room-a", through: 4815)
+        XCTAssertEqual(sessions.state.rows.first?.activity.unread, 3, "further on is not a read of the replies")
+        sessions.noteRead(sessionId: "room-a", through: 4815, caughtUp: true)
+        XCTAssertEqual(sessions.state.rows.first?.activity.unread, 0, "caught up")
+
+        await sessions.refreshSessions().value
+        XCTAssertEqual(sessions.state.rows.first?.activity.unread, 3, "counted after the read: replies since then show")
     }
 }

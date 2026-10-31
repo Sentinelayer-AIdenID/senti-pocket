@@ -86,11 +86,13 @@ final class SessionRowActivityTests: XCTestCase {
         return try JSONDecoder().decode(SessionSummary.self, from: Data(json.utf8))
     }
 
-    private func row(_ summary: SessionSummary, readThrough: Int64? = nil) -> SessionRowPresentation? {
+    private func row(_ summary: SessionSummary, readThrough: Int64? = nil, caughtUp: Bool = false)
+        -> SessionRowPresentation? {
         SessionListPresentationState(
             sessions: [summary], includesArchived: false, hasMore: false,
             provenance: .network(lastUpdated: Date(timeIntervalSince1970: 1_000)),
-            readThrough: readThrough.map { ["room-a": $0] } ?? [:]
+            readThrough: readThrough.map { ["room-a": $0] } ?? [:],
+            caughtUp: caughtUp ? ["room-a"] : []
         ).rows.first
     }
 
@@ -123,6 +125,31 @@ final class SessionRowActivityTests: XCTestCase {
         XCTAssertEqual(behind.activity.unread, 5, "a read behind the first unread leaves the count")
         XCTAssertEqual(behind.firstUnreadSequenceId, 4811)
         XCTAssertEqual(behind.lastReadSequenceId, 4810)
+    }
+
+    /// sentinelayer-api #1078: `unread` is null until the person's first signed-in read after the deploy, and for a
+    /// page whose read of the counts timed out. Null is no badge, never an error; who is online still shows.
+    func test_a_null_unread_shows_no_badge() throws {
+        let shown = try XCTUnwrap(row(try session(#","online":{"humans":1,"agents":0},"lastReadSequenceId":null,"#
+                                                  + #""unread":null"#)))
+        XCTAssertEqual(shown.activity, RoomListActivity(humansOnline: 1, agentsOnline: 0, unread: 0))
+        XCTAssertNil(RoomListActivity.badgeText(for: shown.activity.unread))
+        XCTAssertNil(shown.firstUnreadSequenceId)
+        XCTAssertNil(shown.lastReadSequenceId)
+    }
+
+    /// The count includes thread replies. Replies alone have no first unread message: the count shows, and a read
+    /// that caught up on the room since it was counted clears it. Unread messages still clear only by position.
+    func test_a_count_of_replies_alone_clears_once_this_phone_caught_up() throws {
+        let replies = try session(#","lastReadSequenceId":4810,"unread":{"count":3,"firstUnreadSequenceId":null}"#)
+        XCTAssertEqual(try XCTUnwrap(row(replies)).activity.unread, 3, "replies alone still show")
+        XCTAssertEqual(try XCTUnwrap(row(replies, readThrough: 4900)).activity.unread, 3,
+                       "a read further on is not a read of the replies")
+        XCTAssertEqual(try XCTUnwrap(row(replies, caughtUp: true)).activity.unread, 0, "caught up since")
+
+        let messages = try session(badges)
+        XCTAssertEqual(try XCTUnwrap(row(messages, readThrough: 4800, caughtUp: true)).activity.unread, 5,
+                       "a first unread past the read is news, whatever the replies")
     }
 
     func test_no_count_means_no_place_to_open_at() throws {

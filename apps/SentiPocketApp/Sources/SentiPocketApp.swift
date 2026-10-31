@@ -761,7 +761,9 @@ private struct AuthenticatedRootView: View {
             readMarker: roomReadMarker,
             reader: messageReader,
             onRenamed: { sessions.send(.refreshSessions) },
-            onRead: { sessionId, sequence in sessions.noteRead(sessionId: sessionId, through: sequence) },
+            onRead: { sessionId, sequence, caughtUp in
+                sessions.noteRead(sessionId: sessionId, through: sequence, caughtUp: caughtUp)
+            },
             onReauthenticationRequired: invalidateProtectedAuthentication
         )
     }

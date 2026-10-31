@@ -145,7 +145,7 @@ struct RoomChatScreen: View {
         readMarker: (any RoomReadMarking)? = nil,
         reader: MessageReader,
         onRenamed: @escaping @MainActor () -> Void = {},
-        onRead: @escaping @MainActor (String, Int64) -> Void = { _, _ in },
+        onRead: @escaping @MainActor (_ sessionId: String, _ through: Int64, _ caughtUp: Bool) -> Void = { _, _, _ in },
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.route = route
@@ -187,7 +187,7 @@ struct RoomChatScreen: View {
             directory: ticketExtras,
             readMark: route.readMark,
             readMarker: readMarker,
-            onRead: { [sessionId = route.sessionId] sequence in onRead(sessionId, sequence) },
+            onRead: { [sessionId = route.sessionId] sequence, caughtUp in onRead(sessionId, sequence, caughtUp) },
             onReauthenticationRequired: onReauthenticationRequired
         ))
         _artifacts = StateObject(wrappedValue: RoomArtifactsCoordinator(sessionId: route.sessionId, transport: transport))

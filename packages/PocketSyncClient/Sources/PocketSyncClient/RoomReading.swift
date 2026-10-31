@@ -13,7 +13,9 @@ public struct RoomReadMark: Hashable, Sendable {
         self.lastReadSequenceId = lastReadSequenceId.flatMap { $0 > 0 ? $0 : nil }
     }
 
-    /// Where the room opens: the first unread message, when there is one to open at.
+    /// Where the room opens: the first unread message, when there is one to open at. The count includes thread
+    /// replies, which have no place in the room of their own: with only replies unread there is no first unread
+    /// message, and the room opens at its latest.
     public var opensAt: Int64? {
         guard unreadCount > 0, let first = firstUnreadSequenceId else { return nil }
         // A first unread at or behind what you have read is a stale count: nothing to open at.
@@ -54,6 +56,58 @@ public enum RoomOpening: Equatable, Sendable {
     }
 }
 
+/// What the server answered when told how far you have read a room (`PUT /sessions/{id}/read-cursor`).
+public struct RoomReadReceipt: Equatable, Sendable {
+    public enum Outcome: Equatable, Sendable {
+        /// Your badge cursor moved, or the thread replies so far now count as read.
+        case recorded
+        /// The server already held this position or a later one, and nothing was left to catch up: nothing changed.
+        case unchanged
+        /// Only your own signed-in session moves your badge; the server read the room and moved nothing.
+        case notRecorded
+    }
+
+    /// The server's answer when the credential is not the person's own signed-in session.
+    public static let requiresSignedInSession = "read_cursor_requires_signed_in_session"
+
+    public let outcome: Outcome
+    /// The furthest position the server holds for you, when it said.
+    public let lastReadSequenceId: Int64?
+    /// Nothing the badge counts is left after the position, thread replies included.
+    public let caughtUp: Bool
+
+    public init(outcome: Outcome, lastReadSequenceId: Int64? = nil, caughtUp: Bool = false) {
+        self.outcome = outcome
+        self.lastReadSequenceId = lastReadSequenceId.flatMap { $0 > 0 ? $0 : nil }
+        self.caughtUp = outcome == .notRecorded ? false : caughtUp
+    }
+
+    /// Read from a successful answer's body: `{ok, updated, lastReadSequenceId, actorKind, actorId, caughtUp}`, or
+    /// `updated: false` with no actor and a `reason` when the credential cannot move the badge. A body without those
+    /// fields (an older server) counts as recorded, as any success did before.
+    public init(body: Data?) {
+        guard let body, !body.isEmpty,
+              let object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] else {
+            self.init(outcome: .recorded)
+            return
+        }
+        let reason = object["reason"] as? String
+        let updated = object["updated"] as? Bool
+        let actorKind = object["actorKind"] as? String
+        let lastRead = (object["lastReadSequenceId"] as? NSNumber)?.int64Value
+        let caughtUp = object["caughtUp"] as? Bool ?? false
+        let outcome: Outcome
+        if reason == Self.requiresSignedInSession || (updated == false && actorKind == nil && reason != nil) {
+            outcome = .notRecorded
+        } else if updated == false {
+            outcome = .unchanged
+        } else {
+            outcome = .recorded
+        }
+        self.init(outcome: outcome, lastReadSequenceId: lastRead, caughtUp: caughtUp)
+    }
+}
+
 /// How far you have read a room, told to the server forward only and at most once every `interval` (the server keeps
 /// the furthest it is told, so a late or repeated request is harmless; this keeps them few). Pure: the room's
 /// coordinator runs the timers and the requests.
@@ -68,6 +122,10 @@ public struct RoomReadCursor: Equatable, Sendable {
     private var lastSentAt: TimeInterval?
     /// Failed requests in a row: each one doubles the wait before the next.
     private var failures = 0
+    /// The position waiting is one the server may hold already, sent again for the thread replies (`readAgain`).
+    private var again = false
+    /// The request on its way is such a repeat.
+    private var inFlightIsAgain = false
 
     /// At most one request this often, as the web sends them (sentinelayer-api #1078; the route allows 120 a minute).
     public static let interval: TimeInterval = 1.5
@@ -88,6 +146,14 @@ public struct RoomReadCursor: Equatable, Sendable {
         guard sequence > furthest else { return false }
         pending = sequence
         return true
+    }
+
+    /// Thread replies have no place in the room of their own: the server counts them read when it is told a position
+    /// with nothing unread after it, the same position again included. So, at the bottom with replies unread, the
+    /// furthest position (or `sequence`, if further) goes again, once, on the same interval as any other.
+    public mutating func readAgain(through sequence: Int64) {
+        pending = max(furthest, sequence)
+        again = true
     }
 
     /// What to do next.
@@ -112,7 +178,9 @@ public struct RoomReadCursor: Equatable, Sendable {
             if elapsed >= 0, elapsed < gap { return .wait(gap - elapsed) }
         }
         inFlight = position
+        inFlightIsAgain = again
         pending = nil
+        again = false
         lastSentAt = now
         return .send(position)
     }
@@ -121,25 +189,34 @@ public struct RoomReadCursor: Equatable, Sendable {
     public mutating func flush(at now: TimeInterval) -> Int64? {
         guard let position = pending else { return nil }
         inFlight = position
+        inFlightIsAgain = again
         pending = nil
+        again = false
         lastSentAt = now
         return position
     }
 
-    /// The server took `sequence`.
-    public mutating func sent(_ sequence: Int64) {
+    /// The server took `sequence`, and holds `serverHolds` (its furthest for you) when it said.
+    public mutating func sent(_ sequence: Int64, serverHolds: Int64? = nil) {
         if inFlight == sequence { inFlight = nil }
-        confirmed = max(confirmed, sequence)
+        confirmed = max(confirmed, sequence, serverHolds ?? 0)
         failures = 0
-        if let position = pending, position <= confirmed { pending = nil }
+        if let position = pending, position <= confirmed, !again { pending = nil }
     }
 
     /// Sending `sequence` failed. A failure worth retrying (no connection, the server busy) keeps it waiting, unless
-    /// something further is already on its way or waiting, and makes the next wait longer; any other drops it.
+    /// something further is already on its way or waiting, and makes the next wait longer; any other drops it. A
+    /// repeat for the thread replies waits again too, unless a newer position is waiting, which reads them as well.
     public mutating func failed(_ sequence: Int64, retryable: Bool) {
+        let wasAgain = inFlight == sequence && inFlightIsAgain
         if inFlight == sequence { inFlight = nil }
         guard retryable else { return }
         failures += 1
-        if sequence > max(confirmed, inFlight ?? 0) { pending = max(pending ?? 0, sequence) }
+        if sequence > max(confirmed, inFlight ?? 0) {
+            pending = max(pending ?? 0, sequence)
+        } else if wasAgain, pending == nil {
+            pending = sequence
+            again = true
+        }
     }
 }

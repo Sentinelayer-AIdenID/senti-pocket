@@ -82,8 +82,10 @@ public struct SessionListPresentationState: Equatable, Sendable {
     }
 
     /// Projects an already validated repository snapshot without manufacturing a wire response.
-    /// - Parameter readThrough: how far this phone has read each room since, as the server confirmed it (by session
-    ///   id). A count the server made before that read is stale and shows no badge (`SessionRowPresentation`).
+    /// - Parameters:
+    ///   - readThrough: how far this phone has read each room since, as the server confirmed it (by session id). A
+    ///     count the server made before that read is stale and shows no badge (`SessionRowPresentation`).
+    ///   - caughtUp: rooms this phone caught up on, thread replies included, since these rows were counted.
     public init(
         sessions: [SessionSummary],
         resultCount: Int? = nil,
@@ -92,7 +94,8 @@ public struct SessionListPresentationState: Equatable, Sendable {
         provenance: SessionPresentationProvenance,
         isRefreshing: Bool = false,
         failure: SessionLoadFailure? = nil,
-        readThrough: [String: Int64] = [:]
+        readThrough: [String: Int64] = [:],
+        caughtUp: Set<String> = []
     ) {
         let reportedCount = resultCount ?? sessions.count
         let ids = sessions.map(\.sessionId)
@@ -109,7 +112,10 @@ public struct SessionListPresentationState: Equatable, Sendable {
         let canPresentRows = identitiesAreValid && countIsValid && sourceAllowsContent && failureAllowsContent
 
         self.rows = canPresentRows
-            ? sessions.map { SessionRowPresentation($0, readThrough: readThrough[$0.sessionId]) }
+            ? sessions.map {
+                SessionRowPresentation($0, readThrough: readThrough[$0.sessionId],
+                                       caughtUp: caughtUp.contains($0.sessionId))
+            }
             : []
         self.resultCount = canPresentRows ? reportedCount : 0
         self.includesArchived = includesArchived
@@ -140,11 +146,14 @@ public struct SessionRowPresentation: Equatable, Identifiable, Sendable {
     /// How far you have read the room: the server's mark, or further where this phone has read since.
     public let lastReadSequenceId: Int64?
 
-    /// - Parameter readThrough: how far this phone has read the room since the list was counted, as the server
-    ///   confirmed it. The server's unread messages all come at or after its first unread, so a first unread at or
-    ///   behind that point means the count was made before the read: no badge until the server counts again. One
-    ///   after it is news the read did not cover, and shows.
-    fileprivate init(_ session: SessionSummary, readThrough: Int64?) {
+    /// - Parameters:
+    ///   - readThrough: how far this phone has read the room since the list was counted, as the server confirmed it.
+    ///     The server's unread messages all come at or after its first unread, so a first unread at or behind that
+    ///     point means the count was made before the read: no badge until the server counts again. One after it is
+    ///     news the read did not cover, and shows.
+    ///   - caughtUp: this phone caught up on the room since it was counted. A count with no first unread message is
+    ///     thread replies alone (the count includes them), which that read covered.
+    fileprivate init(_ session: SessionSummary, readThrough: Int64?, caughtUp: Bool = false) {
         self.id = OpaqueUTF8Identity(session.sessionId)
         self.sessionId = session.sessionId
         self.title = session.title.pocketNonblank ?? "Untitled session"
@@ -158,7 +167,7 @@ public struct SessionRowPresentation: Equatable, Identifiable, Sendable {
         self.roomTypeLabel = Self.roomTypeLabel(session.roomType)
         let readHere = readThrough ?? 0
         let first = session.unread?.firstUnreadSequenceId
-        let staleCount = first.map { $0 <= readHere } ?? false
+        let staleCount = first.map { $0 <= readHere } ?? caughtUp
         let unread = staleCount ? 0 : (session.unread?.count ?? 0)
         self.activity = RoomListActivity(
             humansOnline: session.online?.humans,

@@ -123,8 +123,15 @@ final class RoomChatCoordinator: ObservableObject {
     /// How far you have read, told to the server forward only and at most every `RoomReadCursor.interval`.
     private var readCursor: RoomReadCursor
     private let readMarker: (any RoomReadMarking)?
-    /// The server took a further read: the room list's count for this room, made before it, is stale.
-    private let onRead: @MainActor (Int64) -> Void
+    /// The server took a read, holding you read through the position, and caught up (nothing it counts left after
+    /// it, thread replies included) when it said so: the room list's count for this room, made before it, is stale.
+    private let onRead: @MainActor (_ through: Int64, _ caughtUp: Bool) -> Void
+    /// The server counts something here as unread that no further position can read: thread replies, which have no
+    /// place in the room of their own. The room list's count says so when the room opens, and a reply from someone
+    /// else says so again; the same position, sent again at the bottom, reads them.
+    private var repliesUnread: Bool
+    /// The server answered that this credential cannot move the badge: nothing more is sent while the room is open.
+    private var readNotRecorded = false
     private var readWait: Task<Void, Never>?
     /// Rows on screen waiting out the dwell before they count as read, each with its appearance: a row that left and
     /// came back starts again.
@@ -199,13 +206,14 @@ final class RoomChatCoordinator: ObservableObject {
         directory: (any RoomTicketExtrasReading)? = nil,
         readMark: RoomReadMark? = nil,
         readMarker: (any RoomReadMarking)? = nil,
-        onRead: @escaping @MainActor (Int64) -> Void = { _ in },
+        onRead: @escaping @MainActor (_ through: Int64, _ caughtUp: Bool) -> Void = { _, _ in },
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.attachmentFetcher = attachmentFetcher
         self.directory = directory
         self.readMark = readMark
         self.readCursor = RoomReadCursor(confirmed: readMark?.lastReadSequenceId)
+        self.repliesUnread = (readMark?.unreadCount ?? 0) > 0
         // Only a member's reading is told (sentinelayer-api #1078): the server takes a read from anyone who may view
         // the room, and would make someone passing through a public room from a link a member of it.
         self.readMarker = (membershipRole ?? "").isEmpty ? nil : readMarker
@@ -806,6 +814,12 @@ final class RoomChatCoordinator: ObservableObject {
         if hasReadReplies, !unseen.isEmpty {
             onNewReplies?(unseen)
             arrivalFeedback(unseen.map { ($0.authorId, $0.text) })
+            // A reply from someone else is unread on the server until a position is sent after it: at the bottom,
+            // the same one goes again (your own replies never count).
+            if unseen.contains(where: { !ownAuthorIds.contains($0.authorId.lowercased()) }) {
+                repliesUnread = true
+                readAtBottomAfterDwell()
+            }
         }
         hasReadReplies = true
         // Replies stay as rows too (newest revision wins), the newest few thousand.
@@ -1361,7 +1375,7 @@ final class RoomChatCoordinator: ObservableObject {
     /// so the room list's badge follows what you read. A row that flashes past while the room opens or scrolls never
     /// counts, and reading only moves forward.
     private func readWhenSeen(_ message: RoomMessage, isOnScreen: Bool) {
-        guard readMarker != nil else { return }
+        guard marksReading else { return }
         guard isOnScreen else {
             readAppearances[message.id] = nil
             return
@@ -1380,20 +1394,29 @@ final class RoomChatCoordinator: ObservableObject {
     }
 
     /// At the bottom of the live room, once the reader has stayed there for the dwell, the room is read through its
-    /// newest message. That covers messages with no row of their own (a call's turns, folded into its card).
+    /// newest message. That covers messages with no row of their own (a call's turns, folded into its card). With
+    /// thread replies unread and no newer message, the same position goes again, which reads the replies.
     private func readAtBottomAfterDwell() {
-        guard readMarker != nil, readerAtBottom, !timeline.hasMoreNewer,
-              let newest = timeline.newestSequence, newest > readCursor.furthest else { return }
+        guard marksReading, readerAtBottom, !timeline.hasMoreNewer,
+              let newest = timeline.newestSequence, newest > readCursor.furthest || repliesUnread else { return }
         let wait = UUID()
         bottomRead = wait
         Task { [weak self] in
             await self?.sleep(Self.readDwell)
-            guard let self, self.bottomRead == wait, self.readerAtBottom, !self.timeline.hasMoreNewer,
-                  let newest = self.timeline.newestSequence else { return }
+            guard let self, self.bottomRead == wait, self.marksReading, self.readerAtBottom,
+                  !self.timeline.hasMoreNewer, let newest = self.timeline.newestSequence else { return }
             self.bottomRead = nil
-            self.read(through: newest)
+            if newest > self.readCursor.furthest {
+                self.read(through: newest)
+            } else if self.repliesUnread {
+                self.readCursor.readAgain(through: newest)
+                self.sendRead()
+            }
         }
     }
+
+    /// A member's room, and the server has not said this credential cannot move the badge.
+    private var marksReading: Bool { readMarker != nil && !readNotRecorded }
 
     private func read(through sequence: Int64) {
         guard readCursor.read(through: sequence) else { return }
@@ -1402,7 +1425,7 @@ final class RoomChatCoordinator: ObservableObject {
 
     /// Sends the furthest position read when the cursor allows, after its interval since the last one.
     private func sendRead() {
-        guard let readMarker else { return }
+        guard let readMarker, !readNotRecorded else { return }
         switch readCursor.next(at: now().timeIntervalSinceReferenceDate) {
         case .idle:
             return
@@ -1422,18 +1445,31 @@ final class RoomChatCoordinator: ObservableObject {
     private func deliverRead(_ sequence: Int64, with readMarker: any RoomReadMarking) {
         let sessionId = self.sessionId
         Task { [weak self] in
-            var retryable: Bool?
+            var receipt: RoomReadReceipt?
+            var retryable = false
             do {
-                try await readMarker.markRead(sessionId: sessionId, through: sequence)
+                receipt = try await readMarker.markRead(sessionId: sessionId, through: sequence)
             } catch {
-                if case .retryable? = error as? RoomSendError { retryable = true } else { retryable = false }
+                if case .retryable? = error as? RoomSendError { retryable = true }
             }
             guard let self else { return }
-            if let retryable {
+            guard let receipt else {
                 self.readCursor.failed(sequence, retryable: retryable)
-            } else {
-                self.readCursor.sent(sequence)
-                self.onRead(sequence)
+                self.sendRead()
+                return
+            }
+            switch receipt.outcome {
+            case .notRecorded:
+                // Not this person's own signed-in session: the server moved nothing, and nothing would move later.
+                self.readCursor.failed(sequence, retryable: false)
+                self.readNotRecorded = true
+                self.readWait?.cancel()
+                self.readWait = nil
+                return
+            case .recorded, .unchanged:
+                self.readCursor.sent(sequence, serverHolds: receipt.lastReadSequenceId)
+                if receipt.caughtUp { self.repliesUnread = false }
+                self.onRead(max(sequence, receipt.lastReadSequenceId ?? 0), receipt.caughtUp)
             }
             self.sendRead()
         }
@@ -1444,7 +1480,8 @@ final class RoomChatCoordinator: ObservableObject {
     private func flushRead() {
         readAppearances.removeAll()
         bottomRead = nil
-        guard let readMarker, let sequence = readCursor.flush(at: now().timeIntervalSinceReferenceDate) else { return }
+        guard let readMarker, !readNotRecorded,
+              let sequence = readCursor.flush(at: now().timeIntervalSinceReferenceDate) else { return }
         deliverRead(sequence, with: readMarker)
     }
 
