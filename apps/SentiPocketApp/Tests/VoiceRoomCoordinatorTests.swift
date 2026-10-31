@@ -1097,7 +1097,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
 
     // MARK: - Ending a turn on sound, and carrying it on
 
-    /// Carter (10-31): calls should feel live. The recognizer hands words over a beat after the voice, and the pause
+    /// Calls should feel live. The recognizer hands words over a beat after the voice, and the pause
     /// was timed from the words, so it ran that beat longer. It is timed from the voice now: 1.4 s, or 0.8 s after a
     /// finished sentence.
     func test_a_turn_ends_on_the_pause_after_your_voice_even_when_the_words_come_late() async {
@@ -1161,7 +1161,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         await room.hangUp()
     }
 
-    /// Carter (10-31): a pause mid-thought ended the turn, and what came next was lost or went alone. Listening stays
+    /// A pause mid-thought used to end the turn, and what came next was lost or went alone. Listening stays
     /// on a moment after a turn goes, and what you say there joins it: one turn in the call, and in the room words that
     /// carry it on, addressed the same way.
     func test_what_you_say_just_after_a_turn_goes_joins_it() async {
@@ -1327,7 +1327,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         await room.hangUp()
     }
 
-    /// Carter (10-30) wanted a finished turn sent within about 600 ms. The endpoint is asked 0.3 s after the voice
+    /// A finished turn should be sent within about 600 ms. The endpoint is asked 0.3 s after the voice
     /// stops, before the recognizer's last words have settled, and a sure enough answer ends the turn at once. The
     /// line is 0.6 unless the call is given another.
     func test_the_endpoint_is_asked_0_3_s_after_the_voice_stops() async {
