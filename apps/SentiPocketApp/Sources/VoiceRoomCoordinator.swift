@@ -41,6 +41,9 @@ final class VoiceRoomCoordinator: ObservableObject {
     private let voiceLine: (any VoiceLining)?
     /// The server said it has no voice line: the rest of the call waits for the agents' own answers.
     private var voiceLineOff = false
+    /// Whether the call has stopped asking the voice line (the server has none, or it is not yours). A turn can only
+    /// know it once the last ask's answer has landed: one taken sooner asks again.
+    var voiceLineIsOff: Bool { voiceLineOff }
     private var voiceLineAsk: Task<Void, Never>?
     /// After a 429 the voice line rests until then (the server's Retry-After).
     private var voiceLineRestsUntil = Date.distantPast

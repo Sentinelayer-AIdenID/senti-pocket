@@ -27,8 +27,13 @@ private final class FakeVoiceLine: VoiceLining, @unchecked Sendable {
     private let lock = NSLock()
     private var answers: [Result<[String], VoiceLineError>]
     private(set) var asks: [(agentId: String?, text: String, ringCallId: String?, history: [VoiceLineHistory])] = []
+    /// How long each answer takes to come back, as a server's would.
+    private let delay: TimeInterval
 
-    init(_ answers: [Result<[String], VoiceLineError>]) { self.answers = answers }
+    init(_ answers: [Result<[String], VoiceLineError>], delay: TimeInterval = 0) {
+        self.answers = answers
+        self.delay = delay
+    }
 
     var askCount: Int { lock.withLock { asks.count } }
 
@@ -38,15 +43,24 @@ private final class FakeVoiceLine: VoiceLining, @unchecked Sendable {
             asks.append((agentId, text, ringCallId, history))
             return answers.isEmpty ? .failure(.failed) : answers.removeFirst()
         }
+        let delay = self.delay
         return AsyncThrowingStream { continuation in
-            switch answer {
-            case .success(let sentences):
-                for sentence in sentences { continuation.yield(.sentence(sentence)) }
-                continuation.yield(.done(speaker: (agentId ?? "room") + " (voice)"))
-                continuation.finish()
-            case .failure(let error):
-                continuation.finish(throwing: error)
+            let reply = {
+                switch answer {
+                case .success(let sentences):
+                    for sentence in sentences { continuation.yield(.sentence(sentence)) }
+                    continuation.yield(.done(speaker: (agentId ?? "room") + " (voice)"))
+                    continuation.finish()
+                case .failure(let error):
+                    continuation.finish(throwing: error)
+                }
             }
+            guard delay > 0 else { return reply() }
+            let answering = Task {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                reply()
+            }
+            continuation.onTermination = { _ in answering.cancel() }
         }
     }
 }
@@ -163,6 +177,8 @@ final class VoiceLineCallTests: XCTestCase {
         await room.hangUp()
     }
 
+    /// Once the server's "no voice line" has landed, no later turn asks. The test waits for it to land rather than a
+    /// fixed 20 ms: on a slow hosted runner it had not landed by then, and the next turn rightly asked again.
     func test_without_a_voice_line_on_the_server_the_call_stops_asking() async {
         let line = FakeVoiceLine([.failure(.unavailable)])
         let listener = LineListener(), speaker = LineSpeaker(), poster = LinePoster()
@@ -170,12 +186,33 @@ final class VoiceLineCallTests: XCTestCase {
         room.begin()
         await turn(room, listener, "Status?")
         await until("asked once") { line.askCount == 1 }
-        try? await Task.sleep(nanoseconds: 20_000_000)
+        await until("the call knows the server has no voice line") { room.voiceLineIsOff }
         await turn(room, listener, "Anything else?")
         await until("the second turn is kept") { room.state.turns.filter(\.isYou).count == 2 }
-        try? await Task.sleep(nanoseconds: 20_000_000)
+        await turn(room, listener, "And now?")
+        await until("the third turn is kept") { room.state.turns.filter(\.isYou).count == 3 }
         XCTAssertEqual(line.askCount, 1, "no more asks once the server says it has none")
+        XCTAssertTrue(room.voiceLineIsOff)
         XCTAssertTrue(speaker.spoken.isEmpty)
+        await room.hangUp()
+    }
+
+    /// The server's "no voice line" can come back after the next turn: that turn asks again, since nothing has said
+    /// otherwise yet, and once an answer lands no turn asks.
+    func test_a_late_no_voice_line_stops_the_asking_once_it_lands() async {
+        let line = FakeVoiceLine([.failure(.unavailable), .failure(.unavailable)], delay: 0.4)
+        let listener = LineListener(), speaker = LineSpeaker(), poster = LinePoster()
+        let room = call(line, listener: listener, speaker: speaker, poster: poster)
+        room.begin()
+        await turn(room, listener, "Status?")
+        await until("asked once") { line.askCount == 1 }
+        await turn(room, listener, "Anything else?")
+        await until("asked again before any answer came back") { line.askCount == 2 }
+        XCTAssertFalse(room.voiceLineIsOff)
+        await until("the answer lands") { room.voiceLineIsOff }
+        await turn(room, listener, "And now?")
+        await until("the third turn is kept") { room.state.turns.filter(\.isYou).count == 3 }
+        XCTAssertEqual(line.askCount, 2, "no ask after the answer landed")
         await room.hangUp()
     }
 }
