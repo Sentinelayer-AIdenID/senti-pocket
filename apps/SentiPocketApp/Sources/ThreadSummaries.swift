@@ -8,9 +8,10 @@ import FoundationModels
 /// even open the thread"). Written on the phone by Apple's on-device model where the phone has it (iOS 26 with Apple
 /// Intelligence): private, free, and nothing leaves the phone. Elsewhere there is none, and the row reads as before.
 ///
-/// Its shape is Carter's (10-30, "The Perfect Engineering Swarm Summary Spec"): what the thread set out to do, what
-/// changed, how (who did which steps, with which tools), what was checked and how it came out, and the record (the
-/// commits, pull requests and builds it names). The record is copied from the thread, never written by the model.
+/// Its parts: what the thread set out to do, what changed, how (who did which steps, with which tools), what was
+/// checked and how it came out, and the record (the commits, pull requests and builds it names). The record is copied
+/// from the thread, never written by the model. They read as one paragraph of prose, without labels, with when, who
+/// and how much of the thread it covers in the line under it.
 protocol ThreadSummarizing: Sendable {
     func summarize(thread lines: [String]) async -> String?
 }
@@ -28,12 +29,17 @@ enum ThreadSummaryInput {
 
     /// "author: words" for each reply, newest last, the box signature and Markdown left out.
     static func lines(_ replies: [RoomChatMessageInput]) -> [String] {
-        let ordered = replies.sorted { ($0.date ?? .distantPast, $0.sequenceId) < ($1.date ?? .distantPast, $1.sequenceId) }
-        return ordered.suffix(maximumLines).map { reply in
+        read(replies).map { reply in
             let words = RoomChatQuiet.line(reply.text)
             let cut = words.count > maximumLineLength ? String(words.prefix(maximumLineLength)) + "…" : words
             return "\(reply.authorName): \(cut)"
         }
+    }
+
+    /// The replies the model reads: the newest `maximumLines`, oldest first.
+    static func read(_ replies: [RoomChatMessageInput]) -> [RoomChatMessageInput] {
+        let ordered = replies.sorted { ($0.date ?? .distantPast, $0.sequenceId) < ($1.date ?? .distantPast, $1.sequenceId) }
+        return Array(ordered.suffix(maximumLines))
     }
 
     /// The model's answer as a row shows it: one paragraph, no Markdown markers, bounded; nil when empty.
@@ -75,15 +81,36 @@ enum ThreadSummaryInput {
         return found
     }
 
-    /// The summary as the room keeps it: one labeled line per part, the objective first (the row shows it alone).
+    /// The summary as the room keeps it: one paragraph, the parts in order as sentences without labels, a part the
+    /// model had nothing for ("None mentioned") left out, and the ids the thread names last.
     static func composed(objective: String, changed: String, how: String, checks: String, record: [String]) -> String? {
         guard let objective = cleaned(objective) else { return nil }
-        var parts = ["**Objective:** \(objective)"]
-        if let changed = cleaned(changed) { parts.append("**What changed:** \(changed)") }
-        if let how = cleaned(how) { parts.append("**How:** \(how)") }
-        if let checks = cleaned(checks) { parts.append("**Checks:** \(checks)") }
-        if !record.isEmpty { parts.append("**Record:** " + record.map { "`\($0)`" }.joined(separator: ", ")) }
-        return parts.joined(separator: "\n")
+        var parts = [objective] + [changed, how, checks].compactMap { cleaned($0) }
+        if !record.isEmpty { parts.append("The thread names \(SummaryProse.list(record)).") }
+        let prose = SummaryProse.sentences(parts)
+        return prose.isEmpty ? nil : prose
+    }
+
+    /// The line under the summary, about the replies the model read: when they were written, who wrote them (most
+    /// replies first), and, when the thread is longer than the model reads, how many of its replies that is.
+    static func details(_ replies: [RoomChatMessageInput], now: Date = Date(), calendar: Calendar = .current) -> [String] {
+        let covered = read(replies)
+        var counts: [String: Int] = [:]
+        var order: [String] = []
+        for reply in covered {
+            if counts[reply.authorName] == nil { order.append(reply.authorName) }
+            counts[reply.authorName, default: 0] += 1
+        }
+        let ranked = order.enumerated()
+            .sorted { (counts[$0.element] ?? 0, -$0.offset) > (counts[$1.element] ?? 0, -$1.offset) }
+            .map(\.element)
+        let dates = covered.compactMap(\.date)
+        var parts = [SummaryProse.when(from: dates.min(), to: dates.max(), now: now, calendar: calendar),
+                     SummaryProse.people(ranked)].compactMap { $0 }
+        if replies.count > covered.count {
+            parts.append("From the latest \(covered.count) of \(replies.count) replies")
+        }
+        return parts
     }
 }
 

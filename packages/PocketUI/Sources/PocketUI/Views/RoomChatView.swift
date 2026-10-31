@@ -130,7 +130,7 @@ public struct RoomChatView: View {
                 if readingAloudId == open.id {
                     send(.stopReadingAloud)
                 } else {
-                    send(.readAloud(id: open.id, text: open.summary))
+                    send(.readAloud(id: open.id, text: open.summary.prose))
                 }
             }
         }
@@ -716,10 +716,10 @@ private final class RoomBottomWatch {
     var isActive = true
 }
 
-/// A thread summary opened whole: its read-aloud id (so the sheet shows Stop while it is read) and its text.
+/// A thread summary opened whole: its read-aloud id (so the sheet shows Stop while it is read) and the summary.
 private struct OpenThreadSummary: Identifiable {
     let id: String
-    let summary: String
+    let summary: SummaryReading
 }
 
 /// A scroll view that starts at its bottom, where the iOS version can say so.
@@ -749,11 +749,11 @@ private struct RoomMessageRowView: View {
     /// A background line opened in place.
     var isExpanded = false
     /// What happened in this row's thread, summarized on the phone, for a box line or a thread's newest reply.
-    var threadSummary: String?
+    var threadSummary: SummaryReading?
     /// That summary is being read aloud.
     var isReadingSummary = false
-    /// Open the whole summary: its text and what reads it aloud.
-    var onOpenSummary: (String, String) -> Void = { _, _ in }
+    /// Open the whole summary: the summary and what reads it aloud.
+    var onOpenSummary: (SummaryReading, String) -> Void = { _, _ in }
     let onOpenReplyTarget: (Int64) -> Void
     var onOpenCheckpoint: (RoomChatMessageRow) -> Void = { _ in }
     var onEdit: (RoomChatMessageRow) -> Void = { _ in }
@@ -1011,7 +1011,7 @@ private struct RoomMessageRowView: View {
             if let threadSummary, row.trail.map({ $0.count > 1 }) == true {
                 HStack(alignment: .top, spacing: 0) {
                     Button { openWholeSummary() } label: {
-                        ThreadSummaryText(text: threadSummary)
+                        ThreadSummaryText(summary: threadSummary)
                     }
                     .buttonStyle(.plain)
                     .accessibilityHint("Opens the whole summary")
@@ -1035,7 +1035,7 @@ private struct RoomMessageRowView: View {
         if isReadingSummary {
             send(.stopReadingAloud)
         } else if let threadSummary, let id = row.summaryReadAloudId {
-            send(.readAloud(id: id, text: threadSummary))
+            send(.readAloud(id: id, text: threadSummary.prose))
         }
     }
 

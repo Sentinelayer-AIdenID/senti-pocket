@@ -752,6 +752,8 @@ private struct AuthenticatedRootView: View {
             search: roomSearch,
             reader: messageReader,
             onRenamed: { sessions.send(.refreshSessions) },
+            // What the room list has of the room's summary, for a member who reads it without making one.
+            savedSummary: sessions.state.rows.first { UTF8ExactIdentity.matches($0.sessionId, route.sessionId) }?.summary,
             onReauthenticationRequired: invalidateProtectedAuthentication
         )
     }

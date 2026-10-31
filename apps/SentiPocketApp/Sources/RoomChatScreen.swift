@@ -87,6 +87,8 @@ struct RoomChatScreen: View {
     /// Posting spoken turns and the transcript, as you; nil where you cannot post.
     private let voicePoster: (any VoiceRoomPosting)?
     private let summaryGenerator: (any RoomSummaryGenerating)?
+    /// The room's saved summary as the room list has it: what a member who isn't the owner reads.
+    private let savedSummary: String?
     private let inviter: (any RoomInviting)?
     private let ticketWriter: (any RoomTicketWriting)?
     private let ticketLeases: any TicketLeaseStoring
@@ -118,6 +120,7 @@ struct RoomChatScreen: View {
         search: (any RoomSearching)? = nil,
         reader: MessageReader,
         onRenamed: @escaping @MainActor () -> Void = {},
+        savedSummary: String? = nil,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.route = route
@@ -130,6 +133,7 @@ struct RoomChatScreen: View {
         self.ticketAnswerSender = route.membershipRole.lowercased() == "viewer" ? nil : sender
         self.voicePoster = route.membershipRole.lowercased() == "viewer" ? nil : sender as? any VoiceRoomPosting
         self.summaryGenerator = sender as? any RoomSummaryGenerating
+        self.savedSummary = savedSummary
         self.inviter = sender as? any RoomInviting
         self.ticketWriter = ticketWriter
         self.ticketLeases = ticketLeases
@@ -402,6 +406,13 @@ struct RoomChatScreen: View {
         ["owner", "admin", "contributor"].contains(route.membershipRole.lowercased())
     }
 
+    /// Only the room's owner makes its summary (the API enforces it); every other member reads the saved one. A role
+    /// not known yet leaves it to the server.
+    private var makesSummary: Bool {
+        let role = route.membershipRole.lowercased()
+        return role == "owner" || role.isEmpty
+    }
+
     /// Only owners and admins decide agent requests (the API enforces it; the screen follows it).
     private var decidesAdmissions: Bool {
         !route.isBreakout && admissionsTransport != nil && admissionDecider != nil
@@ -518,12 +529,13 @@ struct RoomChatScreen: View {
                     .accessibilityIdentifier("pocket.room.breakouts.open")
                 }
             }
-            if summaryGenerator != nil {
+            // The owner makes the room's summary; every other member reads the one it has.
+            if summaryGenerator != nil, makesSummary || savedSummary != nil {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
                         showsSummary = true
                     } label: {
-                        Label("Summarize this room", systemImage: "text.badge.star")
+                        Label(makesSummary ? "Summarize this room" : "Room summary", systemImage: "text.badge.star")
                     }
                     .accessibilityIdentifier("pocket.room.summary.open")
                 }
@@ -675,7 +687,8 @@ struct RoomChatScreen: View {
         .onChange(of: choosesVoicePartner) { shown in if shown { CrashReporter.shared.note("talk opened") } }
         .sheet(isPresented: $showsSummary) {
             if let summaryGenerator {
-                RoomSummarySheet(sessionId: route.sessionId, roomTitle: coordinator.state.title, generator: summaryGenerator,
+                RoomSummarySheet(sessionId: route.sessionId, roomTitle: coordinator.state.title,
+                                 generator: makesSummary ? summaryGenerator : nil, saved: savedSummary,
                                  reader: reader, onClose: { showsSummary = false },
                                  onReport: coordinator.state.composer.canPost ? { coordinator.send(.sendMessage(text: $0)) } : nil)
             }
