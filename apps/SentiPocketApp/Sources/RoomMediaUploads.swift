@@ -552,6 +552,12 @@ final class RoomMediaUploadCoordinator: ObservableObject {
                     sha256: prepared.sha256, clientAttachmentId: item.id
                 ))
                 if item.withdrawn { return }
+                if !answer.duplicate, item.previewDone {
+                    // A new upload under the same id: the server released the earlier one (a failed check, a storage
+                    // cap, a reservation that ran out) and deleted its preview with it, so the preview goes up again.
+                    item.previewDone = false
+                    persist(item)
+                }
                 let parentId = answer.attachment.attachmentId
                 if let preview = prepared.preview, !item.previewDone {
                     item.previewDone = await sendPreview(preview, of: parentId, uploader: uploader)
@@ -1000,6 +1006,7 @@ final class RoomMediaUploadCoordinator: ObservableObject {
             }
             switch refusal.code {
             case "ATTACHMENT_VERIFICATION_FAILED": return "The upload didn't check out. Retry to send it again."
+            case "ATTACHMENT_RELEASED": return "This upload wasn't finished in time. Retry to send it again."
             case "ATTACHMENT_REFERENCE_REJECTED":
                 return "These files can't be sent any more: an upload not sent within a day expires. Discard this message and pick them again."
             case "ATTACHMENT_CONFLICT": return "This file changed since it was first uploaded. Discard it and pick it again."

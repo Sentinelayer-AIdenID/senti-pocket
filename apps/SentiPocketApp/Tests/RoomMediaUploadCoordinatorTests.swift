@@ -59,6 +59,9 @@ private final class FakeUploader: RoomMediaUploading, @unchecked Sendable {
     private var _deletes: [String] = []
     private var _failingPuts = 0
     private var _failingPosts = 0
+    private var _releasingCompletes = 0
+    /// The uploads the server holds, by id: init again with one of these is a duplicate.
+    private var _rows: Set<String> = []
     /// The API links previews (`previewOf` echoed); an older API would not.
     var linksPreviews = true
     /// Inits of originals wait here (after they are logged).
@@ -110,6 +113,12 @@ private final class FakeUploader: RoomMediaUploading, @unchecked Sendable {
         get { locked { _failingPosts } }
         set { locked { _failingPosts = newValue } }
     }
+    /// This many completes of originals find the upload released by the server (a failed check, a storage cap, a
+    /// reservation that ran out): it and its preview are gone, and init makes them anew.
+    var releasingCompletes: Int {
+        get { locked { _releasingCompletes } }
+        set { locked { _releasingCompletes = newValue } }
+    }
 
     func initUpload(sessionId: String, request: RoomMediaInitRequest) async throws -> RoomMediaInitAnswer {
         await shake()
@@ -117,7 +126,9 @@ private final class FakeUploader: RoomMediaUploading, @unchecked Sendable {
         log("init:\(request.clientAttachmentId)")
         if request.previewOf == nil { try? await initGate?.wait() }
         if let initError { throw initError }
+        let duplicate = locked { !_rows.insert(request.clientAttachmentId).inserted }
         return RoomMediaInitAnswer(
+            duplicate: duplicate,
             attachment: RoomMediaAttachment(attachmentId: request.clientAttachmentId, filename: request.filename,
                                             contentType: request.contentType, sizeBytes: request.sizeBytes,
                                             sha256: request.sha256, status: "initiated",
@@ -153,7 +164,10 @@ private final class FakeUploader: RoomMediaUploading, @unchecked Sendable {
 
     func deleteUpload(sessionId: String, attachmentId: String) async {
         await shake()
-        locked { _deletes.append(attachmentId) }
+        locked { () -> Void in
+            _deletes.append(attachmentId)
+            _rows.remove(attachmentId)
+        }
         log("delete:\(attachmentId)")
     }
 
@@ -163,6 +177,18 @@ private final class FakeUploader: RoomMediaUploading, @unchecked Sendable {
             log("complete-asked:\(attachmentId)")
             try? await completeGate?.wait()
             await completeDelay?()
+        }
+        let released = locked { () -> Bool in
+            guard !attachmentId.hasSuffix(".pv"), _releasingCompletes > 0 else { return false }
+            _releasingCompletes -= 1
+            _rows.remove(attachmentId)
+            _rows.remove(RoomMediaRules.previewClientId(for: attachmentId))
+            return true
+        }
+        if released {
+            log("released:\(attachmentId)")
+            // What the uploader makes of complete's 404 for an upload the server released.
+            throw RoomMediaUploadError.refused(RoomMediaAPIRefusal(status: 404, code: "ATTACHMENT_RELEASED"))
         }
         locked { _completes.append(attachmentId) }
         log("complete:\(attachmentId)")
@@ -716,6 +742,39 @@ final class RoomMediaUploadCoordinatorTests: XCTestCase {
         XCTAssertEqual(media.board.outgoing.first?.canRetry, false, "posting it again cannot help")
         XCTAssertTrue(media.board.outgoing.first?.statusText.contains("expires") == true,
                       media.board.outgoing.first?.statusText ?? "")
+    }
+
+    /// The server releases an upload it could not finish (a failed check, a storage cap, or here a reservation that ran
+    /// out) and its preview with it. The retry makes both anew; a retry of an upload the server still holds sends no
+    /// second preview.
+    func test_an_upload_the_server_released_goes_up_again_with_its_preview() async throws {
+        let uploader = FakeUploader()
+        uploader.releasingCompletes = 1
+        let media = coordinator(uploader)
+        media.add([try source("clip.mov")])
+        media.perform(.send(text: ""))
+        let clientId = try XCTUnwrap(media.board.outgoing.first?.id)
+        await until("failed", boards: [media.board]) { media.board.outgoing.first?.isFailed == true }
+        XCTAssertEqual(media.board.outgoing.first?.canRetry, true, "init again makes it anew")
+        XCTAssertEqual(media.board.outgoing.first?.items.first?.phase,
+                       .failed(reason: "This upload wasn't finished in time. Retry to send it again.", canRetry: true))
+        media.perform(.retry(clientId: clientId))
+        await until("sent", boards: [media.board]) { media.board.outgoing.first?.status == .sent }
+        XCTAssertEqual(uploader.inits.filter { $0.previewOf != nil }.count, 2, "its poster goes up again with it")
+        XCTAssertEqual(uploader.completes, ["pm_test_000001.pv", "pm_test_000001.pv", "pm_test_000001"])
+
+        // The bytes did not get there, and the server still holds the upload and its preview: no second preview.
+        let held = FakeUploader()
+        held.failingPuts = 1
+        let room = coordinator(held, session: "room_held")
+        room.add([try source("clip.mov")])
+        room.perform(.send(text: ""))
+        let heldId = try XCTUnwrap(room.board.outgoing.first?.id)
+        await until("failed", boards: [room.board]) { room.board.outgoing.first?.isFailed == true }
+        room.perform(.retry(clientId: heldId))
+        await until("sent", boards: [room.board]) { room.board.outgoing.first?.status == .sent }
+        XCTAssertEqual(held.inits.filter { $0.previewOf != nil }.count, 1, "its preview is sent once")
+        XCTAssertEqual(held.inits.filter { $0.previewOf == nil }.count, 2, "the same upload, asked for again")
     }
 
     func test_a_preview_goes_up_linked_to_its_file() async throws {
