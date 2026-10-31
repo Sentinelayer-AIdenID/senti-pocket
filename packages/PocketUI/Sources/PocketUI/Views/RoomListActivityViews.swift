@@ -23,7 +23,6 @@ struct RoomOnlineCounts: View {
     private func count(_ value: Int, symbol: String) -> some View {
         HStack(spacing: 2) {
             Image(systemName: symbol)
-                .imageScale(.small)
             Text(verbatim: "\(value)")
                 .monospacedDigit()
         }
