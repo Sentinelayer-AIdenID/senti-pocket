@@ -103,7 +103,7 @@ final class RoomCallsTests: XCTestCase {
         XCTAssertEqual(completions, 2)
     }
 
-    /// Carter (10-30): "When you called me I answered but it didn't work". The voice room takes the answered call
+    /// An agent's call you answer talks at once. The voice room takes the answered call
     /// once CallKit gives it audio, inside the system call, which stays up until the voice room hangs up.
     func test_answering_tells_the_room_and_opens_it_and_the_voice_room_talks_inside_the_system_call() async {
         let api = FakeCallsAPI(details: details())
