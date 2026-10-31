@@ -141,8 +141,10 @@ public struct VoiceRoomState: Equatable, Sendable {
     public var ringStopped = false
     /// Why the agent called, when you answered its call; shown until someone speaks.
     public var about: String?
-    /// Muted on the phone's call screen: nothing you say is heard or posted until unmuted.
+    /// Muted, by the panel's Mute or on the phone's call screen: nothing you say is heard or posted until unmuted.
     public var isMuted = false
+    /// The call is also on the phone's own call screen (an agent's call you answered), whose Mute is this one.
+    public var hasCallScreen = false
 
     public init(
         phase: Phase = .ready,
@@ -190,6 +192,16 @@ public struct VoiceRoomState: Equatable, Sendable {
         if case .speaking(let speaker) = phase { return speaker }
         return nil
     }
+
+    /// What the panel's Mute button says (Carter, Voice Lab #56359: "I don't see a mute button in this when I call
+    /// you"). As on the phone's own call screen, it always shows a crossed-out mic, filled while muted.
+    public var muteLabel: String { isMuted ? "Unmute" : "Mute" }
+
+    /// What the panel says while muted. In a call the phone's call screen also shows, the call screen is muted too.
+    public var mutedStatus: String { hasCallScreen ? "Muted on the call screen" : "Muted" }
+
+    /// The Talk button takes a turn: never while muted, or once the call is ending.
+    public var canTalk: Bool { !isMuted && phase != .ending && phase != .ended }
 }
 
 public enum VoiceRoomIntent: Equatable, Sendable {
@@ -201,7 +213,8 @@ public enum VoiceRoomIntent: Equatable, Sendable {
     case setHandsFree(Bool)
     /// Bring another agent into the call.
     case add(String)
-    /// Muted (or unmuted) on the phone's own call screen: the microphone stops listening.
+    /// The panel's Mute (or Unmute): the microphone stops listening. In a call on the phone's call screen, the call
+    /// screen is asked, so both show the same.
     case setMuted(Bool)
     case hangUp
 }
