@@ -330,19 +330,14 @@ final class SummaryShowMoreTests: XCTestCase {
         }
         .padding(20))
         defer { HostedSummary.close(window) }
-        HostedSummary.pump(0.8)
-        let found = HostedSummary.identifiers(in: window)
-        XCTAssertTrue(found.contains("preview.long"), "\(found)")
-        guard let more = HostedSummary.element("preview.long.more", in: window) else {
-            return XCTFail("a cut summary offers no Show more: \(found)")
+        guard let more = HostedSummary.wait(for: "preview.long.more", in: window) else {
+            return XCTFail("a cut summary offers no Show more: \(HostedSummary.identifiers(in: window))")
         }
         XCTAssertTrue(more.accessibilityActivate())
-        HostedSummary.pump(1.2)
-        let sheet = try XCTUnwrap(window.rootViewController?.presentedViewController, "Show more opened nothing")
-        let text = HostedSummary.element("pocket.summary.whole.text", in: sheet.view)
+        let text = HostedSummary.wait(for: "pocket.summary.whole.text", in: window)
         XCTAssertEqual(text?.accessibilityLabel, whole, "the whole summary, read-only")
-        XCTAssertNil(HostedSummary.element("pocket.room.summary.refresh", in: sheet.view), "no Refresh where it is read-only")
-        sheet.dismiss(animated: false)
+        XCTAssertNil(HostedSummary.element("pocket.room.summary.refresh", in: window), "no Refresh where it is read-only")
+        window.rootViewController?.presentedViewController?.dismiss(animated: false)
         HostedSummary.pump(0.3)
     }
 
@@ -355,10 +350,10 @@ final class SummaryShowMoreTests: XCTestCase {
         }
         .padding(20))
         defer { HostedSummary.close(window) }
-        HostedSummary.pump(0.8)
-        let found = HostedSummary.identifiers(in: window)
-        XCTAssertTrue(found.contains("preview.short"), "\(found)")
-        XCTAssertFalse(found.contains("preview.short.more"), "\(found)")
+        XCTAssertNotNil(HostedSummary.wait(for: "preview.short", in: window), "\(HostedSummary.identifiers(in: window))")
+        // The cut is measured once the text is laid out: a few frames more.
+        HostedSummary.pump(0.5)
+        XCTAssertNil(HostedSummary.element("preview.short.more", in: window), "\(HostedSummary.identifiers(in: window))")
     }
 }
 
@@ -382,9 +377,8 @@ final class RoomSummarySheetTests: XCTestCase {
     func test_a_member_who_isnt_the_owner_reads_the_saved_summary_without_refresh() throws {
         let window = try sheet(nil, saved: "ada-agent ran 2*3 GB and lin-agent merged it.")
         defer { HostedSummary.close(window) }
-        HostedSummary.pump(1.0)
-        XCTAssertEqual(HostedSummary.element("pocket.room.summary.text", in: window)?.accessibilityLabel,
-                       "ada-agent ran 2*3 GB and lin-agent merged it.")
+        XCTAssertNotNil(HostedSummary.wait(for: "pocket.room.summary.text", in: window,
+                                           label: "ada-agent ran 2*3 GB and lin-agent merged it."))
         XCTAssertNil(HostedSummary.element("pocket.room.summary.refresh", in: window), "only the owner can Refresh")
         XCTAssertNil(HostedSummary.element("pocket.room.summary.failure", in: window))
     }
@@ -397,17 +391,16 @@ final class RoomSummarySheetTests: XCTestCase {
                                                           details: ["AI summary"]))
         let window = try sheet(Generator(first: basic, later: written))
         defer { HostedSummary.close(window) }
-        HostedSummary.pump(1.0)
+        XCTAssertNotNil(HostedSummary.wait(for: "pocket.room.summary.pending", in: window), "it says the AI summary is coming")
         XCTAssertNotNil(HostedSummary.element("pocket.room.summary.refresh", in: window), "the owner can Refresh")
-        XCTAssertNotNil(HostedSummary.element("pocket.room.summary.pending", in: window), "it says the AI summary is coming")
         XCTAssertEqual(HostedSummary.element("pocket.room.summary.text", in: window)?.accessibilityLabel,
                        "lin-agent posted a review.")
         XCTAssertNil(HostedSummary.element("pocket.room.summary.note", in: window), "no reason while it is still being written")
 
-        // The first read again comes after RoomSummaryPolling's first delay.
-        HostedSummary.pump(RoomSummaryPolling.delays[0] + 1.5)
-        XCTAssertEqual(HostedSummary.element("pocket.room.summary.text", in: window)?.accessibilityLabel,
-                       "lin-agent reviewed the cache and ada-agent agreed.")
+        // The sheet reads it again after RoomSummaryPolling's first delay, and the AI summary takes its place.
+        XCTAssertNotNil(HostedSummary.wait(for: "pocket.room.summary.text", in: window,
+                                           label: "lin-agent reviewed the cache and ada-agent agreed.",
+                                           timeout: RoomSummaryPolling.delays[0] + 13))
         XCTAssertNil(HostedSummary.element("pocket.room.summary.pending", in: window))
     }
 
@@ -416,9 +409,8 @@ final class RoomSummarySheetTests: XCTestCase {
                                 isFallback: true, fallbackNote: SummaryProse.fallbackNote("budget exhausted"))
         let window = try sheet(Generator(first: basic, later: nil))
         defer { HostedSummary.close(window) }
-        HostedSummary.pump(1.0)
-        XCTAssertEqual(HostedSummary.element("pocket.room.summary.note", in: window)?.accessibilityLabel,
-                       SummaryProse.fallbackNote("budget exhausted"))
+        XCTAssertNotNil(HostedSummary.wait(for: "pocket.room.summary.note", in: window,
+                                           label: SummaryProse.fallbackNote("budget exhausted")))
         XCTAssertNil(HostedSummary.element("pocket.room.summary.pending", in: window))
     }
 }
@@ -435,9 +427,24 @@ enum HostedSummary {
         return unsafeBitCast(symbol, to: (@convention(c) (Bool) -> Void).self)
     }()
 
+    /// The first window a test process shows under UI automation can come up without its accessibility elements while
+    /// the accessibility runtime loads, so the first hosted test shows a throwaway window first, until its text reads.
+    private static var warmedUp = false
+
     static func host<Content: View>(_ content: Content) throws -> UIWindow {
         let setAutomation = try XCTUnwrap(Self.setAutomation, "UI automation could not be turned on")
         setAutomation(true)
+        if !warmedUp {
+            warmedUp = true
+            let warmUp = try window(for: Text("Warm-up").accessibilityIdentifier("hosted.warm-up"))
+            wait(for: "hosted.warm-up", in: warmUp, timeout: 10)
+            warmUp.isHidden = true
+            pump(0.2)
+        }
+        return try window(for: content)
+    }
+
+    private static func window<Content: View>(for content: Content) throws -> UIWindow {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let window = UIWindow(windowScene: scene)
         window.frame = CGRect(x: 0, y: 0, width: 375, height: 667)
@@ -458,10 +465,28 @@ enum HostedSummary {
         while Date() < end { RunLoop.main.run(until: min(end, Date().addingTimeInterval(0.02))) }
     }
 
-    /// Every accessibility element under a view: the views, and the elements they hold.
-    static func elements(in root: Any) -> [NSObject] {
+    /// Runs the main run loop until the window shows an element with this identifier (and this label, when one is
+    /// given), or the time is up. A hosted runner draws a test process's first sheet late, so a test waits for what it
+    /// expects instead of pausing for a fixed time.
+    @discardableResult
+    static func wait(for identifier: String, in window: UIWindow, label: String? = nil,
+                     timeout: TimeInterval = 15) -> NSObject? {
+        let end = Date().addingTimeInterval(timeout)
+        while true {
+            // Drawn first, then read.
+            pump(0.1)
+            if let found = element(identifier, in: window), label == nil || found.accessibilityLabel == label {
+                return found
+            }
+            if Date() >= end { return nil }
+        }
+    }
+
+    /// Every accessibility element in a window and in whatever it presents: the views, and the elements they hold.
+    static func elements(in window: UIWindow) -> [NSObject] {
         var found: [NSObject] = []
-        var queue: [Any] = [root]
+        var queue: [Any] = [window]
+        if let presented = window.rootViewController?.presentedViewController?.view { queue.append(presented) }
         var seen = Set<ObjectIdentifier>()
         while !queue.isEmpty {
             guard let object = queue.removeFirst() as? NSObject, seen.insert(ObjectIdentifier(object)).inserted else { continue }
@@ -484,11 +509,11 @@ enum HostedSummary {
         return object.value(forKey: "accessibilityIdentifier") as? String
     }
 
-    static func identifiers(in root: Any) -> [String] {
-        elements(in: root).compactMap { identifier(of: $0) }.filter { !$0.isEmpty }
+    static func identifiers(in window: UIWindow) -> [String] {
+        elements(in: window).compactMap { identifier(of: $0) }.filter { !$0.isEmpty }
     }
 
-    static func element(_ wanted: String, in root: Any) -> NSObject? {
-        elements(in: root).first { identifier(of: $0) == wanted }
+    static func element(_ wanted: String, in window: UIWindow) -> NSObject? {
+        elements(in: window).first { identifier(of: $0) == wanted }
     }
 }
