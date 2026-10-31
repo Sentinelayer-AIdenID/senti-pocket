@@ -242,8 +242,8 @@ private final class TurnPoster: VoiceRoomPosting, @unchecked Sendable {
     func postCallEnded(sessionId: String, text: String, transcript: VoiceTranscriptAttachment?, clientId: String) async throws {}
 }
 
-/// Carter (10-30): "I thought jev would help us finish everything by 600ms". A short pause asks whether the turn is
-/// over; a sure yes ends it at once, anything else leaves the normal pause in charge.
+/// A finished turn should go within about 600 ms. A short pause asks whether the turn is over; a sure yes ends it at
+/// once, anything else leaves the normal pause in charge.
 @MainActor
 final class VoiceEndpointingTests: XCTestCase {
     private func listening(_ endpointer: FakeEndpointer, _ listener: LineListener, _ poster: TurnPoster) async -> VoiceRoomCoordinator {

@@ -404,8 +404,8 @@ final class VoiceRoomCoordinator: ObservableObject {
     }
 
     /// A short pause: asks whether the words so far are a finished turn, and ends it at once if they are and nothing
-    /// has been said since (Carter, 10-30: "I thought jev would help us finish everything by 600ms"). Unsure, slow or
-    /// unavailable, the normal pause still ends it.
+    /// has been said since, so a finished turn goes within about 600 ms. Unsure, slow or unavailable, the normal pause
+    /// still ends it.
     private func askIfFinished(_ generation: Int) {
         let words = state.partial
         guard let endpointer, !endpointerOff, askedAbout != words,
