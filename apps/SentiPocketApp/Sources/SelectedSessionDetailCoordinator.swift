@@ -115,7 +115,7 @@ final class SelectedSessionDetailCoordinator: ObservableObject {
     private var checkpointOperation: Task<Void, Never>?
     /// A checkpoint opened as the server holds it. Pocket's verified view reads a signed copy through the Pocket
     /// gateway, which was never deployed, and Release builds pin no signing key yet, so that view could only fail
-    /// (Carter, 10-30: "Verified checkpoint · Connection unavailable"). Until signing is live, a checkpoint opens here.
+    /// ("Verified checkpoint · Connection unavailable"). Until signing is live, a checkpoint opens here.
     @Published private(set) var serverCheckpoint: SessionCheckpointRowPresentation?
     private let opensVerifiedCheckpoints: Bool
 

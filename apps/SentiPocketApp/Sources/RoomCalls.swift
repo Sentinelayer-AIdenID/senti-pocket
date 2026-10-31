@@ -118,8 +118,8 @@ struct RoomCallsClient: RoomCallsAPI {
 
 /// The calls agents ring you with, from the doorbell to the room (Carter's P0: agents call you). CallKit rings and
 /// you answer there; the conversation is the room's voice room with the caller, inside the system call, so it talks
-/// as soon as you answer, with the phone locked too (Carter, 10-30: "When you called me I answered but it didn't
-/// work"). Declining, hanging up, and letting it ring out are told to the room through the API.
+/// as soon as you answer, with the phone locked too. Declining, hanging up, and letting it ring out are told to the
+/// room through the API.
 @MainActor
 final class RoomCallDesk: ObservableObject {
     static let shared = RoomCallDesk()
