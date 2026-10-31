@@ -236,12 +236,78 @@ private final class BusyAudio: VoiceRoomAudioSession {
     func deactivate() {}
 }
 
+/// The room's answer to "is this turn finished?", the same every time, and every text it was asked about.
+private final class SureEndpointer: VoiceEndpointing, @unchecked Sendable {
+    private let lock = NSLock()
+    private let done: Double
+    private var _asked: [String] = []
+    var asked: [String] { lock.withLock { _asked } }
+
+    init(_ done: Double) { self.done = done }
+
+    func finished(sessionId: String, text: String, callId: String) async throws -> Double {
+        lock.withLock { _asked.append(text) }
+        return done
+    }
+}
+
+/// The room refuses your first spoken turn and takes the rest.
+private final class FirstTurnLostPoster: VoiceRoomPosting, @unchecked Sendable {
+    private let lock = NSLock()
+    private var refused = false
+    private var _turns: [String] = []
+    var turns: [String] { lock.withLock { _turns } }
+
+    func postCallStarted(sessionId: String, text: String, clientId: String) async throws {}
+
+    func postVoiceTurn(sessionId: String, text: String, clientId: String) async throws {
+        let refuses = lock.withLock { () -> Bool in
+            defer { refused = true }
+            return !refused
+        }
+        if refuses { throw RoomSendError.retryable(retryAfterSeconds: nil) }
+        lock.withLock { _turns.append(text) }
+    }
+
+    func uploadTranscript(sessionId: String, filename: String, markdown: String, clientId: String) async throws -> VoiceTranscriptAttachment {
+        VoiceTranscriptAttachment(attachmentId: "att-3", filename: filename, kind: "text", contentType: "text/markdown",
+                                  sizeBytes: markdown.utf8.count, status: "ready")
+    }
+
+    func postCallEnded(sessionId: String, text: String, transcript: VoiceTranscriptAttachment?, clientId: String) async throws {}
+}
+
 /// A clock only the test moves.
 private final class TestClock: @unchecked Sendable {
     private let lock = NSLock()
     private var current = Date(timeIntervalSince1970: 1_793_300_000)
     var now: Date { lock.withLock { current } }
     func advance(_ seconds: TimeInterval) { lock.withLock { current = current.addingTimeInterval(seconds) } }
+}
+
+/// The microphone's level as the room hears it from the audio tap, on the test's clock: a level every 50 ms.
+@MainActor
+private struct FakeMicrophone {
+    static let step: TimeInterval = 0.05
+    let room: VoiceRoomCoordinator
+    let clock: TestClock
+
+    /// Sound as loud as speech (you, or a fan) for `seconds`, ending on a loud level.
+    func loud(for seconds: TimeInterval) {
+        room.hear(level: 0.8)
+        for _ in 0..<Int((seconds / Self.step).rounded()) {
+            clock.advance(Self.step)
+            room.hear(level: 0.8)
+        }
+    }
+
+    /// A quiet room's level for `seconds`: below speech, so it is not you.
+    func quiet(for seconds: TimeInterval) {
+        for _ in 0..<Int((seconds / Self.step).rounded()) {
+            clock.advance(Self.step)
+            room.hear(level: 0.1)
+        }
+    }
 }
 
 @MainActor
@@ -251,7 +317,9 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
     private func room(with agents: [String], handsFree: Bool = true,
                       listener: FakeListener, speaker: FakeSpeaker, audio: any VoiceRoomAudioSession, ringer: FakeRinger? = nil,
                       callScreen: FakeCallScreen? = nil,
-                      poster: any VoiceRoomPosting, onEnded: @escaping @MainActor () -> Void = {},
+                      poster: any VoiceRoomPosting, endpointer: (any VoiceEndpointing)? = nil,
+                      finishedAt: Double = VoiceRoomCoordinator.finishedAt,
+                      onEnded: @escaping @MainActor () -> Void = {},
                       onRecordFailed: @escaping @MainActor (String) -> Void = { _ in }) -> VoiceRoomCoordinator {
         let clock = self.clock
         let room = VoiceRoomCoordinator(
@@ -265,6 +333,8 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
             ringer: ringer,
             callScreen: callScreen,
             poster: poster,
+            endpointer: endpointer,
+            finishedAt: finishedAt,
             now: { clock.now },
             // Time moves only when a test moves it; the pause watcher just polls.
             sleep: { _ in try? await Task.sleep(nanoseconds: 1_000_000) },
@@ -287,6 +357,23 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 2_000_000)
         }
         XCTFail("timed out waiting for: \(what)")
+    }
+
+    /// Lets the pause watcher look at the clock a few times without moving it.
+    private func settle() async {
+        try? await Task.sleep(nanoseconds: 20_000_000)
+    }
+
+    /// A one-agent call, hands-free and listening, with its microphone.
+    private func listeningCall(_ listener: FakeListener, _ speaker: FakeSpeaker, _ poster: any VoiceRoomPosting,
+                               endpointer: (any VoiceEndpointing)? = nil,
+                               finishedAt: Double = VoiceRoomCoordinator.finishedAt) async
+        -> (VoiceRoomCoordinator, FakeMicrophone) {
+        let room = room(with: ["pocket-forge"], listener: listener, speaker: speaker, audio: FakeAudio(), poster: poster,
+                        endpointer: endpointer, finishedAt: finishedAt)
+        room.begin(rings: false)
+        await until("listening") { listener.partial != nil }
+        return (room, FakeMicrophone(room: room, clock: clock))
     }
 
     func test_a_one_to_one_call_posts_your_turns_to_that_agent_and_reads_only_its_answers() async {
@@ -901,6 +988,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         room.send(.toggleTalk)
         await until("posted") { poster.turns.count == 1 }
         XCTAssertEqual(poster.turns, ["@pocket-forge Now you can hear me"], "only what was said unmuted reaches the room")
+        await room.hangUp()
     }
 
     /// Carter (Voice Lab #56359): in an agent's call answered on the phone's call screen, the panel's Mute is asked of
@@ -1005,5 +1093,289 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         XCTAssertEqual(speaker.spoken.map(\.speaker), ["claude-warden"], "only the agent is read")
         XCTAssertEqual(room.state.turns.filter { !$0.isYou }.map(\.speaker), ["claude-warden"])
         XCTAssertTrue(room.state.turns.filter(\.isHeld).isEmpty, "no cost line took the floor")
+    }
+
+    // MARK: - Ending a turn on sound, and carrying it on
+
+    /// Carter (10-31): calls should feel live. The recognizer hands words over a beat after the voice, and the pause
+    /// was timed from the words, so it ran that beat longer. It is timed from the voice now: 1.4 s, or 0.8 s after a
+    /// finished sentence.
+    func test_a_turn_ends_on_the_pause_after_your_voice_even_when_the_words_come_late() async {
+        let listener = FakeListener(), poster = FakePoster()
+        let (room, microphone) = await listeningCall(listener, FakeSpeaker(), poster)
+        microphone.loud(for: 0.5)
+        listener.say("What about the presence ring")
+        microphone.loud(for: 0.5)
+        // The voice stops here; the last words come 0.2 and 0.4 s later.
+        microphone.quiet(for: 0.2)
+        listener.say("What about the presence ring and")
+        microphone.quiet(for: 0.2)
+        listener.say("What about the presence ring and the dial")
+        microphone.quiet(for: VoiceRoomCoordinator.pauseEndsTurn - 0.5)
+        await settle()
+        XCTAssertTrue(poster.turns.isEmpty, "1.3 s after the voice: not yet")
+        microphone.quiet(for: 0.2)
+        await until("1.5 s after the voice, 1.1 s after the last word") { poster.turns.count == 1 }
+        XCTAssertEqual(poster.turns, ["@pocket-forge What about the presence ring and the dial"])
+        // Timed once the post has returned to the room, which can come after the poster has the turn.
+        await until("post timed") { room.timings.percentile(.endpoint, 0.5) != nil }
+        XCTAssertEqual(room.timings.percentile(.endpoint, 0.5) ?? 0, 1.5, accuracy: 0.01, "end of sound → turn posted")
+        await room.hangUp()
+
+        let next = FakeListener(), nextPoster = FakePoster()
+        let (sentence, nextMicrophone) = await listeningCall(next, FakeSpeaker(), nextPoster)
+        nextMicrophone.loud(for: 0.6)
+        nextMicrophone.quiet(for: 0.3)
+        next.say("Ship it tonight.")
+        nextMicrophone.quiet(for: VoiceRoomCoordinator.pauseAfterSentence - 0.4)
+        await settle()
+        XCTAssertTrue(nextPoster.turns.isEmpty, "0.7 s after the voice: not yet")
+        nextMicrophone.quiet(for: 0.2)
+        await until("0.9 s after the voice, 0.6 s after the words") { nextPoster.turns.count == 1 }
+        XCTAssertEqual(nextPoster.turns, ["@pocket-forge Ship it tonight."])
+        await sentence.hangUp()
+    }
+
+    /// The words are the backstop: while the recognizer still brings new ones (a voice too soft for the level, or a
+    /// slow recognizer), the turn waits, and ends 0.9 s after the last (the 1.4 s pause less the recognizer's 0.5 s).
+    func test_while_new_words_keep_coming_the_turn_waits_for_them() async {
+        let listener = FakeListener(), poster = FakePoster()
+        let (room, microphone) = await listeningCall(listener, FakeSpeaker(), poster)
+        microphone.loud(for: 0.4)
+        listener.say("So the build")
+        for words in ["So the build is", "So the build is green but", "So the build is green but the tests",
+                      "So the build is green but the tests are slow"] {
+            microphone.quiet(for: 0.4)
+            listener.say(words)
+            await settle()
+            XCTAssertTrue(poster.turns.isEmpty, "words still coming: \(words)")
+        }
+        // 1.6 s after the last loud sound, but the words changed just now.
+        let margin = VoiceRoomCoordinator.pauseEndsTurn - VoiceRoomCoordinator.recognizerLag
+        microphone.quiet(for: margin - 0.1)
+        await settle()
+        XCTAssertTrue(poster.turns.isEmpty, "0.8 s after the last word: not yet")
+        microphone.quiet(for: 0.2)
+        await until("ended once the words settled") { poster.turns.count == 1 }
+        XCTAssertEqual(poster.turns, ["@pocket-forge So the build is green but the tests are slow"])
+        await room.hangUp()
+    }
+
+    /// Carter (10-31): a pause mid-thought ended the turn, and what came next was lost or went alone. Listening stays
+    /// on a moment after a turn goes, and what you say there joins it: one turn in the call, and in the room words that
+    /// carry it on, addressed the same way.
+    func test_what_you_say_just_after_a_turn_goes_joins_it() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), poster = FakePoster()
+        let (room, microphone) = await listeningCall(listener, speaker, poster)
+        microphone.loud(for: 0.6)
+        listener.say("What about the presence ring and")
+        microphone.quiet(for: VoiceRoomCoordinator.pauseEndsTurn + 0.1)
+        await until("the pause sent it") { poster.turns.count == 1 }
+        await until("still listening a moment") { listener.starts == 2 && room.state.isListening }
+
+        microphone.quiet(for: 0.8)
+        await settle()
+        XCTAssertTrue(room.state.isListening, "within the moment")
+        microphone.loud(for: 0.4)
+        listener.say("the dial?")
+        microphone.quiet(for: VoiceRoomCoordinator.pauseAfterSentence + 0.1)
+        await until("carried on") { poster.turns.count == 2 }
+        XCTAssertEqual(poster.turns, ["@pocket-forge What about the presence ring and", "@pocket-forge …The dial?"])
+        XCTAssertEqual(room.state.turns.filter(\.isYou).map(\.text), ["What about the presence ring and The dial?"],
+                       "one turn in the call")
+        XCTAssertEqual(room.timings.continued, 1)
+
+        // It listens a moment more; an answer that comes while nothing is heard is read at once.
+        await until("listening a moment more") { listener.starts == 3 && room.state.isListening }
+        room.receive([message("a1", from: "pocket-forge", "The dial ships tonight.", secondsAfterStart: 5)])
+        await until("the answer is read") { room.state.speaker == "pocket-forge" }
+        speaker.finish()
+        await room.hangUp()
+        let closing = poster.endings.first?.text ?? ""
+        XCTAssertTrue(closing.contains("end of sound → turn posted"), closing)
+        XCTAssertTrue(closing.contains("1 continued after a pause"), closing)
+        XCTAssertEqual(poster.uploads.first?.markdown.components(separatedBy: "What about the presence ring").count, 2,
+                       "the transcript has the turn once")
+    }
+
+    /// Just after a turn, a sound may be your next words still on their way through the recognizer: an answer that
+    /// lands then waits for them, and is read once they are sent.
+    func test_an_answer_that_lands_as_you_go_on_waits_for_your_words() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), poster = FakePoster()
+        let (room, microphone) = await listeningCall(listener, speaker, poster)
+        microphone.loud(for: 0.5)
+        listener.say("Can you check the build and")
+        microphone.quiet(for: VoiceRoomCoordinator.pauseEndsTurn + 0.1)
+        await until("sent") { poster.turns.count == 1 }
+        await until("listening a moment") { listener.starts == 2 && room.state.isListening }
+
+        microphone.quiet(for: 0.3)
+        microphone.loud(for: 0.2)
+        room.receive([message("a1", from: "pocket-forge", "Checking now.", secondsAfterStart: 3)])
+        await settle()
+        XCTAssertNil(room.state.speaker, "not read over words on their way")
+        XCTAssertTrue(room.state.isListening)
+        microphone.loud(for: 0.2)
+        listener.say("the tests?")
+        microphone.quiet(for: VoiceRoomCoordinator.pauseAfterSentence + 0.1)
+        await until("carried on") { poster.turns.count == 2 }
+        XCTAssertEqual(poster.turns.last, "@pocket-forge …The tests?")
+        await until("then the answer is read") { room.state.speaker == "pocket-forge" }
+        XCTAssertEqual(listener.cancels, 0, "listening never gave way under you")
+        XCTAssertEqual(listener.starts, 2, "and nothing listens over the answer")
+        speaker.finish()
+        await room.hangUp()
+    }
+
+    /// No barge-in yet: once an answer is read, the moment after your turn is over, and what you say after the answer
+    /// is a new turn.
+    func test_once_an_answer_is_read_what_you_say_next_is_a_new_turn() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), poster = FakePoster()
+        let (room, microphone) = await listeningCall(listener, speaker, poster)
+        microphone.loud(for: 0.5)
+        listener.say("Status please.")
+        microphone.quiet(for: VoiceRoomCoordinator.pauseAfterSentence + 0.1)
+        await until("sent") { poster.turns.count == 1 }
+        await until("listening a moment") { listener.starts == 2 && room.state.isListening }
+        let moment = listener.partial
+        room.receive([message("a1", from: "pocket-forge", "All green.", secondsAfterStart: 3)])
+        await until("the answer is read at once") { room.state.speaker == "pocket-forge" }
+        XCTAssertEqual(listener.cancels, 1, "the moment gave way to the answer")
+        moment?("and the release notes")
+        XCTAssertEqual(room.state.partial, "", "nothing is heard over the answer")
+
+        speaker.finish()
+        await until("listening for a new turn") { listener.starts == 3 && room.state.isListening }
+        microphone.loud(for: 0.4)
+        listener.say("And the release notes?")
+        microphone.quiet(for: VoiceRoomCoordinator.pauseAfterSentence + 0.1)
+        await until("sent") { poster.turns.count == 2 }
+        XCTAssertEqual(poster.turns.last, "@pocket-forge And the release notes?", "a new turn, not carried on")
+        XCTAssertEqual(room.state.turns.filter(\.isYou).map(\.text), ["Status please.", "And the release notes?"])
+        XCTAssertEqual(room.timings.continued, 0)
+        await room.hangUp()
+    }
+
+    /// A fan or a car can be as loud as speech. It never holds a turn past the words' own pause, it joins nothing to a
+    /// turn, and it holds an answer back only a moment.
+    func test_a_noisy_room_is_no_slower_and_never_holds_an_answer_back_for_long() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), poster = FakePoster()
+        let (room, microphone) = await listeningCall(listener, speaker, poster)
+        microphone.loud(for: 0.5)
+        listener.say("Status please.")
+        microphone.loud(for: VoiceRoomCoordinator.pauseAfterSentence - 0.1)
+        await settle()
+        XCTAssertTrue(poster.turns.isEmpty)
+        microphone.loud(for: 0.2)
+        await until("ended on the words' own pause, the fan still going") { poster.turns.count == 1 }
+        await until("listening a moment") { listener.starts == 2 && room.state.isListening }
+
+        microphone.loud(for: 0.2)
+        room.receive([message("a1", from: "pocket-forge", "All green.", secondsAfterStart: 3)])
+        microphone.loud(for: 0.8)
+        await settle()
+        XCTAssertNil(room.state.speaker, "a sound may be your next words: the answer waits a moment")
+        microphone.loud(for: VoiceRoomCoordinator.joinsWithin + VoiceRoomCoordinator.recognizerLag - 1.0 + 0.1)
+        await until("read a little after the moment") { room.state.speaker == "pocket-forge" }
+        XCTAssertEqual(poster.turns.count, 1, "the fan joined nothing")
+        XCTAssertEqual(room.timings.continued, 0)
+        speaker.finish()
+        await room.hangUp()
+    }
+
+    /// Warden (#281), with the moment after a turn: muted, nothing ends a turn, nothing is posted and nothing joins
+    /// the turn that went; unmuted, the next words are a new turn.
+    func test_muted_nothing_ends_a_turn_or_joins_one() async {
+        let listener = FakeListener(), poster = FakePoster()
+        let (room, microphone) = await listeningCall(listener, FakeSpeaker(), poster)
+        microphone.loud(for: 0.4)
+        listener.say("Keep this")
+        let recognizer = listener.partial
+        room.send(.setMuted(true))
+        // What the microphone and the recognizer still deliver while muted is never taken.
+        microphone.loud(for: 0.2)
+        recognizer?("Keep this between us.")
+        microphone.quiet(for: VoiceRoomCoordinator.pauseEndsTurn + VoiceRoomCoordinator.joinsWithin)
+        await settle()
+        XCTAssertTrue(poster.turns.isEmpty, "nothing heard while muted is posted")
+        XCTAssertFalse(room.state.isListening)
+
+        room.send(.setMuted(false))
+        await until("listening once unmuted") { listener.starts == 2 && room.state.isListening }
+        microphone.loud(for: 0.4)
+        listener.say("Status please.")
+        microphone.quiet(for: VoiceRoomCoordinator.pauseAfterSentence + 0.1)
+        await until("sent") { poster.turns.count == 1 }
+        await until("listening a moment") { listener.starts == 3 && room.state.isListening }
+        let moment = listener.partial
+        room.send(.setMuted(true))
+        XCTAssertFalse(room.state.isListening, "muting ends the moment after the turn")
+        microphone.loud(for: 0.2)
+        moment?("and the dial")
+        microphone.quiet(for: VoiceRoomCoordinator.pauseEndsTurn + VoiceRoomCoordinator.joinsWithin)
+        await settle()
+        XCTAssertEqual(poster.turns.count, 1, "nothing joins the turn while muted")
+        XCTAssertEqual(room.timings.continued, 0)
+
+        room.send(.setMuted(false))
+        await until("listening for a new turn") { listener.starts == 4 && room.state.isListening }
+        microphone.loud(for: 0.4)
+        listener.say("New topic.")
+        microphone.quiet(for: VoiceRoomCoordinator.pauseAfterSentence + 0.1)
+        await until("sent") { poster.turns.count == 2 }
+        XCTAssertEqual(poster.turns, ["@pocket-forge Status please.", "@pocket-forge New topic."])
+        await room.hangUp()
+    }
+
+    /// Carter (10-30) wanted a finished turn sent within about 600 ms. The endpoint is asked 0.3 s after the voice
+    /// stops, before the recognizer's last words have settled, and a sure enough answer ends the turn at once. The
+    /// line is 0.6 unless the call is given another.
+    func test_the_endpoint_is_asked_0_3_s_after_the_voice_stops() async {
+        let listener = FakeListener(), poster = FakePoster(), endpointer = SureEndpointer(0.65)
+        let (room, microphone) = await listeningCall(listener, FakeSpeaker(), poster, endpointer: endpointer)
+        microphone.loud(for: 0.6)
+        microphone.quiet(for: 0.1)
+        listener.say("Ship it tonight")
+        microphone.quiet(for: 0.1)
+        await settle()
+        XCTAssertTrue(endpointer.asked.isEmpty, "0.2 s after the voice: too soon")
+        microphone.quiet(for: 0.15)
+        await until("asked 0.35 s after the voice, 0.25 s after the words") { endpointer.asked == ["Ship it tonight"] }
+        await until("0.65 clears the 0.6 line: ended at once") { poster.turns.count == 1 }
+        XCTAssertEqual(room.timings.endedEarly, 1)
+        await room.hangUp()
+
+        let next = FakeListener(), nextPoster = FakePoster(), stricter = SureEndpointer(0.65)
+        let (strict, nextMicrophone) = await listeningCall(next, FakeSpeaker(), nextPoster, endpointer: stricter,
+                                                           finishedAt: 0.7)
+        nextMicrophone.loud(for: 0.6)
+        next.say("Ship it tonight")
+        nextMicrophone.quiet(for: 0.35)
+        await until("asked") { stricter.asked.count == 1 }
+        await settle()
+        XCTAssertTrue(nextPoster.turns.isEmpty, "0.65 is short of a 0.7 line")
+        nextMicrophone.quiet(for: VoiceRoomCoordinator.pauseEndsTurn - 0.35 + 0.1)
+        await until("the normal pause ends it") { nextPoster.turns.count == 1 }
+        XCTAssertEqual(strict.timings.endedEarly, 0)
+        await strict.hangUp()
+    }
+
+    /// No words lost when the room missed the turn: the words that carry it on go with all of it.
+    func test_carrying_on_a_turn_the_room_never_got_sends_all_of_it() async {
+        let listener = FakeListener(), poster = FirstTurnLostPoster()
+        let (room, microphone) = await listeningCall(listener, FakeSpeaker(), poster)
+        microphone.loud(for: 0.5)
+        listener.say("What about the presence ring and")
+        microphone.quiet(for: VoiceRoomCoordinator.pauseEndsTurn + 0.1)
+        await until("the room missed it") { room.state.notice == VoiceRoomCoordinator.turnLost }
+        XCTAssertTrue(poster.turns.isEmpty)
+        await until("listening a moment") { listener.starts == 2 && room.state.isListening }
+        microphone.loud(for: 0.4)
+        listener.say("the dial?")
+        microphone.quiet(for: VoiceRoomCoordinator.pauseAfterSentence + 0.1)
+        await until("all of it went") { poster.turns.count == 1 }
+        XCTAssertEqual(poster.turns, ["@pocket-forge What about the presence ring and The dial?"])
+        await until("it is in the room after all") { room.state.notice == nil }
+        await room.hangUp()
     }
 }

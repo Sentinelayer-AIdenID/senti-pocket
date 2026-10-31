@@ -16,7 +16,9 @@ import PocketVoice
 ///
 /// One thing at a time: while you talk, answers wait; while an answer is read, the next waits. An answer that lands
 /// while the phone is listening but you have not started talking is read at once. Hands-free, listening
-/// comes back after the answers and a pause sends your turn. Hanging up saves the whole transcript to the room as one
+/// comes back after the answers and a pause sends your turn. The pause is timed from when the microphone last heard
+/// you, not from the recognizer's last word, and listening stays on a moment after your turn goes, so what you say
+/// next joins it until an answer starts. Hanging up saves the whole transcript to the room as one
 /// Markdown file on the message that closes the call, which asks the agents for a short summary.
 @MainActor
 final class VoiceRoomCoordinator: ObservableObject {
@@ -49,10 +51,13 @@ final class VoiceRoomCoordinator: ObservableObject {
     /// Asks whether a pause ends the turn (the signal model, through the server); nil without it.
     private let endpointer: (any VoiceEndpointing)?
     private var endpointerOff = false
+    /// How sure the answer must be to end a turn early (`finishedAt` unless the call is given another line).
+    private let finishedLine: Double
     /// The words already asked about in this pause, so one pause is asked about once.
     private var askedAbout: String?
-    /// When the microphone last heard speech-loud sound: the recognizer can lag the voice, so a turn never ends early
-    /// while the microphone still hears you (warden, #276).
+    /// When the microphone last heard speech-loud sound while listening: a pause is timed from it, since the
+    /// recognizer hands words over a beat after they are said, and a turn never ends early while the microphone still
+    /// hears you (warden, #276).
     private var lastLoud: Date?
     /// A microphone level (0 to 1, as the waveform's) this loud is someone speaking.
     static let speakingLevel = 0.35
@@ -72,6 +77,8 @@ final class VoiceRoomCoordinator: ObservableObject {
     private var taken: Set<String> = []
     private var lastHeard: Date?
     private var silenceWatch: Task<Void, Never>?
+    /// Listening just after your turn went: what you say joins that turn, unless nothing is said by `until`.
+    private var joining: (turn: SentTurn, until: Date)?
     private var ringWatch: Task<Void, Never>?
     /// The message that rang the agents: hang-up waits for it, so an end never lands before its start, and a call
     /// whose ring never went out ends without an end message (warden, #267).
@@ -93,18 +100,30 @@ final class VoiceRoomCoordinator: ObservableObject {
     private var floorHolder: (id: String, name: String)?
     private var floorAnnounced = false
 
-    /// A pause this long ends your turn, hands-free.
+    /// A pause this long ends your turn, hands-free, timed from the last sound loud enough to be you talking.
     static let pauseEndsTurn: TimeInterval = 1.4
     /// After words that end a sentence ("." "?" "!"), a shorter pause does.
     static let pauseAfterSentence: TimeInterval = 0.8
+    /// The recognizer hands a word over up to about this long after it is said (the voice comparison, 10-31, put it at
+    /// 0.2–0.5 s). A word that arrives later than this after the last loud sound was said below the microphone's
+    /// speaking level, so it moves the pause on as well: while words keep coming, a turn waits for them.
+    static let recognizerLag: TimeInterval = 0.5
+    /// After a turn goes, listening stays on this long, and what you say joins it (Carter, 10-31: calls should feel
+    /// live and lose no words). A pause mid-thought used to end the turn and drop what came next.
+    static let joinsWithin: TimeInterval = 1.2
+    /// What starts the words that carry on a turn already in the room.
+    static let carriesOn = "…"
     /// A turn never runs past this (the recognizer's own limit is about a minute).
     static let longestTurn: TimeInterval = 50
     /// Answers from just before the call started still count (clocks differ a little).
     static let clockSlack: TimeInterval = 5
     /// After this much silence the phone asks whether the turn is over, and ends it at once when it is.
     static let askAfter: TimeInterval = 0.3
-    /// How sure the answer must be to end a turn early (9 of 10 test phrases right at this line, 10-30).
-    static let finishedAt = 0.7
+    /// How sure the answer must be to end a turn early. The voice comparison (10-31) scored 30 labelled phrases: at
+    /// 0.6, 15 of 16 finished turns end early (13 at 0.7) and none of the 14 unfinished ones is cut off; the highest
+    /// unfinished score was 0.10. It asked for a way to recover a wrong early end before lowering the line: a turn
+    /// ended too soon is now carried on by what you say next.
+    static let finishedAt = 0.6
 
     /// How long the call rings before the line opens without an answer.
     static let ringsFor: TimeInterval = 30
@@ -123,6 +142,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         poster: any VoiceRoomPosting,
         voiceLine: (any VoiceLining)? = nil,
         endpointer: (any VoiceEndpointing)? = nil,
+        finishedAt: Double = VoiceRoomCoordinator.finishedAt,
         ringCallId: String? = nil,
         about: String? = nil,
         now: @escaping @Sendable () -> Date = { Date() },
@@ -144,6 +164,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         self.poster = poster
         self.voiceLine = voiceLine
         self.endpointer = endpointer
+        finishedLine = finishedAt
         self.ringCallId = ringCallId
         self.now = now
         self.sleep = sleep
@@ -304,7 +325,8 @@ final class VoiceRoomCoordinator: ObservableObject {
     }
 
     /// Muted (warden, #281): what was being heard is dropped, not posted, and nothing listens until unmuted. Answers
-    /// are still read. Unmuted, hands-free listening comes back, once the agent has picked up.
+    /// are still read. Unmuted, hands-free listening comes back, once the agent has picked up, for a new turn: muting
+    /// just after a turn went stops anything joining it.
     private func setMuted(_ on: Bool) {
         guard state.isMuted != on else { return }
         state.isMuted = on
@@ -313,6 +335,7 @@ final class VoiceRoomCoordinator: ObservableObject {
             listenGeneration += 1
             silenceWatch?.cancel()
             listener.cancel()
+            joining = nil
             lastHeard = nil
             state.partial = ""
             state.phase = .ready
@@ -344,12 +367,20 @@ final class VoiceRoomCoordinator: ObservableObject {
     }
 
     /// Hands-free listening that has heard nothing yet gives way to an answer that has come in: it is read now, and
-    /// listening comes back after it. Once you have started talking, answers wait.
+    /// listening comes back after it. Once you have started talking, answers wait. Just after your turn went, a sound
+    /// may be your next words on their way through the recognizer, so the answer waits a moment for them.
     private func yieldIfNotTalking() {
-        guard state.isListening, state.isHandsFree, !queue.isEmpty, lastHeard == nil, state.partial.isEmpty else { return }
+        guard state.isListening, state.isHandsFree, !queue.isEmpty, lastHeard == nil, state.partial.isEmpty,
+              joining == nil || quiet(for: Self.recognizerLag) else { return }
+        stopListeningForNow()
+    }
+
+    /// Listening that heard no words lets go of the microphone; the phone is ready for the next answer.
+    private func stopListeningForNow() {
         listenGeneration += 1
         silenceWatch?.cancel()
         listener.cancel()
+        joining = nil
         state.phase = .ready
     }
 
@@ -450,7 +481,18 @@ final class VoiceRoomCoordinator: ObservableObject {
 
     // MARK: - Your turns
 
-    private func startListening() {
+    /// Your latest turn as sent: what you say next may join it.
+    private struct SentTurn {
+        /// Its turn in the call (`state.turns`).
+        let id: String
+        /// All of it so far.
+        let text: String
+        /// Its latest post: true once all of it is in the room.
+        let posted: Task<Bool, Never>
+    }
+
+    /// `turn` is the turn that just went, when this listening is the moment after it: what you say joins that turn.
+    private func startListening(joining turn: SentTurn? = nil) {
         guard !state.isMuted, state.phase == .ready || state.speaker != nil else { return }
         // Talking while it rings: no need to keep ringing.
         stopRinging()
@@ -464,6 +506,8 @@ final class VoiceRoomCoordinator: ObservableObject {
         state.partial = ""
         state.notice = nil
         lastHeard = nil
+        lastLoud = nil
+        joining = turn.map { (turn: $0, until: now().addingTimeInterval(Self.joinsWithin)) }
         Task { [weak self] in
             guard let self else { return }
             do {
@@ -488,7 +532,8 @@ final class VoiceRoomCoordinator: ObservableObject {
         }
     }
 
-    /// Hands-free, a pause after some words sends the turn; any turn stops at the longest length.
+    /// Hands-free, a pause after some words sends the turn; any turn stops at the longest length. Just after a turn
+    /// went, listening that hears no words lets go again.
     private func watchForPause(_ generation: Int) {
         silenceWatch?.cancel()
         let started = now()
@@ -502,8 +547,12 @@ final class VoiceRoomCoordinator: ObservableObject {
                     self.endTurn()
                     return
                 }
+                if self.letGoAfterTurn() {
+                    self.speakIfReady()
+                    return
+                }
                 guard self.state.isHandsFree, let heard = self.lastHeard else { continue }
-                let silence = self.now().timeIntervalSince(heard)
+                let silence = self.now().timeIntervalSince(self.lastSound(words: heard))
                 if silence >= Self.pause(after: self.state.partial) {
                     self.endTurn()
                     return
@@ -511,6 +560,36 @@ final class VoiceRoomCoordinator: ObservableObject {
                 if silence >= Self.askAfter { self.askIfFinished(generation) }
             }
         }
+    }
+
+    /// When you last made a sound, for timing a pause: the last speech-loud sound, since the recognizer hands words
+    /// over a beat after the voice and the pause used to wait that beat as well (the voice comparison, 10-31). A word
+    /// that comes more than `recognizerLag` after that sound was said too softly for the level, so it counts as sound
+    /// until that long before it. Sound never holds a turn past the words' own pause, so a noisy room (a fan, a car) is
+    /// no slower than before. Without the microphone's level, it is the last word, as before.
+    private func lastSound(words heard: Date) -> Date {
+        guard let loud = lastLoud else { return heard }
+        return min(heard, max(loud, heard.addingTimeInterval(-Self.recognizerLag)))
+    }
+
+    /// Just after a turn went, with no words since; true when listening let go. Once the microphone has been quiet
+    /// long enough for no words to be on their way, it lets go when an answer is waiting or the moment has passed:
+    /// the turn stands as it went, and the phone waits for its answer. Sound that has brought no words by a little
+    /// after the moment (a fan, a car) joins nothing: listening goes on as for a new turn, and gives way to an answer
+    /// as soon as one is waiting, so a noisy room never holds an answer back for long.
+    private func letGoAfterTurn() -> Bool {
+        guard let joining, lastHeard == nil, state.partial.isEmpty else { return false }
+        let at = now()
+        let answerWaiting = !queue.isEmpty
+        if quiet(for: Self.recognizerLag), at >= joining.until || answerWaiting {
+            stopListeningForNow()
+            return true
+        }
+        guard at >= joining.until.addingTimeInterval(Self.recognizerLag) else { return false }
+        self.joining = nil
+        guard answerWaiting else { return false }
+        stopListeningForNow()
+        return true
     }
 
     /// A short pause: asks whether the words so far are a finished turn, and ends it at once if they are and nothing
@@ -521,11 +600,13 @@ final class VoiceRoomCoordinator: ObservableObject {
         guard let endpointer, !endpointerOff, askedAbout != words,
               !words.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         askedAbout = words
+        // Words that carry on a turn are asked about with it: "the dial?" alone says little.
+        let asked = joining.map { $0.turn.text + " " + words } ?? words
         Task { [weak self] in
             guard let self else { return }
             do {
-                let done = try await endpointer.finished(sessionId: self.sessionId, text: words, callId: self.callId)
-                guard done >= Self.finishedAt, generation == self.listenGeneration, self.state.isListening,
+                let done = try await endpointer.finished(sessionId: self.sessionId, text: asked, callId: self.callId)
+                guard done >= self.finishedLine, generation == self.listenGeneration, self.state.isListening,
                       !self.stillSpeaking(),
                       self.state.partial == words else { return }
                 self.timings.noteEarlyEnd()
@@ -538,14 +619,21 @@ final class VoiceRoomCoordinator: ObservableObject {
         }
     }
 
-    /// The microphone's level, as the phone hears it (the waveform's feed).
+    /// The microphone's level, as the phone hears it: the waveform's feed, from the recognizer's own audio tap. Only
+    /// what is heard while listening counts, so muted, nothing is.
     func hear(level: Double) {
-        if level >= Self.speakingLevel { lastLoud = now() }
+        guard state.isListening, level >= Self.speakingLevel else { return }
+        lastLoud = now()
+    }
+
+    /// The microphone has heard nothing as loud as speech for this long (or at all) while listening.
+    private func quiet(for seconds: TimeInterval) -> Bool {
+        lastLoud.map { now().timeIntervalSince($0) >= seconds } ?? true
     }
 
     /// Sound as loud as speech within the short pause: the words have not caught up with the voice yet.
     private func stillSpeaking() -> Bool {
-        lastLoud.map { now().timeIntervalSince($0) < Self.askAfter } ?? false
+        !quiet(for: Self.askAfter)
     }
 
     /// How long a silence ends a hands-free turn: shorter once the words so far end a sentence.
@@ -559,7 +647,10 @@ final class VoiceRoomCoordinator: ObservableObject {
         listenGeneration += 1
         silenceWatch?.cancel()
         state.phase = .sending
-        let stoppedTalking = lastHeard ?? now()
+        // You stopped talking when the sound did; the words come a beat later.
+        let stoppedTalking = lastHeard.map { lastSound(words: $0) } ?? lastLoud ?? now()
+        let joins = joining?.turn
+        joining = nil
         let asked = now()
         Task { [weak self] in
             guard let self else { return }
@@ -569,25 +660,85 @@ final class VoiceRoomCoordinator: ObservableObject {
             let text = SpokenCleanup.clean(heard.isEmpty ? self.state.partial : heard)
             self.state.partial = ""
             guard !text.isEmpty else {
-                self.state.phase = .ready
+                self.readyAfterSending()
                 self.speakIfReady()
                 return
             }
-            let turn = VoiceRoomTurn(id: "you:\(UUID().uuidString.lowercased())", speaker: self.you, isYou: true,
-                                     text: text, at: self.now())
-            self.state.turns.append(turn)
-            // A new turn: the floor is open again, and its answer is timed from here.
-            self.turnStoppedAt = stoppedTalking
-            self.floorHolder = nil
-            self.floorAnnounced = false
-            self.gapAnswerId = nil
-            // What is left of the last quick answer goes first, so none of it plays after you spoke (warden, #274).
-            self.dropVoiceLineLeftovers()
-            self.state.phase = .ready
-            self.speakIfReady()
-            self.askVoiceLine(text)
-            await self.post(text)
+            if let joins {
+                await self.carryOn(joins, with: text, stoppedTalking: stoppedTalking)
+            } else {
+                await self.sendTurn(text, stoppedTalking: stoppedTalking)
+            }
         }
+    }
+
+    private func sendTurn(_ text: String, stoppedTalking: Date) async {
+        let turn = VoiceRoomTurn(id: "you:\(UUID().uuidString.lowercased())", speaker: you, isYou: true, text: text,
+                                 at: now())
+        state.turns.append(turn)
+        // A new turn: the floor is open again, and its answer is timed from here.
+        turnStoppedAt = stoppedTalking
+        floorHolder = nil
+        floorAnnounced = false
+        gapAnswerId = nil
+        // What is left of the last quick answer goes first, so none of it plays after you spoke (warden, #274).
+        dropVoiceLineLeftovers()
+        readyAfterSending()
+        speakIfReady()
+        askVoiceLine(text, turn: turn.id)
+        let posted = Task { [weak self] () -> Bool in
+            guard let self else { return false }
+            let inRoom = await self.post(text, stoppedTalking: stoppedTalking)
+            if inRoom { self.awaitingAnswerSince = self.now() }
+            return inRoom
+        }
+        listenForMore(after: SentTurn(id: turn.id, text: text, posted: posted))
+        _ = await posted.value
+    }
+
+    /// What you said just after a turn went joins it (Carter, 10-31: a pause mid-thought ended the turn and the rest
+    /// was lost). The call keeps one turn, on the same floor. The room gets the new words as a turn that carries on
+    /// the last one ("…and the dial?"), addressed the same way and posted after it: the agents' listeners answer new
+    /// messages and never see edits, so editing the first would go unanswered. The voice line is asked again with the
+    /// whole turn, and what it had not yet said about the first part is dropped.
+    private func carryOn(_ sent: SentTurn, with text: String, stoppedTalking: Date) async {
+        let whole = sent.text + " " + text
+        if let index = state.turns.firstIndex(where: { $0.id == sent.id }) {
+            let turn = state.turns[index]
+            state.turns[index] = VoiceRoomTurn(id: turn.id, speaker: turn.speaker, isYou: true, text: whole, at: turn.at)
+        }
+        timings.noteContinued()
+        // You stopped talking later than it seemed: the answer's gap is timed from now on.
+        turnStoppedAt = stoppedTalking
+        dropVoiceLineLeftovers()
+        if let id = gapAnswerId, !queue.contains(where: { $0.id == id }) { gapAnswerId = nil }
+        readyAfterSending()
+        speakIfReady()
+        askVoiceLine(whole, turn: sent.id)
+        let posted = Task { [weak self] () -> Bool in
+            // After the turn it carries on, so the room has them in order. If that never reached the room, all of it
+            // goes now, so nothing said is lost.
+            let inRoom = await sent.posted.value
+            guard let self else { return false }
+            let delivered = await self.post(inRoom ? Self.carriesOn + text : whole, stoppedTalking: stoppedTalking)
+            if delivered, !inRoom { self.awaitingAnswerSince = self.now() }
+            return delivered
+        }
+        listenForMore(after: SentTurn(id: sent.id, text: whole, posted: posted))
+        _ = await posted.value
+    }
+
+    /// Your words are out of the recognizer: the phone is ready again, unless you hung up meanwhile. Then it stays
+    /// ending, so nothing listens again after the call.
+    private func readyAfterSending() {
+        if state.phase == .sending { state.phase = .ready }
+    }
+
+    /// Hands-free, listening stays on a moment after a turn goes, so what you say next joins it instead of being lost.
+    /// Not once an answer is being read: the phone never listens over an answer (no barge-in yet).
+    private func listenForMore(after turn: SentTurn) {
+        guard state.isHandsFree, state.phase == .ready else { return }
+        startListening(joining: turn)
     }
 
     // MARK: - The voice line
@@ -601,12 +752,13 @@ final class VoiceRoomCoordinator: ObservableObject {
 
     /// Asks the voice line for a quick answer while the turn goes to the room (warden, Phase 2): each sentence is read
     /// as it arrives, and the agent's own answer still comes in the room after. A new turn drops what is left of the
-    /// last quick answer.
-    private func askVoiceLine(_ text: String) {
+    /// last quick answer. `turn` is your turn being asked about, which the history leaves out.
+    private func askVoiceLine(_ text: String, turn: String) {
         guard let voiceLine, !voiceLineOff, now() >= voiceLineRestsUntil else { return }
         let agent = state.with.count == 1 ? state.with[0] : nil
         let speaker = (agent ?? "room") + Self.voiceSuffix
-        let history = state.turns.dropLast().suffix(12).map { VoiceLineHistory(speaker: $0.speaker, text: $0.text) }
+        let history = state.turns.filter { $0.id != turn }.suffix(12)
+            .map { VoiceLineHistory(speaker: $0.speaker, text: $0.text) }
         let answerId = "line:" + UUID().uuidString.lowercased()
         let stream = voiceLine.voiceLine(sessionId: sessionId, agentId: agent, text: text, callId: callId,
                                          ringCallId: ringCallId,
@@ -658,20 +810,27 @@ final class VoiceRoomCoordinator: ObservableObject {
     }
 
     /// Your turn in the room. It starts with the mentions of the agents you called, so their listeners know it is for
-    /// them; a meeting is for everyone.
-    private func post(_ text: String) async {
+    /// them; a meeting is for everyone. True once the room has it.
+    private func post(_ text: String, stoppedTalking: Date) async -> Bool {
         let mentions = state.with.map { "@\($0)" }.joined(separator: " ")
         let addressed = mentions.isEmpty ? text : "\(mentions) \(text)"
         let sending = now()
         do {
             try await poster.postVoiceTurn(sessionId: sessionId, text: addressed,
                                            clientId: "voice-" + UUID().uuidString.lowercased())
-            timings.record(.post, now().timeIntervalSince(sending))
-            awaitingAnswerSince = now()
+            let posted = now()
+            timings.record(.post, posted.timeIntervalSince(sending))
+            timings.record(.endpoint, posted.timeIntervalSince(stoppedTalking))
+            // A turn that failed and was then carried on went whole: it is in the room after all.
+            if state.notice == Self.turnLost { state.notice = nil }
+            return true
         } catch {
-            state.notice = "That turn did not reach the room. Say it again."
+            state.notice = Self.turnLost
+            return false
         }
     }
+
+    static let turnLost = "That turn did not reach the room. Say it again."
 
     // MARK: - Hanging up
 
@@ -679,6 +838,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         guard state.phase != .ending, state.phase != .ended else { return }
         listenGeneration += 1
         silenceWatch?.cancel()
+        joining = nil
         stopRinging()
         listener.cancel()
         speaker.stop()
