@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import PocketSyncClient
 import PocketUI
 import PocketVoice
@@ -56,6 +57,11 @@ struct RoomChatScreen: View {
     @State private var showsSearch = false
     @State private var attachmentPreview: AttachmentPreviewItem?
     @State private var attachmentProblem: String?
+    /// Photos, videos and files sent from this phone: picked, uploaded with progress, and posted as one message.
+    @StateObject private var media: RoomMediaUploadCoordinator
+    /// A photo or video opened full screen, and a file being shared.
+    @State private var mediaViewer: RoomMediaViewerItem?
+    @State private var shareItem: RoomShareItem?
     @State private var listenProblem: String?
     /// The app's one reader: one message is read at a time, wherever it was started.
     @ObservedObject private var reader: MessageReader
@@ -159,6 +165,19 @@ struct RoomChatScreen: View {
             directory: ticketExtras,
             onReauthenticationRequired: onReauthenticationRequired
         ))
+        // Files go up through the room's own sender (init, complete, the message) and straight to storage for the
+        // bytes. A viewer cannot post, so has nothing to send them with.
+        let mediaUploader: (any RoomMediaUploading)? = route.membershipRole.lowercased() == "viewer"
+            ? nil
+            : (sender as? HTTPRoomMessageSender).map { HTTPRoomMediaUploader(api: $0) }
+        _media = StateObject(wrappedValue: RoomMediaUploadCoordinator.forRoom(route.sessionId) {
+            RoomMediaUploadCoordinator(
+                sessionId: route.sessionId,
+                uploader: mediaUploader,
+                canUseCamera: UIImagePickerController.isSourceTypeAvailable(.camera),
+                canPaste: { UIPasteboard.general.hasImages }
+            )
+        })
         _artifacts = StateObject(wrappedValue: RoomArtifactsCoordinator(sessionId: route.sessionId, transport: transport))
         _flight = StateObject(wrappedValue: FlightRecordCoordinator(
             sessionId: route.sessionId,
@@ -433,7 +452,8 @@ struct RoomChatScreen: View {
                 canFileTicket: ticketsTransport != nil && writesTickets && !route.isBreakout,
                 canSearch: search != nil
             ),
-            roster: roster
+            roster: roster,
+            media: media.canUpload && coordinator.state.composer.canPost ? media.board : nil
         ) { intent in
             if case .bottomFlapHeld(let rows, let longest) = intent {
                 // The room's bottom marker flapped and the reader's place was held still (Carter's freeze, #56316):
@@ -452,6 +472,8 @@ struct RoomChatScreen: View {
                 showsSearch = true
             } else if case .openAttachment(let attachmentId) = intent {
                 openAttachment(attachmentId)
+            } else if case .shareAttachment(let attachmentId) = intent {
+                shareAttachment(attachmentId)
             } else if case .readAloud(let id, let text) = intent {
                 ReadAloudSource.shared.reading(in: route.sessionId)
                 if reader.read(id: id, markdown: text, title: readAloudTitle(for: id)) == .unavailable {
@@ -762,6 +784,32 @@ struct RoomChatScreen: View {
             AttachmentQuickLook(url: item.url)
                 .ignoresSafeArea()
         }
+        .fullScreenCover(item: $mediaViewer) { item in
+            switch item {
+            case .image(let attachmentId, let filename, let preview):
+                RoomImageViewer(
+                    filename: filename,
+                    preview: preview,
+                    loadOriginal: { try await coordinator.prepareAttachment(attachmentId) },
+                    onClose: { mediaViewer = nil }
+                )
+            case .video(_, let url):
+                RoomVideoViewer(url: url, onClose: { mediaViewer = nil })
+            }
+        }
+        .sheet(item: $shareItem) { item in
+            RoomShareSheet(items: [item.url], deletesWhenDone: true)
+                .presentationDetents([.medium, .large])
+        }
+        // The photo, camera and file pickers, opened from the composer's attach sheet.
+        .background(
+            RoomMediaPickerHost(
+                requests: media.pickers,
+                remaining: { media.board.remainingSlots },
+                onPicked: { media.add($0) },
+                onRefused: { media.refuse($0) }
+            )
+        )
         .sheet(item: $consolePage) { page in
             SafariSheet(url: page.url)
                 .ignoresSafeArea()
@@ -834,6 +882,7 @@ struct RoomChatScreen: View {
             coordinator.resume()
             applyRouteLinksOnce()
             takeAnsweredCall()
+            connectMedia()
         }
         .onDisappear {
             CrashReporter.shared.note("room closed")
@@ -888,22 +937,76 @@ struct RoomChatScreen: View {
         }
     }
 
-    /// Downloads the file and shows it full size; one open at a time.
+    /// The room and its uploads, joined: a sent message's card goes when the room shows it, the room is read the moment
+    /// it posts, and its photos' previews made here show at once.
+    private func connectMedia() {
+        let room = coordinator
+        let outgoing = media
+        room.onOwnEcho = { [weak outgoing] clientIds in outgoing?.echoed(clientIds) }
+        outgoing.onPosted = { [weak room] in room?.pullLatest() }
+        outgoing.onPreviewReady = { [weak room] attachmentId, data in room?.seedPreview(data, for: attachmentId) }
+    }
+
+    /// A photo opens in the zoomable viewer (its preview at once), a video plays from its storage link, and any other
+    /// file downloads and shows full size; one open at a time.
     private func openAttachment(_ attachmentId: String) {
         guard !openingAttachment else { return }
+        if let info = coordinator.attachmentInfo(attachmentId) {
+            switch info.kind {
+            case .image:
+                mediaViewer = .image(attachmentId: attachmentId, filename: info.filename,
+                                     preview: coordinator.loadedPreview(attachmentId))
+                return
+            case .video:
+                openingAttachment = true
+                Task {
+                    defer { openingAttachment = false }
+                    do {
+                        let link = try await coordinator.mediaLink(attachmentId)
+                        mediaViewer = .video(attachmentId: attachmentId, url: link.url)
+                    } catch {
+                        attachmentProblem = Self.openProblem(error)
+                    }
+                }
+                return
+            default:
+                break
+            }
+        }
         openingAttachment = true
         Task {
             defer { openingAttachment = false }
             do {
                 attachmentPreview = AttachmentPreviewItem(url: try await coordinator.prepareAttachment(attachmentId))
-            } catch AttachmentFetchError.tooLarge {
-                attachmentProblem = "This file is too large to open on the phone."
-            } catch let error as SessionTransportError where error == .accessDenied {
-                attachmentProblem = "You no longer have access to this file."
             } catch {
-                attachmentProblem = "Check your connection and try again. If it keeps failing, the file may still be processing."
+                attachmentProblem = Self.openProblem(error)
             }
         }
+    }
+
+    /// Downloads the file (as a download, with its safe name) and offers the share sheet: Save to Files, AirDrop,
+    /// another app.
+    private func shareAttachment(_ attachmentId: String) {
+        guard !openingAttachment else { return }
+        openingAttachment = true
+        Task {
+            defer { openingAttachment = false }
+            do {
+                shareItem = RoomShareItem(url: try await coordinator.prepareAttachment(attachmentId, asDownload: true))
+            } catch {
+                attachmentProblem = Self.openProblem(error)
+            }
+        }
+    }
+
+    private static func openProblem(_ error: Error) -> String {
+        if case AttachmentFetchError.tooLarge? = error as? AttachmentFetchError {
+            return "This file is too large to open on the phone."
+        }
+        if let error = error as? SessionTransportError, error == .accessDenied {
+            return "You no longer have access to this file."
+        }
+        return "Check your connection and try again. If it keeps failing, the file may still be processing."
     }
 
     /// Closes whatever covers the chat, then brings the message into view.

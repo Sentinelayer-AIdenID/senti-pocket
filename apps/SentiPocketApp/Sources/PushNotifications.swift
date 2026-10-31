@@ -333,4 +333,12 @@ final class PocketAppDelegate: NSObject, UIApplicationDelegate {
     }
 
     func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {}
+
+    /// A room's photo, video or file finished uploading while the app was in the background: its session takes the
+    /// events, then tells iOS it is done.
+    func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String,
+                     completionHandler: @escaping () -> Void) {
+        guard identifier == RoomMediaPutSession.backgroundIdentifier else { return completionHandler() }
+        RoomMediaPutSession.shared.handleBackgroundEvents(completion: completionHandler)
+    }
 }

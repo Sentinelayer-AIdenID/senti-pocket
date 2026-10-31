@@ -75,6 +75,11 @@ targets:
         # Required or iOS SIGABRTs on the first permission request (on-device Speech STT + mic barge-in/PTT).
         NSMicrophoneUsageDescription: "Senti Pocket uses the microphone so you can barge in and answer the briefing by voice."
         NSSpeechRecognitionUsageDescription: "Senti Pocket transcribes your speech on-device so you can interrupt a briefing and dictate a proposed action."
+        # The attach sheet's Camera: a photo or video taken to share in a room. Photos and videos from the library come
+        # through the system picker, which needs no library access.
+        NSCameraUsageDescription: "Senti Pocket uses the camera when you take a photo or video to share in a room."
+        # The share sheet's "Save Image" / "Save Video" for a photo or video opened from a room.
+        NSPhotoLibraryAddUsageDescription: "Senti Pocket saves a photo or video from a room to your library when you choose Save."
         # Build trust inputs. They are intentionally undefined by default: Release fails closed until CI or an
         # xcodebuild command-line setting supplies an explicit HTTPS origin. If expansion ever leaves the literal
         # placeholder intact, GatewayEndpoint rejects it too.

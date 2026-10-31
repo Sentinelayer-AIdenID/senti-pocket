@@ -57,17 +57,23 @@ public struct RoomChatView: View {
     /// Everyone who came to the room, for its people list.
     private let roster: RoomRoster
 
+    /// Photos, videos and files on their way, where the room can take them: the composer's paperclip and tray, and the
+    /// messages being sent. Read by those parts alone, so an upload never redraws the room.
+    private let media: RoomMediaBoard?
+
     public init(
         state: RoomChatPresentationState,
         readingAloudId: String? = nil,
         composerActions: RoomComposerActions = RoomComposerActions(),
         roster: RoomRoster = .empty,
+        media: RoomMediaBoard? = nil,
         send: @escaping (RoomChatIntent) -> Void
     ) {
         self.state = state
         self.readingAloudId = readingAloudId
         self.composerActions = composerActions
         self.roster = roster
+        self.media = media
         self.send = send
     }
 
@@ -95,7 +101,8 @@ public struct RoomChatView: View {
                 replying: replyTarget,
                 onCancelReply: { replyTarget = nil },
                 onIntent: send,
-                draftKey: RoomComposerDraft.savedKey(sessionId: state.sessionId)
+                draftKey: RoomComposerDraft.savedKey(sessionId: state.sessionId),
+                media: media
             ) { text in
                 if let target = replyTarget {
                     send(target.replyIntent(text))
@@ -269,6 +276,9 @@ public struct RoomChatView: View {
                         )
                         .id("pending:\(pending.clientId)")
                     }
+                    if let media {
+                        RoomMediaOutgoingList(board: media)
+                    }
                     newerHistoryFooter
                     if !state.composingAgents.isEmpty, !state.canLoadNewer {
                         RoomComposingLine(agents: state.composingAgents)
@@ -286,6 +296,18 @@ public struct RoomChatView: View {
             }
             // Dragging the messages lowers the keyboard with the finger, as in Messages.
             .scrollDismissesKeyboard(.interactively)
+            // Sending photos or files brings you to the bottom, where the message appears, like a typed one. Told by the
+            // board, not watched: an upload never redraws the room.
+            .onAppear {
+                media?.onNewOutgoing = {
+                    if readerAtBottom {
+                        heldAnchor = nil
+                        DispatchQueue.main.async { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
+                    } else {
+                        reopenAtLatest()
+                    }
+                }
+            }
             // The reader scrolling lets go of a message they were taken to.
             .simultaneousGesture(DragGesture(minimumDistance: 8).onChanged { _ in
                 if heldAnchor != nil { heldAnchor = nil }
@@ -1896,6 +1918,8 @@ private struct RoomComposerBar: View {
     var onIntent: (RoomChatIntent) -> Void = { _ in }
     /// Where this room's unsent text is kept on the phone, so a crash or a relaunch never loses it.
     var draftKey: String?
+    /// Photos, videos and files for the next message, where the room takes them.
+    var media: RoomMediaBoard?
     let send: (String) -> Void
     @State private var draft = ""
     /// The text just sent, for a moment: the keyboard can write it back into the emptied box (dictation, a pending
@@ -1920,6 +1944,10 @@ private struct RoomComposerBar: View {
     /// the app is closed before then, it is back in the box at the next launch.
     private func sendDraft() {
         let text = outgoing
+        if let media, !media.tray.isEmpty {
+            sendWithMedia(media, text: text)
+            return
+        }
         guard !text.isEmpty else { return }
         let message = ticketMode ? RoomComposerDraft.ticketRequest(text) : text
         ticketMode = false
@@ -1938,6 +1966,23 @@ private struct RoomComposerBar: View {
             // Typing since is saved; the sent text itself goes when the room confirms it (`forgetSaved`).
             if !outgoing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { saveDraft() }
         }
+    }
+
+    /// Sends the tray as one message, with what was typed. The words go with the files (never as a reply or a
+    /// ticket), and the message shows at once with each file's picture while they upload.
+    private func sendWithMedia(_ media: RoomMediaBoard, text: String) {
+        pasted = []
+        ticketMode = false
+        if replying != nil { onCancelReply() }
+        if let draftKey { UserDefaults.standard.removeObject(forKey: draftKey) }
+        if !text.isEmpty {
+            justSent = text
+            sends += 1
+            let sending = sends
+            emptyComposer($draft, sent: text)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { if sends == sending { justSent = nil } }
+        }
+        DispatchQueue.main.async { media.perform(.send(text: text)) }
     }
 
     private func saveDraft() {
@@ -2046,6 +2091,9 @@ private struct RoomComposerBar: View {
                 }
                 .accessibilityIdentifier("pocket.room.composer.pasted")
             }
+            if let media {
+                RoomMediaTray(board: media)
+            }
             if let replying {
                 HStack(spacing: 6) {
                     Image(systemName: "arrowshape.turn.up.left.fill")
@@ -2098,6 +2146,10 @@ private struct RoomComposerBar: View {
                 .accessibilityIdentifier("pocket.room.composer.ticketMode")
             }
             HStack(alignment: .bottom, spacing: 8) {
+                if let media, replying == nil, !ticketMode {
+                    RoomAttachButton(board: media)
+                        .padding(.bottom, 1)
+                }
                 Menu {
                     Button {
                         let separated = draft.isEmpty || draft.last?.isWhitespace == true
@@ -2159,17 +2211,23 @@ private struct RoomComposerBar: View {
                             .stroke(PocketPalette.separator.opacity(0.6), lineWidth: 0.5)
                     )
                     .accessibilityIdentifier("pocket.room.composer")
-                Button {
-                    sendDraft()
-                } label: {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 32))
-                        .foregroundStyle(canSend ? PocketPalette.accent : PocketPalette.textSecondary.opacity(0.5))
+                if let media {
+                    RoomMediaSendButton(board: media, canSendText: canSend, hasProblem: problem != nil) {
+                        sendDraft()
+                    }
+                } else {
+                    Button {
+                        sendDraft()
+                    } label: {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.system(size: 32))
+                            .foregroundStyle(canSend ? PocketPalette.accent : PocketPalette.textSecondary.opacity(0.5))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canSend)
+                    .accessibilityLabel("Send")
+                    .accessibilityIdentifier("pocket.room.send")
                 }
-                .buttonStyle(.plain)
-                .disabled(!canSend)
-                .accessibilityLabel("Send")
-                .accessibilityIdentifier("pocket.room.send")
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
