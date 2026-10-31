@@ -1,8 +1,8 @@
 import Combine
 import Foundation
 
-/// How loud a voice call is from moment to moment, for the call screen's waveform (Carter, 10-30: "a wave form for
-/// when yall talking"). Your voice is measured at the microphone. An agent's voice comes from the phone's speech
+/// How loud a voice call is from moment to moment, for the call screen's waveform of whoever is talking. Your voice is
+/// measured at the microphone. An agent's voice comes from the phone's speech
 /// synthesizer, which reports words, not loudness, so each word it says is one beat.
 ///
 /// It keeps the last `barCount` steps: twenty a second, each the loudest level heard since the step before, fading
