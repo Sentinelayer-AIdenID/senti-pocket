@@ -1,8 +1,8 @@
 import Foundation
 
-/// What the room list knew about your reading of a room when you opened it (Carter, 10-31: "when you click you scroll
-/// back to last time you read anything … like discord"): how many messages you have not read, the first of them, and
-/// how far the server holds you have read.
+/// What the room list knew about your reading of a room when you opened it (Carter, 10-31: a room opens where you
+/// stopped reading, as Discord does): how many messages you have not read, the first of them, and how far the server
+/// holds you have read.
 public struct RoomReadMark: Hashable, Sendable {
     public let unreadCount: Int
     public let firstUnreadSequenceId: Int64?

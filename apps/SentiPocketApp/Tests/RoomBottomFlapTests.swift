@@ -391,7 +391,7 @@ final class RoomBottomFlapTests: XCTestCase {
     func test_a_room_that_fits_on_the_screen_opened_at_its_line_counts_the_reader_at_the_bottom() throws {
         var rows: [RoomChatMessageInput] = []
         for index in 1...5 {
-            let author = index % 2 == 0 ? "human-mrrcarter" : "pocket-forge"
+            let author = index % 2 == 0 ? "human-sam" : "ada-agent"
             rows.append(Self.input(Int64(57_000 + index), author, "A short note \(index)."))
         }
         let room = Room(rows, openedAt: rows[3].sequenceId)

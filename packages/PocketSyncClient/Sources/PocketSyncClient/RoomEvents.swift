@@ -419,8 +419,8 @@ public struct RoomTimeline: Equatable, Sendable {
 /// bottom, arriving rows from OTHER people count as unread and the divider sits at the first of them. Reaching
 /// the bottom clears both.
 ///
-/// A room opened from the room list with messages you had not read opens at the first of them (Carter, 10-31, "like
-/// discord"): that line stays while the room is open, wherever you scroll, as Discord's does. Only a send, which takes
+/// A room opened from the room list with messages you had not read opens at the first of them (Carter, 10-31): that
+/// line stays while the room is open, wherever you scroll, as Discord's does. Only a send, which takes
 /// you to your own message at the bottom, lets it go.
 public struct RoomUnreadState: Equatable, Sendable {
     public private(set) var unreadCount = 0

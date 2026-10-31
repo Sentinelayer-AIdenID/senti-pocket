@@ -3,8 +3,8 @@ import PocketContracts
 import XCTest
 @testable import PocketUI
 
-/// Carter, 10-31: "saying how many online, like a human avatar and a bot avatar … right after '5min ago', and add a
-/// badge indicator of how many, if there are unread messages … like discord".
+/// Carter, 10-31: the room list says how many people and agents are in each room, right after how long ago it was
+/// active, and shows a badge with your unread messages, as Discord does.
 final class RoomListActivityTests: XCTestCase {
     func test_counts_of_zero_or_none_show_nothing() {
         for activity in [RoomListActivity.none,
@@ -54,7 +54,7 @@ final class RoomListActivityTests: XCTestCase {
 
     func test_the_room_you_are_in_has_no_badge_but_keeps_who_is_online() {
         let busy = RoomListActivity(humansOnline: 1, agentsOnline: 3, unread: 12)
-        let room = PocketSidePanel.Room(id: "a", title: "Senti", subtitle: nil, lastActivity: nil, activity: busy)
+        let room = PocketSidePanel.Room(id: "a", title: "Design review", subtitle: nil, lastActivity: nil, activity: busy)
         XCTAssertEqual(PocketSidePanel.shownActivity(of: room, currentRoomId: "a"),
                        RoomListActivity(humansOnline: 1, agentsOnline: 3, unread: 0))
         XCTAssertEqual(PocketSidePanel.shownActivity(of: room, currentRoomId: "b"), busy)
@@ -63,14 +63,14 @@ final class RoomListActivityTests: XCTestCase {
 
     func test_the_side_panel_row_is_read_as_its_name_then_who_and_what() {
         XCTAssertEqual(PocketSidePanel.accessibilityLabel(
-            title: "VAYLT-BUILD-ROOM", isCurrent: false,
+            title: "Weekly sync", isCurrent: false,
             activity: RoomListActivity(humansOnline: 3, agentsOnline: 2, unread: 5)),
-                       "VAYLT-BUILD-ROOM, 3 people and 2 agents online, 5 unread")
+                       "Weekly sync, 3 people and 2 agents online, 5 unread")
         XCTAssertEqual(PocketSidePanel.accessibilityLabel(
-            title: "Senti", isCurrent: true, activity: RoomListActivity(humansOnline: 1, agentsOnline: 0, unread: 0)),
-                       "Senti, open now, 1 person online")
-        XCTAssertEqual(PocketSidePanel.accessibilityLabel(title: "Hack Nation Crew", isCurrent: false, activity: .none),
-                       "Hack Nation Crew", "as before when there is nothing to say")
+            title: "Design review", isCurrent: true, activity: RoomListActivity(humansOnline: 1, agentsOnline: 0, unread: 0)),
+                       "Design review, open now, 1 person online")
+        XCTAssertEqual(PocketSidePanel.accessibilityLabel(title: "Release notes", isCurrent: false, activity: .none),
+                       "Release notes", "as before when there is nothing to say")
     }
 }
 
@@ -136,7 +136,7 @@ final class SessionRowActivityTests: XCTestCase {
 final class RoomUnreadLinePlacementTests: XCTestCase {
     private static let start = Date(timeIntervalSince1970: 1_793_000_000)
 
-    private func input(_ seq: Int64, _ author: String = "cobalt-warden", _ text: String = "A note.",
+    private func input(_ seq: Int64, _ author: String = "ada-agent", _ text: String = "A note.",
                        voice: Bool = false) -> RoomChatMessageInput {
         let date = Self.start.addingTimeInterval(Double(seq) * 10)
         return RoomChatMessageInput(
@@ -149,7 +149,7 @@ final class RoomUnreadLinePlacementTests: XCTestCase {
     private func state(_ messages: [RoomChatMessageInput], line: Int64?, canLoadOlder: Bool = false,
                        focus: Int64? = nil) -> RoomChatPresentationState {
         RoomChatPresentationState(sessionId: "room", title: "Room", messages: messages,
-                                  ownAuthorIds: ["human-mrrcarter"], unreadDividerSequence: line,
+                                  ownAuthorIds: ["human-sam"], unreadDividerSequence: line,
                                   canLoadOlder: canLoadOlder, focusSequenceId: focus)
     }
 
@@ -169,10 +169,10 @@ final class RoomUnreadLinePlacementTests: XCTestCase {
     func test_a_first_unread_spoken_in_a_call_puts_the_line_before_the_calls_card() {
         let messages = [
             input(100),
-            input(101, "human-mrrcarter", VoiceCallMarkers.start(caller: "mrrcarter", agents: ["pocket-forge"], meeting: false)),
-            input(102, "human-mrrcarter", "Can you hear me?", voice: true),
-            input(103, "pocket-forge", "Yes, loud and clear."),
-            input(104, "human-mrrcarter", "\(VoiceCallMarkers.endPrefix)pocket-forge ended after 1 min.")
+            input(101, "human-sam", VoiceCallMarkers.start(caller: "sam", agents: ["ada-agent"], meeting: false)),
+            input(102, "human-sam", "Can you hear me?", voice: true),
+            input(103, "ada-agent", "Yes, loud and clear."),
+            input(104, "human-sam", "\(VoiceCallMarkers.endPrefix)ada-agent ended after 1 min.")
         ]
         let rows = state(messages, line: 103)
         XCTAssertEqual(underTheLine(rows), 101, "the call's card holds the answer you have not heard")

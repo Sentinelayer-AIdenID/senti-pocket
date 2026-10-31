@@ -164,7 +164,7 @@ final class RoomReadCursorTests: XCTestCase {
 }
 
 final class RoomUnreadLineTests: XCTestCase {
-    private func message(_ seq: Int64, author: String = "cobalt-warden") -> RoomMessage {
+    private func message(_ seq: Int64, author: String = "ada-agent") -> RoomMessage {
         RoomMessage(id: "evt-\(seq)", sequenceId: seq, kind: .message, authorId: author, authorName: author,
                     isHuman: RoomMessage.isHumanAuthor(author), text: "hi", timestamp: "2026-10-31T14:00:00Z")
     }

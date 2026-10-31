@@ -132,8 +132,8 @@ private struct TakesEverything: RoomMessageSending {
     func sendHumanMessage(sessionId: String, text: String, clientId: String) async throws {}
 }
 
-/// Carter, 10-31: opening a room with unread messages "scroll[s] back to last time you read anything … like
-/// discord", and the room list's badge follows your reading.
+/// Carter, 10-31: opening a room with unread messages takes you back to where you stopped reading, as Discord
+/// does, and the room list's badge follows your reading.
 @MainActor
 final class RoomReadingTests: XCTestCase {
     private let clock = TestClock()
@@ -143,7 +143,7 @@ final class RoomReadingTests: XCTestCase {
         try await super.tearDown()
     }
 
-    private func message(_ seq: Int64, author: String = "cobalt-warden") -> RoomMessage {
+    private func message(_ seq: Int64, author: String = "ada-agent") -> RoomMessage {
         RoomMessage(id: "evt-\(seq)", sequenceId: seq, kind: .message, authorId: author, authorName: author,
                     isHuman: RoomMessage.isHumanAuthor(author), text: "Note \(seq).",
                     timestamp: "2026-10-31T14:00:00.000000+00:00")
@@ -171,7 +171,7 @@ final class RoomReadingTests: XCTestCase {
             transport: transport,
             sender: sender,
             membershipRole: membershipRole,
-            ownAuthorIds: ["human-mrrcarter"],
+            ownAuthorIds: ["human-sam"],
             sleep: { [clock] seconds in await clock.sleep(seconds) },
             now: { [clock] in clock.now },
             readMark: mark,

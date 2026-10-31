@@ -114,8 +114,8 @@ public struct PocketSidePanel: View {
         }
     }
 
-    /// What VoiceOver says for a room's row: "Senti-expansion-proj, open now", or with who is online and what is
-    /// unread, "VAYLT-BUILD-ROOM, 3 people and 2 agents online, 5 unread".
+    /// What VoiceOver says for a room's row: "Design review, open now", or with who is online and what is unread,
+    /// "Weekly sync, 3 people and 2 agents online, 5 unread".
     static func accessibilityLabel(title: String, isCurrent: Bool, activity: RoomListActivity) -> String {
         [title, isCurrent ? "open now" : nil, activity.accessibilityDescription].compactMap { $0 }.joined(separator: ", ")
     }
