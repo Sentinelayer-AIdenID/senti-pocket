@@ -15,13 +15,13 @@ public enum VoiceCallMarkers {
             ? " In a meeting the first agent to answer a turn has the floor: if another agent already answered it, or the "
                 + "phone posts that someone has the floor, stay quiet until the next turn."
             : ""
-        // The phone rings until an answer lands and reads it before listening (Carter, 10-30): pick up at once.
+        // The phone rings until an answer lands and reads it before listening: pick up at once.
         return "\(startPrefix)\(mentions): \(caller) started \(what). The phone is ringing: pick up now with a "
             + "one-line hello, which is read before they speak. Then answer each of their spoken turns as a short "
             + "top-level post: 1–3 spoken sentences, no markdown. The phone reads it aloud in your own voice." + floor
     }
 
-    /// "📞 Adding @claude-warden: …", an agent brought into a call already going (Carter, 10-30). The others in the
+    /// "📞 Adding @claude-warden: …", an agent brought into a call already going. The others in the
     /// call are named without a mention, so only the added agent is rung.
     public static func added(caller: String, agent: String, joining others: [String]) -> String {
         let with = others.isEmpty ? "" : " with " + others.joined(separator: ", ")

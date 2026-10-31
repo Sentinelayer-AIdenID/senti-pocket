@@ -1,7 +1,6 @@
 import Foundation
 
-/// One call in "Calls & briefings" (Carter, 10-30: "there should be an upcoming call event or past ones like when I
-/// called yall and the details I asked for"): a voice room you started, or a ring to or from your phone.
+/// One call in "Calls & briefings": a voice room you started, or a ring to or from your phone.
 public struct CallLogRow: Identifiable, Equatable, Sendable {
     public enum Direction: Equatable, Sendable {
         /// You called (a voice room, or a ring you made).
