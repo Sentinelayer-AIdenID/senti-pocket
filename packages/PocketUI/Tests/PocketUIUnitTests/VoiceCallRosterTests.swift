@@ -12,6 +12,7 @@ final class VoiceCallRosterTests: XCTestCase {
             present: ["review-agent", "old-box"],
             posts: [
                 .init(authorId: "respawn-orchestrator", at: now.addingTimeInterval(-10)),
+                .init(authorId: "senti", at: now.addingTimeInterval(-15)),
                 .init(authorId: "build-agent", at: now.addingTimeInterval(-20 * 60)),
                 .init(authorId: "review-agent", at: now.addingTimeInterval(-30)),
                 .init(authorId: "gone-agent", at: now.addingTimeInterval(-2 * 60 * 60)),
