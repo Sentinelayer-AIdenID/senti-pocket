@@ -191,7 +191,7 @@ final class RoomAttachmentsCoordinatorTests: XCTestCase {
         let photo = RoomAttachment(attachmentId: "pm_photo_0001", filename: "IMG_0042.jpg", kind: .image, sizeBytes: 1_000)
         let plan = RoomAttachment(attachmentId: "plan-0001", filename: "plan.json", kind: .json)
         func event(_ id: String, _ seq: Int64, _ text: String, _ files: [RoomAttachment], _ type: String) -> RoomMessage {
-            RoomMessage(id: id, sequenceId: seq, kind: .message, authorId: "human-mrrcarter", authorName: "mrrCarter",
+            RoomMessage(id: id, sequenceId: seq, kind: .message, authorId: "human-mrrcarter", authorName: "Sam",
                         isHuman: true, text: text, timestamp: "2026-10-31T13:3\(seq):00Z", attachments: files, eventType: type)
         }
         let transport = FileRoomTransport(history: [
