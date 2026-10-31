@@ -268,7 +268,7 @@ public enum VoiceCallRoster {
         var seen = Set<String>()
         func offer(_ id: String) {
             let key = id.lowercased()
-            guard !key.isEmpty, !key.hasPrefix("human"), !RoomChatQuiet.systemAuthors.contains(key),
+            guard !key.isEmpty, !key.hasPrefix("human"), !RoomChatQuiet.isRoomVoice(key),
                   running.contains(key) || !ended.contains(key),
                   seen.insert(key).inserted else { return }
             partners.append(id)
