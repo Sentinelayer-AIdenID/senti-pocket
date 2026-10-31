@@ -327,7 +327,7 @@ struct RoomChatScreen: View {
         coordinator.onLiveMessages = { [weak room] messages in room?.receive(messages) }
         coordinator.onNewReplies = { [weak room] replies in room?.receive(replies: replies) }
         coordinator.readsRepliesOften = true
-        // The call fills the screen, over the room and its bars, until you hang up (Carter, 10-30). Without its screen
+        // The call fills the screen, over the room and its bars, until you hang up. Without its screen
         // there would be no way to hang up, so the call does not start (warden, #267).
         guard VoiceCallWindow.shared.show(VoiceRoomHost(room: room, meter: meter, partnerLab: partnerLab(of: room))) else {
             CrashReporter.shared.note("voice call refused: no call screen")

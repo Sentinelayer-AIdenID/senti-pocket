@@ -77,13 +77,13 @@ final class RoomRosterTests: XCTestCase {
         XCTAssertEqual(roster.members.first?.posts, 1)
     }
 
-    /// Carter, 10-30: "I need agents and humans separated and a total number of online and offline".
+    /// Agents and people apart, with how many are online and offline.
     func test_the_people_list_has_agents_and_people_apart_with_online_and_offline_counts() throws {
         let roster = RoomRoster.build(
             posts: [post("human-mrrcarter", 2, human: true), post("human-griff", 300, human: true),
                     post("claude-warden", 30), post("old-agent", 300)],
             present: [
-                RoomChatPresence.Person(id: "human-6c1f", name: "mrrCarter", isHuman: true, isIdle: false, login: "mrrcarter"),
+                RoomChatPresence.Person(id: "human-6c1f", name: "Sam", isHuman: true, isIdle: false, login: "mrrcarter"),
                 RoomChatPresence.Person(id: "pocket-forge", name: "pocket-forge", isHuman: false, isIdle: true)
             ],
             runningBoxes: [RoomRoster.Box(name: "astra-brand-s", model: "m", phase: "ready", lastActivity: nil)],

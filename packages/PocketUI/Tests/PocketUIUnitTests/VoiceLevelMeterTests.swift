@@ -1,7 +1,7 @@
 import XCTest
 @testable import PocketUI
 
-/// Carter (10-30): "a wave form for when yall talking".
+/// A waveform of whoever is talking.
 @MainActor
 final class VoiceLevelMeterTests: XCTestCase {
     func test_a_level_heard_becomes_the_newest_bar_and_then_fades() {
