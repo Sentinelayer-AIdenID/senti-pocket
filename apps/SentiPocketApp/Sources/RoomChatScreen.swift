@@ -325,6 +325,8 @@ struct RoomChatScreen: View {
             // An agent's call you answered talks inside the system call, whose audio CallKit owns.
             audio: call == nil ? PhoneVoiceRoomAudioSession() : CallKitVoiceRoomAudioSession(),
             ringer: RingbackTone(),
+            // Its Mute is the call screen's (Carter, Voice Lab #56359).
+            callScreen: call.map { RoomCallScreen(desk: .shared, uuid: $0.uuid) },
             poster: voicePoster,
             voiceLine: voicePoster as? any VoiceLining,
             endpointer: voicePoster as? any VoiceEndpointing,
@@ -354,6 +356,8 @@ struct RoomChatScreen: View {
         heard.room = room
         voiceRoom = room
         CrashReporter.shared.note(agents.isEmpty ? "voice meeting began" : "voice call began")
+        // Muted on the call screen before this room took the call: it starts muted, as the call screen shows.
+        if let call, callDesk.muted.contains(call.uuid) { room.callScreenMuted(true) }
         room.begin(rings: call == nil)
     }
 
@@ -847,10 +851,11 @@ struct RoomChatScreen: View {
             }
         }
         .onReceive(callDesk.$waiting) { _ in takeAnsweredCall() }
-        // Muted on the phone's own call screen: the voice room stops listening (warden, #281).
+        // Muted on the phone's own call screen, or by the panel's Mute performed there: the voice room stops
+        // listening (warden, #281). Never sent back as the panel's Mute, which would ask the call screen again.
         .onReceive(callDesk.$muted) { muted in
             guard let answeredCall, let voiceRoom else { return }
-            voiceRoom.send(.setMuted(muted.contains(answeredCall.uuid)))
+            voiceRoom.callScreenMuted(muted.contains(answeredCall.uuid))
         }
         // Hung up on the phone's own call screen: the voice room ends with it.
         .onReceive(callDesk.$hungUp) { uuid in

@@ -235,22 +235,43 @@ public struct VoiceRoomPanel: View {
             Spacer()
             talkButton
             Spacer()
-            Button { send(.hangUp) } label: {
-                Image(systemName: "phone.down.fill")
-                    .font(.title3)
-                    .foregroundStyle(.white)
-                    .frame(width: 52, height: 52)
-                    .background(PocketPalette.danger, in: Circle())
+            HStack(spacing: 14) {
+                muteButton
+                Button { send(.hangUp) } label: {
+                    Image(systemName: "phone.down.fill")
+                        .font(.title3)
+                        .foregroundStyle(.white)
+                        .frame(width: 52, height: 52)
+                        .background(PocketPalette.danger, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(state.phase == .ending || state.phase == .ended)
+                .accessibilityLabel("End the voice room")
+                .accessibilityIdentifier("pocket.voice.end")
             }
-            .buttonStyle(.plain)
-            .disabled(state.phase == .ending || state.phase == .ended)
-            .accessibilityLabel("End the voice room")
-            .accessibilityIdentifier("pocket.voice.end")
         }
     }
 
+    /// Mute (Carter, Voice Lab #56359: "I don't see a mute button in this when I call you"), filled while on. In a
+    /// call the phone's call screen also shows, it mutes that call too.
+    private var muteButton: some View {
+        Button { send(.setMuted(!state.isMuted)) } label: {
+            Image(systemName: state.muteSymbol)
+                .font(.title3.weight(.semibold))
+                .frame(width: 48, height: 48)
+                .background(state.isMuted ? PocketPalette.textPrimary : PocketPalette.inset, in: Circle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(state.isMuted ? PocketPalette.canvas : PocketPalette.textPrimary)
+        .disabled(state.phase == .ending || state.phase == .ended)
+        .accessibilityLabel(state.muteLabel)
+        .accessibilityIdentifier("pocket.voice.mute")
+    }
+
+    /// Muted, it is greyed out like Skip with nothing to skip, says so under it, and takes no turn.
     private var talkButton: some View {
         let listening = state.isListening
+        let muted = state.isMuted
         return ZStack {
             if listening && !reduceMotion {
                 Circle()
@@ -262,13 +283,22 @@ public struct VoiceRoomPanel: View {
                     .onDisappear { pulse = false }
             }
             Circle()
-                .fill(listening ? PocketPalette.accent : PocketPalette.accentStrong)
+                .fill(muted ? PocketPalette.inset : listening ? PocketPalette.accent : PocketPalette.accentStrong)
                 .frame(width: 76, height: 76)
-            Image(systemName: listening ? "waveform" : "mic.fill")
+            Image(systemName: muted ? "mic.slash.fill" : listening ? "waveform" : "mic.fill")
                 .font(.system(size: 28, weight: .semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(muted ? PocketPalette.textSecondary.opacity(0.6) : .white)
         }
         .frame(width: 100, height: 100)
+        .overlay(alignment: .bottom) {
+            if muted {
+                Text("Muted")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(PocketPalette.textSecondary)
+                    .offset(y: 8)
+                    .accessibilityHidden(true)
+            }
+        }
         .contentShape(Circle())
         // A tap starts your turn and the next tap sends it; a hold talks while held and sends when let go.
         .onLongPressGesture(minimumDuration: Self.holdThreshold, maximumDistance: 60, perform: {}, onPressingChanged: { pressing in
@@ -282,12 +312,12 @@ public struct VoiceRoomPanel: View {
             }
         })
         .accessibilityElement()
-        .accessibilityLabel(listening ? "Send what you said" : "Talk")
-        .accessibilityHint(listening ? "Ends your turn and sends it to the room" : "Starts listening")
+        .accessibilityLabel(muted ? "Muted" : listening ? "Send what you said" : "Talk")
+        .accessibilityHint(muted ? "Unmute to talk" : listening ? "Ends your turn and sends it to the room" : "Starts listening")
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { send(.toggleTalk) }
         .accessibilityIdentifier("pocket.voice.talk")
-        .disabled(state.phase == .ending || state.phase == .ended)
+        .disabled(!state.canTalk)
     }
 
     static let holdThreshold: TimeInterval = 0.35
@@ -295,7 +325,7 @@ public struct VoiceRoomPanel: View {
     private var statusText: String {
         switch state.phase {
         case .ready where state.isRinging: return "Waiting for \(state.title) to pick up"
-        case .ready where state.isMuted: return "Muted on the call screen"
+        case .ready where state.isMuted: return state.mutedStatus
         case .ready: return state.isHandsFree ? "Your turn: talk, a pause sends it" : "Tap or hold to talk"
         case .listening: return "Listening"
         case .sending: return "Sending"

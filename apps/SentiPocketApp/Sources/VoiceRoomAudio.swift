@@ -41,6 +41,15 @@ protocol VoiceRoomRinging: AnyObject {
     func stopRinging()
 }
 
+/// The phone's own call (CallKit) a voice room talks inside, when it answers an agent's call. Its call screen has a
+/// Mute of its own, so the panel's Mute is asked of it, and its answer mutes the voice room the way a tap there does:
+/// one mute, the same on both screens (Carter, Voice Lab #56359).
+@MainActor
+protocol VoiceRoomCallScreen: AnyObject {
+    /// Mutes or unmutes the call as if on its screen; `done(false)` when the call screen could not.
+    func setMuted(_ on: Bool, done: @escaping @MainActor (Bool) -> Void)
+}
+
 /// The phone's audio for a voice room: held for the whole call, for listening and speaking in turn, through the
 /// speaker (or the headset), with other audio lowered.
 @MainActor
