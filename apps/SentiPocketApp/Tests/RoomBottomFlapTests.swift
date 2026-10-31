@@ -8,7 +8,8 @@ import XCTest
 /// Carter's freezes on build 17 (#56316, #56340): the room drew its rows without end until iOS ended the app, once just
 /// after a voice call began over a room of review packets, once just after a room opened and the one before it closed.
 /// These host the room as the app does, in a window on the simulator, with a room like his, and go through both. The
-/// room must settle: its rows drawn a bounded number of times, and the main thread free to run a timer throughout.
+/// room must settle in each step: its rows drawn a bounded number of times, the main thread never stalled for longer
+/// than `longestStall`, and running again at the end. A loop never ends; a slow machine only makes a step slower.
 ///
 /// On the simulator the room settled through both before the fix as well: the loop needs the phone's own geometry, a
 /// marker within a point of the edge. These guard the two transitions; `RoomBottomSettleTests` pins the settling itself.
@@ -204,13 +205,27 @@ final class RoomBottomFlapTests: XCTestCase {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let window = UIWindow(windowScene: scene)
         window.windowLevel = .normal + 5
-        window.rootViewController = UIHostingController(rootView: Host(room: room))
+        // Warmed up first, unmeasured: a test process's first SwiftUI window and its first text cost a hosted runner
+        // more than a second on their own (the first of these tests failed there in its first step, at the room's open).
+        window.rootViewController = UIHostingController(rootView: Host(room: Room(Self.warmUp())))
         window.makeKeyAndVisible()
         self.window = window
         watch.start()
+        watch.phase("warm-up")
+        pump(0.5)
+        window.rootViewController = UIHostingController(rootView: Host(room: room))
+    }
+
+    /// A few rows of each kind the rooms below hold, for the warm-up.
+    private static func warmUp() -> [RoomChatMessageInput] {
+        [input(1, "respawn-orchestrator", "[cost] warm-up: $1.00 est over 1 calls"),
+         input(2, "gpt-astra-carter", packet(1)),
+         input(3, "aneta-claude", "CONTRACT\n" + Array(repeating: "- a clause", count: 40).joined(separator: "\n")),
+         input(4, "human-mrrcarter", "A note from the phone.")]
     }
 
     private func close() {
+        beat.stop()
         watch.stop()
         VoiceCallWindow.shared.hide()
         window?.isHidden = true
@@ -223,23 +238,36 @@ final class RoomBottomFlapTests: XCTestCase {
         while Date() < end { RunLoop.main.run(until: min(end, Date().addingTimeInterval(0.02))) }
     }
 
-    /// Does `step`, then runs the main run loop for `seconds`: the rows may be drawn at most `maximumDraws` times, and a
-    /// 50 ms timer must keep firing (a room redrawing without end never lets it fire at all; a busy simulator still lets
-    /// it fire a quarter of the time).
+    /// Does `step`, then runs the main run loop for `seconds`. The rows may be drawn at most `maximumDraws` times, the
+    /// main thread may stall for at most `longestStall` at a time (a 20 ms heartbeat measures it), and the heartbeat
+    /// must be running again at the end.
     private func settles(_ name: String, seconds: TimeInterval = 1.5, maximumDraws: Int = 5_000,
                          file: StaticString = #filePath, line: UInt = #line, _ step: () -> Void) {
         watch.phase(name)
-        let fires = FireCount()
-        let timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in fires.add() }
+        beat.start()
         let before = RenderTrace.snapshot().draws
         step()
         pump(seconds)
-        timer.invalidate()
+        let stall = beat.longestGap()
         let draws = RenderTrace.snapshot().draws - before
-        let expected = Int(seconds / 0.05)
+        let beforeRecovery = beat.fires
+        pump(Self.recovery)
+        let recovered = beat.fires - beforeRecovery
+        print("ROOM-SETTLE \(name): \(draws) row draws, longest stall \(String(format: "%.3f", stall)) s, "
+            + "\(recovered) beats in the next \(Self.recovery) s")
         XCTAssertLessThan(draws, maximumDraws, "\(name): the rows were drawn \(draws) times", file: file, line: line)
-        XCTAssertGreaterThanOrEqual(fires.value, expected / 4, "\(name): the main thread stopped answering", file: file, line: line)
+        XCTAssertLessThan(stall, Self.longestStall, "\(name): the main thread stalled \(stall) s", file: file, line: line)
+        XCTAssertGreaterThanOrEqual(recovered, 3, "\(name): the main thread was not running again", file: file, line: line)
     }
+
+    /// The longest the main thread may stall in one step. A room that redraws without end never stops stalling (and
+    /// the watchdog ends the run at `MainThreadStuckWatch.limit`); a slow machine only makes the longest step longer.
+    /// On the Mac with every core kept busy, the room's open stalled at most 0.39 s after the warm-up, and 1.42 s in a
+    /// cold process without it; every other step under 0.11 s.
+    static let longestStall: TimeInterval = 2.0
+    /// How long the heartbeat is watched after each step, for the main thread running again.
+    static let recovery: TimeInterval = 0.3
+    private let beat = Heartbeat()
 
     /// #56316: Carter was at the bottom of a room of review packets and started a call. Its window came over the room,
     /// the room was covered, the call's message arrived and folded into its card, the agent answered, and he hung up.
@@ -299,11 +327,12 @@ final class RoomBottomFlapTests: XCTestCase {
         settles("open") {}
         let scroll = try XCTUnwrap(window.flatMap { Self.list(in: $0) }, "the room's list")
         let changes = room.placeChanges
-        settles("scrolled up", seconds: 0.05) {
-            scroll.setContentOffset(CGPoint(x: 0, y: max(0, scroll.contentOffset.y - 400)), animated: false)
-        }
+        scroll.setContentOffset(CGPoint(x: 0, y: max(0, scroll.contentOffset.y - 400)), animated: false)
+        pump(0.05)
         XCTAssertEqual(room.placeChanges, changes, "not in the pass that moved the marker")
-        pump(0.4)
+        // A slow machine lays out later: give it time to land, rather than a fixed moment.
+        let deadline = Date().addingTimeInterval(2)
+        while room.placeChanges == changes, Date() < deadline { pump(0.05) }
         XCTAssertEqual(room.placeChanges, changes + 1, "once it has stayed gone, the reader is away from the bottom")
     }
 
@@ -317,10 +346,40 @@ final class RoomBottomFlapTests: XCTestCase {
     }
 }
 
-/// A 50 ms timer's fires, counted on the main thread.
-private final class FireCount: @unchecked Sendable {
-    private(set) var value = 0
-    func add() { value += 1 }
+/// A 20 ms timer on the main run loop: how often it fired, and the longest gap between fires (the main thread's longest
+/// stall) since `start()`. Used on the main thread only.
+private final class Heartbeat: @unchecked Sendable {
+    private var timer: Timer?
+    private var last = Date()
+    private var longest: TimeInterval = 0
+    private(set) var fires = 0
+
+    func start() {
+        stop()
+        last = Date()
+        longest = 0
+        fires = 0
+        let timer = Timer(timeInterval: 0.02, repeats: true) { [weak self] _ in self?.fire() }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    /// The longest gap so far, counting the one still open.
+    func longestGap() -> TimeInterval {
+        max(longest, Date().timeIntervalSince(last))
+    }
+
+    private func fire() {
+        let now = Date()
+        longest = max(longest, now.timeIntervalSince(last))
+        last = now
+        fires += 1
+    }
 }
 
 /// A room that redraws without end never returns to the run loop, so no assertion could run: this watches from a
