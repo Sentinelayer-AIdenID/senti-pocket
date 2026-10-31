@@ -185,7 +185,7 @@ final class VoiceCallCardTests: XCTestCase {
                                        date: base.addingTimeInterval(60), attachments: [file])
         let inputs = [
             input("m1", seq: 1, "human-mrrcarter", start, at: 0),
-            input("m2", seq: 2, "pocket-forge", "Hi Carter.", at: 0.2),
+            input("m2", seq: 2, "pocket-forge", "Hi Sam.", at: 0.2),
             end
         ]
         let folded = VoiceCallCard.fold(inputs)
