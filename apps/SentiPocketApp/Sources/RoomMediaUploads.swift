@@ -246,6 +246,13 @@ final class RoomMediaUploadCoordinator: ObservableObject {
         var previewDone = false
         /// Restored from the outbox after the app was closed: its bytes may already be stored.
         var restored = false
+        /// Taken back by the person (out of the tray, or its message cancelled). It is never named in a message, and
+        /// whatever the server holds for it is deleted once its upload's current call has ended.
+        var withdrawn = false
+        /// Its upload is between calls to the API or storage (`run` is going).
+        var isRunning = false
+        /// The PUT of its bytes, stopped at once when it is taken back (a PUT changes nothing a delete must follow).
+        var putTask: Task<Void, Error>?
         var createdAt = Date()
         var phase: RoomMediaItemRow.Phase = .preparing
         let progress = RoomMediaProgress()
@@ -366,7 +373,10 @@ final class RoomMediaUploadCoordinator: ObservableObject {
     }
 
     private func stopAll() {
-        for item in items.values { item.task?.cancel() }
+        for item in items.values {
+            item.task?.cancel()
+            item.putTask?.cancel()
+        }
         for message in outgoing { message.postTask?.cancel() }
         items = [:]
         tray = []
@@ -475,16 +485,26 @@ final class RoomMediaUploadCoordinator: ObservableObject {
         updateKeepAlive()
     }
 
+    /// One file's upload, and the only place its server calls are made. Taking the file back never races it: each
+    /// await is followed by a check, nothing more is asked of the server once it is taken back, and the delete is sent
+    /// when this ends, after any call that was on its way (a completion that lands after Cancel is deleted too).
     private func run(_ id: String) async {
-        guard let item = items[id] else { return }
+        guard let item = items[id], !item.withdrawn else { return }
+        item.isRunning = true
+        defer {
+            item.isRunning = false
+            if item.withdrawn { finishWithdrawal(item) }
+        }
         do {
             if item.thumbnail == nil, item.kind != .file, item.prepared == nil {
                 item.thumbnail = await preparer.thumbnail(for: item.source)
+                if item.withdrawn { return }
                 publish()
             }
             if item.prepared == nil {
                 let prepared = try await preparer.prepare(item.source, thumbnail: item.thumbnail)
                 try Task.checkCancellation()
+                if item.withdrawn { return }
                 item.prepared = prepared
                 item.filename = prepared.filename
                 item.sizeBytes = prepared.sizeBytes
@@ -502,31 +522,46 @@ final class RoomMediaUploadCoordinator: ObservableObject {
                     item.stored = stored
                     persist(item)
                 }
+                if item.withdrawn { return }
             }
             if item.stored == nil {
+                // From the moment init is asked, the server may have a row for it: a file taken out even while init is
+                // on its way is deleted there too (deleting one that never arrived is harmless).
+                if !item.initiated {
+                    item.initiated = true
+                    persist(item)
+                }
                 // The client attachment id becomes the attachment's id: a retry is the same upload, never a second one.
                 let answer = try await uploader.initUpload(sessionId: sessionId, request: RoomMediaInitRequest(
                     filename: prepared.filename, contentType: prepared.type.contentType, sizeBytes: prepared.sizeBytes,
                     sha256: prepared.sha256, clientAttachmentId: item.id
                 ))
-                if !item.initiated {
-                    item.initiated = true
-                    persist(item)
-                }
+                if item.withdrawn { return }
                 let parentId = answer.attachment.attachmentId
                 if let preview = prepared.preview, !item.previewDone {
                     item.previewDone = await sendPreview(preview, of: parentId, uploader: uploader)
+                    if item.withdrawn { return }
                 }
                 if let target = answer.upload, !answer.attachment.isUploaded {
-                    try await uploader.put(file: prepared.file, to: target) { [weak self] sent, total in
-                        Task { @MainActor in self?.tick(id, sent: sent, total: total) }
+                    let file = prepared.file
+                    let put = Task { [weak self] in
+                        try await uploader.put(file: file, to: target) { sent, total in
+                            Task { @MainActor in self?.tick(id, sent: sent, total: total) }
+                        }
                     }
+                    item.putTask = put
+                    defer { item.putTask = nil }
+                    try await put.value
                 }
                 try Task.checkCancellation()
+                if item.withdrawn { return }
                 item.stored = try await uploader.completeUpload(sessionId: sessionId, attachmentId: parentId)
+                // Completed after the person took it back: the delete follows it (in `run`'s end), and it is never sent.
+                if item.withdrawn { return }
                 persist(item)
             }
             try Task.checkCancellation()
+            if item.withdrawn { return }
             item.progress.update(sent: prepared.sizeBytes, total: prepared.sizeBytes)
             item.phase = .uploaded
             if let thumbnail = item.thumbnail, let stored = item.stored {
@@ -536,12 +571,12 @@ final class RoomMediaUploadCoordinator: ObservableObject {
             publish()
             postReadyMessages()
         } catch {
-            guard items[id] === item, !Task.isCancelled, !(error is CancellationError) else { return }
+            guard !item.withdrawn, items[id] === item, !Task.isCancelled, !(error is CancellationError) else { return }
             if let index = tray.firstIndex(of: id), let refusal = Self.refusal(for: error, filename: item.source.filename) {
                 // Refused by the room's rules (too large once converted), or not a picture the phone could read or
                 // clean: out of the tray, with why.
                 tray.remove(at: index)
-                drop(item)
+                withdraw(item)
                 board.setNotice(refusal.message)
                 publish()
                 return
@@ -610,14 +645,26 @@ final class RoomMediaUploadCoordinator: ObservableObject {
     private func removeFromTray(_ id: String) {
         guard let index = tray.firstIndex(of: id), let item = items[id] else { return }
         tray.remove(at: index)
-        takeBack(item)
-        drop(item)
+        withdraw(item)
         publish()
     }
 
-    /// An upload that will never be sent: the server is asked to delete it (and its preview) now rather than let it
-    /// expire. Only once init has made a row, and never for a file a message has named.
-    private func takeBack(_ item: Item) {
+    /// Takes a file back: it leaves the room's view at once and is never named in a message. Its bytes stop at once.
+    /// If its upload is mid-call (init, its preview, complete), that call ends first and `run` then deletes what the
+    /// server holds; otherwise the delete goes now.
+    private func withdraw(_ item: Item) {
+        guard !item.withdrawn else { return }
+        item.withdrawn = true
+        items[item.id] = nil
+        item.putTask?.cancel()
+        persist(item)
+        if !item.isRunning { finishWithdrawal(item) }
+    }
+
+    /// After a taken-back file's last call: the server is asked to delete it and its preview (only once init may have
+    /// made a row; deleting one that never arrived is harmless), and the phone's copy goes.
+    private func finishWithdrawal(_ item: Item) {
+        discard(item.source)
         guard item.initiated, let uploader else { return }
         let sessionId = self.sessionId
         let ids = [item.id, RoomMediaRules.previewClientId(for: item.id)]
@@ -626,7 +673,8 @@ final class RoomMediaUploadCoordinator: ObservableObject {
         }
     }
 
-    private func drop(_ item: Item) {
+    /// Lets go of a file whose message was posted: it belongs to the room now, so nothing is deleted.
+    private func release(_ item: Item) {
         item.task?.cancel()
         items[item.id] = nil
         discard(item.source)
@@ -713,17 +761,16 @@ final class RoomMediaUploadCoordinator: ObservableObject {
         postReadyMessages()
     }
 
-    /// Stops a message: its uploads end and its card goes. Nothing reaches the room, and the server is asked to delete
-    /// what was uploaded for it.
+    /// Stops a message: its uploads end and its card goes. Nothing reaches the room, and what was uploaded for it is
+    /// deleted on the server, after any call still on its way. Once its post has started it can no longer be taken
+    /// back (the card offers no Cancel then), so a late tap does nothing.
     private func cancel(_ clientId: String) {
-        guard let index = outgoing.firstIndex(where: { $0.clientId == clientId }) else { return }
+        guard let index = outgoing.firstIndex(where: { $0.clientId == clientId }),
+              outgoing[index].status != .posting, outgoing[index].status != .sent else { return }
         let message = outgoing.remove(at: index)
         message.postTask?.cancel()
         for id in message.itemIds {
-            guard let item = items[id] else { continue }
-            // A message that may have posted (it was posting or sent) keeps its files: they belong to it now.
-            if message.status != .posting, message.status != .sent { takeBack(item) }
-            drop(item)
+            if let item = items[id] { withdraw(item) }
         }
         publish()
     }
@@ -739,7 +786,7 @@ final class RoomMediaUploadCoordinator: ObservableObject {
     private func finish(_ clientId: String) {
         guard let index = outgoing.firstIndex(where: { $0.clientId == clientId }) else { return }
         let message = outgoing.remove(at: index)
-        for id in message.itemIds { if let item = items[id] { drop(item) } }
+        for id in message.itemIds { if let item = items[id] { release(item) } }
         publish()
     }
 
@@ -757,6 +804,7 @@ final class RoomMediaUploadCoordinator: ObservableObject {
             initiated: item.initiated,
             previewDone: item.previewDone
         )
+        entry.withdrawn = item.withdrawn ? true : nil
         if let prepared = item.prepared {
             entry.prepared = RoomMediaOutboxEntry.Prepared(
                 file: prepared.file.lastPathComponent, filename: prepared.filename,
@@ -786,6 +834,16 @@ final class RoomMediaUploadCoordinator: ObservableObject {
     private func restore() {
         var messages: [String: (text: String?, parts: [(position: Int, id: String)], createdAt: Date)] = [:]
         for (folder, entry) in RoomMediaOutbox.entries(for: sessionId, root: outboxRoot) {
+            if entry.withdrawn == true {
+                // Taken back just before the app closed: deleted on the server now, never shown again.
+                if entry.initiated, let uploader {
+                    let sessionId = self.sessionId
+                    let ids = [entry.itemId, RoomMediaRules.previewClientId(for: entry.itemId)]
+                    Task { for id in ids { await uploader.deleteUpload(sessionId: sessionId, attachmentId: id) } }
+                }
+                try? FileManager.default.removeItem(at: folder)
+                continue
+            }
             guard let saved = entry.prepared, let type = RoomMediaRules.type(forExtension: saved.fileExtension),
                   RoomMediaRules.isValidClientId(entry.itemId), items[entry.itemId] == nil else { continue }
             let file = folder.appendingPathComponent(saved.file)

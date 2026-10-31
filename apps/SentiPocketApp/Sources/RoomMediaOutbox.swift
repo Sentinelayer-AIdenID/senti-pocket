@@ -56,6 +56,8 @@ struct RoomMediaOutboxEntry: Codable, Equatable {
     var previewDone: Bool
     var stored: Stored?
     var message: Message?
+    /// Taken back by the person: deleted on the server at the next open, never restored.
+    var withdrawn: Bool?
 }
 
 enum RoomMediaOutbox {
