@@ -31,9 +31,9 @@ struct BillingSnapshot: Equatable, Sendable {
         let usage = v2["usage"]
         // Used is what the web's gauge counts: included, trial, wallet and overage units.
         used = ["included_ru_used", "trial_ru_used", "wallet_ru_used", "overage_ru_used"]
-            .reduce(0) { $0 + max(0, usage?[$1]?.intValue ?? 0) }
-        available = max(0, v2["balances"]?["total"]?.intValue ?? 0)
-        overageCents = max(0, usage?["overage_cost_cents"]?.intValue ?? 0)
+            .reduce(0) { $0 + max(0, Int(clamping: usage?[$1]?.intValue ?? 0)) }
+        available = max(0, Int(clamping: v2["balances"]?["total"]?.intValue ?? 0))
+        overageCents = max(0, Int(clamping: usage?["overage_cost_cents"]?.intValue ?? 0))
         membershipTier = v1?["membership_tier"]?.stringValue
         // The web enables Manage subscription when the legacy status carries a subscription.
         hasActiveSubscription = v1?["active_subscription"]?.objectValue != nil
