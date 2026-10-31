@@ -113,8 +113,8 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         case .checkpoint:
             text = (payload["title"]?.stringValue ?? payload["summary"]?.stringValue ?? "Checkpoint")
         case .memberJoined:
-            // The server posts a join as itself; who joined is the payload's name (Carter, 10-30: the web said
-            // "Joel joined", the phone "senti joined"). One line, as the web shows it.
+            // The server posts a join as itself; who joined is the payload's name (the web named the person where the
+            // phone said "senti joined"). One line, as the web shows it.
             // Direction overrides and isolates are dropped, so a name can't reorder the line it sits in (warden, #273).
             let bidi: Set<Unicode.Scalar> = Set((0x202A...0x202E).compactMap(Unicode.Scalar.init)
                 + (0x2066...0x2069).compactMap(Unicode.Scalar.init) + [0x200E, 0x200F, 0x061C].compactMap(Unicode.Scalar.init))
