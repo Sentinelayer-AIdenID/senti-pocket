@@ -189,6 +189,8 @@ private struct AuthenticatedRootView: View {
     /// Your calls across your rooms: "Calls & briefings" (Carter, 10-30).
     @StateObject private var callLog: CallLogCoordinator
     @State private var presentsCallLog = false
+    @StateObject private var billing: BillingCoordinator
+    @State private var presentsBilling = false
     /// What waits on your decision across your rooms (ticket 931e1d2e).
     @StateObject private var waiting: WaitingOnYouCoordinator
     @State private var presentsWaiting = false
@@ -318,6 +320,12 @@ private struct AuthenticatedRootView: View {
         _notifications = StateObject(wrappedValue: notifications)
         _callLog = StateObject(wrappedValue: CallLogCoordinator(
             transport: transport,
+            onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
+        ))
+        // Plan & billing reads the same API as the web and opens its payment pages in Safari (Carter, 10-31).
+        _billing = StateObject(wrappedValue: BillingCoordinator(
+            api: BillingClient(apiBaseURL: apiURL),
+            openExternally: { url in UIApplication.shared.open(url) },
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
         ))
         _waiting = StateObject(wrappedValue: WaitingOnYouCoordinator(
@@ -480,6 +488,9 @@ private struct AuthenticatedRootView: View {
                 }
             }
         }
+        .sheet(isPresented: $presentsBilling) {
+            BillingView(state: billing.state, send: billing.send) { presentsBilling = false }
+        }
         .sheet(isPresented: $presentsCallLog) {
             CallLogView(state: callLog.state, readingId: readingCallId) { intent in
                 switch intent {
@@ -607,6 +618,7 @@ private struct AuthenticatedRootView: View {
         // Whatever was open on top goes, so the room opened is the one you see (warden, #272).
         presentsCallLog = false
         presentsWaiting = false
+        presentsBilling = false
         let row = sessions.state.rows.first { UTF8ExactIdentity.matches($0.sessionId, link.sessionId) }
         presentsNotifications = false
         presentsSettings = false
@@ -728,7 +740,12 @@ private struct AuthenticatedRootView: View {
             onNewRoom: roomSender is any RoomCreating ? {
                 closeDrawer()
                 presentsNewRoom = true
-            } : nil
+            } : nil,
+            onBilling: {
+                closeDrawer()
+                presentsBilling = true
+                Task { await billing.refresh() }
+            }
         )
     }
 
@@ -765,7 +782,7 @@ private struct AuthenticatedRootView: View {
     /// Something over the room: a sheet, or the side panel.
     private var roomCovered: Bool {
         drawerOpen || presentsNotifications || presentsWaiting || presentsPocket || presentsActivity || presentsSettings
-            || presentsNewRoom || presentsCallLog
+            || presentsNewRoom || presentsCallLog || presentsBilling
     }
 
     /// The room list has loaded or failed, so a room opened from a link knows its title and your role in it.
