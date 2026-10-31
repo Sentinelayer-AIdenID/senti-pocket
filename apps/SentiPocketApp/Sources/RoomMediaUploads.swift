@@ -731,6 +731,8 @@ final class RoomMediaUploadCoordinator: ObservableObject {
                 try await uploader.postMessage(sessionId: sessionId, text: text, attachments: references, clientId: clientId)
                 guard let self else { return }
                 self.setStatus(clientId, .sent)
+                // Recorded as posted: if the app closes before the room shows it, it is not offered again as unsent.
+                for id in message.itemIds { if let item = self.items[id] { self.persist(item) } }
                 self.onPosted?()
                 // The room shows it (`echoed`); if it never does, the card still goes.
                 await self.sleep(Self.echoGrace)
@@ -824,7 +826,8 @@ final class RoomMediaUploadCoordinator: ObservableObject {
         }
         if let message = outgoing.first(where: { $0.itemIds.contains(item.id) }),
            let position = message.itemIds.firstIndex(of: item.id) {
-            entry.message = RoomMediaOutboxEntry.Message(clientId: message.clientId, text: message.text, position: position)
+            entry.message = RoomMediaOutboxEntry.Message(clientId: message.clientId, text: message.text, position: position,
+                                                         posted: message.status == .sent ? true : nil)
         }
         RoomMediaOutbox.write(entry, in: item.source.folder)
     }
@@ -841,6 +844,11 @@ final class RoomMediaUploadCoordinator: ObservableObject {
                     let ids = [entry.itemId, RoomMediaRules.previewClientId(for: entry.itemId)]
                     Task { for id in ids { await uploader.deleteUpload(sessionId: sessionId, attachmentId: id) } }
                 }
+                try? FileManager.default.removeItem(at: folder)
+                continue
+            }
+            if entry.message?.posted == true {
+                // Posted before the app closed: it is the room's, so nothing of it is shown or kept.
                 try? FileManager.default.removeItem(at: folder)
                 continue
             }

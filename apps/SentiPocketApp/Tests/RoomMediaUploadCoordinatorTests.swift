@@ -280,10 +280,10 @@ final class RoomMediaUploadCoordinatorTests: XCTestCase {
         return RoomMediaSource(file: file, filename: name)
     }
 
-    private func coordinator(_ uploader: FakeUploader?, keepAlive: any RoomMediaKeepingAlive = NoKeepAlive())
-        -> RoomMediaUploadCoordinator {
+    private func coordinator(_ uploader: FakeUploader?, keepAlive: any RoomMediaKeepingAlive = NoKeepAlive(),
+                             session: String = "room_1") -> RoomMediaUploadCoordinator {
         RoomMediaUploadCoordinator(
-            sessionId: "room_1",
+            sessionId: session,
             uploader: uploader,
             preparer: FakePreparer(),
             keepAlive: keepAlive,
@@ -512,11 +512,12 @@ final class RoomMediaUploadCoordinatorTests: XCTestCase {
         for round in 0..<40 {
             let uploader = FakeUploader()
             uploader.completeDelay = { try? await Task.sleep(nanoseconds: UInt64.random(in: 0...3_000_000)) }
-            let media = coordinator(uploader)
+            // Its own room: a room restores the outbox entries it finds, and the rounds before left theirs.
+            let media = coordinator(uploader, session: "room_stress_\(round)")
             media.add([try source("IMG_\(round).jpg")])
+            let itemId = try XCTUnwrap(media.board.tray.first?.id)
             media.perform(.send(text: ""))
-            let clientId = try XCTUnwrap(media.board.outgoing.first?.id)
-            let itemId = try XCTUnwrap(media.board.outgoing.first?.items.first?.id)
+            let clientId = try XCTUnwrap(media.board.outgoing.first { $0.items.map(\.id) == [itemId] }?.id)
             try await Task.sleep(nanoseconds: UInt64.random(in: 0...4_000_000))
             media.perform(.cancel(clientId: clientId))
             if media.board.outgoing.isEmpty {
@@ -540,7 +541,7 @@ final class RoomMediaUploadCoordinatorTests: XCTestCase {
             } else {
                 // The post had already started: the message is the room's, and nothing of it is deleted.
                 await until("sent \(round)", boards: [media.board]) { media.board.outgoing.first?.status == .sent }
-                XCTAssertTrue(uploader.deletes.isEmpty, "round \(round): a posted file was deleted")
+                XCTAssertFalse(uploader.deletes.contains(itemId), "round \(round): a posted file was deleted")
             }
         }
     }
@@ -593,6 +594,18 @@ final class RoomMediaUploadCoordinatorTests: XCTestCase {
         XCTAssertEqual(again.posts.first?.ids, ["pm_test_000001"], "the same upload")
         XCTAssertTrue(again.inits.allSatisfy { $0.clientAttachmentId.hasPrefix("pm_test_000001") })
         XCTAssertEqual(again.completes.first, "pm_test_000001", "completing is tried first: the bytes may have landed")
+    }
+
+    func test_a_posted_message_is_not_shown_again_after_the_app_closes() async throws {
+        let uploader = FakeUploader()
+        let media = coordinator(uploader)
+        media.add([try source("IMG_0001.jpg")])
+        media.perform(.send(text: "Hi"))
+        await until("sent", boards: [media.board]) { media.board.outgoing.first?.status == .sent }
+        // The app closes before the room showed it; at the next launch it is not offered again.
+        let reopened = coordinator(FakeUploader())
+        XCTAssertTrue(reopened.board.outgoing.isEmpty, "a posted message is the room's: it is not shown as unsent")
+        XCTAssertTrue(reopened.board.tray.isEmpty)
     }
 
     func test_a_grant_iOS_ended_is_asked_for_again_and_never_ended_twice() async throws {

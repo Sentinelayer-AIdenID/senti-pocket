@@ -39,6 +39,8 @@ struct RoomMediaOutboxEntry: Codable, Equatable {
         var text: String?
         /// Its place among the message's files.
         var position: Int
+        /// The message was posted: it is the room's now, and is never restored as unsent.
+        var posted: Bool?
     }
 
     var version = 1
