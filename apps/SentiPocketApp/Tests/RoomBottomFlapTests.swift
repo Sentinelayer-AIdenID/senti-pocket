@@ -386,9 +386,8 @@ final class RoomBottomFlapTests: XCTestCase {
         XCTAssertTrue(room.isAtBottom)
     }
 
-    /// A room short enough to fit on the screen cannot scroll, so opening at its line moves nothing. With its rows there
-    /// from the window's first frame, the marker says it is in view before the room decides to open at the line, and
-    /// never says so again: only the check after the open lands it, once.
+    /// A room short enough to fit on the screen cannot scroll, so opening at its line moves nothing, with its rows there
+    /// from the window's first frame: the reader still counts as at the bottom, once, and stays so.
     func test_a_room_that_fits_on_the_screen_opened_at_its_line_counts_the_reader_at_the_bottom() throws {
         var rows: [RoomChatMessageInput] = []
         for index in 1...5 {
