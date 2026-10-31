@@ -1027,7 +1027,7 @@ public enum RoomChatQuiet {
     static let systemAuthors: Set<String> = ["respawn-orchestrator", "ticket-keeper"]
 
     /// The room's own voices, which never answer a call: the orchestrator's costs and mints, the ticket keeper, and
-    /// Senti's own notices ("mrrCarter answered pocket-forge's call").
+    /// Senti's own notices ("sam answered ada-agent's call").
     public static func isRoomVoice(_ authorId: String) -> Bool {
         let key = authorId.lowercased()
         return systemAuthors.contains(key) || key == "senti"
@@ -1050,7 +1050,7 @@ public enum RoomChatQuiet {
     /// remembered: compiling them per call showed up on the main thread in the watchdog's stack (Carter, 10-30).
     ///
     /// The line is cut at `lineCharacters`: it shows on one line, and the room measures every row it draws. The
-    /// review packets in Carter's freeze (#56316) were quiet rows whose first line was a 700-character JSON header.
+    /// review packets in the build-17 freeze were quiet rows whose first line was a 700-character JSON header.
     public static func line(_ text: String) -> String {
         if let known = lineCache.object(forKey: text as NSString) { return known as String }
         let unsigned = RoomBoxThread.unsigned(text)
@@ -1311,8 +1311,8 @@ public enum RoomChatIntent: Equatable, Sendable {
     case openTickets(filing: Bool)
     case openSearch
     case readerAtBottom(Bool)
-    /// The bottom marker flapped, so the reader's place was held still for a moment (Carter's freeze, #56316): for the
-    /// freeze recorder, with how many rows the room had and its longest message's length, never what it says.
+    /// The bottom marker flapped, so the reader's place was held still for a moment: for the freeze recorder, with how
+    /// many rows the room had and its longest message's length, never what it says.
     case bottomFlapHeld(rows: Int, longestText: Int)
     case retry
     case jumpToMessage(sequenceId: Int64)

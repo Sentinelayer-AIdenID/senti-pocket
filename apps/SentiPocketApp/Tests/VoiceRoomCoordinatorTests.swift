@@ -946,7 +946,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         await until("listening again once unmuted") { listener.starts == 2 && room.state.isListening }
     }
 
-    /// Carter (Voice Lab #56359): "I don't see a mute button in this when I call you". In a call made in the app the
+    /// A call in the app has a Mute button. In a call made in the app the
     /// panel's Mute mutes at once: listening stops, words the recognizer still delivers are dropped, holding or tapping
     /// Talk does nothing, answers are still read, and unmuting brings hands-free listening back.
     func test_the_panels_mute_stops_the_room_hearing_you_until_unmuted() async {
@@ -991,7 +991,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         await room.hangUp()
     }
 
-    /// Carter (Voice Lab #56359): in an agent's call answered on the phone's call screen, the panel's Mute is asked of
+    /// In an agent's call answered on the phone's call screen, the panel's Mute is asked of
     /// the call screen and only its answer mutes the room, so the two always agree. A mute made on the call screen and
     /// the panel's own converge on one state, each applied once.
     func test_on_the_call_screen_the_panels_mute_and_the_call_screens_are_one_mute() async {
@@ -1062,7 +1062,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         XCTAssertEqual(listener.starts, 0)
 
         room.send(.setMuted(true))
-        room.receive([message("hi", from: "pocket-forge", "Hi Carter.")])
+        room.receive([message("hi", from: "pocket-forge", "Hi Sam.")])
         await until("the hello is read") { room.state.speaker == "pocket-forge" }
         speaker.finish()
         try? await Task.sleep(nanoseconds: 20_000_000)
@@ -1086,7 +1086,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         room.receive([
             message("o1", from: "respawn-orchestrator", "[cost] astra-web: $15.26 est over 101 calls", secondsAfterStart: 3),
             message("k1", from: "ticket-keeper", "1 asks: R1: no action", secondsAfterStart: 3),
-            message("s1", from: "senti", "📞 mrrCarter answered pocket-forge's call", secondsAfterStart: 3),
+            message("s1", from: "senti", "📞 sam answered ada-agent's call", secondsAfterStart: 3),
             message("a1", from: "claude-warden", "I have it.", secondsAfterStart: 4)
         ])
         await until("the agent is read") { room.state.speaker == "claude-warden" }
@@ -1097,7 +1097,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
 
     // MARK: - Ending a turn on sound, and carrying it on
 
-    /// Carter (10-31): calls should feel live. The recognizer hands words over a beat after the voice, and the pause
+    /// Calls should feel live. The recognizer hands words over a beat after the voice, and the pause
     /// was timed from the words, so it ran that beat longer. It is timed from the voice now: 1.4 s, or 0.8 s after a
     /// finished sentence.
     func test_a_turn_ends_on_the_pause_after_your_voice_even_when_the_words_come_late() async {
@@ -1161,7 +1161,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         await room.hangUp()
     }
 
-    /// Carter (10-31): a pause mid-thought ended the turn, and what came next was lost or went alone. Listening stays
+    /// A pause mid-thought used to end the turn, and what came next was lost or went alone. Listening stays
     /// on a moment after a turn goes, and what you say there joins it: one turn in the call, and in the room words that
     /// carry it on, addressed the same way.
     func test_what_you_say_just_after_a_turn_goes_joins_it() async {
@@ -1327,7 +1327,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         await room.hangUp()
     }
 
-    /// Carter (10-30) wanted a finished turn sent within about 600 ms. The endpoint is asked 0.3 s after the voice
+    /// A finished turn should be sent within about 600 ms. The endpoint is asked 0.3 s after the voice
     /// stops, before the recognizer's last words have settled, and a sure enough answer ends the turn at once. The
     /// line is 0.6 unless the call is given another.
     func test_the_endpoint_is_asked_0_3_s_after_the_voice_stops() async {

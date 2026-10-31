@@ -313,8 +313,8 @@ final class RoomChatCoordinator: ObservableObject {
                 publish()
             }
         case .readerAtBottom(let atBottom):
-            // Only a change is news: the same place told again never publishes (Carter's freeze, #56316). The line
-            // the room opened at stays, so coming back to the bottom publishes only when arrivals were unread.
+            // Only a change is news: the same place told again never publishes, so it can never loop the room. The
+            // line the room opened at stays, so coming back to the bottom publishes only when arrivals were unread.
             guard atBottom != readerAtBottom else { return }
             readerAtBottom = atBottom
             if atBottom {

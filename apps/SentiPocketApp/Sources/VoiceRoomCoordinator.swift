@@ -108,8 +108,8 @@ final class VoiceRoomCoordinator: ObservableObject {
     /// 0.2–0.5 s). A word that arrives later than this after the last loud sound was said below the microphone's
     /// speaking level, so it moves the pause on as well: while words keep coming, a turn waits for them.
     static let recognizerLag: TimeInterval = 0.5
-    /// After a turn goes, listening stays on this long, and what you say joins it (Carter, 10-31: calls should feel
-    /// live and lose no words). A pause mid-thought used to end the turn and drop what came next.
+    /// After a turn goes, listening stays on this long, and what you say joins it: calls should feel live and lose no
+    /// words. A pause mid-thought used to end the turn and drop what came next.
     static let joinsWithin: TimeInterval = 1.2
     /// What starts the words that carry on a turn already in the room.
     static let carriesOn = "…"
@@ -304,7 +304,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         pendingAdds.append(posting)
     }
 
-    /// The panel's Mute (Carter, Voice Lab #56359: "I don't see a mute button in this when I call you"). In a call on
+    /// The panel's Mute, so a call always has one in the app. In a call on
     /// the phone's call screen it is asked of the call screen, and the call screen's own mute comes back through
     /// `callScreenMuted(_:)` as a tap there does: one mute, applied once, the same on both screens. A call made here
     /// mutes at once.
@@ -696,7 +696,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         _ = await posted.value
     }
 
-    /// What you said just after a turn went joins it (Carter, 10-31: a pause mid-thought ended the turn and the rest
+    /// What you said just after a turn went joins it (a pause mid-thought used to end the turn, and the rest
     /// was lost). The call keeps one turn, on the same floor. The room gets the new words as a turn that carries on
     /// the last one ("…and the dial?"), addressed the same way and posted after it: the agents' listeners answer new
     /// messages and never see edits, so editing the first would go unanswered. The voice line is asked again with the

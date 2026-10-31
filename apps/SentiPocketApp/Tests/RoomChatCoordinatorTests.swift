@@ -220,7 +220,7 @@ final class RoomChatCoordinatorTests: XCTestCase {
         coordinator.pause()
     }
 
-    /// Carter's freeze (#56316) ended with the room telling its place over and over: the same place again is never
+    /// A freeze on build 17 ended with the room telling its place over and over: the same place again is never
     /// news, and only coming back with something unread publishes, once.
     func test_the_readers_place_told_again_never_publishes() async {
         let transport = ScriptedRoomTransport(before: [.success(page([1]))])

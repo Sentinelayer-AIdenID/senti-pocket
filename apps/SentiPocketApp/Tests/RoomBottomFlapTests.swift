@@ -5,9 +5,9 @@ import UIKit
 import XCTest
 @testable import SentiPocketApp
 
-/// Carter's freezes on build 17 (#56316, #56340): the room drew its rows without end until iOS ended the app, once just
-/// after a voice call began over a room of review packets, once just after a room opened and the one before it closed.
-/// These host the room as the app does, in a window on the simulator, with a room like his, and go through both. The
+/// The freezes on build 17: the room drew its rows without end until iOS ended the app, once just after a voice call
+/// began over a room of review packets, once just after a room opened and the one before it closed. These host the
+/// room as the app does, in a window on the simulator, with a room like the one that froze, and go through both. The
 /// room must settle in each step: its rows drawn a bounded number of times, the main thread never stalled for longer
 /// than `longestStall`, and running again at the end. A loop never ends; a slow machine only makes a step slower.
 ///
@@ -147,9 +147,9 @@ final class RoomBottomFlapTests: XCTestCase {
         )
     }
 
-    /// A review packet like the 70 in Carter's room: addressed to another agent (so a quiet row), a JSON header of about
-    /// 700 characters on its first line, then up to a few hundred short lines, about 9.5 KB in all. Made up: no room's
-    /// words are in this repository.
+    /// A review packet like the 70 in the room that froze: addressed to another agent (so a quiet row), a JSON header
+    /// of about 700 characters on its first line, then up to a few hundred short lines, about 9.5 KB in all. Made up:
+    /// no room's words are in this repository.
     private static func packet(_ part: Int) -> String {
         var header = "@aneta-claude REVIEW_PACKET {\"packet\":\"flap-test-packet\",\"message_part\":\"\(part)/70\""
         while header.count < 690 { header += ",\"key_\(header.count)\":\"value \(header.count % 89)\"" }
@@ -168,7 +168,7 @@ final class RoomBottomFlapTests: XCTestCase {
     }
 
     /// The room as it was at the call: agents' notes, the orchestrator's costs, 70 review packets, a long contract that
-    /// is not background (it shows its start and a card), and Carter's own messages.
+    /// is not background (it shows its start and a card), and the reader's own messages.
     private static func reviewRoom() -> [RoomChatMessageInput] {
         var rows: [RoomChatMessageInput] = []
         var seq: Int64 = 56_200
@@ -188,7 +188,7 @@ final class RoomBottomFlapTests: XCTestCase {
         return rows
     }
 
-    /// Carter's main room: mostly the orchestrator's one-line notices, boxes starting, and short notes.
+    /// A busy main room: mostly the orchestrator's one-line notices, boxes starting, and short notes.
     private static func mainRoom() -> [RoomChatMessageInput] {
         var rows: [RoomChatMessageInput] = []
         var seq: Int64 = 55_800
@@ -278,8 +278,9 @@ final class RoomBottomFlapTests: XCTestCase {
     static let recovery: TimeInterval = 0.3
     private let beat = Heartbeat()
 
-    /// #56316: Carter was at the bottom of a room of review packets and started a call. Its window came over the room,
-    /// the room was covered, the call's message arrived and folded into its card, the agent answered, and he hung up.
+    /// The first freeze: the reader was at the bottom of a room of review packets and started a call. Its window came
+    /// over the room, the room was covered, the call's message arrived and folded into its card, the agent answered,
+    /// and the reader hung up.
     func test_a_call_starting_over_a_room_of_review_packets_lets_the_room_settle() throws {
         let rows = Self.reviewRoom()
         let room = Room(rows)
@@ -305,8 +306,8 @@ final class RoomBottomFlapTests: XCTestCase {
         }
     }
 
-    /// #56340: from the side panel Carter opened another room; it loaded while the panel closed, and the room before it
-    /// closed. Then the room is closed too.
+    /// The second freeze: from the side panel the reader opened another room; it loaded while the panel closed, and the
+    /// room before it closed. Then the room is closed too.
     func test_a_room_opened_from_the_side_panel_then_closed_lets_the_room_settle() throws {
         let room = Room(Self.reviewRoom())
         try host(room)
@@ -324,7 +325,7 @@ final class RoomBottomFlapTests: XCTestCase {
         }
         let reports = room.placeReports
         settles("the room closes") { room.shows = false }
-        XCTAssertEqual(room.placeReports, reports, "a closing room never tells the coordinator its place (#56340)")
+        XCTAssertEqual(room.placeReports, reports, "a closing room never tells the coordinator its place")
     }
 
     /// What made the loop: the marker leaving view wrote the reader's place in the same layout pass. It now lands only
@@ -500,7 +501,7 @@ private final class MainThreadStuckWatch: @unchecked Sendable {
         lock.unlock()
         if stuck > Self.limit {
             fatalError("The room never settled after \"\(phase)\": the main thread was stuck \(Int(stuck)) s, "
-                + "with \(draws) row draws (Carter's freeze, #56316).")
+                + "with \(draws) row draws.")
         }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
