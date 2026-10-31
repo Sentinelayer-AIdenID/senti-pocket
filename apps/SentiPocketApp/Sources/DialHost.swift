@@ -188,6 +188,11 @@ final class DialHost: ObservableObject {
         // so none of them ever reaches the dial flow below, and no dial UUID reaches the desk.
         let desk = RoomCallDesk.shared
         desk.endSystemCall = { [weak callManager] uuid in callManager?.end(uuid) }
+        // The app's own Mute is performed by CallKit, whose answer comes back through onMuted below.
+        desk.muteSystemCall = { [weak callManager] uuid, muted, done in
+            guard let callManager else { return done(false) }
+            callManager.requestMuted(uuid, muted, completion: done)
+        }
         callManager.isRoomCallAuthorized = { SessionTokenStore.load()?.isEmpty == false }
         callManager.onRoomCallReceived = { doorbell, uuid in desk.received(doorbell, uuid: uuid) }
         // Adapter 1 — admit one reported CallKit episode, then store its receive state under the exact UUID.

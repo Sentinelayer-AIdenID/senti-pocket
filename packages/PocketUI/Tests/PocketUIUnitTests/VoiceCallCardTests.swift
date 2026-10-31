@@ -173,6 +173,24 @@ final class VoiceCallCardTests: XCTestCase {
         XCTAssertEqual(VoiceRoomState(with: ["a", "b", "c"]).title, "a, b and c")
     }
 
+    /// Carter (Voice Lab #56359): "I don't see a mute button in this when I call you". The button says what a tap does,
+    /// Talk takes no turn while muted, and the panel says where the call is muted.
+    func test_the_mute_button_says_what_a_tap_does_and_the_panel_says_where_it_is_muted() {
+        for agents in [["pocket-forge"], []] {
+            var state = VoiceRoomState(with: agents)
+            XCTAssertEqual(state.muteLabel, "Mute")
+            XCTAssertTrue(state.canTalk)
+            state.isMuted = true
+            XCTAssertEqual(state.muteLabel, "Unmute")
+            XCTAssertFalse(state.canTalk, "Talk takes no turn while muted")
+            XCTAssertEqual(state.mutedStatus, "Muted", "a call made in the app")
+            state.hasCallScreen = true
+            XCTAssertEqual(state.mutedStatus, "Muted on the call screen", "an agent's call answered on the call screen")
+        }
+        XCTAssertFalse(VoiceRoomState(phase: .ending, with: ["pocket-forge"]).canTalk)
+        XCTAssertFalse(VoiceRoomState(phase: .ended, with: ["pocket-forge"]).canTalk)
+    }
+
     /// Found porting the card to the web (#694): the closing message carries the transcript and folds into the card,
     /// so the card offers the file itself. A call that never closed has none.
     func test_a_closed_calls_card_offers_the_transcript_its_closing_message_carried() {

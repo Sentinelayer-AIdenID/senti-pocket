@@ -148,6 +148,10 @@ final class RoomCallDesk: ObservableObject {
     var api: any RoomCallsAPI
     /// Ends the system call (CallKit) for this UUID.
     var endSystemCall: (UUID) -> Void = { _ in }
+    /// Mutes or unmutes the system call (CallKit) for this UUID as if on its screen; `done(false)` when it could not.
+    var muteSystemCall: @MainActor (UUID, Bool, @escaping @MainActor (Bool) -> Void) -> Void = { _, _, done in
+        done(false)
+    }
     /// Puts the room on screen.
     var openRoom: (String) -> Void = { _ in }
     private let ringFor: TimeInterval
@@ -219,10 +223,20 @@ final class RoomCallDesk: ObservableObject {
         }
     }
 
-    /// Mute or unmute on the phone's own call screen.
+    /// Mute or unmute on the phone's own call screen, or the app's Mute performed there.
     func setMuted(_ uuid: UUID, _ isMuted: Bool) {
         guard calls[uuid] != nil else { return }
         if isMuted { muted.insert(uuid) } else { muted.remove(uuid) }
+    }
+
+    /// The app's own Mute for a call that is live (Carter, Voice Lab #56359): asked of the call screen, which then
+    /// mutes through `setMuted` exactly as a tap there does, so the app and the call screen never disagree.
+    func requestMuted(_ uuid: UUID, _ isMuted: Bool, done: @escaping @MainActor (Bool) -> Void) {
+        guard isLive(uuid) else {
+            done(false)
+            return
+        }
+        muteSystemCall(uuid, isMuted, done)
     }
 
     /// The call screen ended: before an answer that is a decline; after it, the end of the call, and its voice room
@@ -289,5 +303,21 @@ final class RoomCallDesk: ObservableObject {
             await previous?.value
             try? await api.setStatus(sessionId: call.doorbell.sessionId, callId: call.doorbell.callId, status: status)
         }
+    }
+}
+
+/// An answered call's screen, as its voice room sees it: the panel's Mute is asked of it.
+@MainActor
+final class RoomCallScreen: VoiceRoomCallScreen {
+    private let desk: RoomCallDesk
+    private let uuid: UUID
+
+    init(desk: RoomCallDesk, uuid: UUID) {
+        self.desk = desk
+        self.uuid = uuid
+    }
+
+    func setMuted(_ on: Bool, done: @escaping @MainActor (Bool) -> Void) {
+        desk.requestMuted(uuid, on, done: done)
     }
 }

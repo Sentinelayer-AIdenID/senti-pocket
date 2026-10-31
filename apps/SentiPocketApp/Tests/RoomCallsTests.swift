@@ -244,6 +244,64 @@ final class RoomCallsTests: XCTestCase {
         XCTAssertTrue(desk.muted.isEmpty, "a call this desk does not own is ignored")
     }
 
+    /// Carter (Voice Lab #56359): the app's Mute is asked of the call screen, which mutes through `setMuted` like a
+    /// tap there, so the app and the call screen never disagree. A call that is over is never asked about.
+    func test_the_apps_mute_is_asked_of_the_call_screen_for_a_live_call_only() async {
+        let desk = RoomCallDesk(api: FakeCallsAPI(details: details()),
+                                sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) })
+        var asked: [UUID] = []
+        desk.muteSystemCall = { [weak desk] uuid, muted, done in
+            asked.append(uuid)
+            // CallKit performs it, and onMuted reaches the desk as a tap on the call screen does.
+            desk?.setMuted(uuid, muted)
+            done(true)
+        }
+        let uuid = UUID()
+        desk.received(doorbell, uuid: uuid)
+        desk.answered(uuid)
+        let screen = RoomCallScreen(desk: desk, uuid: uuid)
+        var results: [Bool] = []
+        screen.setMuted(true) { results.append($0) }
+        XCTAssertEqual(asked, [uuid])
+        XCTAssertEqual(desk.muted, [uuid])
+        screen.setMuted(false) { results.append($0) }
+        XCTAssertTrue(desk.muted.isEmpty)
+
+        desk.ended(uuid)
+        screen.setMuted(true) { results.append($0) }
+        desk.requestMuted(UUID(), true) { results.append($0) }
+        XCTAssertEqual(results, [true, true, false, false])
+        XCTAssertEqual(asked, [uuid, uuid], "a call that is over, or not this desk's, is never asked about")
+    }
+
+    /// Carter (Voice Lab #56359): the app's Mute asks CallKit to mute the call as if on its screen, so the call screen
+    /// shows it too, and CallKit performing it reaches `onMuted` like a tap there. A call not live here is not asked.
+    func test_the_apps_mute_is_a_callkit_mute_of_that_call() {
+        let provider = CXProvider(configuration: CXProviderConfiguration())
+        var requested: [CXSetMutedCallAction] = []
+        let manager = SentiCallManager(provider: provider, requestTransaction: { transaction, completion in
+            requested += transaction.actions.compactMap { $0 as? CXSetMutedCallAction }
+            completion(true)
+        })
+        var heard: [String] = []
+        manager.onMuted = { uuid, muted in heard.append("\(uuid) \(muted)") }
+        let call = IncomingDecisionCall(id: UUID(), dialId: "", callerDisplayName: "pocket-forge", message: "",
+                                        context: nil, priority: "high")
+        manager.ring(call)
+        var results: [Bool] = []
+        manager.requestMuted(call.id, true) { results.append($0) }
+        XCTAssertEqual(requested.map(\.callUUID), [call.id])
+        XCTAssertEqual(requested.map(\.isMuted), [true])
+        XCTAssertEqual(results, [true])
+        XCTAssertTrue(heard.isEmpty, "nothing is muted until CallKit performs it")
+        if let action = requested.first { manager.provider(provider, perform: action) }
+        XCTAssertEqual(heard, ["\(call.id) true"])
+
+        manager.requestMuted(UUID(), true) { results.append($0) }
+        XCTAssertEqual(results, [true, false])
+        XCTAssertEqual(requested.count, 1, "a call not live here is never asked about")
+    }
+
     /// Warden (#281): an answered call no voice room takes ends, rather than staying connected and silent.
     func test_an_answered_call_no_voice_room_takes_ends() async {
         let api = FakeCallsAPI(details: details())

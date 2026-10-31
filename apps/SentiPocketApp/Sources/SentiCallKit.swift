@@ -76,6 +76,8 @@ public final class SentiCallManager: NSObject {
         @escaping @MainActor @Sendable (Bool) -> Void
     ) -> Void
     private let reportEndedCall: (UUID) -> Void
+    /// Asks CallKit to perform an action, as the call screen would (CXCallController); true when it accepted.
+    private let requestTransaction: @MainActor (CXTransaction, @escaping @MainActor (Bool) -> Void) -> Void
     private var active: [UUID: IncomingDecisionCall] = [:]
     private struct PendingIncomingReport {
         let call: IncomingDecisionCall
@@ -113,6 +115,12 @@ public final class SentiCallManager: NSObject {
         self.reportEndedCall = { id in
             provider.reportCall(with: id, endedAt: nil, reason: .remoteEnded)
         }
+        let controller = CXCallController()
+        self.requestTransaction = { transaction, completion in
+            controller.request(transaction) { error in
+                Task { @MainActor in completion(error == nil) }
+            }
+        }
         self.audioActivationTimeoutNanoseconds = 8_000_000_000
         super.init()
         provider.setDelegate(self, queue: nil)            // nil → main queue
@@ -131,6 +139,9 @@ public final class SentiCallManager: NSObject {
             @escaping @MainActor @Sendable (Bool) -> Void
         ) -> Void = { _, _, completion in completion(true) },
         reportEndedCall: @escaping (UUID) -> Void = { _ in },
+        requestTransaction: @escaping @MainActor (CXTransaction, @escaping @MainActor (Bool) -> Void) -> Void = { _, completion in
+            completion(false)
+        },
         audioActivationTimeoutNanoseconds: UInt64 = 8_000_000_000
     ) {
         self.provider = provider
@@ -138,6 +149,7 @@ public final class SentiCallManager: NSObject {
         self.currentVoipTokenProvider = currentVoipToken
         self.reportIncomingCall = reportIncomingCall
         self.reportEndedCall = reportEndedCall
+        self.requestTransaction = requestTransaction
         self.audioActivationTimeoutNanoseconds = audioActivationTimeoutNanoseconds
         super.init()
     }
@@ -227,6 +239,17 @@ public final class SentiCallManager: NSObject {
         if pendingReports[id] != nil {
             pendingReports[id]?.cancelled = true
         }
+    }
+
+    /// The app's own Mute (Carter, Voice Lab #56359): CallKit is asked to mute the call as if on its screen, so the
+    /// call screen shows it too, and then performs it through `CXSetMutedCallAction`, which reaches `onMuted` like a
+    /// tap there. `completion(false)` when the call is not live here or CallKit refused.
+    func requestMuted(_ id: UUID, _ isMuted: Bool, completion: @escaping @MainActor (Bool) -> Void) {
+        guard active[id] != nil else {
+            completion(false)
+            return
+        }
+        requestTransaction(CXTransaction(action: CXSetMutedCallAction(call: id, muted: isMuted)), completion)
     }
 
     /// Revoke ringing and answered calls together. Selection/auth transitions cannot wait for an answer before

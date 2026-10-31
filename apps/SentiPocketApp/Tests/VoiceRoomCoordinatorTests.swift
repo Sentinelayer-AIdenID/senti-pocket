@@ -207,6 +207,29 @@ private final class RefusesAddsPoster: VoiceRoomPosting, @unchecked Sendable {
     func postCallEnded(sessionId: String, text: String, transcript: VoiceTranscriptAttachment?, clientId: String) async throws {}
 }
 
+/// The phone's call screen: keeps what the panel asked of it until the test has CallKit perform it, which reaches the
+/// room the way a tap on the call screen does, or refuse it.
+@MainActor
+private final class FakeCallScreen: VoiceRoomCallScreen {
+    private(set) var asked: [Bool] = []
+    private var pending: [(on: Bool, done: @MainActor (Bool) -> Void)] = []
+
+    func setMuted(_ on: Bool, done: @escaping @MainActor (Bool) -> Void) {
+        asked.append(on)
+        pending.append((on, done))
+    }
+
+    func perform(on room: VoiceRoomCoordinator) {
+        let next = pending.removeFirst()
+        room.callScreenMuted(next.on)
+        next.done(true)
+    }
+
+    func refuse() {
+        pending.removeFirst().done(false)
+    }
+}
+
 @MainActor
 private final class BusyAudio: VoiceRoomAudioSession {
     func activate() throws { throw VoiceRoomAudioError.recognizerUnavailable }
@@ -227,6 +250,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
 
     private func room(with agents: [String], handsFree: Bool = true,
                       listener: FakeListener, speaker: FakeSpeaker, audio: any VoiceRoomAudioSession, ringer: FakeRinger? = nil,
+                      callScreen: FakeCallScreen? = nil,
                       poster: any VoiceRoomPosting, onEnded: @escaping @MainActor () -> Void = {},
                       onRecordFailed: @escaping @MainActor (String) -> Void = { _ in }) -> VoiceRoomCoordinator {
         let clock = self.clock
@@ -239,6 +263,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
             speaker: speaker,
             audio: audio,
             ringer: ringer,
+            callScreen: callScreen,
             poster: poster,
             now: { clock.now },
             // Time moves only when a test moves it; the pause watcher just polls.
@@ -813,7 +838,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         room.begin(rings: false)
         await until("listening") { listener.partial != nil }
         listener.say("This is private")
-        room.send(.setMuted(true))
+        room.callScreenMuted(true)
         XCTAssertTrue(room.state.isMuted)
         XCTAssertFalse(room.state.isListening)
         XCTAssertEqual(room.state.partial, "")
@@ -830,8 +855,132 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         room.send(.toggleTalk)
         XCTAssertFalse(room.state.isListening, "a tap does not listen while muted")
 
-        room.send(.setMuted(false))
+        room.callScreenMuted(false)
         await until("listening again once unmuted") { listener.starts == 2 && room.state.isListening }
+    }
+
+    /// Carter (Voice Lab #56359): "I don't see a mute button in this when I call you". In a call made in the app the
+    /// panel's Mute mutes at once: listening stops, words the recognizer still delivers are dropped, holding or tapping
+    /// Talk does nothing, answers are still read, and unmuting brings hands-free listening back.
+    func test_the_panels_mute_stops_the_room_hearing_you_until_unmuted() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), poster = FakePoster()
+        let room = room(with: ["pocket-forge"], listener: listener, speaker: speaker, audio: FakeAudio(), poster: poster)
+        room.begin(rings: false)
+        XCTAssertFalse(room.state.hasCallScreen, "a call made in the app")
+        await until("listening") { listener.partial != nil }
+        listener.say("Keep this")
+        let recognizer = listener.partial
+        room.send(.setMuted(true))
+        XCTAssertTrue(room.state.isMuted)
+        XCTAssertFalse(room.state.isListening)
+        XCTAssertFalse(room.state.canTalk)
+        XCTAssertEqual(listener.cancels, 1)
+        // The recognizer runs a beat behind the voice: what it still delivers while muted is never taken.
+        recognizer?("Keep this between us")
+        XCTAssertEqual(room.state.partial, "")
+        clock.advance(VoiceRoomCoordinator.pauseEndsTurn + 1)
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertTrue(poster.turns.isEmpty, "nothing heard while muted is posted")
+
+        room.send(.talk(true))
+        room.send(.talk(false))
+        room.send(.toggleTalk)
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(listener.starts, 1, "holding or tapping Talk does nothing while muted")
+        XCTAssertFalse(room.state.isListening)
+
+        room.receive([message("a1", from: "pocket-forge", "Still here.", secondsAfterStart: 3)])
+        await until("the answer is still read") { room.state.speaker == "pocket-forge" }
+        speaker.finish()
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(listener.starts, 1, "hands-free does not listen again while muted")
+
+        room.send(.setMuted(false))
+        await until("hands-free listening resumes") { listener.starts == 2 && room.state.isListening }
+        listener.say("Now you can hear me")
+        room.send(.toggleTalk)
+        await until("posted") { poster.turns.count == 1 }
+        XCTAssertEqual(poster.turns, ["@pocket-forge Now you can hear me"], "only what was said unmuted reaches the room")
+    }
+
+    /// Carter (Voice Lab #56359): in an agent's call answered on the phone's call screen, the panel's Mute is asked of
+    /// the call screen and only its answer mutes the room, so the two always agree. A mute made on the call screen and
+    /// the panel's own converge on one state, each applied once.
+    func test_on_the_call_screen_the_panels_mute_and_the_call_screens_are_one_mute() async {
+        let listener = FakeListener(), screen = FakeCallScreen()
+        let room = room(with: ["pocket-forge"], listener: listener, speaker: FakeSpeaker(), audio: FakeAudio(),
+                        callScreen: screen, poster: FakePoster())
+        room.begin(rings: false)
+        XCTAssertTrue(room.state.hasCallScreen)
+        await until("listening") { listener.partial != nil }
+
+        room.send(.setMuted(!room.state.isMuted))
+        XCTAssertEqual(screen.asked, [true], "the call screen is asked")
+        XCTAssertFalse(room.state.isMuted, "not muted here before the call screen is")
+        XCTAssertTrue(room.state.isListening)
+        screen.perform(on: room)
+        XCTAssertTrue(room.state.isMuted)
+        XCTAssertFalse(room.state.isListening)
+        XCTAssertEqual(listener.cancels, 1)
+        room.callScreenMuted(true)
+        XCTAssertEqual(listener.cancels, 1, "the call screen's mute seen again changes nothing")
+
+        // Unmuted on the call screen itself: the panel follows, and its next tap mutes again.
+        room.callScreenMuted(false)
+        XCTAssertFalse(room.state.isMuted)
+        await until("listening again") { listener.starts == 2 && room.state.isListening }
+        room.send(.setMuted(!room.state.isMuted))
+        screen.perform(on: room)
+        XCTAssertTrue(room.state.isMuted)
+        XCTAssertEqual(listener.cancels, 2)
+
+        // Muted on the call screen: the panel shows it, and its next tap asks to unmute, never to mute again.
+        room.callScreenMuted(false)
+        await until("listening") { listener.starts == 3 }
+        room.callScreenMuted(true)
+        room.send(.setMuted(!room.state.isMuted))
+        XCTAssertEqual(screen.asked, [true, true, false])
+        screen.perform(on: room)
+        XCTAssertFalse(room.state.isMuted)
+        await until("listening once more") { listener.starts == 4 && room.state.isListening }
+    }
+
+    /// The call screen could not mute (its call is already going away): the tap still stops the room hearing you.
+    func test_a_mute_the_call_screen_could_not_make_still_mutes_here() async {
+        let listener = FakeListener(), screen = FakeCallScreen()
+        let room = room(with: ["pocket-forge"], listener: listener, speaker: FakeSpeaker(), audio: FakeAudio(),
+                        callScreen: screen, poster: FakePoster())
+        room.begin(rings: false)
+        await until("listening") { listener.partial != nil }
+        room.send(.setMuted(true))
+        screen.refuse()
+        XCTAssertTrue(room.state.isMuted)
+        XCTAssertFalse(room.state.isListening)
+    }
+
+    /// Unmuting while it still rings does not open the line: as without Mute, the phone listens once the agent picks
+    /// up. Muted when it does, its hello is read and nothing listens until unmuted.
+    func test_unmuting_while_it_rings_keeps_ringing_and_listens_only_after_the_pickup() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), ringer = FakeRinger(), poster = FakePoster()
+        let room = room(with: ["pocket-forge"], listener: listener, speaker: speaker, audio: FakeAudio(), ringer: ringer,
+                        poster: poster)
+        room.begin()
+        await until("ringing") { ringer.ringing }
+        room.send(.setMuted(true))
+        room.send(.setMuted(false))
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertTrue(ringer.ringing, "still ringing")
+        XCTAssertTrue(room.state.isRinging)
+        XCTAssertEqual(listener.starts, 0)
+
+        room.send(.setMuted(true))
+        room.receive([message("hi", from: "pocket-forge", "Hi Carter.")])
+        await until("the hello is read") { room.state.speaker == "pocket-forge" }
+        speaker.finish()
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(listener.starts, 0, "muted: nothing listens after the hello")
+        room.send(.setMuted(false))
+        await until("listening once unmuted") { listener.starts == 1 && room.state.isListening }
     }
 
     /// Found porting calls to the web (#702): in a meeting the room's own voices (cost lines, the ticket keeper,

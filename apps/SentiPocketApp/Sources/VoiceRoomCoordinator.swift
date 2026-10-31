@@ -36,6 +36,8 @@ final class VoiceRoomCoordinator: ObservableObject {
     private let speaker: any VoiceSpeaking
     private let audio: any VoiceRoomAudioSession
     private let ringer: (any VoiceRoomRinging)?
+    /// The phone's own call this voice room talks inside, when it answers an agent's call; nil for a call made here.
+    private let callScreen: (any VoiceRoomCallScreen)?
     private let poster: any VoiceRoomPosting
     /// The fast voice line (API #1062): a spoken answer in about a second, as "<agent> (voice)"; nil without one.
     private let voiceLine: (any VoiceLining)?
@@ -117,6 +119,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         speaker: any VoiceSpeaking,
         audio: any VoiceRoomAudioSession,
         ringer: (any VoiceRoomRinging)? = nil,
+        callScreen: (any VoiceRoomCallScreen)? = nil,
         poster: any VoiceRoomPosting,
         voiceLine: (any VoiceLining)? = nil,
         endpointer: (any VoiceEndpointing)? = nil,
@@ -137,6 +140,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         self.speaker = speaker
         self.audio = audio
         self.ringer = ringer
+        self.callScreen = callScreen
         self.poster = poster
         self.voiceLine = voiceLine
         self.endpointer = endpointer
@@ -147,6 +151,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         self.onRecordFailed = onRecordFailed
         state = VoiceRoomState(with: agents, startedAt: now())
         state.about = about.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+        state.hasCallScreen = callScreen != nil
     }
 
     /// Rings the agents (one message that mentions them and opens the call's card), takes the phone's audio and plays
@@ -232,7 +237,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         case .add(let agent):
             add(agent)
         case .setMuted(let on):
-            setMuted(on)
+            askToMute(on)
         case .hangUp:
             Task { await hangUp() }
         }
@@ -278,8 +283,28 @@ final class VoiceRoomCoordinator: ObservableObject {
         pendingAdds.append(posting)
     }
 
-    /// Muted on the call screen (warden, #281): what was being heard is dropped, not posted, and nothing listens until
-    /// unmuted. Answers are still read. Unmuted, hands-free listening comes back.
+    /// The panel's Mute (Carter, Voice Lab #56359: "I don't see a mute button in this when I call you"). In a call on
+    /// the phone's call screen it is asked of the call screen, and the call screen's own mute comes back through
+    /// `callScreenMuted(_:)` as a tap there does: one mute, applied once, the same on both screens. A call made here
+    /// mutes at once.
+    private func askToMute(_ on: Bool) {
+        guard let callScreen else {
+            setMuted(on)
+            return
+        }
+        callScreen.setMuted(on) { [weak self] done in
+            // The call screen could not (its call is already going away): the tap still does what it says here.
+            if !done { self?.setMuted(on) }
+        }
+    }
+
+    /// Muted or unmuted on the phone's own call screen, or by the panel's Mute through it (warden, #281).
+    func callScreenMuted(_ on: Bool) {
+        setMuted(on)
+    }
+
+    /// Muted (warden, #281): what was being heard is dropped, not posted, and nothing listens until unmuted. Answers
+    /// are still read. Unmuted, hands-free listening comes back, once the agent has picked up.
     private func setMuted(_ on: Bool) {
         guard state.isMuted != on else { return }
         state.isMuted = on
@@ -291,7 +316,7 @@ final class VoiceRoomCoordinator: ObservableObject {
             lastHeard = nil
             state.partial = ""
             state.phase = .ready
-        } else if state.isHandsFree, state.phase == .ready, queue.isEmpty {
+        } else if state.isHandsFree, state.phase == .ready, queue.isEmpty, !state.isRinging {
             startListening()
         }
     }
