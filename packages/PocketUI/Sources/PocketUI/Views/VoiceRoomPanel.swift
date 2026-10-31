@@ -252,11 +252,12 @@ public struct VoiceRoomPanel: View {
         }
     }
 
-    /// Mute (Carter, Voice Lab #56359: "I don't see a mute button in this when I call you"), filled while on. In a
-    /// call the phone's call screen also shows, it mutes that call too.
+    /// Mute (Carter, Voice Lab #56359: "I don't see a mute button in this when I call you"). As on the phone's own
+    /// call screen it always shows a crossed-out mic, so it never reads as a second Talk button, and it is filled
+    /// while on. In a call the phone's call screen also shows, it mutes that call too.
     private var muteButton: some View {
         Button { send(.setMuted(!state.isMuted)) } label: {
-            Image(systemName: state.muteSymbol)
+            Image(systemName: "mic.slash")
                 .font(.title3.weight(.semibold))
                 .frame(width: 48, height: 48)
                 .background(state.isMuted ? PocketPalette.textPrimary : PocketPalette.inset, in: Circle())

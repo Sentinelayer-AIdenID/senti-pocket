@@ -193,10 +193,9 @@ public struct VoiceRoomState: Equatable, Sendable {
         return nil
     }
 
-    /// The panel's Mute button (Carter, Voice Lab #56359: "I don't see a mute button in this when I call you"): what
-    /// it says and shows. It is filled while muted.
+    /// What the panel's Mute button says (Carter, Voice Lab #56359: "I don't see a mute button in this when I call
+    /// you"). As on the phone's own call screen, it always shows a crossed-out mic, filled while muted.
     public var muteLabel: String { isMuted ? "Unmute" : "Mute" }
-    public var muteSymbol: String { isMuted ? "mic.slash" : "mic" }
 
     /// What the panel says while muted. In a call the phone's call screen also shows, the call screen is muted too.
     public var mutedStatus: String { hasCallScreen ? "Muted on the call screen" : "Muted" }
