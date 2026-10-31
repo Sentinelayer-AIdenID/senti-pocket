@@ -17,7 +17,7 @@ final class SentiCallLogTests: XCTestCase {
                          {"author": "x", "text": "  "}],
            "startSequenceId": 55589, "endSequenceId": 55598},
           {"kind": "ring", "id": "r-1", "sessionId": "room-2", "roomTitle": "Lab", "direction": "incoming",
-           "callerName": "claude-warden", "callerKind": "agent", "calleeName": "mrrCarter", "reason": "Review is ready",
+           "callerName": "claude-warden", "callerKind": "agent", "calleeName": "sam", "reason": "Review is ready",
            "status": "missed", "createdAt": "2026-10-30T12:00:00Z", "answeredAt": null, "endedAt": "2026-10-30T12:01:00Z"},
           {"kind": "voice_room", "id": "bad", "sessionId": "../etc"},
           {"kind": "fax", "id": "x", "sessionId": "room-3"}

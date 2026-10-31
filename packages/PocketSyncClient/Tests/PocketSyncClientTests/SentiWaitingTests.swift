@@ -35,8 +35,8 @@ final class SentiWaitingTests: XCTestCase {
         XCTAssertEqual(item("fable-xhigh").answerLine("Yes"), "Decision on \(card): Yes @fable-xhigh")
         XCTAssertEqual(item("fable-xhigh").answerLine("Custom", detail: "  ship Monday  "),
                        "Decision on \(card): Custom — ship Monday @fable-xhigh")
-        XCTAssertEqual(item("7a0b1c2d-0000-4000-8000-00000000aaaa").answerLine("Go with blue", personName: "mrrCarter"),
-                       "Decision on \(card): Go with blue (for mrrCarter)")
+        XCTAssertEqual(item("7a0b1c2d-0000-4000-8000-00000000aaaa").answerLine("Go with blue", personName: "Sam"),
+                       "Decision on \(card): Go with blue (for Sam)")
         XCTAssertEqual(item(nil).answerLine("No"), "Decision on \(card): No")
     }
 
