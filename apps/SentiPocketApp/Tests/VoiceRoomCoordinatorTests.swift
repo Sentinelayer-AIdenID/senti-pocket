@@ -998,7 +998,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         room.receive([
             message("o1", from: "respawn-orchestrator", "[cost] astra-web: $15.26 est over 101 calls", secondsAfterStart: 3),
             message("k1", from: "ticket-keeper", "1 asks: R1: no action", secondsAfterStart: 3),
-            message("s1", from: "senti", "📞 mrrCarter answered pocket-forge's call", secondsAfterStart: 3),
+            message("s1", from: "senti", "📞 sam answered ada-agent's call", secondsAfterStart: 3),
             message("a1", from: "claude-warden", "I have it.", secondsAfterStart: 4)
         ])
         await until("the agent is read") { room.state.speaker == "claude-warden" }

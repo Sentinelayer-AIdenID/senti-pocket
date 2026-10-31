@@ -19,7 +19,7 @@ public struct RoomChatView: View {
     @State private var threadDrafts: [Int64: String] = [:]
     @State private var readerAtBottom = true
     /// The reader's place as the bottom marker reports it, settled outside layout, and whether the room is on screen
-    /// to take it (Carter's freezes, #56316, #56340). A reference, so keeping it never redraws the room.
+    /// to take it (see `RoomBottomSettle`). A reference, so keeping it never redraws the room.
     @State private var bottomWatch = RoomBottomWatch()
     @State private var didInitialScroll = false
     /// A new list each time the room is put back at its newest rows (see `reopenAtLatest()`).
@@ -236,8 +236,8 @@ public struct RoomChatView: View {
             .onAppear { send(.peopleOpened) }
         }
         // A room on its way off screen never writes the reader's place or tells the coordinator: its list is being
-        // taken down, and the marker leaving with it is not the reader scrolling (Carter's freeze, #56340, came right
-        // after "room closed").
+        // taken down, and the marker leaving with it is not the reader scrolling (one freeze came right after "room
+        // closed").
         .onAppear { bottomWatch.isActive = true }
         .onDisappear { bottomWatch.isActive = false }
         // A container, so the composer, the send button and every row keep their own identifiers and labels
@@ -609,9 +609,9 @@ public struct RoomChatView: View {
     }
 
     /// The bottom marker came into view or left it. This runs during layout, where writing the reader's place redrew
-    /// the room, the redraw moved the marker, and the marker wrote the place back, until iOS ended the app (Carter,
-    /// #56316: 664,848 row draws in 40 s). So it only reports, and the place lands on a later turn of the run loop once
-    /// the report has held (`RoomBottomSettle`).
+    /// the room, the redraw moved the marker, and the marker wrote the place back, until iOS ended the app (664,848 row
+    /// draws in 40 s). So it only reports, and the place lands on a later turn of the run loop once the report has held
+    /// (`RoomBottomSettle`).
     private func markerSeen(_ shown: Bool) {
         guard bottomWatch.isActive, let check = bottomWatch.settle.marker(shown: shown) else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + check.after) { landBottom(check) }
