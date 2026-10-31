@@ -90,8 +90,7 @@ final class NotificationsCoordinatorTests: XCTestCase {
         XCTFail("timed out waiting for: \(description)")
     }
 
-    /// Carter (10-30): "the notification marked as read as I click and open them", and then "My notifications have
-    /// been auto marked as read. Bad": opening a push or a banner reads that notification, and only that one.
+    /// Opening a push or a banner reads that notification, and only that one: nothing is marked read by itself.
     func test_opening_a_push_reads_only_its_own_notification() async {
         let marker = RecordingMarker()
         let coordinator = NotificationsCoordinator(

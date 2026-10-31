@@ -5,8 +5,8 @@ import PocketUI
 
 /// What waits on your decision across your rooms (ticket 931e1d2e): read from the server's one list, so the phone and
 /// the web agree on what is waiting and how much; answered with the same chat line the web posts, so an answer here
-/// clears it there too (Carter, 10-30: "if someone calls me or I call or I message and I take care of it, it disappears
-/// from that list"). An answer leaves the list at once and stays gone until the server agrees or brings it back.
+/// clears it there too: however you take care of it, it leaves the list. An answer leaves the list at once and stays
+/// gone until the server agrees or brings it back.
 @MainActor
 final class WaitingOnYouCoordinator: ObservableObject {
     @Published private(set) var state = WaitingOnYouState()
