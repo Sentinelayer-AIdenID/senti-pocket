@@ -3,9 +3,8 @@ import SwiftUI
 import UIKit
 #endif
 
-/// Who is here, floating at the top center of the room, under the top bar (Carter, #55354, #55424, #55428, then
-/// #55506: "all the logos in the room ... when one is working we can highlight it in the logo ... have a max number on
-/// the screen and if that exceeds it we just put a group number"; 10-30: the web's ring): each agent here as its lab's
+/// Who is here, floating at the top center of the room, under the top bar, like the web's ring: every logo in the
+/// room, a working one highlighted, up to a limit and then a group count. Each agent here shows as its lab's
 /// logo and each person as a figure, on coins, around the number online. Up to six sit on an arc; more go round a ring
 /// that turns by itself or by hand, with a light tap as each comes to the front. Working logos beat; idle ones stay,
 /// greyed. Someone arriving or leaving shows as a note that grows out of the row and fades. Tapping opens the people
@@ -91,7 +90,7 @@ struct RoomPeopleAvatars: View {
                 withAnimation(.easeOut(duration: 0.7)) { rotation += fling }
             })
         .onTapGesture(perform: onOpen)
-        // Past six it turns by itself, slowly, unless a hand is on it (Carter, 10-30: "or it scrolls by itself").
+        // Past six it turns by itself, slowly, unless a hand is on it.
         .onReceive(turn) { _ in
             guard isRing, dragFrom == nil, Date() > settlingUntil, !reduceMotion else { return }
             rotation -= 0.22 / 30
@@ -125,12 +124,12 @@ struct RoomPeopleAvatars: View {
                     .modifier(PresenceCoin(shape: Circle()))
             }
         }
-        // Idle but not gone: still on the ring, greyed (Carter, 10-30).
+        // Idle but not gone: still on the ring, greyed.
         .saturation(item.isIdle ? 0 : 1)
         .opacity(item.isIdle ? 0.5 : 1)
     }
 
-    /// The number online, with a green dot, in the middle (Carter, 10-30: "If one idles that number drops").
+    /// The number online, with a green dot, in the middle; one that idles drops out of it.
     private func onlineCount(_ online: Int) -> some View {
         HStack(spacing: 4) {
             Circle()
@@ -150,8 +149,7 @@ struct RoomPeopleAvatars: View {
         .accessibilityHidden(true)
     }
 
-    /// A light tap each time a new logo comes to the front (Carter, 10-30: "that small vibration feel that we get when
-    /// a new message comes").
+    /// A light tap each time a new logo comes to the front, like the one a new message gives.
     private func tickIfNewFront(count: Int) {
         let now = PresenceRingLayout.frontIndex(count: count, rotation: rotation)
         guard now != front else { return }
