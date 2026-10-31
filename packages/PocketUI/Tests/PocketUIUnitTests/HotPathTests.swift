@@ -25,6 +25,20 @@ final class HotPathTests: XCTestCase {
         XCTAssertEqual(ChatReferences.mentionHandles(in: "no mention here"), [])
     }
 
+    /// Carter's freeze (#56316): the review packets were quiet rows whose first line was a 700-character JSON header,
+    /// measured on every draw. The line is cut; a short line is kept whole.
+    func test_a_quiet_line_from_a_giant_first_line_is_cut() {
+        let header = "@aneta-claude REVIEW_PACKET {" + (1...60).map { "\"key\($0)\":\"value\"" }.joined(separator: ",")
+        let packet = header + "\n" + Array(repeating: "  \"field\": \"value\",", count: 300).joined(separator: "\n")
+        let line = RoomChatQuiet.line(packet)
+        XCTAssertEqual(line.count, RoomChatQuiet.lineCharacters + 1)
+        XCTAssertTrue(line.hasSuffix("…"))
+        XCTAssertTrue(header.hasPrefix(String(line.dropLast())), "its start, as it was")
+        XCTAssertEqual(RoomChatQuiet.line(packet), line, "remembered")
+        let short = "@aneta-claude a short note"
+        XCTAssertEqual(RoomChatQuiet.line(short), short)
+    }
+
     /// Carter's 08:06 freeze (2026103005) stopped inside a long row's body, in `LongMessage.preview`.
     func test_a_long_rows_preview_and_length_are_kept_and_match() {
         let long = (1...60).map { "line \($0) of a long report" }.joined(separator: "\n")
