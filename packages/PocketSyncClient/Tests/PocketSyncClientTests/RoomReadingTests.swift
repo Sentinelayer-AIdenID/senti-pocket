@@ -26,9 +26,9 @@ final class RoomOpeningTests: XCTestCase {
                                           hasMoreOlder: true), .unreadLine(100), "the oldest loaded row itself")
     }
 
-    func test_a_first_unread_further_back_than_the_newest_page_opens_on_the_window_around_it() {
+    func test_a_first_unread_further_back_than_the_newest_page_is_sought_further_back() {
         XCTAssertEqual(RoomOpening.choose(mark: mark(100, first: 40), focus: nil, oldestLoaded: 100, newestLoaded: 150,
-                                          hasMoreOlder: true), .unreadWindow(40))
+                                          hasMoreOlder: true), .unreadFurtherBack(40))
         XCTAssertEqual(RoomOpening.choose(mark: mark(100, first: 40), focus: nil, oldestLoaded: 100, newestLoaded: 150,
                                           hasMoreOlder: false), .unreadLine(40),
                        "the page reaches the start of the room: the line goes before its first row")
@@ -68,17 +68,19 @@ final class RoomReadCursorTests: XCTestCase {
         XCTAssertEqual(cursor.next(at: 10), .idle)
     }
 
-    func test_one_request_every_two_seconds_and_the_furthest_read_goes() {
+    func test_one_request_every_interval_and_the_furthest_read_goes() {
+        XCTAssertEqual(RoomReadCursor.interval, 1.5, "as the web sends them")
+        let interval = RoomReadCursor.interval
         var cursor = RoomReadCursor()
         cursor.read(through: 5)
         XCTAssertEqual(cursor.next(at: 100), .send(5), "the first read goes at once")
         cursor.sent(5)
         cursor.read(through: 7)
         cursor.read(through: 9)
-        XCTAssertEqual(cursor.next(at: 100.5), .wait(RoomReadCursor.interval - 0.5))
-        guard case .wait(let seconds) = cursor.next(at: 101.9) else { return XCTFail("inside the interval") }
+        XCTAssertEqual(cursor.next(at: 100.5), .wait(interval - 0.5))
+        guard case .wait(let seconds) = cursor.next(at: 100 + interval - 0.1) else { return XCTFail("inside the interval") }
         XCTAssertEqual(seconds, 0.1, accuracy: 1e-9)
-        XCTAssertEqual(cursor.next(at: 102), .send(9), "the two reads in between are one request, the furthest")
+        XCTAssertEqual(cursor.next(at: 100 + interval), .send(9), "the two reads in between are one request, the furthest")
         cursor.sent(9)
         XCTAssertEqual(cursor.next(at: 200), .idle)
     }
@@ -94,19 +96,20 @@ final class RoomReadCursorTests: XCTestCase {
     }
 
     func test_a_failure_worth_retrying_waits_longer_each_time_and_any_other_is_dropped() {
+        let interval = RoomReadCursor.interval
         var cursor = RoomReadCursor()
         cursor.read(through: 5)
         XCTAssertEqual(cursor.next(at: 0), .send(5))
         cursor.failed(5, retryable: true)
         XCTAssertEqual(cursor.pending, 5)
-        XCTAssertEqual(cursor.next(at: 2), .wait(2), "4 s after one failure")
-        XCTAssertEqual(cursor.next(at: 4), .send(5))
+        XCTAssertEqual(cursor.next(at: interval), .wait(interval), "twice the interval after one failure")
+        XCTAssertEqual(cursor.next(at: 2 * interval), .send(5))
         cursor.failed(5, retryable: true)
-        XCTAssertEqual(cursor.next(at: 11), .wait(1), "8 s after two")
-        XCTAssertEqual(cursor.next(at: 12), .send(5))
+        XCTAssertEqual(cursor.next(at: 5 * interval), .wait(interval), "four times after two")
+        XCTAssertEqual(cursor.next(at: 6 * interval), .send(5))
         cursor.sent(5)
         cursor.read(through: 6)
-        XCTAssertEqual(cursor.next(at: 14), .send(6), "a success starts the waits afresh")
+        XCTAssertEqual(cursor.next(at: 7 * interval), .send(6), "a success starts the waits afresh")
 
         cursor.failed(6, retryable: false)
         XCTAssertNil(cursor.pending, "refused: never sent again")

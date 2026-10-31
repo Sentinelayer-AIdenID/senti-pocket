@@ -207,7 +207,9 @@ final class RoomChatCoordinator: ObservableObject {
         self.directory = directory
         self.readMark = readMark
         self.readCursor = RoomReadCursor(confirmed: readMark?.lastReadSequenceId)
-        self.readMarker = readMarker
+        // Only a member's reading is told (sentinelayer-api #1078): the server takes a read from anyone who may view
+        // the room, and would make someone passing through a public room from a link a member of it.
+        self.readMarker = (membershipRole ?? "").isEmpty ? nil : readMarker
         self.onRead = onRead
         self.sessionId = sessionId
         self.title = title
@@ -1202,7 +1204,7 @@ final class RoomChatCoordinator: ObservableObject {
                 apply(page, older: true)
                 pages += 1
             }
-            guard await openAtFirstUnread(current) else { return }
+            guard await openAtFirstUnread(current, pagesLoaded: pages) else { return }
             hasLoadedInitial = true
             failure = nil
         } catch {
@@ -1215,13 +1217,17 @@ final class RoomChatCoordinator: ObservableObject {
         if hasLoadedInitial, focusTarget == nil { readAtBottomAfterDwell() }
     }
 
+    /// The most pages a room reads at its open to reach the first unread message, the newest included, as the web does.
+    static let pagesToFirstUnread = 5
+
     /// Opened from the room list with messages you have not read (Carter, 10-31: "when you click you scroll back to
     /// last time you read anything … like discord"): the room opens at the first of them, behind the unread line,
-    /// and the view takes you there. One further back than the newest page opens the room on the window around it, as
-    /// a link does, and newer messages load as you scroll down; when that window cannot load, the room opens at its
-    /// latest as before. A link's message decides where the room opens, and then the line shows only when it is
-    /// loaded. False when the room was paused meanwhile.
-    private func openAtFirstUnread(_ current: UInt64) async -> Bool {
+    /// and the view takes you there. One further back than the newest page is paged back to, as the web does, up to
+    /// `pagesToFirstUnread` pages in all, so the room is one stretch from the line to the latest; further back than
+    /// that, the room opens on the window around it, as a link does, and newer messages load as you scroll down. When
+    /// those cannot load, the room opens at its latest as before. A link's message decides where the room opens, and
+    /// then the line shows only when it is loaded. False when the room was paused meanwhile.
+    private func openAtFirstUnread(_ current: UInt64, pagesLoaded: Int) async -> Bool {
         switch RoomOpening.choose(mark: readMark, focus: focusTarget, oldestLoaded: timeline.oldestSequence,
                                   newestLoaded: timeline.newestSequence, hasMoreOlder: timeline.hasMoreOlder) {
         case .latest:
@@ -1230,40 +1236,68 @@ final class RoomChatCoordinator: ObservableObject {
             unread.opened(at: line)
             if focusTarget == nil { readerAtBottom = false }
             return true
-        case .unreadWindow(let line):
+        case .unreadFurtherBack(let line):
             do {
-                let before = try await transport.roomEventsBefore(
-                    sessionId: sessionId,
-                    beforeSequence: line + 1,
-                    limit: Self.windowPageSize
-                )
-                let after = try await transport.roomEventsAfter(
-                    sessionId: sessionId,
-                    fromSequence: line,
-                    limit: Self.windowPageSize
-                )
-                guard current == generation else { return false }
-                let window = before.messages + after.messages
-                guard !window.isEmpty else { return true }
-                let readThrough = max(line, after.maxSequence ?? line)
-                if let oldest = timeline.oldestSequence, after.rawCount < Self.windowPageSize || readThrough >= oldest {
-                    // It reaches the newest page: one stretch from before the line to the latest.
-                    timeline.merge(window, trimming: .newest)
-                    noteNewestTrimmed()
-                } else {
-                    timeline.replace(with: window, hasMoreOlder: before.hasMore, hasMoreNewer: true)
-                    noteNewerRead(through: readThrough)
+                var pages = pagesLoaded
+                while pages < Self.pagesToFirstUnread, timeline.hasMoreOlder,
+                      let oldest = timeline.oldestSequence, line < oldest,
+                      let before = nextBeforeSequence ?? timeline.oldestSequence {
+                    let page = try await transport.roomEventsBefore(
+                        sessionId: sessionId,
+                        beforeSequence: before,
+                        limit: Self.pageSize
+                    )
+                    guard current == generation else { return false }
+                    apply(page, older: true)
+                    pages += 1
                 }
-                nextBeforeSequence = before.nextBeforeSequence ?? before.minSequence
-                timeline.hasMoreOlder = before.hasMore && nextBeforeSequence != nil
-                timeline.applyEdits(before.edits + after.edits)
-                reconcilePending(with: window)
-                unread.opened(at: line)
-                readerAtBottom = false
-                return true
+                if let oldest = timeline.oldestSequence, line >= oldest || !timeline.hasMoreOlder {
+                    unread.opened(at: line)
+                    readerAtBottom = false
+                    return true
+                }
             } catch {
+                // What the newest pages loaded stays: the room opens at its latest, as before.
                 return current == generation
             }
+            return await openOnTheWindow(around: line, current)
+        }
+    }
+
+    /// The first unread is further back than the pages read at the open: the room opens on the window around it.
+    private func openOnTheWindow(around line: Int64, _ current: UInt64) async -> Bool {
+        do {
+            let before = try await transport.roomEventsBefore(
+                sessionId: sessionId,
+                beforeSequence: line + 1,
+                limit: Self.windowPageSize
+            )
+            let after = try await transport.roomEventsAfter(
+                sessionId: sessionId,
+                fromSequence: line,
+                limit: Self.windowPageSize
+            )
+            guard current == generation else { return false }
+            let window = before.messages + after.messages
+            guard !window.isEmpty else { return true }
+            let readThrough = max(line, after.maxSequence ?? line)
+            if let oldest = timeline.oldestSequence, after.rawCount < Self.windowPageSize || readThrough >= oldest {
+                // It reaches the newest page: one stretch from before the line to the latest.
+                timeline.merge(window, trimming: .newest)
+                noteNewestTrimmed()
+            } else {
+                timeline.replace(with: window, hasMoreOlder: before.hasMore, hasMoreNewer: true)
+                noteNewerRead(through: readThrough)
+            }
+            nextBeforeSequence = before.nextBeforeSequence ?? before.minSequence
+            timeline.hasMoreOlder = before.hasMore && nextBeforeSequence != nil
+            timeline.applyEdits(before.edits + after.edits)
+            reconcilePending(with: window)
+            unread.opened(at: line)
+            readerAtBottom = false
+            return true
+        } catch {
+            return current == generation
         }
     }
 

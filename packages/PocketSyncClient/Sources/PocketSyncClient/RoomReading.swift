@@ -29,9 +29,10 @@ public enum RoomOpening: Equatable, Sendable {
     case latest
     /// At the unread line, before this message, which the loaded rows hold.
     case unreadLine(Int64)
-    /// At the unread line, before this message, further back than the newest page: the room opens on the window
-    /// around it instead, and newer messages load as you scroll down.
-    case unreadWindow(Int64)
+    /// At the unread line, before this message, further back than the newest page: the room pages back to it, as the
+    /// web does (up to five pages in all), then opens at the line. Further back than that, the room opens on the
+    /// window around it, as a link does, and newer messages load as you scroll down.
+    case unreadFurtherBack(Int64)
 
     /// - Parameters:
     ///   - mark: what the room list knew when the room was opened.
@@ -50,7 +51,7 @@ public enum RoomOpening: Equatable, Sendable {
         // Newer than every message loaded: not a message the room shows (a notice), so there is no line to draw.
         guard first <= newest else { return .latest }
         if first >= oldest || !hasMoreOlder { return .unreadLine(first) }
-        return focus == nil ? .unreadWindow(first) : .latest
+        return focus == nil ? .unreadFurtherBack(first) : .latest
     }
 }
 
@@ -69,8 +70,8 @@ public struct RoomReadCursor: Equatable, Sendable {
     /// Failed requests in a row: each one doubles the wait before the next.
     private var failures = 0
 
-    /// At most one request this often.
-    public static let interval: TimeInterval = 2
+    /// At most one request this often, as the web sends them (sentinelayer-api #1078; the route allows 120 a minute).
+    public static let interval: TimeInterval = 1.5
     /// The longest wait after failures in a row.
     public static let longestWait: TimeInterval = 60
 

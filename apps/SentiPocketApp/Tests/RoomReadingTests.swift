@@ -162,6 +162,7 @@ final class RoomReadingTests: XCTestCase {
         mark: RoomReadMark?,
         marks: ReadMarks? = nil,
         sender: (any RoomMessageSending)? = nil,
+        membershipRole: String? = "contributor",
         onRead: @escaping @MainActor (Int64) -> Void = { _ in }
     ) -> RoomChatCoordinator {
         RoomChatCoordinator(
@@ -169,6 +170,7 @@ final class RoomReadingTests: XCTestCase {
             title: "Room",
             transport: transport,
             sender: sender,
+            membershipRole: membershipRole,
             ownAuthorIds: ["human-mrrcarter"],
             sleep: { [clock] seconds in await clock.sleep(seconds) },
             now: { [clock] in clock.now },
@@ -241,32 +243,48 @@ final class RoomReadingTests: XCTestCase {
         }
     }
 
-    func test_a_first_unread_further_back_than_the_newest_page_opens_on_the_window_around_it() async {
-        let transport = PagedRoom(
-            before: [page(201...300, hasMore: true), page(71...120, hasMore: true)],
-            after: [page(121...170)]
-        )
+    /// As the web does: the room pages back to the first unread, then opens at its line, one stretch to the latest.
+    func test_a_first_unread_further_back_than_the_newest_page_is_paged_back_to() async {
+        let transport = PagedRoom(before: [page(201...300, hasMore: true), page(101...200, hasMore: true)])
         let room = makeRoom(transport, mark: mark(100, first: 120, lastRead: 119))
         await open(room)
-        XCTAssertEqual(transport.calls.before, [nil, 121], "the page up to and with the first unread")
-        XCTAssertEqual(transport.calls.after, [120], "and the page after it")
-        XCTAssertEqual(sequences(room.state), Array(71...170), "the window, not the newest page")
+        XCTAssertEqual(transport.calls.before, [nil, 201], "one page further back")
+        XCTAssertEqual(transport.calls.after, [], "no window")
+        XCTAssertEqual(sequences(room.state), Array(101...300), "from before the line to the latest")
         XCTAssertEqual(underTheLine(room.state), 120)
-        XCTAssertTrue(room.state.canLoadNewer, "newer messages load as you scroll down")
+        XCTAssertFalse(room.state.canLoadNewer)
         XCTAssertEqual(room.state.openPosition(reopening: false), .unreadLine)
         room.pause()
     }
 
-    func test_a_window_that_reaches_the_newest_page_joins_it() async {
+    /// Five pages in all, then the window around the first unread, as a link opens.
+    func test_a_first_unread_further_back_than_five_pages_opens_on_the_window_around_it() async {
         let transport = PagedRoom(
-            before: [page(201...300, hasMore: true), page(131...180, hasMore: true)],
-            after: [page(181...230)]
+            before: [page(901...1000, hasMore: true), page(801...900, hasMore: true), page(701...800, hasMore: true),
+                     page(601...700, hasMore: true), page(501...600, hasMore: true), page(71...120, hasMore: true)],
+            after: [page(121...170)]
         )
-        let room = makeRoom(transport, mark: mark(120, first: 180, lastRead: 179))
+        let room = makeRoom(transport, mark: mark(100, first: 120, lastRead: 119))
         await open(room)
-        XCTAssertEqual(sequences(room.state), Array(131...300), "one stretch from before the line to the latest")
+        XCTAssertEqual(transport.calls.before, [nil, 901, 801, 701, 601, 121], "five pages, then up to the first unread")
+        XCTAssertEqual(transport.calls.after, [120], "and the page after it")
+        XCTAssertEqual(sequences(room.state), Array(71...170), "the window, not the newest pages")
+        XCTAssertEqual(underTheLine(room.state), 120)
+        XCTAssertTrue(room.state.canLoadNewer, "newer messages load as you scroll down")
+        room.pause()
+    }
+
+    func test_a_window_that_reaches_the_pages_read_joins_them() async {
+        let transport = PagedRoom(
+            before: [page(901...1000, hasMore: true), page(801...900, hasMore: true), page(701...800, hasMore: true),
+                     page(601...700, hasMore: true), page(501...600, hasMore: true), page(431...480, hasMore: true)],
+            after: [page(481...530)]
+        )
+        let room = makeRoom(transport, mark: mark(100, first: 480, lastRead: 479))
+        await open(room)
+        XCTAssertEqual(sequences(room.state), Array(431...1000), "one stretch from before the line to the latest")
         XCTAssertFalse(room.state.canLoadNewer)
-        XCTAssertEqual(underTheLine(room.state), 180)
+        XCTAssertEqual(underTheLine(room.state), 480)
         room.pause()
     }
 
@@ -427,6 +445,20 @@ final class RoomReadingTests: XCTestCase {
         await waitUntil("tried again, after a longer wait") { marks.sent == [9, 9] }
         await waitUntil("taken") { heard == [9] }
         room.pause()
+    }
+
+    func test_a_room_you_are_not_a_member_of_is_never_marked_read() async {
+        let marks = ReadMarks()
+        let room = makeRoom(PagedRoom(before: [page(1...10, hasMore: true)]), mark: nil, marks: marks, membershipRole: nil)
+        await open(room)
+        room.send(.messageOnScreen(id: "evt-9", isOnScreen: true))
+        room.send(.readerAtBottom(false))
+        room.send(.readerAtBottom(true))
+        clock.advance(by: 5)
+        await settle()
+        room.pause()
+        await settle()
+        XCTAssertEqual(marks.sent, [], "a link into a public room never makes you a member of it")
     }
 
     func test_a_refused_read_is_never_sent_again() async {
