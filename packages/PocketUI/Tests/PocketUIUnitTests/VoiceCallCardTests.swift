@@ -172,4 +172,25 @@ final class VoiceCallCardTests: XCTestCase {
         XCTAssertTrue(VoiceRoomState(with: ["pocket-forge", "claude-warden"]).sharesFloor)
         XCTAssertEqual(VoiceRoomState(with: ["a", "b", "c"]).title, "a, b and c")
     }
+
+    /// Found porting the card to the web (#694): the closing message carries the transcript and folds into the card,
+    /// so the card offers the file itself. A call that never closed has none.
+    func test_a_closed_calls_card_offers_the_transcript_its_closing_message_carried() {
+        let start = VoiceCallMarkers.start(caller: "mrrcarter", agents: ["pocket-forge"], meeting: false)
+        let file = RoomAttachmentChip(attachmentId: "att-123456", filename: "voice-pocket-forge-20261030-2100.md",
+                                      kind: .markdown)
+        let end = RoomChatMessageInput(id: "m3", sequenceId: 3, kind: .message, authorId: "human-mrrcarter",
+                                       authorName: "human-mrrcarter", isHuman: true,
+                                       text: "📞 Voice room with pocket-forge ended · 40 s · 1 turns.", timestamp: "",
+                                       date: base.addingTimeInterval(60), attachments: [file])
+        let inputs = [
+            input("m1", seq: 1, "human-mrrcarter", start, at: 0),
+            input("m2", seq: 2, "pocket-forge", "Hi Carter.", at: 0.2),
+            end
+        ]
+        let folded = VoiceCallCard.fold(inputs)
+        XCTAssertEqual(folded.kept.map(\.id), ["m1"], "the closing message folds into the card")
+        XCTAssertEqual(folded.cards["m1"]?.transcript, file, "and the card offers its transcript")
+        XCTAssertNil(VoiceCallCard.fold(Array(inputs.dropLast())).cards["m1"]?.transcript, "an open call has none yet")
+    }
 }
