@@ -129,6 +129,14 @@ final class RoomMediaTests: XCTestCase {
         XCTAssertTrue(checked.isRetryable, "init again with the same id gives a fresh upload link")
         XCTAssertFalse(refusal(400, "INVALID_REQUEST", "unsupported").isRetryable)
         XCTAssertTrue(RoomMediaAPIRefusal(status: 503, body: Data()).isRetryable)
+        // What no retry can help: a reference the room refused (expired unsent, sent elsewhere, taken back), an
+        // attachment already sent, an id reused for other bytes, a preview the parent cannot take.
+        for final in ["ATTACHMENT_REFERENCE_REJECTED", "ATTACHMENT_PUBLISHED", "ATTACHMENT_CONFLICT", "ATTACHMENT_PREVIEW_INVALID"] {
+            XCTAssertFalse(refusal(409, final, "no").isRetryable, final)
+        }
+        XCTAssertTrue(refusal(409, "ATTACHMENT_UPLOAD_PENDING", "not landed").isRetryable, "finish the PUT, complete again")
+        XCTAssertTrue(RoomMediaAPIRefusal(status: 404, code: "ATTACHMENT_RELEASED").isRetryable,
+                      "an upload the server released is made anew by init")
         XCTAssertEqual(RoomMediaAPIRefusal(status: 413, body: Data("not json".utf8)).quotaScope, .unknown)
     }
 }

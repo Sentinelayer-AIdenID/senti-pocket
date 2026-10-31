@@ -43,7 +43,7 @@ struct HTTPRoomMediaUploader: RoomMediaUploading {
     func completeUpload(sessionId: String, attachmentId: String) async throws -> RoomMediaAttachment {
         guard RoomMediaRules.isValidClientId(attachmentId) else { throw RoomSendError.rejected }
         let data = try await post(sessionId: sessionId, path: "attachments/\(attachmentId)/complete",
-                                  key: attachmentId + ":complete", body: [:])
+                                  key: attachmentId + ":complete", body: [:], notFoundIsReleased: true)
         return try RoomMediaInitAnswer.completed(data)
     }
 
@@ -60,12 +60,17 @@ struct HTTPRoomMediaUploader: RoomMediaUploading {
         _ = try? await api.deleteAnswer(sessionId: sessionId, path: "attachments/\(attachmentId)")
     }
 
-    /// The sender's POST, with the API's own reason kept for a refusal (whose storage limit, a failed check).
-    private func post(sessionId: String, path: String, key: String, body: [String: Any]) async throws -> Data {
+    /// The sender's POST, with the API's own reason kept for a refusal (whose storage limit, a failed check). For
+    /// complete, a 404 is the server having released the upload (its reservation ran out unfinished): init again with
+    /// the same id makes it anew.
+    private func post(sessionId: String, path: String, key: String, body: [String: Any],
+                      notFoundIsReleased: Bool = false) async throws -> Data {
         let (data, http) = try await api.postAnswer(sessionId: sessionId, path: path, idempotencyKey: key, body: body)
         switch http.statusCode {
         case 200..<300: return data
         case 401: throw RoomSendError.reauthenticationRequired
+        case 404 where notFoundIsReleased:
+            throw RoomMediaUploadError.refused(RoomMediaAPIRefusal(status: 404, code: "ATTACHMENT_RELEASED"))
         case 403, 404: throw RoomSendError.notAllowed
         default: throw RoomMediaUploadError.refused(RoomMediaAPIRefusal(status: http.statusCode, body: data))
         }
@@ -253,6 +258,9 @@ final class RoomMediaUploadCoordinator: ObservableObject {
         var isRunning = false
         /// The PUT of its bytes, stopped at once when it is taken back (a PUT changes nothing a delete must follow).
         var putTask: Task<Void, Error>?
+        /// A Markdown or JSON file: completing one publishes it to the room at once (unlike a photo or file, which a
+        /// message publishes), so it is uploaded only once it is sent, never while it waits in the tray.
+        var waitsForSend = false
         var createdAt = Date()
         var phase: RoomMediaItemRow.Phase = .preparing
         let progress = RoomMediaProgress()
@@ -509,9 +517,16 @@ final class RoomMediaUploadCoordinator: ObservableObject {
                 item.filename = prepared.filename
                 item.sizeBytes = prepared.sizeBytes
                 item.progress.update(sent: 0, total: prepared.sizeBytes)
+                item.waitsForSend = prepared.type.kind == .markdown || prepared.type.kind == .json
                 persist(item)
             }
             guard let prepared = item.prepared, let uploader else { throw RoomSendError.notConfigured }
+            if item.waitsForSend, tray.contains(id) {
+                // Ready, and nothing asked of the server until Send.
+                item.phase = .ready
+                publish()
+                return
+            }
             item.phase = .uploading
             publish()
             if item.stored == nil, item.restored, item.initiated {
@@ -614,6 +629,10 @@ final class RoomMediaUploadCoordinator: ObservableObject {
             _ = try await uploader.completeUpload(sessionId: sessionId, attachmentId: answer.attachment.attachmentId)
             return true
         } catch {
+            // A preview the API will not take (the parent has one already, say) is not tried again.
+            if let upload = error as? RoomMediaUploadError, case .refused(let refusal) = upload, !refusal.isRetryable {
+                return true
+            }
             return false
         }
     }
@@ -712,8 +731,17 @@ final class RoomMediaUploadCoordinator: ObservableObject {
                 outgoing[index].status = .failed(reason: reason, canRetry: parts.allSatisfy { !$0.isFailed || $0.canRetry })
                 continue
             }
-            guard parts.count == message.itemIds.count,
-                  parts.allSatisfy({ $0.phase == .uploaded && $0.stored != nil }) else { continue }
+            guard parts.count == message.itemIds.count else { continue }
+            // A Markdown or JSON file goes up last, once the message's photos and files are stored: the room shows it
+            // as soon as it is uploaded, so the time between that and the message itself stays as short as it can.
+            let waiting = parts.filter { $0.phase == .ready }
+            if !waiting.isEmpty {
+                if parts.allSatisfy({ $0.phase == .ready || ($0.phase == .uploaded && $0.stored != nil) }) {
+                    waiting.forEach(start)
+                }
+                continue
+            }
+            guard parts.allSatisfy({ $0.phase == .uploaded && $0.stored != nil }) else { continue }
             outgoing[index].status = .posting
             post(message.clientId)
         }
@@ -877,7 +905,9 @@ final class RoomMediaUploadCoordinator: ObservableObject {
                                     contentType: $0.contentType, sizeBytes: $0.sizeBytes, sha256: $0.sha256, status: $0.status)
             }
             item.progress.update(sent: item.stored == nil ? 0 : saved.sizeBytes, total: saved.sizeBytes)
+            item.waitsForSend = type.kind == .markdown || type.kind == .json
             item.phase = item.stored == nil ? .failed(reason: Self.interruptedReason, canRetry: true) : .uploaded
+            if item.waitsForSend, item.stored == nil, entry.message == nil { item.phase = .ready }
             items[item.id] = item
             if let message = entry.message {
                 var group = messages[message.clientId] ?? (text: message.text, parts: [], createdAt: entry.createdAt)
@@ -968,7 +998,13 @@ final class RoomMediaUploadCoordinator: ObservableObject {
             case .unknown: return "This file is over a storage limit."
             case nil: break
             }
-            if refusal.code == "ATTACHMENT_VERIFICATION_FAILED" { return "The upload didn't check out. Retry to send it again." }
+            switch refusal.code {
+            case "ATTACHMENT_VERIFICATION_FAILED": return "The upload didn't check out. Retry to send it again."
+            case "ATTACHMENT_REFERENCE_REJECTED":
+                return "These files can't be sent any more: an upload not sent within a day expires. Discard this message and pick them again."
+            case "ATTACHMENT_CONFLICT": return "This file changed since it was first uploaded. Discard it and pick it again."
+            default: break
+            }
             return refusal.isRetryable ? "Not sent. Check your connection and retry." : "Senti did not accept this file."
         }
         if let send = error as? RoomSendError {

@@ -343,9 +343,18 @@ public struct RoomMediaAPIRefusal: Equatable, Sendable {
         return .unknown
     }
 
+    /// Refusals no retry can help: a reference the room will not take (sent by another message, expired unsent, taken
+    /// back), an attachment already sent, an id reused for other bytes, a preview the parent cannot take, a request
+    /// the API does not accept.
+    public static let finalCodes: Set<String> = [
+        "ATTACHMENT_REFERENCE_REJECTED", "ATTACHMENT_PUBLISHED", "ATTACHMENT_CONFLICT", "ATTACHMENT_PREVIEW_INVALID",
+        "INVALID_REQUEST"
+    ]
+
     /// Trying again with the same ids can help: storage verification (re-init gives a fresh link), an upload still
     /// landing, too many unfinished uploads, a busy or unavailable server.
     public var isRetryable: Bool {
+        if let code, Self.finalCodes.contains(code) { return false }
         if code == "ATTACHMENT_VERIFICATION_FAILED" || code == "ATTACHMENT_UPLOAD_PENDING" { return true }
         // An unfinished upload the server let expire: init again (the same id) makes it anew.
         if status == 404, code?.hasPrefix("ATTACHMENT") == true { return true }

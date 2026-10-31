@@ -64,8 +64,9 @@ struct RoomMediaOutboxEntry: Codable, Equatable {
 
 enum RoomMediaOutbox {
     static let entryName = "entry.json"
-    /// An outbox entry not finished within this long is dropped at launch (the server lets unfinished uploads expire).
-    static let maximumAge: TimeInterval = 7 * 24 * 60 * 60
+    /// An outbox entry not sent within this long is dropped at launch: the server lets an unsent upload expire after a
+    /// day, so it could not be sent any more.
+    static let maximumAge: TimeInterval = 24 * 60 * 60
 
     static func write(_ entry: RoomMediaOutboxEntry, in folder: URL) {
         let encoder = JSONEncoder()
@@ -93,7 +94,7 @@ enum RoomMediaOutbox {
     }
 
     /// At launch: drops what should not stay on the phone. A folder with no entry (closed before it was written), an
-    /// entry never prepared (it would still hold the original, location and all), and an entry older than a week.
+    /// entry never prepared (it would still hold the original, location and all), and an entry older than a day.
     static func sweep(root: URL = RoomMediaFiles.outbox, now: Date = Date()) {
         let folders = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
         for folder in folders {

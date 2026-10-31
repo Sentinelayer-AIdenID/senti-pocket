@@ -71,6 +71,8 @@ private final class FakeUploader: RoomMediaUploading, @unchecked Sendable {
     var postGate: Gate?
     /// Init answers with this error (a sign-in that expired, a full storage).
     var initError: Error?
+    /// The message's POST answers with this error (a reference the room refused).
+    var postError: Error?
     /// Called inside complete, after the server would have stored it and before the answer arrives (stress tests).
     var completeDelay: (@Sendable () async -> Void)?
     /// Every logged call, as it happens.
@@ -177,6 +179,7 @@ private final class FakeUploader: RoomMediaUploading, @unchecked Sendable {
             return true
         }
         log("post:\(clientId)")
+        if let postError { throw postError }
         if fails { throw RoomSendError.retryable(retryAfterSeconds: nil) }
     }
 }
@@ -673,6 +676,46 @@ final class RoomMediaUploadCoordinatorTests: XCTestCase {
         XCTAssertTrue(mine.1)
         let checked = reason(400, "ATTACHMENT_VERIFICATION_FAILED", "checksum mismatch")
         XCTAssertTrue(checked.1, "a failed check is uploaded again with the same id")
+    }
+
+    /// Markdown and JSON are published by complete itself (photos and files only by the message), so they are never
+    /// uploaded while they wait in the tray, and go up last, right before the message.
+    func test_a_markdown_file_waits_for_send_and_goes_up_last() async throws {
+        let uploader = FakeUploader()
+        let media = coordinator(uploader)
+        media.add([try source("notes.md"), try source("IMG_0001.jpg")])
+        await until("ready and uploaded", boards: [media.board]) {
+            media.board.tray.map(\.phase) == [.ready, .uploaded]
+        }
+        XCTAssertFalse(uploader.events.contains("init:pm_test_000001"), "nothing of it reaches the server before Send")
+        media.perform(.send(text: "Notes and a photo"))
+        await until("sent", boards: [media.board]) { media.board.outgoing.first?.status == .sent }
+        let events = uploader.events
+        XCTAssertLessThan(try XCTUnwrap(events.firstIndex(of: "complete:pm_test_000002")),
+                          try XCTUnwrap(events.firstIndex(of: "init:pm_test_000001")), "it goes up after the photo")
+        XCTAssertEqual(uploader.posts.first?.ids, ["pm_test_000001", "pm_test_000002"])
+
+        // Taken out of the tray before Send: the server never hears of it.
+        let other = FakeUploader()
+        let room = coordinator(other, session: "room_markdown")
+        room.add([try source("plan.json")])
+        await until("ready", boards: [room.board]) { room.board.tray.first?.phase == .ready }
+        room.perform(.remove(itemId: try XCTUnwrap(room.board.tray.first?.id)))
+        XCTAssertTrue(other.inits.isEmpty)
+        XCTAssertTrue(other.deletes.isEmpty)
+    }
+
+    func test_a_message_the_room_refuses_to_take_is_final_and_says_why() async throws {
+        let uploader = FakeUploader()
+        uploader.postError = RoomMediaUploadError.refused(RoomMediaAPIRefusal(
+            status: 409, code: "ATTACHMENT_REFERENCE_REJECTED", message: "attachment expired"))
+        let media = coordinator(uploader)
+        media.add([try source("IMG_0001.jpg")])
+        media.perform(.send(text: "Hi"))
+        await until("failed", boards: [media.board]) { media.board.outgoing.first?.isFailed == true }
+        XCTAssertEqual(media.board.outgoing.first?.canRetry, false, "posting it again cannot help")
+        XCTAssertTrue(media.board.outgoing.first?.statusText.contains("expires") == true,
+                      media.board.outgoing.first?.statusText ?? "")
     }
 
     func test_a_preview_goes_up_linked_to_its_file() async throws {

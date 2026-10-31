@@ -188,6 +188,8 @@ struct RoomMediaThumb: View {
                         .foregroundStyle(Color.white, Color.black.opacity(0.45))
                         .accessibilityHidden(true)
                 }
+            case .ready:
+                EmptyView()
             case .failed(_, let canRetry):
                 Button {
                     onRetry?()
@@ -435,7 +437,7 @@ struct RoomMediaOutgoingCard: View {
                     RoomMediaRing(progress: item.progress, isPreparing: true, diameter: 44)
                 case .uploading:
                     RoomMediaRing(progress: item.progress, isPreparing: false, diameter: 44)
-                case .uploaded:
+                case .uploaded, .ready:
                     if item.kind == .video {
                         Image(systemName: "play.circle.fill")
                             .font(.system(size: 44))

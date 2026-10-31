@@ -87,6 +87,9 @@ public struct RoomMediaItemRow: Identifiable, Equatable {
         case preparing
         case uploading
         case uploaded
+        /// Ready, and uploaded when the message is sent (a Markdown or JSON file, which the room publishes as soon as
+        /// it is uploaded).
+        case ready
         case failed(reason: String, canRetry: Bool)
     }
 
@@ -144,6 +147,7 @@ public struct RoomMediaItemRow: Identifiable, Equatable {
         case .preparing: state = "getting ready"
         case .uploading: state = "uploading"
         case .uploaded: state = "uploaded"
+        case .ready: state = "ready to send"
         case .failed(let reason, _): state = "not sent. \(reason)"
         }
         return "\(kindLabel), \(filename), \(state)"
