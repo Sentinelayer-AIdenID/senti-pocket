@@ -68,22 +68,30 @@ final class SessionPresentationTests: XCTestCase {
         XCTAssertEqual(state.rows[0].lastActivity?.raw, "2026-07-18T10:36:34Z")
     }
 
-    /// Carter (10-31): the room list and the side panel show a room's saved summary as prose, also the five labelled
-    /// parts an older server saved.
+    /// The room list and the side panel show a room's saved summary: the server's prose exactly as written, and the
+    /// five labelled parts an older server saved read as sentences. The rooms and people are made up.
     func testARoomsSavedSummaryReadsAsProseInTheList() throws {
         let page = try decode(SessionListPage.self, """
         {"sessions":[{"sessionId":"room-1","status":"active","archiveStatus":"active",
-        "visibility":"private","membershipRole":"owner","title":"Room",
-        "summaryText":"Objective: @human-mrrcarter *Warden's adversarial review.\\nWhat changed: 1 recorded events; outcomes not verified.\\nHow: 1 participant(s), 0s. Top contributor: claude-warden.\\nChecks: Tests not verified; RLAIF not reported.\\nRecord: 1408 tokens, $0.0000; deterministic transcript summary.",
+        "visibility":"private","membershipRole":"owner","title":"Orchid",
+        "summaryText":"Objective: @human-sam *Lin's adversarial review.\\nWhat changed: 1 recorded events; outcomes not verified.\\nHow: 1 participant(s), 0s. Top contributor: lin-agent.\\nChecks: Tests not verified; RLAIF not reported.\\nRecord: deterministic transcript summary.",
         "summaryGeneratedAt":null,"summaryModel":"deterministic-fallback","agentCount":1,"eventCount":1,"totalCostUsd":0,
         "createdAt":null,"lastActivityAt":null,"expiresAt":null,
-        "killedAt":null,"templateName":null,"codebasePath":null,"s3ArchivePath":null}],"count":1,
+        "killedAt":null,"templateName":null,"codebasePath":null,"s3ArchivePath":null},
+        {"sessionId":"room-2","status":"active","archiveStatus":"active",
+        "visibility":"private","membershipRole":"viewer","title":"Juniper",
+        "summaryText":"  ada-agent ran `make check` on 2*3 GB; ~~Friday~~ Monday is the cutover.  ",
+        "summaryGeneratedAt":null,"summaryModel":"server","agentCount":1,"eventCount":1,"totalCostUsd":0,
+        "createdAt":null,"lastActivityAt":null,"expiresAt":null,
+        "killedAt":null,"templateName":null,"codebasePath":null,"s3ArchivePath":null}],"count":2,
         "include_archived":false,"next_cursor":null,"has_more":false}
         """)
 
         let state = SessionListPresentationState(page: page, provenance: .network(lastUpdated: Date(timeIntervalSince1970: 1)))
 
-        XCTAssertEqual(state.rows.first?.summary, "Warden's adversarial review. Only claude-warden took part.")
+        XCTAssertEqual(state.rows.first?.summary, "Sam: Lin's adversarial review. Only lin-agent took part.")
+        XCTAssertEqual(state.rows.last?.summary, "ada-agent ran `make check` on 2*3 GB; ~~Friday~~ Monday is the cutover.",
+                       "the server's prose, as written")
     }
 
     func testActivityKeepsEventsAndActionsSeparateAndLosslesslyTargetsThem() throws {

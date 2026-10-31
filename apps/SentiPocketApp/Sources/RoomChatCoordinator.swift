@@ -1450,7 +1450,8 @@ final class RoomChatCoordinator: ObservableObject {
                 guard let self else { return }
                 self.summarizing = nil
                 // Remembered even when there is none, so a phone without the model doesn't ask again for this count.
-                let summary = text.map { SummaryReading($0, details: details) }.flatMap { $0.prose.isEmpty ? nil : $0 }
+                // The phone's own prose, shown as it was composed.
+                let summary = text.map { SummaryReading(prose: $0, details: details) }.flatMap { $0.prose.isEmpty ? nil : $0 }
                 self.threadSummaries[parent] = (count, summary)
                 if summary != nil { self.publish() }
             }

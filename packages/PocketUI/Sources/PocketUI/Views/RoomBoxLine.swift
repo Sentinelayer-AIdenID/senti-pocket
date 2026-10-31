@@ -128,7 +128,8 @@ struct ThreadSummarySheet: View {
                     .accessibilityLabel(isReading ? "Stop reading the summary" : "Listen to the summary")
                     .accessibilityIdentifier("pocket.room.threadSummary.sheet.listen")
                     SummaryReadingView(summary, identifier: "pocket.room.threadSummary.sheet.text")
-                    Text("Written on this phone from the thread's newest replies.")
+                    // The line above says how many of the replies it covers when the thread is longer than that.
+                    Text("Written on this phone from the thread's replies.")
                         .font(.footnote)
                         .foregroundStyle(PocketPalette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)

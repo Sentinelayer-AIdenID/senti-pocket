@@ -1,18 +1,32 @@
 import Foundation
 import PocketContracts
 
-/// A summary as Pocket shows it: sentences, never label lines (Carter, 10-31: a summary has the "meat and bones",
-/// who, what, when, why and where). Whoever wrote it reads the same way: the server in prose, an older server in five
-/// labelled parts, or this phone. The paragraph comes first, then one quiet line of when, who and how it was written.
+/// A summary as Pocket shows it: a paragraph of prose, then one quiet line of when, who and how it was written. The
+/// server's prose (`format: "prose-v2"`) and this phone's own summaries are shown exactly as written; only an older
+/// server's summary, which has no format, is read into sentences here (`SummaryProse.legacy`).
 public struct SummaryReading: Equatable, Sendable {
-    /// The summary in sentences: no labels, no stock phrases that say nothing, no @-mentions, no Markdown marks.
+    /// The summary's paragraph (or paragraphs).
     public let prose: String
     /// When it covers, who took part and how it was written, each a short phrase; empty when none of it is known.
     public let detailParts: [String]
 
-    /// Any summary text, read as prose (`SummaryProse.prose`), with its quiet line's parts.
-    public init(_ text: String, details: [String] = []) {
-        prose = SummaryProse.prose(text)
+    /// Text that is prose already, shown as written: only the whitespace around it is trimmed, so "2*3" stays "2*3".
+    public init(prose text: String, details: [String] = []) {
+        self.init(shown: text.trimmingCharacters(in: .whitespacesAndNewlines), details: details)
+    }
+
+    /// An older server's summary (no `format`), read into sentences by `SummaryProse.legacy`.
+    public init(legacy text: String, details: [String] = []) {
+        self.init(shown: SummaryProse.legacy(text), details: details)
+    }
+
+    /// The server's summary text with its `format`: as written when it has one, an older server's when it has none.
+    public init(server text: String, format: String?, details: [String] = []) {
+        self.init(shown: SummaryProse.server(text, format: format), details: details)
+    }
+
+    private init(shown prose: String, details: [String]) {
+        self.prose = prose
         detailParts = details
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -23,7 +37,7 @@ public struct SummaryReading: Equatable, Sendable {
         prose.replacingOccurrences(of: "\n\n", with: " ")
     }
 
-    /// The quiet line under the paragraph: "Oct 31, 9:02 – 9:40 AM · mrrcarter, claude-warden · Basic summary".
+    /// The quiet line under the paragraph: "Oct 31, 9:02 – 9:40 AM · ada-agent and lin-agent · Basic summary".
     public var details: String? {
         detailParts.isEmpty ? nil : detailParts.joined(separator: " · ")
     }
@@ -34,11 +48,11 @@ public struct SummaryReading: Equatable, Sendable {
     }
 }
 
-/// Turns any summary into prose. An older server (and this phone, until 10-31) wrote five labelled lines, "Objective:",
-/// "What changed:", "How:", "Checks:" and "Record:", padded with stock phrases when it knew nothing ("1 recorded
-/// events; outcomes not verified", "Tests not verified; RLAIF not reported", "1408 tokens, $0.0000; deterministic
-/// transcript summary"). Read here, the labels and the stock phrases go and what is left is joined into sentences.
-/// No summary keeps an @-mention or a Markdown mark.
+/// How Pocket reads a summary's text. The server's prose (`format: "prose-v2"`) is the server's to write and is never
+/// parsed or changed here. An older server sent no format and wrote five labelled lines, "Objective:", "What changed:",
+/// "How:", "Checks:" and "Record:", padded with its own stock phrases when it knew nothing ("outcomes not verified",
+/// "RLAIF not reported", its usage record, "deterministic transcript summary"). Read here, its labels and those exact
+/// phrases go, what is left is joined into sentences, and each @-mention becomes the name it stands for.
 public enum SummaryProse {
     /// The five parts, by the label a line starts with.
     enum Part: String {
@@ -49,31 +63,56 @@ public enum SummaryProse {
         case record
     }
 
-    /// Any summary text as prose: labelled parts become sentences, and prose keeps its paragraphs.
-    public static func prose(_ text: String) -> String {
-        let lines = text.replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-            .components(separatedBy: "\n")
+    /// Where a part being read into sentences comes from.
+    enum Source: Equatable {
+        /// An older server's labelled line.
+        case legacy(Part)
+        /// This phone's own model.
+        case phone
+    }
+
+    /// The server's summary text as Pocket shows it. A summary that names its format (`"prose-v2"`) is the server's
+    /// prose, which clients do not parse: only the whitespace around it is trimmed. One without a format comes from
+    /// an older server and is read by `legacy`.
+    public static func server(_ text: String, format: String?) -> String {
+        isLegacy(format: format) ? legacy(text) : text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Whether a summary comes from an older server: it names no format.
+    public static func isLegacy(format: String?) -> Bool {
+        format?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
+    }
+
+    /// A room's saved summary, which the room list carries without its format. An older server's five labelled lines
+    /// are read by `legacy`; anything else is the server's prose, shown as written. The server's prose never opens
+    /// with one of the labels: it refuses a summary that does.
+    public static func saved(_ text: String) -> String {
+        labelledParts(splitLines(text)) == nil ? text.trimmingCharacters(in: .whitespacesAndNewlines) : legacy(text)
+    }
+
+    /// An older server's summary as prose: labelled parts become sentences, and other text keeps its paragraphs.
+    public static func legacy(_ text: String) -> String {
+        let lines = splitLines(text)
         if let parts = labelledParts(lines) {
-            return joined(parts.map { rewrite($0.text, as: $0.part) })
+            return joined(parts.map { rewrite($0.text, from: .legacy($0.part)) })
         }
         return paragraphs(lines)
     }
 
-    /// A summary's parts as sentences, in order: each one cleaned, its stock phrases left out, a part with nothing
-    /// left dropped, and each ending as a sentence ends.
+    /// This phone's own summary parts as sentences, in order. A part that is only the placeholder the phone's model
+    /// writes when the thread names nothing ("None mentioned") is left out; everything else is kept as it says it.
     public static func sentences(_ parts: [String]) -> String {
-        joined(parts.map { rewrite($0, as: nil) })
+        joined(parts.map { rewrite($0, from: .phone) })
     }
 
-    /// Text without Markdown marks or @-mentions. A link keeps its words and code keeps its letters. Mentions that
-    /// open a sentence (who it was addressed to) go; a name mentioned inside one stays, without its @.
+    /// Text without Markdown marks, each @-mention as the name it stands for. A link keeps its words, code keeps its
+    /// letters, and a star between two letters or digits stays ("2*3"): only emphasis and stray stars go.
     public static func clean(_ text: String) -> String {
         var value = replace(linkExpression, in: text, with: "$1")
-        for mark in ["`", "*", "~~"] { value = value.replacingOccurrences(of: mark, with: "") }
+        for mark in ["`", "~~"] { value = value.replacingOccurrences(of: mark, with: "") }
+        value = replace(starExpression, in: value, with: "")
         value = replace(markerExpression, in: value, with: "")
-        value = replace(carbonCopyExpression, in: value, with: "")
-        value = unmentioned(unaddressed(value))
+        value = named(value)
         return value.split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
 
@@ -115,7 +154,7 @@ public enum SummaryProse {
         return formatter.string(from: first, to: last)
     }
 
-    /// Who took part: up to `shown` names, then how many more ("claude-warden, pocket-forge, mrrcarter and 2 more").
+    /// Who took part: up to `shown` names, then how many more ("ada-agent, lin-agent, sam and 2 more").
     public static func people(_ names: [String], shown: Int = 3) -> String? {
         var seen = Set<String>()
         var unique: [String] = []
@@ -129,13 +168,13 @@ public enum SummaryProse {
         return unique.prefix(shown).joined(separator: ", ") + " and \(unique.count - shown) more"
     }
 
-    /// How a summary was written, as its quiet line says it. The server's outline made without a model is a "Basic
-    /// summary" (the web's words), one a model wrote is a "Model summary", and any other mode is named as it comes.
+    /// How a summary was written, as its quiet line says it, in the API's words: "AI summary" for one a model wrote
+    /// (`mode: "llm"`), "Basic summary" for one composed from the text without a model, any other mode as it comes.
     public static func mode(_ raw: String?) -> String? {
         guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
         let lower = value.lowercased()
         if ["determin", "fallback", "basic", "outline"].contains(where: { lower.contains($0) }) { return "Basic summary" }
-        if ["model", "llm", "ai", "server", "generated"].contains(lower) { return "Model summary" }
+        if ["model", "llm", "ai", "server", "generated"].contains(lower) { return "AI summary" }
         // A format is not a mode.
         if lower.hasPrefix("prose") || lower.hasPrefix("five-part") { return nil }
         let words = lower.replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: "-", with: " ")
@@ -143,17 +182,48 @@ public enum SummaryProse {
         return words.prefix(1).uppercased() + words.dropFirst()
     }
 
-    /// The quiet line's parts from the server's summary fields (`format: "prose-v2"`): its time range, participants
-    /// and mode, each left out when absent. A time range is `{"start", "end"}` (or from/to, first/last,
-    /// startedAt/endedAt), a pair, or one date, as ISO 8601 or epoch seconds; other text is shown as written.
-    /// Participants are names, or objects with a name.
+    /// Why a basic summary was written without AI, in plain words, from the server's `fallbackReason`; nil when it
+    /// gives none. The server's own reason is never shown as it is.
+    public static func fallbackNote(_ reason: String?) -> String? {
+        guard let value = reason?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !value.isEmpty else {
+            return nil
+        }
+        switch value {
+        case "provider disabled":
+            return "AI summaries are turned off on the server, so this one was written without AI."
+        case "provider unavailable":
+            return "The AI summary service isn't available right now, so this one was written without AI."
+        case "reader cannot generate":
+            return "This one was written without AI. An AI summary takes its place when someone who can post here "
+                + "opens it."
+        case "budget exhausted":
+            return "Today's AI summaries are used up, so this one was written without AI. Try again tomorrow."
+        default:
+            if value.hasPrefix("invalid") || value.contains("attempt") {
+                return "The AI summary didn't work this time, so this one was written without AI. It can be tried "
+                    + "again tomorrow."
+            }
+            return "This one was written without AI."
+        }
+    }
+
+    /// The quiet line's parts from the server's summary fields: its time range, participants and mode, each left out
+    /// when absent. A time range is `{"start", "end"}` (or from/to, first/last, startedAt/endedAt), a pair, or one
+    /// date, as ISO 8601 or epoch seconds; other text is shown as written. Participants are names, or objects with a
+    /// name.
     public static func details(server fields: [String: Any], now: Date = Date(), calendar: Calendar = .current) -> [String] {
         [timeRange(fields["timeRange"], now: now, calendar: calendar),
          people(participants(fields["participants"])),
          mode(fields["mode"] as? String)].compactMap { $0 }
     }
 
-    // MARK: - Labelled parts
+    // MARK: - An older server's labelled parts
+
+    static func splitLines(_ text: String) -> [String] {
+        text.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .components(separatedBy: "\n")
+    }
 
     /// The labelled parts, when the text is a five-part summary: its first line carries one of the labels. A line
     /// without a label continues the part above it.
@@ -183,9 +253,9 @@ public enum SummaryProse {
         return (part, String(line[restRange]))
     }
 
-    /// One part as sentences, or nil when nothing in it says anything. Its stock phrases go, the counts an outline
-    /// gives instead of names become a sentence, and a record of ids reads "See …".
-    static func rewrite(_ text: String, as part: Part?) -> String? {
+    /// One part as sentences, or nil when nothing in it says anything. Only boilerplate goes (`isBoilerplate`); an
+    /// older server's counts become a sentence, and its record of ids reads "See …".
+    static func rewrite(_ text: String, from source: Source) -> String? {
         var counts = Counts()
         var units: [String] = []
         for unit in sentenceUnits(clean(text)) {
@@ -198,7 +268,8 @@ public enum SummaryProse {
             var kept: [String] = []
             for piece in body.split(separator: ";") {
                 let clause = piece.trimmingCharacters(in: CharacterSet(charactersIn: " ,:"))
-                if clause.isEmpty || counts.take(clause) || isStock(clause) { continue }
+                if clause.isEmpty || isBoilerplate(clause, from: source) { continue }
+                if case .legacy = source, counts.take(clause) { continue }
                 kept.append(kept.isEmpty ? opening(clause) : clause)
             }
             if !kept.isEmpty { units.append(kept.joined(separator: "; ") + terminal) }
@@ -206,11 +277,11 @@ public enum SummaryProse {
         if let line = counts.sentence { units.append(line) }
         guard !units.isEmpty else { return nil }
         let sentence = units.joined(separator: " ")
-        return part == .record && startsWithReference(sentence) ? "See " + sentence : sentence
+        return source == .legacy(.record) && startsWithReference(sentence) ? "See " + sentence : sentence
     }
 
-    /// The counts an older server's outline gave instead of saying who worked ("1 participant(s), 0s. Top contributor:
-    /// claude-warden"), said as one sentence.
+    /// The counts an older server's outline gave instead of saying who worked ("1 participant(s), 0s. Top
+    /// contributor: lin-agent"), said as one sentence.
     struct Counts {
         var participants: Int?
         var seconds: Int?
@@ -265,24 +336,38 @@ public enum SummaryProse {
         return hours == 1 ? "an hour" : "\(hours) hours"
     }
 
-    /// A phrase that says nothing: the outline's counts of events and tokens, "not verified", "not reported".
-    static func isStock(_ clause: String) -> Bool {
-        let value = clause.trimmingCharacters(in: CharacterSet(charactersIn: " .,:;!?…"))
-        guard !value.isEmpty else { return true }
-        let range = NSRange(value.startIndex..., in: value)
-        if stockExpressions.contains(where: { $0.firstMatch(in: value, range: range) != nil }) { return true }
-        let lower = value.lowercased()
-        guard lower.contains("rlaif") else { return false }
-        return lower.range(of: #"\b(?:not|no|none|unreported|absent|n/a)\b"#, options: .regularExpression) != nil
+    /// A clause that says nothing, exactly as its writer puts it when it knows nothing: the placeholder this phone's
+    /// model is told to write for a part the thread doesn't mention ("None mentioned"), and an older server's own
+    /// stock phrases ("Tests not verified", "RLAIF not reported", "3 recorded events", its usage record,
+    /// "deterministic transcript summary"). A clause with anything more in it is kept, whoever wrote it: "Tests were
+    /// not verified." and "No tests found." say something.
+    static func isBoilerplate(_ clause: String, from source: Source) -> Bool {
+        let key = clause.lowercased()
+            .replacingOccurrences(of: ":", with: " ")
+            .trimmingCharacters(in: CharacterSet(charactersIn: " .,;!?…"))
+            .split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        if key.isEmpty || placeholders.contains(key) { return true }
+        guard case .legacy = source else { return false }
+        if legacyStockPhrases.contains(key) { return true }
+        let range = NSRange(key.startIndex..., in: key)
+        return legacyStockExpressions.contains { $0.firstMatch(in: key, range: range) != nil }
     }
+
+    /// What a summary writer puts in a part it has nothing for.
+    static let placeholders: Set<String> = ["none mentioned", "none", "n/a"]
+    /// An older server's stock phrases, as it wrote them.
+    static let legacyStockPhrases: Set<String> = [
+        "no objective reported", "outcomes not verified", "tests not verified", "rlaif not reported",
+        "not reported", "deterministic transcript summary"
+    ]
 
     static func startsWithReference(_ text: String) -> Bool {
         referenceExpression?.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
     }
 
-    // MARK: - Prose
+    // MARK: - An older server's other text
 
-    /// Prose as it came, paragraph by paragraph: each paragraph's lines joined, a list item or heading ending as a
+    /// Text as it came, paragraph by paragraph: each paragraph's lines joined, a list item or heading ending as a
     /// sentence ends, and every line cleaned.
     static func paragraphs(_ lines: [String]) -> String {
         var paragraphs: [String] = []
@@ -343,46 +428,36 @@ public enum SummaryProse {
         return units.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
     }
 
-    /// Text without the mentions that open it or a sentence in it to say who it is for: several mentions, a mention
-    /// followed by a comma or colon, or one followed by a capital or a mark ("@a @b *Warden's review",
-    /// "@claude-warden, please look"). One mention followed by a lowercase word is the sentence's subject
-    /// ("@claude-warden fixed it") and keeps its name.
-    static func unaddressed(_ text: String) -> String {
-        guard text.contains("@"), let regex = addresseesExpression else { return text }
+    /// Each @-mention as the name it stands for, so no name is lost: "@a @b approved the fix." reads "a and b approved
+    /// the fix.", and @all is everyone. Mentions that open a sentence before another one starts, which say who it was
+    /// for ("@a @b The build is green."), keep their names before a colon: "a and b: The build is green."
+    static func named(_ text: String) -> String {
+        guard text.contains("@"), let regex = mentionRunExpression else { return text }
         var result = text
         for match in regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).reversed() {
-            guard let run = Range(match.range(at: 2), in: result) else { continue }
-            let mentions = result[run].filter { $0 == "@" }.count
-            let punctuated = result[run].contains(where: { $0 == "," || $0 == ":" })
-            let next = result[run.upperBound...].first
-            if mentions > 1 || punctuated || next.map({ !$0.isLowercase }) ?? true {
-                let rest = opening(String(result[run.upperBound...]))
-                result.replaceSubrange(run.lowerBound..., with: rest)
+            guard let run = Range(match.range, in: result) else { continue }
+            let names = result[run].split(whereSeparator: \.isWhitespace).map { handle -> String in
+                let name = displayName(String(handle))
+                return name.lowercased() == "all" ? "everyone" : name
             }
+            let before = result[..<run.lowerBound]
+            let opensSentence = before.trimmingCharacters(in: .whitespaces).isEmpty
+                || before.range(of: #"[.!?;]\s+$"#, options: .regularExpression) != nil
+            let next = result[run.upperBound...].first { !$0.isWhitespace }
+            let addressed = opensSentence && next.map { !$0.isLowercase && !",:;.!?".contains($0) } == true
+            result.replaceSubrange(run, with: list(names) + (addressed ? ":" : ""))
         }
         return result
     }
 
     /// Words that now open a sentence, capitalized when the first is a plain lowercase word ("the pin moved"), never
-    /// when it is a handle or a name ("pocket-forge", "iOS").
+    /// when it is a handle or a name ("ada-agent", "iOS").
     static func opening(_ text: String) -> String {
         guard let first = text.first, first.isLowercase else { return text }
         let word = text.prefix { !$0.isWhitespace }.trimmingCharacters(in: CharacterSet(charactersIn: ",.;:!?"))
         guard !word.isEmpty,
               word.allSatisfy({ ($0.isLetter && $0.isLowercase) || $0 == "'" || $0 == "\u{2019}" }) else { return text }
         return text.prefix(1).uppercased() + text.dropFirst()
-    }
-
-    /// Each @handle left inside a sentence, as its name; @all is everyone.
-    static func unmentioned(_ text: String) -> String {
-        guard text.contains("@"), let regex = mentionExpression else { return text }
-        var result = text
-        for match in regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).reversed() {
-            guard let whole = Range(match.range, in: result), let handle = Range(match.range(at: 1), in: result) else { continue }
-            let name = String(result[handle])
-            result.replaceSubrange(whole, with: name.lowercased() == "all" ? "everyone" : displayName(name))
-        }
-        return result
     }
 
     static func replace(_ expression: NSRegularExpression?, in text: String, with template: String) -> String {
@@ -408,7 +483,8 @@ public enum SummaryProse {
             if ends.count == 2, let start = date(ends[0]), let end = date(ends[1]) {
                 return when(from: start, to: end, now: now, calendar: calendar)
             }
-            let shown = prose(text)
+            // The server's own words, as written.
+            let shown = text.trimmingCharacters(in: .whitespacesAndNewlines)
             return shown.isEmpty ? nil : shown
         default:
             return nil
@@ -455,13 +531,14 @@ public enum SummaryProse {
         #"^(?:[-*•]\s+)?(?:\*\*|__)?\s*(objective|what\s+changed|how|checks|record)\s*(?:\*\*|__)?\s*:\s*(?:\*\*|__)?\s*(.*)$"#
     )
     private static let linkExpression = expression(#"!?\[([^\]]*)\]\([^)]*\)"#)
+    /// Stars that are not between two letters or digits: emphasis, or a stray mark ("2*3" keeps its star).
+    private static let starExpression = expression(#"(?<![\p{L}\p{N}])\*+|\*+(?![\p{L}\p{N}])"#, [])
     /// A heading, quote, bullet or number opening a line.
     private static let markerExpression = expression(#"^\s*(?:#{1,6}\s+|>\s*|[-*•+]\s+|\d{1,3}[.)]\s+)"#)
-    /// Mentions opening the text or a sentence (group 2), which may say who it was addressed to.
-    private static let addresseesExpression = expression(#"(^|[.!?;]\s+)((?:@[A-Za-z0-9_-]+[,:]?(?:\s+|$))+)"#)
-    /// "cc @a @b" closing the text.
-    private static let carbonCopyExpression = expression(#"[\s,;]*\bcc\b:?\s*(?:@[A-Za-z0-9_-]+[,]?\s*)+$"#)
-    private static let mentionExpression = expression(#"(?<![\w@.])@([A-Za-z0-9_-]+)"#, [])
+    /// @-mentions one after another, with only spaces between them; an email address's @ is not one.
+    private static let mentionRunExpression = expression(
+        #"(?<![\w@.])@[A-Za-z0-9_-]+(?:[ \t]+@[A-Za-z0-9_-]+)*"#, []
+    )
     private static let sentenceBreakExpression = expression(#"(?<=[.!?…])\s+"#, [])
     fileprivate static let participantsExpression = expression(
         #"^(\d+)\s+participants?(?:\s*\(s\))?(?:\s*,\s*(\d+)\s*s(?:econds?)?)?$"#
@@ -470,16 +547,9 @@ public enum SummaryProse {
     private static let referenceExpression = expression(
         #"^(?:#\d|(?:prs?|pull\s+requests?|commits?|builds?|issues?|tickets?|releases?|tags?)\b|[0-9a-f]{7,40}\b|https?://|v?\d)"#
     )
-    private static let stockExpressions: [NSRegularExpression] = [
+    /// An older server's stock phrases with a number in them: its count of events, and its usage record.
+    private static let legacyStockExpressions: [NSRegularExpression] = [
         #"^\d[\d,]*\s+recorded\s+events?$"#,
-        #"^outcomes?\s+(?:(?:were|was|are|is)\s+)?not\s+verified$"#,
-        #"^tests?\s+(?:(?:were|was|are|is)\s+)?not\s+verified$"#,
-        #"^deterministic\s+transcript\s+summary$"#,
-        #"^\d[\d,]*\s+tokens?(?:\s*,\s*\$\s*\d[\d,]*(?:\.\d+)?)?$"#,
-        #"^\$\s*\d[\d,]*(?:\.\d+)?$"#,
-        #"^(?:none|nothing|n/?a)(?:\s+(?:mentioned|reported|recorded|noted|given|found))?$"#,
-        #"^not\s+(?:reported|mentioned|recorded|verified|available)$"#,
-        #"^no\s+objective\s+(?:reported|recorded|given|stated)$"#,
-        #"^no\s+(?:checks?|tests?|commits?|prs?|pull\s+requests?|builds?|artifacts?|evidence|records?|hashes|links|references)(?:\s*(?:,|or|and)\s*(?:checks?|tests?|commits?|prs?|pull\s+requests?|builds?|artifacts?|evidence|records?|hashes|links|references))*\s+(?:(?:were|was)\s+)?(?:reported|mentioned|recorded|referenced|named|given|found|noted)$"#
+        #"^\d[\d,]*\s+tokens?(?:\s*,\s*\$\s*\d[\d,]*(?:\.\d+)?)?$"#
     ].compactMap { expression($0) }
 }

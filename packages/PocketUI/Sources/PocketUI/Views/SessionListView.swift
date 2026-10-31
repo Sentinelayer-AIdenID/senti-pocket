@@ -159,7 +159,7 @@ private struct SessionRow: View {
             }
 
             if let summary = row.summary {
-                Text(summary)
+                SummaryPreviewText(summary, title: row.title, identifier: "pocket.sessions.row.\(row.sessionId).summary")
                     .font(.subheadline)
                     .foregroundStyle(PocketPalette.textSecondary)
                     .lineLimit(3)

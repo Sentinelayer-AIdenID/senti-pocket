@@ -409,9 +409,10 @@ extension HTTPRoomMessageSender: VoiceRoomPosting {
         }
     }
 
-    /// The same POST, answered as it came back: the caller reads the status and the request id.
+    /// The same POST, answered as it came back: the caller reads the status and the request id. `query` is already
+    /// percent-encoded ("cachedOnly=true").
     func postAnswer(sessionId: String, path: String, idempotencyKey: String, body: [String: Any],
-                    session: URLSession? = nil) async throws -> (Data, HTTPURLResponse) {
+                    query: String? = nil, session: URLSession? = nil) async throws -> (Data, HTTPURLResponse) {
         guard let apiBaseURL,
               var components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false) else {
             throw RoomSendError.notConfigured
@@ -424,7 +425,7 @@ extension HTTPRoomMessageSender: VoiceRoomPosting {
             throw RoomSendError.rejected
         }
         components.percentEncodedPath = "/api/v1/sessions/\(encodedSession)/\(path)"
-        components.query = nil
+        components.percentEncodedQuery = query
         guard let url = components.url else { throw RoomSendError.notConfigured }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"

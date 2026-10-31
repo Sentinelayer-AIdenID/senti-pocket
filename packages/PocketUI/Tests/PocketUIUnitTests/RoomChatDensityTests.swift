@@ -98,10 +98,12 @@ final class RoomChatDensityTests: XCTestCase {
         XCTAssertEqual(RoomChatQuiet.line("test ⟂ speech c705 · life 1"), "test")
     }
 
-    /// Carter (10-31): a row shows the summary as prose, never its labels; the whole of it opens in a sheet.
+    /// A row shows the summary as prose, never its labels; the whole of it opens in a sheet.
     func test_a_row_shows_the_summary_as_prose() {
-        XCTAssertEqual(SummaryReading("**Objective:** Ship it.\n**What changed:** Things.").prose, "Ship it. Things.")
-        XCTAssertEqual(SummaryReading("One paragraph from an older phone.").prose, "One paragraph from an older phone.")
+        XCTAssertEqual(SummaryReading(legacy: "**Objective:** Ship it.\n**What changed:** Things.").prose, "Ship it. Things.")
+        XCTAssertEqual(SummaryReading(legacy: "One paragraph from an older phone.").prose, "One paragraph from an older phone.")
+        XCTAssertEqual(SummaryReading(prose: "The phone's own paragraph, at 2*3.\n\nAnd its second.").oneLine,
+                       "The phone's own paragraph, at 2*3. And its second.")
     }
 
     func test_a_box_thread_is_one_line_with_the_box_and_its_status() {
