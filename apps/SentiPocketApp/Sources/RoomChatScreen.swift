@@ -432,6 +432,13 @@ struct RoomChatScreen: View {
             ),
             roster: roster
         ) { intent in
+            if case .bottomFlapHeld(let rows, let longest) = intent {
+                // The room's bottom marker flapped and the reader's place was held still (Carter's freeze, #56316):
+                // one line for the freeze recorder, with what may have kept it moving, never what the room says.
+                CrashReporter.shared.note("bottom marker flapped, held \(Int(RoomBottomSettle.holdTime)) s (\(rows) rows, "
+                    + "longest message \(longest) chars, voice room \(voiceRoom == nil ? "off" : "on"))")
+                return
+            }
             CrashReporter.shared.note(intent, rows: coordinator.state.rows.count)
             if case .openBreakout(let childSessionId) = intent {
                 openBreakout(childSessionId)

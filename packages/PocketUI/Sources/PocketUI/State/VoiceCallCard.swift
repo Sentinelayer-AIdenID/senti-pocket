@@ -77,6 +77,9 @@ public struct VoiceCallCard: Equatable, Sendable {
     public let startedAt: Date?
     public let endedAt: Date?
     public let turns: [Turn]
+    /// The transcript the closing message carries. That message folds into the card, so the card offers the file
+    /// itself (found porting the card to the web, #694: otherwise the file can't be reached from the room).
+    public var transcript: RoomAttachmentChip?
 
     public var isLive: Bool { endedAt == nil }
 
@@ -114,6 +117,7 @@ public struct VoiceCallCard: Equatable, Sendable {
             var turns: [Turn] = []
             var others: [RoomChatMessageInput] = []
             var endedAt: Date?
+            var transcript: RoomAttachmentChip?
             var next = index + 1
             while next < inputs.count {
                 let candidate = inputs[next]
@@ -126,6 +130,7 @@ public struct VoiceCallCard: Equatable, Sendable {
                 }
                 if fromCaller, VoiceCallMarkers.isEnd(candidate.text) {
                     endedAt = candidate.date ?? input.date
+                    transcript = candidate.attachments.first
                     next += 1
                     break
                 }
@@ -151,7 +156,7 @@ public struct VoiceCallCard: Equatable, Sendable {
                 endedAt = last
             }
             cards[input.id] = VoiceCallCard(id: input.id, agents: agents, caller: input.authorName,
-                                            startedAt: input.date, endedAt: endedAt, turns: turns)
+                                            startedAt: input.date, endedAt: endedAt, turns: turns, transcript: transcript)
             kept.append(input)
             kept.append(contentsOf: others)
             index = next

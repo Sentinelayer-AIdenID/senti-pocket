@@ -285,6 +285,8 @@ final class RoomChatCoordinator: ObservableObject {
                 publish()
             }
         case .readerAtBottom(let atBottom):
+            // Only a change is news: the same place told again never publishes (Carter's freeze, #56316).
+            guard atBottom != readerAtBottom else { return }
             readerAtBottom = atBottom
             if atBottom, unread.unreadCount > 0 || unread.dividerSequence != nil {
                 unread.readerReachedBottom()
@@ -350,8 +352,9 @@ final class RoomChatCoordinator: ObservableObject {
             guard focusTarget != nil else { return }
             focusTarget = nil
             publish()
-        case .openBreakout, .openAttachment, .readAloud, .stopReadingAloud, .openTickets, .openSearch, .peopleOpened, .openInvite:
-            break   // the room screen navigates or presents
+        case .openBreakout, .openAttachment, .readAloud, .stopReadingAloud, .openTickets, .openSearch, .peopleOpened, .openInvite,
+             .bottomFlapHeld:
+            break   // the room screen navigates, presents or notes it
         case .setPinned(let sequenceId, let isPinned):
             setPinned(isPinned, on: sequenceId)
         case .messageOnScreen(let id, let isOnScreen):

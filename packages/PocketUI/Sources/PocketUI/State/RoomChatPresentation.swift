@@ -977,6 +977,13 @@ public enum RoomChatRepeats {
 public enum RoomChatQuiet {
     /// The room's own voices: costs, mints, relay notices, ticket filing and "working on" lines.
     static let systemAuthors: Set<String> = ["respawn-orchestrator", "ticket-keeper"]
+
+    /// The room's own voices, which never answer a call: the orchestrator's costs and mints, the ticket keeper, and
+    /// Senti's own notices ("mrrCarter answered pocket-forge's call").
+    public static func isRoomVoice(_ authorId: String) -> Bool {
+        let key = authorId.lowercased()
+        return systemAuthors.contains(key) || key == "senti"
+    }
     /// The signature a box's relayed speech ends with.
     static let boxSignature = "⟂ speech"
 
@@ -993,6 +1000,9 @@ public enum RoomChatQuiet {
     ///
     /// A quiet row asks for its line on every render, so the expressions are compiled once and each text's line is
     /// remembered: compiling them per call showed up on the main thread in the watchdog's stack (Carter, 10-30).
+    ///
+    /// The line is cut at `lineCharacters`: it shows on one line, and the room measures every row it draws. The
+    /// review packets in Carter's freeze (#56316) were quiet rows whose first line was a 700-character JSON header.
     public static func line(_ text: String) -> String {
         if let known = lineCache.object(forKey: text as NSString) { return known as String }
         let unsigned = RoomBoxThread.unsigned(text)
@@ -1002,9 +1012,14 @@ public enum RoomChatQuiet {
             line = expression.stringByReplacingMatches(in: line, range: NSRange(line.startIndex..., in: line), withTemplate: template)
         }
         line = line.trimmingCharacters(in: .whitespaces)
+        if line.count > lineCharacters { line = String(line.prefix(lineCharacters)) + "…" }
         lineCache.setObject(line as NSString, forKey: text as NSString)
         return line
     }
+
+    /// The most of a quiet line kept: far more than one line on a phone shows, and as much as a thread's summary reads
+    /// of each reply (`ThreadSummaries.maximumLineLength`).
+    public static let lineCharacters = 280
 
     private static let lineRules: [(NSRegularExpression, String)] = [
         (#"\[([^\]]*)\]\([^)]*\)"#, "$1"),
@@ -1248,6 +1263,9 @@ public enum RoomChatIntent: Equatable, Sendable {
     case openTickets(filing: Bool)
     case openSearch
     case readerAtBottom(Bool)
+    /// The bottom marker flapped, so the reader's place was held still for a moment (Carter's freeze, #56316): for the
+    /// freeze recorder, with how many rows the room had and its longest message's length, never what it says.
+    case bottomFlapHeld(rows: Int, longestText: Int)
     case retry
     case jumpToMessage(sequenceId: Int64)
     case sendMessage(text: String)
