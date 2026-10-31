@@ -231,6 +231,9 @@ private final class ScriptedKeepAlive: RoomMediaKeepingAlive {
 @MainActor
 final class RoomMediaUploadCoordinatorTests: XCTestCase {
     private var discarded: [String] = []
+    /// Told each time the coordinator lets a file's local copy go: a file taken back during a step that asks nothing
+    /// of the server (its preview, its preparation) ends with no call to log, and `until` must hear of it too.
+    private let discards = PassthroughSubject<Void, Never>()
     private var counter = 0
     /// This test's own outbox, removed when it ends.
     private lazy var root: URL = {
@@ -241,7 +244,8 @@ final class RoomMediaUploadCoordinatorTests: XCTestCase {
     }()
 
     /// Waits for `condition`, checked again each time something it depends on happens: a call the uploader logs, a
-    /// board change, a progress change. No sleeping and no polling; the timeout only stops a hang from blocking the run.
+    /// board change, a progress change, a local copy let go. No sleeping and no polling; the timeout only stops a hang
+    /// from blocking the run.
     private func until(_ description: String, uploaders: [FakeUploader] = [], boards: [RoomMediaBoard] = [],
                        progresses: [RoomMediaProgress] = [], _ condition: @escaping @MainActor () -> Bool) async {
         if condition() { return }
@@ -253,7 +257,7 @@ final class RoomMediaUploadCoordinatorTests: XCTestCase {
             fulfilled = true
             met.fulfill()
         }
-        var watches: [AnyCancellable] = []
+        var watches: [AnyCancellable] = [discards.sink { _ in Task { @MainActor in check() } }]
         for board in boards {
             watches.append(board.objectWillChange.sink { _ in Task { @MainActor in check() } })
         }
@@ -295,6 +299,7 @@ final class RoomMediaUploadCoordinatorTests: XCTestCase {
             discard: { [unowned self] source in
                 self.discarded.append(source.filename)
                 RoomMediaFiles.discard(source, root: self.root)
+                self.discards.send(())
             },
             outboxRoot: root
         )
