@@ -327,7 +327,7 @@ struct RoomChatScreen: View {
         coordinator.onLiveMessages = { [weak room] messages in room?.receive(messages) }
         coordinator.onNewReplies = { [weak room] replies in room?.receive(replies: replies) }
         coordinator.readsRepliesOften = true
-        // The call fills the screen, over the room and its bars, until you hang up (Carter, 10-30). Without its screen
+        // The call fills the screen, over the room and its bars, until you hang up. Without its screen
         // there would be no way to hang up, so the call does not start (warden, #267).
         guard VoiceCallWindow.shared.show(VoiceRoomHost(room: room, meter: meter, partnerLab: partnerLab(of: room))) else {
             CrashReporter.shared.note("voice call refused: no call screen")
@@ -767,8 +767,8 @@ struct RoomChatScreen: View {
             offerCrashReports()
         }
         .task {
-            // The room's running boxes, for the ring and its count, kept fresh while the room is open (Carter, 10-30:
-            // the count only caught up once the people list was opened).
+            // The room's running boxes, for the ring and its count, kept fresh while the room is open (the count once
+            // caught up only when the people list was opened).
             while !Task.isCancelled {
                 await flight.refresh()
                 try? await Task.sleep(nanoseconds: 60_000_000_000)
