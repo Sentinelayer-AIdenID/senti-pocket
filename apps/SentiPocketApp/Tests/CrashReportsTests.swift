@@ -160,16 +160,16 @@ final class CrashReportsTests: XCTestCase {
         XCTAssertNil(older.drawsText, "a record from before the count says nothing about draws")
     }
 
-    /// Carter's build 16 freeze (10-30 23:30): 176,832 row draws in 20 s, and nothing said what kept redrawing them.
+    /// A freeze on build 16: 176,832 row draws in 20 s, and nothing said what kept redrawing them.
     /// The report now names the parts that updated most while it lasted and the room's last action, by name only.
     func test_a_stall_names_what_kept_updating_and_the_last_action() {
         var run = LastRun(build: "2026103017", launchedAt: start, updatedAt: start, isActive: true)
         run.availableMB = 3_266
         let stall = MainThreadWatch.Stall(startedAt: start.addingTimeInterval(5), afterStep: "room closed", seconds: 20,
-                                          recovered: false, rowDraws: 176_832, lastRow: 55_786,
+                                          recovered: false, rowDraws: 176_832, lastRow: 12_346,
                                           busiest: "room 58,940, room screen 58,940", lastIntent: "readerAtBottom")
         let reason = run.closedReport(system: "iOS 26.5.1", device: "iPhone18,2", stall: stall)?.reason ?? ""
-        XCTAssertTrue(reason.contains("While it was stuck: 176,832 row draws, the last #55786; busiest: room 58,940, "
+        XCTAssertTrue(reason.contains("While it was stuck: 176,832 row draws, the last #12346; busiest: room 58,940, "
                                       + "room screen 58,940; last action: readerAtBottom."), reason)
 
         XCTAssertEqual(RenderTrace.busiest(from: ["room": 10, "bell": 4], to: ["room": 30, "bell": 5, "flight": 2]),

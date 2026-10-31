@@ -19,8 +19,8 @@ public enum RenderTrace {
         lock.unlock()
     }
 
-    /// One update from a named part of the app (a coordinator publishing, a screen drawn). Carter's build 16 freeze
-    /// (10-30 23:30) drew rows 176,832 times in 20 s; these say which part kept updating.
+    /// One update from a named part of the app (a coordinator publishing, a screen drawn). A freeze on build 16 drew
+    /// rows 176,832 times in 20 s; these say which part kept updating.
     public static func tick(_ source: String) {
         lock.lock()
         ticks[source, default: 0] &+= 1
