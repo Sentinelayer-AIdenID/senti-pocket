@@ -40,8 +40,8 @@ public struct SessionSummary: Codable, Equatable, Sendable, Identifiable {
     public let s3ArchivePath: String?
     /// What the room is for: general, study, research or conference (absent from older servers).
     public let roomType: String?
-    /// Who is in the room now, people and agents (Carter, 10-31: the room list says how many are online). Absent
-    /// from older servers; null when the server cannot say.
+    /// Who is in the room now, people and agents, for the room list's online counts. Absent from older servers; null
+    /// when the server cannot say.
     public let online: SessionOnlineCounts?
     /// Your unread messages in the room and the first of them (absent from older servers).
     public let unread: SessionUnreadSummary?

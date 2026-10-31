@@ -797,9 +797,9 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     }
 
     /// Where the room opens (`RoomChatView`): at the message it was opened for (a link or a notification); else at
-    /// the unread line when its rows hold one (Carter, 10-31: a room opens where you stopped reading, as Discord
-    /// does); else at its newest messages, as it always has. Put back at its newest rows (a send,
-    /// or Jump to latest, from up a long history), it opens at the newest whatever the line: that is what was asked.
+    /// the unread line when its rows hold one, where you stopped reading; else at its newest messages, as it always
+    /// has. Put back at its newest rows (a send, or Jump to latest, from up a long history), it opens at the newest
+    /// whatever the line: that is what was asked.
     public func openPosition(reopening: Bool) -> RoomOpenPosition {
         if let focusSequenceId { return .message(focusSequenceId) }
         if !reopening, rows.contains(.unreadDivider) { return .unreadLine }

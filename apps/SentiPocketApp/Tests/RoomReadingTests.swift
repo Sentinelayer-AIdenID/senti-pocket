@@ -132,8 +132,8 @@ private struct TakesEverything: RoomMessageSending {
     func sendHumanMessage(sessionId: String, text: String, clientId: String) async throws {}
 }
 
-/// Carter, 10-31: opening a room with unread messages takes you back to where you stopped reading, as Discord
-/// does, and the room list's badge follows your reading.
+/// Opening a room with unread messages takes you back to where you stopped reading, and the room list's badge
+/// follows your reading.
 @MainActor
 final class RoomReadingTests: XCTestCase {
     private let clock = TestClock()
@@ -297,7 +297,7 @@ final class RoomReadingTests: XCTestCase {
         room.send(.readerAtBottom(true))
         room.send(.readerAtBottom(false))
         room.send(.readerAtBottom(true))
-        XCTAssertEqual(publishes, 0, "the same rows: nothing to draw (Carter's freeze, #56316)")
+        XCTAssertEqual(publishes, 0, "the same rows: nothing to draw")
         XCTAssertEqual(underTheLine(room.state), 8)
         watching.cancel()
         room.pause()

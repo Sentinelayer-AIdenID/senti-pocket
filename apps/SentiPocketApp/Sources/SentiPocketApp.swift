@@ -224,7 +224,7 @@ private struct AuthenticatedRootView: View {
     private let accountIdentity: any AccountIdentityProviding
     private let roomReceipts: any RoomReceiptsClient
     private let roomSearch: any RoomSearching
-    /// How far you have read each room, told to the server as you read (Carter, 10-31: the unread badges).
+    /// How far you have read each room, told to the server as you read, for the unread badges.
     private let roomReadMarker: any RoomReadMarking
     private let authenticationRevision: UInt64
     private let onSignOut: @MainActor () -> Void
@@ -432,7 +432,7 @@ private struct AuthenticatedRootView: View {
         .overlay { LaunchSplash(isReady: roomListSettled) }
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: drawerOpen)
         // Opening the side panel reads the bell, so its count is never older than the panel; and the rooms, so who is
-        // online and their unread badges are not either (Carter, 10-31).
+        // online and their unread badges are not either.
         .onChange(of: drawerOpen) { open in
             if open { Task { await notifications.refresh(force: true) } }
             if open { Task { await waiting.refresh() } }

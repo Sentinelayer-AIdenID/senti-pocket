@@ -148,7 +148,7 @@ private struct SessionRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
-            // The unread badge sits on the right of the name's line, as Discord shows it (Carter, 10-31).
+            // The unread badge sits on the right of the name's line, as Discord shows it.
             ViewThatFits(in: .horizontal) {
                 HStack(alignment: .firstTextBaseline) {
                     title
@@ -183,7 +183,7 @@ private struct SessionRow: View {
             .font(.caption)
             .foregroundStyle(PocketPalette.textSecondary)
 
-            // When it was last active, then who is in it now (Carter, 10-31).
+            // When it was last active, then who is in it now.
             Group {
                 if dynamicTypeSize.isAccessibilitySize {
                     VStack(alignment: .leading, spacing: 4) {

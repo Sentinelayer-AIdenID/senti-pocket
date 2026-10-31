@@ -118,8 +118,7 @@ final class RoomChatCoordinator: ObservableObject {
     private var timeline = RoomTimeline()
     private var unread = RoomUnreadState()
     private var readerAtBottom = true
-    /// What the room list knew about your reading when the room was opened: it opens at your first unread message
-    /// (Carter, 10-31: as Discord does).
+    /// What the room list knew about your reading when the room was opened: it opens at your first unread message.
     private let readMark: RoomReadMark?
     /// How far you have read, told to the server forward only and at most every `RoomReadCursor.interval`.
     private var readCursor: RoomReadCursor
@@ -1220,8 +1219,8 @@ final class RoomChatCoordinator: ObservableObject {
     /// The most pages a room reads at its open to reach the first unread message, the newest included, as the web does.
     static let pagesToFirstUnread = 5
 
-    /// Opened from the room list with messages you have not read (Carter, 10-31: a room opens where you stopped
-    /// reading, as Discord does): the room opens at the first of them, behind the unread line,
+    /// Opened from the room list with messages you have not read, a room opens where you stopped reading: at the
+    /// first of them, behind the unread line,
     /// and the view takes you there. One further back than the newest page is paged back to, as the web does, up to
     /// `pagesToFirstUnread` pages in all, so the room is one stretch from the line to the latest; further back than
     /// that, the room opens on the window around it, as a link does, and newer messages load as you scroll down. When
@@ -1358,9 +1357,9 @@ final class RoomChatCoordinator: ObservableObject {
 
     // MARK: - Reading
 
-    /// A message came on screen or left it. Once it has stayed on screen for the dwell, the room is read through it
-    /// (Carter, 10-31: the room list's badge follows what you read). A row that flashes past while the room opens or
-    /// scrolls never counts, and reading only moves forward.
+    /// A message came on screen or left it. Once it has stayed on screen for the dwell, the room is read through it,
+    /// so the room list's badge follows what you read. A row that flashes past while the room opens or scrolls never
+    /// counts, and reading only moves forward.
     private func readWhenSeen(_ message: RoomMessage, isOnScreen: Bool) {
         guard readMarker != nil else { return }
         guard isOnScreen else {

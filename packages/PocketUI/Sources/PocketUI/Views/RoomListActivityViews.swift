@@ -1,7 +1,7 @@
 #if canImport(SwiftUI)
 import SwiftUI
 
-/// Who is in a room now, after how long ago it was active (Carter, 10-31): a person with how many people, a bot (the
+/// Who is in a room now, after how long ago it was active: a person with how many people, a bot (the
 /// app's agent mark, as in the people list) with how many agents. Each hides at 0, and the whole is one element that
 /// says it in words ("3 people and 2 agents online"). It takes the font and colour of the text around it.
 struct RoomOnlineCounts: View {

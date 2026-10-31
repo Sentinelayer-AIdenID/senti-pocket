@@ -419,7 +419,7 @@ public struct RoomTimeline: Equatable, Sendable {
 /// bottom, arriving rows from OTHER people count as unread and the divider sits at the first of them. Reaching
 /// the bottom clears both.
 ///
-/// A room opened from the room list with messages you had not read opens at the first of them (Carter, 10-31): that
+/// A room opened from the room list with messages you had not read opens at the first of them: that
 /// line stays while the room is open, wherever you scroll, as Discord's does. Only a send, which takes
 /// you to your own message at the bottom, lets it go.
 public struct RoomUnreadState: Equatable, Sendable {
@@ -454,7 +454,7 @@ public struct RoomUnreadState: Equatable, Sendable {
     }
 
     /// The reader came back to the bottom: arrivals are read. The line the room opened at stays. Whether anything
-    /// changed, so the same place told again never redraws the room (Carter's freeze, #56316).
+    /// changed, so the same place told again never redraws the room.
     @discardableResult
     public mutating func readerReachedBottom() -> Bool {
         guard unreadCount != 0 || arrivedAt != nil else { return false }

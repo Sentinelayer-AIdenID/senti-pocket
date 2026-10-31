@@ -133,7 +133,7 @@ public struct SessionRowPresentation: Equatable, Identifiable, Sendable {
     public let lastActivity: ParsedSessionTimestamp?
     /// The room's kind when it isn't a general room: "Study together", "Research" or "Meetings".
     public let roomTypeLabel: String?
-    /// Who is in the room now and your unread messages, for the row's counts and badge (Carter, 10-31).
+    /// Who is in the room now and your unread messages, for the row's counts and badge.
     public let activity: RoomListActivity
     /// The first message you have not read, where the room opens; nil with nothing unread.
     public let firstUnreadSequenceId: Int64?

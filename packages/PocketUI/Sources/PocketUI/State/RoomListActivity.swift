@@ -1,6 +1,6 @@
 import Foundation
 
-/// What a room's row in the room list says besides its name (Carter, 10-31): who is in the room now, a person and a
+/// What a room's row in the room list says besides its name: who is in the room now, a person and a
 /// bot with how many of each, right after how long ago it was active; and a badge with your unread messages on the
 /// right, as Discord shows them. A count of 0, or one the server did not give, shows nothing.
 public struct RoomListActivity: Equatable, Sendable {

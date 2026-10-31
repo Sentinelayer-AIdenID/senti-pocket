@@ -18,7 +18,7 @@ struct RoomRoute: Hashable {
     /// A breakout's own room: no agent requests or tickets of its own in v1-a.
     var isBreakout = false
     /// What the room list knew about your reading when the room was opened from it: the room opens at your first
-    /// unread message (Carter, 10-31).
+    /// unread message.
     var readMark: RoomReadMark?
 }
 

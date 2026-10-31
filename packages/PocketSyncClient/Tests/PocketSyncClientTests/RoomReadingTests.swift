@@ -3,8 +3,8 @@ import PocketContracts
 import XCTest
 @testable import PocketSyncClient
 
-/// Carter, 10-31: the room list shows who is online and your unread messages, and opening a room with unread messages
-/// takes you to the first of them, like Discord. These pin where a room opens and how reading is told to the server.
+/// The room list shows who is online and your unread messages, and opening a room with unread messages takes you to
+/// the first of them. These pin where a room opens and how reading is told to the server.
 final class RoomOpeningTests: XCTestCase {
     private func mark(_ count: Int, first: Int64?, lastRead: Int64? = nil) -> RoomReadMark {
         RoomReadMark(unreadCount: count, firstUnreadSequenceId: first, lastReadSequenceId: lastRead)

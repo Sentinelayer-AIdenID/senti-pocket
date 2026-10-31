@@ -1,7 +1,7 @@
 import Foundation
 
-/// Tells the server how far you have read a room (Carter, 10-31: the room list's unread badge follows your reading,
-/// like Discord). A protocol so the room is testable without a network.
+/// Tells the server how far you have read a room, so the room list's unread badge follows your reading. A protocol so
+/// the room is testable without a network.
 protocol RoomReadMarking: Sendable {
     /// You have read the room through the message at `sequenceId`.
     func markRead(sessionId: String, through sequenceId: Int64) async throws

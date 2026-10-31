@@ -3,8 +3,8 @@ import PocketContracts
 import XCTest
 @testable import PocketUI
 
-/// Carter, 10-31: the room list says how many people and agents are in each room, right after how long ago it was
-/// active, and shows a badge with your unread messages, as Discord does.
+/// The room list says how many people and agents are in each room, right after how long ago it was active, and shows
+/// a badge with your unread messages, as Discord does.
 final class RoomListActivityTests: XCTestCase {
     func test_counts_of_zero_or_none_show_nothing() {
         for activity in [RoomListActivity.none,

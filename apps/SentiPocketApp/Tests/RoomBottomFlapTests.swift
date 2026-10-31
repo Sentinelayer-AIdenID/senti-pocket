@@ -31,7 +31,7 @@ final class RoomBottomFlapTests: XCTestCase {
         private var atBottom = true
         private var unread = 0
         private var divider: Int64?
-        /// The first unread message the room opened at (Carter, 10-31): its line stays while the room is open.
+        /// The first unread message the room opened at: its line stays while the room is open.
         private var openedAt: Int64?
         private(set) var placeChanges = 0
         /// Every time the room told its place, changed or not.
@@ -346,8 +346,8 @@ final class RoomBottomFlapTests: XCTestCase {
         XCTAssertEqual(room.placeChanges, changes + 1, "once it has stayed gone, the reader is away from the bottom")
     }
 
-    /// Carter, 10-31: a room opened from the room list with unread messages opens at the first of them, behind the
-    /// "New messages" line, here far up a room of review packets. Opening there must settle like any open (#56316):
+    /// A room opened from the room list with unread messages opens at the first of them, behind the
+    /// "New messages" line, here far up a room of review packets. Opening there must settle like any open:
     /// rows drawn a bounded number of times, no stall, the place said at most once each way and then still. The list
     /// stays well up from the bottom: nothing pulls the reader down.
     func test_a_room_opened_at_its_unread_line_settles_there() throws {

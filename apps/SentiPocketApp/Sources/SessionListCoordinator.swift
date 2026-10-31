@@ -87,7 +87,7 @@ final class SessionListCoordinator: ObservableObject {
         setSelectedSession(nil)
     }
 
-    /// The server took your read of a room through `sequence` (Carter, 10-31: the badge follows your reading). The
+    /// The server took your read of a room through `sequence`, so the badge follows your reading. The
     /// list draws again only when that clears a badge it shows, once a visit, never at every read.
     func noteRead(sessionId: String, through sequence: Int64) {
         guard sequence > (readThrough[sessionId] ?? 0) else { return }

@@ -36,7 +36,7 @@ public struct PocketSidePanel: View {
         public let lastActivity: Date?
         /// The room's kind when it isn't general ("Study together", "Research", "Meetings").
         public let kind: String?
-        /// Who is in the room now and your unread messages (Carter, 10-31).
+        /// Who is in the room now and your unread messages.
         public let activity: RoomListActivity
 
         public init(id: String, title: String, subtitle: String?, lastActivity: Date?, kind: String? = nil,
@@ -253,7 +253,7 @@ public struct PocketSidePanel: View {
                     .frame(width: 3)
                 VStack(alignment: .leading, spacing: 2) {
                     // The name, then how long ago and who is online, then the unread badge on the right, as Discord
-                    // lists channels (Carter, 10-31). A room with unread messages has its name in bold.
+                    // lists channels. A room with unread messages has its name in bold.
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text(room.title)
                             .font(.subheadline.weight(isCurrent || activity.unread > 0 ? .semibold : .regular))
