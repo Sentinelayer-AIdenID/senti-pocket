@@ -34,7 +34,7 @@ struct RoomOnlineCounts: View {
 /// for one digit. Nothing at 0. The rooms, the bell and Waiting on you share it.
 struct PocketCountBadge: View {
     let count: Int
-    /// What VoiceOver says, which carries the whole count past 99.
+    /// What VoiceOver says; "5 unread" or "more than 99 unread" when not given.
     let accessibilityText: String?
     /// One digit is a circle: as wide as the badge is tall, at every text size.
     @ScaledMetric(relativeTo: .caption) private var minimumWidth: CGFloat = 20
@@ -56,7 +56,7 @@ struct PocketCountBadge: View {
                 .frame(minWidth: minimumWidth)
                 .background(PocketPalette.accent, in: Capsule())
                 .fixedSize()
-                .accessibilityLabel(accessibilityText ?? "\(count) unread")
+                .accessibilityLabel(accessibilityText ?? RoomListActivity.unreadDescription(for: count) ?? text)
                 .accessibilityIdentifier("pocket.rooms.unread")
         }
     }

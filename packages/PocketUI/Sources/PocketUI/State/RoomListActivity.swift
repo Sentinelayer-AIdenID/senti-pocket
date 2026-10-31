@@ -43,8 +43,14 @@ public struct RoomListActivity: Equatable, Sendable {
         return who.isEmpty ? nil : who.joined(separator: " and ") + " online"
     }
 
-    /// "5 unread", the whole count even past the badge's 99+; nil with nothing unread.
-    public var unreadDescription: String? { unread > 0 ? "\(unread) unread" : nil }
+    /// "5 unread"; past the badge's 99+, "more than 99 unread" (the server counts to 100 at most, so 100 means 100
+    /// or more); nil with nothing unread.
+    public var unreadDescription: String? { Self.unreadDescription(for: unread) }
+
+    public static func unreadDescription(for count: Int) -> String? {
+        guard count > 0 else { return nil }
+        return count > badgeLimit ? "more than \(badgeLimit) unread" : "\(count) unread"
+    }
 
     /// What VoiceOver says for the row after the room's name: "3 people and 2 agents online, 5 unread".
     public var accessibilityDescription: String? {

@@ -45,8 +45,11 @@ final class RoomListActivityTests: XCTestCase {
         XCTAssertEqual(RoomListActivity.badgeText(for: 99), "99")
         XCTAssertEqual(RoomListActivity.badgeText(for: 100), "99+")
         XCTAssertEqual(RoomListActivity.badgeText(for: 4_000), "99+")
-        XCTAssertEqual(RoomListActivity(humansOnline: 0, agentsOnline: 0, unread: 150).unreadDescription, "150 unread",
-                       "VoiceOver says the whole count")
+        XCTAssertEqual(RoomListActivity(humansOnline: 0, agentsOnline: 0, unread: 99).unreadDescription, "99 unread")
+        XCTAssertEqual(RoomListActivity(humansOnline: 0, agentsOnline: 0, unread: 100).unreadDescription,
+                       "more than 99 unread", "the server counts to 100 at most: 100 means 100 or more, as 99+ says")
+        XCTAssertEqual(RoomListActivity(humansOnline: 3, agentsOnline: 2, unread: 100).accessibilityDescription,
+                       "3 people and 2 agents online, more than 99 unread")
     }
 
     func test_the_room_you_are_in_has_no_badge_but_keeps_who_is_online() {
