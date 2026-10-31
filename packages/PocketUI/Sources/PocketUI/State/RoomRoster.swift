@@ -182,7 +182,7 @@ public struct RoomRoster: Equatable, Sendable {
                 return a.offset < b.offset
             }.map(\.element)
         }
-        // The web's names for the same three (warden, 10-30), so both read alike.
+        // The web's names for the same three, so both read alike.
         return [Side(title: "Humans", members: ordered(people)), Side(title: "Live agents", members: ordered(agents)),
                 Side(title: "Agents in boxes", members: ordered(boxes))]
             .filter { !$0.members.isEmpty }

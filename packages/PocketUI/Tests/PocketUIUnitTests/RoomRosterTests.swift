@@ -90,7 +90,7 @@ final class RoomRosterTests: XCTestCase {
             endedBoxes: [], now: now
         )
         let sides = roster.sides
-        // Carter, 10-30: "separation of humans, live agents and agents in boxes".
+        // Humans, live agents and agents in boxes apart.
         XCTAssertEqual(sides.map(\.title), ["Humans", "Live agents", "Agents in boxes"])
         let people = try XCTUnwrap(sides.first)
         XCTAssertEqual(people.online, 1)
@@ -102,7 +102,7 @@ final class RoomRosterTests: XCTestCase {
         let boxes = sides[2]
         XCTAssertEqual(boxes.members.map(\.name), ["astra-brand-s"])
         XCTAssertEqual(boxes.online, 1)
-        XCTAssertEqual(roster.activeCount, 1, "mrrCarter only: forge idles and the box has done nothing yet")
+        XCTAssertEqual(roster.activeCount, 1, "Sam only: forge idles and the box has done nothing yet")
         XCTAssertEqual(roster.summary, "1 active · 2 idle · 3 offline", "the whole room's line leads with the ring's number")
     }
 
