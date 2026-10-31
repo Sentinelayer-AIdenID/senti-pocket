@@ -329,7 +329,7 @@ struct RoomChatScreen: View {
             // An agent's call you answered talks inside the system call, whose audio CallKit owns.
             audio: call == nil ? PhoneVoiceRoomAudioSession() : CallKitVoiceRoomAudioSession(),
             ringer: RingbackTone(),
-            // Its Mute is the call screen's (Carter, Voice Lab #56359).
+            // Its Mute is the call screen's.
             callScreen: call.map { RoomCallScreen(desk: .shared, uuid: $0.uuid) },
             poster: voicePoster,
             voiceLine: voicePoster as? any VoiceLining,
@@ -447,7 +447,7 @@ struct RoomChatScreen: View {
             roster: roster
         ) { intent in
             if case .bottomFlapHeld(let rows, let longest) = intent {
-                // The room's bottom marker flapped and the reader's place was held still (Carter's freeze, #56316):
+                // The room's bottom marker flapped and the reader's place was held still:
                 // one line for the freeze recorder, with what may have kept it moving, never what the room says.
                 CrashReporter.shared.note("bottom marker flapped, held \(Int(RoomBottomSettle.holdTime)) s (\(rows) rows, "
                     + "longest message \(longest) chars, voice room \(voiceRoom == nil ? "off" : "on"))")

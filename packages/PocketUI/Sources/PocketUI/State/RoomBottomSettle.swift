@@ -2,7 +2,7 @@ import Foundation
 
 /// Whether the reader is at the bottom of the room, settled from the bottom marker coming into view and leaving it.
 ///
-/// The marker reports during layout. Carter's freezes on build 17 (#56316, #56340) wrote the reader's place right
+/// The marker reports during layout. The freezes on build 17 wrote the reader's place right
 /// there: the room redrew, the redraw moved the marker by a point, the marker wrote the place back, and the main thread
 /// went round that loop until iOS ended the app (664,848 row draws in 40 s, the last action each time readerAtBottom).
 /// So the marker only reports here, and the place changes on a later turn of the run loop, once the report has held:

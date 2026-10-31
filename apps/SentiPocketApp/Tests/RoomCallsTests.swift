@@ -244,7 +244,7 @@ final class RoomCallsTests: XCTestCase {
         XCTAssertTrue(desk.muted.isEmpty, "a call this desk does not own is ignored")
     }
 
-    /// Carter (Voice Lab #56359): the app's Mute is asked of the call screen, which mutes through `setMuted` like a
+    /// The app's Mute is asked of the call screen, which mutes through `setMuted` like a
     /// tap there, so the app and the call screen never disagree. A call that is over is never asked about.
     func test_the_apps_mute_is_asked_of_the_call_screen_for_a_live_call_only() async {
         let desk = RoomCallDesk(api: FakeCallsAPI(details: details()),
@@ -274,7 +274,7 @@ final class RoomCallsTests: XCTestCase {
         XCTAssertEqual(asked, [uuid, uuid], "a call that is over, or not this desk's, is never asked about")
     }
 
-    /// Carter (Voice Lab #56359): the app's Mute asks CallKit to mute the call as if on its screen, so the call screen
+    /// The app's Mute asks CallKit to mute the call as if on its screen, so the call screen
     /// shows it too, and CallKit performing it reaches `onMuted` like a tap there. A call not live here is not asked.
     func test_the_apps_mute_is_a_callkit_mute_of_that_call() {
         let provider = CXProvider(configuration: CXProviderConfiguration())

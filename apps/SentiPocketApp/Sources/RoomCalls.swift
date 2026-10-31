@@ -229,8 +229,8 @@ final class RoomCallDesk: ObservableObject {
         if isMuted { muted.insert(uuid) } else { muted.remove(uuid) }
     }
 
-    /// The app's own Mute for a call that is live (Carter, Voice Lab #56359): asked of the call screen, which then
-    /// mutes through `setMuted` exactly as a tap there does, so the app and the call screen never disagree.
+    /// The app's own Mute for a call that is live: asked of the call screen, which then mutes through `setMuted`
+    /// exactly as a tap there does, so the app and the call screen never disagree.
     func requestMuted(_ uuid: UUID, _ isMuted: Bool, done: @escaping @MainActor (Bool) -> Void) {
         guard isLive(uuid) else {
             done(false)
