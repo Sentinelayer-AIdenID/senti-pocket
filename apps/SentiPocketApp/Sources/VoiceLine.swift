@@ -1,7 +1,7 @@
 import Foundation
 
 /// The fast voice line (API #1062): a short spoken answer to a call turn, grounded in the room, streamed sentence by
-/// sentence in about a second instead of waiting for an agent to write one (Carter, 10-30: each answer took 18 s). It
+/// sentence in about a second instead of waiting for an agent to write one (each answer used to take 18 s). It
 /// speaks as "<agent> (voice)", never as the agent itself; the agent's own answer still comes in the room after.
 enum VoiceLineEvent: Equatable, Sendable {
     case sentence(String)
@@ -20,7 +20,7 @@ enum VoiceLineError: Error, Equatable {
 /// Asking the voice line. A protocol so the call is testable without a network.
 protocol VoiceLining: Sendable {
     /// `ringCallId` is the agent's call you answered, if this is one: the server reads why the agent called and its
-    /// brief from it, so the quick answer can talk them through (Carter, 10-30).
+    /// brief from it, so the quick answer can talk them through.
     func voiceLine(sessionId: String, agentId: String?, text: String, callId: String, ringCallId: String?,
                    history: [VoiceLineHistory]) -> AsyncThrowingStream<VoiceLineEvent, Error>
 }
