@@ -3,7 +3,7 @@ import Foundation
 /// Where each logo sits in who is here: past six, a full ring that goes all the way round, that you can scroll or that
 /// turns by itself, and that holds as many as there are. Up to `arcLimit` logos sit on a gentle arc under
 /// the online count; past that they go round a full ring that turns, the front ones large and bright, the back ones
-/// small and dim. The count sits above them all (Carter, 10-30: "the logos are hiding it").
+/// small and dim. The count sits above them all, where no logo hides it.
 public enum PresenceRingLayout {
     /// Up to this many sit on the arc; more go round the ring.
     public static let arcLimit = 6

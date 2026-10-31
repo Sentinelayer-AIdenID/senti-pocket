@@ -11,7 +11,7 @@ final class PresenceRingTests: XCTestCase {
         XCTAssertEqual(arc[0].x, -arc[3].x, accuracy: 0.001, "the arc is even either side")
         XCTAssertEqual(arc[1].x, -arc[2].x, accuracy: 0.001)
         XCTAssertEqual(PresenceRingLayout.spot(index: 1, count: 3, rotation: 0).x, 0, accuracy: 0.001,
-                       "the arc is centred: the count sits above it, not in its middle (Carter, 10-30)")
+                       "the arc is centred: the count sits above it, not in its middle")
         XCTAssertEqual(PresenceRingLayout.spot(index: 0, count: 1, rotation: 0).x, 0, accuracy: 0.001, "one logo, centred")
         XCTAssertLessThan(arc[0].y, arc[1].y, "the ends curve back")
         XCTAssertEqual(PresenceRingLayout.spot(index: 0, count: 4, rotation: 1).x, arc[0].x, "the arc does not turn")

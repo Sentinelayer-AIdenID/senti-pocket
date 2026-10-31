@@ -106,8 +106,7 @@ struct RoomPeopleAvatars: View {
         // clock stops for an arc, with Reduce Motion, under a hand, or while the room is covered (warden, #265).
         TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !isRing || reduceMotion || dragFrom != nil || resting)) { context in
             let turned = turn(at: context.date, isRing: isRing)
-            // The online count sits above the logos, where none of them covers it (Carter, 10-30: "move the number of
-            // online a bit higher to be visible because the logos are hiding it").
+            // The online count sits above the logos, where none of them covers it.
             VStack(spacing: Self.countGap) {
                 onlineCount(online)
                     .zIndex(1)
