@@ -6,7 +6,7 @@ import SwiftUI
 struct RoomBoxLine: View {
     let box: RoomBoxThread
     /// What happened in its thread, in a sentence or two, when the phone has summarized it.
-    var summary: String?
+    var summary: SummaryReading?
     /// The summary is being read aloud.
     var isReadingSummary = false
     /// Read the summary aloud, or stop (Carter, on #55474: "a voice version of the summary").
@@ -47,7 +47,7 @@ struct RoomBoxLine: View {
             }
             if let summary {
                 // Room on the right for the open and speaker buttons, which sit over the card and are their own.
-                ThreadSummaryText(text: summary)
+                ThreadSummaryText(summary: summary)
                     .padding(.trailing, ThreadSummaryListenButton.size * CGFloat([onListen != nil, onOpenSummary != nil].filter { $0 }.count))
             }
             }
@@ -57,7 +57,7 @@ struct RoomBoxLine: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Box \(box.name), \(box.status), \(box.replies) in its thread\(summary.map { ". Summary: \($0)" } ?? "")")
+        .accessibilityLabel("Box \(box.name), \(box.status), \(box.replies) in its thread\(summary.map { ". Summary: \($0.oneLine)" } ?? "")")
         .accessibilityHint("Opens its thread")
         .overlay(alignment: .bottomTrailing) {
             if summary != nil {
@@ -72,9 +72,9 @@ struct RoomBoxLine: View {
     }
 }
 
-/// A thread's summary on its row: a small spark, then the sentence, quiet.
+/// A thread's summary on its row: a small spark, then the start of its prose, quiet.
 struct ThreadSummaryText: View {
-    let text: String
+    let summary: SummaryReading
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 5) {
@@ -82,7 +82,7 @@ struct ThreadSummaryText: View {
                 .font(.caption2)
                 .foregroundStyle(PocketPalette.accentStrong)
                 .accessibilityHidden(true)
-            Text(ThreadSummaryFormat.headline(text))
+            Text(summary.oneLine)
                 .font(.caption)
                 .foregroundStyle(PocketPalette.textSecondary)
                 .lineLimit(2)
@@ -110,9 +110,9 @@ struct ThreadSummaryOpenButton: View {
     }
 }
 
-/// A thread's whole summary, in a sheet: each part on its line, the record's ids as written, and Listen.
+/// A thread's whole summary, in a sheet: its prose, when and who under it, and Listen.
 struct ThreadSummarySheet: View {
-    let summary: String
+    let summary: SummaryReading
     let isReading: Bool
     let onListen: () -> Void
     @Environment(\.dismiss) private var dismiss
@@ -125,12 +125,13 @@ struct ThreadSummarySheet: View {
                         Label(isReading ? "Stop" : "Listen", systemImage: isReading ? "stop.fill" : "speaker.wave.2.fill")
                     }
                     .buttonStyle(.borderedProminent)
+                    .accessibilityLabel(isReading ? "Stop reading the summary" : "Listen to the summary")
                     .accessibilityIdentifier("pocket.room.threadSummary.sheet.listen")
-                    ChatMarkdownView(text: summary.replacingOccurrences(of: "\n", with: "\n\n"), ownHandles: [])
-                        .accessibilityIdentifier("pocket.room.threadSummary.sheet.text")
-                    Text("Written on this phone from the thread's newest replies. The record is copied from the thread.")
+                    SummaryReadingView(summary, identifier: "pocket.room.threadSummary.sheet.text")
+                    Text("Written on this phone from the thread's newest replies.")
                         .font(.footnote)
                         .foregroundStyle(PocketPalette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(16)

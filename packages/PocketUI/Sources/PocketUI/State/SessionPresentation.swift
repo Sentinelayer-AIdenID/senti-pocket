@@ -133,7 +133,8 @@ public struct SessionRowPresentation: Equatable, Identifiable, Sendable {
         self.id = OpaqueUTF8Identity(session.sessionId)
         self.sessionId = session.sessionId
         self.title = session.title.pocketNonblank ?? "Untitled session"
-        self.summary = session.summaryText.pocketNonblank
+        // The room's saved summary, as prose: an older server saved five labelled parts (Carter, 10-31).
+        self.summary = session.summaryText.pocketNonblank.map(SummaryProse.prose).pocketNonblank
         self.status = session.status
         self.archiveStatus = session.archiveStatus
         self.membershipRole = session.membershipRole

@@ -51,19 +51,38 @@ final class ThreadSummaryTests: XCTestCase {
                        ["#253", "bf68d264", "402ef9d3", "#1054", "2026103014", "6bcfc61f"])
     }
 
-    /// The parts in Carter's order, labeled, the objective first; an empty part is left out, and with no objective
-    /// there is no summary.
-    func test_the_summary_is_labeled_parts_with_the_objective_first() throws {
+    /// Carter (10-31): the parts read as one paragraph in his order, without labels. An empty part and a stock
+    /// "None mentioned" are left out, the ids the thread names come last, and with no objective there is no summary.
+    func test_the_summary_is_one_paragraph_in_carters_order_without_labels() throws {
         let text = try XCTUnwrap(ThreadSummaryInput.composed(
             objective: "Stop Pocket freezing at send.", changed: "A send from up the history reopens the room.",
-            how: "pocket-forge changed RoomChatView; warden reviewed.", checks: "", record: ["#262", "cdec7a2c"]))
-        XCTAssertEqual(text, """
-        **Objective:** Stop Pocket freezing at send.
-        **What changed:** A send from up the history reopens the room.
-        **How:** pocket-forge changed RoomChatView; warden reviewed.
-        **Record:** `#262`, `cdec7a2c`
-        """)
-        XCTAssertEqual(ThreadSummaryFormat.headline(text), "Stop Pocket freezing at send.", "the row shows the objective")
+            how: "pocket-forge changed RoomChatView; warden reviewed.", checks: "None mentioned", record: ["#262", "cdec7a2c"]))
+        XCTAssertEqual(text, "Stop Pocket freezing at send. A send from up the history reopens the room. "
+            + "pocket-forge changed RoomChatView; warden reviewed. The thread names #262 and cdec7a2c.")
+        for mark in ["Objective", "What changed", "How:", "Checks", "Record", "**", "`", "None mentioned"] {
+            XCTAssertFalse(text.contains(mark), mark)
+        }
+        XCTAssertEqual(SummaryReading(text).prose, text, "the row shows the prose as written")
+        XCTAssertEqual(ThreadSummaryInput.composed(objective: "Ship it", changed: "", how: "", checks: "", record: []), "Ship it.")
         XCTAssertNil(ThreadSummaryInput.composed(objective: " ", changed: "x", how: "y", checks: "z", record: []))
+    }
+
+    /// Under the summary: when the thread's replies were written, and who wrote them, most replies first.
+    func test_the_line_under_a_thread_summary_says_when_and_who() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC") ?? .current
+        calendar.locale = Locale(identifier: "en_US")
+        let thread = [
+            reply(1, "claude-warden", "Reviewed.", minutes: 0),
+            reply(2, "pocket-forge", "Fixed.", minutes: 30),
+            reply(3, "pocket-forge", "Pushed.", minutes: 42)
+        ]
+        let details = ThreadSummaryInput.details(thread, now: Date(timeIntervalSince1970: 1_793_010_000), calendar: calendar)
+        XCTAssertEqual(details.count, 2)
+        guard details.count == 2 else { return }
+        let when = details[0].replacingOccurrences(of: "\u{202F}", with: " ").replacingOccurrences(of: "\u{2009}", with: " ")
+        for piece in ["Oct 26", "7:33", "8:15"] { XCTAssertTrue(when.contains(piece), "\(when) has \(piece)") }
+        XCTAssertEqual(details[1], "pocket-forge and claude-warden")
+        XCTAssertEqual(ThreadSummaryInput.details([], calendar: calendar), [])
     }
 }

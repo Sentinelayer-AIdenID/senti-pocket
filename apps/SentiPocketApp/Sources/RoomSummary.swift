@@ -9,22 +9,52 @@ import UIKit
 /// A room's summary, written by the API on request (Carter, 10-30: "I come to a room like this either as a stranger
 /// or if it's been a long time"). `POST /api/v1/sessions/{id}/summary/generate` runs a small model with a deterministic
 /// fallback and a 60-second cap, and keeps the result on the room.
+///
+/// It reads as prose whatever the server sends (Carter, 10-31: who, what, when, why and where, and no "Objective:"
+/// lines): the prose summary (`format: "prose-v2"`) with its time range, participants and mode in the line under it,
+/// or an older server's five labelled parts turned into sentences.
 struct RoomSummary: Equatable, Sendable {
+    /// A heading, when it says more than the summary's first sentence.
     let title: String?
-    let text: String
-    /// Written by a model, or by the API's own fallback when no model answered.
+    let reading: SummaryReading
+    /// Written by the API's own fallback, when no model answered.
     let isFallback: Bool
 
-    /// The API's answer: `{"ok": true, "summary": {"summary": "…", "title": "…", "model": "…"}, …}`.
-    init?(json data: Data) {
-        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let summary = object["summary"] as? [String: Any],
-              let text = (summary["summary"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+    /// What the sheet says when nothing in the summary said anything.
+    static let nothingYet = "There isn't enough in this room to summarize yet."
+
+    /// The API's answer: `{"ok": true, "summary": {"summary": "…", "title": "…", "model": "…", "format": "prose-v2",
+    /// "participants": […], "timeRange": {…}, "mode": "…"}, …}`. A field the summary object lacks is read from the
+    /// answer around it.
+    init?(json data: Data, now: Date = Date(), calendar: Calendar = .current) {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        let fields = object.merging(object["summary"] as? [String: Any] ?? [:]) { _, inner in inner }
+        guard let text = (fields["summary"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
               !text.isEmpty else { return nil }
-        self.text = text
-        let title = (summary["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.title = title?.isEmpty == false ? title : nil
-        isFallback = (summary["model"] as? String) == "deterministic-fallback"
+        let details = SummaryProse.details(server: fields, now: now, calendar: calendar)
+        let written = SummaryReading(text, details: details)
+        let reading = written.prose.isEmpty ? SummaryReading(Self.nothingYet, details: details) : written
+        self.reading = reading
+        title = Self.heading(fields["title"] as? String, over: reading.prose)
+        isFallback = (fields["model"] as? String) == "deterministic-fallback"
+    }
+
+    /// The title as a heading, cleaned like the summary and without a closing period. None when it is empty, when it
+    /// only names the room by id ("Session 1a2b3c4d"), or when the summary opens with it (an older server's title
+    /// was its objective).
+    static func heading(_ raw: String?, over prose: String) -> String? {
+        guard let raw else { return nil }
+        var title = SummaryProse.prose(raw).replacingOccurrences(of: "\n", with: " ")
+        while let last = title.last, ".:;,".contains(last) { title.removeLast() }
+        title = title.trimmingCharacters(in: .whitespaces)
+        guard !title.isEmpty,
+              title.range(of: #"^session [0-9a-f]{6,}$"#, options: [.regularExpression, .caseInsensitive]) == nil,
+              !letters(prose).hasPrefix(letters(title)) else { return nil }
+        return title
+    }
+
+    private static func letters(_ text: String) -> String {
+        text.lowercased().filter { $0.isLetter || $0.isNumber }
     }
 }
 
@@ -84,7 +114,8 @@ extension HTTPRoomMessageSender: RoomSummaryGenerating {
     }()
 }
 
-/// The summary sheet: it says it is working while the room is read, then shows the summary with Listen and Copy.
+/// The summary sheet: it says it is working while the room is read, then shows the summary as prose with Listen and
+/// Copy. Refresh asks the server again (a room that has moved on gets a new summary).
 struct RoomSummarySheet: View {
     let sessionId: String
     let roomTitle: String
@@ -120,36 +151,29 @@ struct RoomSummarySheet: View {
                         .accessibilityIdentifier("pocket.room.summary.working")
                     case .ready(let summary):
                         if let title = summary.title {
-                            Text(title).font(.title3.weight(.semibold))
+                            Text(title)
+                                .font(.title3.weight(.semibold))
+                                .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityAddTraits(.isHeader)
                         }
-                        HStack(spacing: 12) {
-                            Button {
-                                if reader.readingId == readId {
-                                    reader.stop()
-                                } else {
-                                    ReadAloudSource.shared.reading(in: sessionId)
-                                    _ = reader.read(id: readId, markdown: summary.text, title: "Room summary")
-                                }
-                            } label: {
-                                Label(reader.readingId == readId ? "Stop" : "Listen",
-                                      systemImage: reader.readingId == readId ? "stop.fill" : "speaker.wave.2.fill")
+                        // Side by side, or one over the other when large text leaves no room.
+                        ViewThatFits(in: .horizontal) {
+                            HStack(spacing: 12) {
+                                listenButton(summary)
+                                copyButton(summary)
                             }
-                            .buttonStyle(.borderedProminent)
-                            .accessibilityIdentifier("pocket.room.summary.listen")
-                            Button {
-                                copy(summary)
-                            } label: {
-                                Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+                            VStack(alignment: .leading, spacing: 10) {
+                                listenButton(summary)
+                                copyButton(summary)
                             }
-                            .buttonStyle(.bordered)
-                            .accessibilityIdentifier("pocket.room.summary.copy")
                         }
-                        ChatMarkdownView(text: summary.text, ownHandles: [])
-                            .accessibilityIdentifier("pocket.room.summary.text")
-                        if summary.isFallback {
+                        SummaryReadingView(summary.reading, identifier: "pocket.room.summary.text")
+                        // The prose line names a basic summary itself; an older server's outline says it here.
+                        if summary.isFallback && !summary.reading.detailParts.contains("Basic summary") {
                             Text("Written without a model this time: the summary service did not answer, so this is the room's own outline.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     case .failed(let message, let report):
                         Text(message)
@@ -176,6 +200,17 @@ struct RoomSummarySheet: View {
             .navigationTitle(roomTitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button {
+                        if reader.readingId == readId { reader.stop() }
+                        Task { await load() }
+                    } label: {
+                        Label("Refresh", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(phase == .working)
+                    .accessibilityLabel("Refresh summary")
+                    .accessibilityIdentifier("pocket.room.summary.refresh")
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { onClose() }
                 }
@@ -187,6 +222,34 @@ struct RoomSummarySheet: View {
         }
     }
 
+    private func listenButton(_ summary: RoomSummary) -> some View {
+        Button {
+            if reader.readingId == readId {
+                reader.stop()
+            } else {
+                ReadAloudSource.shared.reading(in: sessionId)
+                _ = reader.read(id: readId, markdown: summary.reading.prose, title: "Room summary")
+            }
+        } label: {
+            Label(reader.readingId == readId ? "Stop" : "Listen",
+                  systemImage: reader.readingId == readId ? "stop.fill" : "speaker.wave.2.fill")
+        }
+        .buttonStyle(.borderedProminent)
+        .accessibilityLabel(reader.readingId == readId ? "Stop reading the summary" : "Listen to the summary")
+        .accessibilityIdentifier("pocket.room.summary.listen")
+    }
+
+    private func copyButton(_ summary: RoomSummary) -> some View {
+        Button {
+            copy(summary)
+        } label: {
+            Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+        }
+        .buttonStyle(.bordered)
+        .accessibilityLabel(copied ? "Summary copied" : "Copy the summary")
+        .accessibilityIdentifier("pocket.room.summary.copy")
+    }
+
     private var readId: String { "summary:\(sessionId)" }
 
     private static var build: String {
@@ -195,6 +258,7 @@ struct RoomSummarySheet: View {
 
     private func load() async {
         phase = .working
+        copied = false
         do {
             phase = .ready(try await generator.generateSummary(sessionId: sessionId))
         } catch RoomSendError.reauthenticationRequired {
@@ -209,7 +273,8 @@ struct RoomSummarySheet: View {
 
     private func copy(_ summary: RoomSummary) {
         #if canImport(UIKit)
-        UIPasteboard.general.string = [summary.title, summary.text].compactMap { $0 }.joined(separator: "\n\n")
+        UIPasteboard.general.string = [summary.title, summary.reading.prose, summary.reading.details]
+            .compactMap { $0 }.joined(separator: "\n\n")
         #endif
         copied = true
     }

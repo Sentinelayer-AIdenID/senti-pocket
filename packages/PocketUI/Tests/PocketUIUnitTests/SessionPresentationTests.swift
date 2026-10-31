@@ -68,6 +68,24 @@ final class SessionPresentationTests: XCTestCase {
         XCTAssertEqual(state.rows[0].lastActivity?.raw, "2026-07-18T10:36:34Z")
     }
 
+    /// Carter (10-31): the room list and the side panel show a room's saved summary as prose, also the five labelled
+    /// parts an older server saved.
+    func testARoomsSavedSummaryReadsAsProseInTheList() throws {
+        let page = try decode(SessionListPage.self, """
+        {"sessions":[{"sessionId":"room-1","status":"active","archiveStatus":"active",
+        "visibility":"private","membershipRole":"owner","title":"Room",
+        "summaryText":"Objective: @human-mrrcarter *Warden's adversarial review.\\nWhat changed: 1 recorded events; outcomes not verified.\\nHow: 1 participant(s), 0s. Top contributor: claude-warden.\\nChecks: Tests not verified; RLAIF not reported.\\nRecord: 1408 tokens, $0.0000; deterministic transcript summary.",
+        "summaryGeneratedAt":null,"summaryModel":"deterministic-fallback","agentCount":1,"eventCount":1,"totalCostUsd":0,
+        "createdAt":null,"lastActivityAt":null,"expiresAt":null,
+        "killedAt":null,"templateName":null,"codebasePath":null,"s3ArchivePath":null}],"count":1,
+        "include_archived":false,"next_cursor":null,"has_more":false}
+        """)
+
+        let state = SessionListPresentationState(page: page, provenance: .network(lastUpdated: Date(timeIntervalSince1970: 1)))
+
+        XCTAssertEqual(state.rows.first?.summary, "Warden's adversarial review. Only claude-warden took part.")
+    }
+
     func testActivityKeepsEventsAndActionsSeparateAndLosslesslyTargetsThem() throws {
         let events = try decode(SessionEventForwardPage.self, """
         {"events":[{"id":"ev-1","event":"session_message","agent":{"displayName":"Relay"},

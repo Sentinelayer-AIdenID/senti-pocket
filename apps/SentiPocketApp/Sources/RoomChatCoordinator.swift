@@ -17,7 +17,7 @@ final class RoomChatCoordinator: ObservableObject {
     private let canRename: Bool
     /// Thread summaries written on the phone (Carter, #55474), by parent sequence, with the reply count each was
     /// written for; a thread is summarized again only once it has grown.
-    private var threadSummaries: [Int64: (replies: Int, text: String)] = [:]
+    private var threadSummaries: [Int64: (replies: Int, summary: SummaryReading?)] = [:]
     private var summarizing: Int64?
     private let summarizer: (any ThreadSummarizing)?
     private let canInvite: Bool
@@ -1442,6 +1442,7 @@ final class RoomChatCoordinator: ObservableObject {
         guard let (parent, thread) = due else { return }
         summarizing = parent
         let lines = ThreadSummaryInput.lines(thread)
+        let details = ThreadSummaryInput.details(thread)
         let count = thread.count
         Task.detached(priority: .utility) { [weak self] in
             let text = await summarizer.summarize(thread: lines)
@@ -1449,8 +1450,9 @@ final class RoomChatCoordinator: ObservableObject {
                 guard let self else { return }
                 self.summarizing = nil
                 // Remembered even when there is none, so a phone without the model doesn't ask again for this count.
-                self.threadSummaries[parent] = (count, text ?? "")
-                if text != nil { self.publish() }
+                let summary = text.map { SummaryReading($0, details: details) }.flatMap { $0.prose.isEmpty ? nil : $0 }
+                self.threadSummaries[parent] = (count, summary)
+                if summary != nil { self.publish() }
             }
         }
     }
@@ -1671,7 +1673,7 @@ final class RoomChatCoordinator: ObservableObject {
             pinLimit: pinLimit,
             canRename: canRename,
             canInvite: canInvite,
-            threadSummaries: threadSummaries.compactMapValues { $0.text.isEmpty ? nil : $0.text },
+            threadSummaries: threadSummaries.compactMapValues { $0.summary },
             replies: replyInputs,
             expandedRepeats: expandedRepeats
         )

@@ -530,7 +530,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     public let canInvite: Bool
     /// A short summary of a thread, by its parent's sequence, shown on the room's row for it before it is opened
     /// (Carter, #55474: "I wish I had the summarized here at top level before I even open the thread").
-    public let threadSummaries: [Int64: String]
+    public let threadSummaries: [Int64: SummaryReading]
 
     /// Same-author rows closer together than this share one header.
     public static let groupingWindow: TimeInterval = 5 * 60
@@ -567,7 +567,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         pinLimit: Int = 10,
         canRename: Bool = false,
         canInvite: Bool = false,
-        threadSummaries: [Int64: String] = [:],
+        threadSummaries: [Int64: SummaryReading] = [:],
         replies: [RoomChatMessageInput] = [],
         expandedRepeats: Set<String> = [],
         calendar: Calendar = .current
@@ -838,17 +838,6 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         formatter.timeZone = calendar.timeZone
         formatter.setLocalizedDateFormatFromTemplate("EEE MMM d")
         return formatter.string(from: date)
-    }
-}
-
-/// A thread's summary, as written on the phone: labeled lines, the objective first (Carter, 10-30: Objective, What
-/// changed, How, Checks, Record). A row shows the objective alone; the whole of it opens in a sheet.
-public enum ThreadSummaryFormat {
-    /// The line a row shows: the objective without its label (or, for a summary in one paragraph, all of it).
-    public static func headline(_ summary: String) -> String {
-        let first = summary.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? summary
-        let label = "**Objective:** "
-        return first.hasPrefix(label) ? String(first.dropFirst(label.count)) : first
     }
 }
 

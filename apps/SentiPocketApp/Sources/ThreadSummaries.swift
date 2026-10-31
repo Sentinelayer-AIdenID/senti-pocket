@@ -8,9 +8,10 @@ import FoundationModels
 /// even open the thread"). Written on the phone by Apple's on-device model where the phone has it (iOS 26 with Apple
 /// Intelligence): private, free, and nothing leaves the phone. Elsewhere there is none, and the row reads as before.
 ///
-/// Its shape is Carter's (10-30, "The Perfect Engineering Swarm Summary Spec"): what the thread set out to do, what
+/// Its parts are Carter's (10-30, "The Perfect Engineering Swarm Summary Spec"): what the thread set out to do, what
 /// changed, how (who did which steps, with which tools), what was checked and how it came out, and the record (the
 /// commits, pull requests and builds it names). The record is copied from the thread, never written by the model.
+/// They read as one paragraph of prose, without labels (Carter, 10-31), with when and who in the line under it.
 protocol ThreadSummarizing: Sendable {
     func summarize(thread lines: [String]) async -> String?
 }
@@ -75,15 +76,30 @@ enum ThreadSummaryInput {
         return found
     }
 
-    /// The summary as the room keeps it: one labeled line per part, the objective first (the row shows it alone).
+    /// The summary as the room keeps it: one paragraph, the parts in Carter's order as sentences without labels, the
+    /// stock phrases that say nothing ("None mentioned") left out, and the ids the thread names last.
     static func composed(objective: String, changed: String, how: String, checks: String, record: [String]) -> String? {
         guard let objective = cleaned(objective) else { return nil }
-        var parts = ["**Objective:** \(objective)"]
-        if let changed = cleaned(changed) { parts.append("**What changed:** \(changed)") }
-        if let how = cleaned(how) { parts.append("**How:** \(how)") }
-        if let checks = cleaned(checks) { parts.append("**Checks:** \(checks)") }
-        if !record.isEmpty { parts.append("**Record:** " + record.map { "`\($0)`" }.joined(separator: ", ")) }
-        return parts.joined(separator: "\n")
+        var parts = [objective] + [changed, how, checks].compactMap { cleaned($0) }
+        if !record.isEmpty { parts.append("The thread names \(SummaryProse.list(record)).") }
+        let prose = SummaryProse.sentences(parts)
+        return prose.isEmpty ? nil : prose
+    }
+
+    /// The line under the summary: when the thread's replies were written, and who wrote them, most replies first.
+    static func details(_ replies: [RoomChatMessageInput], now: Date = Date(), calendar: Calendar = .current) -> [String] {
+        var counts: [String: Int] = [:]
+        var order: [String] = []
+        for reply in replies {
+            if counts[reply.authorName] == nil { order.append(reply.authorName) }
+            counts[reply.authorName, default: 0] += 1
+        }
+        let ranked = order.enumerated()
+            .sorted { (counts[$0.element] ?? 0, -$0.offset) > (counts[$1.element] ?? 0, -$1.offset) }
+            .map(\.element)
+        let dates = replies.compactMap(\.date)
+        return [SummaryProse.when(from: dates.min(), to: dates.max(), now: now, calendar: calendar),
+                SummaryProse.people(ranked)].compactMap { $0 }
     }
 }
 

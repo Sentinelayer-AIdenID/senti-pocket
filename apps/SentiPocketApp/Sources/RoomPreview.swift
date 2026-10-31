@@ -283,14 +283,16 @@ private struct RoomPreviewTickets: RoomTicketsTransport {
 private struct RoomPreviewSender: RoomMessageSending, RoomActionSending, RoomSummaryGenerating {
     func generateSummary(sessionId: String) async throws -> RoomSummary {
         try? await Task.sleep(nanoseconds: 1_200_000_000)
-        let text = [
-            "The team is fixing two findings in the onboarding flow.",
-            "",
-            "- **Paste validation** is fixed and build 319 is green; Alex asked for a look on device.",
-            "- **The retry counter** is next, after finding 1 ships.",
-            "- A breakout is ordering the fixes; 2 of 3 have acknowledged."
-        ].joined(separator: "\n")
-        let body: [String: Any] = ["ok": true, "summary": ["title": "Design review: onboarding fixes", "summary": text, "model": "preview"]]
+        // The server's prose summary (`format: "prose-v2"`), with the fields its quiet line reads.
+        let text = "Alex asked the team to fix two findings in the onboarding flow before the next build. "
+            + "Paste validation is fixed and build 319 is green; Alex asked for a look on a device. "
+            + "The retry counter is next, once that ships, and a breakout is ordering the fixes."
+        let iso = ISO8601DateFormatter()
+        let body: [String: Any] = ["ok": true, "summary": [
+            "format": "prose-v2", "title": "Design review: onboarding fixes", "summary": text, "model": "preview",
+            "participants": ["human-alex", "review-agent", "build-agent"], "mode": "llm",
+            "timeRange": ["start": iso.string(from: Date().addingTimeInterval(-5_400)), "end": iso.string(from: Date())]
+        ] as [String: Any]]
         guard let summary = RoomSummary(json: try JSONSerialization.data(withJSONObject: body)) else { throw RoomSendError.rejected }
         return summary
     }
