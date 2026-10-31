@@ -116,8 +116,8 @@ public enum AgentLab: String, CaseIterable, Comparable, Sendable {
         public let isBox: Bool
         public let signal: String?
         public let isWorking: Bool
-        /// Here but quiet (Carter, 10-30: "the people that aren't live but idle (not destroyed) are there still and
-        /// they're kinda greyed out"): idle in presence, or a running box not heard from, and not working.
+        /// Here but quiet, and shown greyed out (an idle agent stays listed until it is destroyed): idle in presence,
+        /// or a running box not heard from, and not working.
         public let isIdle: Bool
 
         public init(id: String, lab: AgentLab, isBox: Bool = false, signal: String? = nil, isWorking: Bool? = nil,

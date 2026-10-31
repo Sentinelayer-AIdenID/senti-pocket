@@ -547,7 +547,7 @@ final class MainThreadWatch: @unchecked Sendable {
         var rowDraws: Int?
         var lastRow: Int64?
 
-        /// "1,240 row draws, the last #55578", or nil when none were counted.
+        /// "1,240 row draws, the last #12345", or nil when none were counted.
         var drawsText: String? {
             guard let rowDraws else { return nil }
             let count = rowDraws.formatted(.number.locale(Locale(identifier: "en_US")))

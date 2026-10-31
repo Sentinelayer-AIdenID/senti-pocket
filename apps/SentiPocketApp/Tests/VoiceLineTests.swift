@@ -119,7 +119,7 @@ final class VoiceLineCallTests: XCTestCase {
         room.send(.toggleTalk)
     }
 
-    /// Carter (10-30): each answer took 18 s. The voice line answers in its agent's voice, marked "(voice)".
+    /// Each answer used to take 18 s. The voice line answers in its agent's voice, marked "(voice)".
     func test_a_turn_is_answered_by_the_voice_line_in_the_agents_voice_and_marked_as_the_voice_line() async {
         let line = FakeVoiceLine([.success(["Build 15 is on TestFlight.", "Calls ring first now."])])
         let listener = LineListener(), speaker = LineSpeaker(), poster = LinePoster()
