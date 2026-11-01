@@ -282,6 +282,31 @@
    ]
   },
   {
+   "id": "header-with-inline-hash",
+   "posts": [
+    {
+     "thread": 112,
+     "body": "review-defects.jsonl part 1/3 (2264 bytes, SHA256 ada0b4c25adc9092f8eeca7ec3544fa6a2179264dc9e941d025a3bb958a6787b, gzip plus base64)\nH4sIAAAAAAACCn3Vu2rDUBCE4T5PYVQnQTtzji4u0+YpjGOIwUmTCwSTdw9xo9ktppX5WbA+Rtfh/DLsh+enh3GM4X44Xg7nt2E/fPy8f76ePs/H3e3J7v+378Pl6zTsx9+7q1QwFbYqHnvuaDpuHXPVTNW2qtVr3XR966"
+    },
+    {
+     "thread": 112,
+     "body": "review-defects.jsonl part 2/3 (2264 bytes, SHA256 ada0b4c25adc9092f8eeca7ec3544fa6a2179264dc9e941d025a3bb958a6787b, gzip plus base64)\nZcTaaatmqu12bTzVu35mox1SL/5FjPrSZcJUTKYnTve5SO5WBYKUIlSueshGKZ6kWnJYRLLLlzXkLAxFovOjEhZBC5c2ZC0AD1olMTwgYtd85NCBz0etHBCZGDOXVwciBysJSLcHIgcphXBnZlRA7rzsDJgQ5NXho4ORA5"
+    },
+    {
+     "thread": 112,
+     "body": "review-defects.jsonl part 3/3 (2264 bytes, SHA256 ada0b4c25adc9092f8eeca7ec3544fa6a2179264dc9e941d025a3bb958a6787b, gzip plus base64)\nrFsDJwcih3lt4ORA5LDuDZwciBzmxYGTA5HT6uTAyYHIaXlz6ORQ5LS6OXRyKHJa6ZwcipxWN4f2CyVyWt4cOjnUj1TdHDo5FDk9bw6dHIqcXjeHTg5FTs+bQyeHIqfXzaGTQ5HT8+Y0J6eJnH7bnD8IsHji2AgAAA=="
+    }
+   ],
+   "expect": [
+    {
+     "status": "verified",
+     "name": "review-defects.jsonl",
+     "bytes": 2264,
+     "sha256": "ada0b4c25adc9092f8eeca7ec3544fa6a2179264dc9e941d025a3bb958a6787b"
+    }
+   ]
+  },
+  {
    "id": "ordinary-messages-ignored",
    "posts": [
     {

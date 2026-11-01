@@ -50,7 +50,7 @@ final class RoomBase64FilesTests: XCTestCase {
     func test_every_vector_gives_its_expected_outcome() throws {
         let all = try vectors()
         XCTAssertEqual(all.spec, "room-base64-files/1")
-        XCTAssertEqual(all.cases.count, 13)
+        XCTAssertEqual(all.cases.count, 14)
         for testCase in all.cases {
             XCTAssertEqual(RoomBase64Files.reassemble(posts(testCase)).map(outcome), testCase.expect, testCase.id)
         }
@@ -85,6 +85,53 @@ final class RoomBase64FilesTests: XCTestCase {
         XCTAssertNotEqual(decoded, file.declaredSHA256)
         XCTAssertNil(gunzipped, "not gzip")
         XCTAssertNil(file.data)
+    }
+
+    /// A header may declare its hash, and its size, in a parenthetical on its own line: then no declaration is
+    /// needed. A parenthetical without a hash changes nothing.
+    func test_a_header_can_declare_its_hash_inline() throws {
+        let text = Data((1...40).map { "line \($0)" }.joined(separator: "\n").utf8)
+        let hash = RoomBase64Files.sha256Hex(text)
+        let encoded = text.base64EncodedString()
+        let halves = [String(encoded.prefix(encoded.count / 2)), String(encoded.dropFirst(encoded.count / 2))]
+        func posts(_ meta: String) -> [RoomFilePost] {
+            halves.enumerated().map { index, data in
+                RoomFilePost(thread: 7, id: "p\(index)", body: "notes.txt part \(index + 1)/2\(meta)\n\(data)")
+            }
+        }
+        let inline = " (\(text.count) bytes, SHA256 \(hash.uppercased()), base64)"
+        let verified = try XCTUnwrap(RoomBase64Files.reassemble(posts(inline)).first)
+        XCTAssertEqual(verified.status, .verified)
+        XCTAssertEqual(verified.declaredSHA256, hash)
+        XCTAssertEqual(verified.data, text)
+        XCTAssertTrue(RoomBase64Files.mayBePart(posts(inline)[0].body))
+
+        let wrongSize = " (\(text.count + 1) bytes, sha256: \(hash))"
+        XCTAssertEqual(RoomBase64Files.reassemble(posts(wrongSize)).first?.status, .sizeMismatch,
+                       "the size is declared")
+        XCTAssertEqual(RoomBase64Files.reassemble(posts(" (base64)")).first?.status, .noDeclaredHash,
+                       "no hash in the parenthetical: a declaration is still needed")
+    }
+
+    /// Each part keeps the hash its own header declares: a corrected file posted again under the same name in the
+    /// same thread is a second file, not conflicting copies of the first (the reference gives the same two files).
+    func test_each_part_keeps_the_hash_its_own_header_declares() {
+        func parts(_ file: Data) -> [String] {
+            let encoded = file.base64EncodedString()
+            let hash = RoomBase64Files.sha256Hex(file)
+            return [String(encoded.prefix(encoded.count / 2)), String(encoded.dropFirst(encoded.count / 2))]
+                .enumerated().map { index, data in
+                    "notes.txt part \(index + 1)/2 (\(file.count) bytes, SHA256 \(hash))\n\(data)"
+                }
+        }
+        let first = Data(String(repeating: "first version\n", count: 20).utf8)
+        let second = Data(String(repeating: "second version, corrected\n", count: 20).utf8)
+        let posts = (parts(first) + parts(second)).enumerated().map {
+            RoomFilePost(thread: 9, id: "p\($0.offset)", body: $0.element)
+        }
+        let files = RoomBase64Files.reassemble(posts)
+        XCTAssertEqual(files.map(\.status), [.verified, .verified])
+        XCTAssertEqual(Set(files.compactMap(\.data)), [first, second])
     }
 
     func test_names_are_made_safe() {

@@ -75,8 +75,10 @@ public struct RoomBase64File: Equatable, Sendable {
 ///
 /// A part is a post whose whole body is either a JSON envelope (`artifact`, `sha256`, `part`, `parts`, `data`, and
 /// optionally `bytes` and `encoding`), or a text header line `<name> part <i>/<n>` followed by the base64 text. A
-/// header's hash comes from a declaration elsewhere in the thread: a line naming the file, then `sha256` and 64 hex
-/// characters (and optionally `<n> bytes`).
+/// header's hash comes from the header line itself, when it ends with a parenthetical holding `sha256` and 64 hex
+/// characters (`(2264 bytes, SHA256 <hex>, gzip plus base64)`, its `<n> bytes` the size); otherwise from a
+/// declaration elsewhere in the thread: a line naming the file, then `sha256` and 64 hex characters (and optionally
+/// `<n> bytes`).
 public enum RoomBase64Files {
     /// The largest file put back together, decoded or unzipped (a guard against a small post unzipping to a huge one).
     public static let maximumBytes = 50 * 1024 * 1024
@@ -189,7 +191,13 @@ public enum RoomBase64Files {
     }
 
     private static let headerPattern = try? NSRegularExpression(
-        pattern: #"^([^\s/\\]{1,128}) part ([0-9]+)/([0-9]+)$"#, options: [.caseInsensitive]
+        pattern: #"^([^\s/\\]{1,128}) part ([0-9]+)/([0-9]+)(?:\s*\(([^)]*)\))?$"#, options: [.caseInsensitive]
+    )
+    private static let inlineHashPattern = try? NSRegularExpression(
+        pattern: #"sha256[\s:=`]*([0-9a-f]{64})"#, options: [.caseInsensitive]
+    )
+    private static let sizePattern = try? NSRegularExpression(
+        pattern: #"([0-9][0-9,]*)\s*bytes"#, options: [.caseInsensitive]
     )
 
     private static func parsePart(_ body: String) -> Part? {
@@ -204,8 +212,23 @@ public enum RoomBase64Files {
               let totalRange = Range(match.range(at: 3), in: first),
               let index = Int(first[indexRange]), let total = Int(first[totalRange]),
               index >= 1, total >= 1, index <= total else { return nil }
-        return Part(name: String(first[nameRange]), sha256: nil, index: index, total: total,
-                    data: String(text[text.index(after: newline)...]), bytes: nil)
+        // A parenthetical on the header line that holds the hash declares it, and its size; without one, the thread
+        // needs a declaration line.
+        let meta = Range(match.range(at: 4), in: first).map { String(first[$0]) } ?? ""
+        let inline = inlineDeclaration(in: meta)
+        return Part(name: String(first[nameRange]), sha256: inline?.sha256, index: index, total: total,
+                    data: String(text[text.index(after: newline)...]), bytes: inline?.bytes)
+    }
+
+    /// The hash a header's parenthetical declares (`sha256` and 64 hex characters), and its `<n> bytes` with it.
+    private static func inlineDeclaration(in meta: String) -> (sha256: String, bytes: Int?)? {
+        let range = NSRange(meta.startIndex..., in: meta)
+        guard let inlineHashPattern, let match = inlineHashPattern.firstMatch(in: meta, range: range),
+              let hashRange = Range(match.range(at: 1), in: meta) else { return nil }
+        let bytes = sizePattern?.firstMatch(in: meta, range: range)
+            .flatMap { Range($0.range(at: 1), in: meta) }
+            .flatMap { Int(meta[$0].replacingOccurrences(of: ",", with: "")) }
+        return (meta[hashRange].lowercased(), bytes)
     }
 
     private static func parseEnvelope(_ text: String) -> Part? {
@@ -243,7 +266,7 @@ public enum RoomBase64Files {
         let escaped = NSRegularExpression.escapedPattern(for: name)
         guard let declaration = try? NSRegularExpression(
             pattern: escaped + #".*?sha256[\s:=`]*([0-9a-f]{64})"#, options: [.caseInsensitive]
-        ), let size = try? NSRegularExpression(pattern: #"([0-9][0-9,]*)\s*bytes"#, options: [.caseInsensitive]) else {
+        ), let size = sizePattern else {
             return nil
         }
         for body in bodies {
