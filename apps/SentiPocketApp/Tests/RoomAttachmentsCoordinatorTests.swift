@@ -13,6 +13,8 @@ private final class FileRoomTransport: RoomTransport, @unchecked Sendable {
     var previewed: Set<String> = []
     /// Attachments taken back since: their link answers 404 (read as no access).
     var gone: Set<String> = []
+    /// The API cannot be reached for these.
+    var unreachable: Set<String> = []
     var expiresIn = 300
 
     init(history: [RoomMessage]) { self.history = history }
@@ -39,8 +41,10 @@ private final class FileRoomTransport: RoomTransport, @unchecked Sendable {
         lock.lock()
         links.append("\(sessionId)/\(attachmentId)")
         let isGone = gone.contains(attachmentId)
+        let isUnreachable = unreachable.contains(attachmentId)
         lock.unlock()
         if isGone { throw SessionTransportError.accessDenied }
+        if isUnreachable { throw SessionTransportError.network }
         return RoomAttachmentDownload(
             url: URL(string: "https://storage.example/\(attachmentId)?sig=1")!,
             expiresIn: expiresIn,
@@ -175,6 +179,29 @@ final class RoomAttachmentsCoordinatorTests: XCTestCase {
                 && self.chip(room, "pm_photo_0001")?.isRemoved == true
         }
         XCTAssertEqual(fetcher.fetchedPaths(), [], "nothing downloaded")
+        room.pause()
+    }
+
+    /// Offline, a kept preview stays: only the API saying the file is gone takes it away.
+    func test_a_kept_preview_stays_while_the_api_cannot_answer() async {
+        let store = RoomMediaPreviewMemoryStore()
+        store.store(Self.png(width: 64, height: 64), for: "room_1/pm_photo_0001")
+        let photo = RoomAttachment(attachmentId: "pm_photo_0001", filename: "IMG_0042.jpg", kind: .image,
+                                   contentType: "image/jpeg", sizeBytes: 40_000)
+        let transport = FileRoomTransport(history: [Self.message([photo])])
+        transport.unreachable = ["pm_photo_0001"]
+        let room = coordinator(transport, ScriptedFetcher(image: Data()), store: store)
+        room.resume()
+        await waitUntil("loaded") { !room.state.isLoadingInitial }
+        room.send(.attachmentAppeared(attachmentId: "pm_photo_0001"))
+        await waitUntil("the API asked") { transport.requestedLinks() == ["room_1/pm_photo_0001"] }
+        for _ in 0..<20 {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+        XCTAssertNotNil(room.state.attachmentPreviews["pm_photo_0001"])
+        XCTAssertNotNil(store.data(for: "room_1/pm_photo_0001"))
+        XCTAssertEqual(chip(room, "pm_photo_0001")?.isRemoved, false)
         room.pause()
     }
 

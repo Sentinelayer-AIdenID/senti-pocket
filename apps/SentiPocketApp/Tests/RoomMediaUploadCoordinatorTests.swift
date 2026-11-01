@@ -849,6 +849,53 @@ final class RoomMediaUploadCoordinatorTests: XCTestCase {
         await until("withdrawn row deleted", uploaders: [uploader]) { uploader.deletes.contains("pm_test_000001") }
     }
 
+    /// The server refuses the new id too: the upload does not start over again by itself (once only), and waits for
+    /// Retry.
+    func test_an_id_refused_again_after_a_new_one_waits_for_retry() async throws {
+        let uploader = FakeUploader()
+        uploader.initError = RoomMediaUploadError.refused(RoomMediaAPIRefusal(status: 409, code: "ATTACHMENT_CONFLICT"))
+        let media = coordinator(uploader)
+        media.add([try source("IMG_0001.jpg")])
+        await until("failed", boards: [media.board]) { media.board.tray.first?.isFailed == true }
+        XCTAssertEqual(uploader.inits.filter { $0.previewOf == nil }.map(\.clientAttachmentId),
+                       ["pm_test_000001", "pm_test_000002"], "one new id, then it stops")
+        XCTAssertEqual(media.board.tray.first?.phase,
+                       .failed(reason: "The server withdrew this upload. Retry to send it again.", canRetry: true))
+    }
+
+    /// A file taken out after its upload started over under a new id is deleted under that id, with its preview.
+    func test_a_file_taken_out_after_a_new_id_is_deleted_under_it() async throws {
+        let uploader = FakeUploader()
+        uploader.failingChecks = 1
+        let media = coordinator(uploader)
+        media.add([try source("IMG_0001.jpg")])
+        await until("failed", boards: [media.board]) { media.board.tray.first?.isFailed == true }
+        media.perform(.retryItem(itemId: "pm_test_000001"))
+        await until("uploaded", boards: [media.board]) { media.board.tray.first?.phase == .uploaded }
+        media.perform(.remove(itemId: "pm_test_000001"))
+        await until("deleted", uploaders: [uploader]) {
+            uploader.deletes.contains("pm_test_000002") && uploader.deletes.contains("pm_test_000002.pv")
+        }
+    }
+
+    /// A new id is kept across the app closing: after the relaunch the upload goes on under it, never the old one.
+    func test_a_new_id_survives_the_app_closing() async throws {
+        let uploader = FakeUploader()
+        uploader.failingChecks = 1
+        let media = coordinator(uploader)
+        media.add([try source("IMG_0001.jpg")])
+        media.perform(.send(text: "Hi"))
+        let clientId = try XCTUnwrap(media.board.outgoing.first?.id)
+        await until("failed", boards: [media.board]) { media.board.outgoing.first?.isFailed == true }
+
+        let again = FakeUploader()
+        let reopened = coordinator(again)
+        reopened.perform(.retry(clientId: clientId))
+        await until("posted", uploaders: [again]) { again.posts.count == 1 }
+        XCTAssertEqual(again.posts.first?.ids, ["pm_test_000002"])
+        XCTAssertFalse(again.inits.contains { $0.clientAttachmentId == "pm_test_000001" }, "the old id is never asked for")
+    }
+
     /// The app closed with an upload unfinished; meanwhile the server swept it and refuses its id. Retry after the next
     /// launch tries complete (404), init (409), then starts over under a new id at once: the message is sent with no
     /// second Retry.
@@ -918,6 +965,27 @@ final class RoomMediaUploadCoordinatorTests: XCTestCase {
         await until("its card goes", boards: [media.board]) { media.board.outgoing.isEmpty }
         await until("its copy goes", boards: [media.board]) { self.discarded.contains("IMG_0001.jpg") }
         XCTAssertTrue(uploader.deletes.isEmpty, "what may be in the room stays there")
+
+        // The same after a relaunch: the outbox remembers its post was asked for.
+        let posting = FakeUploader()
+        posting.failingPosts = 1
+        let before = coordinator(posting, session: "room_relaunch")
+        before.add([try source("IMG_0003.jpg")])
+        before.perform(.send(text: "Hi"))
+        let relaunchId = try XCTUnwrap(before.board.outgoing.first?.id)
+        await until("post failed", uploaders: [posting], boards: [before.board]) {
+            posting.posts.count == 1 && before.board.outgoing.first?.isFailed == true
+        }
+        let after = FakeUploader()
+        let reopened = coordinator(after, session: "room_relaunch")
+        reopened.perform(.cancel(clientId: relaunchId))
+        await until("its card goes", boards: [reopened.board]) { reopened.board.outgoing.isEmpty }
+        await until("its copy goes", boards: [reopened.board]) { self.discarded.contains("IMG_0003.jpg") }
+        for _ in 0..<20 {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+        XCTAssertTrue(after.deletes.isEmpty, "after a relaunch too")
 
         let refused = FakeUploader()
         refused.postError = RoomMediaUploadError.refused(RoomMediaAPIRefusal(status: 409, code: "ATTACHMENT_REFERENCE_REJECTED"))
