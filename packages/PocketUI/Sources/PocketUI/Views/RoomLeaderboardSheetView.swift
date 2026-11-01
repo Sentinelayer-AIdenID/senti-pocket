@@ -106,7 +106,7 @@ struct RoomLeaderboardSheetView: View {
         }
     }
 
-    /// Who posted the board, by the id the room shows; "room owner/admin" only when the server stamped it so.
+    /// Who posted the board, by the id the room shows.
     @ViewBuilder
     private var postedBy: some View {
         if !sheet.postedBy.isEmpty {

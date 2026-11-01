@@ -1363,19 +1363,16 @@ public struct RoomChatPinned: Equatable, Identifiable, Sendable {
     public let text: String
     /// Who posted the message, by the id the room shows for them.
     public let author: String
-    /// What the server's stamp on the message's own event says about who posted it, kept across its edits.
-    public let trust: RoomChatPinTrust
     /// The text read as a leaderboard, once per revision; nil when it isn't one.
     public let board: RoomLeaderboard?
 
     public init(sequenceId: Int64, snippet: String, pinnedBy: String, text: String = "", author: String = "",
-                trust: RoomChatPinTrust = .unstamped, board: RoomLeaderboard? = nil) {
+                board: RoomLeaderboard? = nil) {
         self.sequenceId = sequenceId
         self.snippet = snippet
         self.pinnedBy = pinnedBy
         self.text = text
         self.author = author
-        self.trust = trust
         self.board = board
     }
 
@@ -1386,33 +1383,19 @@ public struct RoomChatPinned: Equatable, Identifiable, Sendable {
     /// followed by an emoji variation selector counts too.
     public var isLeaderboard: Bool { snippet.unicodeScalars.first == Self.leaderboardMark }
 
-    /// "Posted by host-agent", with "· room owner/admin" only when the server stamped the message so.
+    /// "Posted by host-agent": who posted the message, by the id the room shows, and nothing more. A message's own
+    /// claims about its author are never taken for an owner or admin.
     public var postedByLine: String {
-        let name = author.isEmpty ? "an unknown member" : author
-        return "Posted by \(name)" + (trust == .ownerOrAdmin ? " · room owner/admin" : "")
+        "Posted by \(author.isEmpty ? "an unknown member" : author)"
     }
 
-    /// The room's leaderboard among its pins (newest first). Only pins whose text starts with the trophy, and never
-    /// one stamped as posted by someone other than the room's owner or an admin. Of those, one that reads as a board
-    /// comes first: one stamped as the owner's or an admin's, else the newest unstamped one, so neither another
-    /// member's board nor a trophy announcement hides the real board. With none that reads, the newest such pin
+    /// The room's leaderboard among its pins (newest first): the newest pin whose text starts with the trophy and
+    /// reads as a board, so a trophy announcement never hides the board; with none that reads, the newest trophy pin
     /// (its sheet says the board is unavailable).
     public static func leaderboard(among pins: [RoomChatPinned]) -> RoomChatPinned? {
-        let trophies = pins.filter { $0.isLeaderboard && $0.trust != .external }
-        let boards = trophies.filter { $0.board != nil }
-        return boards.first { $0.trust == .ownerOrAdmin } ?? boards.first
-            ?? trophies.first { $0.trust == .ownerOrAdmin } ?? trophies.first
+        let trophies = pins.filter(\.isLeaderboard)
+        return trophies.first { $0.board != nil } ?? trophies.first
     }
-}
-
-/// What the server says about who posted a pinned message, as its own event was stamped (edits carry nothing).
-public enum RoomChatPinTrust: Equatable, Sendable {
-    /// The room's owner or an admin.
-    case ownerOrAdmin
-    /// Anyone else: never the room's board.
-    case external
-    /// No stamp (an older message, or a server that doesn't stamp yet).
-    case unstamped
 }
 
 /// The open leaderboard: the board's message, and what the sheet shows of it.
@@ -1427,7 +1410,7 @@ public struct RoomChatLeaderboardSheet: Equatable, Sendable {
 
     public let sequenceId: Int64
     public let content: Content
-    /// "Posted by …", with the owner/admin label only when the server stamped it.
+    /// "Posted by …": who posted the board, by the id the room shows.
     public let postedBy: String
 
     public init(sequenceId: Int64, content: Content, postedBy: String = "") {

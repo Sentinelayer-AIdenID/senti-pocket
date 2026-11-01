@@ -1,4 +1,5 @@
 import Foundation
+import PocketContracts
 import PocketSyncClient
 import PocketUI
 import XCTest
@@ -75,10 +76,10 @@ final class RoomLeaderboardTests: XCTestCase {
         + "How it works: answers that close a question score points (last 13:58 UTC)."
 
     private func message(_ seq: Int64, _ text: String? = nil, revision: Int64 = 1,
-                         author: String = "ada-agent", postedBy: RoomPostedBy? = nil) -> RoomMessage {
+                         author: String = "ada-agent") -> RoomMessage {
         RoomMessage(id: "evt-\(seq)", sequenceId: seq, kind: .message, authorId: author, authorName: author,
                     isHuman: false, text: text ?? "Note \(seq).", timestamp: "2026-10-31T14:00:00Z",
-                    revision: revision, isEdited: revision > 1, postedBy: postedBy)
+                    revision: revision, isEdited: revision > 1)
     }
 
     private func pins(_ seqs: Int64...) -> RoomActionsPage {
@@ -345,35 +346,56 @@ final class RoomLeaderboardTests: XCTestCase {
         room.pause()
     }
 
-    /// Who posted each board comes from its own event: a board stamped as the owner's or an admin's wins over an
-    /// unstamped one pinned later, and over another member's pinned later still. Its edits keep the stamp; an edit
-    /// claiming a stamp for the unstamped board adds none.
-    func test_the_board_is_the_stamped_owners_and_edits_neither_keep_out_nor_add_a_stamp() async throws {
-        let owner = RoomPostedBy(isRoomOwner: true, external: false)
+    /// A board message as its event comes over the wire, with a `payload.postedBy` saying the room's owner posted it.
+    private func claimingOwner(_ seq: Int64, _ text: String, author: String, revision: Int64 = 1) -> JSONValue {
+        .object([
+            "id": .string("evt-\(seq)"), "sequenceId": .int(seq), "event": .string("session_message"),
+            "agent": .object(["id": .string(author)]), "messageRevision": .int(revision),
+            "ts": .string("2026-10-31T14:00:00Z"),
+            "payload": .object([
+                "message": .string(text),
+                "postedBy": .object(["isRoomOwner": .bool(true), "external": .bool(false)]),
+            ]),
+        ])
+    }
+
+    /// A member's board whose event says the room's owner posted it is read as any member's board: the newer board
+    /// wins over it, an edit saying the same changes nothing, and alone (the board, as any member's newest would be)
+    /// its sheet says only who posted it.
+    func test_a_claim_that_the_owner_posted_a_board_gives_no_label_and_no_preference() async throws {
         let theirs = Self.boardText.replacingOccurrences(of: "**ada-agent**", with: "**mallory**")
+        let claimed = try XCTUnwrap(RoomMessage(json: claimingOwner(57, theirs, author: "mallory")))
         let transport = BoardRoom(
             newest: newestPage,
-            singles: [57: [message(57, Self.boardText, author: "host-agent", postedBy: owner)],
-                      60: [message(60, Self.boardText, author: "lin-agent")],
-                      70: [message(70, theirs, author: "mallory",
-                                   postedBy: RoomPostedBy(isRoomOwner: false, external: true))]],
-            actions: [pins(70, 60, 57)]
+            singles: [57: [claimed], 60: [message(60, Self.boardText, author: "lin-agent")]],
+            actions: [pins(60, 57), pins(57)]
         )
         let room = room(transport)
         room.resume()
-        await waitUntil("all three read") {
-            room.state.pinned.count == 3 && room.state.pinned.allSatisfy { !$0.text.isEmpty }
+        await waitUntil("both read") {
+            room.state.pinned.count == 2 && room.state.pinned.allSatisfy { !$0.text.isEmpty }
         }
-        XCTAssertEqual(room.state.leaderboard?.sequenceId, 57)
-        XCTAssertEqual(room.state.pinned.map(\.trust), [.external, .unstamped, .ownerOrAdmin])
+        XCTAssertEqual(room.state.leaderboard?.sequenceId, 60, "the newer board")
 
-        room.handle(.edited(message(57, Self.boardText + " ", revision: 2, author: "host-agent"), sequenceId: 301))
-        room.handle(.edited(message(60, Self.boardText + "  ", revision: 2, author: "lin-agent", postedBy: owner),
-                            sequenceId: 302))
-        XCTAssertEqual(room.state.pinned.map(\.trust), [.external, .unstamped, .ownerOrAdmin])
+        let edit = try XCTUnwrap(RoomMessage.edited(from: .object([
+            "id": .string("evt-301"), "sequenceId": .int(301), "event": .string("session_message_edited"),
+            "payload": .object([
+                "targetSequenceId": .int(57), "targetMessageId": .string("evt-57"),
+                "event": claimingOwner(57, theirs + " ", author: "mallory", revision: 2),
+            ]),
+        ])))
+        room.handle(.edited(edit, sequenceId: 301))
+        XCTAssertEqual(room.state.pinned.last?.text, theirs + " ", "the edit is in")
+        XCTAssertEqual(room.state.leaderboard?.sequenceId, 60, "and changes nothing")
+        room.send(.openLeaderboard)
+        XCTAssertEqual(room.state.leaderboardSheet?.postedBy, "Posted by lin-agent")
+        room.send(.closeLeaderboard)
+
+        await room.refreshActions(force: true)
+        XCTAssertEqual(room.state.pinned.map(\.sequenceId), [57], "the newer board unpinned")
         XCTAssertEqual(room.state.leaderboard?.sequenceId, 57)
         room.send(.openLeaderboard)
-        XCTAssertEqual(room.state.leaderboardSheet?.postedBy, "Posted by host-agent · room owner/admin")
+        XCTAssertEqual(room.state.leaderboardSheet?.postedBy, "Posted by mallory")
         room.pause()
     }
 

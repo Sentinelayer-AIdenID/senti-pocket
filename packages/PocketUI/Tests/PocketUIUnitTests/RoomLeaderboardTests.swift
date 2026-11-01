@@ -138,10 +138,9 @@ final class RoomLeaderboardTests: XCTestCase {
 
     // MARK: - The sheet
 
-    private func board(_ text: String, seq: Int64 = 57, author: String = "host-agent",
-                       trust: RoomChatPinTrust = .unstamped) -> RoomChatPinned {
+    private func board(_ text: String, seq: Int64 = 57, author: String = "host-agent") -> RoomChatPinned {
         RoomChatPinned(sequenceId: seq, snippet: String(text.prefix { $0 != "\n" }), pinnedBy: "ada-agent", text: text,
-                       author: author, trust: trust, board: RoomLeaderboard.parse(text))
+                       author: author, board: RoomLeaderboard.parse(text))
     }
 
     private func state(_ pinned: [RoomChatPinned], open: Bool) -> RoomChatPresentationState {
@@ -180,8 +179,8 @@ final class RoomLeaderboardTests: XCTestCase {
 
     private static let otherBoard = fixture.replacingOccurrences(of: "**host-agent**", with: "**mallory**")
 
-    /// Nothing stamped: the newest pin that reads as a board, as before; a newer or older trophy announcement that
-    /// isn't a board never hides it, whichever order they were pinned in.
+    /// The newest pin that reads as a board, whoever posted it; a newer or older trophy announcement that isn't a
+    /// board never hides it, whichever order they were pinned in.
     func test_a_trophy_announcement_never_hides_the_board() {
         let announcement = board("🏆 Winners announced at 18:00 UTC in the main hall.", seq: 90)
         let real = board(Self.fixture, seq: 57)
@@ -190,28 +189,16 @@ final class RoomLeaderboardTests: XCTestCase {
             XCTAssertEqual(state(pins).leaderboard?.sequenceId, 57)
         }
         XCTAssertEqual(state([board(Self.otherBoard, seq: 60), real]).leaderboard?.sequenceId, 60,
-                       "nothing stamped: the newest board")
+                       "the newest board")
         XCTAssertEqual(state([announcement]).leaderboard?.sequenceId, 90, "no board at all: the trophy pin, unavailable")
     }
 
-    /// A board-format pin the server stamped as another member's never wins, even pinned after the room's own.
-    func test_another_members_stamped_board_never_wins() {
-        let members = board(Self.otherBoard, seq: 900, author: "mallory", trust: .external)
-        let legacy = board(Self.fixture, seq: 57)
-        XCTAssertEqual(state([members, legacy]).leaderboard?.sequenceId, 57)
-        XCTAssertNil(state([members]).leaderboard, "never the board, even alone")
-    }
-
-    /// A board stamped as the room owner's or an admin's beats an unstamped one and another member's, wherever it is
-    /// pinned, and its sheet says so; an unstamped one says only who posted it.
-    func test_a_stamped_owner_board_beats_the_others() throws {
-        let owners = board(Self.fixture, seq: 40, author: "host-agent", trust: .ownerOrAdmin)
-        let legacy = board(Self.otherBoard, seq: 57, author: "box-host")
-        let members = board(Self.otherBoard, seq: 900, author: "mallory", trust: .external)
-        XCTAssertEqual(state([members, legacy, owners]).leaderboard?.sequenceId, 40)
-        let sheet = try XCTUnwrap(state([members, legacy, owners], open: true).leaderboardSheet)
-        XCTAssertEqual(sheet.postedBy, "Posted by host-agent · room owner/admin")
-        XCTAssertEqual(state([legacy], open: true).leaderboardSheet?.postedBy, "Posted by box-host")
+    /// The sheet says who posted the board, by the id the room shows, and nothing more.
+    func test_the_sheet_says_plainly_who_posted_the_board() {
+        XCTAssertEqual(state([board(Self.otherBoard, author: "mallory")], open: true).leaderboardSheet?.postedBy,
+                       "Posted by mallory")
+        XCTAssertEqual(state([board(Self.fixture, author: "")], open: true).leaderboardSheet?.postedBy,
+                       "Posted by an unknown member")
     }
 
     // MARK: - Bounds
