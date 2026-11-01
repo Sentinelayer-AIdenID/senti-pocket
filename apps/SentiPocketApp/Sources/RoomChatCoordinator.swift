@@ -91,6 +91,14 @@ final class RoomChatCoordinator: ObservableObject {
     private var pinnedAsked: Set<Int64> = []
     /// The leaderboard is asked to be open: the sheet shows while the room keeps a board, and says when it closes.
     private var leaderboardOpen = false
+    /// The open sheet has shown a board: if the room then has none (unpinned), it closes, and doesn't come back by
+    /// itself when a board is pinned again. An open asked for before the board is read waits for it.
+    private var leaderboardShown = false
+    /// The server's stamp of who posted each pinned message, by message id, from the message's own event: kept
+    /// across its edits, which never carry one.
+    private var pinStamps: [String: RoomPostedBy] = [:]
+    /// Each board message read once per revision.
+    private let boards = RoomLeaderboardCache()
     /// A message to bring into view once (opened from a notification or link); cleared when the view shows it.
     private var focusTarget: Int64?
     /// Links whose message could not be loaded; each one sends the reader to the latest messages.
@@ -346,9 +354,11 @@ final class RoomChatCoordinator: ObservableObject {
             openThread(sequenceId)
         case .openLeaderboard:
             leaderboardOpen = true
+            leaderboardShown = false
             publish()
         case .closeLeaderboard:
             leaderboardOpen = false
+            leaderboardShown = false
             publish()
         case .closeThread:
             // Unsent replies stay with their thread and show again when it reopens.
@@ -846,6 +856,8 @@ final class RoomChatCoordinator: ObservableObject {
     private func notePinned(_ messages: [RoomMessage]) -> Bool {
         var changed = false
         for message in messages where pinned.contains(where: { $0.targetSequenceId == message.sequenceId }) {
+            // Who posted it, from its own event: an edit carries no stamp, so it never adds or changes one.
+            if let stamp = message.postedBy, pinStamps[message.id] == nil { pinStamps[message.id] = stamp }
             guard message.revision > (pinnedMessages[message.sequenceId]?.revision ?? 0) else { continue }
             pinnedMessages[message.sequenceId] = message
             changed = true
@@ -857,7 +869,8 @@ final class RoomChatCoordinator: ObservableObject {
     @discardableResult
     private func applyEdits(_ edits: [RoomMessage]) -> Bool {
         let replaced = !timeline.applyEdits(edits).isEmpty
-        return notePinned(edits) || replaced
+        // Who posted a message comes only from its own event: an edit's claim never counts.
+        return notePinned(edits.map { $0.withPostedBy(nil) }) || replaced
     }
 
     private func react(_ type: String, on sequenceId: Int64) {
@@ -1632,12 +1645,31 @@ final class RoomChatCoordinator: ObservableObject {
                            pinnedMessages[pin.targetSequenceId]]
                 .compactMap { $0 }.max { $0.revision < $1.revision }
             let by = pin.pinnedBy.lowercased().hasPrefix("human-") ? String(pin.pinnedBy.dropFirst("human-".count)) : pin.pinnedBy
+            let stamp = message.flatMap { pinStamps[$0.id] }
             return RoomChatPinned(
                 sequenceId: pin.targetSequenceId,
                 snippet: message.map { Self.pinSnippet($0.text) } ?? "Message #\(pin.targetSequenceId)",
                 pinnedBy: by,
-                text: message?.text ?? ""
+                text: message?.text ?? "",
+                author: message.map { Self.principalName($0.authorId) } ?? "",
+                trust: stamp.map { $0.external ? RoomChatPinTrust.external : .ownerOrAdmin } ?? .unstamped,
+                board: message.flatMap { message in
+                    message.text.unicodeScalars.first == RoomChatPinned.leaderboardMark
+                        ? boards.board(messageId: message.id, revision: message.revision, text: message.text) : nil
+                }
             )
+        }
+        boards.keep(only: Set(pinnedMessages.values.map(\.id) + timeline.messages.filter { message in
+            pinned.contains { $0.targetSequenceId == message.sequenceId }
+        }.map(\.id)))
+        if leaderboardOpen {
+            if RoomChatPinned.leaderboard(among: pins) != nil {
+                leaderboardShown = true
+            } else if leaderboardShown {
+                // The board was unpinned while open: closed, and it stays closed when one is pinned again.
+                leaderboardOpen = false
+                leaderboardShown = false
+            }
         }
         let work = workLines()
         let inputs = timeline.messages.map { message -> RoomChatMessageInput in

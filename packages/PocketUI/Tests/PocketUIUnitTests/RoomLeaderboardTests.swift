@@ -83,6 +83,7 @@ final class RoomLeaderboardTests: XCTestCase {
         XCTAssertEqual(rows[7].accessibilityLabel, "Rank 8, sam, person, 18.0 points, 7 helpful")
         XCTAssertEqual(rows[4].accessibilityLabel, "Rank 5, oak-agent, 33.2 points, 11 helpful")
         XCTAssertEqual(rows[9].accessibilityLabel, "Rank 10, elm-agent, 13.5 points, 5 helpful, up 2")
+        XCTAssertEqual(rows[10].accessibilityLabel, "Rank 11, mo-agent, 12.9 points, 5 helpful, down 1")
         XCTAssertEqual(rows[11].accessibilityLabel, "Rank 12, fir-agent, 12.8 points, 5 helpful, new on the board")
     }
 
@@ -119,7 +120,7 @@ final class RoomLeaderboardTests: XCTestCase {
         XCTAssertNil(RoomLeaderboard.parse(""))
         XCTAssertNil(RoomLeaderboard.parse("🏆 Who's helping most in this room\n\nScores are being counted."))
         let undated = try XCTUnwrap(RoomLeaderboard.parse("🏆 Board\n\n🥇 **ada-agent** · 2.0 pts · 1 helpful"))
-        XCTAssertEqual(undated.header, "Who's helping most · Updated just now")
+        XCTAssertEqual(undated.header, "Who's helping most · time unknown")
         XCTAssertNil(undated.howItWorks)
     }
 
@@ -137,8 +138,10 @@ final class RoomLeaderboardTests: XCTestCase {
 
     // MARK: - The sheet
 
-    private func board(_ text: String, seq: Int64 = 57) -> RoomChatPinned {
-        RoomChatPinned(sequenceId: seq, snippet: String(text.prefix { $0 != "\n" }), pinnedBy: "ada-agent", text: text)
+    private func board(_ text: String, seq: Int64 = 57, author: String = "host-agent",
+                       trust: RoomChatPinTrust = .unstamped) -> RoomChatPinned {
+        RoomChatPinned(sequenceId: seq, snippet: String(text.prefix { $0 != "\n" }), pinnedBy: "ada-agent", text: text,
+                       author: author, trust: trust, board: RoomLeaderboard.parse(text))
     }
 
     private func state(_ pinned: [RoomChatPinned], open: Bool) -> RoomChatPresentationState {
@@ -171,5 +174,81 @@ final class RoomLeaderboardTests: XCTestCase {
         XCTAssertEqual(unreadable.content, .unavailable)
         let unknown = RoomChatPinned(sequenceId: 57, snippet: "🏆 Who's helping most", pinnedBy: "ada-agent")
         XCTAssertEqual(state([unknown], open: true).leaderboardSheet?.content, .loading)
+    }
+
+    // MARK: - Which pin is the board
+
+    private static let otherBoard = fixture.replacingOccurrences(of: "**host-agent**", with: "**mallory**")
+
+    /// Nothing stamped: the newest pin that reads as a board, as before; a newer or older trophy announcement that
+    /// isn't a board never hides it, whichever order they were pinned in.
+    func test_a_trophy_announcement_never_hides_the_board() {
+        let announcement = board("🏆 Winners announced at 18:00 UTC in the main hall.", seq: 90)
+        let real = board(Self.fixture, seq: 57)
+        XCTAssertNil(announcement.board)
+        for pins in [[announcement, real], [real, announcement]] {
+            XCTAssertEqual(state(pins).leaderboard?.sequenceId, 57)
+        }
+        XCTAssertEqual(state([board(Self.otherBoard, seq: 60), real]).leaderboard?.sequenceId, 60,
+                       "nothing stamped: the newest board")
+        XCTAssertEqual(state([announcement]).leaderboard?.sequenceId, 90, "no board at all: the trophy pin, unavailable")
+    }
+
+    /// A board-format pin the server stamped as another member's never wins, even pinned after the room's own.
+    func test_another_members_stamped_board_never_wins() {
+        let members = board(Self.otherBoard, seq: 900, author: "mallory", trust: .external)
+        let legacy = board(Self.fixture, seq: 57)
+        XCTAssertEqual(state([members, legacy]).leaderboard?.sequenceId, 57)
+        XCTAssertNil(state([members]).leaderboard, "never the board, even alone")
+    }
+
+    /// A board stamped as the room owner's or an admin's beats an unstamped one and another member's, wherever it is
+    /// pinned, and its sheet says so; an unstamped one says only who posted it.
+    func test_a_stamped_owner_board_beats_the_others() throws {
+        let owners = board(Self.fixture, seq: 40, author: "host-agent", trust: .ownerOrAdmin)
+        let legacy = board(Self.otherBoard, seq: 57, author: "box-host")
+        let members = board(Self.otherBoard, seq: 900, author: "mallory", trust: .external)
+        XCTAssertEqual(state([members, legacy, owners]).leaderboard?.sequenceId, 40)
+        let sheet = try XCTUnwrap(state([members, legacy, owners], open: true).leaderboardSheet)
+        XCTAssertEqual(sheet.postedBy, "Posted by host-agent · room owner/admin")
+        XCTAssertEqual(state([legacy], open: true).leaderboardSheet?.postedBy, "Posted by box-host")
+    }
+
+    // MARK: - Bounds
+
+    /// Only a clock time is an update time: 00 to 23, then 00 to 59.
+    func test_only_a_clock_time_is_an_update_time() throws {
+        let row = "🥇 **ada-agent** · 2.0 pts · 1 helpful"
+        for (time, read) in [("23:59", "23:59"), ("00:00", "00:00"), ("24:00", nil), ("99:99", nil), ("12:60", nil),
+                             ("7:05", nil)] {
+            let board = try XCTUnwrap(RoomLeaderboard.parse("🏆 Board\n\n" + row + "\n\nUpdated (last \(time) UTC)."))
+            XCTAssertEqual(board.updatedAt, read, time)
+        }
+    }
+
+    /// At most 100 rows; the row lines past the cap are still no part of the paragraph.
+    func test_a_board_shows_at_most_a_hundred_rows() throws {
+        let rows = (1...150).map { "\($0). **agent-\($0)** · 1.0 pts · 1 helpful" }
+        let text = "🏆 Board\n\n" + rows.joined(separator: "\n") + "\n\nHow it works: points (last 09:40 UTC)."
+        let board = try XCTUnwrap(RoomLeaderboard.parse(text))
+        XCTAssertEqual(board.rows.count, RoomLeaderboard.maximumRows)
+        XCTAssertEqual(board.rows.last?.name, "agent-100")
+        XCTAssertEqual(board.howItWorks, "How it works: points (last 09:40 UTC).")
+    }
+
+    /// A board message is read once per revision, however often the room redraws; a new revision is read again.
+    func test_a_board_is_read_once_per_revision() {
+        var reads = 0
+        let cache = RoomLeaderboardCache { text in
+            reads += 1
+            return RoomLeaderboard.parse(text)
+        }
+        for _ in 0..<5 { XCTAssertNotNil(cache.board(messageId: "evt-57", revision: 1, text: Self.fixture)) }
+        XCTAssertEqual(reads, 1)
+        XCTAssertNotNil(cache.board(messageId: "evt-57", revision: 2, text: Self.fixture))
+        XCTAssertEqual(reads, 2)
+        cache.keep(only: [])
+        _ = cache.board(messageId: "evt-57", revision: 2, text: Self.fixture)
+        XCTAssertEqual(reads, 3, "a message let go is read again")
     }
 }

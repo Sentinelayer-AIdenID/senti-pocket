@@ -66,6 +66,7 @@ struct RoomLeaderboardSheetView: View {
                     .font(.subheadline)
                     .foregroundStyle(PocketPalette.textSecondary)
                     .multilineTextAlignment(.center)
+                postedBy
                 openMessageButton
             }
             .padding(24)
@@ -78,8 +79,11 @@ struct RoomLeaderboardSheetView: View {
                         RoomLeaderboardRowView(row: row, isMoved: moved.contains(row.id))
                     }
                 } header: {
-                    Text(verbatim: board.header)
-                        .accessibilityIdentifier("pocket.room.leaderboard.header")
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(verbatim: board.header)
+                            .accessibilityIdentifier("pocket.room.leaderboard.header")
+                        postedBy
+                    }
                 } footer: {
                     VStack(alignment: .leading, spacing: 14) {
                         if let howItWorks = board.howItWorks {
@@ -99,6 +103,18 @@ struct RoomLeaderboardSheetView: View {
                 }
             }
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.35), value: board.rows.map(\.id))
+        }
+    }
+
+    /// Who posted the board, by the id the room shows; "room owner/admin" only when the server stamped it so.
+    @ViewBuilder
+    private var postedBy: some View {
+        if !sheet.postedBy.isEmpty {
+            Text(verbatim: sheet.postedBy)
+                .font(.caption)
+                .foregroundStyle(PocketPalette.textSecondary)
+                .textCase(nil)
+                .accessibilityIdentifier("pocket.room.leaderboard.postedBy")
         }
     }
 
@@ -131,9 +147,15 @@ struct RoomLeaderboardSheetView: View {
 private struct RoomLeaderboardRowView: View {
     let row: RoomLeaderboard.Row
     let isMoved: Bool
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
-        HStack(spacing: 10) {
+        // At accessibility text sizes the row stacks, so nothing is squeezed or cut.
+        let stacked = typeSize.isAccessibilitySize
+        let layout = stacked
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 6))
+            : AnyLayout(HStackLayout(spacing: 10))
+        layout {
             Text(verbatim: row.rankText)
                 .font(row.rank <= 3 ? .title3 : .body.monospacedDigit().weight(.semibold))
                 .foregroundStyle(PocketPalette.textSecondary)
@@ -142,7 +164,7 @@ private struct RoomLeaderboardRowView: View {
                 Text(verbatim: row.name)
                     .font(.body.weight(.semibold))
                     .foregroundStyle(PocketPalette.textPrimary)
-                    .lineLimit(1)
+                    .lineLimit(stacked ? 3 : 1)
                     .truncationMode(.middle)
                 HStack(spacing: 6) {
                     if let chip = row.chip {
@@ -158,8 +180,8 @@ private struct RoomLeaderboardRowView: View {
                         .foregroundStyle(PocketPalette.textSecondary)
                 }
             }
-            Spacer(minLength: 6)
-            VStack(alignment: .trailing, spacing: 3) {
+            if !stacked { Spacer(minLength: 6) }
+            VStack(alignment: stacked ? .leading : .trailing, spacing: 3) {
                 Text(verbatim: row.pointsText)
                     .font(.subheadline.monospacedDigit().weight(.semibold))
                     .foregroundStyle(PocketPalette.textPrimary)

@@ -75,10 +75,10 @@ final class RoomLeaderboardTests: XCTestCase {
         + "How it works: answers that close a question score points (last 13:58 UTC)."
 
     private func message(_ seq: Int64, _ text: String? = nil, revision: Int64 = 1,
-                         author: String = "ada-agent") -> RoomMessage {
+                         author: String = "ada-agent", postedBy: RoomPostedBy? = nil) -> RoomMessage {
         RoomMessage(id: "evt-\(seq)", sequenceId: seq, kind: .message, authorId: author, authorName: author,
                     isHuman: false, text: text ?? "Note \(seq).", timestamp: "2026-10-31T14:00:00Z",
-                    revision: revision, isEdited: revision > 1)
+                    revision: revision, isEdited: revision > 1, postedBy: postedBy)
     }
 
     private func pins(_ seqs: Int64...) -> RoomActionsPage {
@@ -321,6 +321,73 @@ final class RoomLeaderboardTests: XCTestCase {
         guard case .board(let board)? = room.state.leaderboardSheet?.content else { return XCTFail("no board") }
         XCTAssertEqual(board.rows.first?.points, "99.0")
         XCTAssertEqual(transport.reads, [57], "read on its own once, at revision 1")
+        room.pause()
+    }
+
+    /// An open board that is unpinned closes; pinned again, it stays closed until it is opened again.
+    func test_an_unpinned_board_closes_its_sheet_and_stays_closed_when_pinned_again() async {
+        let transport = BoardRoom(newest: newestPage, singles: [57: [message(57, Self.boardText)]],
+                                  actions: [pins(57), pins(298), pins(57)])
+        let room = room(transport)
+        room.resume()
+        await waitUntil("the board read") { room.state.leaderboard != nil }
+        room.send(.openLeaderboard)
+        XCTAssertNotNil(room.state.leaderboardSheet)
+
+        await room.refreshActions(force: true)
+        XCTAssertNil(room.state.leaderboard, "unpinned")
+        XCTAssertNil(room.state.leaderboardSheet)
+        await room.refreshActions(force: true)
+        await waitUntil("pinned again and read") { room.state.leaderboard?.sequenceId == 57 }
+        XCTAssertNil(room.state.leaderboardSheet, "closed until opened again")
+        room.send(.openLeaderboard)
+        XCTAssertNotNil(room.state.leaderboardSheet)
+        room.pause()
+    }
+
+    /// Who posted each board comes from its own event: a board stamped as the owner's or an admin's wins over an
+    /// unstamped one pinned later, and over another member's pinned later still. Its edits keep the stamp; an edit
+    /// claiming a stamp for the unstamped board adds none.
+    func test_the_board_is_the_stamped_owners_and_edits_neither_keep_out_nor_add_a_stamp() async throws {
+        let owner = RoomPostedBy(isRoomOwner: true, external: false)
+        let theirs = Self.boardText.replacingOccurrences(of: "**ada-agent**", with: "**mallory**")
+        let transport = BoardRoom(
+            newest: newestPage,
+            singles: [57: [message(57, Self.boardText, author: "host-agent", postedBy: owner)],
+                      60: [message(60, Self.boardText, author: "lin-agent")],
+                      70: [message(70, theirs, author: "mallory",
+                                   postedBy: RoomPostedBy(isRoomOwner: false, external: true))]],
+            actions: [pins(70, 60, 57)]
+        )
+        let room = room(transport)
+        room.resume()
+        await waitUntil("all three read") {
+            room.state.pinned.count == 3 && room.state.pinned.allSatisfy { !$0.text.isEmpty }
+        }
+        XCTAssertEqual(room.state.leaderboard?.sequenceId, 57)
+        XCTAssertEqual(room.state.pinned.map(\.trust), [.external, .unstamped, .ownerOrAdmin])
+
+        room.handle(.edited(message(57, Self.boardText + " ", revision: 2, author: "host-agent"), sequenceId: 301))
+        room.handle(.edited(message(60, Self.boardText + "  ", revision: 2, author: "lin-agent", postedBy: owner),
+                            sequenceId: 302))
+        XCTAssertEqual(room.state.pinned.map(\.trust), [.external, .unstamped, .ownerOrAdmin])
+        XCTAssertEqual(room.state.leaderboard?.sequenceId, 57)
+        room.send(.openLeaderboard)
+        XCTAssertEqual(room.state.leaderboardSheet?.postedBy, "Posted by host-agent · room owner/admin")
+        room.pause()
+    }
+
+    /// Asked to open before the board's message is read (a link, or the room opening with it), the sheet waits and
+    /// shows the board once it is read.
+    func test_an_open_asked_before_the_board_is_read_shows_it_once_read() async {
+        let transport = BoardRoom(newest: newestPage, singles: [57: [message(57, Self.boardText)]],
+                                  actions: [pins(57)])
+        let room = room(transport)
+        room.send(.openLeaderboard)
+        XCTAssertNil(room.state.leaderboardSheet, "no board yet")
+        room.resume()
+        await waitUntil("the board read and shown") { room.state.leaderboardSheet != nil }
+        XCTAssertEqual(room.state.leaderboardSheet?.sequenceId, 57)
         room.pause()
     }
 }

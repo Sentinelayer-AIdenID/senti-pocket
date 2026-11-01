@@ -20,6 +20,25 @@ public enum RoomMessageKind: String, Equatable, Sendable {
     case breakoutOutcome
 }
 
+/// The server's stamp of who posted a message (`payload.postedBy`): the room's owner or an admin (`external` false),
+/// or anyone else (`external` true). Older events, and every edit notice, carry none.
+public struct RoomPostedBy: Equatable, Sendable {
+    public let isRoomOwner: Bool
+    /// Not the room's owner or an admin.
+    public let external: Bool
+
+    public init(isRoomOwner: Bool, external: Bool) {
+        self.isRoomOwner = isRoomOwner
+        self.external = external
+    }
+
+    /// A stamp whose `external` is a JSON boolean; anything else is no stamp.
+    init?(json: JSONValue?) {
+        guard let external = json?["external"]?.boolValue else { return nil }
+        self.init(isRoomOwner: json?["isRoomOwner"]?.boolValue ?? false, external: external)
+    }
+}
+
 public struct RoomMessage: Equatable, Identifiable, Sendable {
     /// The event UUID (`id`), stable across edits.
     public let id: String
@@ -42,6 +61,8 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
     public let channel: String?
     /// A checkpoint's summary (its title is the text).
     public let checkpointSummary: String?
+    /// The server's stamp of who posted it, from its own event; nil on older events and on edit notices.
+    public let postedBy: RoomPostedBy?
     /// The wire event type. Only `session_message` rows take view receipts (the API refuses the others).
     public let eventType: String
 
@@ -62,7 +83,8 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         attachments: [RoomAttachment] = [],
         eventType: String = "session_message",
         channel: String? = nil,
-        checkpointSummary: String? = nil
+        checkpointSummary: String? = nil,
+        postedBy: RoomPostedBy? = nil
     ) {
         self.id = id
         self.sequenceId = sequenceId
@@ -81,6 +103,7 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         self.eventType = eventType
         self.channel = channel
         self.checkpointSummary = checkpointSummary
+        self.postedBy = postedBy
     }
 
     /// Projects one wire event. Returns nil for events a room does not display (control, presence, edit
@@ -164,6 +187,17 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
             ? payload["summary"]?.stringValue.flatMap { $0.isEmpty ? nil : String($0.prefix(20_000)) }
             : nil
         self.eventType = event
+        self.postedBy = kind == .message ? RoomPostedBy(json: payload["postedBy"]) : nil
+    }
+
+    /// The same message with `postedBy` as given.
+    public func withPostedBy(_ stamp: RoomPostedBy?) -> RoomMessage {
+        RoomMessage(
+            id: id, sequenceId: sequenceId, kind: kind, authorId: authorId, authorName: authorName, isHuman: isHuman,
+            text: text, timestamp: timestamp, replyToSequenceId: replyToSequenceId, clientMessageId: clientMessageId,
+            revision: revision, isEdited: isEdited, breakout: breakout, attachments: attachments, eventType: eventType,
+            channel: channel, checkpointSummary: checkpointSummary, postedBy: stamp
+        )
     }
 
     /// The message as it reads now, from a `session_message_edited` envelope (`session-message-edit:v1`). The
@@ -178,7 +212,8 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
               message.id == payload["targetMessageId"]?.stringValue else {
             return nil
         }
-        return message
+        // An edit never says who posted the message: only the message's own event does.
+        return message.withPostedBy(nil)
     }
 
     /// Human identities are server-authored as `human-<user>`; agents can never claim that prefix.
@@ -327,7 +362,7 @@ public struct RoomTimeline: Equatable, Sendable {
             if let index = indexOfSameMessage(as: message) {
                 let existing = messages[index]
                 if message.revision > existing.revision {
-                    messages[index] = message
+                    messages[index] = message.withPostedBy(message.postedBy ?? existing.postedBy)
                     result.updatedIds.append(message.id)
                 }
                 continue
@@ -366,7 +401,8 @@ public struct RoomTimeline: Equatable, Sendable {
         var replaced: [String] = []
         for message in edits {
             guard let index = indexOfSameMessage(as: message), message.revision > messages[index].revision else { continue }
-            messages[index] = message
+            // The new text, with the stamp of who posted it kept from the message's own event.
+            messages[index] = message.withPostedBy(messages[index].postedBy)
             replaced.append(message.id)
         }
         return replaced

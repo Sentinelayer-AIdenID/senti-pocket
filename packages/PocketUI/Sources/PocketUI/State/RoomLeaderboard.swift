@@ -80,8 +80,13 @@ public struct RoomLeaderboard: Equatable, Sendable {
     /// The board's own words on how it works: plain text, shown collapsed under the list.
     public let howItWorks: String?
 
-    /// "Who's helping most · Updated 00:46 UTC" (or "just now" when the board doesn't say).
-    public var header: String { "Who's helping most · Updated \(updatedAt.map { "\($0) UTC" } ?? "just now")" }
+    /// "Who's helping most · Updated 00:46 UTC", or "· time unknown" when the board doesn't say.
+    public var header: String {
+        "Who's helping most · " + (updatedAt.map { "Updated \($0) UTC" } ?? "time unknown")
+    }
+
+    /// The most rows a board shows: far more than any room ranks, and a bound on the work an edit can cause.
+    public static let maximumRows = 100
 
     public init(rows: [Row], updatedAt: String?, howItWorks: String?) {
         self.rows = rows
@@ -96,11 +101,14 @@ public struct RoomLeaderboard: Equatable, Sendable {
             String(String.UnicodeScalarView(line.last == "\r" ? line.dropLast() : line[...]))
         }
         var rows: [Row] = []
+        var names = Set<String>()
         var lastRow = -1
         for (index, line) in lines.enumerated() {
-            guard let row = Self.row(line), !rows.contains(where: { $0.name == row.name }) else { continue }
-            rows.append(row)
+            guard let row = Self.row(line) else { continue }
             lastRow = index
+            // An author once, and no more rows than the cap; the rest of the row lines are still not paragraph.
+            guard rows.count < Self.maximumRows, names.insert(row.name).inserted else { continue }
+            rows.append(row)
         }
         guard !rows.isEmpty else { return nil }
         let paragraph = lines[(lastRow + 1)...]
@@ -117,7 +125,10 @@ public struct RoomLeaderboard: Equatable, Sendable {
         pattern: #"^(🥇|🥈|🥉|([0-9]{1,3})\.) \*\*([a-z0-9._-]{1,40})\*\*( \(person\))?( · SentiLab team)?"#
             + #" · ([0-9]{1,6}\.[0-9]) pts · ([0-9]{1,6}) helpful(?: (🆕|▲[0-9]{1,3}|▼[0-9]{1,3}))?$"#
     )
-    private static let updatedPattern = try? NSRegularExpression(pattern: #"last ([0-9]{2}:[0-9]{2}) UTC"#)
+    /// A clock time only: 00 to 23, then 00 to 59.
+    private static let updatedPattern = try? NSRegularExpression(
+        pattern: #"last ((?:[01][0-9]|2[0-3]):[0-5][0-9]) UTC"#
+    )
 
     static func row(_ line: String) -> Row? {
         let range = NSRange(line.startIndex..., in: line)
@@ -153,5 +164,29 @@ public struct RoomLeaderboard: Equatable, Sendable {
               let match = pattern.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
               let range = Range(match.range(at: 1), in: text) else { return nil }
         return String(text[range])
+    }
+}
+
+/// Each board message read once per revision: the room publishes far more often than its board changes, so a board
+/// is parsed when its message or its revision is new, never on every redraw.
+public final class RoomLeaderboardCache {
+    private var entries: [String: (revision: Int64, board: RoomLeaderboard?)] = [:]
+    private let parse: (String) -> RoomLeaderboard?
+
+    public init(parse: @escaping (String) -> RoomLeaderboard? = RoomLeaderboard.parse) {
+        self.parse = parse
+    }
+
+    /// The board in a message's text at a revision: read only when the message, or its revision, is new here.
+    public func board(messageId: String, revision: Int64, text: String) -> RoomLeaderboard? {
+        if let entry = entries[messageId], entry.revision == revision { return entry.board }
+        let board = parse(text)
+        entries[messageId] = (revision, board)
+        return board
+    }
+
+    /// Lets go of the messages that aren't pinned any more.
+    public func keep(only messageIds: Set<String>) {
+        entries = entries.filter { messageIds.contains($0.key) }
     }
 }
