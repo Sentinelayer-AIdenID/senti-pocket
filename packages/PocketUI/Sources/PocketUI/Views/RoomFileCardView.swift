@@ -4,15 +4,16 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// A verified file on its way out of the app: written only when the person picks where it goes in the share sheet
-/// (Files, AirDrop, another app), never before, and never opened or rendered here. Old exports are removed as it is
-/// written (see `RoomFileExports`).
+/// (Files, AirDrop, another app), never before, and never opened or rendered here. Its bytes are made again and
+/// checked again first, and nothing is written when they don't check out. Old exports are removed as it is written
+/// (see `RoomFileExports`).
 struct RoomFileExport: Transferable, Sendable {
     let name: String
     let content: RoomChatFileContent
 
     static var transferRepresentation: some TransferRepresentation {
         FileRepresentation(exportedContentType: .data) { export in
-            SentTransferredFile(try RoomFileExports.write(export.content.data, named: export.name))
+            SentTransferredFile(try RoomFileExports.write(export.content, named: export.name))
         }
     }
 }
@@ -24,7 +25,8 @@ struct RoomFileCardView: View {
     let card: RoomChatFileCard
     let showsParts: Bool
     let onToggleParts: () -> Void
-    @State private var showsPreview = false
+    /// The preview, made from the file when it is opened; nil while closed.
+    @State private var shownPreview: String?
 
     // Written out: the private state would make the memberwise one private to this file.
     init(card: RoomChatFileCard, showsParts: Bool, onToggleParts: @escaping () -> Void) {
@@ -70,11 +72,13 @@ struct RoomFileCardView: View {
                     .accessibilityIdentifier("pocket.room.file.download")
                 }
             }
-            if let preview = card.preview {
-                Button(showsPreview ? "Hide preview" : "Preview") { showsPreview.toggle() }
-                    .font(.caption.weight(.semibold))
-                    .accessibilityIdentifier("pocket.room.file.preview")
-                if showsPreview {
+            if card.previewable {
+                Button(shownPreview == nil ? "Preview" : "Hide preview") {
+                    shownPreview = shownPreview == nil ? (card.preview() ?? "") : nil
+                }
+                .font(.caption.weight(.semibold))
+                .accessibilityIdentifier("pocket.room.file.preview")
+                if let preview = shownPreview {
                     ScrollView(.horizontal, showsIndicators: false) {
                         Text(verbatim: preview)
                             .font(.caption.monospaced())

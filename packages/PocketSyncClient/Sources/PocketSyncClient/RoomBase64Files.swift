@@ -6,7 +6,7 @@ import CryptoKit
 import Compression
 #endif
 
-/// A post that may carry part of a file sent as base64 text: who posted it, and in which thread.
+/// A post that may carry part of a file sent as base64 text: who posted it, in which thread, and where in the room.
 public struct RoomFilePost: Equatable, Sendable {
     /// The thread: the root message's sequence for a reply, and for the root message itself when its file is in its
     /// thread; nil for a top-level post, whose parts group with the same author's other top-level posts.
@@ -16,18 +16,33 @@ public struct RoomFilePost: Equatable, Sendable {
     public let author: String
     /// The post's own id (a message's or a reply's), so the room can fold the parts it finds.
     public let id: String
+    /// Where the post is in the room: a message's sequence id, or for a threaded reply (which has none of its own)
+    /// its message's. Files are checked oldest first by their first part's, so which file the room's budget runs
+    /// out on never depends on the order the posts arrive in.
+    public let sequence: Int64
     public let body: String
 
-    public init(thread: Int64?, author: String, id: String, body: String) {
+    public init(thread: Int64?, author: String, id: String, sequence: Int64, body: String) {
         self.thread = thread
         self.author = author
         self.id = id
+        self.sequence = sequence
         self.body = body
     }
 }
 
 /// A file found in one author's posts in a thread, and whether its bytes are the ones that author declared.
 public struct RoomBase64File: Equatable, Sendable {
+    /// Why a file is too large to put together.
+    public enum TooLarge: Equatable, Sendable {
+        /// Over the cap for one file.
+        case file
+        /// Its author's share of the room view's budget is used up.
+        case authorShare
+        /// The room view's budget is used up.
+        case room
+    }
+
     public enum Status: Equatable, Sendable {
         case verified
         case partsMissing(found: Int, total: Int)
@@ -39,7 +54,7 @@ public struct RoomBase64File: Equatable, Sendable {
         case conflictingSizes
         case totalsDisagree
         case notValidBase64
-        case tooLarge
+        case tooLarge(TooLarge)
         /// The joined bytes hash to `decoded`, and, when they are gzip, the unzipped bytes to `gunzipped`: neither is
         /// the declared hash.
         case hashMismatch(decoded: String, gunzipped: String?)
@@ -56,7 +71,9 @@ public struct RoomBase64File: Equatable, Sendable {
             case .conflictingSizes: return "conflicting sizes"
             case .totalsDisagree: return "parts disagree on the total"
             case .notValidBase64: return "not valid base64"
-            case .tooLarge: return "too large"
+            case .tooLarge(.file): return "too large"
+            case .tooLarge(.authorShare): return "too large: this author's share is used up"
+            case .tooLarge(.room): return "too large: this room's file budget is used up"
             case .hashMismatch: return "hash mismatch"
             case .sizeMismatch: return "size mismatch"
             }
@@ -79,8 +96,14 @@ public struct RoomBase64File: Equatable, Sendable {
     /// The posts that carry the parts, by id.
     public let partPostIds: [String]
     public let status: Status
-    /// The file, only when its bytes hash to the declared hash (and have the declared size, if one was given).
-    public let data: Data?
+    /// All that is kept of a verified file: its decoded parts, which are the file itself or, when `isGzip`, its
+    /// gzip. The unzipped bytes are never kept: `RoomBase64Files.fileBytes(of:)` makes them again, and checks them
+    /// again, when the file is saved. Nil unless verified.
+    public let packed: Data?
+    /// Whether the file is `packed` unzipped.
+    public let isGzip: Bool
+    /// The verified file's size; nil unless verified.
+    public let size: Int?
 
     public var isVerified: Bool { status == .verified }
 }
@@ -100,9 +123,12 @@ public struct RoomBase64File: Equatable, Sendable {
 public enum RoomBase64Files {
     /// The largest file put back together, decoded or unzipped (a guard against a small post unzipping to a huge one).
     public static let maximumBytes = 50 * 1024 * 1024
-    /// What one author's files in one thread may decode and unzip together in one call: a guard against many small
-    /// posts that each unzip to almost the cap. Each author has their own, so no one can use up another's.
-    public static let authorBudgetBytes = 200 * 1024 * 1024
+    /// What one author's files may decode and unzip in a room view, all its threads together: a guard against
+    /// many small posts that each unzip to almost the cap. Each author has their own share, so no one uses up
+    /// another's.
+    public static let authorShareBytes = 64 * 1024 * 1024
+    /// What all the files in a room view may decode and unzip together, every author's share inside it.
+    public static let roomBudgetBytes = 256 * 1024 * 1024
 
     private struct Part {
         let name: [Unicode.Scalar]
@@ -136,6 +162,8 @@ public enum RoomBase64Files {
         var sizes: Set<Int> = []
         var parts: [Int: Set<[UInt8]>] = [:]
         var postIds: [String] = []
+        /// Where the group's oldest post is in the room.
+        var firstSequence: Int64
 
         var threadText: String { poster.thread.map(String.init) ?? "top" }
         var nameText: String { String(String.UnicodeScalarView(name)) }
@@ -146,11 +174,15 @@ public enum RoomBase64Files {
         }
     }
 
-    /// Every file the posts hold, by thread, author and name. `maximumBytes` caps each file and `authorBudget` what one
-    /// author's files in one thread may decode and unzip together; both are lowered only by tests. A cancelled task
-    /// gets nothing back.
+    /// Every file in a room view's posts, all its threads at once, by thread, author and name. What decoding and
+    /// unzipping cost is counted for the whole room view: each author has a share (`authorShare`) inside the room's
+    /// budget (`roomBudget`), and the files are checked one at a time, the one whose first part is oldest first
+    /// (the author breaking a tie), so a file that would need more than its author or the room has left is too
+    /// large, whatever order the posts came in. `maximumBytes` caps each file. The caps are lowered only by tests. A
+    /// cancelled task gets nothing back.
     public static func reassemble(_ posts: [RoomFilePost], maximumBytes: Int = RoomBase64Files.maximumBytes,
-                                  authorBudget: Int = RoomBase64Files.authorBudgetBytes) -> [RoomBase64File] {
+                                  authorShare: Int = RoomBase64Files.authorShareBytes,
+                                  roomBudget: Int = RoomBase64Files.roomBudgetBytes) -> [RoomBase64File] {
         var bodies: [Poster: [String]] = [:]
         for post in posts {
             bodies[Poster(thread: post.thread, author: Array(post.author.utf8)), default: []].append(post.body)
@@ -179,35 +211,66 @@ public enum RoomBase64Files {
             }
             let key = GroupKey(poster: poster, name: part.name, hash: sha256 ?? (ambiguous ? "?" : "-"))
             var group = groups[key] ?? Group(poster: poster, author: post.author, name: part.name, sha256: sha256,
-                                             ambiguous: ambiguous)
+                                             ambiguous: ambiguous, firstSequence: post.sequence)
+            group.firstSequence = min(group.firstSequence, post.sequence)
             group.totals.insert(part.total)
             group.sizes.formUnion(sizes)
             group.parts[part.index, default: []].insert(part.data)
             group.postIds.append(post.id)
             groups[key] = group
         }
-        var budgets: [Poster: Int] = [:]
-        var files: [RoomBase64File] = []
-        let ordered = groups.values.map { (order: $0.order, group: $0) }
-            .sorted { $0.order.lexicographicallyPrecedes($1.order) }
-            .map(\.group)
-        for group in ordered {
+        // Checked one at a time, oldest first: the sequence of each file's first part, then its author, then the
+        // order files are returned in (thread, author, name and hash).
+        let checking = groups.values.map { (sequence: $0.firstSequence, author: $0.poster.author, order: $0.order,
+                                            group: $0) }
+            .sorted { first, second in
+                if first.sequence != second.sequence { return first.sequence < second.sequence }
+                if first.author != second.author { return first.author.lexicographicallyPrecedes(second.author) }
+                return first.order.lexicographicallyPrecedes(second.order)
+            }
+        var allowance = Allowance(room: roomBudget, share: authorShare)
+        var files: [(order: [UInt32], file: RoomBase64File)] = []
+        for entry in checking {
             if Task.isCancelled { return [] }
-            var budget = budgets[group.poster] ?? authorBudget
-            files.append(verify(group, maximumBytes: maximumBytes, budget: &budget))
-            budgets[group.poster] = budget
+            files.append((entry.order, verify(entry.group, maximumBytes: maximumBytes, allowance: &allowance)))
         }
-        return Task.isCancelled ? [] : files
+        if Task.isCancelled { return [] }
+        return files.sorted { $0.order.lexicographicallyPrecedes($1.order) }.map(\.file)
+    }
+
+    /// What a room view may still decode and unzip: each author's share, inside the room's budget.
+    private struct Allowance {
+        var room: Int
+        let share: Int
+        var spent: [[UInt8]: Int] = [:]
+
+        /// What the author may still use: the rest of their share, and the rest of the room's budget.
+        func left(for author: [UInt8]) -> (share: Int, room: Int) { (share - (spent[author] ?? 0), room) }
+
+        /// Why `bytes` more would be too much for the author (their share first, then the room's budget); nil when
+        /// they fit.
+        func shortfall(_ bytes: Int, for author: [UInt8]) -> RoomBase64File.TooLarge? {
+            let left = left(for: author)
+            if bytes > left.share { return .authorShare }
+            if bytes > left.room { return .room }
+            return nil
+        }
+
+        mutating func spend(_ bytes: Int, by author: [UInt8]) {
+            spent[author, default: 0] += bytes
+            room -= bytes
+        }
     }
 
     /// A group's verdict. The order of the checks is the spec's, so every implementation reports the same reason.
-    private static func verify(_ group: Group, maximumBytes: Int, budget: inout Int) -> RoomBase64File {
+    private static func verify(_ group: Group, maximumBytes: Int, allowance: inout Allowance) -> RoomBase64File {
         let total = group.totals.min() ?? 0
-        func file(_ status: RoomBase64File.Status, _ data: Data? = nil) -> RoomBase64File {
+        func file(_ status: RoomBase64File.Status, packed: Data? = nil, isGzip: Bool = false,
+                  size: Int? = nil) -> RoomBase64File {
             RoomBase64File(id: group.id, thread: group.poster.thread, author: group.author,
                            name: sanitizedName(group.nameText), declaredSHA256: group.sha256,
                            partsFound: group.parts.count, partsTotal: total, partPostIds: group.postIds.sorted(),
-                           status: status, data: data)
+                           status: status, packed: packed, isGzip: isGzip, size: size)
         }
         if group.totals.count > 1 { return file(.totalsDisagree) }
         // The lowest index with differing copies, whatever order they came in.
@@ -222,30 +285,74 @@ public enum RoomBase64Files {
         }
         var joined: [UInt8] = []
         for index in 1...max(total, 1) { joined += group.parts[index]?.first ?? [] }
-        // The size is known from the text before anything is decoded.
+        // The size is known from the text before anything is decoded: checked against the cap, then against what
+        // the author and the room have left.
+        let author = group.poster.author
         let estimate = decodedLength(joined)
-        if estimate > maximumBytes || estimate > budget { return file(.tooLarge) }
+        if estimate > maximumBytes { return file(.tooLarge(.file)) }
+        if let short = allowance.shortfall(estimate, for: author) { return file(.tooLarge(short)) }
         guard let raw = decodeBase64(joined) else { return file(.notValidBase64) }
-        budget -= raw.count
+        allowance.spend(raw.count, by: author)
         let rawHash = sha256Hex(raw)
-        var verified: Data?
-        var unzippedHash: String?
         if rawHash == declared {
-            verified = raw
-        } else if raw.count >= 2, raw[raw.startIndex] == 0x1f, raw[raw.startIndex + 1] == 0x8b, budget > 0 {
-            let unzipping = gunzipCounting(raw, limit: min(maximumBytes, budget))
-            // What the unzipping produced is spent, whether it finished or stopped past the cap: a file that stops
-            // there still did that work, and the next one finds it gone.
-            budget -= unzipping.produced
-            if let unzipped = unzipping.data {
-                let hash = sha256Hex(unzipped)
-                unzippedHash = hash
-                if hash == declared { verified = unzipped }
-            }
+            if let size = group.sizes.first, size != raw.count { return file(.sizeMismatch) }
+            return file(.verified, packed: raw, size: raw.count)
         }
-        guard let verified else { return file(.hashMismatch(decoded: rawHash, gunzipped: unzippedHash)) }
-        if let size = group.sizes.first, size != verified.count { return file(.sizeMismatch) }
-        return file(.verified, verified)
+        guard raw.count >= 2, raw[raw.startIndex] == 0x1f, raw[raw.startIndex + 1] == 0x8b else {
+            return file(.hashMismatch(decoded: rawHash, gunzipped: nil))
+        }
+        // Unzipping needs something left of the author's share and of the room's budget, and stops at the first of
+        // the cap and what is left of them. The unzipped bytes are hashed as they come out, and never kept.
+        let left = allowance.left(for: author)
+        if let short = allowance.shortfall(1, for: author) { return file(.tooLarge(short)) }
+        let limit = min(maximumBytes, left.share, left.room)
+        var hasher = StreamingSHA256()
+        let unzipping = inflateGzip(raw, limit: limit) { hasher.update($0) }
+        // Every byte the unzipping produced is spent, whether it finished or stopped: the work was done either way.
+        allowance.spend(unzipping.produced, by: author)
+        guard unzipping.finished else {
+            // Stopped at what the author or the room had left: too large, for that reason. Stopped at the cap for one
+            // file, or on data that isn't DEFLATE: the bytes never hash to the declared hash.
+            if unzipping.produced > limit, limit < maximumBytes {
+                return file(.tooLarge(left.share <= left.room ? .authorShare : .room))
+            }
+            return file(.hashMismatch(decoded: rawHash, gunzipped: nil))
+        }
+        let hash = hasher.hex()
+        guard hash == declared else { return file(.hashMismatch(decoded: rawHash, gunzipped: hash)) }
+        if let size = group.sizes.first, size != unzipping.produced { return file(.sizeMismatch) }
+        return file(.verified, packed: raw, isGzip: true, size: unzipping.produced)
+    }
+
+    /// A verified file's bytes, made again from what is kept of it and checked again before they are handed over:
+    /// unzipped again under the cap when it is gzip, then its size and its hash. Nil when the file isn't verified
+    /// or anything differs, and then there is nothing to save.
+    public static func fileBytes(of file: RoomBase64File) -> Data? {
+        guard file.isVerified, let packed = file.packed, let size = file.size, let declared = file.declaredSHA256 else {
+            return nil
+        }
+        return fileBytes(packed: packed, isGzip: file.isGzip, size: size, sha256: declared)
+    }
+
+    /// As `fileBytes(of:)`, from what is kept: the decoded parts, whether the file is them unzipped, and the file's
+    /// size and declared hash.
+    public static func fileBytes(packed: Data, isGzip: Bool, size: Int, sha256: String) -> Data? {
+        guard let bytes = isGzip ? gunzip(packed, limit: min(maximumBytes, size)) : packed,
+              bytes.count == size, sha256Hex(bytes) == sha256 else {
+            return nil
+        }
+        return bytes
+    }
+
+    /// The first `count` bytes of a verified file (fewer when it is shorter), made again from what is kept, for a
+    /// preview shown when it is asked for. Unzipping stops a little past `count` (a piece of output at most).
+    public static func firstBytes(packed: Data, isGzip: Bool, count: Int) -> Data {
+        guard isGzip else { return packed.prefix(count) }
+        var head = Data()
+        _ = inflateGzip(packed, limit: count + 64 * 1024) { piece in
+            if head.count < count { head += piece.prefix(count - head.count) }
+        }
+        return head
     }
 
     // MARK: - Parts
@@ -706,52 +813,76 @@ public enum RoomBase64Files {
     /// `limit`, checked as the bytes come out. The declared hash checks the result, so the trailer's checksum is not
     /// read.
     static func gunzip(_ data: Data, limit: Int) -> Data? {
-        gunzipCounting(data, limit: limit).data
+        var output = Data()
+        let unzipping = inflateGzip(data, limit: limit) { output += $0 }
+        return unzipping.finished ? output : nil
     }
 
-    /// As `gunzip`, with how many bytes the inflating produced, whether it finished or stopped (past `limit`, or on
-    /// data that isn't DEFLATE): the work done either way. Nothing is produced for a header that isn't gzip.
-    static func gunzipCounting(_ data: Data, limit: Int) -> (data: Data?, produced: Int) {
+    /// Unzips gzip `data` as a stream, handing each piece to `take` as it comes out, and stops as soon as the output
+    /// would pass `limit`, or the task is cancelled. `produced` counts every byte the inflating handed over, kept or
+    /// not: the work done either way. `finished` says whether it reached the end within the limit. A header that
+    /// isn't gzip produces nothing.
+    static func inflateGzip(_ data: Data, limit: Int, _ take: (Data) -> Void) -> (produced: Int, finished: Bool) {
         let bytes = [UInt8](data)
-        guard bytes.count >= 18, bytes[0] == 0x1f, bytes[1] == 0x8b, bytes[2] == 8 else { return (nil, 0) }
+        guard bytes.count >= 18, bytes[0] == 0x1f, bytes[1] == 0x8b, bytes[2] == 8 else { return (0, false) }
         let flags = bytes[3]
         var offset = 10
         if flags & 0x04 != 0 {
-            guard bytes.count >= offset + 2 else { return (nil, 0) }
+            guard bytes.count >= offset + 2 else { return (0, false) }
             offset += 2 + (Int(bytes[offset]) | Int(bytes[offset + 1]) << 8)
         }
         for flag in [UInt8(0x08), UInt8(0x10)] where flags & flag != 0 {
-            guard offset < bytes.count, let end = bytes[offset...].firstIndex(of: 0) else { return (nil, 0) }
+            guard offset < bytes.count, let end = bytes[offset...].firstIndex(of: 0) else { return (0, false) }
             offset = end + 1
         }
         if flags & 0x02 != 0 { offset += 2 }
-        guard offset < bytes.count - 8 else { return (nil, 0) }
-        return inflate(Array(bytes[offset..<(bytes.count - 8)]), limit: limit)
+        guard offset < bytes.count - 8 else { return (0, false) }
+        return inflate(Array(bytes[offset..<(bytes.count - 8)]), limit: limit, take)
     }
 
     private struct Stopped: Error {}
 
-    private static func inflate(_ deflated: [UInt8], limit: Int) -> (data: Data?, produced: Int) {
+    private static func inflate(_ deflated: [UInt8], limit: Int,
+                                _ take: (Data) -> Void) -> (produced: Int, finished: Bool) {
         #if canImport(Compression)
-        var output = Data()
-        var produced = 0
-        do {
-            let filter = try OutputFilter(.decompress, using: .zlib) { (chunk: Data?) in
-                guard let chunk else { return }
-                // Every byte the inflater hands over was work done, kept or not.
-                produced += chunk.count
-                // Past the cap, or no longer wanted: stop as the bytes come out.
-                guard output.count + chunk.count <= limit, !Task.isCancelled else { throw Stopped() }
-                output.append(chunk)
+        return withoutActuallyEscaping(take) { take in
+            var produced = 0
+            var kept = 0
+            do {
+                // The filter lives only inside the `do`: what it hands over as it closes is counted too.
+                let filter = try OutputFilter(.decompress, using: .zlib) { (chunk: Data?) in
+                    guard let chunk else { return }
+                    // Every byte the inflater hands over was work done, kept or not.
+                    produced += chunk.count
+                    // Past the cap, or no longer wanted: stop as the bytes come out.
+                    guard kept + chunk.count <= limit, !Task.isCancelled else { throw Stopped() }
+                    kept += chunk.count
+                    take(chunk)
+                }
+                try filter.write(deflated)
+                try filter.finalize()
+            } catch {
+                return (produced, false)
             }
-            try filter.write(deflated)
-            try filter.finalize()
-        } catch {
-            return (nil, produced)
+            return (produced, true)
         }
-        return (output, produced)
         #else
-        return (nil, 0)
+        return (0, false)
+        #endif
+    }
+
+    /// SHA-256 over bytes given piece by piece, as lowercase hex.
+    private struct StreamingSHA256 {
+        #if canImport(CryptoKit)
+        private var hasher = SHA256()
+
+        mutating func update(_ data: Data) { hasher.update(data: data) }
+
+        func hex() -> String { hasher.finalize().map { String(format: "%02x", $0) }.joined() }
+        #else
+        mutating func update(_ data: Data) {}
+
+        func hex() -> String { "" }
         #endif
     }
 

@@ -38,14 +38,14 @@ final class RoomBase64FilesTests: XCTestCase {
     private func posts(_ testCase: Vectors.Case) -> [RoomFilePost] {
         testCase.posts.enumerated().map {
             RoomFilePost(thread: $0.element.thread, author: $0.element.author, id: "\(testCase.id)-\($0.offset)",
-                         body: $0.element.body)
+                         sequence: Int64($0.offset + 1), body: $0.element.body)
         }
     }
 
     /// As the reference checks them: a verified file by its status, author, name, size and the hash of its bytes; any
     /// other outcome by its status line, author and name.
     private func outcome(_ file: RoomBase64File) -> Vectors.Case.Expect {
-        guard file.isVerified, let data = file.data else {
+        guard file.isVerified, let data = RoomBase64Files.fileBytes(of: file) else {
             return .init(status: file.status.line, author: file.author, name: file.name, bytes: nil, sha256: nil)
         }
         return .init(status: "verified", author: file.author, name: file.name, bytes: data.count,
@@ -76,9 +76,15 @@ final class RoomBase64FilesTests: XCTestCase {
         }
     }
 
-    private func post(_ body: String, by author: String = "ada-agent", in thread: Int64? = 7,
+    private func post(_ body: String, by author: String = "ada-agent", in thread: Int64? = 7, sequence: Int64 = 1,
                       id: String? = nil) -> RoomFilePost {
-        RoomFilePost(thread: thread, author: author, id: id ?? "\(author)-\(body.hashValue)", body: body)
+        RoomFilePost(thread: thread, author: author, id: id ?? "\(author)-\(body.hashValue)", sequence: sequence,
+                     body: body)
+    }
+
+    /// What saving the file gives: its bytes made again from what is kept, and checked again.
+    private func saved(_ file: RoomBase64File?) -> Data? {
+        file.flatMap(RoomBase64Files.fileBytes(of:))
     }
 
     private func text(_ scalars: UInt32...) -> String {
@@ -90,7 +96,7 @@ final class RoomBase64FilesTests: XCTestCase {
     func test_every_vector_gives_its_expected_outcome() throws {
         let all = try vectors()
         XCTAssertEqual(all.spec, "room-base64-files/2")
-        XCTAssertEqual(all.cases.count, 32)
+        XCTAssertEqual(all.cases.count, 33)
         for testCase in all.cases {
             XCTAssertEqual(RoomBase64Files.reassemble(posts(testCase)).map(outcome), testCase.expect, testCase.id)
         }
@@ -108,7 +114,7 @@ final class RoomBase64FilesTests: XCTestCase {
             for order in orders {
                 let other = RoomBase64Files.reassemble(order)
                 XCTAssertEqual(given.map(outcome), other.map(outcome), testCase.id)
-                XCTAssertEqual(given.map(\.data), other.map(\.data), testCase.id)
+                XCTAssertEqual(given.map(\.packed), other.map(\.packed), testCase.id)
                 XCTAssertEqual(given.map(\.partPostIds), other.map(\.partPostIds), testCase.id)
             }
         }
@@ -120,7 +126,7 @@ final class RoomBase64FilesTests: XCTestCase {
         XCTAssertEqual(file.partsFound, 2)
         XCTAssertEqual(file.partsTotal, 3)
         XCTAssertEqual(file.author, "alice-agent")
-        XCTAssertNil(file.data, "no file without every part")
+        XCTAssertNil(file.packed, "no file without every part")
     }
 
     func test_a_hash_mismatch_shows_what_the_bytes_hash_to() throws {
@@ -131,7 +137,7 @@ final class RoomBase64FilesTests: XCTestCase {
         XCTAssertEqual(decoded.count, 64)
         XCTAssertNotEqual(decoded, file.declaredSHA256)
         XCTAssertNil(gunzipped, "not gzip")
-        XCTAssertNil(file.data)
+        XCTAssertNil(file.packed)
     }
 
     // MARK: - Authors
@@ -152,7 +158,7 @@ final class RoomBase64FilesTests: XCTestCase {
         let files = RoomBase64Files.reassemble(posts)
         let ada = try XCTUnwrap(files.first { $0.author == "ada-agent" })
         XCTAssertEqual(ada.status, .verified)
-        XCTAssertEqual(ada.data, pack)
+        XCTAssertEqual(saved(ada), pack)
         XCTAssertEqual(ada.partPostIds, ["ada-0", "ada-1", "ada-2"], "only the author's own posts fold under it")
         let lin = files.filter { $0.author == "lin-agent" }
         XCTAssertEqual(lin.map(\.status.line).sorted(), ["1 of 3 parts", "verified"])
@@ -235,7 +241,7 @@ final class RoomBase64FilesTests: XCTestCase {
         for breakText in ["\r\n", "\r"] {
             let body = "notes.txt part 1/1 (2 bytes, SHA256 \(RoomBase64Files.sha256Hex(text)))\(breakText)SGk="
             XCTAssertTrue(RoomBase64Files.mayBePart(body))
-            XCTAssertEqual(RoomBase64Files.reassemble([post(body)]).first?.data, text)
+            XCTAssertEqual(saved(RoomBase64Files.reassemble([post(body)]).first), text)
         }
     }
 
@@ -248,7 +254,7 @@ final class RoomBase64FilesTests: XCTestCase {
         let halves = [String(encoded.prefix(encoded.count / 2)), String(encoded.dropFirst(encoded.count / 2))]
         func posts(_ meta: String) -> [RoomFilePost] {
             halves.enumerated().map { index, data in
-                RoomFilePost(thread: 7, author: "ada-agent", id: "p\(index)",
+                RoomFilePost(thread: 7, author: "ada-agent", id: "p\(index)", sequence: 1,
                              body: "notes.txt part \(index + 1)/2\(meta)\n\(data)")
             }
         }
@@ -256,7 +262,7 @@ final class RoomBase64FilesTests: XCTestCase {
         let verified = try XCTUnwrap(RoomBase64Files.reassemble(posts(inline)).first)
         XCTAssertEqual(verified.status, .verified)
         XCTAssertEqual(verified.declaredSHA256, hash)
-        XCTAssertEqual(verified.data, text)
+        XCTAssertEqual(saved(verified), text)
         XCTAssertTrue(RoomBase64Files.mayBePart(posts(inline)[0].body))
 
         let wrongSize = " (\(text.count + 1) bytes, sha256: \(hash))"
@@ -280,11 +286,11 @@ final class RoomBase64FilesTests: XCTestCase {
         let first = Data(String(repeating: "first version\n", count: 20).utf8)
         let second = Data(String(repeating: "second version, corrected\n", count: 20).utf8)
         let posts = (parts(first) + parts(second)).enumerated().map {
-            RoomFilePost(thread: 9, author: "ada-agent", id: "p\($0.offset)", body: $0.element)
+            RoomFilePost(thread: 9, author: "ada-agent", id: "p\($0.offset)", sequence: 1, body: $0.element)
         }
         let files = RoomBase64Files.reassemble(posts)
         XCTAssertEqual(files.map(\.status), [.verified, .verified])
-        XCTAssertEqual(Set(files.compactMap(\.data)), [first, second])
+        XCTAssertEqual(Set(files.compactMap { saved($0) }), [first, second])
     }
 
     // MARK: - Declarations
@@ -315,7 +321,7 @@ final class RoomBase64FilesTests: XCTestCase {
         let parts = files.map { post("\($0.0) part 1/1\n\($0.1.base64EncodedString())", id: $0.0) }
         let found = RoomBase64Files.reassemble([post(line, id: "line")] + parts)
         XCTAssertEqual(found.map(\.status), [.verified, .verified, .verified])
-        XCTAssertEqual(found.compactMap(\.data), files.map(\.1))
+        XCTAssertEqual(found.compactMap { saved($0) }, files.map(\.1))
 
         let echo = Data("echo\n".utf8)
         let both = "`d.txt`, `e.txt` sha256 \(RoomBase64Files.sha256Hex(echo))"
@@ -392,23 +398,71 @@ final class RoomBase64FilesTests: XCTestCase {
         let file = bytes(3_004)
         let posts = envelopes(file, name: "pack.zip", total: 3).enumerated()
             .map { post($0.element, id: "p\($0.offset)") }
-        XCTAssertEqual(RoomBase64Files.reassemble(posts, maximumBytes: 3_003).first?.status, .tooLarge)
-        XCTAssertEqual(RoomBase64Files.reassemble(posts, maximumBytes: 3_004).first?.data, file)
+        XCTAssertEqual(RoomBase64Files.reassemble(posts, maximumBytes: 3_003).first?.status, .tooLarge(.file))
+        XCTAssertEqual(saved(RoomBase64Files.reassemble(posts, maximumBytes: 3_004).first), file)
     }
 
-    /// Each author's files in a thread share one budget for what they decode and unzip; another author has their own.
-    func test_each_author_has_their_own_budget_in_a_thread() throws {
-        let first = bytes(1_000)
-        let second = bytes(1_000, seed: 3)
-        let theirs = bytes(1_000, seed: 5)
-        let posts = [post(envelopes(first, name: "a.bin", total: 1)[0], by: "ada-agent", id: "a"),
-                     post(envelopes(second, name: "b.bin", total: 1)[0], by: "ada-agent", id: "b"),
-                     post(envelopes(theirs, name: "c.bin", total: 1)[0], by: "lin-agent", id: "c")]
-        let files = RoomBase64Files.reassemble(posts, authorBudget: 1_500)
-        XCTAssertEqual(files.map(\.name), ["a.bin", "b.bin", "c.bin"])
-        XCTAssertEqual(files.map(\.status), [.verified, .tooLarge, .verified])
-        XCTAssertEqual(RoomBase64Files.reassemble(posts, authorBudget: 2_000).map(\.status),
-                       [.verified, .verified, .verified])
+    /// A file as one envelope, its bytes gzip, with the declared size when one is given.
+    private func gzipEnvelope(_ source: Data, name: String, bytes: Int? = nil) throws -> String {
+        var object: [String: Any] = [
+            "artifact": name, "sha256": RoomBase64Files.sha256Hex(source), "part": 1, "parts": 1,
+            "data": try gzip(source).base64EncodedString()
+        ]
+        object["bytes"] = bytes
+        let body = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        return String(decoding: body, as: UTF8.self)
+    }
+
+    /// Each author has a share of the room's budget: one author's many small gzip posts, each unzipping to most of
+    /// the cap, use up their share and no one else's, so another author's 3 KB file is still a file, posted before
+    /// them or after.
+    func test_one_authors_many_small_gzip_posts_never_touch_another_authors_file() throws {
+        let theirs = bytes(3_000)
+        let small = try (1...8).map { index in
+            try gzipEnvelope(Data(repeating: UInt8(index), count: 90_000), name: "z\(index).bin")
+        }
+        XCTAssertTrue(small.allSatisfy { $0.utf8.count < 2_000 }, "small posts")
+        for theirSequence: Int64 in [1, 99] {
+            let posts = small.enumerated().map { index, body in
+                post(body, by: "mallory-agent", sequence: Int64(10 + index), id: "m\(index)")
+            } + [post(envelopes(theirs, name: "notes.bin", total: 1)[0], sequence: theirSequence, id: "ada")]
+            let files = RoomBase64Files.reassemble(posts, maximumBytes: 100_000, authorShare: 250_000,
+                                                   roomBudget: 2_000_000)
+            XCTAssertEqual(saved(files.first { $0.author == "ada-agent" }), theirs, "posted at \(theirSequence)")
+            let mallorys = files.filter { $0.author == "mallory-agent" }.map(\.status)
+            XCTAssertEqual(mallorys.filter { $0 == .verified }.count, 2, "what the share covers")
+            XCTAssertEqual(mallorys.filter { $0 == .tooLarge(.authorShare) }.count, 6)
+        }
+    }
+
+    /// Files are checked one at a time, the one whose first part is oldest first, then by author: when the room's
+    /// budget covers only one of two files, it is the older one's, in whatever order the posts are given. Ada's
+    /// second part comes 50 later, so her file is older by its first part; a tie goes by author, not by thread.
+    func test_files_are_checked_oldest_first_in_either_order_of_two_authors() {
+        let adaParts = envelopes(bytes(3_000), name: "a.bin", total: 2)
+        let linPart = envelopes(bytes(3_000, seed: 5), name: "b.bin", total: 1)[0]
+        func verdicts(ada: Int64, lin: Int64) -> [String: RoomBase64File.Status] {
+            let posts = [post(adaParts[0], in: 9, sequence: ada, id: "a1"),
+                         post(adaParts[1], in: 9, sequence: ada + 50, id: "a2"),
+                         post(linPart, by: "lin-agent", in: 3, sequence: lin, id: "l1")]
+            let given = [posts, Array(posts.reversed()), [posts[2], posts[0], posts[1]]].map { order in
+                let files = RoomBase64Files.reassemble(order, authorShare: 10_000, roomBudget: 4_000)
+                XCTAssertEqual(files.map(\.author), ["lin-agent", "ada-agent"], "returned by thread, author and name")
+                return Dictionary(uniqueKeysWithValues: files.map { ($0.author, $0.status) })
+            }
+            for other in given.dropFirst() { XCTAssertEqual(other, given[0], "ada at \(ada), lin at \(lin)") }
+            return given[0]
+        }
+        XCTAssertEqual(verdicts(ada: 5, lin: 9), ["ada-agent": .verified, "lin-agent": .tooLarge(.room)])
+        XCTAssertEqual(verdicts(ada: 9, lin: 5), ["ada-agent": .tooLarge(.room), "lin-agent": .verified])
+        XCTAssertEqual(verdicts(ada: 7, lin: 7), ["ada-agent": .verified, "lin-agent": .tooLarge(.room)])
+    }
+
+    /// A file too large to put together says why.
+    func test_a_file_too_large_says_why() {
+        XCTAssertEqual(RoomBase64File.Status.tooLarge(.file).line, "too large")
+        XCTAssertEqual(RoomBase64File.Status.tooLarge(.authorShare).line, "too large: this author's share is used up")
+        XCTAssertEqual(RoomBase64File.Status.tooLarge(.room).line, "too large: this room's file budget is used up")
     }
 
     /// A rebuild that has been superseded (its task cancelled) stops and gives nothing back.
@@ -564,13 +618,14 @@ final class RoomBase64FilesTests: XCTestCase {
         let file = try XCTUnwrap(RoomBase64Files.reassemble([post(String(decoding: envelope, as: UTF8.self))]).first)
         XCTAssertEqual(file.status, .hashMismatch(decoded: RoomBase64Files.sha256Hex(packed),
                                                   gunzipped: RoomBase64Files.sha256Hex(text)))
-        XCTAssertNil(file.data, "never saved")
+        XCTAssertNil(file.packed, "nothing kept")
+        XCTAssertNil(saved(file), "never saved")
     }
 
-    /// Unzipping that stops past the cap still did that work, and the author's budget pays for it. Three gzip files
-    /// that each unzip past a lowered cap spend the shared budget by their decoded bytes and by what each inflated
-    /// before stopping, so a later file finds exactly that much gone: one that fits what is left is a file, one byte
-    /// more is too large.
+    /// Unzipping that stops past the cap still did that work, and it is spent. Three gzip files that each unzip
+    /// past a lowered cap spend their author's share (or, when that is larger, the room's budget) by their decoded
+    /// bytes and by what each inflated before stopping, so a later file finds exactly that much gone: one that fits
+    /// what is left is a file, one byte more is too large, for that reason.
     func test_unzipping_that_stops_at_the_cap_still_spends_the_budget() throws {
         let cap = 300_000
         let budget = 1_300_000
@@ -595,11 +650,69 @@ final class RoomBase64FilesTests: XCTestCase {
             }
             return bombPosts + [post(envelopes(probe, name: "z.bin", total: 1)[0], id: "probe")]
         }
-        let fits = RoomBase64Files.reassemble(try posts(probe: bytes(left)), maximumBytes: cap, authorBudget: budget)
-        XCTAssertEqual(fits.map(\.status.line), ["hash mismatch", "hash mismatch", "hash mismatch", "verified"])
-        let over = RoomBase64Files.reassemble(try posts(probe: bytes(left + 1)), maximumBytes: cap,
-                                              authorBudget: budget)
-        XCTAssertEqual(over.last?.status, .tooLarge, "the unzipping that stopped at the cap was spent")
+        for (share, room, short) in [(budget, 10 * budget, RoomBase64File.TooLarge.authorShare),
+                                     (10 * budget, budget, .room)] {
+            let fits = RoomBase64Files.reassemble(try posts(probe: bytes(left)), maximumBytes: cap,
+                                                  authorShare: share, roomBudget: room)
+            XCTAssertEqual(fits.map(\.status.line), ["hash mismatch", "hash mismatch", "hash mismatch", "verified"])
+            let over = RoomBase64Files.reassemble(try posts(probe: bytes(left + 1)), maximumBytes: cap,
+                                                  authorShare: share, roomBudget: room)
+            XCTAssertEqual(over.last?.status, .tooLarge(short), "the unzipping that stopped at the cap was spent")
+        }
+    }
+
+    /// What is kept of a verified file is its decoded parts; saving makes the bytes again and checks them again,
+    /// unzipped again when they are gzip, then their size and hash. Kept bytes that no longer check out give nothing.
+    func test_saving_a_file_makes_its_bytes_again_and_checks_them() throws {
+        let text = Data(String(repeating: "row, value\n", count: 500).utf8)
+        let file = try XCTUnwrap(RoomBase64Files.reassemble([post(try gzipEnvelope(text, name: "rows.csv"))]).first)
+        XCTAssertEqual(file.status, .verified)
+        XCTAssertTrue(file.isGzip)
+        XCTAssertEqual(file.packed, try gzip(text))
+        XCTAssertEqual(file.size, text.count)
+        XCTAssertEqual(saved(file), text)
+        let declared = RoomBase64Files.sha256Hex(text)
+        let other = try gzip(Data(String(repeating: "row, VALUE\n", count: 500).utf8))
+        XCTAssertNil(RoomBase64Files.fileBytes(packed: other, isGzip: true, size: text.count, sha256: declared),
+                     "other bytes of the same size")
+        XCTAssertNil(RoomBase64Files.fileBytes(packed: try gzip(text), isGzip: true, size: text.count - 1,
+                                               sha256: declared), "another size")
+        XCTAssertNil(RoomBase64Files.fileBytes(packed: try gzip(text), isGzip: true, size: text.count,
+                                               sha256: RoomBase64Files.sha256Hex(other)), "another hash")
+
+        let plain = bytes(2_000)
+        let plainFile = try XCTUnwrap(RoomBase64Files.reassemble([post(envelopes(plain, name: "a.bin", total: 1)[0])]).first)
+        XCTAssertFalse(plainFile.isGzip)
+        XCTAssertEqual(saved(plainFile), plain)
+        var changed = plain
+        changed[0] ^= 1
+        XCTAssertNil(RoomBase64Files.fileBytes(packed: changed, isGzip: false, size: plain.count,
+                                               sha256: RoomBase64Files.sha256Hex(plain)), "a changed byte")
+        XCTAssertNil(RoomBase64Files.fileBytes(packed: plain, isGzip: false, size: plain.count + 1,
+                                               sha256: RoomBase64Files.sha256Hex(plain)), "the hash matches, the size doesn't")
+    }
+
+    /// A gzip file's declared size is the unzipped file's: any other is a size mismatch.
+    func test_a_gzip_files_declared_size_is_its_unzipped_size() throws {
+        let text = Data(String(repeating: "row, value\n", count: 50).utf8)
+        let sized = { (bytes: Int) in try self.gzipEnvelope(text, name: "rows.csv", bytes: bytes) }
+        XCTAssertEqual(RoomBase64Files.reassemble([post(try sized(text.count))]).first?.status, .verified)
+        XCTAssertEqual(RoomBase64Files.reassemble([post(try sized(text.count + 1))]).first?.status, .sizeMismatch)
+    }
+
+    /// A verified gzip file keeps its decoded parts (a few hundred bytes here), never the megabyte it unzips to; a
+    /// preview's first bytes are made again from them.
+    func test_a_verified_file_keeps_its_decoded_parts_never_the_unzipped_bytes() throws {
+        let big = Data(repeating: 0x41, count: 1_000_000)
+        let packed = try gzip(big)
+        XCTAssertLessThan(packed.count, 10_000)
+        let file = try XCTUnwrap(RoomBase64Files.reassemble([post(try gzipEnvelope(big, name: "a.txt"))]).first)
+        XCTAssertEqual(file.status, .verified)
+        XCTAssertEqual(file.size, big.count)
+        XCTAssertEqual(file.packed?.count, packed.count)
+        let kept = try XCTUnwrap(file.packed)
+        XCTAssertEqual(RoomBase64Files.firstBytes(packed: kept, isGzip: true, count: 70_000), big.prefix(70_000))
+        XCTAssertEqual(RoomBase64Files.firstBytes(packed: kept, isGzip: true, count: 2_000_000), big, "all there is")
     }
 
     func test_unzipping_stops_at_the_cap_as_the_bytes_come_out() throws {
@@ -621,7 +734,7 @@ final class RoomBase64FilesTests: XCTestCase {
         let named = try gzip(text, flags: 0x08)
         let body = "kb.jsonl part 1/1 (\(text.count) bytes, SHA256 \(RoomBase64Files.sha256Hex(text)))\n"
             + named.base64EncodedString()
-        XCTAssertEqual(RoomBase64Files.reassemble([post(body)]).first?.data, text)
+        XCTAssertEqual(saved(RoomBase64Files.reassemble([post(body)]).first), text)
     }
 
     /// A few kilobytes that unzip past 50 MiB are never a file: the unzipping stops at the cap.
@@ -635,6 +748,6 @@ final class RoomBase64FilesTests: XCTestCase {
         ]), as: UTF8.self)
         let file = try XCTUnwrap(RoomBase64Files.reassemble([post(body)]).first)
         XCTAssertEqual(file.status.line, "hash mismatch")
-        XCTAssertNil(file.data)
+        XCTAssertNil(file.packed)
     }
 }

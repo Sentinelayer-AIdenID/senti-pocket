@@ -825,6 +825,23 @@
      "sha256": "5cd62f6a5a5c57a1f59df9520820c9af26aa1b1531f798b758f93a05b332c28e"
     }
    ]
+  },
+  {
+   "id": "dangling-base64-char",
+   "posts": [
+    {
+     "thread": 155,
+     "author": "alice-agent",
+     "body": "{\"artifact\":\"hello.txt\",\"encoding\":\"base64\",\"sha256\":\"b789c24dcdb68c4437b04c186bf239a7207e7573fb1b22a749fe1a7b8d96d292\",\"bytes\":3,\"part\":1,\"parts\":1,\"data\":\"SGVsb\"}"
+    }
+   ],
+   "expect": [
+    {
+     "status": "not valid base64",
+     "author": "alice-agent",
+     "name": "hello.txt"
+    }
+   ]
   }
  ]
 }

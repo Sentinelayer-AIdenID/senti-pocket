@@ -1,3 +1,4 @@
+import Compression
 import Foundation
 import PocketSyncClient
 import PocketUI
@@ -29,6 +30,40 @@ private final class FilesRoom: RoomTransport, @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return actions.count > 1 ? actions.removeFirst() : (actions.first ?? RoomActionsPage())
+    }
+}
+
+/// Counts the rebuilds running at once and holds each a moment, so a second one would overlap it if the room let it.
+private final class RebuildProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var running = 0
+    private var most = 0
+    private var given: [[String]] = []
+    private var places: [String: Int64] = [:]
+
+    var mostAtOnce: Int { locked { most } }
+    /// The posts each rebuild was given, by id.
+    var calls: [[String]] { locked { given } }
+    /// Where each post given was in the room, by id.
+    var sequences: [String: Int64] { locked { places } }
+
+    func reassemble(_ posts: [RoomFilePost]) -> [RoomBase64File] {
+        locked {
+            running += 1
+            most = max(most, running)
+            given.append(posts.map(\.id).sorted())
+            for post in posts { places[post.id] = post.sequence }
+        }
+        Thread.sleep(forTimeInterval: 0.1)
+        let files = RoomBase64Files.reassemble(posts)
+        locked { running -= 1 }
+        return files
+    }
+
+    private func locked<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
     }
 }
 
@@ -69,7 +104,10 @@ final class RoomBase64FilesRoomTests: XCTestCase {
         }
     }
 
-    private func room(_ transport: FilesRoom) -> RoomChatCoordinator {
+    private func room(
+        _ transport: FilesRoom,
+        reassembleFiles: @escaping @Sendable ([RoomFilePost]) -> [RoomBase64File] = { RoomBase64Files.reassemble($0) }
+    ) -> RoomChatCoordinator {
         RoomChatCoordinator(
             sessionId: "room_1",
             title: "Room",
@@ -79,8 +117,20 @@ final class RoomBase64FilesRoomTests: XCTestCase {
             sleep: { seconds in
                 if seconds > 5 { try? await Task.sleep(nanoseconds: 3_600_000_000_000) }
             },
+            reassembleFiles: reassembleFiles,
             onReauthenticationRequired: {}
         )
+    }
+
+    /// RFC 1952 around raw DEFLATE made by Compression; the trailer is zeros, which the hash check makes unneeded.
+    private func gzip(_ data: Data) throws -> Data {
+        var deflated = Data()
+        let filter = try OutputFilter(.compress, using: .zlib) { (chunk: Data?) in
+            if let chunk { deflated.append(chunk) }
+        }
+        try filter.write(data)
+        try filter.finalize()
+        return Data([0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 255]) + deflated + Data(count: 8)
     }
 
     private func waitUntil(_ description: String, file: StaticString = #filePath, line: UInt = #line,
@@ -116,11 +166,11 @@ final class RoomBase64FilesRoomTests: XCTestCase {
         await waitUntil("the file put together") { self.card(room)?.isVerified == true }
         let verified = try XCTUnwrap(card(room))
         XCTAssertEqual(verified.name, "rows.csv")
-        XCTAssertEqual(verified.content?.data, file)
+        XCTAssertEqual(verified.content?.bytes(), file)
         XCTAssertTrue(verified.detail.contains("sha256 ✓ \(RoomBase64Files.sha256Hex(file).prefix(12)) · 3 parts"),
                       verified.detail)
         XCTAssertEqual(verified.partCount, 3)
-        XCTAssertNotNil(verified.preview, "a text file previews")
+        XCTAssertNotNil(verified.preview(), "a text file previews")
         XCTAssertTrue(rows(room).filter(\.isInlineReply).allSatisfy { $0.filePartOf == 300 }, "the parts fold")
         XCTAssertNil(rows(room).first { $0.id == "evt-299" }?.filePartOf, "an ordinary message stays")
         XCTAssertEqual(verified.postedBy, "posted by ada-agent")
@@ -147,12 +197,12 @@ final class RoomBase64FilesRoomTests: XCTestCase {
         room.resume()
         await waitUntil("three files at the message") { self.cards(room).count == 3 }
         let ada = try XCTUnwrap(cards(room).first { $0.author == "ada-agent" })
-        XCTAssertEqual(ada.content?.data, file, "the first author's file is untouched")
+        XCTAssertEqual(ada.content?.bytes(), file, "the first author's file is untouched")
         XCTAssertEqual(ada.partCount, 3, "only the author's own parts fold under it")
         let lin = cards(room).filter { $0.author == "lin-agent" }
         XCTAssertEqual(lin.map(\.postedBy), ["posted by lin-agent", "posted by lin-agent"])
         XCTAssertEqual(lin.first { !$0.isVerified }?.detail, "1 of 3 parts")
-        XCTAssertEqual(lin.first { $0.isVerified }?.content?.data, other)
+        XCTAssertEqual(lin.first { $0.isVerified }?.content?.bytes(), other)
         XCTAssertEqual(Set(cards(room).map(\.id)).count, 3)
         room.pause()
     }
@@ -172,7 +222,7 @@ final class RoomBase64FilesRoomTests: XCTestCase {
         let room = room(transport)
         room.resume()
         await waitUntil("the file put together") { self.cards(room, on: "evt-303").first?.isVerified == true }
-        XCTAssertEqual(cards(room, on: "evt-303").first?.content?.data, file)
+        XCTAssertEqual(cards(room, on: "evt-303").first?.content?.bytes(), file)
         XCTAssertEqual(cards(room, on: "evt-303").count, 1)
         let parts = rows(room).filter { ["evt-301", "evt-302", "evt-303"].contains($0.id) }
         XCTAssertEqual(parts.map(\.filePartOf), [303, 303, 303])
@@ -208,7 +258,7 @@ final class RoomBase64FilesRoomTests: XCTestCase {
         let room = room(transport)
         room.resume()
         await waitUntil("the file put together") { self.card(room)?.isVerified == true }
-        XCTAssertEqual(card(room)?.content?.data, file)
+        XCTAssertEqual(card(room)?.content?.bytes(), file)
         XCTAssertNil(rows(room).first { $0.id == "evt-300" }?.filePartOf, "the declaration is not a part")
         room.pause()
     }
@@ -227,7 +277,7 @@ final class RoomBase64FilesRoomTests: XCTestCase {
 
         await room.refreshActions(force: true)
         await waitUntil("the file put together") { self.card(room)?.isVerified == true }
-        XCTAssertEqual(card(room)?.content?.data, file)
+        XCTAssertEqual(card(room)?.content?.bytes(), file)
     }
 
     /// Parts edited into something else are parts no more: the file goes with them.
@@ -245,6 +295,61 @@ final class RoomBase64FilesRoomTests: XCTestCase {
         await room.refreshActions(force: true)
         await waitUntil("the file gone") { self.card(room) == nil }
         XCTAssertTrue(rows(room).allSatisfy { $0.filePartOf == nil })
+        room.pause()
+    }
+
+    /// A gzip file's card keeps its decoded parts (the gzip, a few kilobytes), never the 200 KB it unzips to; its
+    /// preview is the file's first lines, and saving makes the file again and checks it again.
+    func test_a_card_keeps_the_gzip_never_the_unzipped_file() async throws {
+        let text = Data(String(repeating: "row,value\n", count: 20_000).utf8)
+        let packed = try gzip(text)
+        XCTAssertLessThan(packed.count, 5_000)
+        let part = try envelope("rows.csv", sha256: RoomBase64Files.sha256Hex(text), bytes: text.count, part: 1,
+                                of: 1, data: packed.base64EncodedString())
+        let transport = FilesRoom(newest: [message(300, "The rows, gzipped, below.")],
+                                  actions: [RoomActionsPage(replies: [
+                                      RoomReply(id: "g1", targetSequenceId: 300, authorId: "ada-agent", text: part,
+                                                createdAt: "2026-10-31T14:01:00Z")
+                                  ])])
+        let room = room(transport)
+        room.resume()
+        await waitUntil("the file put together") { self.card(room)?.isVerified == true }
+        let verified = try XCTUnwrap(card(room)?.content)
+        XCTAssertEqual(verified.kept, packed, "the gzip, not the file")
+        XCTAssertEqual(verified.size, text.count)
+        XCTAssertEqual(verified.bytes(), text)
+        XCTAssertEqual(card(room)?.preview()?.hasPrefix("row,value\nrow,value"), true, "made from the gzip when opened")
+        room.pause()
+    }
+
+    /// The room's files are put together for the whole room view at once, never one thread beside another, and a
+    /// rebuild for newer posts starts only once the one it supersedes has ended.
+    func test_the_room_view_is_put_together_one_rebuild_at_a_time() async throws {
+        let rows = try parts(3)
+        let more = try parts(2, name: "more.csv").map { reply in
+            RoomReply(id: "s" + reply.id, targetSequenceId: 310, authorId: "lin-agent", text: reply.text,
+                      createdAt: reply.createdAt)
+        }
+        let note = RoomReply(id: "note", targetSequenceId: 300, authorId: "ada-agent", text: "All three are up.",
+                             createdAt: "2026-10-31T14:09:00Z")
+        let transport = FilesRoom(newest: [message(300, "The rows, in 3 parts."), message(310, "More, in 2.")],
+                                  actions: [RoomActionsPage(replies: rows + more),
+                                            RoomActionsPage(replies: rows + more + [note])])
+        let probe = RebuildProbe()
+        let room = room(transport, reassembleFiles: { probe.reassemble($0) })
+        room.resume()
+        await waitUntil("the first rebuild under way") { !probe.calls.isEmpty }
+        // Newer posts while it runs: the next rebuild waits for it.
+        await room.refreshActions(force: true)
+        await waitUntil("both files put together") {
+            self.cards(room).first?.isVerified == true && self.cards(room, on: "evt-310").first?.isVerified == true
+                && probe.calls.count == 2
+        }
+        XCTAssertEqual(probe.mostAtOnce, 1, "never two at once")
+        XCTAssertTrue(probe.calls.allSatisfy { $0.contains("r1") && $0.contains("sr1") }, "every thread each time")
+        XCTAssertTrue(probe.calls[1].contains("note"), "the second for the newer posts")
+        XCTAssertEqual(probe.sequences["evt-300"], 300)
+        XCTAssertEqual([probe.sequences["r1"], probe.sequences["sr1"]], [300, 310], "a reply is where its message is")
         room.pause()
     }
 

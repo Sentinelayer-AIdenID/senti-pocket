@@ -1,13 +1,35 @@
 import Foundation
 
-/// A verified file's bytes, held by reference: the room's state is compared each time it changes, and a file of many
-/// megabytes compares by identity, not byte by byte.
+/// A verified file as a card keeps it: its size and what it is made from (its decoded parts, which are the file
+/// itself or its gzip), never the unzipped bytes. The bytes are made again only when they are wanted: the whole
+/// file, checked again, when it is saved; its first bytes when its preview is opened. Held by reference: the room's
+/// state is compared each time it changes, and this compares by identity.
 public final class RoomChatFileContent: Equatable, @unchecked Sendable {
-    public let data: Data
+    /// The file's size.
+    public let size: Int
+    /// What the card keeps of the file: its decoded parts.
+    public let kept: Data
+    private let make: @Sendable (Data) -> Data?
+    private let head: @Sendable (Data) -> Data
 
-    public init(_ data: Data) {
-        self.data = data
+    /// - Parameters:
+    ///   - make: the file's bytes from `kept`, checked again (unzipped again under the cap when it is gzip, then
+    ///     its size and hash); nil when they don't check out.
+    ///   - head: the file's first bytes from `kept` (at least `RoomChatFileCard.previewBytes` of them when the
+    ///     file has that many), for its preview; by default `kept` itself, for a file that isn't gzip.
+    public init(size: Int, kept: Data, make: @escaping @Sendable (Data) -> Data?,
+                head: @escaping @Sendable (Data) -> Data = { $0 }) {
+        self.size = size
+        self.kept = kept
+        self.make = make
+        self.head = head
     }
+
+    /// The file's bytes, made again and checked again: nil when they no longer check out, and then nothing is saved.
+    public func bytes() -> Data? { make(kept) }
+
+    /// The file's first bytes, made again for its preview.
+    public func firstBytes() -> Data { head(kept) }
 
     public static func == (lhs: RoomChatFileContent, rhs: RoomChatFileContent) -> Bool { lhs === rhs }
 }
@@ -29,37 +51,40 @@ public struct RoomChatFileCard: Equatable, Identifiable, Sendable {
     public let detail: String
     /// For a hash mismatch: what the bytes hash to instead, 12 hex characters each.
     public let mismatch: String?
-    /// The first lines of a verified text file, shown as plain text only; nil for any other file.
-    public let preview: String?
+    /// Whether the file is verified and of a text type, which has a preview.
+    public let previewable: Bool
     /// The posts folded behind the card's toggle.
     public let partCount: Int
 
     public var isVerified: Bool { content != nil }
 
-    /// The lines a text preview shows, and the longest line it shows whole.
+    /// The lines a text preview shows, the longest line it shows whole, and how far into the file it reads.
     public static let previewLines = 40
     public static let previewLineLength = 200
+    public static let previewBytes = 64 * 1024
 
     /// - Parameters:
     ///   - id: the file among the room's (its thread, author, name and hash); by default made from those shown.
     ///   - author: who posted the parts, as the room names them.
     ///   - sha256: the declared hash, lowercase hex.
-    ///   - verified: the file, only when its bytes hash to the declared hash (and have the declared size).
+    ///   - verified: what is kept of the file, only when its bytes hash to the declared hash (and have the declared
+    ///     size).
     ///   - status: why it is not a file, worded for the room; nil when verified.
     ///   - partsTotal: how many parts the file has.
     ///   - partPosts: the posts that carry them (folded behind the card).
     ///   - computedHashes: for a hash mismatch, what the bytes hash to (decoded, then unzipped).
     ///   - previewable: a text type the room previews as plain text.
-    public init(id: String? = nil, thread: Int64, name: String, author: String, sha256: String?, verified: Data?,
-                status: String?, partsTotal: Int, partPosts: Int, computedHashes: [String] = [], previewable: Bool) {
+    public init(id: String? = nil, thread: Int64, name: String, author: String, sha256: String?,
+                verified: RoomChatFileContent?, status: String?, partsTotal: Int, partPosts: Int,
+                computedHashes: [String] = [], previewable: Bool) {
         self.id = id ?? "\(thread)/\(author)/\(name)/\(sha256 ?? "-")"
         self.thread = thread
         self.name = name
         self.author = author
-        self.content = verified.map(RoomChatFileContent.init)
+        self.content = verified
         let parts = partsTotal == 1 ? "1 part" : "\(partsTotal) parts"
         if let verified, let sha256 {
-            let size = ByteCountFormatter.string(fromByteCount: Int64(verified.count), countStyle: .file)
+            let size = ByteCountFormatter.string(fromByteCount: Int64(verified.size), countStyle: .file)
             self.detail = "\(size) · sha256 ✓ \(sha256.prefix(12)) · \(parts)"
         } else {
             self.detail = status ?? "not verified"
@@ -67,13 +92,20 @@ public struct RoomChatFileCard: Equatable, Identifiable, Sendable {
         self.mismatch = computedHashes.isEmpty ? nil : computedHashes.enumerated().map { index, hash in
             "\(index == 0 ? "decoded" : "unzipped") \(hash.prefix(12))"
         }.joined(separator: " · ")
-        self.preview = verified.flatMap { previewable ? Self.preview(of: $0) : nil }
+        self.previewable = verified != nil && previewable
         self.partCount = partPosts
+    }
+
+    /// The first lines of a verified text file, shown as plain text only, made when the preview is opened; nil for
+    /// any other file.
+    public func preview() -> String? {
+        guard previewable, let content else { return nil }
+        return Self.preview(of: content.firstBytes())
     }
 
     /// The first `previewLines` lines, each cut at `previewLineLength` characters: plain text, never markup.
     static func preview(of data: Data) -> String {
-        let text = String(decoding: data.prefix(64 * 1024), as: UTF8.self)
+        let text = String(decoding: data.prefix(previewBytes), as: UTF8.self)
         return text.split(separator: "\n", omittingEmptySubsequences: false)
             .prefix(previewLines)
             .map { line in
@@ -100,6 +132,17 @@ public enum RoomFileExports {
     public static var folder: URL {
         FileManager.default.temporaryDirectory.appendingPathComponent("room-files", isDirectory: true)
     }
+
+    /// Saves a verified file: its bytes made again and checked again, then written as `write(_:named:in:now:)`
+    /// writes them. Bytes that no longer check out are never written.
+    public static func write(_ content: RoomChatFileContent, named name: String,
+                             in folder: URL = RoomFileExports.folder, now: Date = Date()) throws -> URL {
+        guard let data = content.bytes() else { throw NotVerified() }
+        return try write(data, named: name, in: folder, now: now)
+    }
+
+    /// The file's bytes didn't check out again when it was saved, so nothing was written.
+    public struct NotVerified: Error, Equatable {}
 
     /// Writes the file under its (already safe) name in a new folder of its own, after removing old exports.
     public static func write(_ data: Data, named name: String, in folder: URL = RoomFileExports.folder,
