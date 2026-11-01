@@ -494,6 +494,18 @@ final class RoomBase64FilesTests: XCTestCase {
         XCTAssertEqual(RoomBase64Files.decodedLength(Array("SGk=".utf8)), 2)
     }
 
+    /// Text of a length no base64 has ("SGVsb") passes the parser's own rules, padded to "SGVsb===", and Foundation's
+    /// decoder refuses it there. Printed, so a run's log carries Foundation's own answer on this machine.
+    func test_foundation_refuses_the_padded_text_of_an_impossible_length() {
+        for (given, decodes) in [("SGVsb===", false), ("SGVsbG8=", true), ("SGVsbA==", true)] {
+            let result = Data(base64Encoded: given)
+            print("ROOM-FILES-FOUNDATION Data(base64Encoded: \"\(given)\") -> "
+                  + (result.map { "\($0.count) bytes" } ?? "nil"))
+            XCTAssertEqual(result != nil, decodes, given)
+        }
+        XCTAssertNil(RoomBase64Files.decodeBase64("SGVsb"), "so the parser says it isn't base64")
+    }
+
     // MARK: - Unzipping
 
     /// Raw DEFLATE made by Compression.
@@ -516,6 +528,78 @@ final class RoomBase64FilesTests: XCTestCase {
         if flags & 0x10 != 0 { header += Data("a comment".utf8) + Data([0]) }
         if flags & 0x02 != 0 { header += Data([0x12, 0x34]) }
         return header + (try deflate(data)) + Data(count: 8)
+    }
+
+    /// What Compression hands over inflating a gzip file made by `gzip` (flags 0) until the output would pass `limit`,
+    /// counted here apart from the parser: the inflating work done before it stops, whether or not it is kept. The
+    /// filter lives only inside the `do`, so it is closed before the count is read, and what it hands over as it closes
+    /// is counted too.
+    private func inflatedBeforeStopping(_ packed: Data, limit: Int) -> Int {
+        struct Stop: Error {}
+        var produced = 0
+        var kept = 0
+        do {
+            let filter = try OutputFilter(.decompress, using: .zlib) { (chunk: Data?) in
+                guard let chunk else { return }
+                produced += chunk.count
+                guard kept + chunk.count <= limit else { throw Stop() }
+                kept += chunk.count
+            }
+            try filter.write(Data(packed.dropFirst(10).dropLast(8)))
+            try filter.finalize()
+        } catch {
+        }
+        return produced
+    }
+
+    /// Bytes that unzip but don't hash to the declared hash are never a file: the hash mismatch shows what both hash
+    /// to, and nothing can be saved.
+    func test_unzipped_bytes_that_dont_match_the_declared_hash_are_never_a_file() throws {
+        let text = Data(String(repeating: "row, value\n", count: 200).utf8)
+        let packed = try gzip(text)
+        let envelope = try JSONSerialization.data(withJSONObject: [
+            "artifact": "rows.csv", "sha256": RoomBase64Files.sha256Hex(Data("other rows\n".utf8)), "part": 1,
+            "parts": 1, "data": packed.base64EncodedString()
+        ], options: [.sortedKeys])
+        let file = try XCTUnwrap(RoomBase64Files.reassemble([post(String(decoding: envelope, as: UTF8.self))]).first)
+        XCTAssertEqual(file.status, .hashMismatch(decoded: RoomBase64Files.sha256Hex(packed),
+                                                  gunzipped: RoomBase64Files.sha256Hex(text)))
+        XCTAssertNil(file.data, "never saved")
+    }
+
+    /// Unzipping that stops past the cap still did that work, and the author's budget pays for it. Three gzip files
+    /// that each unzip past a lowered cap spend the shared budget by their decoded bytes and by what each inflated
+    /// before stopping, so a later file finds exactly that much gone: one that fits what is left is a file, one byte
+    /// more is too large.
+    func test_unzipping_that_stops_at_the_cap_still_spends_the_budget() throws {
+        let cap = 300_000
+        let budget = 1_300_000
+        let sources = (1...3).map { Data(repeating: UInt8($0), count: 1_000_000) }
+        let bombs = try sources.map { try gzip($0) }
+        var left = budget
+        for packed in bombs {
+            left -= packed.count
+            let produced = inflatedBeforeStopping(packed, limit: min(cap, left))
+            XCTAssertGreaterThan(produced, min(cap, left), "inflated past the cap before it stopped")
+            left -= produced
+        }
+        XCTAssertGreaterThan(left, 0)
+        XCTAssertLessThan(left, cap)
+        func posts(probe: Data) throws -> [RoomFilePost] {
+            let bombPosts = try zip(sources, bombs).enumerated().map { index, pair -> RoomFilePost in
+                let envelope = try JSONSerialization.data(withJSONObject: [
+                    "artifact": "a\(index + 1).bin", "sha256": RoomBase64Files.sha256Hex(pair.0), "part": 1,
+                    "parts": 1, "data": pair.1.base64EncodedString()
+                ], options: [.sortedKeys])
+                return post(String(decoding: envelope, as: UTF8.self), id: "bomb-\(index)")
+            }
+            return bombPosts + [post(envelopes(probe, name: "z.bin", total: 1)[0], id: "probe")]
+        }
+        let fits = RoomBase64Files.reassemble(try posts(probe: bytes(left)), maximumBytes: cap, authorBudget: budget)
+        XCTAssertEqual(fits.map(\.status.line), ["hash mismatch", "hash mismatch", "hash mismatch", "verified"])
+        let over = RoomBase64Files.reassemble(try posts(probe: bytes(left + 1)), maximumBytes: cap,
+                                              authorBudget: budget)
+        XCTAssertEqual(over.last?.status, .tooLarge, "the unzipping that stopped at the cap was spent")
     }
 
     func test_unzipping_stops_at_the_cap_as_the_bytes_come_out() throws {

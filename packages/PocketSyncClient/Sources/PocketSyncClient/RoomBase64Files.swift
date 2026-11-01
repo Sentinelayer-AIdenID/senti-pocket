@@ -232,12 +232,16 @@ public enum RoomBase64Files {
         var unzippedHash: String?
         if rawHash == declared {
             verified = raw
-        } else if raw.count >= 2, raw[raw.startIndex] == 0x1f, raw[raw.startIndex + 1] == 0x8b, budget > 0,
-                  let unzipped = gunzip(raw, limit: min(maximumBytes, budget)) {
-            budget -= unzipped.count
-            let hash = sha256Hex(unzipped)
-            unzippedHash = hash
-            if hash == declared { verified = unzipped }
+        } else if raw.count >= 2, raw[raw.startIndex] == 0x1f, raw[raw.startIndex + 1] == 0x8b, budget > 0 {
+            let unzipping = gunzipCounting(raw, limit: min(maximumBytes, budget))
+            // What the unzipping produced is spent, whether it finished or stopped past the cap: a file that stops
+            // there still did that work, and the next one finds it gone.
+            budget -= unzipping.produced
+            if let unzipped = unzipping.data {
+                let hash = sha256Hex(unzipped)
+                unzippedHash = hash
+                if hash == declared { verified = unzipped }
+            }
         }
         guard let verified else { return file(.hashMismatch(decoded: rawHash, gunzipped: unzippedHash)) }
         if let size = group.sizes.first, size != verified.count { return file(.sizeMismatch) }
@@ -702,31 +706,40 @@ public enum RoomBase64Files {
     /// `limit`, checked as the bytes come out. The declared hash checks the result, so the trailer's checksum is not
     /// read.
     static func gunzip(_ data: Data, limit: Int) -> Data? {
+        gunzipCounting(data, limit: limit).data
+    }
+
+    /// As `gunzip`, with how many bytes the inflating produced, whether it finished or stopped (past `limit`, or on
+    /// data that isn't DEFLATE): the work done either way. Nothing is produced for a header that isn't gzip.
+    static func gunzipCounting(_ data: Data, limit: Int) -> (data: Data?, produced: Int) {
         let bytes = [UInt8](data)
-        guard bytes.count >= 18, bytes[0] == 0x1f, bytes[1] == 0x8b, bytes[2] == 8 else { return nil }
+        guard bytes.count >= 18, bytes[0] == 0x1f, bytes[1] == 0x8b, bytes[2] == 8 else { return (nil, 0) }
         let flags = bytes[3]
         var offset = 10
         if flags & 0x04 != 0 {
-            guard bytes.count >= offset + 2 else { return nil }
+            guard bytes.count >= offset + 2 else { return (nil, 0) }
             offset += 2 + (Int(bytes[offset]) | Int(bytes[offset + 1]) << 8)
         }
         for flag in [UInt8(0x08), UInt8(0x10)] where flags & flag != 0 {
-            guard offset < bytes.count, let end = bytes[offset...].firstIndex(of: 0) else { return nil }
+            guard offset < bytes.count, let end = bytes[offset...].firstIndex(of: 0) else { return (nil, 0) }
             offset = end + 1
         }
         if flags & 0x02 != 0 { offset += 2 }
-        guard offset < bytes.count - 8 else { return nil }
+        guard offset < bytes.count - 8 else { return (nil, 0) }
         return inflate(Array(bytes[offset..<(bytes.count - 8)]), limit: limit)
     }
 
     private struct Stopped: Error {}
 
-    private static func inflate(_ deflated: [UInt8], limit: Int) -> Data? {
+    private static func inflate(_ deflated: [UInt8], limit: Int) -> (data: Data?, produced: Int) {
         #if canImport(Compression)
         var output = Data()
+        var produced = 0
         do {
             let filter = try OutputFilter(.decompress, using: .zlib) { (chunk: Data?) in
                 guard let chunk else { return }
+                // Every byte the inflater hands over was work done, kept or not.
+                produced += chunk.count
                 // Past the cap, or no longer wanted: stop as the bytes come out.
                 guard output.count + chunk.count <= limit, !Task.isCancelled else { throw Stopped() }
                 output.append(chunk)
@@ -734,11 +747,11 @@ public enum RoomBase64Files {
             try filter.write(deflated)
             try filter.finalize()
         } catch {
-            return nil
+            return (nil, produced)
         }
-        return output
+        return (output, produced)
         #else
-        return nil
+        return (nil, 0)
         #endif
     }
 
