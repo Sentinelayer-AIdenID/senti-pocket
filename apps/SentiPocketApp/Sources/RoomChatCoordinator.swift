@@ -1622,6 +1622,10 @@ final class RoomChatCoordinator: ObservableObject {
     }
 
     private func publish() {
+        // What is shown of a pinned message comes from here, so the newest revision the loaded rows hold is kept
+        // first: a board shown at a newer revision (in a window loaded around it, say) never goes back to an older
+        // one when those rows go.
+        _ = notePinned(timeline.messages)
         let pins = pinned.map { pin in
             // The loaded row or the copy kept apart, whichever has the newer edit.
             let message = [timeline.messages.first { $0.sequenceId == pin.targetSequenceId },

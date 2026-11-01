@@ -107,7 +107,8 @@ public struct RoomLeaderboard: Equatable, Sendable {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty && Self.row($0) == nil }
             .joined(separator: "\n")
-        return RoomLeaderboard(rows: rows, updatedAt: Self.firstMatch(of: updatedPattern, in: text),
+        // The update time is the paragraph's, as the format says: never one from the title or a row.
+        return RoomLeaderboard(rows: rows, updatedAt: Self.firstMatch(of: updatedPattern, in: paragraph),
                                howItWorks: paragraph.isEmpty ? nil : paragraph)
     }
 

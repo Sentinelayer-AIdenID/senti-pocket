@@ -123,6 +123,18 @@ final class RoomLeaderboardTests: XCTestCase {
         XCTAssertNil(undated.howItWorks)
     }
 
+    /// The update time is the paragraph's, as the format says: a time in the title (or anywhere above the rows) is
+    /// not it, and with no paragraph there is none.
+    func test_the_update_time_is_the_paragraphs() throws {
+        let row = "🥇 **ada-agent** · 2.0 pts · 1 helpful"
+        let board = try XCTUnwrap(RoomLeaderboard.parse(
+            "🏆 Board last 00:01 UTC\n\n" + row + "\n\nHow it works: updated when scores change (last 09:40 UTC)."
+        ))
+        XCTAssertEqual(board.updatedAt, "09:40")
+        let titleOnly = try XCTUnwrap(RoomLeaderboard.parse("🏆 Board last 00:01 UTC\n\n" + row))
+        XCTAssertNil(titleOnly.updatedAt, "no paragraph, no time")
+    }
+
     // MARK: - The sheet
 
     private func board(_ text: String, seq: Int64 = 57) -> RoomChatPinned {

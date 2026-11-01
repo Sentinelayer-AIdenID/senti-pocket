@@ -285,4 +285,42 @@ final class RoomLeaderboardTests: XCTestCase {
         XCTAssertEqual(room.state.leaderboardSheet?.content, .unavailable)
         room.pause()
     }
+
+    /// The board is read on its own at revision 1, then shows at revision 2 in a window loaded around it ("Open
+    /// message"). Back at the latest messages, the window gone, it stays at revision 2: a board never goes back to an
+    /// older revision because the rows that held the newer one were let go.
+    func test_a_newer_board_seen_in_a_loaded_window_stays_after_the_window_goes() async {
+        let newer = Self.boardText.replacingOccurrences(of: "42.0 pts", with: "99.0 pts")
+        let older = (40...160).map { seq in
+            seq == 57 ? message(57, newer, revision: 2) : message(Int64(seq))
+        }
+        let transport = BoardRoom(newest: newestPage, older: older, singles: [57: [message(57, Self.boardText)]],
+                                  actions: [pins(57)])
+        let room = room(transport)
+        room.resume()
+        await waitUntil("the board read at revision 1") { room.state.leaderboard?.text.contains("42.0 pts") == true }
+
+        room.send(.jumpToMessage(sequenceId: 57))
+        await waitUntil("revision 2 in the window around it") {
+            room.state.leaderboard?.text.contains("99.0 pts") == true
+        }
+        room.send(.focusHandled)
+        room.send(.jumpToLatest)
+        await waitUntil("back at the latest messages, the window gone") {
+            room.state.rows.contains { row in
+                if case .message(let message) = row { return message.sequenceId == 300 }
+                return false
+            } && !room.state.rows.contains { row in
+                if case .message(let message) = row { return message.sequenceId == 57 }
+                return false
+            }
+        }
+        await settle()
+        XCTAssertEqual(room.state.leaderboard?.text, newer, "revision 2 stays")
+        room.send(.openLeaderboard)
+        guard case .board(let board)? = room.state.leaderboardSheet?.content else { return XCTFail("no board") }
+        XCTAssertEqual(board.rows.first?.points, "99.0")
+        XCTAssertEqual(transport.reads, [57], "read on its own once, at revision 1")
+        room.pause()
+    }
 }
