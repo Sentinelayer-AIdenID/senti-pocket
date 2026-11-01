@@ -27,6 +27,9 @@ public struct RoomAttachment: Equatable, Identifiable, Sendable {
     public let summary: String?
     /// waiting_upload, pending, processing, retry, ready or dead_letter (the API's processing states).
     public let summaryStatus: String?
+    /// Taken back after it was sent: the API marks the message's pointer `removed: true` and answers 404 for it from
+    /// then on. Nothing of it is shown but its name, and nothing of it is fetched.
+    public let isRemoved: Bool
 
     public init(
         attachmentId: String,
@@ -35,7 +38,8 @@ public struct RoomAttachment: Equatable, Identifiable, Sendable {
         contentType: String? = nil,
         sizeBytes: Int64? = nil,
         summary: String? = nil,
-        summaryStatus: String? = nil
+        summaryStatus: String? = nil,
+        isRemoved: Bool = false
     ) {
         self.attachmentId = attachmentId
         self.filename = filename
@@ -44,6 +48,7 @@ public struct RoomAttachment: Equatable, Identifiable, Sendable {
         self.sizeBytes = sizeBytes
         self.summary = summary
         self.summaryStatus = summaryStatus
+        self.isRemoved = isRemoved
     }
 
     init?(json: JSONValue) {
@@ -62,7 +67,8 @@ public struct RoomAttachment: Equatable, Identifiable, Sendable {
             contentType: contentType,
             sizeBytes: json["sizeBytes"]?.intValue.flatMap { $0 >= 0 ? $0 : nil },
             summary: summary,
-            summaryStatus: json["summaryStatus"]?.stringValue
+            summaryStatus: json["summaryStatus"]?.stringValue,
+            isRemoved: json["removed"]?.boolValue == true
         )
     }
 

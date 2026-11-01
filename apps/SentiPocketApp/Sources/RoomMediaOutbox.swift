@@ -41,12 +41,17 @@ struct RoomMediaOutboxEntry: Codable, Equatable {
         var position: Int
         /// The message was posted: it is the room's now, and is never restored as unsent.
         var posted: Bool?
+        /// Its post was asked for and no refusal came back: it may be in the room, so it is never taken back on the
+        /// server if it is discarded.
+        var postStarted: Bool?
     }
 
     var version = 1
     var sessionId: String
-    /// The client attachment id, which becomes the attachment's id.
+    /// The file's own id: its place in the outbox, and its first client attachment id.
     var itemId: String
+    /// The client attachment id its upload goes under now, when the server withdrew `itemId` (absent: `itemId`).
+    var attachmentId: String?
     var filename: String
     /// image, video or file.
     var kind: String

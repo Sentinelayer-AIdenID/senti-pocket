@@ -141,7 +141,7 @@ public enum RoomMediaRules {
     }
 
     /// The API's attachment id alphabet (`^[A-Za-z0-9._:-]{8,120}$`, never `..`). A client attachment id becomes the
-    /// attachment's id, so a retry with the same one is the same upload.
+    /// attachment's id, so a retry with the same one is the same upload, until the server withdraws it.
     public static func isValidClientId(_ id: String) -> Bool {
         id.range(of: #"^[A-Za-z0-9._:-]{8,120}$"#, options: .regularExpression) != nil && !id.contains("..")
     }
@@ -344,19 +344,26 @@ public struct RoomMediaAPIRefusal: Equatable, Sendable {
     }
 
     /// Refusals no retry can help: a reference the room will not take (sent by another message, expired unsent, taken
-    /// back), an attachment already sent, an id reused for other bytes, a preview the parent cannot take, a request
-    /// the API does not accept.
+    /// back), a preview the parent cannot take, a request the API does not accept.
     public static let finalCodes: Set<String> = [
-        "ATTACHMENT_REFERENCE_REJECTED", "ATTACHMENT_PUBLISHED", "ATTACHMENT_CONFLICT", "ATTACHMENT_PREVIEW_INVALID",
-        "INVALID_REQUEST"
+        "ATTACHMENT_REFERENCE_REJECTED", "ATTACHMENT_PREVIEW_INVALID", "INVALID_REQUEST"
     ]
 
-    /// Trying again with the same ids can help: storage verification (re-init gives a fresh link), an upload still
-    /// landing, too many unfinished uploads, a busy or unavailable server.
+    /// The upload can only go on under a new client attachment id: the server withdrew this one (a failed check, a
+    /// reservation that ran out unfinished: `ATTACHMENT_RELEASED` is complete's 404), or holds it for other bytes
+    /// (`ATTACHMENT_CONFLICT`, init's 409), and init with it again answers 409 for hours. A refused request (400) or a
+    /// storage limit (413) starts over under a new one too, as the web does.
+    public var needsNewAttachmentId: Bool {
+        if code == "ATTACHMENT_CONFLICT" || code == "ATTACHMENT_RELEASED" { return true }
+        return status == 400 || status == 413
+    }
+
+    /// Trying again can help (under a new client attachment id when `needsNewAttachmentId`): a failed storage check, an
+    /// upload still landing, an id the server withdrew, too many unfinished uploads, a busy or unavailable server.
     public var isRetryable: Bool {
         if let code, Self.finalCodes.contains(code) { return false }
         if code == "ATTACHMENT_VERIFICATION_FAILED" || code == "ATTACHMENT_UPLOAD_PENDING" { return true }
-        // An unfinished upload the server let expire: init again (the same id) makes it anew.
+        // An unfinished upload the server let expire: it starts over under a new id.
         if status == 404, code?.hasPrefix("ATTACHMENT") == true { return true }
         if quotaScope == .uploader { return true }
         return [409, 425, 429].contains(status) || (500..<600).contains(status)

@@ -126,17 +126,28 @@ final class RoomMediaTests: XCTestCase {
         XCTAssertTrue(mine.isRetryable, "unfinished uploads free up as they finish")
         let checked = refusal(400, "ATTACHMENT_VERIFICATION_FAILED", "checksum mismatch")
         XCTAssertNil(checked.quotaScope)
-        XCTAssertTrue(checked.isRetryable, "init again with the same id gives a fresh upload link")
+        XCTAssertTrue(checked.isRetryable, "a retry uploads the bytes again")
+        XCTAssertTrue(checked.needsNewAttachmentId, "the server withdrew the id: init with it again answers 409")
         XCTAssertFalse(refusal(400, "INVALID_REQUEST", "unsupported").isRetryable)
         XCTAssertTrue(RoomMediaAPIRefusal(status: 503, body: Data()).isRetryable)
-        // What no retry can help: a reference the room refused (expired unsent, sent elsewhere, taken back), an
-        // attachment already sent, an id reused for other bytes, a preview the parent cannot take.
-        for final in ["ATTACHMENT_REFERENCE_REJECTED", "ATTACHMENT_PUBLISHED", "ATTACHMENT_CONFLICT", "ATTACHMENT_PREVIEW_INVALID"] {
+        // What no retry can help: a reference the room refused (expired unsent, sent elsewhere, taken back), a preview
+        // the parent cannot take.
+        for final in ["ATTACHMENT_REFERENCE_REJECTED", "ATTACHMENT_PREVIEW_INVALID"] {
             XCTAssertFalse(refusal(409, final, "no").isRetryable, final)
+            XCTAssertFalse(refusal(409, final, "no").needsNewAttachmentId, final)
         }
-        XCTAssertTrue(refusal(409, "ATTACHMENT_UPLOAD_PENDING", "not landed").isRetryable, "finish the PUT, complete again")
-        XCTAssertTrue(RoomMediaAPIRefusal(status: 404, code: "ATTACHMENT_RELEASED").isRetryable,
-                      "an upload the server released is made anew by init")
+        let pending = refusal(409, "ATTACHMENT_UPLOAD_PENDING", "not landed")
+        XCTAssertTrue(pending.isRetryable, "finish the PUT, complete again")
+        XCTAssertFalse(pending.needsNewAttachmentId, "the same upload, still landing")
+        // An id the server withdrew (released unfinished, or held for other bytes): only a new id goes on.
+        let released = RoomMediaAPIRefusal(status: 404, code: "ATTACHMENT_RELEASED")
+        XCTAssertTrue(released.isRetryable)
+        XCTAssertTrue(released.needsNewAttachmentId, "init with the released id answers 409 for hours")
+        let withdrawn = refusal(409, "ATTACHMENT_CONFLICT", "this attachmentId was withdrawn")
+        XCTAssertTrue(withdrawn.isRetryable, "under a new id")
+        XCTAssertTrue(withdrawn.needsNewAttachmentId)
+        XCTAssertTrue(room.needsNewAttachmentId, "a storage limit starts over under a new id, as the web does")
+        XCTAssertFalse(RoomMediaAPIRefusal(status: 503, body: Data()).needsNewAttachmentId, "a busy server: the same id")
         XCTAssertEqual(RoomMediaAPIRefusal(status: 413, body: Data("not json".utf8)).quotaScope, .unknown)
     }
 }

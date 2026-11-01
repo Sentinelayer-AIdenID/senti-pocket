@@ -5,6 +5,17 @@ import XCTest
 
 @MainActor
 final class RoomMediaPresentationTests: XCTestCase {
+    /// A photo taken back after it was sent is no picture any more: only its name and "Attachment removed".
+    func test_a_removed_photo_is_no_picture_and_says_it_was_removed() {
+        let photo = RoomAttachmentChip(attachmentId: "pm_photo_000001", filename: "IMG_0001.jpg", kind: .image,
+                                       sizeBytes: 2_048)
+        XCTAssertTrue(photo.isVisual)
+        let removed = RoomAttachmentChip(attachmentId: "pm_photo_000001", filename: "IMG_0001.jpg", kind: .image,
+                                         sizeBytes: 2_048, isRemoved: true)
+        XCTAssertFalse(removed.isVisual, "no preview is shown or fetched")
+        XCTAssertEqual(removed.accessibilityLabel, "Photo, IMG_0001.jpg, Attachment removed")
+    }
+
     func test_a_message_with_only_files_says_what_it_shares() {
         XCTAssertEqual(RoomMediaOutgoingRow.defaultText(for: [.image]), "Shared a photo.")
         XCTAssertEqual(RoomMediaOutgoingRow.defaultText(for: [.image, .image, .image]), "Shared 3 photos.")

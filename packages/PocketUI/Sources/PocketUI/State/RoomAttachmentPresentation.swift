@@ -19,6 +19,8 @@ public struct RoomAttachmentChip: Equatable, Identifiable, Sendable {
     public let summary: String?
     /// The API's processing state (waiting_upload, pending, processing, retry, ready, dead_letter).
     public let processingStatus: String?
+    /// Taken back after it was sent: only its name shows, with "Attachment removed", and nothing opens it.
+    public let isRemoved: Bool
 
     public init(
         attachmentId: String,
@@ -26,7 +28,8 @@ public struct RoomAttachmentChip: Equatable, Identifiable, Sendable {
         kind: Kind,
         sizeBytes: Int64? = nil,
         summary: String? = nil,
-        processingStatus: String? = nil
+        processingStatus: String? = nil,
+        isRemoved: Bool = false
     ) {
         self.attachmentId = attachmentId
         self.filename = filename
@@ -34,6 +37,7 @@ public struct RoomAttachmentChip: Equatable, Identifiable, Sendable {
         self.sizeBytes = sizeBytes
         self.summary = summary
         self.processingStatus = processingStatus
+        self.isRemoved = isRemoved
     }
 
     public var kindLabel: String {
@@ -58,13 +62,17 @@ public struct RoomAttachmentChip: Equatable, Identifiable, Sendable {
         }
     }
 
-    /// Shown as a picture (a photo, or a video's poster frame), not as a file card.
-    public var isVisual: Bool { kind == .image || kind == .video }
+    /// Shown as a picture (a photo, or a video's poster frame), not as a file card. A removed one never is.
+    public var isVisual: Bool { !isRemoved && (kind == .image || kind == .video) }
 
-    /// What VoiceOver says: the kind, the name and the size, then what a tap does.
+    /// What VoiceOver says: the kind, the name and the size, then what a tap does; or that it was removed.
     public var accessibilityLabel: String {
-        [kind == .image ? "Photo" : kindLabel, filename, sizeLabel, statusLabel].compactMap { $0 }.joined(separator: ", ")
+        if isRemoved { return [kind == .image ? "Photo" : kindLabel, filename, Self.removedLabel].joined(separator: ", ") }
+        return [kind == .image ? "Photo" : kindLabel, filename, sizeLabel, statusLabel].compactMap { $0 }.joined(separator: ", ")
     }
+
+    /// What a removed attachment says under its name.
+    public static let removedLabel = "Attachment removed"
 
     public var accessibilityHint: String {
         switch kind {

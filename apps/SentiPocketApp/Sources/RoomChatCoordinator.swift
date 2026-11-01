@@ -140,6 +140,9 @@ final class RoomChatCoordinator: ObservableObject {
     private var previews: [String: Data] = [:]
     private var previewOrder: [String] = []
     private var previewsInFlight: Set<String> = []
+    /// Attachments taken back after they were sent: marked `removed` in their message, or answered 404 when their
+    /// link was asked for. They show as removed, and their previews are gone from memory and from the phone.
+    private var removedAttachments: Set<String> = []
     private let attachmentFetcher: any AttachmentFileFetching
     private let previewStore: any RoomMediaPreviewStoring
     /// Storage links, reused until five minutes before they expire.
@@ -680,10 +683,12 @@ final class RoomChatCoordinator: ObservableObject {
     }
 
     /// Loads a small preview for a photo or video that came into view: from the phone if it was read before, else the
-    /// preview uploaded with it, else (a photo with no preview, up to 10 MB) the photo itself, downsampled.
+    /// preview uploaded with it, else (a photo with no preview, up to 10 MB) the photo itself, downsampled. One taken
+    /// back after it was sent gets none.
     private func loadPreview(_ attachmentId: String) {
         guard previews[attachmentId] == nil, !previewsInFlight.contains(attachmentId), !failureIsTerminal,
-              let attachment = attachment(attachmentId), attachment.kind == .image || attachment.kind == .video else { return }
+              !removedAttachments.contains(attachmentId), let attachment = attachment(attachmentId), !attachment.isRemoved,
+              attachment.kind == .image || attachment.kind == .video else { return }
         previewsInFlight.insert(attachmentId)
         let key = RoomMediaPreviewDiskCache.key(sessionId: sessionId, attachmentId: attachmentId)
         let store = previewStore
@@ -691,6 +696,9 @@ final class RoomChatCoordinator: ObservableObject {
             defer { self?.previewsInFlight.remove(attachmentId) }
             if let kept = await Task.detached(priority: .utility, operation: { store.data(for: key) }).value {
                 self?.storePreview(kept, for: attachmentId, keep: false)
+                // Kept from an earlier visit: the file may have been taken back since. Its link is asked for now (it
+                // is needed to open it anyway), and one the API no longer has loses its preview.
+                await self?.confirmKeptPreview(attachmentId)
                 return
             }
             guard let self, let preview = await self.fetchPreview(attachment) else { return }
@@ -718,10 +726,45 @@ final class RoomChatCoordinator: ObservableObject {
         return await Task.detached(priority: .utility) { AttachmentFiles.preview(from: data) }.value
     }
 
+    /// A kept preview stays only while the API still has its attachment: a 404 (or 403) for its link means it was
+    /// taken back, or the room is no longer this account's, so the preview goes and it shows as removed. Offline or
+    /// busy, the preview stays until the API can answer.
+    private func confirmKeptPreview(_ attachmentId: String) async {
+        do {
+            _ = try await mediaLink(attachmentId)
+        } catch SessionTransportError.accessDenied {
+            removedAttachments.insert(attachmentId)
+            forgetPreview(attachmentId)
+            publish()
+        } catch {}
+    }
+
+    /// Attachments marked `removed` in their messages lose their previews, here and on the phone, once.
+    private func forgetRemovedAttachments() {
+        for message in timeline.messages where message.attachments.contains(where: \.isRemoved) {
+            for attachment in message.attachments where attachment.isRemoved
+                && !removedAttachments.contains(attachment.attachmentId) {
+                removedAttachments.insert(attachment.attachmentId)
+                forgetPreview(attachment.attachmentId)
+            }
+        }
+    }
+
+    /// A preview gone from memory, and from the phone's disk.
+    private func forgetPreview(_ attachmentId: String) {
+        previews[attachmentId] = nil
+        previewOrder.removeAll { $0 == attachmentId }
+        linkCache.forget(sessionId: sessionId, attachmentId: attachmentId)
+        let key = RoomMediaPreviewDiskCache.key(sessionId: sessionId, attachmentId: attachmentId)
+        let store = previewStore
+        Task.detached(priority: .utility) { store.remove(for: key) }
+    }
+
     /// A preview made on this phone for a photo or video it just sent: the room shows it the moment the message
     /// arrives, with nothing to download.
     func seedPreview(_ data: Data, for attachmentId: String) {
-        guard RoomMediaRules.isValidClientId(attachmentId), previews[attachmentId] == nil else { return }
+        guard RoomMediaRules.isValidClientId(attachmentId), previews[attachmentId] == nil,
+              !removedAttachments.contains(attachmentId) else { return }
         storePreview(data, for: attachmentId, keep: true)
     }
 
@@ -744,7 +787,9 @@ final class RoomChatCoordinator: ObservableObject {
     /// asks for the file with a safe name, for saving and sharing; `fresh` asks the API for a new one (a video about to
     /// play, or a link that stopped working), which is then the one reused.
     func mediaLink(_ attachmentId: String, asDownload: Bool = false, fresh: Bool = false) async throws -> RoomAttachmentDownload {
-        guard attachment(attachmentId) != nil else { throw AttachmentFetchError.failed }
+        guard let attachment = attachment(attachmentId), !attachment.isRemoved, !removedAttachments.contains(attachmentId) else {
+            throw AttachmentFetchError.failed
+        }
         let transport = self.transport
         let sessionId = self.sessionId
         if fresh { linkCache.forget(sessionId: sessionId, attachmentId: attachmentId) }
@@ -1646,6 +1691,7 @@ final class RoomChatCoordinator: ObservableObject {
     }
 
     private func publish() {
+        forgetRemovedAttachments()
         let work = workLines()
         // A file sent with a message shows with that message: its upload notice ("Attachment uploaded: …") would show
         // the same photo a second time.
@@ -1684,7 +1730,7 @@ final class RoomChatCoordinator: ObservableObject {
                         isPinned: $0.isPinned
                     )
                 },
-                attachments: message.attachments.map(Self.chip),
+                attachments: message.attachments.map { Self.chip($0, removed: removedAttachments.contains($0.attachmentId)) },
                 views: message.eventType == "session_message"
                     ? views(of: message.id, at: message.revision, author: viewAuthor(message.authorId, isHuman: message.isHuman))
                     : nil,
@@ -1961,7 +2007,7 @@ final class RoomChatCoordinator: ObservableObject {
             && message.attachments.allSatisfy { filesInMessages.contains($0.attachmentId) }
     }
 
-    private static func chip(_ attachment: RoomAttachment) -> RoomAttachmentChip {
+    private static func chip(_ attachment: RoomAttachment, removed: Bool) -> RoomAttachmentChip {
         let kind: RoomAttachmentChip.Kind
         switch attachment.kind {
         case .markdown: kind = .markdown
@@ -1977,7 +2023,8 @@ final class RoomChatCoordinator: ObservableObject {
             kind: kind,
             sizeBytes: attachment.sizeBytes,
             summary: attachment.summary,
-            processingStatus: attachment.summaryStatus
+            processingStatus: attachment.summaryStatus,
+            isRemoved: attachment.isRemoved || removed
         )
     }
 

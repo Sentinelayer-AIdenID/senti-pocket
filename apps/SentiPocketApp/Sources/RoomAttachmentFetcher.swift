@@ -23,13 +23,19 @@ struct URLSessionAttachmentFetcher: AttachmentFileFetching {
     private let session: URLSession
 
     init() {
+        self.session = URLSession(configuration: Self.configuration())
+    }
+
+    /// No cookies, no cache. A whole file (up to 250 MB) may take long on a slow link, so it has an hour, as an upload
+    /// has; a connection that goes quiet for a minute still ends it.
+    static func configuration() -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpCookieStorage = nil
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.timeoutIntervalForRequest = 60
-        configuration.timeoutIntervalForResource = 300
-        self.session = URLSession(configuration: configuration)
+        configuration.timeoutIntervalForResource = 60 * 60
+        return configuration
     }
 
     func data(from url: URL, maximumBytes: Int) async throws -> Data {
@@ -64,6 +70,19 @@ enum AttachmentFiles {
         while cleaned.hasPrefix(".") { cleaned.removeFirst() }
         cleaned = String(cleaned.prefix(160)).trimmingCharacters(in: .whitespaces)
         return cleaned.isEmpty ? "attachment" : cleaned
+    }
+
+    /// Kinds of file Quick Look renders as a web page: shown instead as their plain text.
+    static let shownAsText: Set<String> = ["html", "htm", "xhtml", "shtml", "svg", "svgz", "xml", "xsl",
+                                         "webarchive", "mht", "mhtml"]
+
+    /// The file Quick Look is given: the downloaded file itself, or, for a page it would render (HTML, SVG, XML, web
+    /// archives), the same file renamed with `.txt` added, so it shows as its text and nothing in it runs or loads.
+    static func forQuickLook(_ file: URL) throws -> URL {
+        guard shownAsText.contains(file.pathExtension.lowercased()) else { return file }
+        let text = file.appendingPathExtension("txt")
+        try FileManager.default.moveItem(at: file, to: text)
+        return text
     }
 
     /// A small JPEG preview (longest side `maxPixels`) decoded straight from the file, without inflating the full

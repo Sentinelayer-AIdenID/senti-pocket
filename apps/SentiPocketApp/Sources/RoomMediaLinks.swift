@@ -58,6 +58,8 @@ final class RoomMediaLinkCache {
 protocol RoomMediaPreviewStoring: Sendable {
     func data(for key: String) -> Data?
     func store(_ data: Data, for key: String)
+    /// Forgets one preview: its attachment was taken back.
+    func remove(for key: String)
 }
 
 final class RoomMediaPreviewDiskCache: RoomMediaPreviewStoring, @unchecked Sendable {
@@ -100,6 +102,10 @@ final class RoomMediaPreviewDiskCache: RoomMediaPreviewStoring, @unchecked Senda
         if trims { trim() }
     }
 
+    func remove(for key: String) {
+        try? FileManager.default.removeItem(at: file(for: key))
+    }
+
     /// Every kept preview goes (signing out).
     func removeAll() {
         try? FileManager.default.removeItem(at: folder)
@@ -133,6 +139,12 @@ final class RoomMediaPreviewMemoryStore: RoomMediaPreviewStoring, @unchecked Sen
     func store(_ data: Data, for key: String) {
         lock.lock()
         stored[key] = data
+        lock.unlock()
+    }
+
+    func remove(for key: String) {
+        lock.lock()
+        stored[key] = nil
         lock.unlock()
     }
 }

@@ -11,6 +11,8 @@ private final class FileRoomTransport: RoomTransport, @unchecked Sendable {
     private var links: [String] = []
     /// Attachments that have an uploaded preview, and how long links last.
     var previewed: Set<String> = []
+    /// Attachments taken back since: their link answers 404 (read as no access).
+    var gone: Set<String> = []
     var expiresIn = 300
 
     init(history: [RoomMessage]) { self.history = history }
@@ -36,7 +38,9 @@ private final class FileRoomTransport: RoomTransport, @unchecked Sendable {
     func attachmentDownload(sessionId: String, attachmentId: String) async throws -> RoomAttachmentDownload {
         lock.lock()
         links.append("\(sessionId)/\(attachmentId)")
+        let isGone = gone.contains(attachmentId)
         lock.unlock()
+        if isGone { throw SessionTransportError.accessDenied }
         return RoomAttachmentDownload(
             url: URL(string: "https://storage.example/\(attachmentId)?sig=1")!,
             expiresIn: expiresIn,
@@ -121,6 +125,81 @@ final class RoomAttachmentsCoordinatorTests: XCTestCase {
         )
     }
 
+    private func chip(_ room: RoomChatCoordinator, _ attachmentId: String) -> RoomAttachmentChip? {
+        for row in room.state.rows {
+            if case .message(let message) = row,
+               let chip = message.attachments.first(where: { $0.attachmentId == attachmentId }) { return chip }
+        }
+        return nil
+    }
+
+    /// A photo taken back after it was sent (`removed: true`) shows as removed: its preview kept on the phone goes,
+    /// and nothing of it is asked for or fetched.
+    func test_a_removed_photo_shows_as_removed_and_its_kept_preview_goes() async {
+        let store = RoomMediaPreviewMemoryStore()
+        store.store(Self.png(width: 64, height: 64), for: "room_1/pm_photo_0001")
+        let removed = RoomAttachment(attachmentId: "pm_photo_0001", filename: "IMG_0042.jpg", kind: .image,
+                                     contentType: "image/jpeg", sizeBytes: 40_000, isRemoved: true)
+        let transport = FileRoomTransport(history: [Self.message([removed])])
+        let fetcher = ScriptedFetcher(image: Self.png(width: 64, height: 64))
+        let room = coordinator(transport, fetcher, store: store)
+        room.resume()
+        await waitUntil("loaded") { !room.state.isLoadingInitial }
+        room.send(.attachmentAppeared(attachmentId: "pm_photo_0001"))
+        await waitUntil("kept preview gone") { store.data(for: "room_1/pm_photo_0001") == nil }
+        XCTAssertEqual(chip(room, "pm_photo_0001")?.isRemoved, true)
+        XCTAssertNil(room.state.attachmentPreviews["pm_photo_0001"])
+        XCTAssertEqual(transport.requestedLinks(), [], "nothing is asked for it")
+        XCTAssertEqual(fetcher.fetchedPaths(), [])
+        room.pause()
+    }
+
+    /// A preview kept from an earlier visit shows at once, and its link is asked for: when the API answers 404 (the
+    /// photo was taken back since), the preview goes, from the room and from the phone, and the photo shows as
+    /// removed.
+    func test_a_kept_preview_the_api_no_longer_has_goes() async {
+        let store = RoomMediaPreviewMemoryStore()
+        store.store(Self.png(width: 64, height: 64), for: "room_1/pm_photo_0001")
+        let photo = RoomAttachment(attachmentId: "pm_photo_0001", filename: "IMG_0042.jpg", kind: .image,
+                                   contentType: "image/jpeg", sizeBytes: 40_000)
+        let transport = FileRoomTransport(history: [Self.message([photo])])
+        transport.gone = ["pm_photo_0001"]
+        let fetcher = ScriptedFetcher(image: Self.png(width: 64, height: 64))
+        let room = coordinator(transport, fetcher, store: store)
+        room.resume()
+        await waitUntil("loaded") { !room.state.isLoadingInitial }
+        room.send(.attachmentAppeared(attachmentId: "pm_photo_0001"))
+        await waitUntil("the API asked") { transport.requestedLinks() == ["room_1/pm_photo_0001"] }
+        await waitUntil("the preview gone") {
+            room.state.attachmentPreviews["pm_photo_0001"] == nil && store.data(for: "room_1/pm_photo_0001") == nil
+                && self.chip(room, "pm_photo_0001")?.isRemoved == true
+        }
+        XCTAssertEqual(fetcher.fetchedPaths(), [], "nothing downloaded")
+        room.pause()
+    }
+
+    /// A page Quick Look would render (HTML and the like) opens as its plain text; other files open as they are. A
+    /// whole file has an hour to download, and a connection that goes quiet for a minute ends it.
+    func test_a_page_opens_as_its_text_and_a_download_has_an_hour() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("quick-look-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let page = folder.appendingPathComponent("report.HTML")
+        try Data("<script>alert(1)</script>".utf8).write(to: page)
+        let shown = try AttachmentFiles.forQuickLook(page)
+        XCTAssertEqual(shown.lastPathComponent, "report.HTML.txt")
+        XCTAssertEqual(try Data(contentsOf: shown), Data("<script>alert(1)</script>".utf8))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: page.path), "only the text copy is left")
+        let pdf = folder.appendingPathComponent("spec.pdf")
+        try Data("%PDF".utf8).write(to: pdf)
+        XCTAssertEqual(try AttachmentFiles.forQuickLook(pdf), pdf)
+
+        let configuration = URLSessionAttachmentFetcher.configuration()
+        XCTAssertEqual(configuration.timeoutIntervalForResource, 3_600)
+        XCTAssertEqual(configuration.timeoutIntervalForRequest, 60)
+        XCTAssertNil(configuration.httpCookieStorage)
+    }
+
     func test_an_image_in_view_gets_a_small_preview_and_other_files_do_not() async {
         let files = [
             RoomAttachment(attachmentId: "img-0001", filename: "screen.png", kind: .image, contentType: "image/png", sizeBytes: 50_000),
@@ -174,7 +253,8 @@ final class RoomAttachmentsCoordinatorTests: XCTestCase {
         await waitUntil("kept on disk") { store.data(for: "room_1/pm_video_0001") != nil }
         room.pause()
 
-        // Opened again: the kept preview shows, and nothing is asked of the API or storage.
+        // Opened again: the kept preview shows at once and nothing is downloaded. Its link is asked for, so a file taken
+        // back since loses its preview; this one is still there, and keeps it.
         let again = FileRoomTransport(history: [Self.message(files)])
         let quiet = ScriptedFetcher(image: Data())
         let reopened = coordinator(again, quiet, store: store)
@@ -182,8 +262,9 @@ final class RoomAttachmentsCoordinatorTests: XCTestCase {
         await waitUntil("loaded again") { !reopened.state.isLoadingInitial }
         reopened.send(.attachmentAppeared(attachmentId: "pm_video_0001"))
         await waitUntil("kept preview") { reopened.state.attachmentPreviews["pm_video_0001"] != nil }
-        XCTAssertTrue(again.requestedLinks().isEmpty)
+        await waitUntil("its link asked") { again.requestedLinks() == ["room_1/pm_video_0001"] }
         XCTAssertTrue(quiet.fetchedPaths().isEmpty)
+        XCTAssertNotNil(reopened.state.attachmentPreviews["pm_video_0001"], "still there: the preview stays")
         reopened.pause()
     }
 

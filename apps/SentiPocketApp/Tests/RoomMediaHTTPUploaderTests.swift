@@ -133,4 +133,39 @@ final class RoomMediaHTTPUploaderTests: XCTestCase {
         XCTAssertEqual(delete.url?.path, "/api/v1/sessions/room_1/attachments/pm_test_000001")
         XCTAssertEqual(delete.value(forHTTPHeaderField: "Authorization"), "Bearer user-token")
     }
+
+    /// The PUT goes straight to storage with exactly the headers init returned: never the user's token, a cookie or a
+    /// host of its own. Storage's refusal is told apart from the network.
+    func test_the_put_carries_only_the_signed_headers_and_says_what_storage_answered() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("put-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appendingPathComponent("original.jpg")
+        try Data(repeating: 7, count: 2_048).write(to: file)
+        let storage = RoomMediaPutSession(backgroundIdentifier: nil, protocolClasses: [RoomMediaAPIStub.self])
+        let target = RoomMediaUploadTarget(
+            url: URL(string: "https://storage.example.test/rooms/r1/pm_put_000001?sig=abc")!,
+            headers: ["Content-Type": "image/jpeg", "x-ms-blob-type": "BlockBlob", "Authorization": "Bearer leaked",
+                      "Cookie": "session=1", "Host": "elsewhere.example"]
+        )
+        RoomMediaAPIStub.answer { _ in (201, "") }
+        let before = RoomMediaAPIStub.requests.count
+        try await storage.put(file: file, to: target) { _, _ in }
+        let put = try XCTUnwrap(RoomMediaAPIStub.requests.dropFirst(before).first?.0)
+        XCTAssertEqual(put.httpMethod, "PUT")
+        XCTAssertEqual(put.url, target.url)
+        XCTAssertEqual(put.value(forHTTPHeaderField: "Content-Type"), "image/jpeg")
+        XCTAssertEqual(put.value(forHTTPHeaderField: "x-ms-blob-type"), "BlockBlob")
+        XCTAssertNil(put.value(forHTTPHeaderField: "Authorization"), "the user's token never reaches storage")
+        XCTAssertNil(put.value(forHTTPHeaderField: "Cookie"))
+        XCTAssertNotEqual(put.value(forHTTPHeaderField: "Host"), "elsewhere.example")
+
+        RoomMediaAPIStub.answer { _ in (403, "") }
+        do {
+            try await storage.put(file: file, to: target) { _, _ in }
+            XCTFail("storage refused it")
+        } catch let error as RoomMediaUploadError {
+            XCTAssertEqual(error, .storageRefused(status: 403))
+        }
+    }
 }

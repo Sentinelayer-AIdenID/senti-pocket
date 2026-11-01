@@ -3,7 +3,8 @@ import SwiftUI
 
 /// Files under a message. Photos show their preview, videos their poster frame with a play button, and other files a
 /// card with the name, size and type, and a Share button. Tapping opens a photo full size (zoomable), plays a video
-/// straight from storage, and previews any other file.
+/// straight from storage, and previews any other file. A file taken back after it was sent shows only its name and
+/// "Attachment removed", and nothing opens it.
 struct RoomAttachmentsView: View {
     let chips: [RoomAttachmentChip]
     let previews: [String: Data]
@@ -12,7 +13,9 @@ struct RoomAttachmentsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(chips) { chip in
-                if chip.isVisual {
+                if chip.isRemoved {
+                    removed(chip)
+                } else if chip.isVisual {
                     Button {
                         send(.openAttachment(attachmentId: chip.attachmentId))
                     } label: {
@@ -97,6 +100,26 @@ struct RoomAttachmentsView: View {
             .foregroundStyle(chip.processingStatus == "dead_letter" ? PocketPalette.danger : PocketPalette.textSecondary)
             .frame(maxWidth: 260, alignment: .leading)
         }
+    }
+
+    /// A removed file: its name and that it was removed. No picture, no tap, no share.
+    private func removed(_ chip: RoomAttachmentChip) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(chip.filename)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(PocketPalette.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Text(RoomAttachmentChip.removedLabel)
+                .font(.caption2)
+                .foregroundStyle(PocketPalette.textSecondary)
+        }
+        .padding(8)
+        .frame(maxWidth: 320, alignment: .leading)
+        .background(PocketPalette.inset, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(chip.accessibilityLabel)
+        .accessibilityIdentifier("pocket.room.attachment.removed")
     }
 
     private func card(_ chip: RoomAttachmentChip) -> some View {

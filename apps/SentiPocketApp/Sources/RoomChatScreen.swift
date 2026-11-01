@@ -984,7 +984,8 @@ struct RoomChatScreen: View {
         Task {
             defer { openingAttachment = false }
             do {
-                attachmentPreview = AttachmentPreviewItem(url: try await coordinator.prepareAttachment(attachmentId))
+                let file = try await coordinator.prepareAttachment(attachmentId)
+                attachmentPreview = AttachmentPreviewItem(url: try AttachmentFiles.forQuickLook(file))
             } catch {
                 attachmentProblem = Self.openProblem(error)
             }
