@@ -115,7 +115,7 @@ final class RoomLeaderboardTests: XCTestCase {
         XCTAssertEqual(RoomLeaderboard.parse(Self.fixture.replacingOccurrences(of: "\n", with: "\r\n")), board)
     }
 
-    /// No row to read: no board (the sheet says it is unavailable); and no update time: "just now".
+    /// No row to read: no board (the sheet says it is unavailable); and no update time: "time unknown".
     func test_a_board_without_rows_is_unavailable() throws {
         XCTAssertNil(RoomLeaderboard.parse(""))
         XCTAssertNil(RoomLeaderboard.parse("🏆 Who's helping most in this room\n\nScores are being counted."))
@@ -138,9 +138,9 @@ final class RoomLeaderboardTests: XCTestCase {
 
     // MARK: - The sheet
 
-    private func board(_ text: String, seq: Int64 = 57, author: String = "host-agent") -> RoomChatPinned {
+    private func board(_ text: String, seq: Int64 = 57) -> RoomChatPinned {
         RoomChatPinned(sequenceId: seq, snippet: String(text.prefix { $0 != "\n" }), pinnedBy: "ada-agent", text: text,
-                       author: author, board: RoomLeaderboard.parse(text))
+                       board: RoomLeaderboard.parse(text))
     }
 
     private func state(_ pinned: [RoomChatPinned], open: Bool) -> RoomChatPresentationState {
@@ -193,12 +193,24 @@ final class RoomLeaderboardTests: XCTestCase {
         XCTAssertEqual(state([announcement]).leaderboard?.sequenceId, 90, "no board at all: the trophy pin, unavailable")
     }
 
-    /// The sheet says who posted the board, by the id the room shows, and nothing more.
-    func test_the_sheet_says_plainly_who_posted_the_board() {
-        XCTAssertEqual(state([board(Self.otherBoard, author: "mallory")], open: true).leaderboardSheet?.postedBy,
-                       "Posted by mallory")
-        XCTAssertEqual(state([board(Self.fixture, author: "")], open: true).leaderboardSheet?.postedBy,
-                       "Posted by an unknown member")
+    /// A pin that reads as a board but doesn't start with the trophy is never the room's board: not over an older
+    /// trophy board, and not alone.
+    func test_a_board_without_the_trophy_is_never_the_board() {
+        let untitled = board(Self.fixture.replacingOccurrences(of: "🏆 ", with: ""), seq: 90)
+        XCTAssertNotNil(untitled.board, "it reads as a board")
+        XCTAssertEqual(state([untitled, board(Self.fixture, seq: 57)]).leaderboard?.sequenceId, 57)
+        XCTAssertNil(state([untitled]).leaderboard)
+    }
+
+    /// The open sheet holds the board (or says it is unavailable) and nothing about who posted it: the poster line is
+    /// removed until the server provides a verified poster.
+    func test_the_sheet_holds_the_board_and_nothing_about_who_posted_it() throws {
+        let shown = try XCTUnwrap(RoomLeaderboard.parse(Self.otherBoard))
+        XCTAssertEqual(state([board(Self.otherBoard, seq: 60)], open: true).leaderboardSheet,
+                       RoomChatLeaderboardSheet(sequenceId: 60, content: .board(shown)))
+        XCTAssertEqual(state([board("🏆 Who's helping most\n\nRecounting, back soon.", seq: 61)], open: true)
+                        .leaderboardSheet,
+                       RoomChatLeaderboardSheet(sequenceId: 61, content: .unavailable))
     }
 
     // MARK: - Bounds
@@ -210,6 +222,17 @@ final class RoomLeaderboardTests: XCTestCase {
                              ("7:05", nil)] {
             let board = try XCTUnwrap(RoomLeaderboard.parse("🏆 Board\n\n" + row + "\n\nUpdated (last \(time) UTC)."))
             XCTAssertEqual(board.updatedAt, read, time)
+        }
+    }
+
+    /// The update time follows "last" as a whole word, and "UTC" ends it: "blast 12:34 UTC" is no update time.
+    func test_the_update_time_follows_the_word_last() throws {
+        let row = "🥇 **ada-agent** · 2.0 pts · 1 helpful"
+        for (paragraph, read) in [("How it works: points (last 12:34 UTC).", "12:34"),
+                                  ("How it works: points, blast 12:34 UTC.", nil),
+                                  ("How it works: points (last 12:34 UTCX).", nil)] {
+            let board = try XCTUnwrap(RoomLeaderboard.parse("🏆 Board\n\n" + row + "\n\n" + paragraph))
+            XCTAssertEqual(board.updatedAt, read, paragraph)
         }
     }
 

@@ -360,14 +360,14 @@ final class RoomLeaderboardTests: XCTestCase {
     }
 
     /// A member's board whose event says the room's owner posted it is read as any member's board: the newer board
-    /// wins over it, an edit saying the same changes nothing, and alone (the board, as any member's newest would be)
-    /// its sheet says only who posted it.
-    func test_a_claim_that_the_owner_posted_a_board_gives_no_label_and_no_preference() async throws {
+    /// wins over it, and an edit saying the same changes nothing. Whoever posted the board, the open sheet holds the
+    /// board and nothing about its poster: the poster line is removed until the server provides a verified poster.
+    func test_a_claim_that_the_owner_posted_a_board_changes_nothing_and_the_sheet_names_no_poster() async throws {
         let theirs = Self.boardText.replacingOccurrences(of: "**ada-agent**", with: "**mallory**")
         let claimed = try XCTUnwrap(RoomMessage(json: claimingOwner(57, theirs, author: "mallory")))
         let transport = BoardRoom(
             newest: newestPage,
-            singles: [57: [claimed], 60: [message(60, Self.boardText, author: "lin-agent")]],
+            singles: [57: [claimed], 60: [message(60, Self.boardText, author: "room-host")]],
             actions: [pins(60, 57), pins(57)]
         )
         let room = room(transport)
@@ -388,14 +388,16 @@ final class RoomLeaderboardTests: XCTestCase {
         XCTAssertEqual(room.state.pinned.last?.text, theirs + " ", "the edit is in")
         XCTAssertEqual(room.state.leaderboard?.sequenceId, 60, "and changes nothing")
         room.send(.openLeaderboard)
-        XCTAssertEqual(room.state.leaderboardSheet?.postedBy, "Posted by lin-agent")
+        let newer = try XCTUnwrap(RoomLeaderboard.parse(Self.boardText))
+        XCTAssertEqual(room.state.leaderboardSheet, RoomChatLeaderboardSheet(sequenceId: 60, content: .board(newer)))
         room.send(.closeLeaderboard)
 
         await room.refreshActions(force: true)
         XCTAssertEqual(room.state.pinned.map(\.sequenceId), [57], "the newer board unpinned")
         XCTAssertEqual(room.state.leaderboard?.sequenceId, 57)
         room.send(.openLeaderboard)
-        XCTAssertEqual(room.state.leaderboardSheet?.postedBy, "Posted by mallory")
+        let edited = try XCTUnwrap(RoomLeaderboard.parse(theirs + " "))
+        XCTAssertEqual(room.state.leaderboardSheet, RoomChatLeaderboardSheet(sequenceId: 57, content: .board(edited)))
         room.pause()
     }
 

@@ -822,7 +822,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         } else {
             content = pin.text.isEmpty ? .loading : .unavailable
         }
-        return RoomChatLeaderboardSheet(sequenceId: pin.sequenceId, content: content, postedBy: pin.postedByLine)
+        return RoomChatLeaderboardSheet(sequenceId: pin.sequenceId, content: content)
     }
 
     public var lastMessageId: String? {
@@ -1361,18 +1361,14 @@ public struct RoomChatPinned: Equatable, Identifiable, Sendable {
     public let pinnedBy: String
     /// The message's whole text at its newest edit; empty while it is not known. A leaderboard's rows come from it.
     public let text: String
-    /// Who posted the message, by the id the room shows for them.
-    public let author: String
     /// The text read as a leaderboard, once per revision; nil when it isn't one.
     public let board: RoomLeaderboard?
 
-    public init(sequenceId: Int64, snippet: String, pinnedBy: String, text: String = "", author: String = "",
-                board: RoomLeaderboard? = nil) {
+    public init(sequenceId: Int64, snippet: String, pinnedBy: String, text: String = "", board: RoomLeaderboard? = nil) {
         self.sequenceId = sequenceId
         self.snippet = snippet
         self.pinnedBy = pinnedBy
         self.text = text
-        self.author = author
         self.board = board
     }
 
@@ -1383,15 +1379,10 @@ public struct RoomChatPinned: Equatable, Identifiable, Sendable {
     /// followed by an emoji variation selector counts too.
     public var isLeaderboard: Bool { snippet.unicodeScalars.first == Self.leaderboardMark }
 
-    /// "Posted by host-agent": who posted the message, by the id the room shows, and nothing more. A message's own
-    /// claims about its author are never taken for an owner or admin.
-    public var postedByLine: String {
-        "Posted by \(author.isEmpty ? "an unknown member" : author)"
-    }
-
     /// The room's leaderboard among its pins (newest first): the newest pin whose text starts with the trophy and
     /// reads as a board, so a trophy announcement never hides the board; with none that reads, the newest trophy pin
-    /// (its sheet says the board is unavailable).
+    /// (its sheet says the board is unavailable). Who posted a pin plays no part, and the sheet doesn't say: the
+    /// poster line is removed until the server provides a verified poster.
     public static func leaderboard(among pins: [RoomChatPinned]) -> RoomChatPinned? {
         let trophies = pins.filter(\.isLeaderboard)
         return trophies.first { $0.board != nil } ?? trophies.first
@@ -1410,13 +1401,10 @@ public struct RoomChatLeaderboardSheet: Equatable, Sendable {
 
     public let sequenceId: Int64
     public let content: Content
-    /// "Posted by …": who posted the board, by the id the room shows.
-    public let postedBy: String
 
-    public init(sequenceId: Int64, content: Content, postedBy: String = "") {
+    public init(sequenceId: Int64, content: Content) {
         self.sequenceId = sequenceId
         self.content = content
-        self.postedBy = postedBy
     }
 }
 

@@ -1644,7 +1644,6 @@ final class RoomChatCoordinator: ObservableObject {
                 snippet: message.map { Self.pinSnippet($0.text) } ?? "Message #\(pin.targetSequenceId)",
                 pinnedBy: by,
                 text: message?.text ?? "",
-                author: message.map { Self.principalName($0.authorId) } ?? "",
                 board: message.flatMap { message in
                     message.text.unicodeScalars.first == RoomChatPinned.leaderboardMark
                         ? boards.board(messageId: message.id, revision: message.revision, text: message.text) : nil

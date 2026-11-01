@@ -66,7 +66,6 @@ struct RoomLeaderboardSheetView: View {
                     .font(.subheadline)
                     .foregroundStyle(PocketPalette.textSecondary)
                     .multilineTextAlignment(.center)
-                postedBy
                 openMessageButton
             }
             .padding(24)
@@ -79,11 +78,8 @@ struct RoomLeaderboardSheetView: View {
                         RoomLeaderboardRowView(row: row, isMoved: moved.contains(row.id))
                     }
                 } header: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(verbatim: board.header)
-                            .accessibilityIdentifier("pocket.room.leaderboard.header")
-                        postedBy
-                    }
+                    Text(verbatim: board.header)
+                        .accessibilityIdentifier("pocket.room.leaderboard.header")
                 } footer: {
                     VStack(alignment: .leading, spacing: 14) {
                         if let howItWorks = board.howItWorks {
@@ -103,18 +99,6 @@ struct RoomLeaderboardSheetView: View {
                 }
             }
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.35), value: board.rows.map(\.id))
-        }
-    }
-
-    /// Who posted the board, by the id the room shows.
-    @ViewBuilder
-    private var postedBy: some View {
-        if !sheet.postedBy.isEmpty {
-            Text(verbatim: sheet.postedBy)
-                .font(.caption)
-                .foregroundStyle(PocketPalette.textSecondary)
-                .textCase(nil)
-                .accessibilityIdentifier("pocket.room.leaderboard.postedBy")
         }
     }
 

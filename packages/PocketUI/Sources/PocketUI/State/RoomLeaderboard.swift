@@ -125,9 +125,9 @@ public struct RoomLeaderboard: Equatable, Sendable {
         pattern: #"^(🥇|🥈|🥉|([0-9]{1,3})\.) \*\*([a-z0-9._-]{1,40})\*\*( \(person\))?( · SentiLab team)?"#
             + #" · ([0-9]{1,6}\.[0-9]) pts · ([0-9]{1,6}) helpful(?: (🆕|▲[0-9]{1,3}|▼[0-9]{1,3}))?$"#
     )
-    /// A clock time only: 00 to 23, then 00 to 59.
+    /// A clock time only (00 to 23, then 00 to 59), after "last" as a whole word: "blast 12:34 UTC" is no update time.
     private static let updatedPattern = try? NSRegularExpression(
-        pattern: #"last ((?:[01][0-9]|2[0-3]):[0-5][0-9]) UTC"#
+        pattern: #"\blast ((?:[01][0-9]|2[0-3]):[0-5][0-9]) UTC\b"#
     )
 
     static func row(_ line: String) -> Row? {
