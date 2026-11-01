@@ -83,6 +83,19 @@ final class RoomChatCoordinator: ObservableObject {
     /// The room's pinned messages (newest first) and how many it may hold.
     private var pinned: [RoomPinnedMessage] = []
     private var pinLimit = 10
+    /// Each pinned message at its newest edit, kept apart from the loaded rows: one the rows don't hold is read once at
+    /// its place, and one they drop keeps its text. A pin far up the room still shows its line, and one starting with
+    /// the trophy is the room's leaderboard.
+    private var pinnedMessages: [Int64: RoomMessage] = [:]
+    /// Pinned messages asked for, each once (again only after a read that failed).
+    private var pinnedAsked: Set<Int64> = []
+    /// The leaderboard is asked to be open: the sheet shows while the room keeps a board, and says when it closes.
+    private var leaderboardOpen = false
+    /// The open sheet has shown a board: if the room then has none (unpinned), it closes, and doesn't come back by
+    /// itself when a board is pinned again. An open asked for before the board is read waits for it.
+    private var leaderboardShown = false
+    /// Each board message read once per revision.
+    private let boards = RoomLeaderboardCache()
     /// A message to bring into view once (opened from a notification or link); cleared when the view shows it.
     private var focusTarget: Int64?
     /// Links whose message could not be loaded; each one sends the reader to the latest messages.
@@ -336,6 +349,14 @@ final class RoomChatCoordinator: ObservableObject {
             rename(to: name)
         case .openThread(let sequenceId):
             openThread(sequenceId)
+        case .openLeaderboard:
+            leaderboardOpen = true
+            leaderboardShown = false
+            publish()
+        case .closeLeaderboard:
+            leaderboardOpen = false
+            leaderboardShown = false
+            publish()
         case .closeThread:
             // Unsent replies stay with their thread and show again when it reopens.
             openThreadSequence = nil
@@ -506,7 +527,7 @@ final class RoomChatCoordinator: ObservableObject {
                     guard current == self.generation, self.timeline.hasMoreNewer else { return }
                     let oldest = self.timeline.oldestSequence
                     self.timeline.merge(page.messages, trimming: .oldest)
-                    self.timeline.applyEdits(page.edits)
+                    self.applyEdits(page.edits)
                     self.noteOldestTrimmed(was: oldest)
                     self.reconcilePending(with: page.messages)
                     from = max(from, page.maxSequence ?? from)
@@ -794,7 +815,56 @@ final class RoomChatCoordinator: ObservableObject {
         // The pinned list is the room's whole current list.
         pinned = page.pinned
         pinLimit = page.pinLimit
+        readPinnedOutsideRows()
         publish()
+    }
+
+    /// Keeps every pinned message's text: the loaded rows' copies, and for one the rows don't hold, the one message at
+    /// its place, read through the room's own page read (no other request). A message that is unpinned is let go.
+    private func readPinnedOutsideRows() {
+        let sequences = Set(pinned.map(\.targetSequenceId))
+        pinnedMessages = pinnedMessages.filter { sequences.contains($0.key) }
+        pinnedAsked.formIntersection(sequences)
+        _ = notePinned(timeline.messages.filter { sequences.contains($0.sequenceId) })
+        for sequence in sequences.sorted() where pinnedMessages[sequence] == nil && !pinnedAsked.contains(sequence) {
+            pinnedAsked.insert(sequence)
+            let current = generation
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    let page = try await self.transport.roomEventsBefore(
+                        sessionId: self.sessionId, beforeSequence: sequence + 1, limit: 1
+                    )
+                    guard current == self.generation else {
+                        self.pinnedAsked.remove(sequence)
+                        return
+                    }
+                    // Nothing at that place (gone, or not a message): asked, and not asked again.
+                    let message = page.messages.first { $0.sequenceId == sequence }
+                    if let message, self.notePinned([message]) { self.publish() }
+                } catch {
+                    self.pinnedAsked.remove(sequence)
+                }
+            }
+        }
+    }
+
+    /// Keeps a pinned message's newest revision. Whether one changed.
+    private func notePinned(_ messages: [RoomMessage]) -> Bool {
+        var changed = false
+        for message in messages where pinned.contains(where: { $0.targetSequenceId == message.sequenceId }) {
+            guard message.revision > (pinnedMessages[message.sequenceId]?.revision ?? 0) else { continue }
+            pinnedMessages[message.sequenceId] = message
+            changed = true
+        }
+        return changed
+    }
+
+    /// Edits land on the loaded rows and on the pinned messages kept outside them. Whether anything shown changed.
+    @discardableResult
+    private func applyEdits(_ edits: [RoomMessage]) -> Bool {
+        let replaced = !timeline.applyEdits(edits).isEmpty
+        return notePinned(edits) || replaced
     }
 
     private func react(_ type: String, on sequenceId: Int64) {
@@ -1325,7 +1395,7 @@ final class RoomChatCoordinator: ObservableObject {
         case .edited(let message, let sequenceId):
             connection = .live
             lastAppliedSequence = max(lastAppliedSequence, sequenceId)
-            if !timeline.applyEdits([message]).isEmpty { publish() }
+            if applyEdits([message]) { publish() }
             return true
         case .nonDisplayable(let sequenceId):
             connection = .live
@@ -1364,7 +1434,7 @@ final class RoomChatCoordinator: ObservableObject {
         }
         // After the page's own rows, so an edit of a message in the same page lands on it (Carter, #55371: an edit
         // made elsewhere showed neither its text nor "edited" until the room was reopened).
-        timeline.applyEdits(page.edits)
+        applyEdits(page.edits)
         if let maxSequence = page.maxSequence {
             lastAppliedSequence = max(lastAppliedSequence, maxSequence)
         }
@@ -1559,6 +1629,39 @@ final class RoomChatCoordinator: ObservableObject {
     }
 
     private func publish() {
+        // What is shown of a pinned message comes from here, so the newest revision the loaded rows hold is kept
+        // first: a board shown at a newer revision (in a window loaded around it, say) never goes back to an older
+        // one when those rows go.
+        _ = notePinned(timeline.messages)
+        let pins = pinned.map { pin in
+            // The loaded row or the copy kept apart, whichever has the newer edit.
+            let message = [timeline.messages.first { $0.sequenceId == pin.targetSequenceId },
+                           pinnedMessages[pin.targetSequenceId]]
+                .compactMap { $0 }.max { $0.revision < $1.revision }
+            let by = pin.pinnedBy.lowercased().hasPrefix("human-") ? String(pin.pinnedBy.dropFirst("human-".count)) : pin.pinnedBy
+            return RoomChatPinned(
+                sequenceId: pin.targetSequenceId,
+                snippet: message.map { Self.pinSnippet($0.text) } ?? "Message #\(pin.targetSequenceId)",
+                pinnedBy: by,
+                text: message?.text ?? "",
+                board: message.flatMap { message in
+                    message.text.unicodeScalars.first == RoomChatPinned.leaderboardMark
+                        ? boards.board(messageId: message.id, revision: message.revision, text: message.text) : nil
+                }
+            )
+        }
+        boards.keep(only: Set(pinnedMessages.values.map(\.id) + timeline.messages.filter { message in
+            pinned.contains { $0.targetSequenceId == message.sequenceId }
+        }.map(\.id)))
+        if leaderboardOpen {
+            if RoomChatPinned.leaderboard(among: pins) != nil {
+                leaderboardShown = true
+            } else if leaderboardShown {
+                // The board was unpinned while open: closed, and it stays closed when one is pinned again.
+                leaderboardOpen = false
+                leaderboardShown = false
+            }
+        }
         let work = workLines()
         let inputs = timeline.messages.map { message -> RoomChatMessageInput in
             let date: Date?
@@ -1658,15 +1761,8 @@ final class RoomChatCoordinator: ObservableObject {
             breakouts: breakouts.mapValues(Self.card),
             attachmentPreviews: previews,
             presence: presenceState,
-            pinned: pinned.map { pin in
-                let message = timeline.messages.first { $0.sequenceId == pin.targetSequenceId }
-                let by = pin.pinnedBy.lowercased().hasPrefix("human-") ? String(pin.pinnedBy.dropFirst("human-".count)) : pin.pinnedBy
-                return RoomChatPinned(
-                    sequenceId: pin.targetSequenceId,
-                    snippet: message.map { Self.pinSnippet($0.text) } ?? "Message #\(pin.targetSequenceId)",
-                    pinnedBy: by
-                )
-            },
+            pinned: pins,
+            leaderboardOpen: leaderboardOpen,
             canPin: canPin,
             pinLimit: pinLimit,
             canRename: canRename,

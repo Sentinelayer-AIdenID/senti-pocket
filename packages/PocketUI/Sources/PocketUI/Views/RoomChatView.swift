@@ -122,6 +122,22 @@ public struct RoomChatView: View {
                 )
             }
         }
+        .sheet(isPresented: Binding(
+            get: { state.leaderboardSheet != nil },
+            set: { presented in if !presented { send(.closeLeaderboard) } }
+        )) {
+            if let sheet = state.leaderboardSheet {
+                RoomLeaderboardSheetView(
+                    sheet: sheet,
+                    onOpenMessage: {
+                        // The sheet closes, and the room brings the board's message into view, loaded or not.
+                        send(.closeLeaderboard)
+                        send(.jumpToMessage(sequenceId: sheet.sequenceId))
+                    },
+                    onDone: { send(.closeLeaderboard) }
+                )
+            }
+        }
         .sheet(item: $openCheckpoint) { row in
             CheckpointSheet(row: row, send: send)
         }
@@ -317,6 +333,8 @@ public struct RoomChatView: View {
                         pinned: state.pinned,
                         limit: state.pinLimit,
                         canUnpin: state.canPin,
+                        leaderboard: state.leaderboard,
+                        onOpenLeaderboard: { send(.openLeaderboard) },
                         onOpen: { jump(to: $0, proxy: proxy) },
                         onUnpin: { send(.setPinned(sequenceId: $0, isPinned: false)) }
                     )
@@ -2772,6 +2790,10 @@ private struct RoomPinnedStrip: View {
     let pinned: [RoomChatPinned]
     let limit: Int
     let canUnpin: Bool
+    /// The room's leaderboard among the pins, if it keeps one.
+    let leaderboard: RoomChatPinned?
+    /// Opens the leaderboard as a list in a sheet.
+    let onOpenLeaderboard: () -> Void
     let onOpen: (Int64) -> Void
     let onUnpin: (Int64) -> Void
 
@@ -2784,6 +2806,10 @@ private struct RoomPinnedStrip: View {
                 Text("\(min(pinned.count, limit))/\(limit)")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(PocketPalette.textSecondary)
+                Spacer(minLength: 8)
+                if let leaderboard {
+                    leaderboardButton(leaderboard)
+                }
             }
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
@@ -2832,6 +2858,27 @@ private struct RoomPinnedStrip: View {
             }
         }
         .accessibilityIdentifier("pocket.room.pinned")
+    }
+
+    /// The room's leaderboard, in the strip's first row, right under the room's title: the navigation bar of a
+    /// 375-point phone shows two buttons and folds the rest into its overflow menu, where a trophy would be lost. It
+    /// opens the board as a ranked list in a sheet, never as a jump to its message.
+    private func leaderboardButton(_ board: RoomChatPinned) -> some View {
+        Button {
+            onOpenLeaderboard()
+        } label: {
+            Label("Leaderboard", systemImage: "trophy.fill")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(PocketPalette.warning)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(PocketPalette.raised, in: Capsule())
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Leaderboard")
+        .accessibilityHint("Shows who is helping most in this room")
+        .accessibilityIdentifier("pocket.room.leaderboard")
     }
 }
 

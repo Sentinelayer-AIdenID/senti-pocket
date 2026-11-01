@@ -833,6 +833,9 @@ struct RoomChatScreen: View {
             CrashReporter.shared.note("room opened")
             coordinator.resume()
             applyRouteLinksOnce()
+            #if DEBUG
+            if RoomPreview.isLeaderboardSheetRequested { coordinator.send(.openLeaderboard) }
+            #endif
             takeAnsweredCall()
         }
         .onDisappear {

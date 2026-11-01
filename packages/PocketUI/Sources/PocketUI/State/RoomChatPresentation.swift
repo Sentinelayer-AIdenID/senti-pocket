@@ -520,6 +520,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     public let presence: RoomChatPresence?
     /// The room's pinned messages, newest pin first.
     public let pinned: [RoomChatPinned]
+    /// The leaderboard sheet is open (see `leaderboardSheet`).
+    public let leaderboardOpen: Bool
     /// You may pin and unpin (contributors and up).
     public let canPin: Bool
     /// How many messages the room can pin at once.
@@ -563,6 +565,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         attachmentPreviews: [String: Data] = [:],
         presence: RoomChatPresence? = nil,
         pinned: [RoomChatPinned] = [],
+        leaderboardOpen: Bool = false,
         canPin: Bool = false,
         pinLimit: Int = 10,
         canRename: Bool = false,
@@ -597,6 +600,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         self.attachmentPreviews = protectedFailure ? [:] : attachmentPreviews
         self.presence = protectedFailure ? nil : presence
         self.pinned = protectedFailure ? [] : pinned
+        self.leaderboardOpen = protectedFailure ? false : leaderboardOpen
         self.canPin = protectedFailure ? false : canPin
         self.pinLimit = max(1, pinLimit)
         self.canRename = protectedFailure ? false : canRename
@@ -800,6 +804,25 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     /// A pin belongs to its message: a reply shown in the room is never marked by its message's pin.
     public func isPinned(_ row: RoomChatMessageRow) -> Bool {
         !row.isInlineReply && pinned.contains { $0.sequenceId == row.sequenceId }
+    }
+
+    /// The room's leaderboard (see `RoomChatPinned.leaderboard(among:)`). Rooms that keep one (a scoreboard of who
+    /// is helping most, pinned and edited as the scores change) show a Leaderboard button under the room's title
+    /// that opens it; any other room shows none.
+    public var leaderboard: RoomChatPinned? { RoomChatPinned.leaderboard(among: pinned) }
+
+    /// The leaderboard sheet while it is open and the room keeps a board: the board read from the pinned message
+    /// (again at each edit, so the open list follows the standings), a line while its text is still being read, or
+    /// "Board unavailable" when no row in it can be read. Never the message's raw text.
+    public var leaderboardSheet: RoomChatLeaderboardSheet? {
+        guard leaderboardOpen, let pin = leaderboard else { return nil }
+        let content: RoomChatLeaderboardSheet.Content
+        if let board = pin.board {
+            content = .board(board)
+        } else {
+            content = pin.text.isEmpty ? .loading : .unavailable
+        }
+        return RoomChatLeaderboardSheet(sequenceId: pin.sequenceId, content: content)
     }
 
     public var lastMessageId: String? {
@@ -1274,6 +1297,9 @@ public enum RoomChatIntent: Equatable, Sendable {
     case react(sequenceId: Int64, type: String)
     case openThread(sequenceId: Int64)
     case closeThread
+    /// The room's leaderboard, as a list in a sheet.
+    case openLeaderboard
+    case closeLeaderboard
     case sendReply(sequenceId: Int64, text: String)
     /// A reply to a reply in a thread (it nests under it).
     case sendReplyToReply(sequenceId: Int64, replyId: String, text: String)
@@ -1330,14 +1356,55 @@ public enum RoomTitle {
 public struct RoomChatPinned: Equatable, Identifiable, Sendable {
     public var id: Int64 { sequenceId }
     public let sequenceId: Int64
-    /// The message's first line, or "Message #N" when it is not loaded.
+    /// The message's first line, or "Message #N" when its text is not known yet.
     public let snippet: String
     public let pinnedBy: String
+    /// The message's whole text at its newest edit; empty while it is not known. A leaderboard's rows come from it.
+    public let text: String
+    /// The text read as a leaderboard, once per revision; nil when it isn't one.
+    public let board: RoomLeaderboard?
 
-    public init(sequenceId: Int64, snippet: String, pinnedBy: String) {
+    public init(sequenceId: Int64, snippet: String, pinnedBy: String, text: String = "", board: RoomLeaderboard? = nil) {
         self.sequenceId = sequenceId
         self.snippet = snippet
         self.pinnedBy = pinnedBy
+        self.text = text
+        self.board = board
+    }
+
+    /// The mark a leaderboard's text starts with.
+    public static let leaderboardMark: Unicode.Scalar = "🏆"
+
+    /// A pin whose text starts with the trophy: the room's leaderboard. Compared by its first scalar, so the mark
+    /// followed by an emoji variation selector counts too.
+    public var isLeaderboard: Bool { snippet.unicodeScalars.first == Self.leaderboardMark }
+
+    /// The room's leaderboard among its pins (newest first): the newest pin whose text starts with the trophy and
+    /// reads as a board, so a trophy announcement never hides the board; with none that reads, the newest trophy pin
+    /// (its sheet says the board is unavailable). Who posted a pin plays no part, and the sheet doesn't say: the
+    /// poster line is removed until the server provides a verified poster.
+    public static func leaderboard(among pins: [RoomChatPinned]) -> RoomChatPinned? {
+        let trophies = pins.filter(\.isLeaderboard)
+        return trophies.first { $0.board != nil } ?? trophies.first
+    }
+}
+
+/// The open leaderboard: the board's message, and what the sheet shows of it.
+public struct RoomChatLeaderboardSheet: Equatable, Sendable {
+    public enum Content: Equatable, Sendable {
+        /// The pinned message's text is still being read.
+        case loading
+        case board(RoomLeaderboard)
+        /// Not one row of the message could be read: the sheet offers the message itself instead.
+        case unavailable
+    }
+
+    public let sequenceId: Int64
+    public let content: Content
+
+    public init(sequenceId: Int64, content: Content) {
+        self.sequenceId = sequenceId
+        self.content = content
     }
 }
 
