@@ -358,6 +358,32 @@ final class RoomBase64FilesTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(started), 3, "linear, not quadratic")
     }
 
+    /// A file named once and then a long run of characters that can't end a file name: finding where the name's
+    /// declaration ends stays linear (a backtracking pattern over the run takes seconds). The review's input, a post of
+    /// 64k characters, and the same run with a hash after it, so the declaration is read to its end. Each under 200 ms,
+    /// the fastest of three runs, so a busy machine doesn't decide it.
+    func test_a_long_run_after_a_name_is_read_in_linear_time() throws {
+        let run = String(repeating: "a", count: 60_000)
+        let hash = RoomBase64Files.sha256Hex(Data("Hi".utf8))
+        let cases: [(body: String, status: RoomBase64File.Status)] = [
+            ("`notes.txt` " + run, .noDeclaredHash),
+            ("`notes.txt` " + String(repeating: "a", count: 65_536 - 12), .noDeclaredHash),
+            ("`notes.txt` " + run + " sha256 " + hash, .verified)
+        ]
+        let part = post("notes.txt part 1/1\nSGk=", id: "part")
+        for (body, status) in cases {
+            let posts = [post(body, id: "long"), part]
+            var fastest = Double.infinity
+            for _ in 0..<3 {
+                let started = Date()
+                XCTAssertEqual(RoomBase64Files.reassemble(posts).map(\.status), [status], "\(body.count) characters")
+                fastest = min(fastest, Date().timeIntervalSince(started))
+            }
+            print("ROOM-FILES-TIMING \(body.count) characters, \(status.line): fastest of 3 \(Int(fastest * 1_000)) ms")
+            XCTAssertLessThan(fastest, 0.2, "\(body.count) characters")
+        }
+    }
+
     // MARK: - Resources
 
     /// The cap is checked from the base64 length before anything is decoded: a file one byte over a lowered cap is
