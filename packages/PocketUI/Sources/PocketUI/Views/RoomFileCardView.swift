@@ -4,26 +4,22 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// A verified file on its way out of the app: written only when the person picks where it goes in the share sheet
-/// (Files, AirDrop, another app), never before, and never opened or rendered here.
+/// (Files, AirDrop, another app), never before, and never opened or rendered here. Old exports are removed as it is
+/// written (see `RoomFileExports`).
 struct RoomFileExport: Transferable, Sendable {
     let name: String
     let content: RoomChatFileContent
 
     static var transferRepresentation: some TransferRepresentation {
         FileRepresentation(exportedContentType: .data) { export in
-            let folder = FileManager.default.temporaryDirectory
-                .appendingPathComponent("room-files", isDirectory: true)
-                .appendingPathComponent(UUID().uuidString, isDirectory: true)
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            let url = folder.appendingPathComponent(export.name)
-            try export.content.data.write(to: url, options: .atomic)
-            return SentTransferredFile(url)
+            SentTransferredFile(try RoomFileExports.write(export.content.data, named: export.name))
         }
     }
 }
 
-/// A file posted as base64 parts, at the root of its thread. Verified: its name, size, hash and parts, and Download.
-/// Not verified: the reason, and no way to save it. The posts it came from fold behind "N data parts".
+/// A file posted as base64 parts, at the root of its thread, with who posted it. Verified: its name, size, hash and
+/// parts, and Download. Not verified: the reason, and no way to save it. The posts it came from fold behind
+/// "N data parts".
 struct RoomFileCardView: View {
     let card: RoomChatFileCard
     let showsParts: Bool
@@ -49,6 +45,11 @@ struct RoomFileCardView: View {
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(PocketPalette.textPrimary)
                         .lineLimit(2)
+                    Text(verbatim: card.postedBy)
+                        .font(.caption)
+                        .foregroundStyle(PocketPalette.textSecondary)
+                        .lineLimit(1)
+                        .accessibilityIdentifier("pocket.room.file.author")
                     Text(verbatim: card.detail)
                         .font(.caption)
                         .foregroundStyle(card.isVerified ? PocketPalette.textSecondary : PocketPalette.warning)

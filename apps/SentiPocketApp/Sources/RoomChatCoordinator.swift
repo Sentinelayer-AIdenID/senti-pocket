@@ -80,11 +80,13 @@ final class RoomChatCoordinator: ObservableObject {
     private var ownLogin: String?
     /// Read receipts and presence, when the room is wired for them.
     private var receiptsTracker: RoomReceiptsTracker?
-    /// Files posted as base64 parts, by thread: the posts they were put together from (each post's id and revision),
-    /// their cards, and the posts that are parts. Put together off the main thread when a thread's posts change.
-    private var fileThreads: [Int64: (posts: [String], cards: [RoomChatFileCard], parts: [String])] = [:]
-    /// The threads being put together now, with the posts they are being put together from.
-    private var fileThreadsWorking: [Int64: [String]] = [:]
+    /// Files posted as base64 parts, by thread (nil: the room's top level): the posts they were put together from
+    /// (each post's id and revision), their cards by the message each goes on, and the posts that are parts by the
+    /// message whose card they fold behind. Put together off the main thread when a thread's posts change.
+    private var fileThreads: [Int64?: PlacedFiles] = [:]
+    /// The threads being put together now: the posts each is being put together from, and the work, cancelled when
+    /// newer posts supersede it.
+    private var fileThreadsWorking: [Int64?: (posts: [String], work: Task<[RoomBase64File], Never>)] = [:]
     /// Whether each post, at its revision, is shaped like a part: asked once per revision.
     private var partShaped: [String: (revision: Int64, isPart: Bool)] = [:]
     /// The room's pinned messages (newest first) and how many it may hold.
@@ -244,6 +246,8 @@ final class RoomChatCoordinator: ObservableObject {
     func resume() {
         guard liveTasks.isEmpty, !failureIsTerminal else { return }
         learnOwnIdentityIfNeeded()
+        // Files saved from rooms earlier are left for the share sheet a while, then removed here.
+        Task.detached(priority: .utility) { RoomFileExports.removeExports() }
         receiptsTracker?.start()
         generation &+= 1
         let current = generation
@@ -1682,8 +1686,8 @@ final class RoomChatCoordinator: ObservableObject {
             threadSummaries: threadSummaries.compactMapValues { $0.text.isEmpty ? nil : $0.text },
             replies: replyInputs,
             expandedRepeats: expandedRepeats,
-            files: fileThreads.mapValues(\.cards).filter { !$0.value.isEmpty },
-            fileParts: Dictionary(fileThreads.flatMap { thread, files in files.parts.map { ($0, thread) } },
+            files: fileCards(),
+            fileParts: Dictionary(fileThreads.values.flatMap { $0.parts.map { ($0.key, $0.value) } },
                                   uniquingKeysWith: { first, _ in first })
         )
         summarizeNextThread(replyInputs)
@@ -1691,68 +1695,135 @@ final class RoomChatCoordinator: ObservableObject {
 
     // MARK: - Files posted as base64 parts
 
+    /// A thread's files: the posts they came from (by id and revision), their cards by the message each goes on, and
+    /// each part post by the message whose card it folds behind.
+    private typealias PlacedFiles = (posts: [String], cards: [Int64: [RoomChatFileCard]], parts: [String: Int64])
+
     private struct FilePost {
-        let thread: Int64
+        /// The thread; nil for the room's top level.
+        let thread: Int64?
+        /// A message's own sequence (nil for a threaded reply): where a top-level file's card can go.
+        let sequence: Int64?
+        let author: String
         let id: String
         let revision: Int64
         let body: String
     }
 
-    /// Every post the room holds, in a fixed order: its messages by sequence (a reply to a message belongs to that
-    /// message's thread), then the threaded replies by time.
+    /// Every post the room holds, in a fixed order: its messages by sequence, then the threaded replies by time. A
+    /// reply belongs to its message's thread, and so does a message that answers another. A top-level message
+    /// belongs to its own thread when its author posted a part in reply to it (its file is there, and it may
+    /// declare it); otherwise to the room's top level, where its parts group with its author's other top-level
+    /// posts. Anyone's reply to a top-level part leaves that part where it is.
     private func filePosts() -> [FilePost] {
-        var posts = timeline.messages.filter { $0.kind == .message }.map {
-            FilePost(thread: $0.replyToSequenceId ?? $0.sequenceId, id: $0.id, revision: $0.revision, body: $0.text)
-        }
+        let messages = timeline.messages.filter { $0.kind == .message }
         var replies = inlineReplies
         for reply in threadReplies where (replies[reply.id]?.revision ?? 0) < reply.revision {
             replies[reply.id] = reply
         }
-        posts += replies.values.sorted { ($0.createdAt, $0.id) < ($1.createdAt, $1.id) }.map {
-            FilePost(thread: $0.targetSequenceId, id: $0.id, revision: $0.revision, body: $0.text)
+        let sortedReplies = replies.values.sorted { ($0.createdAt, $0.id) < ($1.createdAt, $1.id) }
+        var holdsOwnPart = Set<String>()
+        for reply in sortedReplies where isPart(reply.id, reply.revision, reply.text) {
+            holdsOwnPart.insert("\(reply.targetSequenceId)\n\(reply.authorId)")
+        }
+        for message in messages {
+            guard let root = message.replyToSequenceId, isPart(message.id, message.revision, message.text) else {
+                continue
+            }
+            holdsOwnPart.insert("\(root)\n\(message.authorId)")
+        }
+        var posts = messages.map { message -> FilePost in
+            let ownThread = holdsOwnPart.contains("\(message.sequenceId)\n\(message.authorId)")
+            return FilePost(thread: message.replyToSequenceId ?? (ownThread ? message.sequenceId : nil),
+                            sequence: message.sequenceId, author: message.authorId, id: message.id,
+                            revision: message.revision, body: message.text)
+        }
+        posts += sortedReplies.map {
+            FilePost(thread: $0.targetSequenceId, sequence: nil, author: $0.authorId, id: $0.id,
+                     revision: $0.revision, body: $0.text)
         }
         return posts
     }
 
-    /// Puts together the files of each thread whose posts changed since, off the main thread (decoding and hashing
-    /// a file of many megabytes takes a moment); a thread with no part any more lets its files go.
+    /// Whether a post, at its revision, is a part: worked out once per revision.
+    private func isPart(_ id: String, _ revision: Int64, _ body: String) -> Bool {
+        if let known = partShaped[id], known.revision == revision { return known.isPart }
+        let isPart = RoomBase64Files.mayBePart(body)
+        partShaped[id] = (revision, isPart)
+        return isPart
+    }
+
+    /// Puts together the files of each thread (and of the room's top level) whose posts changed since, off the main
+    /// thread (decoding and hashing a file of many megabytes takes a moment). Newer posts cancel the work they
+    /// supersede; a thread with no part any more lets its files go.
     private func refreshFiles() {
         let posts = filePosts()
-        var threads = Set<Int64>()
-        for post in posts {
-            let isPart: Bool
-            if let known = partShaped[post.id], known.revision == post.revision {
-                isPart = known.isPart
-            } else {
-                isPart = RoomBase64Files.mayBePart(post.body)
-                partShaped[post.id] = (post.revision, isPart)
-            }
-            if isPart { threads.insert(post.thread) }
+        var threads = Set<Int64?>()
+        for post in posts where isPart(post.id, post.revision, post.body) { threads.insert(post.thread) }
+        for thread in Set(fileThreads.keys).union(fileThreadsWorking.keys) where !threads.contains(thread) {
+            fileThreads[thread] = nil
+            fileThreadsWorking[thread]?.work.cancel()
+            fileThreadsWorking[thread] = nil
         }
-        for thread in fileThreads.keys where !threads.contains(thread) { fileThreads[thread] = nil }
         for (thread, threadPosts) in Dictionary(grouping: posts.filter { threads.contains($0.thread) }, by: \.thread) {
-            let key = threadPosts.map { "\($0.id)#\($0.revision)" }
-            guard fileThreads[thread]?.posts != key, fileThreadsWorking[thread] != key else { continue }
-            fileThreadsWorking[thread] = key
-            let input = threadPosts.map { RoomFilePost(thread: $0.thread, id: $0.id, body: $0.body) }
+            var input = threadPosts
+            if thread == nil {
+                // At the top level only the authors who posted a part there count: declarations are their own.
+                let authors = Set(threadPosts.filter { isPart($0.id, $0.revision, $0.body) }.map(\.author))
+                input = threadPosts.filter { authors.contains($0.author) }
+            }
+            let key = input.map { "\($0.id)#\($0.revision)" }
+            guard fileThreads[thread]?.posts != key, fileThreadsWorking[thread]?.posts != key else { continue }
+            fileThreadsWorking[thread]?.work.cancel()
+            let files = input.map { RoomFilePost(thread: $0.thread, author: $0.author, id: $0.id, body: $0.body) }
+            let sequences = Dictionary(input.compactMap { post in post.sequence.map { (post.id, $0) } },
+                                       uniquingKeysWith: { first, _ in first })
+            let work = Task.detached(priority: .userInitiated) { RoomBase64Files.reassemble(files) }
+            fileThreadsWorking[thread] = (key, work)
             Task { [weak self] in
-                let files = await Task.detached(priority: .userInitiated) { RoomBase64Files.reassemble(input) }.value
-                guard let self, self.fileThreadsWorking[thread] == key else { return }
+                let found = await work.value
+                guard let self, !work.isCancelled, self.fileThreadsWorking[thread]?.posts == key else { return }
                 self.fileThreadsWorking[thread] = nil
-                self.fileThreads[thread] = (key, files.map(Self.card), files.flatMap(\.partPostIds))
+                self.fileThreads[thread] = Self.placed(found, in: thread, sequences: sequences, posts: key)
                 self.publish()
             }
         }
     }
 
-    private static func card(_ file: RoomBase64File) -> RoomChatFileCard {
+    /// Every file card by the message it goes on; threads in a fixed order, so cards that share a message keep theirs.
+    private func fileCards() -> [Int64: [RoomChatFileCard]] {
+        var cards: [Int64: [RoomChatFileCard]] = [:]
+        for thread in fileThreads.keys.sorted(by: { ($0 ?? .min) < ($1 ?? .min) }) {
+            for (message, list) in fileThreads[thread]?.cards ?? [:] { cards[message, default: []] += list }
+        }
+        return cards
+    }
+
+    /// A thread's files as cards on its root message; at the top level, each file's card on the newest message that
+    /// is one of its parts. Each part folds behind its file's card.
+    private static func placed(
+        _ files: [RoomBase64File], in thread: Int64?, sequences: [String: Int64], posts: [String]
+    ) -> PlacedFiles {
+        var cards: [Int64: [RoomChatFileCard]] = [:]
+        var parts: [String: Int64] = [:]
+        for file in files {
+            guard let message = thread ?? file.partPostIds.compactMap({ sequences[$0] }).max() else { continue }
+            cards[message, default: []].append(card(file, on: message))
+            for id in file.partPostIds { parts[id] = message }
+        }
+        return (posts, cards, parts)
+    }
+
+    private static func card(_ file: RoomBase64File, on message: Int64) -> RoomChatFileCard {
         var hashes: [String] = []
         if case .hashMismatch(let decoded, let gunzipped) = file.status {
             hashes = [decoded] + (gunzipped.map { [$0] } ?? [])
         }
         return RoomChatFileCard(
-            thread: file.thread,
+            id: file.id,
+            thread: message,
             name: file.name,
+            author: principalName(file.author),
             sha256: file.declaredSHA256,
             verified: file.data,
             status: file.isVerified ? nil : file.status.line,

@@ -18,9 +18,10 @@ final class RoomFilePresentationTests: XCTestCase {
     }
 
     private func card(verified: Data?, status: String? = nil, hashes: [String] = [], previewable: Bool = false,
-                      name: String = "fixture-pack.zip") -> RoomChatFileCard {
-        RoomChatFileCard(thread: 10, name: name, sha256: declaredHash, verified: verified, status: status, partsTotal: 3,
-                         partPosts: 3, computedHashes: hashes, previewable: previewable)
+                      name: String = "fixture-pack.zip", author: String = "ada-agent",
+                      thread: Int64 = 10) -> RoomChatFileCard {
+        RoomChatFileCard(thread: thread, name: name, author: author, sha256: declaredHash, verified: verified,
+                         status: status, partsTotal: 3, partPosts: 3, computedHashes: hashes, previewable: previewable)
     }
 
     func test_a_verified_file_shows_its_size_hash_and_parts_and_can_be_saved() throws {
@@ -33,7 +34,21 @@ final class RoomFilePresentationTests: XCTestCase {
         XCTAssertNil(verified.mismatch)
         XCTAssertNil(verified.preview, "not a text file")
         XCTAssertEqual(verified.partsToggleTitle, "3 data parts")
-        XCTAssertEqual(verified.id, "10/fixture-pack.zip/\(declaredHash)")
+        XCTAssertEqual(verified.id, "10/ada-agent/fixture-pack.zip/\(declaredHash)")
+    }
+
+    /// The card says whose file it is: another member's file of the same name in the thread is its own card.
+    func test_the_card_says_who_posted_the_file() {
+        let ada = card(verified: Data([1]))
+        let lin = card(verified: nil, status: "1 of 3 parts", author: "lin-agent")
+        XCTAssertEqual(ada.postedBy, "posted by ada-agent")
+        XCTAssertEqual(lin.postedBy, "posted by lin-agent")
+        XCTAssertNotEqual(ada.id, lin.id, "same name and hash, two authors: two cards")
+        XCTAssertEqual(card(verified: nil, author: "").postedBy, "posted by an unknown member")
+        let given = RoomChatFileCard(id: "top/ada-agent/a.bin/-", thread: 5, name: "a.bin", author: "ada-agent",
+                                     sha256: nil, verified: nil, status: "no declared hash", partsTotal: 1,
+                                     partPosts: 1, previewable: false)
+        XCTAssertEqual(given.id, "top/ada-agent/a.bin/-", "the room's own id for the file")
     }
 
     func test_a_file_that_is_not_verified_shows_why_and_cannot_be_saved() {
@@ -102,6 +117,45 @@ final class RoomFilePresentationTests: XCTestCase {
         }.last)
         XCTAssertEqual(part.files, [missing])
         XCTAssertEqual(part.filePartOf, 10)
+    }
+
+    /// Parts posted at the top level, not as replies: the card goes on the newest of them, and the others fold.
+    func test_top_level_parts_carry_their_card_on_the_newest_part() throws {
+        let state = RoomChatPresentationState(
+            sessionId: "room", title: "Room",
+            messages: [input("m20", seq: 20, at: 0), input("m21", seq: 21, at: 10), input("m22", seq: 22, at: 20)],
+            files: [22: [card(verified: Data([1]), thread: 22)]],
+            fileParts: ["m20": 22, "m21": 22, "m22": 22]
+        )
+        let rows = state.rows.compactMap { row -> RoomChatMessageRow? in
+            if case .message(let message) = row { return message }
+            return nil
+        }
+        XCTAssertEqual(rows.map(\.filePartOf), [22, 22, 22])
+        XCTAssertEqual(rows.map(\.files.count), [0, 0, 1])
+    }
+
+    /// Each export is written in a folder of its own; exports older than their lifetime are removed first, newer ones
+    /// stay (the share sheet may still be using them).
+    func test_exports_are_written_fresh_and_old_ones_removed() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("room-files-test-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let now = Date()
+        let old = folder.appendingPathComponent("old", isDirectory: true)
+        let recent = folder.appendingPathComponent("recent", isDirectory: true)
+        for (export, age) in [(old, RoomFileExports.lifetime + 60), (recent, 60)] {
+            try FileManager.default.createDirectory(at: export, withIntermediateDirectories: true)
+            try Data([1]).write(to: export.appendingPathComponent("f.bin"))
+            try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-age)],
+                                                  ofItemAtPath: export.path)
+        }
+        let url = try RoomFileExports.write(Data("rows".utf8), named: "rows.csv", in: folder, now: now)
+        XCTAssertEqual(try Data(contentsOf: url), Data("rows".utf8))
+        XCTAssertEqual(url.lastPathComponent, "rows.csv")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: old.path), "an old export is removed")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: recent.path), "a recent one stays")
+        XCTAssertEqual(RoomFileExports.removeExports(olderThan: 0, in: folder, now: now.addingTimeInterval(60)), 2)
     }
 
     func test_the_thread_sheet_marks_the_replies_that_are_parts() throws {

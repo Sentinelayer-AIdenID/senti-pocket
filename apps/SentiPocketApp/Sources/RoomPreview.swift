@@ -449,7 +449,8 @@ private struct RoomPreviewTransport: RoomTransport {
         row(125, "build-agent", minutesAgo: 2, "The fixture pack, in 3 parts below.")
     ]
 
-    /// Each file in envelope parts, as replies to its message: every part of the checks, and two of the pack's three.
+    /// Each file in envelope parts, as replies to its message by the agent who posted it: every part of the checks,
+    /// and two of the pack's three.
     private static let fileParts: [RoomReply] = {
         let checks = Data((["step,check,result"] + (1...24).map { "\($0),field \($0) validates on paste,pass" })
             .joined(separator: "\n").utf8)
@@ -466,7 +467,8 @@ private struct RoomPreviewTransport: RoomTransport {
                 // A few seconds apart, after the message they answer.
                 let posted = base.addingTimeInterval((root == 124 ? -180 : -120) + Double(index + 1) * 10)
                 let stamp = ISO8601DateFormatter().string(from: posted)
-                return RoomReply(id: "file-\(root)-\(index + 1)", targetSequenceId: root, authorId: "review-agent",
+                return RoomReply(id: "file-\(root)-\(index + 1)", targetSequenceId: root,
+                                 authorId: root == 124 ? "review-agent" : "build-agent",
                                  text: body, createdAt: stamp)
             }
         }
