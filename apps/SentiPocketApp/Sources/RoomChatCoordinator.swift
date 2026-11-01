@@ -89,6 +89,8 @@ final class RoomChatCoordinator: ObservableObject {
     private var pinnedMessages: [Int64: RoomMessage] = [:]
     /// Pinned messages asked for, each once (again only after a read that failed).
     private var pinnedAsked: Set<Int64> = []
+    /// The leaderboard is asked to be open: the sheet shows while the room keeps a board, and says when it closes.
+    private var leaderboardOpen = false
     /// A message to bring into view once (opened from a notification or link); cleared when the view shows it.
     private var focusTarget: Int64?
     /// Links whose message could not be loaded; each one sends the reader to the latest messages.
@@ -342,6 +344,12 @@ final class RoomChatCoordinator: ObservableObject {
             rename(to: name)
         case .openThread(let sequenceId):
             openThread(sequenceId)
+        case .openLeaderboard:
+            leaderboardOpen = true
+            publish()
+        case .closeLeaderboard:
+            leaderboardOpen = false
+            publish()
         case .closeThread:
             // Unsent replies stay with their thread and show again when it reopens.
             openThreadSequence = nil
@@ -1614,6 +1622,19 @@ final class RoomChatCoordinator: ObservableObject {
     }
 
     private func publish() {
+        let pins = pinned.map { pin in
+            // The loaded row or the copy kept apart, whichever has the newer edit.
+            let message = [timeline.messages.first { $0.sequenceId == pin.targetSequenceId },
+                           pinnedMessages[pin.targetSequenceId]]
+                .compactMap { $0 }.max { $0.revision < $1.revision }
+            let by = pin.pinnedBy.lowercased().hasPrefix("human-") ? String(pin.pinnedBy.dropFirst("human-".count)) : pin.pinnedBy
+            return RoomChatPinned(
+                sequenceId: pin.targetSequenceId,
+                snippet: message.map { Self.pinSnippet($0.text) } ?? "Message #\(pin.targetSequenceId)",
+                pinnedBy: by,
+                text: message?.text ?? ""
+            )
+        }
         let work = workLines()
         let inputs = timeline.messages.map { message -> RoomChatMessageInput in
             let date: Date?
@@ -1713,18 +1734,8 @@ final class RoomChatCoordinator: ObservableObject {
             breakouts: breakouts.mapValues(Self.card),
             attachmentPreviews: previews,
             presence: presenceState,
-            pinned: pinned.map { pin in
-                // The loaded row or the copy kept apart, whichever has the newer edit.
-                let message = [timeline.messages.first { $0.sequenceId == pin.targetSequenceId },
-                               pinnedMessages[pin.targetSequenceId]]
-                    .compactMap { $0 }.max { $0.revision < $1.revision }
-                let by = pin.pinnedBy.lowercased().hasPrefix("human-") ? String(pin.pinnedBy.dropFirst("human-".count)) : pin.pinnedBy
-                return RoomChatPinned(
-                    sequenceId: pin.targetSequenceId,
-                    snippet: message.map { Self.pinSnippet($0.text) } ?? "Message #\(pin.targetSequenceId)",
-                    pinnedBy: by
-                )
-            },
+            pinned: pins,
+            leaderboardOpen: leaderboardOpen,
             canPin: canPin,
             pinLimit: pinLimit,
             canRename: canRename,

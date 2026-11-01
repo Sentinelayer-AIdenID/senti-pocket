@@ -122,6 +122,22 @@ public struct RoomChatView: View {
                 )
             }
         }
+        .sheet(isPresented: Binding(
+            get: { state.leaderboardSheet != nil },
+            set: { presented in if !presented { send(.closeLeaderboard) } }
+        )) {
+            if let sheet = state.leaderboardSheet {
+                RoomLeaderboardSheetView(
+                    sheet: sheet,
+                    onOpenMessage: {
+                        // The sheet closes, and the room brings the board's message into view, loaded or not.
+                        send(.closeLeaderboard)
+                        send(.jumpToMessage(sequenceId: sheet.sequenceId))
+                    },
+                    onDone: { send(.closeLeaderboard) }
+                )
+            }
+        }
         .sheet(item: $openCheckpoint) { row in
             CheckpointSheet(row: row, send: send)
         }
@@ -318,6 +334,7 @@ public struct RoomChatView: View {
                         limit: state.pinLimit,
                         canUnpin: state.canPin,
                         leaderboard: state.leaderboard,
+                        onOpenLeaderboard: { send(.openLeaderboard) },
                         onOpen: { jump(to: $0, proxy: proxy) },
                         onUnpin: { send(.setPinned(sequenceId: $0, isPinned: false)) }
                     )
@@ -2775,6 +2792,8 @@ private struct RoomPinnedStrip: View {
     let canUnpin: Bool
     /// The room's leaderboard among the pins, if it keeps one.
     let leaderboard: RoomChatPinned?
+    /// Opens the leaderboard as a list in a sheet.
+    let onOpenLeaderboard: () -> Void
     let onOpen: (Int64) -> Void
     let onUnpin: (Int64) -> Void
 
@@ -2843,10 +2862,10 @@ private struct RoomPinnedStrip: View {
 
     /// The room's leaderboard, in the strip's first row, right under the room's title: the navigation bar of a
     /// 375-point phone shows two buttons and folds the rest into its overflow menu, where a trophy would be lost. It
-    /// opens the message as its pin does.
+    /// opens the board as a ranked list in a sheet, never as a jump to its message.
     private func leaderboardButton(_ board: RoomChatPinned) -> some View {
         Button {
-            onOpen(board.sequenceId)
+            onOpenLeaderboard()
         } label: {
             Label("Leaderboard", systemImage: "trophy.fill")
                 .font(.caption.weight(.semibold))

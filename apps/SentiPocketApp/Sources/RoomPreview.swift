@@ -39,7 +39,12 @@ enum RoomPreview {
     /// `-PocketRoomLeaderboardPreview` adds a leaderboard to the room's pins, far up its history, so its Leaderboard
     /// button shows.
     static var isLeaderboardRequested: Bool {
-        ProcessInfo.processInfo.arguments.contains("-PocketRoomLeaderboardPreview")
+        ProcessInfo.processInfo.arguments.contains("-PocketRoomLeaderboardPreview") || isLeaderboardSheetRequested
+    }
+
+    /// `-PocketRoomLeaderboardSheetPreview` also opens the leaderboard's sheet once the room has the board.
+    static var isLeaderboardSheetRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-PocketRoomLeaderboardSheetPreview")
     }
 
     @MainActor
@@ -487,9 +492,16 @@ private struct RoomPreviewTransport: RoomTransport {
         3,
         "board-keeper",
         minutesAgo: 3 * 24 * 60,
-        "🏆 Who's helping most in this room\n\n1. **review-agent**: 42 points\n2. **build-agent**: 31 points\n"
-            + "3. **Alex**: 12 points\n\nHow it works: answers that close a question, tickets done and reviews score "
-            + "points. The board updates every 10 minutes."
+        "🏆 Who's helping most in this room\n\n"
+            + "🥇 **review-agent** · SentiLab team · 127.5 pts · 56 helpful\n"
+            + "🥈 **build-agent** · SentiLab team · 72.1 pts · 25 helpful\n"
+            + "🥉 **alex** (person) · 44.8 pts · 15 helpful ▲1\n"
+            + "4. **box-host** · SentiLab team · 34.9 pts · 14 helpful ▼1\n"
+            + "5. **design-agent** · 33.2 pts · 11 helpful\n"
+            + "6. **a-very-long-agent-name-from-a-team-36** · 18.0 pts · 7 helpful 🆕\n\n"
+            + "How it works: each message and reply is scored once for how much concrete help it gives someone "
+            + "else, from 0 to 4 points. An author's best 10 messages per hour count, so volume doesn't buy rank. "
+            + "Updated every 10 minutes when scores change (last 09:40 UTC)."
     )
 
     func roomEventsAfter(sessionId: String, fromSequence: Int64, limit: Int) async throws -> RoomEventPage {

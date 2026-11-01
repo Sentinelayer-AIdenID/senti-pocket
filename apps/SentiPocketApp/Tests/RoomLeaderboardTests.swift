@@ -69,8 +69,10 @@ private final class BoardRoom: RoomTransport, @unchecked Sendable {
 /// The pinned message's text is known wherever it is in the room, and follows its edits.
 @MainActor
 final class RoomLeaderboardTests: XCTestCase {
-    private static let boardText = "🏆 Who's helping most in this room\n\n1. ada-agent: 42 points\n2. lin-agent: 31 points"
-        + "\n\nHow it works: answers that close a question score points."
+    private static let boardText = "🏆 Who's helping most in this room\n\n"
+        + "🥇 **ada-agent** · SentiLab team · 42.0 pts · 9 helpful\n"
+        + "🥈 **lin-agent** · 31.5 pts · 7 helpful\n\n"
+        + "How it works: answers that close a question score points (last 13:58 UTC)."
 
     private func message(_ seq: Int64, _ text: String? = nil, revision: Int64 = 1,
                          author: String = "ada-agent") -> RoomMessage {
@@ -222,6 +224,65 @@ final class RoomLeaderboardTests: XCTestCase {
         }, "the board's row has left the loaded rows")
         XCTAssertEqual(room.state.leaderboard?.sequenceId, 300, "and the trophy stays")
         XCTAssertEqual(transport.reads, [], "with no read of its own")
+        room.pause()
+    }
+
+    // MARK: - The sheet
+
+    private func shownRows(_ room: RoomChatCoordinator) -> [String]? {
+        guard case .board(let board)? = room.state.leaderboardSheet?.content else { return nil }
+        return board.rows.map(\.name)
+    }
+
+    /// The trophy opens the board as a ranked list in a sheet (never a jump to the message), and Done closes it.
+    func test_the_trophy_opens_the_board_as_a_list() async {
+        let transport = BoardRoom(newest: newestPage, singles: [57: [message(57, Self.boardText)]],
+                                  actions: [pins(57)])
+        let room = room(transport)
+        room.resume()
+        await waitUntil("the board read") { room.state.leaderboard != nil }
+        XCTAssertNil(room.state.leaderboardSheet, "closed until asked")
+
+        room.send(.openLeaderboard)
+        XCTAssertEqual(shownRows(room), ["ada-agent", "lin-agent"])
+        XCTAssertEqual(room.state.leaderboardSheet?.sequenceId, 57)
+        XCTAssertNil(room.state.focusSequenceId, "the room stays where it was")
+        room.send(.closeLeaderboard)
+        XCTAssertNil(room.state.leaderboardSheet)
+        room.pause()
+    }
+
+    /// While it is open, the list follows the board's edits: the standings change in place.
+    func test_an_edit_updates_the_open_board() async {
+        let transport = BoardRoom(newest: newestPage, singles: [57: [message(57, Self.boardText)]],
+                                  actions: [pins(57)])
+        let room = room(transport)
+        room.resume()
+        await waitUntil("the board read") { room.state.leaderboard != nil }
+        room.send(.openLeaderboard)
+
+        let swapped = "🏆 Who's helping most in this room\n\n"
+            + "🥇 **lin-agent** · 45.5 pts · 10 helpful ▲1\n"
+            + "🥈 **ada-agent** · SentiLab team · 42.0 pts · 9 helpful ▼1\n"
+            + "🥉 **sam** (person) · 3.0 pts · 1 helpful 🆕"
+        room.handle(.edited(message(57, swapped, revision: 2), sequenceId: 301))
+        XCTAssertEqual(shownRows(room), ["lin-agent", "ada-agent", "sam"])
+        guard case .board(let board)? = room.state.leaderboardSheet?.content else { return XCTFail("no board") }
+        XCTAssertEqual(board.rows.map(\.move), [.up(1), .down(1), .new])
+        room.pause()
+    }
+
+    /// An edit that leaves no row to read shows "Board unavailable", never the message's raw text.
+    func test_an_unreadable_board_falls_back() async {
+        let transport = BoardRoom(newest: newestPage, singles: [57: [message(57, Self.boardText)]],
+                                  actions: [pins(57)])
+        let room = room(transport)
+        room.resume()
+        await waitUntil("the board read") { room.state.leaderboard != nil }
+        room.send(.openLeaderboard)
+        room.handle(.edited(message(57, "🏆 Who's helping most in this room\n\nRecounting, back soon.", revision: 2),
+                            sequenceId: 301))
+        XCTAssertEqual(room.state.leaderboardSheet?.content, .unavailable)
         room.pause()
     }
 }
