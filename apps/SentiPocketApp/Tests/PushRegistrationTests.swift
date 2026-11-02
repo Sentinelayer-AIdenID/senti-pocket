@@ -209,6 +209,23 @@ final class PushRegistrationTests: XCTestCase {
         }
     }
 
+    /// Warden, #298 review of build 10: a retry already under way never deletes a row its account has reclaimed since.
+    @MainActor
+    func test_a_retry_after_the_account_signed_in_again_sends_nothing() async {
+        await withRegistrar(status: 503) { registrar in
+            let reclaimed = "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f"
+            UserDefaults.standard.set(reclaimed, forKey: "pocket.push.deviceId")
+            registrar.signOut(bearer: bearer("d"))
+            registrar.signedIn(account: "sub:d")
+            PushDeviceURLProtocol.reset(status: 204)
+            try? await Task.sleep(nanoseconds: 3_000_000_000)   // past the first retry (2 s)
+            let deletes = PushDeviceURLProtocol.requests().filter {
+                $0.httpMethod == "DELETE" && $0.url?.lastPathComponent == reclaimed
+            }
+            XCTAssertEqual(deletes.count, 0, "the account signed in again: its row is its own, never deleted on a retry")
+        }
+    }
+
     @MainActor
     func test_a_phone_no_one_is_signed_in_on_keeps_no_bell_registration() async {
         await withRegistrar(status: 204) { registrar in

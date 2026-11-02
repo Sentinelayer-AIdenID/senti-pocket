@@ -192,9 +192,17 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
     @AppStorage("pocket.push.sound") var sound = true
     @AppStorage("pocket.push.vibrate") var vibrate = true
     @AppStorage("pocket.push.previews") var showPreviews = true
-    @AppStorage("pocket.push.token") private var storedToken = ""
+    /// This phone's Apple token for bells. Like everything below, read straight from the phone's settings each time,
+    /// never a cached copy (warden, #298 review).
+    private var storedToken: String {
+        get { UserDefaults.standard.string(forKey: "pocket.push.token") ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: "pocket.push.token") }
+    }
     /// The PushKit token agents' calls ring, registered with the API while someone is signed in.
-    @AppStorage("pocket.push.voipToken") private var storedVoipToken = ""
+    private var storedVoipToken: String {
+        get { UserDefaults.standard.string(forKey: "pocket.push.voipToken") ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: "pocket.push.voipToken") }
+    }
     /// The rows the server keeps for this phone's bell and call tokens, by the ids its registrations returned. Read
     /// straight from the phone's settings each time, never a cached copy: a call checks `voipAccount` as it rings.
     private var deviceId: String {
@@ -211,7 +219,10 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
         set { UserDefaults.standard.set(newValue, forKey: "pocket.push.voipAccount") }
     }
     /// Settings the server has not confirmed yet; sent again when the app comes back.
-    @AppStorage("pocket.push.preferencesPending") private var preferencesPending = false
+    private var preferencesPending: Bool {
+        get { UserDefaults.standard.bool(forKey: "pocket.push.preferencesPending") }
+        set { UserDefaults.standard.set(newValue, forKey: "pocket.push.preferencesPending") }
+    }
     private var activeObserver: NSObjectProtocol?
 
     /// Where a tapped notification goes.
@@ -287,14 +298,16 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
         Task { await self.registerVoip(token) }
     }
 
-    /// PushKit dropped the token: the API stops ringing it.
+    /// PushKit dropped the token: the API stops ringing it. Only that row goes, and only with its own account's
+    /// credential (the person signed in now, if it was theirs); otherwise it stays owed like any other.
     func voipTokenInvalidated() {
         guard !storedVoipToken.isEmpty else { return }
         storedVoipToken = ""
-        owe([voipDeviceId], account: voipAccount)
+        let row = voipDeviceId
+        owe([row], account: voipAccount)
         voipDeviceId = ""
         voipAccount = ""
-        sendOwedUnregisters(bearer: SessionTokenStore.load())
+        sendOwedUnregisters(bearer: SessionTokenStore.load(), only: [row])
     }
 
     private func registerVoip(_ token: String) async {
@@ -446,18 +459,23 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
         queue.save()
     }
 
-    /// Sends the sign-outs `bearer`'s account owes, again while the app runs if they fail; the ones the server
-    /// confirms are dropped. The credential is held in memory only.
-    private func sendOwedUnregisters(bearer: String?, attempts: Int = 1) {
+    /// Sends the sign-outs `bearer`'s account owes (or just the rows in `only`), again while the app runs if they
+    /// fail; the ones the server confirms are dropped. The credential is held in memory only.
+    private func sendOwedUnregisters(bearer: String?, attempts: Int = 1, only: [String]? = nil) {
         guard let bearer, !bearer.isEmpty, let account = RoomSendOutbox.account(token: bearer) else { return }
         var queue = PushUnregisterQueue.load()
-        var owed = queue.due(for: account)
+        var owed = queue.due(for: account).filter { only?.contains($0.deviceId) ?? true }
         queue.save()
         guard !owed.isEmpty else { return }
         var unregistering = client
         unregistering.tokenProvider = { bearer }
         Task {
             for attempt in 0..<attempts {
+                // Only what is still owed: a row its account reclaimed (or a registration returned) since the last
+                // try is never deleted from under it (warden, #298 review).
+                let stillOwed = PushUnregisterQueue.load().entries
+                owed.removeAll { !stillOwed.contains($0) }
+                guard !owed.isEmpty else { return }
                 let done = await PushUnregisterQueue.confirmed(of: owed) { try await unregistering.unregister(deviceId: $0) }
                 var stored = PushUnregisterQueue.load()
                 stored.remove(deviceIds: done, account: account)
