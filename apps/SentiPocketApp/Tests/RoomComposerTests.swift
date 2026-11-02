@@ -256,6 +256,31 @@ final class RoomComposerCoordinatorTests: XCTestCase {
         coordinator.pause()
     }
 
+    /// A shared crash report is marked handled only once the room accepted it: a failed send keeps it for next time.
+    func test_a_crash_report_is_handled_only_after_the_room_accepts_it() async {
+        let failing = ScriptedSender([.failure(.retryable(retryAfterSeconds: nil))])
+        let lost = makeCoordinator(sender: failing)
+        lost.resume()
+        var handledAfterFailure = 0
+        lost.sendCrashReport("Pocket closed unexpectedly") { handledAfterFailure += 1 }
+        await waitUntil("the send failed") {
+            if case .failed = lost.state.pending.first?.status { return true }
+            return false
+        }
+        XCTAssertEqual(handledAfterFailure, 0, "a lost send leaves the report unhandled")
+        lost.pause()
+
+        let sender = ScriptedSender([.success(())])
+        let coordinator = makeCoordinator(sender: sender)
+        coordinator.resume()
+        var handled = 0
+        coordinator.sendCrashReport("Pocket closed unexpectedly") { handled += 1 }
+        XCTAssertEqual(handled, 0, "not before the room answers")
+        await waitUntil("sent") { coordinator.state.pending.first?.status == .sent }
+        XCTAssertEqual(handled, 1)
+        coordinator.pause()
+    }
+
     func test_a_failed_send_can_be_retried_with_the_same_client_id_and_discarded() async {
         let sender = ScriptedSender([.failure(.retryable(retryAfterSeconds: nil)), .success(())])
         let coordinator = makeCoordinator(sender: sender)

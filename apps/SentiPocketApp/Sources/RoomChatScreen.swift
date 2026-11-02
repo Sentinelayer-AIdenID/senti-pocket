@@ -787,8 +787,8 @@ struct RoomChatScreen: View {
         .alert("Pocket closed unexpectedly", isPresented: $offersCrashReports) {
             Button("Send to this room") {
                 let reports = crashes.unhandled
-                coordinator.send(.sendMessage(text: CrashReportText.message(reports)))
-                crashes.markHandled(reports)
+                // Handled only once the room has it: a lost send offers the reports again next time.
+                coordinator.sendCrashReport(CrashReportText.message(reports)) { crashes.markHandled(reports) }
             }
             Button("Not now", role: .cancel) { crashes.markHandled(crashes.unhandled) }
         } message: {
