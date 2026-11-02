@@ -33,6 +33,17 @@ private final class FakeMint: MintStarting, @unchecked Sendable {
     var sent: [MintUpRequest] { lock.withLock { requests } }
 }
 
+/// A clock the test moves.
+private final class MintClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: Date
+    init(_ date: Date) { current = date }
+    var date: Date {
+        get { lock.withLock { current } }
+        set { lock.withLock { current = newValue } }
+    }
+}
+
 private final class OneTicket: RoomTicketsTransport, @unchecked Sendable {
     let ticket: RoomTicket
     init(_ ticket: RoomTicket) { self.ticket = ticket }
@@ -121,9 +132,10 @@ final class TicketAgentTests: XCTestCase {
         }
     }
 
-    private func temporaryLedger() -> MintStartLedger {
-        MintStartLedger(url: FileManager.default.temporaryDirectory
-            .appendingPathComponent("mint-starts-\(UUID().uuidString).json"))
+    private func temporaryLedger(_ clock: MintClock? = nil) -> MintStartLedger {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("mint-starts-\(UUID().uuidString).json")
+        guard let clock else { return MintStartLedger(url: url) }
+        return MintStartLedger(url: url, now: { clock.date })
     }
 
     /// Every start carries a key of its own; two starts never share one.
@@ -226,6 +238,89 @@ final class TicketAgentTests: XCTestCase {
             XCTAssertTrue(mint.sent.isEmpty, "\(name): not sent")
             XCTAssertEqual(model.phase, .failed(TicketAgentModel.notKeptMessage), name)
         }
+    }
+
+    /// #298 review: the mint keeps a key 24 h from its first use and a replay does not extend it. Checks at 10 h and
+    /// 23 h never move the start's time; from 23 h it is never sent again (an hour inside the mint's day), and after a
+    /// day it is forgotten.
+    func test_checking_again_never_outlives_the_mints_key() async throws {
+        let clock = MintClock(Date(timeIntervalSince1970: 1_800_000_000))
+        let start = clock.date
+        let ledger = temporaryLedger(clock)
+        defer { try? FileManager.default.removeItem(at: ledger.url) }
+        let mint = FakeMint(models: models, script: [.notConfirmed, .notConfirmed, .notConfirmed])
+        let model = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger, account: "sub:carter") { _ in }
+        await model.load()
+        await model.start()
+        XCTAssertEqual(model.phase, .unconfirmed)
+
+        clock.date = start.addingTimeInterval(10 * 3600)
+        await model.checkAgain()
+        XCTAssertEqual(mint.sent.count, 2)
+        XCTAssertEqual(ledger.entry(account: "sub:carter", sessionId: "room-1", ticketId: ticket.id)?.createdAt, start,
+                       "a check never moves the start's time")
+
+        clock.date = start.addingTimeInterval(23 * 3600)
+        await model.checkAgain()
+        XCTAssertEqual(mint.sent.count, 2, "never sent again within an hour of the mint forgetting its key")
+        XCTAssertEqual(model.phase, .unconfirmedTooOld)
+
+        clock.date = start.addingTimeInterval(23.5 * 3600)
+        let reopened = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger, account: "sub:carter") { _ in }
+        await reopened.load()
+        XCTAssertEqual(reopened.phase, .unconfirmedTooOld)
+        await reopened.checkAgain()
+        await reopened.start()
+        XCTAssertEqual(mint.sent.count, 2, "neither checked nor started again")
+
+        clock.date = start.addingTimeInterval(24 * 3600 + 1)
+        let dayLater = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger, account: "sub:carter") { _ in }
+        await dayLater.load()
+        XCTAssertEqual(dayLater.phase, .ready, "forgotten after a day")
+    }
+
+    /// #298 review: two sheets for one ticket. While one start is unresolved, a start from the other sheet takes that
+    /// one up instead of making a second; the record refuses to replace it.
+    func test_a_second_sheet_takes_up_the_unconfirmed_start_instead_of_making_another() async throws {
+        let ledger = temporaryLedger()
+        defer { try? FileManager.default.removeItem(at: ledger.url) }
+        let mint = FakeMint(models: models, script: [.notConfirmed, .notConfirmed])
+        let first = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger, account: "sub:carter") { _ in }
+        let second = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger, account: "sub:carter") { _ in }
+        await first.load()
+        await second.load()
+        XCTAssertEqual(second.phase, .ready)
+        await first.start()
+        second.job = "A different job"
+        await second.start()
+        XCTAssertEqual(mint.sent.count, 1, "no second start")
+        XCTAssertEqual(second.phase, .unconfirmed)
+        XCTAssertEqual(second.job, mint.sent.first?.jobDescription, "the sheet shows the start it took up")
+        await second.checkAgain()
+        XCTAssertEqual(mint.sent.map(\.idempotencyKey), [mint.sent[0].idempotencyKey, mint.sent[0].idempotencyKey])
+
+        let other = MintUpRequest(model: "model-a", jobDescription: "Other", sessionId: "room-1", ticketId: ticket.id,
+                                  idempotencyKey: "pocket-other-0000000000")
+        XCTAssertThrowsError(try ledger.keep(other, account: "sub:carter", sessionId: "room-1", ticketId: ticket.id)) {
+            XCTAssertEqual($0 as? MintStartLedger.Refusal, .anotherStartPending)
+        }
+    }
+
+    /// Killed after the start was kept but before it was sent: it comes back unconfirmed, and checking it again sends it
+    /// once, under its own key.
+    func test_a_start_kept_but_never_sent_is_sent_once_under_its_key() async throws {
+        let ledger = temporaryLedger()
+        defer { try? FileManager.default.removeItem(at: ledger.url) }
+        let kept = MintUpRequest(model: "model-a", jobDescription: "Kept job", sessionId: "room-1", agentName: "mint-36d92287",
+                                 ticketId: ticket.id, ticketTitle: "Breakouts API fix", idempotencyKey: "pocket-kept-00000000000")
+        try ledger.keep(kept, account: "sub:carter", sessionId: "room-1", ticketId: ticket.id)
+        let mint = FakeMint(models: models)
+        let model = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger, account: "sub:carter") { _ in }
+        await model.load()
+        XCTAssertEqual(model.phase, .unconfirmed)
+        await model.checkAgain()
+        XCTAssertEqual(mint.sent, [kept])
+        guard case .started = model.phase else { return XCTFail("not started: \(model.phase)") }
     }
 
     /// A refusal means nothing started under the key: the phone forgets the start.

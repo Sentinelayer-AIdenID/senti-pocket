@@ -5,14 +5,26 @@ import SwiftUI
 
 /// Starts of an agent whose outcome is not known yet, kept on the phone per account, room and ticket with the key the
 /// mint knows them by. Checking again sends the same start under the same key, so it can only return that agent, even
-/// after the sheet closed or the app was killed. Kept for a day, as the mint keeps its keys.
+/// after the sheet closed, the app was killed, or the person signed out and in again.
+///
+/// The mint keeps a key for 24 hours from its first use, and a replay does not extend that. So a start keeps the time it
+/// was first kept (never refreshed by a check), is sent again only within `checkHorizon` of it (an hour inside the
+/// mint's day, for clock skew), and is forgotten after `maxAge`. One start per ticket: while one is unresolved, a new
+/// start for that ticket takes it up instead of replacing it (#298 review).
 struct MintStartLedger: Sendable {
     struct Entry: Codable, Equatable {
         let request: MintUpRequest
+        /// When this start was first kept; never moved by a check.
         let createdAt: Date
     }
 
+    enum Refusal: Error, Equatable {
+        /// Another start for this ticket is still unresolved.
+        case anotherStartPending
+    }
+
     static let maxAge: TimeInterval = 24 * 60 * 60
+    static let checkHorizon: TimeInterval = 23 * 60 * 60
 
     let url: URL
     private let now: @Sendable () -> Date
@@ -28,21 +40,30 @@ struct MintStartLedger: Sendable {
         return MintStartLedger(url: base.appendingPathComponent("mint-starts.json"))
     }
 
-    /// Signing out forgets every unconfirmed start on the phone.
-    static func clearStandard() {
-        guard let url = standard?.url else { return }
-        try? FileManager.default.removeItem(at: url)
+    func entry(account: String, sessionId: String, ticketId: String) -> Entry? {
+        load()[Self.key(account, sessionId, ticketId)]
     }
 
     func pending(account: String, sessionId: String, ticketId: String) -> MintUpRequest? {
-        load()[Self.key(account, sessionId, ticketId)]?.request
+        entry(account: account, sessionId: sessionId, ticketId: ticketId)?.request
     }
 
-    /// Writes the start to the phone, and throws if it could not: a start that is not kept is not sent, since after a
-    /// kill its key would be lost.
+    /// Whether the start may still be sent again: the mint still knows its key.
+    func isCheckable(_ entry: Entry) -> Bool {
+        now().timeIntervalSince(entry.createdAt) < Self.checkHorizon
+    }
+
+    /// Writes the start to the phone before it is sent, and throws if it could not: a start that is not kept is not
+    /// sent, since after a kill its key would be lost. The same start kept again keeps its first time; a different start
+    /// for a ticket with one still unresolved is refused.
     func keep(_ request: MintUpRequest, account: String, sessionId: String, ticketId: String) throws {
         var all = load()
-        all[Self.key(account, sessionId, ticketId)] = Entry(request: request, createdAt: now())
+        let slot = Self.key(account, sessionId, ticketId)
+        if let existing = all[slot] {
+            guard existing.request == request else { throw Refusal.anotherStartPending }
+            return
+        }
+        all[slot] = Entry(request: request, createdAt: now())
         try save(all)
         guard pending(account: account, sessionId: sessionId, ticketId: ticketId) == request else {
             throw CocoaError(.fileWriteUnknown)
@@ -85,10 +106,13 @@ final class TicketAgentModel: ObservableObject {
         case started(MintUpResponse)
         /// Sent, but not confirmed: the agent may exist. Offered to check again (the same start, the same key).
         case unconfirmed
+        /// Not confirmed, and too old to check again: the mint may have forgotten its key, so it is never sent again.
+        case unconfirmedTooOld
         case failed(String)
     }
 
     static let unconfirmedMessage = "Not confirmed: the agent may already be starting. Check again; it can only bring back this one agent."
+    static let tooOldMessage = "Not confirmed, and too old to check again safely. Look for its agent in the Flight record before starting another; this start clears a day after it was made."
     static let notKeptMessage = "This phone could not keep a record of the start, so it was not sent. Nothing started."
 
     @Published private(set) var phase: Phase = .loading
@@ -135,16 +159,9 @@ final class TicketAgentModel: ObservableObject {
                 return
             }
             select(first.id)
-            // A start left unconfirmed (the sheet closed, or the app was killed) comes back as it was sent.
-            if let ledger, let account, let kept = ledger.pending(account: account, sessionId: sessionId, ticketId: ticket.id) {
-                pending = kept
-                if models.contains(where: { $0.id == kept.model }) { modelId = kept.model }
-                effort = kept.effort
-                agentName = kept.agentName ?? ""
-                job = kept.jobDescription
-                phase = .unconfirmed
-                return
-            }
+            // A start left unconfirmed (the sheet closed, the app was killed, or the person signed out and in) comes
+            // back as it was sent.
+            if adoptKeptStart() { return }
             phase = .ready
         } catch {
             phase = .failed(Self.message(error))
@@ -157,9 +174,11 @@ final class TicketAgentModel: ObservableObject {
         effort = selectedModel?.defaultEffort ?? selectedModel?.efforts.first
     }
 
-    /// A new start: a new key, kept on the phone before it is sent.
+    /// A new start: a new key, kept on the phone before it is sent. While another start for this ticket is unresolved
+    /// (from another sheet, say), that one is taken up instead: one start per ticket.
     func start(now: Date = Date()) async {
         guard canStart else { return }
+        if adoptKeptStart() { return }
         let name = agentName.trimmingCharacters(in: .whitespacesAndNewlines)
         let request = MintUpRequest(
             model: modelId,
@@ -178,7 +197,26 @@ final class TicketAgentModel: ObservableObject {
     /// started, and starts it once if it never did.
     func checkAgain(now: Date = Date()) async {
         guard phase == .unconfirmed, let pending else { return }
+        if let ledger, let account,
+           let kept = ledger.entry(account: account, sessionId: sessionId, ticketId: ticket.id), kept.request == pending,
+           !ledger.isCheckable(kept) {
+            phase = .unconfirmedTooOld
+            return
+        }
         await send(pending, now: now)
+    }
+
+    /// Takes up this ticket's kept, unresolved start: its fields, and the phase it calls for. False when there is none.
+    private func adoptKeptStart() -> Bool {
+        guard let ledger, let account,
+              let kept = ledger.entry(account: account, sessionId: sessionId, ticketId: ticket.id) else { return false }
+        pending = kept.request
+        if models.contains(where: { $0.id == kept.request.model }) { modelId = kept.request.model }
+        effort = kept.request.effort
+        agentName = kept.request.agentName ?? ""
+        job = kept.request.jobDescription
+        phase = ledger.isCheckable(kept) ? .unconfirmed : .unconfirmedTooOld
+        return true
     }
 
     /// Sends a start that is kept on the phone first. One that cannot be kept (no record on this phone, no signed-in
@@ -187,6 +225,10 @@ final class TicketAgentModel: ObservableObject {
         do {
             guard let ledger, let account else { throw CocoaError(.fileWriteUnknown) }
             try ledger.keep(request, account: account, sessionId: sessionId, ticketId: ticket.id)
+        } catch MintStartLedger.Refusal.anotherStartPending {
+            // Another sheet made a start for this ticket meanwhile: that one is checked, never a second.
+            _ = adoptKeptStart()
+            return
         } catch {
             phase = .failed(Self.notKeptMessage)
             return
@@ -358,6 +400,11 @@ struct TicketAgentSheet: View {
                 Text("Its box shows in the Flight record once it is up.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+            } else if model.phase == .unconfirmedTooOld {
+                Text(TicketAgentModel.tooOldMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("pocket.agent.tooOld")
             } else {
                 Button {
                     Task { await model.start() }

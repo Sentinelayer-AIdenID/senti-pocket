@@ -60,7 +60,8 @@ final class SignInCoordinator: ObservableObject {
          signOut: @escaping () throws -> Void = {
              try SessionTokenStore.delete()
              RoomSendOutbox.clearStandard()
-             MintStartLedger.clearStandard()
+             // Unconfirmed agent starts stay (MintStartLedger): only the same account sees them, and forgetting one
+             // could let a second paid agent start after signing back in.
          },
          clearProtectedLocalState: @escaping () -> Void = { OutboxStore.clear() }) {
         self.login = login
