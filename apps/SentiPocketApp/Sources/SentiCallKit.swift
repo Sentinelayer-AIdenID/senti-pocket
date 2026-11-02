@@ -125,8 +125,17 @@ public final class SentiCallManager: NSObject {
         super.init()
         provider.setDelegate(self, queue: nil)            // nil → main queue
         pushRegistry.delegate = self
-        pushRegistry.desiredPushTypes = [.voIP]
+        // PushKit stays off until the host turns it on for a signed-in person (`setVoipPushes`).
     }
+
+    /// Whether this phone takes VoIP pushes (calls). Only while someone is signed in: a registration the server still
+    /// holds for the last account (an unregister that never got through) must not ring here (warden, #298 review).
+    func setVoipPushes(enabled: Bool) {
+        pushRegistry?.desiredPushTypes = enabled ? [.voIP] : []
+    }
+
+    /// Whether PushKit delivers VoIP pushes (calls) to this phone now.
+    var takesVoipPushes: Bool { pushRegistry?.desiredPushTypes?.contains(.voIP) == true }
 
     /// Hermetic lifecycle-test initializer: no PushKit registration, provider delegate callbacks, or real CallKit
     /// report side effects. Tests invoke delegate methods directly when exercising provider lifecycle behavior.

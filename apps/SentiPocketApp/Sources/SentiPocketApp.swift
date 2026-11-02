@@ -85,9 +85,20 @@ struct SentiPocketApp: App {
     @MainActor
     private func wireRegistrarToLogin() {
         #if !DEBUG
-        let host = dialHost
+        Self.wire(signIn, to: dialHost, endPushes: { PushRegistrar.shared.signOut() })
+        #endif
+    }
+
+    /// The release wiring above, separate so a test runs it with a test host.
+    @MainActor
+    static func wire(_ signIn: SignInCoordinator, to host: DialHost, endPushes: @escaping @MainActor () -> Void) {
         signIn.onAuthenticated = { host.onLoginCompleted() }
-        signIn.onAuthenticationRevoked = { host.onAuthenticationInvalidated() }
+        signIn.onAuthenticationRevoked = {
+            host.onAuthenticationInvalidated()
+            // A refused credential ends this account's notifications on this phone too, as signing out does: someone
+            // else may sign in next (warden, #298 review).
+            endPushes()
+        }
         signIn.onSignOutStarted = {
             try host.beginSignOut()
         }
@@ -100,7 +111,6 @@ struct SentiPocketApp: App {
         if signIn.isAuthenticated {
             host.onLoginCompleted()
         }
-        #endif
     }
     #endif
 

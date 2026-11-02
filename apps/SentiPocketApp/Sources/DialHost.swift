@@ -56,7 +56,8 @@ final class DialHost: ObservableObject {
 
     init(
         gatewayURL: URL? = DialHost.gatewayURL(),
-        registryStateStore: DeviceRingRegistryStateStore = DeviceRingRegistryStateStore()
+        registryStateStore: DeviceRingRegistryStateStore = DeviceRingRegistryStateStore(),
+        isSignedIn: () -> Bool = { SessionTokenStore.load()?.isEmpty == false }
     ) {
         let selectionGate = DialSessionSelectionGate()
         let authenticationExpiry = AuthenticationExpiryRelay()
@@ -79,6 +80,9 @@ final class DialHost: ObservableObject {
         }
 
         let cm = SentiCallManager()
+        // Calls ring only while someone is signed in. Decided here, at launch: a call that launches the app is
+        // delivered only if PushKit is already on.
+        cm.setVoipPushes(enabled: isSignedIn())
         let registryClient = DeviceRingRegistrationClient(
             apiBaseURL: gatewayURL,
             onReauthenticationRequired: { authenticationExpiry.signal(expectedToken: $0) }
@@ -257,12 +261,14 @@ final class DialHost: ObservableObject {
     /// Login alone never chooses a ring target. It merely arms registration for a later authorized selection.
     func onLoginCompleted() {
         authenticated = true
+        callManager?.setVoipPushes(enabled: true)
         _ = registrar?.loginCompleted()
     }
 
     /// Revoke all selected-session dial authority before the stale authenticated root is removed.
     func onAuthenticationInvalidated() {
         authenticated = false
+        callManager?.setVoipPushes(enabled: false)
         closeLocalAuthority()
         registrar?.authenticationInvalidated()
         selectedSessionId = nil
@@ -271,6 +277,7 @@ final class DialHost: ObservableObject {
     /// Synchronous sign-out half. This runs before SignInCoordinator.handle(.signOut) returns: runtime authority closes
     /// immediately and the registrar durably marks the old binding for revoke while the old bearer is still available.
     func beginSignOut() throws {
+        callManager?.setVoipPushes(enabled: false)
         closeLocalAuthority()
         selectedSessionId = nil
         if let registrar {
