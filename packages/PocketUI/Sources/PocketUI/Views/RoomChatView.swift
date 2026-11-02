@@ -37,6 +37,8 @@ public struct RoomChatView: View {
     @State private var openSummary: OpenThreadSummary?
     /// Your own message being edited.
     @State private var editingRow: RoomChatMessageRow?
+    /// The row the emoji picker is open for.
+    @State private var reactingRow: RoomChatMessageRow?
     /// A long message opened in full.
     @State private var longRow: RoomChatMessageRow?
     /// "Jump to latest" from a window further back: scroll to the bottom once the live room has loaded.
@@ -171,6 +173,13 @@ public struct RoomChatView: View {
                 } else {
                     send(.editMessage(sequenceId: row.sequenceId, text: text))
                 }
+            }
+        }
+        .sheet(item: $reactingRow) { row in
+            RoomEmojiPickerSheet(recent: RoomEmojiPicker.recent()) { emoji in
+                RoomEmojiPicker.noteUsed(emoji)
+                send(row.emojiReaction(emoji, isOn: true))
+                reactingRow = nil
             }
         }
         .safeAreaInset(edge: .top, spacing: 0) {
@@ -521,6 +530,7 @@ public struct RoomChatView: View {
             ownHandles: state.ownMentionHandles,
             isHighlighted: highlightedRowId == RoomChatRow.message(message).id,
             canReact: state.canReact,
+            canAddEmoji: state.canAddEmoji,
             canReply: state.composer.canPost,
             canPin: state.canPin,
             isPinned: state.isPinned(message),
@@ -544,6 +554,7 @@ public struct RoomChatView: View {
             },
             onOpenLong: { longRow = $0 },
             onReply: { replyTarget = $0 },
+            onAddReaction: { reactingRow = $0 },
             isMinimized: message.isInlineReply && message.replyToSequenceId.map { minimizedThreads.contains($0) } == true,
             onToggleMinimized: {
                 guard let thread = message.replyToSequenceId else { return }
@@ -834,6 +845,8 @@ private struct RoomMessageRowView: View {
     let ownHandles: Set<String>
     let isHighlighted: Bool
     var canReact = false
+    /// The emoji picker is offered.
+    var canAddEmoji = false
     var canReply = false
     var canPin = false
     var isPinned = false
@@ -857,6 +870,8 @@ private struct RoomMessageRowView: View {
     var onOpenLong: (RoomChatMessageRow) -> Void = { _ in }
     /// Reply to this row from the room's box, without leaving the room (Carter, #55074).
     var onReply: (RoomChatMessageRow) -> Void = { _ in }
+    /// Open the emoji picker for this row.
+    var onAddReaction: (RoomChatMessageRow) -> Void = { _ in }
     /// A thread's answer shown in the room, minimized to the line over it: what it answers and who replied.
     var isMinimized = false
     var onToggleMinimized: () -> Void = {}
@@ -1051,7 +1066,7 @@ private struct RoomMessageRowView: View {
         // Simultaneous, so a single tap on a link or a button inside the message is never held back.
         .simultaneousGesture(TapGesture(count: 2).onEnded { showsOptions = true })
         .confirmationDialog("Message options", isPresented: $showsOptions, titleVisibility: .hidden) {
-            ForEach(row.options(canReply: canReply, canReact: canReact, canPin: canPin, isPinned: isPinned, pinsFull: pinsFull, canEdit: canReply)) { option in
+            ForEach(rowOptions) { option in
                 Button(option.title) { perform(option) }
                     .disabled(!option.isEnabled)
             }
@@ -1238,8 +1253,12 @@ private struct RoomMessageRowView: View {
         if let reactions = row.reactions {
             RoomReactionBar(
                 reactions: reactions,
+                sequenceId: row.sequenceId,
                 canReact: canReact,
+                canAddEmoji: canAddEmoji,
                 onReact: { send(row.reaction($0)) },
+                onEmoji: { send(row.emojiToggle($0)) },
+                onAddReaction: { onAddReaction(row) },
                 onOpenThread: { send(.openThread(sequenceId: row.sequenceId)) }
             )
         }
@@ -1399,7 +1418,7 @@ private struct RoomMessageRowView: View {
     /// Copy, listen, like, dislike and more, as the assistant apps put under an answer: the row's own options, so a
     /// reply shown in the room acts on itself here too.
     private var actionRow: some View {
-        let options = row.options(canReply: canReply, canReact: canReact, canPin: canPin, isPinned: isPinned, pinsFull: pinsFull, canEdit: canReply)
+        let options = rowOptions
         // Reply when you can post, else the thread, never both.
         let shown = Self.actionRowKinds.compactMap { kind in options.first { $0.kind == kind } }
             .filter { $0.kind != .thread || !options.contains { $0.kind == .reply } }
@@ -1423,11 +1442,19 @@ private struct RoomMessageRowView: View {
         .padding(.top, 2)
     }
 
-    private static let actionRowKinds: [RoomRowOption.Kind] = [.copy, .listen, .like, .dislike, .reply, .thread]
+    private static let actionRowKinds: [RoomRowOption.Kind] = [.copy, .listen, .like, .dislike, .emoji, .reply, .thread]
+
+    /// This row's options, for its action row, its long-press menu and its double-tap options.
+    private var rowOptions: [RoomRowOption] {
+        row.options(canReply: canReply, canReact: canReact, canPin: canPin, isPinned: isPinned, pinsFull: pinsFull,
+                    canEdit: canReply, canAddEmoji: canAddEmoji)
+    }
 
     private func perform(_ option: RoomRowOption) {
         if option.kind == .reply {
             onReply(row)
+        } else if option.kind == .emoji {
+            onAddReaction(row)
         } else if option.kind == .edit {
             onEdit(row)
         } else if option.kind == .copy {
@@ -1452,7 +1479,7 @@ private struct RoomMessageRowView: View {
     /// The long-press menu, from the row's own options: a reply shown in the room acts on itself, never on the
     /// message it answers.
     private var messageMenu: some View {
-        ForEach(row.options(canReply: canReply, canReact: canReact, canPin: canPin, isPinned: isPinned, pinsFull: pinsFull, canEdit: canReply)) { option in
+        ForEach(rowOptions) { option in
             Button {
                 perform(option)
             } label: {
@@ -1578,14 +1605,21 @@ private func copyToPasteboard(_ text: String) {
 /// Reaction chips, the acknowledged and working lines, and the reply count under a message.
 private struct RoomReactionBar: View {
     let reactions: RoomChatReactions
+    /// The message's sequence, for the emoji chips' identifiers.
+    let sequenceId: Int64
     let canReact: Bool
+    var canAddEmoji = false
     let onReact: (String) -> Void
+    /// An emoji chip was tapped.
+    var onEmoji: (RoomChatReactions.EmojiChip) -> Void = { _ in }
+    var onAddReaction: () -> Void = {}
     let onOpenThread: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            if !reactions.chips.isEmpty || reactions.replyCount > 0 || reactions.isPinned {
-                HStack(spacing: 6) {
+            if !reactions.chips.isEmpty || !reactions.emojiChips.isEmpty || reactions.replyCount > 0
+                || reactions.isPinned {
+                RoomReactionFlow(spacing: 6) {
                     if reactions.isPinned {
                         Image(systemName: "pin.fill")
                             .font(.caption)
@@ -1614,6 +1648,46 @@ private struct RoomReactionBar: View {
                         .disabled(!canReact || chip.type == "disregard")
                         .accessibilityLabel("\(chip.label), \(chip.count)\(chip.isMine ? ", yours" : "")")
                     }
+                    ForEach(Array(reactions.emojiChips.enumerated()), id: \.element.id) { index, chip in
+                        Button {
+                            onEmoji(chip)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text(chip.emoji)
+                                    .font(.subheadline)
+                                Text("\(chip.count)").monospacedDigit()
+                            }
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(
+                                Capsule().fill(chip.isMine ? PocketPalette.accent.opacity(0.18) : PocketPalette.raised)
+                            )
+                            .overlay(Capsule().stroke(
+                                chip.isMine ? PocketPalette.accent.opacity(0.7) : PocketPalette.separator.opacity(0.6),
+                                lineWidth: chip.isMine ? 1 : 0.5
+                            ))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!canReact)
+                        .accessibilityLabel(chip.accessibilityLabel(canReact: canReact))
+                        .accessibilityIdentifier("pocket.room.emoji.\(sequenceId).\(index)")
+                    }
+                    // Beside the emoji already there; the action row and the menu offer it too.
+                    if canAddEmoji, !reactions.emojiChips.isEmpty {
+                        Button(action: onAddReaction) {
+                            Image(systemName: "face.smiling")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(PocketPalette.textSecondary)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Capsule().fill(PocketPalette.raised))
+                                .overlay(Capsule().stroke(PocketPalette.separator.opacity(0.6), lineWidth: 0.5))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Add reaction")
+                        .accessibilityIdentifier("pocket.room.emoji.\(sequenceId).add")
+                    }
                     if reactions.replyCount > 0 {
                         Button(action: onOpenThread) {
                             Label("\(reactions.replyCount) \(reactions.replyCount == 1 ? "reply" : "replies")", systemImage: "arrow.turn.down.right")
@@ -1633,6 +1707,100 @@ private struct RoomReactionBar: View {
             }
         }
         .padding(.top, 2)
+    }
+}
+
+/// Reaction chips in lines, as many as fit on each, every line's chips centred on it: one line until a message has
+/// more reactions than the width holds.
+private struct RoomReactionFlow: Layout {
+    var spacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let lines = lines(of: subviews, width: proposal.width ?? .infinity)
+        return CGSize(
+            width: lines.map(\.width).max() ?? 0,
+            height: lines.map(\.height).reduce(0, +) + spacing * CGFloat(max(lines.count - 1, 0))
+        )
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for line in lines(of: subviews, width: bounds.width) {
+            var x = bounds.minX
+            for index in line.indices {
+                let size = subviews[index].sizeThatFits(.unspecified)
+                subviews[index].place(at: CGPoint(x: x, y: y + (line.height - size.height) / 2),
+                                      proposal: ProposedViewSize(size))
+                x += size.width + spacing
+            }
+            y += line.height + spacing
+        }
+    }
+
+    private func lines(of subviews: Subviews, width: CGFloat) -> [(indices: [Int], width: CGFloat, height: CGFloat)] {
+        var lines: [(indices: [Int], width: CGFloat, height: CGFloat)] = []
+        for index in subviews.indices {
+            let size = subviews[index].sizeThatFits(.unspecified)
+            if let last = lines.last, last.width + spacing + size.width <= width {
+                lines[lines.count - 1] = (last.indices + [index], last.width + spacing + size.width,
+                                          max(last.height, size.height))
+            } else {
+                lines.append(([index], size.width, size.height))
+            }
+        }
+        return lines
+    }
+}
+
+/// The emoji picker: your recently used reactions over a grid of common ones. Picking one reacts with it.
+private struct RoomEmojiPickerSheet: View {
+    let recent: [String]
+    let onPick: (String) -> Void
+
+    private static let columns = Array(repeating: GridItem(.flexible(), spacing: 4), count: 6)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Add reaction")
+                .font(.headline)
+                .foregroundStyle(PocketPalette.textPrimary)
+            if !recent.isEmpty {
+                Text("Recently used")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(PocketPalette.textSecondary)
+                LazyVGrid(columns: Self.columns, spacing: 4) {
+                    ForEach(Array(recent.enumerated()), id: \.offset) { index, emoji in
+                        pick(emoji, identifier: "pocket.room.emoji.recent.\(index)")
+                    }
+                }
+                Text("Common")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(PocketPalette.textSecondary)
+            }
+            LazyVGrid(columns: Self.columns, spacing: 4) {
+                ForEach(Array(RoomEmojiPicker.common.enumerated()), id: \.offset) { index, emoji in
+                    pick(emoji, identifier: "pocket.room.emoji.common.\(index)")
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(20)
+        .presentationDetents([.medium, .large])
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("pocket.room.emoji.picker")
+    }
+
+    private func pick(_ emoji: String, identifier: String) -> some View {
+        Button {
+            onPick(emoji)
+        } label: {
+            Text(emoji)
+                .font(.system(size: 30))
+                .frame(maxWidth: .infinity, minHeight: 48)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier(identifier)
     }
 }
 

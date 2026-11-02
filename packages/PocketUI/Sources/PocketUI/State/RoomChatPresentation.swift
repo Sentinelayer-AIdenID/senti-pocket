@@ -137,7 +137,31 @@ public struct RoomChatReactions: Equatable, Sendable {
         }
     }
 
+    /// An emoji reaction: the emoji, how many reacted with it, and whether you did.
+    public struct EmojiChip: Equatable, Identifiable, Sendable {
+        public var id: String { emoji }
+        public let emoji: String
+        public let count: Int
+        public let isMine: Bool
+
+        public init(emoji: String, count: Int, isMine: Bool) {
+            self.emoji = emoji
+            self.count = count
+            self.isMine = isMine
+        }
+
+        /// What VoiceOver reads: "👍 3, you reacted. Double-tap to remove". What a tap does is said only when you
+        /// can react.
+        public func accessibilityLabel(canReact: Bool) -> String {
+            let said = "\(emoji) \(count)" + (isMine ? ", you reacted" : "")
+            guard canReact else { return said }
+            return said + (isMine ? ". Double-tap to remove" : ". Double-tap to add yours")
+        }
+    }
+
     public let chips: [Chip]
+    /// Emoji reactions after the chips, in the order they were first used.
+    public let emojiChips: [EmojiChip]
     /// "Acked by a, b, c +N" (web parity: three names, sorted).
     public let ackedBy: String?
     /// "Working: a, b".
@@ -145,17 +169,25 @@ public struct RoomChatReactions: Equatable, Sendable {
     public let replyCount: Int
     public let isPinned: Bool
 
-    public init(chips: [Chip] = [], ackedBy: String? = nil, working: String? = nil, replyCount: Int = 0, isPinned: Bool = false) {
+    /// The most emoji reactions shown under one message (the API's limit).
+    public static let emojiLimit = 20
+
+    public init(chips: [Chip] = [], emojiChips: [EmojiChip] = [], ackedBy: String? = nil, working: String? = nil,
+                replyCount: Int = 0, isPinned: Bool = false) {
         self.chips = chips
+        self.emojiChips = emojiChips
         self.ackedBy = ackedBy
         self.working = working
         self.replyCount = replyCount
         self.isPinned = isPinned
     }
 
-    public var isEmpty: Bool { chips.isEmpty && ackedBy == nil && working == nil && replyCount == 0 && !isPinned }
+    public var isEmpty: Bool {
+        chips.isEmpty && emojiChips.isEmpty && ackedBy == nil && working == nil && replyCount == 0 && !isPinned
+    }
 
-    /// Builds the line from raw counts and actors, in the web order and wording.
+    /// Builds the line from raw counts and actors, in the web order and wording, then at most `emojiLimit` emoji
+    /// reactions.
     public static func make(
         counts: [String: Int],
         actorsByType: [String: [String]],
@@ -163,7 +195,8 @@ public struct RoomChatReactions: Equatable, Sendable {
         likedByViewer: Bool,
         dislikedByViewer: Bool,
         replyCount: Int,
-        isPinned: Bool
+        isPinned: Bool,
+        emoji: [EmojiChip] = []
     ) -> RoomChatReactions {
         let order = ["ack", "like", "dislike", "disregard"]
         let chips = order.compactMap { type -> Chip? in
@@ -173,6 +206,7 @@ public struct RoomChatReactions: Equatable, Sendable {
         }
         return RoomChatReactions(
             chips: chips,
+            emojiChips: Array(emoji.prefix(emojiLimit)),
             ackedBy: names(actorsByType["ack"] ?? [], prefix: "Acked by"),
             working: names(activeOwners, prefix: "Working:"),
             replyCount: replyCount,
@@ -523,6 +557,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     public let composer: RoomComposerState
     /// Whether you can react (ack, like, dislike): any member, including a viewer, when actions are wired.
     public let canReact: Bool
+    /// Whether the emoji picker is offered: you can react, and the room has not refused emoji reactions.
+    public let canAddEmoji: Bool
     public let thread: RoomChatThreadState?
     /// Counts links whose message could not be loaded (before the start of the room, or the room could not be
     /// read). Each increase takes the reader to the latest messages.
@@ -576,6 +612,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         pending: [RoomChatPendingRow] = [],
         composer: RoomComposerState = .hidden,
         canReact: Bool = false,
+        canAddEmoji: Bool = false,
         thread threadInput: RoomChatThreadInput? = nil,
         focusFallbackCount: Int = 0,
         focusSequenceId: Int64? = nil,
@@ -616,6 +653,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         self.pending = protectedFailure ? [] : pending
         self.composer = protectedFailure ? .hidden : composer
         self.canReact = protectedFailure ? false : canReact
+        self.canAddEmoji = protectedFailure ? false : canAddEmoji
         self.focusFallbackCount = focusFallbackCount
         self.focusSequenceId = protectedFailure ? nil : focusSequenceId
         self.mentionCandidates = protectedFailure ? [] : mentionCandidates
@@ -1283,13 +1321,13 @@ public enum CheckpointText {
 /// One option in a row's long-press menu, and what it asks the room for.
 public struct RoomRowOption: Equatable, Identifiable, Sendable {
     public enum Kind: String, Sendable {
-        case reply, thread, listen, like, dislike, acknowledge, pin, edit, copy
+        case reply, thread, listen, like, dislike, acknowledge, emoji, pin, edit, copy
     }
 
     public let kind: Kind
     public let title: String
     public let symbol: String
-    /// What it asks the room for; nil for Copy, which the view does itself.
+    /// What it asks the room for; nil for what the view does itself (Copy, and the sheets it opens).
     public let intent: RoomChatIntent?
     public var isEnabled = true
 
@@ -1331,10 +1369,20 @@ extension RoomChatMessageRow {
         return .react(sequenceId: sequenceId, type: type)
     }
 
+    /// Your emoji reaction on this row (on the reply itself for a reply shown in the room), added or taken back.
+    public func emojiReaction(_ emoji: String, isOn: Bool) -> RoomChatIntent {
+        .setEmojiReaction(sequenceId: sequenceId, replyId: inlineReplyId, emoji: emoji, isOn: isOn)
+    }
+
+    /// What tapping an emoji chip sends: takes your reaction back when it is yours, else adds yours.
+    public func emojiToggle(_ chip: RoomChatReactions.EmojiChip) -> RoomChatIntent {
+        emojiReaction(chip.emoji, isOn: !chip.isMine)
+    }
+
     /// The long-press menu, in order. A message's options act on the message. A reply shown in the room answers
     /// itself, opens its thread, reads itself aloud, reacts to itself and copies itself; it has no pin.
     public func options(canReply: Bool, canReact: Bool, canPin: Bool, isPinned: Bool, pinsFull: Bool,
-                        canEdit: Bool = false) -> [RoomRowOption] {
+                        canEdit: Bool = false, canAddEmoji: Bool = false) -> [RoomRowOption] {
         var options: [RoomRowOption] = []
         if canReply {
             // Written right in the room's box, and it goes to the thread (Carter, #55074): the view starts it.
@@ -1359,6 +1407,10 @@ extension RoomChatMessageRow {
                                          intent: reaction(disliked ? "undislike" : "dislike")))
             options.append(RoomRowOption(kind: .acknowledge, title: "Acknowledge", symbol: "checkmark.circle",
                                          intent: reaction("ack")))
+        }
+        // The view opens the emoji picker.
+        if canAddEmoji {
+            options.append(RoomRowOption(kind: .emoji, title: "Add reaction", symbol: "face.smiling", intent: nil))
         }
         if canPin, !isInlineReply {
             options.append(RoomRowOption(
@@ -1418,6 +1470,8 @@ public enum RoomChatIntent: Equatable, Sendable {
     case sendReplyToReply(sequenceId: Int64, replyId: String, text: String)
     /// Like, dislike, unlike, undislike or acknowledge a reply in a thread.
     case reactToReply(sequenceId: Int64, replyId: String, type: String)
+    /// Add your emoji reaction to a message, or to a reply shown in the room (`replyId`), or take it back.
+    case setEmojiReaction(sequenceId: Int64, replyId: String?, emoji: String, isOn: Bool)
     /// The view brought `focusSequenceId` into view.
     case focusHandled
     /// Open a breakout started from this room (the screen navigates; the room keeps running).

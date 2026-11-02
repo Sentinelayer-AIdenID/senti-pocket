@@ -1,4 +1,5 @@
 import Foundation
+import PocketContracts
 
 /// Why a room message did not post. Response bodies are never surfaced, only their class.
 enum RoomSendError: Error, Equatable {
@@ -191,6 +192,14 @@ protocol RoomActionSending: Sendable {
     func sendAction(_ action: RoomActionRequest) async throws
 }
 
+/// Why the API refused an emoji reaction.
+enum RoomEmojiRefusal: Error, Equatable {
+    /// 409: the message holds as many emoji reactions as it can, or as many of yours.
+    case full
+    /// Any other refusal of the request itself (400, 422, ...): the API does not take emoji reactions.
+    case unavailable
+}
+
 struct RoomActionRequest: Equatable, Sendable {
     let sessionId: String
     let actionType: String
@@ -198,10 +207,13 @@ struct RoomActionRequest: Equatable, Sendable {
     let targetActionId: String?
     let note: String?
     let idempotencyKey: String
+    /// The emoji a `react` or `unreact` carries, sent as `metadata.emoji`.
+    var emoji: String? = nil
 
     static let replyLimit = 4_000
     static let reactionTypes: Set<String> = ["ack", "like", "dislike", "unlike", "undislike"]
     static let pinTypes: Set<String> = ["pin", "unpin"]
+    static let emojiTypes: Set<String> = ["react", "unreact"]
 
     /// A reply to a message (or, with `targetActionId`, to a reply). `nonce` is minted once per reply, so a retry
     /// sends the same key and the API de-duplicates it.
@@ -242,6 +254,22 @@ struct RoomActionRequest: Equatable, Sendable {
             note: nil,
             idempotencyKey: boundedKey(type == "ack" ? base : "\(base):\(UUID().uuidString.lowercased())")
         )
+    }
+
+    /// Your emoji reaction (`react`), or taking it back (`unreact`). Like a like, each tap gets its own key; the emoji
+    /// is never in the key, which also goes in a header.
+    static func emoji(
+        _ emoji: String,
+        isOn: Bool,
+        sessionId: String,
+        sequenceId: Int64,
+        actor: String,
+        toReply: String? = nil
+    ) -> RoomActionRequest {
+        var request = reaction(isOn ? "react" : "unreact", sessionId: sessionId, sequenceId: sequenceId, actor: actor,
+                               toReply: toReply)
+        request.emoji = emoji
+        return request
     }
 
     /// Pin a message for the room, or unpin it. Each tap gets its own key, as on the web, so pin, unpin, pin again do
@@ -285,11 +313,13 @@ final class HTTPRoomActionSender: RoomActionSending, @unchecked Sendable {
         }
         guard let token = tokenProvider(), !token.isEmpty else { throw RoomSendError.reauthenticationRequired }
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        let isEmoji = RoomActionRequest.emojiTypes.contains(action.actionType)
         guard !action.sessionId.isEmpty, action.sessionId.utf8.count <= 256,
               let encodedSession = action.sessionId.addingPercentEncoding(withAllowedCharacters: allowed),
               action.targetSequenceId > 0,
               action.actionType == "reply" || RoomActionRequest.reactionTypes.contains(action.actionType)
-                || RoomActionRequest.pinTypes.contains(action.actionType),
+                || RoomActionRequest.pinTypes.contains(action.actionType) || isEmoji,
+              !isEmoji || action.emoji.map(ReactionEmoji.isValid) == true,
               (action.note?.unicodeScalars.count ?? 0) <= RoomActionRequest.replyLimit,
               action.actionType != "reply" || !(action.note ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw RoomSendError.rejected
@@ -305,6 +335,7 @@ final class HTTPRoomActionSender: RoomActionSending, @unchecked Sendable {
         ]
         if let target = action.targetActionId { body["targetActionId"] = target }
         if let note = action.note { body["note"] = note }
+        if let emoji = action.emoji { body["metadata"] = ["emoji": emoji] }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -325,9 +356,11 @@ final class HTTPRoomActionSender: RoomActionSending, @unchecked Sendable {
         case 200..<300: return
         case 401: throw RoomSendError.reauthenticationRequired
         case 403, 404: throw RoomSendError.notAllowed
+        case 409 where isEmoji: throw RoomEmojiRefusal.full
         case 409, 425, 429, 500..<600:
             throw RoomSendError.retryable(retryAfterSeconds: http.value(forHTTPHeaderField: "Retry-After").flatMap(Int.init))
-        default: throw RoomSendError.rejected
+        // An API without emoji reactions refuses the action type itself.
+        default: throw isEmoji ? RoomEmojiRefusal.unavailable : RoomSendError.rejected
         }
     }
 }

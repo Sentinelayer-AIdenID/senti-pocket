@@ -61,6 +61,48 @@ public struct RoomReply: Equatable, Identifiable, Sendable {
     }
 }
 
+/// One emoji reaction on a message: the emoji, how many reacted with it, whether you did, and some of who did.
+public struct RoomEmojiReaction: Equatable, Sendable {
+    public let emoji: String
+    public let count: Int
+    public let viewerReacted: Bool
+    /// Public ids of who reacted, at most `actorLimit`.
+    public let actors: [String]
+
+    /// The most distinct emoji a message holds (the API's limit).
+    public static let limit = 20
+    /// The most reactors the API lists per emoji.
+    public static let actorLimit = 10
+
+    public init(emoji: String, count: Int, viewerReacted: Bool, actors: [String] = []) {
+        self.emoji = emoji
+        self.count = count
+        self.viewerReacted = viewerReacted
+        self.actors = actors
+    }
+
+    /// One entry of the summary's `emojiReactions`, or nil unless it holds exactly one emoji and a count.
+    init?(json: JSONValue) {
+        guard let emoji = json["emoji"]?.stringValue, ReactionEmoji.isValid(emoji),
+              let count = json["count"]?.intValue, count > 0 else { return nil }
+        let actors = (json["actors"]?.arrayValue ?? []).compactMap(\.stringValue).filter { !$0.isEmpty }
+        self.init(
+            emoji: emoji,
+            count: Int(clamping: count),
+            viewerReacted: json["viewerReacted"]?.boolValue ?? false,
+            actors: Array(actors.prefix(Self.actorLimit))
+        )
+    }
+
+    /// The summary's `emojiReactions` in first-use order: entries that are not one emoji are dropped, an emoji
+    /// listed twice counts once, and at most `limit` are kept.
+    static func list(_ json: JSONValue?) -> [RoomEmojiReaction] {
+        var seen = Set<String>()
+        let entries = (json?.arrayValue ?? []).compactMap(RoomEmojiReaction.init(json:))
+        return Array(entries.filter { seen.insert($0.emoji).inserted }.prefix(limit))
+    }
+}
+
 /// What the room shows under one message: reaction counts, who reacted, who is working on it, and its replies.
 public struct RoomReactionSummary: Equatable, Sendable {
     public let targetSequenceId: Int64
@@ -76,6 +118,8 @@ public struct RoomReactionSummary: Equatable, Sendable {
     public let latestReplies: [RoomReply]
     public let hasMoreReplies: Bool
     public let isPinned: Bool
+    /// Emoji reactions, in the order they were first used.
+    public let emojiReactions: [RoomEmojiReaction]
 
     public init(
         targetSequenceId: Int64,
@@ -87,7 +131,8 @@ public struct RoomReactionSummary: Equatable, Sendable {
         replyTotal: Int = 0,
         latestReplies: [RoomReply] = [],
         hasMoreReplies: Bool = false,
-        isPinned: Bool = false
+        isPinned: Bool = false,
+        emojiReactions: [RoomEmojiReaction] = []
     ) {
         self.targetSequenceId = targetSequenceId
         self.counts = counts
@@ -99,6 +144,7 @@ public struct RoomReactionSummary: Equatable, Sendable {
         self.latestReplies = latestReplies
         self.hasMoreReplies = hasMoreReplies
         self.isPinned = isPinned
+        self.emojiReactions = emojiReactions
     }
 
     init?(json: JSONValue) {
@@ -132,7 +178,8 @@ public struct RoomReactionSummary: Equatable, Sendable {
             replyTotal: max(Int(clamping: json["replyTotal"]?.intValue ?? 0), counts["reply"] ?? 0, replies.count),
             latestReplies: replies,
             hasMoreReplies: json["hasMoreReplies"]?.boolValue ?? false,
-            isPinned: json["isPinned"]?.boolValue ?? false
+            isPinned: json["isPinned"]?.boolValue ?? false,
+            emojiReactions: RoomEmojiReaction.list(json["emojiReactions"])
         )
     }
 }

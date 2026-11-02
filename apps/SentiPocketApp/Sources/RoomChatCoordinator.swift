@@ -464,6 +464,8 @@ final class RoomChatCoordinator: ObservableObject {
             sendReply(text, to: sequenceId, toReply: replyId)
         case .reactToReply(let sequenceId, let replyId, let type):
             reactToReply(type, on: replyId, in: sequenceId)
+        case .setEmojiReaction(let sequenceId, let replyId, let emoji, let isOn):
+            setEmojiReaction(emoji, isOn: isOn, on: sequenceId, reply: replyId)
         case .focusHandled:
             guard focusTarget != nil else { return }
             focusTarget = nil
@@ -723,6 +725,10 @@ final class RoomChatCoordinator: ObservableObject {
     // MARK: - Replies and reactions
 
     private var canReact: Bool { actionSender != nil && !failureIsTerminal }
+    /// The API refused an emoji reaction as something it does not take: the picker is hidden in this room.
+    private var emojiUnavailable = false
+    static let emojiUnavailableNotice = "Emoji reactions aren't available yet."
+    static let emojiFullNotice = "That message has as many reactions as it can take."
     /// Pinning is a contributor's action (the API refuses viewers).
     private var canPin: Bool { actionSender != nil && postingRefusedReason == nil && !failureIsTerminal }
 
@@ -1139,8 +1145,63 @@ final class RoomChatCoordinator: ObservableObject {
             replyTotal: current.replyTotal,
             latestReplies: current.latestReplies,
             hasMoreReplies: current.hasMoreReplies,
-            isPinned: current.isPinned
+            isPinned: current.isPinned,
+            emojiReactions: current.emojiReactions
         )
+        publish()
+    }
+
+    /// Adds your emoji reaction to a message (or a reply shown in the room), or takes it back. A message shows the tap
+    /// at once; if the API does not take it, that is undone, and a refusal is said in the room's notice line.
+    private func setEmojiReaction(_ emoji: String, isOn: Bool, on sequenceId: Int64, reply replyId: String?) {
+        guard let actionSender, canReact, ReactionEmoji.isValid(emoji) else { return }
+        let before = summaries[sequenceId]
+        // A reply shown in the room shows no reactions, so only a message shows the tap before the API answers.
+        let shown = replyId == nil
+            ? (before ?? RoomReactionSummary(targetSequenceId: sequenceId)).settingEmoji(emoji, isOn: isOn)
+            : nil
+        if let shown {
+            summaries[sequenceId] = shown
+            publish()
+        }
+        let sessionId = self.sessionId
+        Task { [weak self] in
+            var landed = false
+            var refusal: RoomEmojiRefusal?
+            // Not sent while you are unknown; what the tap showed is undone.
+            if let actor = await self?.resolvedActorRef() {
+                do {
+                    try await actionSender.sendAction(.emoji(
+                        emoji, isOn: isOn, sessionId: sessionId, sequenceId: sequenceId, actor: actor, toReply: replyId
+                    ))
+                    landed = true
+                } catch RoomSendError.reauthenticationRequired {
+                    self?.onReauthenticationRequired()
+                } catch let refused as RoomEmojiRefusal {
+                    refusal = refused
+                } catch {
+                    // Undone below; the refresh then shows the server's truth.
+                }
+            }
+            guard let self else { return }
+            if !landed { self.undoEmojiReaction(on: sequenceId, shown: shown, before: before, refusal: refusal) }
+            await self.refreshActions(force: true)
+        }
+    }
+
+    /// Takes back what an emoji tap showed, unless a newer read has replaced it, and says why the API refused it.
+    private func undoEmojiReaction(on sequenceId: Int64, shown: RoomReactionSummary?, before: RoomReactionSummary?,
+                                   refusal: RoomEmojiRefusal?) {
+        if let shown, summaries[sequenceId] == shown { summaries[sequenceId] = before }
+        switch refusal {
+        case .full:
+            notice = Self.emojiFullNotice
+        case .unavailable:
+            emojiUnavailable = true
+            notice = Self.emojiUnavailableNotice
+        case nil:
+            break
+        }
         publish()
     }
 
@@ -2153,7 +2214,10 @@ final class RoomChatCoordinator: ObservableObject {
                         likedByViewer: $0.likedByViewer,
                         dislikedByViewer: $0.dislikedByViewer,
                         replyCount: $0.replyTotal,
-                        isPinned: $0.isPinned
+                        isPinned: $0.isPinned,
+                        emoji: $0.emojiReactions.map {
+                            RoomChatReactions.EmojiChip(emoji: $0.emoji, count: $0.count, isMine: $0.viewerReacted)
+                        }
                     )
                 },
                 attachments: message.attachments.map { Self.chip($0, removed: removedAttachments.contains($0.attachmentId)) },
@@ -2215,6 +2279,7 @@ final class RoomChatCoordinator: ObservableObject {
             pending: pending.map { RoomChatPendingRow(clientId: $0.clientId, text: $0.text, status: $0.status) },
             composer: composerState,
             canReact: canReact,
+            canAddEmoji: canReact && !emojiUnavailable,
             thread: threadInput,
             focusFallbackCount: focusFallbackCount,
             focusSequenceId: focusTarget,
@@ -2618,6 +2683,40 @@ final class RoomChatCoordinator: ObservableObject {
             canRead: breakout.canRead,
             canPost: breakout.canPost,
             createdDate: ParsedSessionTimestamp(breakout.createdAt).date
+        )
+    }
+}
+
+extension RoomReactionSummary {
+    /// The same summary with your emoji reaction added or taken back, to show a tap at once; nil when it is already so.
+    /// Who reacted is left to the next read.
+    func settingEmoji(_ emoji: String, isOn: Bool) -> RoomReactionSummary? {
+        var list = emojiReactions
+        if let index = list.firstIndex(where: { $0.emoji == emoji }) {
+            let entry = list[index]
+            guard entry.viewerReacted != isOn else { return nil }
+            let count = entry.count + (isOn ? 1 : -1)
+            if count > 0 {
+                list[index] = RoomEmojiReaction(emoji: emoji, count: count, viewerReacted: isOn, actors: entry.actors)
+            } else {
+                list.remove(at: index)
+            }
+        } else {
+            guard isOn else { return nil }
+            list.append(RoomEmojiReaction(emoji: emoji, count: 1, viewerReacted: true))
+        }
+        return RoomReactionSummary(
+            targetSequenceId: targetSequenceId,
+            counts: counts,
+            actorsByType: actorsByType,
+            activeOwners: activeOwners,
+            likedByViewer: likedByViewer,
+            dislikedByViewer: dislikedByViewer,
+            replyTotal: replyTotal,
+            latestReplies: latestReplies,
+            hasMoreReplies: hasMoreReplies,
+            isPinned: isPinned,
+            emojiReactions: list
         )
     }
 }

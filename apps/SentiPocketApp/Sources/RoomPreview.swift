@@ -522,9 +522,14 @@ private struct RoomPreviewTransport: RoomTransport {
                 actorsByType: ["ack": ["build-agent", "human-alex"]],
                 likedByViewer: true,
                 replyTotal: 2,
-                latestReplies: Self.threadReplies
+                latestReplies: Self.threadReplies,
+                emojiReactions: [
+                    RoomEmojiReaction(emoji: "🎉", count: 3, viewerReacted: true),
+                    RoomEmojiReaction(emoji: "👀", count: 1, viewerReacted: false)
+                ]
             ),
-            113: RoomReactionSummary(targetSequenceId: 113, counts: ["like": 1]),
+            113: RoomReactionSummary(targetSequenceId: 113, counts: ["like": 1],
+                                     emojiReactions: [RoomEmojiReaction(emoji: "🚀", count: 2, viewerReacted: false)]),
             120: RoomReactionSummary(
                 targetSequenceId: 120,
                 counts: ["ack": 1, "working_on": 1],
