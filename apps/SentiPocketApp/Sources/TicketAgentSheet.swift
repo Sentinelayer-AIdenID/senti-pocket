@@ -197,9 +197,11 @@ final class TicketAgentModel: ObservableObject {
     /// started, and starts it once if it never did.
     func checkAgain(now: Date = Date()) async {
         guard phase == .unconfirmed, let pending else { return }
-        if let ledger, let account,
-           let kept = ledger.entry(account: account, sessionId: sessionId, ticketId: ticket.id), kept.request == pending,
-           !ledger.isCheckable(kept) {
+        // Sent again only while the phone still holds this very start, inside the horizon. A record gone (pruned after a
+        // day, deleted, unreadable) or replaced means the mint may have forgotten the key: never sent (#298 review).
+        guard let ledger, let account,
+              let kept = ledger.entry(account: account, sessionId: sessionId, ticketId: ticket.id), kept.request == pending,
+              ledger.isCheckable(kept) else {
             phase = .unconfirmedTooOld
             return
         }

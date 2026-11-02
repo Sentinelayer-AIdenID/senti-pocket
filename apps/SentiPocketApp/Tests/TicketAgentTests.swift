@@ -279,6 +279,32 @@ final class TicketAgentTests: XCTestCase {
         XCTAssertEqual(dayLater.phase, .ready, "forgotten after a day")
     }
 
+    /// #298 review: the SAME open sheet, left unconfirmed, checked again only after the record was pruned (a day and a
+    /// second later), deleted, or made unreadable. With no record of this very start inside the horizon, it is never
+    /// sent: the mint may have forgotten its key.
+    func test_an_open_sheet_never_resends_a_start_whose_record_is_gone() async throws {
+        for gone in ["pruned after a day", "deleted", "unreadable"] {
+            let clock = MintClock(Date(timeIntervalSince1970: 1_800_000_000))
+            let ledger = temporaryLedger(clock)
+            defer { try? FileManager.default.removeItem(at: ledger.url) }
+            let mint = FakeMint(models: models, script: [.notConfirmed])
+            let model = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger, account: "sub:carter") { _ in }
+            await model.load()
+            await model.start()
+            XCTAssertEqual(model.phase, .unconfirmed, gone)
+            switch gone {
+            case "pruned after a day": clock.date = clock.date.addingTimeInterval(24 * 3600 + 1)
+            case "deleted": try FileManager.default.removeItem(at: ledger.url)
+            default: try Data("not json".utf8).write(to: ledger.url)
+            }
+            await model.checkAgain()
+            XCTAssertEqual(mint.sent.count, 1, "\(gone): never sent again")
+            XCTAssertEqual(model.phase, .unconfirmedTooOld, gone)
+            XCTAssertNil(ledger.entry(account: "sub:carter", sessionId: "room-1", ticketId: ticket.id),
+                         "\(gone): the start is not written back with a new time")
+        }
+    }
+
     /// #298 review: two sheets for one ticket. While one start is unresolved, a start from the other sheet takes that
     /// one up instead of making a second; the record refuses to replace it.
     func test_a_second_sheet_takes_up_the_unconfirmed_start_instead_of_making_another() async throws {
