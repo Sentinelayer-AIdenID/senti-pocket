@@ -37,6 +37,8 @@ final class VoiceRoomCoordinator: ObservableObject {
     private let speaker: any VoiceSpeaking
     private let audio: any VoiceRoomAudioSession
     private let ringer: (any VoiceRoomRinging)?
+    /// The room's agents who could be added: "bring warden into this call" adds one by voice.
+    private let addable: @MainActor () -> [String]
     /// The phone's own call this voice room talks inside, when it answers an agent's call; nil for a call made here.
     private let callScreen: (any VoiceRoomCallScreen)?
     private let poster: any VoiceRoomPosting
@@ -147,6 +149,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         speaker: any VoiceSpeaking,
         audio: any VoiceRoomAudioSession,
         ringer: (any VoiceRoomRinging)? = nil,
+        addable: @escaping @MainActor () -> [String] = { [] },
         callScreen: (any VoiceRoomCallScreen)? = nil,
         poster: any VoiceRoomPosting,
         voiceLine: (any VoiceLining)? = nil,
@@ -169,6 +172,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         self.speaker = speaker
         self.audio = audio
         self.ringer = ringer
+        self.addable = addable
         self.callScreen = callScreen
         self.poster = poster
         self.voiceLine = voiceLine
@@ -714,6 +718,15 @@ final class VoiceRoomCoordinator: ObservableObject {
     }
 
     private func sendTurn(_ text: String, stoppedTalking: Date) async {
+        // "Bring warden into this call": adding someone is a control, not a turn for the room or the voice line.
+        if state.canAdd, let agent = VoiceAddIntent.agent(in: text, among: addable()) {
+            state.turns.append(VoiceRoomTurn(id: "you:\(UUID().uuidString.lowercased())", speaker: you, isYou: true,
+                                             text: text, at: now()))
+            readyAfterSending()
+            add(agent)
+            if state.isHandsFree, state.phase == .ready, queue.isEmpty { startListening() }
+            return
+        }
         let turn = VoiceRoomTurn(id: "you:\(UUID().uuidString.lowercased())", speaker: you, isYou: true, text: text,
                                  at: now())
         state.turns.append(turn)
@@ -1039,5 +1052,31 @@ final class VoiceRoomCoordinator: ObservableObject {
         let cleaned = text.lowercased().replacingOccurrences(of: #"[^a-z0-9]+"#, with: "-", options: .regularExpression)
             .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
         return cleaned.isEmpty ? "room" : String(cleaned.prefix(40))
+    }
+}
+
+/// Asking to add someone to the call by voice: "bring Claude warden into this call", "add forge", "get chatgpt on the
+/// call". The name is matched against the room's agents; only a single clear match adds anyone.
+enum VoiceAddIntent {
+    private static let verbs: Set<String> = ["bring", "add", "invite", "get", "pull", "loop"]
+    private static let stops: Set<String> = ["in", "into", "on", "onto", "to", "this", "the", "call", "too", "also",
+                                              "please", "here", "now", "and", "me"]
+
+    static func agent(in text: String, among agents: [String]) -> String? {
+        let words = text.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-")).inverted)
+            .filter { !$0.isEmpty }
+        guard let verb = words.firstIndex(where: { verbs.contains($0) }) else { return nil }
+        // A request to add someone mentions the call (or is short: "add warden").
+        guard words.contains("call") || words.count <= 4 else { return nil }
+        let name = words[(verb + 1)...].prefix { !stops.contains($0) }
+        guard !name.isEmpty else { return nil }
+        let joined = name.joined(separator: "-")
+        let matches = agents.filter { agent in
+            let id = agent.lowercased()
+            return id == joined || id.hasSuffix("-" + joined) || id.split(separator: "-").map(String.init).contains(joined)
+                || name.allSatisfy { part in id.split(separator: "-").contains(Substring(part)) }
+        }
+        return matches.count == 1 ? matches[0] : nil
     }
 }

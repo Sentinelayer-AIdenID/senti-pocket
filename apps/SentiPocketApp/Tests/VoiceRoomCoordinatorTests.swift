@@ -1427,3 +1427,22 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         await room.hangUp()
     }
 }
+
+
+final class VoiceAddIntentTests: XCTestCase {
+    private let agents = ["claude-warden", "pocket-forge", "chatgpt", "gpt-astra-carter"]
+
+    func test_asking_to_bring_someone_into_the_call_names_one_agent() {
+        XCTAssertEqual(VoiceAddIntent.agent(in: "Bring Claude warden into this call", among: agents), "claude-warden")
+        XCTAssertEqual(VoiceAddIntent.agent(in: "can you add warden to the call", among: agents), "claude-warden")
+        XCTAssertEqual(VoiceAddIntent.agent(in: "get chatgpt on the call please", among: agents), "chatgpt")
+        XCTAssertEqual(VoiceAddIntent.agent(in: "add forge", among: agents), "pocket-forge")
+    }
+
+    func test_ordinary_talk_and_unclear_names_add_no_one() {
+        XCTAssertNil(VoiceAddIntent.agent(in: "What's the status of the build?", among: agents))
+        XCTAssertNil(VoiceAddIntent.agent(in: "get the tests green before the call tomorrow and add notes", among: agents))
+        XCTAssertNil(VoiceAddIntent.agent(in: "bring someone into this call", among: agents))
+        XCTAssertNil(VoiceAddIntent.agent(in: "add gpt to the call", among: ["gpt-astra-carter", "gpt-luna"]), "two matches")
+    }
+}
