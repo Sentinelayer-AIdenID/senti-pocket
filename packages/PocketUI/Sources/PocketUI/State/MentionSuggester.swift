@@ -1,4 +1,5 @@
 import Foundation
+import PocketContracts
 
 /// Someone you can @-mention in a room.
 public struct MentionCandidate: Equatable, Identifiable, Sendable {
@@ -233,8 +234,9 @@ public struct TicketDecision: Equatable, Sendable {
                 if key == "option" || key == "options" {
                     sawOptions = true
                     for part in value.components(separatedBy: "·") {
-                        let option = part.trimmingCharacters(in: .whitespaces)
-                        guard !option.isEmpty else { continue }
+                        // A one-tap answer is posted as the person: an option that would not show whole (padding,
+                        // invisible characters, a mention, or too long) is left out (`AnswerOption`).
+                        guard let option = AnswerOption.answerable(part) else { continue }
                         if ["custom", "other", "free text", "something else"].contains(option.lowercased()) {
                             custom = true
                         } else if !options.contains(option), options.count < maximumOptions {

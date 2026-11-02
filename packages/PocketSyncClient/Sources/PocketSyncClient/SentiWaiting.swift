@@ -46,8 +46,7 @@ public struct SentiWaitingItem: Equatable, Identifiable, Sendable {
         guard let ticketId = json["ticketId"]?.stringValue,
               ticketId.range(of: identifier, options: .regularExpression) != nil,
               let roomId = json["roomId"]?.stringValue, SessionIdentifier.isValid(roomId) else { return nil }
-        let options = (json["options"]?.arrayValue ?? []).compactMap { $0.stringValue }
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        let options = (json["options"]?.arrayValue ?? []).compactMap { $0.stringValue }.compactMap(Self.answerableOption)
         let askedBy = json["askedBy"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
         let assignee = json["assignee"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.init(
@@ -116,6 +115,12 @@ public struct SentiWaitingItem: Equatable, Identifiable, Sendable {
     }
 
     /// Control characters become spaces and runs of spaces one, as the web's `oneLineText`.
+    /// The longest option offered as a one-tap answer (`AnswerOption.maxLength`).
+    public static let optionMaxLength = AnswerOption.maxLength
+
+    /// An option as it can be answered in one tap, or nil (`AnswerOption.answerable`).
+    public static func answerableOption(_ raw: String) -> String? { AnswerOption.answerable(raw) }
+
     private static func oneLine(_ text: String) -> String {
         let plain = String(String.UnicodeScalarView(text.unicodeScalars.map { $0.value < 32 || $0.value == 127 ? " " : $0 }))
         return plain.split(whereSeparator: \.isWhitespace).joined(separator: " ")
