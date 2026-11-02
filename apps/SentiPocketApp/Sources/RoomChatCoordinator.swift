@@ -41,6 +41,11 @@ final class RoomChatCoordinator: ObservableObject {
     private var pending: [PendingSend] = []
     /// Run once a send's POST succeeds (a shared crash report is marked handled only then).
     private var sentCallbacks: [String: () -> Void] = [:]
+    /// Sends not yet confirmed, kept on the phone so a relaunch retries them under the same client id.
+    private let outbox: RoomSendOutbox?
+    /// The account key the outbox is read and written under, fixed when the room opens (the ids learned later never
+    /// move an item to a different key).
+    private let outboxAccount: String?
     private var identityRequested = false
 
     // Replies and reactions (GET /actions projection), and the open thread.
@@ -195,8 +200,11 @@ final class RoomChatCoordinator: ObservableObject {
         attachmentFetcher: any AttachmentFileFetching = URLSessionAttachmentFetcher(),
         receipts: (any RoomReceiptsClient)? = nil,
         directory: (any RoomTicketExtrasReading)? = nil,
+        outbox: RoomSendOutbox? = nil,
+        outboxAccount: String? = nil,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
+        self.outbox = outbox
         self.attachmentFetcher = attachmentFetcher
         self.directory = directory
         self.sessionId = sessionId
@@ -214,6 +222,13 @@ final class RoomChatCoordinator: ObservableObject {
         self.readsMembers = ["owner", "admin"].contains(membershipRole?.lowercased() ?? "")
         self.postingRefusedReason = refusedReason
         self.ownAuthorIds = Set(ownAuthorIds.map { $0.lowercased() })
+        // A send left unconfirmed by a kill comes back as it was: same client id, offered to Retry or Discard.
+        self.outboxAccount = outbox == nil ? nil : (outboxAccount ?? RoomSendOutbox.account(self.ownAuthorIds))
+        if let outbox, let account = outboxAccount {
+            pending = outbox.items(account: account, sessionId: sessionId).map {
+                PendingSend(clientId: $0.clientId, text: $0.text, status: .failed(reason: Self.unconfirmedReason, canRetry: true))
+            }
+        }
         self.sleep = sleep
         self.now = now
         self.onReauthenticationRequired = onReauthenticationRequired
@@ -337,6 +352,7 @@ final class RoomChatCoordinator: ObservableObject {
             }
             pending.removeAll { $0.clientId == clientId }
             pendingReplies.removeAll { $0.clientId == clientId }
+            forgetUnconfirmed(clientId)
             publish()
         case .react(let sequenceId, let type):
             react(type, on: sequenceId)
@@ -1122,6 +1138,10 @@ final class RoomChatCoordinator: ObservableObject {
         jumpToLatest()
         keepLatestForTheJumpDown()
         pending.append(PendingSend(clientId: clientId, text: text, status: .sending))
+        if let outbox, let account = outboxAccount {
+            outbox.add(RoomSendOutbox.Item(clientId: clientId, text: text, createdAt: now()), account: account,
+                       sessionId: sessionId)
+        }
         readerAtBottom = true
         unread.readerReachedBottom()
         publish()
@@ -1159,6 +1179,7 @@ final class RoomChatCoordinator: ObservableObject {
                 try await sender.sendHumanMessage(sessionId: sessionId, text: item.text, clientId: clientId)
                 guard let self else { return }
                 self.updatePending(clientId) { $0.status = .sent; $0.sentAt = self.now() }
+                self.forgetUnconfirmed(clientId)
                 self.sentCallbacks.removeValue(forKey: clientId)?()
                 RoomComposerDraft.forgetSaved(sessionId: sessionId, sent: item.text)
                 self.onFeedback?(.sent)
@@ -1175,6 +1196,13 @@ final class RoomChatCoordinator: ObservableObject {
         }
     }
 
+    static let unconfirmedReason = "Not confirmed before the app closed. Retry sends this same message once."
+
+    private func forgetUnconfirmed(_ clientId: String) {
+        guard let outbox, let account = outboxAccount else { return }
+        outbox.remove(clientId: clientId, account: account, sessionId: sessionId)
+    }
+
     private func updatePending(_ clientId: String, _ change: (inout PendingSend) -> Void) {
         guard let index = pending.firstIndex(where: { $0.clientId == clientId }) else { return }
         change(&pending[index])
@@ -1188,6 +1216,7 @@ final class RoomChatCoordinator: ObservableObject {
             guard let clientId = message.clientMessageId,
                   pending.contains(where: { $0.clientId == clientId }) else { continue }
             pending.removeAll { $0.clientId == clientId }
+            forgetUnconfirmed(clientId)
             if !message.authorId.isEmpty { ownAuthorIds.insert(message.authorId.lowercased()) }
         }
     }
