@@ -354,10 +354,25 @@ struct RoomMediaTray: View {
                     .padding(.top, 10)
                     .padding(.bottom, 2)
                 }
+                .modifier(TrayOnTheRight())
                 .accessibilityElement(children: .contain)
                 .accessibilityLabel("Attached, \(board.tray.count) of \(board.perMessageLimit)")
                 .accessibilityIdentifier("pocket.room.media.tray")
             }
+        }
+    }
+}
+
+/// The files being added sit on the right, over your message, as they will when it is sent (Carter, #58637), where
+/// the iOS version can say so.
+private struct TrayOnTheRight: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, macOS 15.0, *) {
+            content
+                .defaultScrollAnchor(.trailing, for: .alignment)
+                .defaultScrollAnchor(.trailing, for: .initialOffset)
+        } else {
+            content
         }
     }
 }
