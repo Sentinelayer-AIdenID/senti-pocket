@@ -246,6 +246,7 @@ final class RoomChatCoordinator: ObservableObject {
             title: title,
             messages: [],
             isLoadingInitial: true,
+            pending: pending.map { RoomChatPendingRow(clientId: $0.clientId, text: $0.text, status: $0.status) },
             composer: initialComposer,
             canRename: canRename && sender is any RoomTitleSetting,
             canInvite: canInvite && sender is any RoomInviting
