@@ -39,6 +39,8 @@ final class RoomChatCoordinator: ObservableObject {
         var sentAt: Date?
     }
     private var pending: [PendingSend] = []
+    /// Run once a send's POST succeeds (a shared crash report is marked handled only then).
+    private var sentCallbacks: [String: () -> Void] = [:]
     private var identityRequested = false
 
     // Replies and reactions (GET /actions projection), and the open thread.
@@ -1267,9 +1269,17 @@ final class RoomChatCoordinator: ObservableObject {
         return RoomComposerState(canPost: true, disabledReason: nil, maximumLength: HTTPRoomMessageSender.maximumLength)
     }
 
-    private func enqueueSend(_ raw: String) {
+    /// Sends a crash report the person chose to share, and calls `onSent` only once the room accepted it: a send that
+    /// fails or is cut off leaves the report unhandled, so it is offered again instead of being lost (#58491 review).
+    func sendCrashReport(_ text: String, onSent: @escaping () -> Void) {
+        guard let clientId = enqueueSend(text) else { return }
+        sentCallbacks[clientId] = onSent
+    }
+
+    @discardableResult
+    private func enqueueSend(_ raw: String) -> String? {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard sender != nil, postingRefusedReason == nil, !text.isEmpty else { return }
+        guard sender != nil, postingRefusedReason == nil, !text.isEmpty else { return nil }
         guard text.unicodeScalars.count <= HTTPRoomMessageSender.maximumLength else {
             // The composer refuses this before sending; this is the backstop. The full text is kept (only the row's
             // display is cut), so nothing typed is lost.
@@ -1279,7 +1289,7 @@ final class RoomChatCoordinator: ObservableObject {
                 status: .failed(reason: "Too long to send (the limit is 64,000 characters).", canRetry: false)
             ))
             publish()
-            return
+            return nil
         }
         let clientId = Self.makeClientId()
         // Sending from a window further back returns to the live room, where the message appears.
@@ -1292,6 +1302,7 @@ final class RoomChatCoordinator: ObservableObject {
         publish()
         readAtBottomAfterDwell()
         deliver(clientId)
+        return clientId
     }
 
     /// Rows kept when the reader goes back down from up the history: the most a jump to the bottom crosses.
@@ -1324,6 +1335,7 @@ final class RoomChatCoordinator: ObservableObject {
                 try await sender.sendHumanMessage(sessionId: sessionId, text: item.text, clientId: clientId)
                 guard let self else { return }
                 self.updatePending(clientId) { $0.status = .sent; $0.sentAt = self.now() }
+                self.sentCallbacks.removeValue(forKey: clientId)?()
                 RoomComposerDraft.forgetSaved(sessionId: sessionId, sent: item.text)
                 self.onFeedback?(.sent)
                 // Pull the echo now instead of waiting for the stream or the next poll.
