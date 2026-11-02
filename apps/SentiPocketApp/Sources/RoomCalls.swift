@@ -36,9 +36,12 @@ struct RoomCallDetails: Equatable, Sendable {
     /// ringing, answered, declined, ended or missed.
     let status: String
     let ringExpiresAt: Date?
+    /// The server says its voice line reads this call's brief when a turn names the call (`voiceLineBrief`). Only then
+    /// does a turn carry the call: a refused turn is never taken to mean an older server.
+    let briefsVoiceLine: Bool
 
     init(callId: String, sessionId: String, callerActorId: String, callerName: String, reason: String?, status: String,
-         ringExpiresAt: Date?) {
+         ringExpiresAt: Date?, briefsVoiceLine: Bool = false) {
         self.callId = callId
         self.sessionId = sessionId
         self.callerActorId = callerActorId
@@ -46,6 +49,14 @@ struct RoomCallDetails: Equatable, Sendable {
         self.reason = reason
         self.status = status
         self.ringExpiresAt = ringExpiresAt
+        self.briefsVoiceLine = briefsVoiceLine
+    }
+
+    /// The live ring of exactly this doorbell's call: same call and room, a caller the server named, still ringing,
+    /// and not past its ring.
+    func isLiveRing(of doorbell: RoomCallDoorbell, at now: Date) -> Bool {
+        callId == doorbell.callId && sessionId == doorbell.sessionId && !callerActorId.isEmpty && status == "ringing"
+            && (ringExpiresAt.map { $0 > now } ?? true)
     }
 
     init?(json: JSONValue) {
@@ -57,8 +68,10 @@ struct RoomCallDetails: Equatable, Sendable {
             callerActorId: caller,
             callerName: json["callerName"]?.stringValue ?? caller,
             reason: json["reason"]?.stringValue,
-            status: json["status"]?.stringValue ?? "ringing",
-            ringExpiresAt: json["ringExpiresAt"]?.stringValue.flatMap { ParsedSessionTimestamp($0).date }
+            // A call read without its status is not taken to be ringing.
+            status: json["status"]?.stringValue ?? "unknown",
+            ringExpiresAt: json["ringExpiresAt"]?.stringValue.flatMap { ParsedSessionTimestamp($0).date },
+            briefsVoiceLine: json["voiceLineBrief"]?.boolValue ?? false
         )
     }
 }
@@ -127,14 +140,19 @@ final class RoomCallDesk: ObservableObject {
     struct Call: Equatable {
         let uuid: UUID
         let doorbell: RoomCallDoorbell
+        /// The call as the server read it to you, set only when it is this doorbell's live ring.
         var details: RoomCallDetails?
         var answered = false
+        /// The answer has gone to the server (it is told "ended" after this, "declined" before).
+        var answerSent = false
+        /// The server took the answer, or read the call back as answered when the answer's reply was lost.
+        var answerConfirmed = false
         var finished = false
         /// CallKit has given the answered call its audio: the voice room can listen and speak.
         var audioReady = false
 
-        /// Whom the voice room talks with: the caller's id once read, else the name the doorbell carried.
-        var partner: String { details?.callerActorId ?? doorbell.callerName }
+        /// Whom the voice room talks with: the caller as the server named it. The push's name only labels the ring.
+        var partner: String? { details?.callerActorId }
     }
 
     /// An answered call waiting for its room's voice room to take it.
@@ -157,20 +175,27 @@ final class RoomCallDesk: ObservableObject {
     private let ringFor: TimeInterval
     /// How long an answered call may wait for a voice room before it ends (warden, #281): never connected and silent.
     private let takeWithin: TimeInterval
+    /// The pause before reading a call again when the server could not be reached.
+    private let retryAfter: TimeInterval
     private let sleep: @Sendable (TimeInterval) async -> Void
+    private let now: () -> Date
 
     init(
         api: any RoomCallsAPI = RoomCallsClient(apiBaseURL: GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_API_URL"])),
         ringFor: TimeInterval = 45,
         takeWithin: TimeInterval = 60,
+        retryAfter: TimeInterval = 1,
         sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
             try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
-        }
+        },
+        now: @escaping () -> Date = { Date() }
     ) {
         self.api = api
         self.ringFor = ringFor
         self.takeWithin = takeWithin
+        self.retryAfter = retryAfter
         self.sleep = sleep
+        self.now = now
     }
 
     func owns(_ uuid: UUID) -> Bool { calls[uuid] != nil }
@@ -184,18 +209,22 @@ final class RoomCallDesk: ObservableObject {
         }
         calls[uuid] = Call(uuid: uuid, doorbell: doorbell)
         let api = self.api
+        let retryAfter = self.retryAfter
         Task { [weak self] in
-            let details = try? await api.call(sessionId: doorbell.sessionId, callId: doorbell.callId)
-            guard let self, var call = self.calls[uuid] else { return }
+            let details = await Self.read(doorbell, api: api, retryAfter: retryAfter)
+            guard let self, var call = self.calls[uuid], !call.finished else { return }
+            // Only the server's live ring of this very call goes on: one it refused or could not be reached for, a
+            // different call, or one answered, declined, missed or past its ring elsewhere stops ringing here, and an
+            // answer already given ends with it. The push alone never starts a call.
+            guard let details, details.isLiveRing(of: doorbell, at: self.now()) else {
+                self.drop(uuid)
+                return
+            }
             call.details = details
             self.calls[uuid] = call
             if self.waiting?.uuid == uuid { self.waiting = call }
-            // Answered, declined or missed elsewhere already: stop ringing here.
-            if let status = details?.status, status != "ringing", !call.answered {
-                self.finish(uuid, report: nil)
-                return
-            }
-            let expiry = details?.ringExpiresAt.map { $0.timeIntervalSinceNow } ?? self.ringFor
+            self.sendAnswer(uuid)
+            let expiry = details.ringExpiresAt.map { $0.timeIntervalSince(self.now()) } ?? self.ringFor
             await self.sleep(expiry)
             if let call = self.calls[uuid], !call.answered, !call.finished {
                 // Nobody answered before the ring ran out; the server calls it missed.
@@ -204,23 +233,85 @@ final class RoomCallDesk: ObservableObject {
         }
     }
 
-    /// Answered on the call screen: tell the room, then open it, where its voice room takes the call. One no voice
-    /// room takes in time (Pocket was killed and the push woke it with no room on screen) ends, rather than staying
-    /// connected and silent.
+    /// The call as the server reads it to you. Only an unreachable server is asked again (three tries in all); a
+    /// refusal or an unreadable answer is final.
+    private static func read(_ doorbell: RoomCallDoorbell, api: any RoomCallsAPI,
+                             retryAfter: TimeInterval) async -> RoomCallDetails? {
+        for attempt in 1...3 {
+            do {
+                return try await api.call(sessionId: doorbell.sessionId, callId: doorbell.callId)
+            } catch RoomCallsClient.Failure.unreachable where attempt < 3 {
+                try? await Task.sleep(nanoseconds: UInt64(max(0, retryAfter) * 1_000_000_000))
+            } catch {
+                return nil
+            }
+        }
+        return nil
+    }
+
+    /// Answered on the call screen. The answer goes to the server once the call is read as its live ring (at once,
+    /// or when the read lands), and the room opens only when the server has taken it; its voice room then takes the
+    /// call. One no voice room takes in time (Pocket was killed and the push woke it with no room on screen, or the
+    /// call could not be confirmed) ends, rather than staying connected and silent.
     func answered(_ uuid: UUID) {
         guard var call = calls[uuid], !call.finished else { return }
         call.answered = true
         calls[uuid] = call
-        report(call, "answered")
         waiting = call
-        openRoom(call.doorbell.sessionId)
+        sendAnswer(uuid)
         let wait = takeWithin
         Task { [weak self] in
             await self?.sleep(wait)
-            guard let self, self.waiting?.uuid == uuid, self.isLive(uuid) else { return }
+            guard let self, self.waiting?.uuid == uuid, let call = self.calls[uuid], !call.finished else { return }
             self.waiting = nil
-            self.finish(uuid, report: "ended")
+            self.finish(uuid, report: call.answerSent ? "ended" : nil)
         }
+    }
+
+    /// Tells the server an answered, verified call was answered, in order with the other reports. The room opens on
+    /// the server's yes. A refusal ends the call. A lost reply (no answer, or one that could not be read) is settled by
+    /// reading the call back: answered is a yes, anything else ends it.
+    private func sendAnswer(_ uuid: UUID) {
+        guard var call = calls[uuid], call.answered, !call.answerSent, !call.finished, call.details != nil else { return }
+        call.answerSent = true
+        calls[uuid] = call
+        let api = self.api
+        let doorbell = call.doorbell
+        let previous = reporting
+        let confirming = Task { () -> Bool in
+            await previous?.value
+            do {
+                try await api.setStatus(sessionId: doorbell.sessionId, callId: doorbell.callId, status: "answered")
+                return true
+            } catch RoomCallsClient.Failure.refused(_) {
+                return false
+            } catch {
+                guard let read = try? await api.call(sessionId: doorbell.sessionId, callId: doorbell.callId) else {
+                    return false
+                }
+                return read.callId == doorbell.callId && read.sessionId == doorbell.sessionId && read.status == "answered"
+            }
+        }
+        reporting = Task { _ = await confirming.value }
+        Task { [weak self] in
+            let confirmed = await confirming.value
+            guard let self, var call = self.calls[uuid], !call.finished else { return }
+            guard confirmed else {
+                self.drop(uuid)
+                return
+            }
+            call.answerConfirmed = true
+            self.calls[uuid] = call
+            if self.waiting?.uuid == uuid { self.waiting = call }
+            self.openRoom(doorbell.sessionId)
+        }
+    }
+
+    /// A call that is not the server's to take: its ring or its answered call ends, and nothing waits for it. Nothing
+    /// is reported, since the server did not take this phone's word for the call.
+    private func drop(_ uuid: UUID) {
+        if waiting?.uuid == uuid { waiting = nil }
+        finish(uuid, report: nil)
     }
 
     /// Mute or unmute on the phone's own call screen, or the app's Mute performed there.
@@ -239,8 +330,8 @@ final class RoomCallDesk: ObservableObject {
         muteSystemCall(uuid, isMuted, done)
     }
 
-    /// The call screen ended: before an answer that is a decline; after it, the end of the call, and its voice room
-    /// hangs up too.
+    /// The call screen ended: before the answer reached the server that is a decline; after it, the end of the call,
+    /// and its voice room hangs up too.
     func ended(_ uuid: UUID) {
         guard let call = calls[uuid], !call.finished else { return }
         if waiting?.uuid == uuid {
@@ -248,7 +339,7 @@ final class RoomCallDesk: ObservableObject {
             waiting = nil
         }
         markFinished(uuid)
-        report(call, call.answered ? "ended" : "declined")
+        report(call, call.answerSent ? "ended" : "declined")
         if call.answered { hungUp = uuid }
     }
 
@@ -269,7 +360,8 @@ final class RoomCallDesk: ObservableObject {
     /// audio is the voice room's, which is what keeps the call talking with the phone locked or Pocket in the
     /// background.
     func takeWaiting(for sessionId: String) -> Call? {
-        guard let call = waiting, call.doorbell.sessionId == sessionId, call.audioReady else { return nil }
+        guard let call = waiting, call.doorbell.sessionId == sessionId, call.audioReady, call.answerConfirmed,
+              call.partner != nil else { return nil }
         waiting = nil
         return call
     }

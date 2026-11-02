@@ -389,7 +389,8 @@ struct RoomChatScreen: View {
             poster: voicePoster,
             voiceLine: voicePoster as? any VoiceLining,
             endpointer: voicePoster as? any VoiceEndpointing,
-            ringCallId: call?.doorbell.callId,
+            // A turn names the call only when the server said its voice line reads call briefs.
+            ringCallId: call?.details?.briefsVoiceLine == true ? call?.doorbell.callId : nil,
             about: call?.details?.reason,
             onEnded: { endVoiceRoom() },
             onRecordFailed: { [weak coordinator] failure in coordinator?.show(notice: failure) }
@@ -449,10 +450,11 @@ struct RoomChatScreen: View {
     /// An agent's call answered on the call screen: once this room has it and CallKit has given it audio, the voice
     /// room starts with the caller inside the system call, with Pocket in front or not.
     private func takeAnsweredCall() {
-        guard voiceRoom == nil, voicePoster != nil, let call = callDesk.takeWaiting(for: route.sessionId) else { return }
+        guard voiceRoom == nil, voicePoster != nil, let call = callDesk.takeWaiting(for: route.sessionId),
+              let partner = call.partner else { return }
         answeredCall = call
         CrashReporter.shared.note("call answered")
-        startVoiceRoom(with: [call.partner], answering: call)
+        startVoiceRoom(with: [partner], answering: call)
     }
 
     /// Contributors and above file and change tickets (the API's `min_role="contributor"`). An unknown role offers

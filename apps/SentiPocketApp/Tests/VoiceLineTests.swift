@@ -559,24 +559,20 @@ final class VoiceLineRequestTests: XCTestCase {
         XCTAssertNil(VoiceTurnURLProtocol.sent().first?["ringCallId"], "no key at all, so an older server takes it")
     }
 
-    /// A server from before call briefs refuses the field it does not know (422): the turn is asked again without
-    /// it, once, and still answered.
-    func test_a_server_without_call_briefs_is_asked_again_without_the_call() async throws {
-        VoiceTurnURLProtocol.reset(statuses: [422, 200])
-        let heard = try await sentences(ringCallId: "ring-1")
-        XCTAssertEqual(heard, ["Yes."])
-        let sent = VoiceTurnURLProtocol.sent()
-        XCTAssertEqual(sent.count, 2)
-        XCTAssertEqual(sent.first?["ringCallId"] as? String, "ring-1")
-        XCTAssertNil(sent.last?["ringCallId"])
-        XCTAssertEqual(sent.last?["text"] as? String, "Status?")
-
-        VoiceTurnURLProtocol.reset(statuses: [422, 200])
-        do {
-            _ = try await sentences(ringCallId: nil)
-            XCTFail("a refused turn without the call is not asked again")
-        } catch {
-            XCTAssertEqual(VoiceTurnURLProtocol.sent().count, 1)
+    /// A refused turn that names a call (422 can be the call's own refusal, not an older server) fails as it is: it is
+    /// never asked again with the call stripped off.
+    func test_a_refused_turn_that_names_a_call_fails_and_is_not_asked_again_without_it() async throws {
+        for ringCallId in ["ring-1", nil] as [String?] {
+            VoiceTurnURLProtocol.reset(statuses: [422, 200])
+            do {
+                _ = try await sentences(ringCallId: ringCallId)
+                XCTFail("a refused turn fails")
+            } catch {
+                XCTAssertEqual(error as? VoiceLineError, .failed)
+            }
+            let sent = VoiceTurnURLProtocol.sent()
+            XCTAssertEqual(sent.count, 1, "asked once")
+            XCTAssertEqual(sent.first?["ringCallId"] as? String, ringCallId)
         }
     }
 }

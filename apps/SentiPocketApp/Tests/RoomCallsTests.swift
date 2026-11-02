@@ -5,29 +5,84 @@ import PocketContracts
 import XCTest
 @testable import SentiPocketApp
 
-/// The calls API as a recording fake.
+/// The calls API as a recording fake. A read returns `details` (or the matching one of `others`), or throws `failure`;
+/// it waits for `gate` when there is one. An answer throws `answerFailure` when set, and later reads then return
+/// `readBack` (or throw `failure`).
 private final class FakeCallsAPI: RoomCallsAPI, @unchecked Sendable {
     private let lock = NSLock()
     private var statuses: [String] = []
     private var reads = 0
+    private var answerTried = false
     let details: RoomCallDetails?
+    private let failure: any Error
+    private let others: [RoomCallDetails]
+    private let answerFailure: (any Error)?
+    private let readBack: RoomCallDetails?
+    private let gate: ReadGate?
 
-    init(details: RoomCallDetails?) {
+    init(details: RoomCallDetails?, failure: any Error = RoomCallsClient.Failure.unreachable,
+         others: [RoomCallDetails] = [], answerFailure: (any Error)? = nil, readBack: RoomCallDetails? = nil,
+         gate: ReadGate? = nil) {
         self.details = details
+        self.failure = failure
+        self.others = others
+        self.answerFailure = answerFailure
+        self.readBack = readBack
+        self.gate = gate
     }
 
     func call(sessionId: String, callId: String) async throws -> RoomCallDetails {
-        lock.withLock { reads += 1 }
-        guard let details else { throw RoomCallsClient.Failure.unreachable }
+        await gate?.wait()
+        let afterFailedAnswer = lock.withLock { () -> Bool in
+            reads += 1
+            return answerTried && answerFailure != nil
+        }
+        if afterFailedAnswer {
+            guard let readBack else { throw failure }
+            return readBack
+        }
+        if let other = others.first(where: { $0.callId == callId }) { return other }
+        guard let details else { throw failure }
         return details
     }
 
     func setStatus(sessionId: String, callId: String, status: String) async throws {
-        lock.withLock { statuses.append(status) }
+        lock.withLock {
+            statuses.append(status)
+            if status == "answered" { answerTried = true }
+        }
+        if status == "answered", let answerFailure { throw answerFailure }
     }
 
     var sent: [String] { lock.withLock { statuses } }
     var readCount: Int { lock.withLock { reads } }
+}
+
+/// Holds reads until the test lets them through, so a call can be answered before it is read.
+private final class ReadGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let goes = lock.withLock { () -> Bool in
+                if isOpen { return true }
+                waiters.append(continuation)
+                return false
+            }
+            if goes { continuation.resume() }
+        }
+    }
+
+    func open() {
+        let held = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+            isOpen = true
+            defer { waiters = [] }
+            return waiters
+        }
+        held.forEach { $0.resume() }
+    }
 }
 
 /// Carter's P0: agents ring his phone (sentinelayer-api #1046). The push is a doorbell; CallKit rings; answering
@@ -37,9 +92,14 @@ final class RoomCallsTests: XCTestCase {
     private let doorbell = RoomCallDoorbell(callId: "call_1", sessionId: "e9e8dc5e-8d57-4603-975f-09156e3b4473",
                                             callerName: "pocket-forge")
 
-    private func details(status: String = "ringing", expires: Date? = nil) -> RoomCallDetails {
-        RoomCallDetails(callId: "call_1", sessionId: doorbell.sessionId, callerActorId: "pocket-forge",
-                        callerName: "pocket-forge", reason: "Build 19 is up", status: status, ringExpiresAt: expires)
+    private func details(callId: String = "call_1", sessionId: String? = nil, caller: String = "pocket-forge",
+                         status: String = "ringing", expires: Date? = nil) -> RoomCallDetails {
+        RoomCallDetails(callId: callId, sessionId: sessionId ?? doorbell.sessionId, callerActorId: caller,
+                        callerName: caller, reason: "Build 19 is up", status: status, ringExpiresAt: expires)
+    }
+
+    private func confirmed(_ desk: RoomCallDesk) async {
+        await until("the server took the answer") { desk.waiting?.answerConfirmed == true }
     }
 
     private func settle() async {
@@ -120,7 +180,7 @@ final class RoomCallsTests: XCTestCase {
         desk.answered(uuid)
         await until("answered") { api.sent == ["answered"] }
         XCTAssertEqual(api.sent, ["answered"])
-        XCTAssertEqual(opened, [doorbell.sessionId])
+        await until("opened on the server's yes") { opened == [doorbell.sessionId] }
         XCTAssertNil(desk.takeWaiting(for: doorbell.sessionId), "not before CallKit gives the call its audio")
         desk.audioActivated(uuid)
         XCTAssertEqual(desk.waiting?.audioReady, true, "the room hears that the waiting call can talk")
@@ -150,6 +210,7 @@ final class RoomCallsTests: XCTestCase {
         desk.received(doorbell, uuid: uuid)
         desk.answered(uuid)
         desk.audioActivated(uuid)
+        await confirmed(desk)
         XCTAssertNotNil(desk.takeWaiting(for: doorbell.sessionId))
         desk.ended(uuid)
         XCTAssertEqual(desk.hungUp, uuid, "the room's voice room is told to hang up")
@@ -159,7 +220,7 @@ final class RoomCallsTests: XCTestCase {
     }
 
     func test_ending_before_an_answer_declines_and_after_it_ends() async {
-        let api = FakeCallsAPI(details: details())
+        let api = FakeCallsAPI(details: details(), others: [details(callId: "call_2", caller: "claude-warden")])
         let desk = RoomCallDesk(api: api, sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) })
         let declined = UUID()
         desk.received(doorbell, uuid: declined)
@@ -172,11 +233,30 @@ final class RoomCallsTests: XCTestCase {
         let hungUp = UUID()
         desk.received(other, uuid: hungUp)
         desk.answered(hungUp)
+        await confirmed(desk)
         desk.ended(hungUp)
         await until("answered, then ended") { api.sent == ["declined", "answered", "ended"] }
         XCTAssertEqual(api.sent, ["declined", "answered", "ended"])
-        XCTAssertNil(desk.waiting, "hung up before the room opened: nothing waits")
+        XCTAssertNil(desk.waiting, "hung up before the voice room took it: nothing waits")
         XCTAssertNotEqual(desk.hungUp, declined, "a declined call had no voice room to end")
+    }
+
+    /// Hanging up before the answer reached the server (the call was still being read) is a decline: the server
+    /// never hears an answer for it.
+    func test_hanging_up_before_the_answer_reached_the_server_declines() async {
+        let gate = ReadGate()
+        let api = FakeCallsAPI(details: details(), gate: gate)
+        let desk = RoomCallDesk(api: api, sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) })
+        let uuid = UUID()
+        desk.received(doorbell, uuid: uuid)
+        desk.answered(uuid)
+        desk.ended(uuid)
+        await until("declined") { api.sent == ["declined"] }
+        gate.open()
+        await until("read") { api.readCount == 1 }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(api.sent, ["declined"], "no answer is sent for a call already hung up")
+        XCTAssertNil(desk.waiting)
     }
 
     func test_a_repeated_doorbell_ends_its_second_ring_and_a_finished_call_stops_ringing() async {
@@ -227,6 +307,20 @@ final class RoomCallsTests: XCTestCase {
         XCTAssertEqual(details?.status, "ringing")
         XCTAssertEqual(details?.ringExpiresAt, ParsedSessionTimestamp("2026-10-30T03:00:45Z").date)
         XCTAssertNil(RoomCallDetails(json: try JSONDecoder().decode(JSONValue.self, from: Data("{\"callId\": \"x\"}".utf8))))
+        XCTAssertEqual(details?.briefsVoiceLine, false, "a turn names the call only when the server says so")
+
+        let briefed = RoomCallDetails(json: try JSONDecoder().decode(JSONValue.self, from: Data("""
+        {"callId": "call_1", "sessionId": "room-1", "callerActorId": "pocket-forge", "status": "ringing",
+         "voiceLineBrief": true}
+        """.utf8)))
+        XCTAssertEqual(briefed?.briefsVoiceLine, true)
+
+        let statusless = RoomCallDetails(json: try JSONDecoder().decode(JSONValue.self, from: Data("""
+        {"callId": "call_1", "sessionId": "room-1", "callerActorId": "pocket-forge"}
+        """.utf8)))
+        XCTAssertNotEqual(statusless?.status, "ringing", "a call read without its status is not ringing")
+        XCTAssertEqual(statusless?.isLiveRing(of: RoomCallDoorbell(callId: "call_1", sessionId: "room-1", callerName: "x"),
+                                              at: Date()), false)
     }
 
     /// Warden (#281): Mute on the phone's call screen reaches the room's voice room.
@@ -304,7 +398,7 @@ final class RoomCallsTests: XCTestCase {
 
     /// Warden (#281): an answered call no voice room takes ends, rather than staying connected and silent.
     func test_an_answered_call_no_voice_room_takes_ends() async {
-        let api = FakeCallsAPI(details: details())
+        let api = FakeCallsAPI(details: details(), others: [details(callId: "call_2", caller: "claude-warden")])
         let desk = RoomCallDesk(api: api, ringFor: 3_600, takeWithin: 0.05,
                                 sleep: { seconds in try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) })
         var endedSystem: [UUID] = []
@@ -317,16 +411,176 @@ final class RoomCallsTests: XCTestCase {
         XCTAssertNil(desk.waiting)
         XCTAssertFalse(desk.isLive(uuid))
 
-        // One a voice room took in time is left alone.
+        // One a voice room took in time is left alone (its own desk: the take now waits for the server's yes).
+        let patient = RoomCallDesk(api: api, ringFor: 3_600, takeWithin: 0.3,
+                                   sleep: { seconds in try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) })
+        var endedLater: [UUID] = []
+        patient.endSystemCall = { endedLater.append($0) }
         let taken = UUID()
         let other = RoomCallDoorbell(callId: "call_2", sessionId: doorbell.sessionId, callerName: "claude-warden")
-        desk.received(other, uuid: taken)
-        desk.answered(taken)
-        desk.audioActivated(taken)
-        XCTAssertNotNil(desk.takeWaiting(for: doorbell.sessionId))
-        try? await Task.sleep(nanoseconds: 150_000_000)
-        XCTAssertTrue(desk.isLive(taken))
-        XCTAssertEqual(endedSystem, [uuid])
+        patient.received(other, uuid: taken)
+        patient.answered(taken)
+        patient.audioActivated(taken)
+        await confirmed(patient)
+        XCTAssertNotNil(patient.takeWaiting(for: doorbell.sessionId))
+        try? await Task.sleep(nanoseconds: 450_000_000)
+        XCTAssertTrue(patient.isLive(taken))
+        XCTAssertTrue(endedLater.isEmpty)
+    }
+
+    // MARK: - Only the server's live ring of this call becomes a call (#298 review)
+
+    /// A call the server refuses to read, or answers unreadably, never starts: its ring ends, an answer given meanwhile
+    /// ends with it, nothing is told to the server, and the room never opens. A refusal is not asked again.
+    func test_a_call_the_server_will_not_read_never_starts() async {
+        let failures: [any Error] = [RoomCallsClient.Failure.refused(401), RoomCallsClient.Failure.refused(403),
+                                     RoomCallsClient.Failure.unreadable, RoomCallsClient.Failure.signedOut]
+        for failure in failures {
+            let gate = ReadGate()
+            let api = FakeCallsAPI(details: nil, failure: failure, gate: gate)
+            let desk = RoomCallDesk(api: api, retryAfter: 0, sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) })
+            var opened: [String] = []
+            var endedSystem: [UUID] = []
+            desk.openRoom = { opened.append($0) }
+            desk.endSystemCall = { endedSystem.append($0) }
+            let uuid = UUID()
+            desk.received(doorbell, uuid: uuid)
+            desk.answered(uuid)
+            desk.audioActivated(uuid)
+            XCTAssertNil(desk.takeWaiting(for: doorbell.sessionId), "\(failure): not before the server read it")
+            gate.open()
+            await until("\(failure): the call ends") { endedSystem == [uuid] }
+            XCTAssertNil(desk.waiting, "\(failure)")
+            XCTAssertNil(desk.takeWaiting(for: doorbell.sessionId), "\(failure)")
+            XCTAssertFalse(desk.isLive(uuid), "\(failure)")
+            XCTAssertTrue(opened.isEmpty, "\(failure): the room never opens")
+            XCTAssertTrue(api.sent.isEmpty, "\(failure): nothing is told to the server")
+            XCTAssertEqual(api.readCount, 1, "\(failure): a refusal is final")
+        }
+    }
+
+    /// An unreachable server is read three times in all; still nothing, and the ring ends.
+    func test_an_unreachable_server_is_read_three_times_then_the_ring_ends() async {
+        let api = FakeCallsAPI(details: nil)
+        let desk = RoomCallDesk(api: api, retryAfter: 0, sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) })
+        var endedSystem: [UUID] = []
+        desk.endSystemCall = { endedSystem.append($0) }
+        let uuid = UUID()
+        desk.received(doorbell, uuid: uuid)
+        await until("the ring ends") { endedSystem == [uuid] }
+        XCTAssertEqual(api.readCount, 3)
+        XCTAssertTrue(api.sent.isEmpty)
+    }
+
+    /// A read that is not this doorbell's live ring (another call, another room, a caller the server did not name,
+    /// over already, or past its ring) ends the call it was answered as, before the room opens.
+    func test_a_read_that_is_not_this_calls_live_ring_ends_it() async {
+        let cases: [(String, RoomCallDetails)] = [
+            ("another call", details(callId: "call_9")),
+            ("another room", details(sessionId: "another-room")),
+            ("no caller", details(caller: "")),
+            ("declined", details(status: "declined")),
+            ("missed", details(status: "missed")),
+            ("past its ring", details(expires: Date().addingTimeInterval(-1))),
+        ]
+        for (name, read) in cases {
+            let gate = ReadGate()
+            let api = FakeCallsAPI(details: read, gate: gate)
+            let desk = RoomCallDesk(api: api, sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) })
+            var opened: [String] = []
+            var endedSystem: [UUID] = []
+            desk.openRoom = { opened.append($0) }
+            desk.endSystemCall = { endedSystem.append($0) }
+            let uuid = UUID()
+            desk.received(doorbell, uuid: uuid)
+            desk.answered(uuid)
+            desk.audioActivated(uuid)
+            gate.open()
+            await until("\(name): the call ends") { endedSystem == [uuid] }
+            XCTAssertNil(desk.takeWaiting(for: doorbell.sessionId), name)
+            XCTAssertTrue(opened.isEmpty, "\(name): the room never opens")
+            XCTAssertTrue(api.sent.isEmpty, "\(name): no answer is sent")
+        }
+    }
+
+    /// Answered before the read lands: nothing is sent and the room stays shut until the server reads the call as
+    /// its live ring; then the answer goes, and the room opens on the server's yes. The voice room talks with the
+    /// caller the server named, never the name the push carried.
+    func test_an_answer_before_the_read_waits_for_it_and_talks_with_the_caller_the_server_named() async {
+        let gate = ReadGate()
+        let api = FakeCallsAPI(details: details(caller: "pocket-forge"), gate: gate)
+        let desk = RoomCallDesk(api: api, sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) })
+        var opened: [String] = []
+        desk.openRoom = { opened.append($0) }
+        let pushed = RoomCallDoorbell(callId: "call_1", sessionId: doorbell.sessionId, callerName: "someone-else")
+        let uuid = UUID()
+        desk.received(pushed, uuid: uuid)
+        desk.answered(uuid)
+        desk.audioActivated(uuid)
+        await settle()
+        XCTAssertTrue(api.sent.isEmpty, "no answer before the read")
+        XCTAssertTrue(opened.isEmpty, "the room waits for the server")
+        XCTAssertNil(desk.takeWaiting(for: doorbell.sessionId))
+        XCTAssertTrue(desk.isLive(uuid), "still pending, not ended")
+
+        gate.open()
+        await confirmed(desk)
+        XCTAssertEqual(api.sent, ["answered"])
+        XCTAssertEqual(opened, [doorbell.sessionId])
+        XCTAssertEqual(desk.takeWaiting(for: doorbell.sessionId)?.partner, "pocket-forge")
+    }
+
+    /// The server refusing the answer (the call was taken, or is over) ends the call; the room never opens.
+    func test_a_refused_answer_ends_the_call() async {
+        let api = FakeCallsAPI(details: details(), answerFailure: RoomCallsClient.Failure.refused(409),
+                               readBack: details(status: "answered"))
+        let desk = RoomCallDesk(api: api, sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) })
+        var opened: [String] = []
+        var endedSystem: [UUID] = []
+        desk.openRoom = { opened.append($0) }
+        desk.endSystemCall = { endedSystem.append($0) }
+        let uuid = UUID()
+        desk.received(doorbell, uuid: uuid)
+        desk.answered(uuid)
+        desk.audioActivated(uuid)
+        await until("the call ends") { endedSystem == [uuid] }
+        XCTAssertEqual(api.sent, ["answered"])
+        XCTAssertEqual(api.readCount, 1, "a refusal is not read back: answered by someone else is not yours")
+        XCTAssertTrue(opened.isEmpty)
+        XCTAssertNil(desk.takeWaiting(for: doorbell.sessionId))
+    }
+
+    /// The answer's reply was lost: the call is read back. Answered is the server's yes; still ringing, or no read at
+    /// all, ends the call.
+    func test_a_lost_answer_reply_is_settled_by_reading_the_call_back() async {
+        let outcomes: [(String, RoomCallDetails?, Bool)] = [
+            ("read back answered", details(status: "answered"), true),
+            ("read back ringing", details(status: "ringing"), false),
+            ("read back another call", details(callId: "call_9", status: "answered"), false),
+            ("no read back", nil, false),
+        ]
+        for (name, readBack, connects) in outcomes {
+            let api = FakeCallsAPI(details: details(), answerFailure: RoomCallsClient.Failure.unreachable, readBack: readBack)
+            let desk = RoomCallDesk(api: api, sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) })
+            var opened: [String] = []
+            var endedSystem: [UUID] = []
+            desk.openRoom = { opened.append($0) }
+            desk.endSystemCall = { endedSystem.append($0) }
+            let uuid = UUID()
+            desk.received(doorbell, uuid: uuid)
+            desk.answered(uuid)
+            desk.audioActivated(uuid)
+            if connects {
+                await confirmed(desk)
+                XCTAssertEqual(opened, [doorbell.sessionId], name)
+                XCTAssertNotNil(desk.takeWaiting(for: doorbell.sessionId), name)
+            } else {
+                await until("\(name): the call ends") { endedSystem == [uuid] }
+                XCTAssertTrue(opened.isEmpty, name)
+                XCTAssertNil(desk.takeWaiting(for: doorbell.sessionId), name)
+            }
+            XCTAssertEqual(api.readCount, 2, "\(name): read, then read back once")
+        }
     }
 }
 #endif

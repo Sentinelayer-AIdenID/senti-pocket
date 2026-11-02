@@ -698,14 +698,9 @@ extension HTTPRoomMessageSender: VoiceLining {
                     if let ringCallId { body["ringCallId"] = ringCallId }
                     request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-                    var (bytes, response) = try await urlSession.bytes(for: request)
-                    if (response as? HTTPURLResponse)?.statusCode == 422, body["ringCallId"] != nil {
-                        // A server from before call briefs refuses the field it doesn't know: the turn is asked again
-                        // without it, and answers from the room alone.
-                        body["ringCallId"] = nil
-                        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-                        (bytes, response) = try await urlSession.bytes(for: request)
-                    }
+                    // A refused turn (422 included) is never asked again without its call: the caller only names the
+                    // call when the server said it reads call briefs.
+                    let (bytes, response) = try await urlSession.bytes(for: request)
                     let http = response as? HTTPURLResponse
                     switch http?.statusCode ?? 0 {
                     case 200: break
