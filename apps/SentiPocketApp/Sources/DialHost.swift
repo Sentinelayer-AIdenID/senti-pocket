@@ -197,7 +197,9 @@ final class DialHost: ObservableObject {
             guard let callManager else { return done(false) }
             callManager.requestMuted(uuid, muted, completion: done)
         }
-        callManager.isRoomCallAuthorized = { SessionTokenStore.load()?.isEmpty == false }
+        // Only for the account this phone's call row was confirmed for: until the person signed in now has registered,
+        // the server may still ring the last account's row here (warden, #298 review).
+        callManager.isRoomCallAuthorized = { PushRegistrar.shared.ringsForSignedInAccount }
         callManager.onRoomCallReceived = { doorbell, uuid in desk.received(doorbell, uuid: uuid) }
         // Adapter 1 — admit one reported CallKit episode, then store its receive state under the exact UUID.
         callManager.onDialReceived = { [weak self] state, dialId, callUUID in

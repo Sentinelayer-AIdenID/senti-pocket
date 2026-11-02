@@ -160,6 +160,7 @@ final class RoomCallsTests: XCTestCase {
         XCTAssertEqual(reported.count, 2, "every push is reported, signed in or not")
         XCTAssertEqual(received.count, 1, "signed out, the call never reaches the desk")
         XCTAssertEqual(ended, [reported[1].0], "and its ring ends at once")
+        XCTAssertEqual(reported[1].1, "Senti", "a ring not for the person signed in names no caller (warden, #298 review)")
         XCTAssertEqual(completions, 2)
     }
 

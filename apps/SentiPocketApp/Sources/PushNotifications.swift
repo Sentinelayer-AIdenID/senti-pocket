@@ -4,8 +4,9 @@ import SwiftUI
 import UIKit
 import UserNotifications
 
-/// This phone with the API, for the bell's Apple push (sentinelayer-api `PUT/DELETE /api/v1/me/push-devices`,
-/// `PUT /api/v1/me/push-devices/{token}/preferences`), with the signed-in person's own bearer.
+/// This phone with the API, for the bell's Apple push (sentinelayer-api `PUT /api/v1/me/push-devices`, then
+/// `DELETE /api/v1/me/push-devices/{id}` and `PUT /api/v1/me/push-devices/{id}/preferences` by the row id the
+/// registration returns: a route never carries the device token), with the signed-in person's own bearer.
 struct PushDeviceClient: Sendable {
     let apiBaseURL: URL?
     var urlSession: URLSession = SentiHTTPTransportPolicy.liveSession
@@ -15,10 +16,21 @@ struct PushDeviceClient: Sendable {
 
     /// `kind` is "voip" for the PushKit token agents' calls ring (sentinelayer-api #1046); an alert token sends none,
     /// so a server without calls still accepts it.
-    func register(token: String, environment: String, bundleId: String, appVersion: String?, kind: String? = nil) async throws {
-        try await send("PUT", path: "/api/v1/me/push-devices",
-                       body: Self.registration(token: token, environment: environment, bundleId: bundleId,
-                                               appVersion: appVersion, kind: kind))
+    /// Returns the row's id, which signing out and settings address it by (nil when the answer has none).
+    @discardableResult
+    func register(token: String, environment: String, bundleId: String, appVersion: String?,
+                  kind: String? = nil) async throws -> String? {
+        let answer = try await send("PUT", path: "/api/v1/me/push-devices",
+                                    body: Self.registration(token: token, environment: environment, bundleId: bundleId,
+                                                            appVersion: appVersion, kind: kind))
+        return Self.deviceId(in: answer)
+    }
+
+    /// The row id in a registration's answer, only as a UUID: it goes into a route.
+    static func deviceId(in answer: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: answer) as? [String: Any],
+              let id = object["id"] as? String, let uuid = UUID(uuidString: id) else { return nil }
+        return uuid.uuidString.lowercased()
     }
 
     static func registration(token: String, environment: String, bundleId: String, appVersion: String?,
@@ -29,16 +41,25 @@ struct PushDeviceClient: Sendable {
         return body
     }
 
-    func unregister(token: String) async throws {
-        try await send("DELETE", path: "/api/v1/me/push-devices/\(token)", body: nil)
+    /// Signs one row out. A row the server does not have for this person (gone already, or moved to the account
+    /// signed in here since) is signed out too.
+    func unregister(deviceId: String) async throws {
+        guard let id = UUID(uuidString: deviceId) else { return }
+        do {
+            try await send("DELETE", path: "/api/v1/me/push-devices/\(id.uuidString.lowercased())", body: nil)
+        } catch Failure.refused(404) {
+            return
+        }
     }
 
-    func setPreferences(token: String, sound: Bool, vibrate: Bool, showPreviews: Bool) async throws {
-        try await send("PUT", path: "/api/v1/me/push-devices/\(token)/preferences",
+    func setPreferences(deviceId: String, sound: Bool, vibrate: Bool, showPreviews: Bool) async throws {
+        guard let id = UUID(uuidString: deviceId) else { throw Failure.notConfigured }
+        try await send("PUT", path: "/api/v1/me/push-devices/\(id.uuidString.lowercased())/preferences",
                        body: ["sound": sound, "vibrate": vibrate, "showPreviews": showPreviews])
     }
 
-    private func send(_ method: String, path: String, body: [String: Any]?) async throws {
+    @discardableResult
+    private func send(_ method: String, path: String, body: [String: Any]?) async throws -> Data {
         guard let apiBaseURL, var components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false) else {
             throw Failure.notConfigured
         }
@@ -54,14 +75,74 @@ struct PushDeviceClient: Sendable {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
         }
+        let data: Data
         let response: URLResponse
         do {
-            (_, response) = try await urlSession.data(for: request)
+            (data, response) = try await urlSession.data(for: request)
         } catch {
             throw Failure.unreachable
         }
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else { throw Failure.refused(status) }
+        return data
+    }
+}
+
+/// Rows this phone still owes the server a sign-out for, with the account each belongs to: kept on the phone until
+/// the server confirms, and sent with that account's next credential. A sign-out, or a refused credential, that could
+/// not reach the server must not leave this phone registered for the last person (warden, #298 review).
+struct PushUnregisterQueue: Codable, Equatable {
+    struct Entry: Codable, Equatable {
+        let deviceId: String
+        let account: String
+        let since: Date
+    }
+
+    var entries: [Entry] = []
+
+    /// After this long an entry goes: the server forgets a phone it has not seen for a while anyway.
+    static let keptFor: TimeInterval = 30 * 24 * 3600
+    static let key = "pocket.push.pendingUnregisters"
+
+    /// A row whose account cannot be told is not kept: no credential could ever sign it out.
+    mutating func add(deviceId: String, account: String?, now: Date = Date()) {
+        guard let account, !account.isEmpty, UUID(uuidString: deviceId) != nil,
+              !entries.contains(where: { $0.deviceId == deviceId }) else { return }
+        entries.append(Entry(deviceId: deviceId, account: account, since: now))
+    }
+
+    /// What `account`'s credential can sign out, oldest first. Entries past `keptFor` are dropped.
+    mutating func due(for account: String?, now: Date = Date()) -> [Entry] {
+        entries.removeAll { now.timeIntervalSince($0.since) > Self.keptFor }
+        guard let account else { return [] }
+        return entries.filter { $0.account == account }
+    }
+
+    mutating func remove(deviceIds: [String]) {
+        entries.removeAll { deviceIds.contains($0.deviceId) }
+    }
+
+    static func load(from defaults: UserDefaults = .standard) -> PushUnregisterQueue {
+        guard let data = defaults.data(forKey: key),
+              let queue = try? JSONDecoder().decode(PushUnregisterQueue.self, from: data) else { return PushUnregisterQueue() }
+        return queue
+    }
+
+    func save(to defaults: UserDefaults = .standard) {
+        if entries.isEmpty {
+            defaults.removeObject(forKey: Self.key)
+        } else if let data = try? JSONEncoder().encode(self) {
+            defaults.set(data, forKey: Self.key)
+        }
+    }
+
+    /// Signs each entry out; returns the ones the server confirmed.
+    static func confirmed(of entries: [Entry], unregister: (String) async throws -> Void) async -> [String] {
+        var done: [String] = []
+        for entry in entries {
+            if (try? await unregister(entry.deviceId)) != nil { done.append(entry.deviceId) }
+        }
+        return done
     }
 }
 
@@ -100,6 +181,11 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
     @AppStorage("pocket.push.token") private var storedToken = ""
     /// The PushKit token agents' calls ring, registered with the API while someone is signed in.
     @AppStorage("pocket.push.voipToken") private var storedVoipToken = ""
+    /// The rows the server keeps for this phone's bell and call tokens, by the ids its registrations returned.
+    @AppStorage("pocket.push.deviceId") private var deviceId = ""
+    @AppStorage("pocket.push.voipDeviceId") private var voipDeviceId = ""
+    /// The account the call row was confirmed for: calls ring only for that account (`ringsForSignedInAccount`).
+    @AppStorage("pocket.push.voipAccount") private var voipAccount = ""
     /// Settings the server has not confirmed yet; sent again when the app comes back.
     @AppStorage("pocket.push.preferencesPending") private var preferencesPending = false
     private var activeObserver: NSObjectProtocol?
@@ -124,6 +210,28 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
 
     var hasToken: Bool { !storedToken.isEmpty }
 
+    /// Whether a call ringing here is for the person signed in now: this phone's call row was confirmed for their
+    /// account. Until it is, the server may still hold the last account's row, so a ring is not theirs (warden, #298).
+    var ringsForSignedInAccount: Bool {
+        Self.rings(callAccount: voipAccount, signedIn: RoomSendOutbox.account(token: SessionTokenStore.load()))
+    }
+
+    nonisolated static func rings(callAccount: String, signedIn: String?) -> Bool {
+        guard let signedIn, !callAccount.isEmpty else { return false }
+        return callAccount == signedIn
+    }
+
+    /// At launch: a phone no one is signed in on keeps no Apple registration for bells, whatever an older build left
+    /// behind (a refused credential there never signed it out). The server disables the row once Apple refuses it.
+    func launched(signedIn: Bool) {
+        guard !signedIn, !storedToken.isEmpty else { return }
+        storedToken = ""
+        deviceId = ""
+        isRegistered = false
+        preferencesPending = false
+        UIApplication.shared.unregisterForRemoteNotifications()
+    }
+
     /// After sign-in: asks for notifications (the first time), then registers with Apple; the token comes back
     /// through the app delegate.
     func start() async {
@@ -131,9 +239,11 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
             activeObserver = NotificationCenter.default.addObserver(
                 forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
             ) { [weak self] _ in
-                Task { @MainActor in self?.sendPendingPreferences() }
+                Task { @MainActor in self?.cameBack() }
             }
         }
+        // Signed in: what this account still owes the server goes now.
+        sendOwedUnregisters(bearer: SessionTokenStore.load())
         let center = UNUserNotificationCenter.current()
         let settings = await center.notificationSettings()
         var allowed = settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional
@@ -157,9 +267,11 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
     /// PushKit dropped the token: the API stops ringing it.
     func voipTokenInvalidated() {
         guard !storedVoipToken.isEmpty else { return }
-        let token = storedVoipToken
         storedVoipToken = ""
-        Task { try? await self.client.unregister(token: token) }
+        owe([voipDeviceId], account: voipAccount)
+        voipDeviceId = ""
+        voipAccount = ""
+        sendOwedUnregisters(bearer: SessionTokenStore.load())
     }
 
     private func registerVoip(_ token: String) async {
@@ -169,9 +281,21 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
         let environment = "production"
         #endif
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-        // A server without calls refuses the kind; the next sign-in or token tries again.
-        try? await client.register(token: token, environment: environment,
-                                   bundleId: Bundle.main.bundleIdentifier ?? "", appVersion: version, kind: "voip")
+        // Again while the app runs if it fails: until it lands, calls do not ring here (`ringsForSignedInAccount`).
+        for attempt in 0..<Self.registerAttempts {
+            guard let account = RoomSendOutbox.account(token: SessionTokenStore.load()), storedVoipToken == token else { return }
+            do {
+                let id = try await client.register(token: token, environment: environment,
+                                                   bundleId: Bundle.main.bundleIdentifier ?? "", appVersion: version,
+                                                   kind: "voip")
+                guard storedVoipToken == token, RoomSendOutbox.account(token: SessionTokenStore.load()) == account else { return }
+                voipDeviceId = id ?? ""
+                voipAccount = account
+                return
+            } catch {
+                try? await Task.sleep(nanoseconds: UInt64(2 << attempt) * 1_000_000_000)
+            }
+        }
     }
 
     func didRegister(deviceToken: Data) {
@@ -187,15 +311,33 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
         let environment = "production"
         #endif
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-        do {
-            try await client.register(token: token, environment: environment,
-                                      bundleId: Bundle.main.bundleIdentifier ?? "", appVersion: version)
-            isRegistered = true
-            preferencesPending = true
-            sendPendingPreferences()
-        } catch {
-            // The API may not offer push yet; the next launch tries again.
-            isRegistered = false
+        // Again while the app runs if it fails, and when the app comes back (warden, #298 review).
+        for attempt in 0..<Self.registerAttempts {
+            guard SessionTokenStore.load()?.isEmpty == false, storedToken == token else { return }
+            do {
+                let id = try await client.register(token: token, environment: environment,
+                                                   bundleId: Bundle.main.bundleIdentifier ?? "", appVersion: version)
+                guard storedToken == token else { return }
+                deviceId = id ?? ""
+                isRegistered = true
+                preferencesPending = true
+                sendPendingPreferences()
+                return
+            } catch {
+                isRegistered = false
+                try? await Task.sleep(nanoseconds: UInt64(2 << attempt) * 1_000_000_000)
+            }
+        }
+    }
+
+    /// The app came back: settings the server has not confirmed go again, and so does a registration that failed.
+    private func cameBack() {
+        sendPendingPreferences()
+        guard SessionTokenStore.load()?.isEmpty == false else { return }
+        sendOwedUnregisters(bearer: SessionTokenStore.load())
+        if !isRegistered, !storedToken.isEmpty { Task { await self.register(self.storedToken) } }
+        if !storedVoipToken.isEmpty, !Self.rings(callAccount: voipAccount, signedIn: RoomSendOutbox.account(token: SessionTokenStore.load())) {
+            Task { await self.registerVoip(self.storedVoipToken) }
         }
     }
 
@@ -208,13 +350,13 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
     }
 
     private func sendPendingPreferences() {
-        guard preferencesPending, !storedToken.isEmpty else { return }
-        let token = storedToken, sound = sound, vibrate = vibrate, previews = showPreviews
+        guard preferencesPending, !deviceId.isEmpty else { return }
+        let id = deviceId, sound = sound, vibrate = vibrate, previews = showPreviews
         Task {
-            guard (try? await self.client.setPreferences(token: token, sound: sound, vibrate: vibrate, showPreviews: previews)) != nil
+            guard (try? await self.client.setPreferences(deviceId: id, sound: sound, vibrate: vibrate, showPreviews: previews)) != nil
             else { return }
             // Only what was sent is confirmed: a later change is still pending.
-            if self.storedToken == token, self.sound == sound, self.vibrate == vibrate, self.showPreviews == previews {
+            if self.deviceId == id, self.sound == sound, self.vibrate == vibrate, self.showPreviews == previews {
                 self.preferencesPending = false
             }
         }
@@ -225,27 +367,46 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
     /// dropped connection must not leave this phone registered for them (warden). The credential is held in memory only.
     func signOut() {
         let bearer = SessionTokenStore.load()
-        var unregistering = client
-        unregistering.tokenProvider = { bearer }
-        if !storedVoipToken.isEmpty {
-            // The PushKit token itself is kept (PushKit does not re-send it); only this person's registration goes.
-            unregister(storedVoipToken, with: unregistering)
-        }
+        // Both rows are owed until the server confirms: kept on the phone, so a sign-out that cannot reach the server
+        // (or a credential already refused) goes again with this account's next credential. The PushKit token itself
+        // is kept (PushKit does not re-send it); only this person's registration goes.
+        owe([voipDeviceId, deviceId], account: RoomSendOutbox.account(token: bearer))
+        voipDeviceId = ""
+        voipAccount = ""
+        deviceId = ""
+        sendOwedUnregisters(bearer: bearer, attempts: Self.unregisterAttempts)
         guard !storedToken.isEmpty else { return }
-        let token = storedToken
         storedToken = ""
         preferencesPending = false
         isRegistered = false
         UIApplication.shared.unregisterForRemoteNotifications()
-        unregister(token, with: unregistering)
         setBadge(0)
     }
 
-    /// Asks the server to forget one of this phone's tokens, again while the app runs if the request fails.
-    private func unregister(_ token: String, with client: PushDeviceClient) {
+    private func owe(_ deviceIds: [String], account: String?) {
+        var queue = PushUnregisterQueue.load()
+        for id in deviceIds { queue.add(deviceId: id, account: account) }
+        queue.save()
+    }
+
+    /// Sends the sign-outs `bearer`'s account owes, again while the app runs if they fail; the ones the server
+    /// confirms are dropped. The credential is held in memory only.
+    private func sendOwedUnregisters(bearer: String?, attempts: Int = 1) {
+        guard let bearer, !bearer.isEmpty else { return }
+        var queue = PushUnregisterQueue.load()
+        var owed = queue.due(for: RoomSendOutbox.account(token: bearer))
+        queue.save()
+        guard !owed.isEmpty else { return }
+        var unregistering = client
+        unregistering.tokenProvider = { bearer }
         Task {
-            for attempt in 0..<Self.unregisterAttempts {
-                if (try? await client.unregister(token: token)) != nil { return }
+            for attempt in 0..<attempts {
+                let done = await PushUnregisterQueue.confirmed(of: owed) { try await unregistering.unregister(deviceId: $0) }
+                var stored = PushUnregisterQueue.load()
+                stored.remove(deviceIds: done)
+                stored.save()
+                owed.removeAll { done.contains($0.deviceId) }
+                guard !owed.isEmpty, attempt < attempts - 1 else { return }
                 try? await Task.sleep(nanoseconds: UInt64(2 << attempt) * 1_000_000_000)
             }
         }
@@ -253,6 +414,7 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
 
     /// Tries over about a minute (2, 4, 8, 16 and 32 seconds apart).
     static let unregisterAttempts = 5
+    static let registerAttempts = 5
 
     /// The app icon's badge: the bell's unread count.
     func setBadge(_ count: Int) {
@@ -322,6 +484,7 @@ final class PocketAppDelegate: NSObject, UIApplicationDelegate {
         CrashReporter.shared.start()
         // Before any room opens: the outbox keeps only what can still be sent, never an original left mid-way.
         RoomMediaOutbox.sweep()
+        PushRegistrar.shared.launched(signedIn: SessionTokenStore.load()?.isEmpty == false)
         return true
     }
 

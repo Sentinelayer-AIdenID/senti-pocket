@@ -11,7 +11,8 @@ public enum AnswerOption {
     /// left out rather than cut, since a cut answer can say something else; it is answered in the room instead.
     public static func answerable(_ raw: String) -> String? {
         let visible = raw.unicodeScalars.compactMap { scalar -> Unicode.Scalar? in
-            if scalar.properties.generalCategory == .format { return nil }
+            // Format characters and every other invisible one (variation selectors too): not shown, not counted.
+            if scalar.properties.generalCategory == .format || scalar.properties.isDefaultIgnorableCodePoint { return nil }
             return scalar.value < 32 || scalar.value == 127 ? " " : scalar
         }
         let oneLine = String(String.UnicodeScalarView(visible)).split(whereSeparator: \.isWhitespace).joined(separator: " ")

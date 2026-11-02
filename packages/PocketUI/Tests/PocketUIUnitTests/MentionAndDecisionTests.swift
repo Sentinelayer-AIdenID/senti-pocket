@@ -138,5 +138,10 @@ final class TicketDecisionAnswerOptionTests: XCTestCase {
         let tooLong = "Approve" + String(repeating: " ", count: 50) + String(repeating: "and more ", count: 12)
         XCTAssertEqual(TicketDecision.parse("## Decision\nQuestion: Q?\nOptions: \(tooLong) · No\n")?.options, ["No"],
                        "too long to show whole: left out, not cut")
+        // Variation selectors are invisible too: dropped, never counted toward the length (warden, #298 review).
+        let selectors = String(repeating: String(Character(Unicode.Scalar(0xFE0F)!)), count: 100)
+            + String(Character(Unicode.Scalar(0xE0100)!))
+        XCTAssertEqual(TicketDecision.parse("## Decision\nQuestion: Q?\nOptions: Approve\(selectors) · No\n")?.options,
+                       ["Approve", "No"])
     }
 }

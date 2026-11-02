@@ -60,7 +60,8 @@ public final class SentiCallManager: NSObject {
     var onMuted: ((UUID, Bool) -> Void)?
     /// An agent's room call (the API's doorbell push) that CallKit accepted, with the UUID it rings under.
     var onRoomCallReceived: ((RoomCallDoorbell, UUID) -> Void)?
-    /// Whether a room call may ring here at all: someone is signed in. Otherwise its mandatory ring ends at once.
+    /// Whether a room call may ring here at all: it is for the person signed in. Otherwise its mandatory ring shows no
+    /// caller and ends at once.
     var isRoomCallAuthorized: (() -> Bool)?
     /// CallKit ACTIVATED the audio session → safe to start capture/playback (hand to PocketVoice's DuplexAudioSessionLease).
     public var onAudioSessionActivated: ((AVAudioSession, UUID) -> Void)?
@@ -428,12 +429,15 @@ extension SentiCallManager: @preconcurrency PKPushRegistryDelegate {
         // An agent's room call (sentinelayer-api #1046): the doorbell names the caller, and the call is read with
         // the person's own session after CallKit accepts the report. Every push is still reported, under a fresh UUID.
         if let doorbell = RoomCallDoorbell.parse(dict) {
+            // A ring that is not for the person signed in is still reported (iOS requires it), but names no one.
+            let authorized = isRoomCallAuthorized?() == true
             let call = IncomingDecisionCall(
-                id: UUID(), dialId: "", callerDisplayName: doorbell.callerName, message: "", context: nil, priority: "high"
+                id: UUID(), dialId: "", callerDisplayName: authorized ? doorbell.callerName : "Senti", message: "",
+                context: nil, priority: "high"
             )
             ring(call) { [weak self] accepted in
                 if accepted {
-                    if self?.isRoomCallAuthorized?() == true {
+                    if authorized {
                         self?.onRoomCallReceived?(doorbell, call.id)
                     } else {
                         self?.end(call.id)
