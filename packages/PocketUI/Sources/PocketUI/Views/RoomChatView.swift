@@ -2127,6 +2127,7 @@ private struct RoomComposerBar: View {
     /// the app is closed before then, it is back in the box at the next launch.
     private func sendDraft() {
         let text = outgoing
+        if !text.isEmpty || media?.tray.isEmpty == false { onIntent(.sendTapped(characters: text.count)) }
         if let media, !media.tray.isEmpty {
             sendWithMedia(media, text: text)
             return

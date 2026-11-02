@@ -894,8 +894,12 @@ struct RoomChatScreen: View {
         .alert("Pocket closed unexpectedly", isPresented: $offersCrashReports) {
             Button("Send to this room") {
                 let reports = crashes.unhandled
-                // Handled only once the room has it: a lost send offers the reports again next time.
-                coordinator.sendCrashReport(CrashReportText.message(reports)) { crashes.markHandled(reports) }
+                CrashReporter.shared.note("crash report sent to the room")
+                // Once the alert has gone, as a typed send waits a turn: the alert leaving and the new row are never
+                // laid out in one update. Handled only once the room has it: a lost send offers it again next time.
+                DispatchQueue.main.async {
+                    coordinator.sendCrashReport(CrashReportText.message(reports)) { crashes.markHandled(reports) }
+                }
             }
             Button("Not now", role: .cancel) { crashes.markHandled(crashes.unhandled) }
         } message: {

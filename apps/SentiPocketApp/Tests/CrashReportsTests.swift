@@ -9,6 +9,9 @@ final class CrashReportsTests: XCTestCase {
         XCTAssertEqual(CrashReporter.sentLength(.sendMessage(text: "hello")), 5)
         XCTAssertEqual(CrashReporter.sentLength(.sendReplyToReply(sequenceId: 1, replyId: "r1", text: "ok")), 2)
         XCTAssertNil(CrashReporter.sentLength(.loadOlder))
+        // Build 07, #58648: the tap is a step of its own, before the box empties.
+        XCTAssertEqual(CrashReporter.step(for: .sendTapped(characters: 40)), "sendTapped")
+        XCTAssertEqual(CrashReporter.sentLength(.sendTapped(characters: 40)), 40)
     }
 
     private let start = Date(timeIntervalSince1970: 1_800_000_000)

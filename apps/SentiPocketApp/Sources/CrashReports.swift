@@ -462,6 +462,7 @@ final class CrashReporter: NSObject, ObservableObject, MXMetricManagerSubscriber
     nonisolated static func sentLength(_ intent: RoomChatIntent) -> Int? {
         switch intent {
         case .sendMessage(let text), .sendReply(_, let text), .sendReplyToReply(_, _, let text): return text.count
+        case .sendTapped(let characters): return characters
         default: return nil
         }
     }
