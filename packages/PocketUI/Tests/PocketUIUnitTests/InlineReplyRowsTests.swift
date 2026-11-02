@@ -189,6 +189,28 @@ final class InlineReplyRowsTests: XCTestCase {
         XCTAssertEqual(reply?.trail?.label, "2 replies · review-agent")
     }
 
+    /// Carter, #58637: the ticket keeper's "Tickets for this message" came last under his ask and hid the answer to him.
+    func test_the_answer_is_the_threads_row_and_the_keepers_receipt_a_line_under_it() {
+        let messages = [input("m1", seq: 1, at: 0, author: "human-mrrcarter", text: "add the BU testers @pocket-forge")]
+        let answer = input("reply-2", seq: 1, at: 50, author: "pocket-forge", text: "Done: all 5 are in", replyTo: 1, inline: true)
+        let receipt = input("reply-3", seq: 1, at: 64, author: "ticket-keeper",
+                            text: "Tickets for this message: 2 asks" + "\n" + "R1: new", replyTo: 1, inline: true)
+        let replies = [input("reply-1", seq: 1, at: 10, author: "pocket-forge", text: "On it", replyTo: 1, inline: true),
+                       answer, receipt]
+        let state = RoomChatPresentationState(sessionId: "room", title: "Room", messages: messages, replies: replies)
+        XCTAssertEqual(messageIds(state), ["m1", "reply-2"], "the answer to him is the row, not the receipt after it")
+        XCTAssertEqual(messageRow(state, "reply-2")?.trail?.label, "3 replies · pocket-forge", "the keeper is not an answer")
+        XCTAssertEqual(messageRow(state, "reply-2")?.trail?.receipt, "Tickets for this message: 2 asks", "its first line")
+
+        let onlyReceipts = RoomChatPresentationState(sessionId: "room", title: "Room", messages: messages, replies: [receipt])
+        XCTAssertEqual(messageIds(onlyReceipts), ["m1", "reply-3"], "with no answer yet, the receipt is the row as before")
+        XCTAssertNil(messageRow(onlyReceipts, "reply-3")?.trail?.receipt)
+
+        let senti = input("reply-4", seq: 1, at: 80, author: "senti", text: "Here is the build", replyTo: 1, inline: true)
+        let answered = RoomChatPresentationState(sessionId: "room", title: "Room", messages: messages, replies: replies + [senti])
+        XCTAssertEqual(messageIds(answered), ["m1", "reply-4"], "Senti's answer is an answer")
+    }
+
     func test_a_reply_to_a_message_that_is_not_loaded_has_no_quote_and_long_lines_are_cut() {
         let long = String(repeating: "word ", count: 30)
         let state = RoomChatPresentationState(

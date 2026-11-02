@@ -975,10 +975,19 @@ public enum RoomReadAloud {
     }
 }
 
-/// A thread as the room shows it: how many replies, who wrote them (newest first), and the newest one is the row.
+/// A thread as the room shows it: how many replies, who wrote them (newest first), and the newest answer is the row.
 public struct RoomChatTrail: Equatable, Sendable {
     public let count: Int
     public let authors: [String]
+    /// The room's own receipt in the thread (the ticket keeper's "Tickets for this message"), first line only, when an
+    /// answer is the row instead: it shows as a small chip under the answer, never in its place (Carter, #58637).
+    public let receipt: String?
+
+    public init(count: Int, authors: [String], receipt: String? = nil) {
+        self.count = count
+        self.authors = authors
+        self.receipt = receipt
+    }
 
     /// "4 replies · claude-warden, pocket-forge and 1 more".
     public var label: String {
@@ -989,14 +998,18 @@ public struct RoomChatTrail: Equatable, Sendable {
         return "\(replies) · \(shown)\(more)"
     }
 
-    /// Keeps each thread's newest reply where it is (at its own time) and drops the older ones, so a thread is one
-    /// row; that row says how many replies and who. Messages are untouched.
+    /// Keeps each thread's newest answer where it is (at its own time) and drops the other replies, so a thread is one
+    /// row; that row says how many replies and who. The room's own receipts (the ticket keeper's) are never the row
+    /// while someone has answered: they came last under Carter's message and hid the answer to him (#58637). Messages
+    /// are untouched.
     public static func fold(_ inputs: [RoomChatMessageInput]) -> (kept: [RoomChatMessageInput], trails: [String: RoomChatTrail]) {
         var newest: [Int64: Int] = [:]
+        var newestAnswer: [Int64: Int] = [:]
         var groups: [Int64: [RoomChatMessageInput]] = [:]
         for (index, input) in inputs.enumerated() where input.isInlineReply {
             let thread = input.replyToSequenceId ?? input.sequenceId
             newest[thread] = index
+            if !isReceipt(input) { newestAnswer[thread] = index }
             groups[thread, default: []].append(input)
         }
         guard !groups.isEmpty else { return (inputs, [:]) }
@@ -1009,13 +1022,25 @@ public struct RoomChatTrail: Equatable, Sendable {
                 continue
             }
             let thread = input.replyToSequenceId ?? input.sequenceId
-            guard newest[thread] == index, let group = groups[thread] else { continue }
+            guard (newestAnswer[thread] ?? newest[thread]) == index, let group = groups[thread] else { continue }
+            let answered = newestAnswer[thread] != nil
             var authors: [String] = []
-            for reply in group.reversed() where !authors.contains(reply.authorName) { authors.append(reply.authorName) }
-            trails[input.id] = RoomChatTrail(count: group.count, authors: authors)
+            for reply in group.reversed() where !authors.contains(reply.authorName) {
+                if answered, isReceipt(reply) { continue }
+                authors.append(reply.authorName)
+            }
+            let receipt = answered
+                ? group.last(where: isReceipt).map { RoomChatQuiet.line($0.text) } : nil
+            trails[input.id] = RoomChatTrail(count: group.count, authors: authors, receipt: receipt)
             kept.append(input)
         }
         return (kept, trails)
+    }
+
+    /// The room's own bookkeeping in a thread: the orchestrator's and the ticket keeper's lines. Senti's answers are
+    /// answers.
+    public static func isReceipt(_ reply: RoomChatMessageInput) -> Bool {
+        RoomChatQuiet.systemAuthors.contains(reply.authorId.lowercased())
     }
 }
 

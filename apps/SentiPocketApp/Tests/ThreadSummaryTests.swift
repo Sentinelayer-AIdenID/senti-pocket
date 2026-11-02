@@ -24,6 +24,19 @@ final class ThreadSummaryTests: XCTestCase {
         XCTAssertEqual(lines.last, "claude-warden: CI is green")
     }
 
+    /// Carter, #58637: the summary said he added the testers he had asked pocket-forge to add.
+    func test_the_model_reads_who_asked_first_and_never_the_rooms_receipts() {
+        let ask = RoomChatMessageInput(id: "m1", sequenceId: 55474, kind: .message, authorId: "human-mrrcarter",
+                                       authorName: "mrrCarter", isHuman: true, text: "Please add the 5 BU testers", timestamp: "")
+        let lines = ThreadSummaryInput.lines([
+            reply(1, "pocket-forge", "Done: all 5 BU testers are in", minutes: 1),
+            reply(2, "ticket-keeper", "Tickets for this message: 1 ask", minutes: 2)
+        ], parent: ask)
+        XCTAssertEqual(lines, ["mrrCarter (started the thread): Please add the 5 BU testers",
+                               "pocket-forge: Done: all 5 BU testers are in"])
+        XCTAssertTrue(OnDeviceThreadSummarizer.instructions.contains("A name inside the words is who it is addressed to"))
+    }
+
     func test_only_the_newest_replies_of_a_long_thread_are_read() {
         let many = (0..<40).map { reply(Int64($0), "box", "step \($0)", minutes: Double($0)) }
         let lines = ThreadSummaryInput.lines(many)

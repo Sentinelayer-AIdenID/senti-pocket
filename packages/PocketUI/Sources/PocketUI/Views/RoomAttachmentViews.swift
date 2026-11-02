@@ -8,10 +8,12 @@ import SwiftUI
 struct RoomAttachmentsView: View {
     let chips: [RoomAttachmentChip]
     let previews: [String: Data]
+    /// Your own message's files line up on the right, with its bubble.
+    var alignment: HorizontalAlignment = .leading
     let send: (RoomChatIntent) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: alignment, spacing: 6) {
             ForEach(chips) { chip in
                 if chip.isRemoved {
                     removed(chip)

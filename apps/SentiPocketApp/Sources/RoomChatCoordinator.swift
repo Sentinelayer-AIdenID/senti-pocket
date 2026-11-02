@@ -1953,7 +1953,7 @@ final class RoomChatCoordinator: ObservableObject {
 
     /// Writes the next thread summary the room lacks, one at a time and off the main thread: the thread with the most
     /// replies first, and again only once it has grown. A phone without the on-device model writes none.
-    private func summarizeNextThread(_ replies: [RoomChatMessageInput]) {
+    private func summarizeNextThread(_ replies: [RoomChatMessageInput], messages: [RoomChatMessageInput]) {
         guard let summarizer, summarizing == nil, !liveTasks.isEmpty else { return }
         var byThread: [Int64: [RoomChatMessageInput]] = [:]
         for reply in replies { byThread[reply.sequenceId, default: []].append(reply) }
@@ -1962,7 +1962,7 @@ final class RoomChatCoordinator: ObservableObject {
             .max { $0.value.count < $1.value.count }
         guard let (parent, thread) = due else { return }
         summarizing = parent
-        let lines = ThreadSummaryInput.lines(thread)
+        let lines = ThreadSummaryInput.lines(thread, parent: messages.first { $0.sequenceId == parent && !$0.isInlineReply })
         let details = ThreadSummaryInput.details(thread)
         let count = thread.count
         Task.detached(priority: .utility) { [weak self] in
@@ -2235,7 +2235,7 @@ final class RoomChatCoordinator: ObservableObject {
             fileParts: placedFiles?.parts ?? [:],
             draftKey: draftKey
         )
-        summarizeNextThread(replyInputs)
+        summarizeNextThread(replyInputs, messages: inputs)
     }
 
     // MARK: - Files posted as base64 parts

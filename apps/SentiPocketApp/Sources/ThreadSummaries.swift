@@ -27,13 +27,19 @@ enum ThreadSummaryInput {
     /// The most record entries kept.
     static let maximumRecord = 8
 
-    /// "author: words" for each reply, newest last, the box signature and Markdown left out.
-    static func lines(_ replies: [RoomChatMessageInput]) -> [String] {
-        read(replies).map { reply in
-            let words = RoomChatQuiet.line(reply.text)
-            let cut = words.count > maximumLineLength ? String(words.prefix(maximumLineLength)) + "…" : words
-            return "\(reply.authorName): \(cut)"
+    /// "author: words" for each reply, newest last, the box signature and Markdown left out. First, the message the
+    /// thread answers, marked as such: without it the model took the person asking for the one who did it ("Carter
+    /// added the 5 BU testers" for pocket-forge's reply to his ask, #58637). The room's own receipts are left out.
+    static func lines(_ replies: [RoomChatMessageInput], parent: RoomChatMessageInput? = nil) -> [String] {
+        let opening = parent.map { "\($0.authorName) (started the thread): \(line($0.text))" }
+        return (opening.map { [$0] } ?? []) + read(replies.filter { !RoomChatTrail.isReceipt($0) }).map { reply in
+            "\(reply.authorName): \(line(reply.text))"
         }
+    }
+
+    private static func line(_ text: String) -> String {
+        let words = RoomChatQuiet.line(text)
+        return words.count > maximumLineLength ? String(words.prefix(maximumLineLength)) + "…" : words
     }
 
     /// The replies the model reads: the newest `maximumLines`, oldest first.
@@ -135,7 +141,8 @@ struct OnDeviceThreadSummarizer: ThreadSummarizing {
     static let instructions = """
         You summarize an engineering chat thread for someone deciding whether to open it. Fill each part from the \
         thread only: never invent names, numbers, tools or results that are not in it. Be concrete and plain, \
-        without greetings, lists or Markdown.
+        without greetings, lists or Markdown. Each line starts with who wrote it: that writer is the one who did what \
+        the line says. A name inside the words is who it is addressed to, not who acted.
         """
 
     func summarize(thread lines: [String]) async -> String? {

@@ -26,14 +26,24 @@ public struct RoomAttachSheet: View {
     let canPaste: Bool
     /// How many more files this message can carry.
     let remaining: Int
+    /// The sources offered: none when the message cannot carry files (a reply in the room's box, or a ticket).
+    let sources: [RoomAttachSource]
+    /// The composer's other actions, under the files (Carter, #58635: "attachments and all should be in the + button").
+    let more: [RoomComposerMore]
     let choose: (RoomAttachSource) -> Void
+    let pick: (RoomComposerMore) -> Void
     @Environment(\.dismiss) private var dismiss
 
-    public init(canUseCamera: Bool, canPaste: Bool, remaining: Int, choose: @escaping (RoomAttachSource) -> Void) {
+    public init(canUseCamera: Bool, canPaste: Bool, remaining: Int,
+                sources: [RoomAttachSource] = RoomAttachSource.allCases, more: [RoomComposerMore] = [],
+                choose: @escaping (RoomAttachSource) -> Void, pick: @escaping (RoomComposerMore) -> Void = { _ in }) {
         self.canUseCamera = canUseCamera
         self.canPaste = canPaste
         self.remaining = remaining
+        self.sources = sources
+        self.more = more
         self.choose = choose
+        self.pick = pick
     }
 
     private func isEnabled(_ source: RoomAttachSource) -> Bool {
@@ -57,7 +67,7 @@ public struct RoomAttachSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 10) {
-                    ForEach(RoomAttachSource.allCases) { source in
+                    ForEach(sources) { source in
                         let enabled = isEnabled(source)
                         Button {
                             choose(source)
@@ -101,20 +111,60 @@ public struct RoomAttachSheet: View {
                         .accessibilityAddTraits(.isButton)
                         .accessibilityIdentifier("pocket.room.attach.\(source.rawValue)")
                     }
-                    Text(remaining > 0
-                         ? "Up to \(remaining) more in this message. Photos up to 50 MB; videos and files up to 250 MB. Location is removed from photos before they're sent."
-                         : "This message has as many files as it can carry. Send it, then add more.")
-                        .font(.footnote)
-                        .foregroundStyle(PocketPalette.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.top, 4)
-                        .accessibilityIdentifier("pocket.room.attach.limits")
+                    if !sources.isEmpty {
+                        Text(remaining > 0
+                             ? "Up to \(remaining) more in this message. Photos up to 50 MB; videos and files up to 250 MB. Location is removed from photos before they're sent."
+                             : "This message has as many files as it can carry. Send it, then add more.")
+                            .font(.footnote)
+                            .foregroundStyle(PocketPalette.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.top, 4)
+                            .accessibilityIdentifier("pocket.room.attach.limits")
+                    }
+                    ForEach(more) { action in
+                        Button {
+                            pick(action)
+                        } label: {
+                            HStack(spacing: 14) {
+                                Image(systemName: action.symbolName)
+                                    .font(.title3.weight(.semibold))
+                                    .foregroundStyle(PocketPalette.accent)
+                                    .frame(width: 44, height: 44)
+                                    .background(PocketPalette.inset, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                    .accessibilityHidden(true)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(action.title)
+                                        .font(.body.weight(.semibold))
+                                        .foregroundStyle(PocketPalette.textPrimary)
+                                    Text(action.detail)
+                                        .font(.footnote)
+                                        .foregroundStyle(PocketPalette.textSecondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                    .stroke(PocketPalette.separator.opacity(0.7), lineWidth: 0.5)
+                            )
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel(action.title)
+                        .accessibilityValue(action.detail)
+                        .accessibilityAddTraits(.isButton)
+                        .accessibilityIdentifier("pocket.room.plus.\(action.id)")
+                    }
                 }
                 .padding(16)
             }
             .pocketCanvas()
-            .navigationTitle("Attach")
+            .navigationTitle(sources.isEmpty ? "More" : "Add to your message")
             .navigationBarTitleDisplayModeInlineIfAvailable()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -312,19 +362,41 @@ struct RoomMediaTray: View {
     }
 }
 
-/// The composer's paperclip: opens the attach sheet, then hands the chosen source to the app.
-struct RoomAttachButton: View {
-    @ObservedObject var board: RoomMediaBoard
+/// One of the + page's actions besides files: mention someone, file as a ticket, search the room.
+public struct RoomComposerMore: Identifiable {
+    public let id: String
+    public let title: String
+    public let detail: String
+    public let symbolName: String
+    public let action: () -> Void
+
+    public init(id: String, title: String, detail: String, symbolName: String, action: @escaping () -> Void) {
+        self.id = id
+        self.title = title
+        self.detail = detail
+        self.symbolName = symbolName
+        self.action = action
+    }
+}
+
+/// The composer's +: one page with what can go with a message, its files first, then mention, ticket and search
+/// (Carter, #58635). What was chosen runs once the page has gone: one sheet at a time, and the keyboard can come up.
+struct RoomComposerPlusButton: View {
+    /// Files can go with this message; nil for a reply in the box, a ticket, or a room that takes none.
+    let board: RoomMediaBoard?
+    let more: [RoomComposerMore]
+    let identifier: String
     @State private var showsSheet = false
     @State private var chosen: RoomAttachSource?
+    @State private var picked: RoomComposerMore?
     @State private var canPaste = false
 
     var body: some View {
         Button {
-            canPaste = board.canPaste()
+            canPaste = board?.canPaste() ?? false
             showsSheet = true
         } label: {
-            Image(systemName: "paperclip")
+            Image(systemName: "plus")
                 .font(.system(size: 17, weight: .semibold))
                 .foregroundStyle(PocketPalette.textPrimary)
                 .frame(width: 36, height: 36)
@@ -332,22 +404,32 @@ struct RoomAttachButton: View {
                 .overlay(Circle().stroke(PocketPalette.separator.opacity(0.8), lineWidth: 0.5))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Attach")
-        .accessibilityHint("Adds photos, videos or files to your message")
-        .accessibilityIdentifier("pocket.room.composer.attach")
+        .accessibilityLabel("Add")
+        .accessibilityHint(board == nil ? "Mention someone, file a ticket or search"
+                                        : "Adds photos, videos or files, or mentions someone, files a ticket or searches")
+        .accessibilityIdentifier(identifier)
         .sheet(isPresented: $showsSheet, onDismiss: {
-            // The picker opens once this sheet has gone: one sheet at a time.
             if let source = chosen {
                 chosen = nil
-                board.perform(.choose(source))
+                board?.perform(.choose(source))
+            }
+            if let action = picked {
+                picked = nil
+                action.action()
             }
         }) {
-            RoomAttachSheet(canUseCamera: board.canUseCamera, canPaste: canPaste, remaining: board.remainingSlots) { source in
-                chosen = source
-                showsSheet = false
-            }
-            // Tall enough for the four sources and the limits at the default text size, on a 375-point phone too.
-            .presentationDetents([.height(450), .large])
+            RoomAttachSheet(canUseCamera: board?.canUseCamera ?? false, canPaste: canPaste,
+                            remaining: board?.remainingSlots ?? 0, sources: board == nil ? [] : RoomAttachSource.allCases,
+                            more: more,
+                            choose: { source in
+                                chosen = source
+                                showsSheet = false
+                            },
+                            pick: { action in
+                                picked = action
+                                showsSheet = false
+                            })
+            .presentationDetents(board == nil ? [.medium, .large] : [.large] as Set<PresentationDetent>)
         }
     }
 }

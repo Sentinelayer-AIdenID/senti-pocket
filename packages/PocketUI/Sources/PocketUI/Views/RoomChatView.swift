@@ -44,6 +44,8 @@ public struct RoomChatView: View {
     @State private var highlightedRowId: String?
     /// Background lines opened in place.
     @State private var expandedQuiet: Set<String> = []
+    /// Threads whose answer is minimized to its one line, by the message they answer (Carter, #58637).
+    @State private var minimizedThreads: Set<Int64> = []
     /// Threads whose file parts are shown (by the thread's root sequence); otherwise they fold behind the file's card.
     @State private var shownFileParts: Set<Int64> = []
     @State private var showsPresence = false
@@ -542,6 +544,15 @@ public struct RoomChatView: View {
             },
             onOpenLong: { longRow = $0 },
             onReply: { replyTarget = $0 },
+            isMinimized: message.isInlineReply && message.replyToSequenceId.map { minimizedThreads.contains($0) } == true,
+            onToggleMinimized: {
+                guard let thread = message.replyToSequenceId else { return }
+                if minimizedThreads.contains(thread) {
+                    minimizedThreads.remove(thread)
+                } else {
+                    minimizedThreads.insert(thread)
+                }
+            },
             send: send
         )
         .onAppear { send(.messageOnScreen(id: message.id, isOnScreen: true)) }
@@ -846,6 +857,9 @@ private struct RoomMessageRowView: View {
     var onOpenLong: (RoomChatMessageRow) -> Void = { _ in }
     /// Reply to this row from the room's box, without leaving the room (Carter, #55074).
     var onReply: (RoomChatMessageRow) -> Void = { _ in }
+    /// A thread's answer shown in the room, minimized to the line over it: what it answers and who replied.
+    var isMinimized = false
+    var onToggleMinimized: () -> Void = {}
     var send: (RoomChatIntent) -> Void = { _ in }
     /// How far the row follows a swipe to the right (swipe to reply, as in Messages).
     @State private var swipe: CGFloat = 0
@@ -1072,28 +1086,14 @@ private struct RoomMessageRowView: View {
     @ViewBuilder
     private var replyQuote: some View {
         if let reply = row.replyToSequenceId {
-            Button {
+            HStack(alignment: .top, spacing: 6) {
+                quoteButton(reply)
                 if row.isInlineReply {
-                    send(.openThread(sequenceId: reply))
-                } else {
-                    onOpenReplyTarget(reply)
+                    Spacer(minLength: 0)
+                    minimizeButton
                 }
-            } label: {
-                Label(quoteText(reply), systemImage: row.trail.map { $0.count > 1 } == true
-                        ? "bubble.left.and.bubble.right" : "arrowshape.turn.up.left")
-                    .font(.caption)
-                    .foregroundStyle(PocketPalette.textSecondary)
-                    .lineLimit(2)
-                    .padding(.leading, 8)
-                    .overlay(alignment: .leading) {
-                        RoundedRectangle(cornerRadius: 1)
-                            .fill(PocketPalette.separator)
-                            .frame(width: 2)
-                    }
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(row.isInlineReply ? "\(quoteText(reply)). Opens the thread." : "Replying to message \(reply)")
-            if let threadSummary, row.trail.map({ $0.count > 1 }) == true {
+            if let threadSummary, !isMinimized, row.trail.map({ $0.count > 1 }) == true {
                 HStack(alignment: .top, spacing: 0) {
                     Button { openWholeSummary() } label: {
                         ThreadSummaryText(summary: threadSummary)
@@ -1105,7 +1105,70 @@ private struct RoomMessageRowView: View {
                 }
                 .padding(.leading, 10)
             }
+            if let receipt = row.trail?.receipt {
+                receiptChip(receipt, thread: reply)
+            }
         }
+    }
+
+    /// What the row answers, as a line: opens the thread, or the message a plain reply answers.
+    private func quoteButton(_ reply: Int64) -> some View {
+        Button {
+            if row.isInlineReply {
+                send(.openThread(sequenceId: reply))
+            } else {
+                onOpenReplyTarget(reply)
+            }
+        } label: {
+            Label(quoteText(reply), systemImage: row.trail.map { $0.count > 1 } == true
+                    ? "bubble.left.and.bubble.right" : "arrowshape.turn.up.left")
+                .font(.caption)
+                .foregroundStyle(PocketPalette.textSecondary)
+                .lineLimit(2)
+                .padding(.leading, 8)
+                .overlay(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(PocketPalette.separator)
+                        .frame(width: 2)
+                }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(row.isInlineReply ? "\(quoteText(reply)). Opens the thread." : "Replying to message \(reply)")
+    }
+
+    /// Minimizes the answer to the line over it, or shows it again (Carter, #58637: "I should still be able to minimize
+    /// the reply that answered me").
+    private var minimizeButton: some View {
+        Button(action: onToggleMinimized) {
+            Image(systemName: isMinimized ? "chevron.down" : "chevron.up")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(PocketPalette.textSecondary)
+                .frame(width: 28, height: 22)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(isMinimized ? "Show the reply" : "Minimize the reply")
+        .accessibilityIdentifier("pocket.room.reply.minimize.\(row.id)")
+    }
+
+    /// The room's own receipt in this thread (the ticket keeper's tickets), as one small line that opens the thread.
+    private func receiptChip(_ receipt: String, thread: Int64) -> some View {
+        Button {
+            send(.openThread(sequenceId: thread))
+        } label: {
+            Text(receipt)
+                .font(.caption2)
+                .foregroundStyle(PocketPalette.textSecondary)
+                .lineLimit(1)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(PocketPalette.raised, in: Capsule())
+                .overlay(Capsule().stroke(PocketPalette.separator.opacity(0.6), lineWidth: 0.5))
+        }
+        .buttonStyle(.plain)
+        .padding(.leading, 10)
+        .accessibilityHint("Opens the thread")
+        .accessibilityIdentifier("pocket.room.reply.receipt.\(row.id)")
     }
 
     /// Opens this row's thread summary whole (Carter, 10-30: "clicking on the summary message can give you a pop up of
@@ -1132,8 +1195,19 @@ private struct RoomMessageRowView: View {
     }
 
     /// Edited mark, attachments, who viewed it and the reactions: the same under every kind of message.
+    private var messageFooter: some View { footer(showsAttachments: true) }
+
+    /// A message's files, over its words (Carter, #58637: "put image attachment at the top of the message on the
+    /// right"): yours on the right with your bubble, everyone else's on the left.
     @ViewBuilder
-    private var messageFooter: some View {
+    private func attachmentsOnTop(alignment: HorizontalAlignment) -> some View {
+        if !row.attachments.isEmpty {
+            RoomAttachmentsView(chips: row.attachments, previews: attachmentPreviews, alignment: alignment, send: send)
+        }
+    }
+
+    @ViewBuilder
+    private func footer(showsAttachments: Bool) -> some View {
         if row.repeats > 1, let stack = row.repeatStack {
             Button {
                 send(.toggleRepeats(stack: stack))
@@ -1158,7 +1232,7 @@ private struct RoomMessageRowView: View {
         if !row.work.isEmpty {
             RoomWorkLines(lines: row.work)
         }
-        if !row.attachments.isEmpty {
+        if showsAttachments, !row.attachments.isEmpty {
             RoomAttachmentsView(chips: row.attachments, previews: attachmentPreviews, send: send)
         }
         if let reactions = row.reactions {
@@ -1192,21 +1266,24 @@ private struct RoomMessageRowView: View {
                         .accessibilityIdentifier("pocket.room.ownName")
                 }
                 replyQuote
-                messageText
-                    .font(.body)
-                    .foregroundStyle(PocketPalette.textPrimary)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 9)
-                    // The bubble is dark in both appearances, so what is in it takes the dark colours.
-                    .environment(\.colorScheme, .dark)
-                    .background(PocketPalette.ownBubble, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                    .overlay {
-                        if isHighlighted {
-                            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                                .strokeBorder(PocketPalette.warning, lineWidth: 2)
+                if !isMinimized {
+                    attachmentsOnTop(alignment: .trailing)
+                    messageText
+                        .font(.body)
+                        .foregroundStyle(PocketPalette.textPrimary)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        // The bubble is dark in both appearances, so what is in it takes the dark colours.
+                        .environment(\.colorScheme, .dark)
+                        .background(PocketPalette.ownBubble, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        .overlay {
+                            if isHighlighted {
+                                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                                    .strokeBorder(PocketPalette.warning, lineWidth: 2)
+                            }
                         }
-                    }
-                messageFooter
+                    footer(showsAttachments: false)
+                }
                 if row.endsRun || row.isEdited {
                     HStack(spacing: 6) {
                         if row.isEdited { Text("edited") }
@@ -1232,16 +1309,19 @@ private struct RoomMessageRowView: View {
             VStack(alignment: .leading, spacing: 4) {
                 if row.showsHeader { authorLine }
                 replyQuote
-                messageText
-                    .font(.body)
-                    .foregroundStyle(PocketPalette.textPrimary)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 9)
-                    .background(bubbleFill, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                if row.isEdited {
-                    Text("edited").font(.caption2).foregroundStyle(PocketPalette.textSecondary)
+                if !isMinimized {
+                    attachmentsOnTop(alignment: .leading)
+                    messageText
+                        .font(.body)
+                        .foregroundStyle(PocketPalette.textPrimary)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        .background(bubbleFill, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    if row.isEdited {
+                        Text("edited").font(.caption2).foregroundStyle(PocketPalette.textSecondary)
+                    }
+                    footer(showsAttachments: false)
                 }
-                messageFooter
                 if let views = row.views, row.endsRun {
                     RoomViewedLine(views: views)
                 }
@@ -1264,13 +1344,16 @@ private struct RoomMessageRowView: View {
             }
             VStack(alignment: .leading, spacing: 5) {
                 replyQuote
-                messageText
-                    .font(.body)
-                    .foregroundStyle(PocketPalette.textPrimary)
-                if row.isEdited {
-                    Text("edited").font(.caption2).foregroundStyle(PocketPalette.textSecondary)
+                if !isMinimized {
+                    attachmentsOnTop(alignment: .leading)
+                    messageText
+                        .font(.body)
+                        .foregroundStyle(PocketPalette.textPrimary)
+                    if row.isEdited {
+                        Text("edited").font(.caption2).foregroundStyle(PocketPalette.textSecondary)
+                    }
+                    footer(showsAttachments: false)
                 }
-                messageFooter
                 if row.endsRun {
                     if let views = row.views {
                         RoomViewedLine(views: views)
@@ -1582,6 +1665,31 @@ private struct RoomThreadSheet: View {
     /// The thread's file parts are shown; otherwise they fold behind the file's card.
     @State private var showsFileParts = false
 
+    /// The + page's actions (Carter, #58635); a reply in a thread carries no files.
+    private var plusActions: [RoomComposerMore] {
+        var items = [
+            RoomComposerMore(id: "mention", title: "Mention someone", detail: "Adds an @ to your reply", symbolName: "at") {
+                let separated = draft.isEmpty || draft.last?.isWhitespace == true
+                draft += separated ? "@" : " @"
+                isReplying = true
+            },
+            RoomComposerMore(id: "ticket", title: "File as a ticket",
+                             detail: "The ticket keeper files your words and replies with the link", symbolName: "ticket") {
+                ticketMode = true
+                isReplying = true
+            }
+        ]
+        if self.actions.canSearch {
+            // Search opens over the room, so the thread steps aside first.
+            items.append(RoomComposerMore(id: "search", title: "Search this room", detail: "Messages, people and files",
+                                            symbolName: "magnifyingglass") {
+                send(.closeThread)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { send(.openSearch) }
+            })
+        }
+        return items
+    }
+
     private var suggestions: [MentionCandidate] {
         guard let active = MentionSuggester.activeQuery(in: draft, at: editOffset ?? draft.count) else { return [] }
         return MentionSuggester.suggestions(for: active.query, among: mentionCandidates)
@@ -1773,40 +1881,8 @@ private struct RoomThreadSheet: View {
                         .accessibilityIdentifier("pocket.thread.composer.ticketMode")
                     }
                     HStack(alignment: .bottom, spacing: 8) {
-                        Menu {
-                            Button {
-                                let separated = draft.isEmpty || draft.last?.isWhitespace == true
-                                draft += separated ? "@" : " @"
-                                isReplying = true
-                            } label: {
-                                Label("Mention someone", systemImage: "at")
-                            }
-                            Button {
-                                ticketMode = true
-                                isReplying = true
-                            } label: {
-                                Label("File as a ticket", systemImage: "ticket")
-                            }
-                            if actions.canSearch {
-                                // Search opens over the room, so the thread steps aside first.
-                                Button {
-                                    send(.closeThread)
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { send(.openSearch) }
-                                } label: {
-                                    Label("Search this room", systemImage: "magnifyingglass")
-                                }
-                            }
-                        } label: {
-                            Image(systemName: "plus")
-                                .font(.system(size: 17, weight: .semibold))
-                                .foregroundStyle(PocketPalette.textPrimary)
-                                .frame(width: 36, height: 36)
-                                .background(PocketPalette.raised, in: Circle())
-                                .overlay(Circle().stroke(PocketPalette.separator.opacity(0.8), lineWidth: 0.5))
-                        }
-                        .accessibilityLabel("More")
-                        .accessibilityIdentifier("pocket.thread.composer.plus")
-                        .padding(.bottom, 1)
+                        RoomComposerPlusButton(board: nil, more: plusActions, identifier: "pocket.thread.composer.plus")
+                            .padding(.bottom, 1)
                         TextField(ticketMode ? "Describe the ticket" : "Reply", text: $draft, axis: .vertical)
                             .lineLimit(1...6)
                             .textFieldStyle(.plain)
@@ -2023,6 +2099,28 @@ private struct RoomComposerBar: View {
     @State private var pasted: [String] = []
     @State private var viewingPaste: PastedBlock?
 
+    /// The + page's actions besides files (Carter, #58635).
+    private var plusActions: [RoomComposerMore] {
+        var items = [
+            RoomComposerMore(id: "mention", title: "Mention someone", detail: "Adds an @ to your message", symbolName: "at") {
+                let separated = draft.isEmpty || draft.last?.isWhitespace == true
+                draft += separated ? "@" : " @"
+                isEditing = true
+            },
+            // Plain words become a ticket: the room's ticket keeper files it and replies with the link.
+            RoomComposerMore(id: "ticket", title: "File as a ticket",
+                             detail: "The ticket keeper files your words and replies with the link", symbolName: "ticket") {
+                ticketMode = true
+                isEditing = true
+            }
+        ]
+        if self.actions.canSearch {
+            items.append(RoomComposerMore(id: "search", title: "Search this room", detail: "Messages, people and files",
+                                            symbolName: "magnifyingglass") { onIntent(.openSearch) })
+        }
+        return items
+    }
+
     /// Sends what is in the box. The box empties first; the message goes to the room on the next turn of the run loop,
     /// so the emptied box, the new row and the scroll to it are not all laid out in one update (every freeze on 10-30
     /// began at a send). The text stays saved on the phone for a few seconds more, long enough to be on its way: if
@@ -2233,42 +2331,9 @@ private struct RoomComposerBar: View {
                 .accessibilityIdentifier("pocket.room.composer.ticketMode")
             }
             HStack(alignment: .bottom, spacing: 8) {
-                if let media, replying == nil, !ticketMode {
-                    RoomAttachButton(board: media)
-                        .padding(.bottom, 1)
-                }
-                Menu {
-                    Button {
-                        let separated = draft.isEmpty || draft.last?.isWhitespace == true
-                        draft += separated ? "@" : " @"
-                    } label: {
-                        Label("Mention someone", systemImage: "at")
-                    }
-                    // Plain words become a ticket: the room's ticket keeper files it and replies with the link.
-                    Button {
-                        ticketMode = true
-                        isEditing = true
-                    } label: {
-                        Label("File as a ticket", systemImage: "ticket")
-                    }
-                    if actions.canSearch {
-                        Button {
-                            onIntent(.openSearch)
-                        } label: {
-                            Label("Search this room", systemImage: "magnifyingglass")
-                        }
-                    }
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(PocketPalette.textPrimary)
-                        .frame(width: 36, height: 36)
-                        .background(PocketPalette.raised, in: Circle())
-                        .overlay(Circle().stroke(PocketPalette.separator.opacity(0.8), lineWidth: 0.5))
-                }
-                .accessibilityLabel("More")
-                .accessibilityIdentifier("pocket.room.composer.plus")
-                .padding(.bottom, 1)
+                RoomComposerPlusButton(board: replying == nil && !ticketMode ? media : nil, more: plusActions,
+                                       identifier: "pocket.room.composer.plus")
+                    .padding(.bottom, 1)
                 TextField(ticketMode ? "Describe the ticket" : (replying == nil ? "Message" : "Reply"), text: $draft, axis: .vertical)
                     .lineLimit(1...6)
                     .textFieldStyle(.plain)
