@@ -7,6 +7,7 @@ public struct RoomAttachmentChip: Equatable, Identifiable, Sendable {
         case json
         case image
         case pdf
+        case video
         case other
     }
 
@@ -18,6 +19,8 @@ public struct RoomAttachmentChip: Equatable, Identifiable, Sendable {
     public let summary: String?
     /// The API's processing state (waiting_upload, pending, processing, retry, ready, dead_letter).
     public let processingStatus: String?
+    /// Taken back after it was sent: only its name shows, with "Attachment removed", and nothing opens it.
+    public let isRemoved: Bool
 
     public init(
         attachmentId: String,
@@ -25,7 +28,8 @@ public struct RoomAttachmentChip: Equatable, Identifiable, Sendable {
         kind: Kind,
         sizeBytes: Int64? = nil,
         summary: String? = nil,
-        processingStatus: String? = nil
+        processingStatus: String? = nil,
+        isRemoved: Bool = false
     ) {
         self.attachmentId = attachmentId
         self.filename = filename
@@ -33,6 +37,7 @@ public struct RoomAttachmentChip: Equatable, Identifiable, Sendable {
         self.sizeBytes = sizeBytes
         self.summary = summary
         self.processingStatus = processingStatus
+        self.isRemoved = isRemoved
     }
 
     public var kindLabel: String {
@@ -41,6 +46,7 @@ public struct RoomAttachmentChip: Equatable, Identifiable, Sendable {
         case .json: return "JSON"
         case .image: return "Image"
         case .pdf: return "PDF"
+        case .video: return "Video"
         case .other: return "File"
         }
     }
@@ -51,7 +57,28 @@ public struct RoomAttachmentChip: Equatable, Identifiable, Sendable {
         case .json: return "curlybraces"
         case .image: return "photo"
         case .pdf: return "doc.text"
+        case .video: return "play.rectangle"
         case .other: return "doc"
+        }
+    }
+
+    /// Shown as a picture (a photo, or a video's poster frame), not as a file card. A removed one never is.
+    public var isVisual: Bool { !isRemoved && (kind == .image || kind == .video) }
+
+    /// What VoiceOver says: the kind, the name and the size, then what a tap does; or that it was removed.
+    public var accessibilityLabel: String {
+        if isRemoved { return [kind == .image ? "Photo" : kindLabel, filename, Self.removedLabel].joined(separator: ", ") }
+        return [kind == .image ? "Photo" : kindLabel, filename, sizeLabel, statusLabel].compactMap { $0 }.joined(separator: ", ")
+    }
+
+    /// What a removed attachment says under its name.
+    public static let removedLabel = "Attachment removed"
+
+    public var accessibilityHint: String {
+        switch kind {
+        case .image: return "Opens it full size"
+        case .video: return "Plays it"
+        default: return "Opens it"
         }
     }
 

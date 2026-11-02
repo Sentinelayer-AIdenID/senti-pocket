@@ -320,6 +320,8 @@ final class PocketAppDelegate: NSObject, UIApplicationDelegate {
         UNUserNotificationCenter.current().delegate = PushRegistrar.shared
         // First, so the last run's end and iOS's crash records are read before anything else can fail.
         CrashReporter.shared.start()
+        // Before any room opens: the outbox keeps only what can still be sent, never an original left mid-way.
+        RoomMediaOutbox.sweep()
         return true
     }
 
@@ -333,4 +335,12 @@ final class PocketAppDelegate: NSObject, UIApplicationDelegate {
     }
 
     func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {}
+
+    /// A room's photo, video or file finished uploading while the app was in the background: its session takes the
+    /// events, then tells iOS it is done.
+    func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String,
+                     completionHandler: @escaping () -> Void) {
+        guard identifier == RoomMediaPutSession.backgroundIdentifier else { return completionHandler() }
+        RoomMediaPutSession.shared.handleBackgroundEvents(completion: completionHandler)
+    }
 }
