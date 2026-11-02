@@ -51,6 +51,26 @@ private final class FakeVoiceLine: VoiceLining, @unchecked Sendable {
     }
 }
 
+/// A voice line whose answer waits until the test lets it go, so an agent's post can come first.
+private final class GatedVoiceLine: VoiceLining, @unchecked Sendable {
+    private let lock = NSLock()
+    private var held: [AsyncThrowingStream<VoiceLineEvent, Error>.Continuation] = []
+    var askCount: Int { lock.withLock { held.count } }
+
+    func voiceLine(sessionId: String, agentId: String?, text: String, callId: String, ringCallId: String?,
+                   history: [VoiceLineHistory]) -> AsyncThrowingStream<VoiceLineEvent, Error> {
+        AsyncThrowingStream { continuation in self.lock.withLock { self.held.append(continuation) } }
+    }
+
+    func release(_ sentences: [String]) {
+        for continuation in lock.withLock({ held }) {
+            for sentence in sentences { continuation.yield(.sentence(sentence)) }
+            continuation.yield(.done(speaker: "pocket-forge (voice)"))
+            continuation.finish()
+        }
+    }
+}
+
 @MainActor
 private final class LineListener: VoiceListening {
     var partial: (@MainActor (String) -> Void)?
@@ -103,7 +123,7 @@ final class VoiceLineCallTests: XCTestCase {
         XCTFail("timed out waiting for: \(what)")
     }
 
-    private func call(_ line: FakeVoiceLine, listener: LineListener, speaker: LineSpeaker, poster: LinePoster,
+    private func call(_ line: any VoiceLining, listener: LineListener, speaker: LineSpeaker, poster: LinePoster,
                       ringCallId: String? = nil, about: String? = nil) -> VoiceRoomCoordinator {
         let room = VoiceRoomCoordinator(sessionId: "room_line", with: ["pocket-forge"], you: "mrrcarter",
                                         ownAuthorIds: ["human-mrrcarter"], listener: listener, speaker: speaker,
@@ -142,6 +162,49 @@ final class VoiceLineCallTests: XCTestCase {
 
         await room.hangUp()
         XCTAssertTrue(poster.uploads.first?.contains("Turns marked (voice) are the fast voice line") == true)
+    }
+
+    private func agentPost(_ id: String, _ text: String, in room: VoiceRoomCoordinator) -> RoomMessage {
+        let stamp = ISO8601DateFormatter().string(from: room.state.startedAt.addingTimeInterval(2))
+        return RoomMessage(id: id, sequenceId: Int64(abs(id.hashValue % 100_000)) + 1, kind: .message, authorId: "pocket-forge",
+                           authorName: "pocket-forge", isHuman: false, text: text, timestamp: stamp)
+    }
+
+    /// Carter heard every answer twice: the voice line spoke as the agent, then the agent's own post was read too.
+    /// Now the voice line's answer is the one heard, and the agent's post is kept in the transcript, not read again.
+    func test_when_the_voice_line_answered_the_turn_the_agents_post_is_kept_not_read_again() async {
+        let line = FakeVoiceLine([.success(["Build 15 is on TestFlight."])])
+        let listener = LineListener(), speaker = LineSpeaker(), poster = LinePoster()
+        let room = call(line, listener: listener, speaker: speaker, poster: poster)
+        room.begin()
+        await turn(room, listener, "What's new in the build?")
+        await until("the voice line is heard") { speaker.spoken.count == 1 }
+        speaker.finish()
+        room.receive([agentPost("m1", "Build 15 is on TestFlight with the call fixes.", in: room)])
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(speaker.spoken.map(\.text), ["Build 15 is on TestFlight."], "said once")
+        XCTAssertEqual(room.state.turns.last?.text, "Build 15 is on TestFlight with the call fixes.", "kept in the transcript")
+        XCTAssertEqual(room.state.turns.last?.isHeld, true)
+        await room.hangUp()
+    }
+
+    /// The other order: the agent's post comes before the voice line, so the agent's words are read and the voice
+    /// line's answer to that turn is not.
+    func test_when_the_agent_answered_first_the_voice_lines_answer_to_that_turn_is_not_read() async {
+        let line = GatedVoiceLine()
+        let listener = LineListener(), speaker = LineSpeaker(), poster = LinePoster()
+        let room = call(line, listener: listener, speaker: speaker, poster: poster)
+        room.begin()
+        await turn(room, listener, "What's new in the build?")
+        await until("the voice line was asked") { line.askCount == 1 }
+        room.receive([agentPost("m1", "Build 15 is out.", in: room)])
+        await until("the agent is heard") { speaker.spoken.count == 1 }
+        XCTAssertEqual(speaker.spoken.map(\.text), ["Build 15 is out."])
+        speaker.finish()
+        line.release(["Build 15 is on TestFlight."])
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(speaker.spoken.count, 1, "the voice line's answer to the same turn is not read")
+        await room.hangUp()
     }
 
     /// An agent can call you with its reason and what it needs, and talk you through it. Answering an agent's call, the
