@@ -504,7 +504,9 @@ private struct RoomPreviewTransport: RoomTransport {
 
     private static let threadReplies: [RoomReply] = [
         RoomReply(id: "r1", targetSequenceId: 111, authorId: "human-alex", text: "Is finding 2 also in the onboarding module?", createdAt: "2026-10-28T13:25:00Z"),
-        RoomReply(id: "r2", targetSequenceId: 111, authorId: "review-agent", text: "Yes, `OnboardingForm.swift`. Same PR.", createdAt: "2026-10-28T13:27:00Z")
+        RoomReply(id: "r2", targetSequenceId: 111, authorId: "review-agent", text: "Yes, `OnboardingForm.swift`. Same PR.", createdAt: "2026-10-28T13:27:00Z"),
+        // The keeper files the thread after the answer: its receipt is a line under the answer, never the row.
+        RoomReply(id: "r3", targetSequenceId: 111, authorId: "ticket-keeper", text: "Tickets for this message: [Ticket: Validate the email step on paste](/dashboard/sessions/preview-room?ticket=t1)", createdAt: "2026-10-28T13:28:00Z")
     ]
 
     func roomActions(sessionId: String, targetSequenceId: Int64?, limit: Int) async throws -> RoomActionsPage {
