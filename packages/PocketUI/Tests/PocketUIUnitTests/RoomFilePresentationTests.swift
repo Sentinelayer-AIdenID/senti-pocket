@@ -1,0 +1,212 @@
+import Foundation
+import XCTest
+@testable import PocketUI
+
+/// A file posted as base64 parts shows as a card at its thread's root: verified, its name, size, hash and parts with a
+/// way to save it; otherwise the reason and nothing to save. The posts it came from fold behind the card.
+final class RoomFilePresentationTests: XCTestCase {
+    private let declaredHash = "9b1f5b6cba4a92954a0ecd0cee5730d99d25dc09a5cc7da631079bb9963fab71"
+
+    private func input(_ id: String, seq: Int64, at seconds: TimeInterval, text: String = "A note.",
+                       inline: Bool = false) -> RoomChatMessageInput {
+        RoomChatMessageInput(
+            id: id, sequenceId: seq, kind: .message, authorId: "ada-agent", authorName: "ada-agent", isHuman: false,
+            text: text, timestamp: "", replyToSequenceId: inline ? seq : nil,
+            date: Date(timeIntervalSince1970: 1_800_000_000 + seconds),
+            inlineReplyId: inline ? String(id.dropFirst("reply-".count)) : nil
+        )
+    }
+
+    /// A card; a verified file's bytes are kept as they are and given back as they are.
+    private func card(verified: Data?, status: String? = nil, hashes: [String] = [], previewable: Bool = false,
+                      name: String = "fixture-pack.zip", author: String = "ada-agent",
+                      thread: Int64 = 10) -> RoomChatFileCard {
+        RoomChatFileCard(thread: thread, name: name, author: author, sha256: declaredHash,
+                         verified: verified.map { data in RoomChatFileContent(size: data.count, kept: data) { $0 } },
+                         status: status, partsTotal: 3, partPosts: 3, computedHashes: hashes, previewable: previewable)
+    }
+
+    func test_a_verified_file_shows_its_size_hash_and_parts_and_can_be_saved() throws {
+        let data = Data(repeating: 7, count: 3_004)
+        let verified = card(verified: data)
+        let size = ByteCountFormatter.string(fromByteCount: 3_004, countStyle: .file)
+        XCTAssertEqual(verified.detail, "\(size) · sha256 ✓ 9b1f5b6cba4a · 3 parts")
+        XCTAssertEqual(verified.content?.bytes(), data)
+        XCTAssertTrue(verified.isVerified)
+        XCTAssertNil(verified.mismatch)
+        XCTAssertNil(verified.preview(), "not a text file")
+        XCTAssertEqual(verified.partsToggleTitle, "3 data parts")
+        XCTAssertEqual(verified.id, "10/ada-agent/fixture-pack.zip/\(declaredHash)")
+    }
+
+    /// A card keeps what the room gives it of a verified file (here 300 bytes of gzip) and shows the file's own
+    /// size; its preview is made from the file's first bytes when it is opened, not from what is kept.
+    func test_a_verified_file_shows_its_own_size_and_makes_its_preview_when_opened() {
+        let content = RoomChatFileContent(size: 3_000_000, kept: Data(repeating: 0x1f, count: 300), make: { _ in nil },
+                                          head: { _ in Data("a,b\n1,2\n".utf8) })
+        let verified = RoomChatFileCard(thread: 10, name: "rows.csv", author: "ada-agent", sha256: declaredHash,
+                                        verified: content, status: nil, partsTotal: 1, partPosts: 1, previewable: true)
+        let size = ByteCountFormatter.string(fromByteCount: 3_000_000, countStyle: .file)
+        XCTAssertEqual(verified.detail, "\(size) · sha256 ✓ 9b1f5b6cba4a · 1 part")
+        XCTAssertEqual(verified.content?.kept.count, 300)
+        XCTAssertTrue(verified.previewable)
+        XCTAssertEqual(verified.preview(), "a,b\n1,2\n")
+    }
+
+    /// Saving makes the file's bytes again and checks them again: bytes that check out are written; when they
+    /// don't, nothing is written and the save fails.
+    func test_saving_writes_only_bytes_that_check_out_again() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("room-files-save-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let good = RoomChatFileContent(size: 4, kept: Data(repeating: 0x1f, count: 30)) { _ in Data("rows".utf8) }
+        let url = try RoomFileExports.write(good, named: "rows.csv", in: folder)
+        XCTAssertEqual(try Data(contentsOf: url), Data("rows".utf8))
+        let changed = RoomChatFileContent(size: 4, kept: Data(repeating: 0x1f, count: 30)) { _ in nil }
+        XCTAssertThrowsError(try RoomFileExports.write(changed, named: "other.csv", in: folder)) { error in
+            XCTAssertEqual(error as? RoomFileExports.NotVerified, RoomFileExports.NotVerified())
+        }
+        let written = try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
+        XCTAssertEqual(written.count, 1, "nothing written for the file that didn't check out")
+    }
+
+    /// The card says whose file it is: another member's file of the same name in the thread is its own card.
+    func test_the_card_says_who_posted_the_file() {
+        let ada = card(verified: Data([1]))
+        let lin = card(verified: nil, status: "1 of 3 parts", author: "lin-agent")
+        XCTAssertEqual(ada.postedBy, "posted by ada-agent")
+        XCTAssertEqual(lin.postedBy, "posted by lin-agent")
+        XCTAssertNotEqual(ada.id, lin.id, "same name and hash, two authors: two cards")
+        XCTAssertEqual(card(verified: nil, author: "").postedBy, "posted by an unknown member")
+        let given = RoomChatFileCard(id: "top/ada-agent/a.bin/-", thread: 5, name: "a.bin", author: "ada-agent",
+                                     sha256: nil, verified: nil, status: "no declared hash", partsTotal: 1,
+                                     partPosts: 1, previewable: false)
+        XCTAssertEqual(given.id, "top/ada-agent/a.bin/-", "the room's own id for the file")
+    }
+
+    func test_a_file_that_is_not_verified_shows_why_and_cannot_be_saved() {
+        let missing = card(verified: nil, status: "2 of 3 parts")
+        XCTAssertEqual(missing.detail, "2 of 3 parts")
+        XCTAssertNil(missing.content)
+        XCTAssertFalse(missing.isVerified)
+
+        let mismatch = card(verified: nil, status: "hash mismatch",
+                            hashes: [String(repeating: "1", count: 64), String(repeating: "a", count: 64)],
+                            previewable: true, name: "rows.csv")
+        XCTAssertEqual(mismatch.detail, "hash mismatch")
+        XCTAssertEqual(mismatch.mismatch, "decoded 111111111111 · unzipped aaaaaaaaaaaa")
+        XCTAssertNil(mismatch.preview(), "nothing of an unverified file is shown")
+        XCTAssertFalse(mismatch.previewable)
+    }
+
+    func test_a_text_file_previews_its_first_forty_lines_as_plain_text() throws {
+        let lines = (1...60).map { #"{"id":"KB-\#($0)","note":"<b>not markup</b>"}"# }
+        let long = String(repeating: "x", count: 500)
+        let data = Data((lines + [long]).joined(separator: "\n").utf8)
+        let preview = try XCTUnwrap(card(verified: data, previewable: true, name: "knowledge.jsonl").preview())
+        let shown = preview.split(separator: "\n", omittingEmptySubsequences: false)
+        XCTAssertEqual(shown.count, 40)
+        XCTAssertEqual(String(shown[0]), #"{"id":"KB-1","note":"<b>not markup</b>"}"#, "the text as it is")
+        XCTAssertEqual(RoomChatFileCard.preview(of: Data(long.utf8)).count, RoomChatFileCard.previewLineLength + 1,
+                       "a long line is cut, with an ellipsis")
+    }
+
+    /// The card goes on the thread's root message; each part (a message by its id, a reply by its own) is marked so
+    /// the room folds it behind the card.
+    func test_the_card_goes_on_the_root_and_the_parts_are_marked() throws {
+        let verified = card(verified: Data([1, 2, 3]))
+        let state = RoomChatPresentationState(
+            sessionId: "room", title: "Room",
+            messages: [input("m9", seq: 9, at: 0), input("m10", seq: 10, at: 10, text: "The pack, in 3 parts below.")],
+            replies: [input("reply-r1", seq: 10, at: 20, inline: true),
+                      input("reply-r2", seq: 10, at: 30, inline: true)],
+            files: [10: [verified]],
+            fileParts: ["r1": 10, "r2": 10]
+        )
+        let rows = state.rows.compactMap { row -> RoomChatMessageRow? in
+            if case .message(let message) = row { return message }
+            return nil
+        }
+        let root = try XCTUnwrap(rows.first { $0.id == "m10" })
+        XCTAssertEqual(root.files, [verified])
+        XCTAssertNil(root.filePartOf, "the root is not a part")
+        XCTAssertTrue(rows.filter(\.isInlineReply).allSatisfy { $0.filePartOf == 10 }, "every part shown is marked")
+        XCTAssertTrue(rows.filter(\.isInlineReply).allSatisfy { $0.files.isEmpty }, "the card is on the root alone")
+        XCTAssertFalse(rows.filter(\.isInlineReply).isEmpty)
+        XCTAssertTrue(rows.first { $0.id == "m9" }?.files.isEmpty ?? false, "other messages carry nothing")
+    }
+
+    /// With the root not loaded, the card goes on the newest part shown, so the file is never lost from the room.
+    func test_without_the_root_the_card_goes_on_the_newest_part() throws {
+        let missing = card(verified: nil, status: "2 of 3 parts")
+        let state = RoomChatPresentationState(
+            sessionId: "room", title: "Room",
+            messages: [input("m30", seq: 30, at: 0)],
+            replies: [input("reply-r1", seq: 10, at: 20, inline: true)],
+            files: [10: [missing]],
+            fileParts: ["r1": 10]
+        )
+        let part = try XCTUnwrap(state.rows.compactMap { row -> RoomChatMessageRow? in
+            if case .message(let message) = row, message.isInlineReply { return message }
+            return nil
+        }.last)
+        XCTAssertEqual(part.files, [missing])
+        XCTAssertEqual(part.filePartOf, 10)
+    }
+
+    /// Parts posted at the top level, not as replies: the card goes on the newest of them, and the others fold.
+    func test_top_level_parts_carry_their_card_on_the_newest_part() throws {
+        let state = RoomChatPresentationState(
+            sessionId: "room", title: "Room",
+            messages: [input("m20", seq: 20, at: 0), input("m21", seq: 21, at: 10), input("m22", seq: 22, at: 20)],
+            files: [22: [card(verified: Data([1]), thread: 22)]],
+            fileParts: ["m20": 22, "m21": 22, "m22": 22]
+        )
+        let rows = state.rows.compactMap { row -> RoomChatMessageRow? in
+            if case .message(let message) = row { return message }
+            return nil
+        }
+        XCTAssertEqual(rows.map(\.filePartOf), [22, 22, 22])
+        XCTAssertEqual(rows.map(\.files.count), [0, 0, 1])
+    }
+
+    /// Each export is written in a folder of its own; exports older than their lifetime are removed first, newer ones
+    /// stay (the share sheet may still be using them).
+    func test_exports_are_written_fresh_and_old_ones_removed() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("room-files-test-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let now = Date()
+        let old = folder.appendingPathComponent("old", isDirectory: true)
+        let recent = folder.appendingPathComponent("recent", isDirectory: true)
+        for (export, age) in [(old, RoomFileExports.lifetime + 60), (recent, 60)] {
+            try FileManager.default.createDirectory(at: export, withIntermediateDirectories: true)
+            try Data([1]).write(to: export.appendingPathComponent("f.bin"))
+            try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-age)],
+                                                  ofItemAtPath: export.path)
+        }
+        let url = try RoomFileExports.write(Data("rows".utf8), named: "rows.csv", in: folder, now: now)
+        XCTAssertEqual(try Data(contentsOf: url), Data("rows".utf8))
+        XCTAssertEqual(url.lastPathComponent, "rows.csv")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: old.path), "an old export is removed")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: recent.path), "a recent one stays")
+        XCTAssertEqual(RoomFileExports.removeExports(olderThan: 0, in: folder, now: now.addingTimeInterval(60)), 2)
+    }
+
+    func test_the_thread_sheet_marks_the_replies_that_are_parts() throws {
+        let replies = ["r1", "r2", "r3"].map { id in
+            RoomChatReplyRow(id: id, authorName: "lin-agent", isHuman: false, isOwn: false, text: "data", date: nil,
+                             isEdited: false)
+        }
+        let state = RoomChatPresentationState(
+            sessionId: "room", title: "Room",
+            messages: [input("m10", seq: 10, at: 0)],
+            thread: RoomChatThreadInput(sequenceId: 10, replies: replies),
+            files: [10: [card(verified: Data([1]))]],
+            fileParts: ["r1": 10, "r3": 10]
+        )
+        let thread = try XCTUnwrap(state.thread)
+        XCTAssertEqual(thread.replies.map(\.filePartOf), [10, nil, 10], "r2 is an ordinary reply")
+        XCTAssertEqual(thread.parent.files.count, 1, "the sheet shows the card with its message")
+    }
+}
