@@ -47,6 +47,19 @@ final class CrashReportsTests: XCTestCase {
         XCTAssertEqual(CrashReport.stoppedThread(callStackTree: tree, limit: 2).frames, ["B +0x2", "D +0x4"])
     }
 
+    /// A freeze inside SwiftUI fills the first frames with the system; the app's view sits deeper on the same path.
+    func test_past_the_limit_only_the_apps_own_frames_are_kept_with_their_depth() {
+        var deepest: [String: Any] = frame("UIKitCore", 9, "uk")
+        deepest = frame("SentiPocketApp", 0x77, "APP", [deepest])
+        deepest = frame("SwiftUICore", 3, "sc", [deepest])
+        let tree = json(["callStacks": [["threadAttributed": true, "callStackRootFrames": [
+            frame("AttributeGraph", 1, "ag", [frame("SwiftUICore", 2, "sc", [deepest])])
+        ]]]])
+        let thread = CrashReport.stoppedThread(callStackTree: tree, limit: 2)
+        XCTAssertEqual(thread.frames, ["AttributeGraph +0x1", "SwiftUICore +0x2", "#3 SentiPocketApp +0x77"])
+        XCTAssertEqual(thread.binaries, ["AttributeGraph ag", "SwiftUICore sc", "SentiPocketApp APP"])
+    }
+
     func test_the_reason_names_the_stop_and_what_it_usually_means() {
         XCTAssertEqual(
             CrashReport.reason(exceptionType: 6, signal: 5, termination: nil, exception: nil, memoryRegion: nil),
