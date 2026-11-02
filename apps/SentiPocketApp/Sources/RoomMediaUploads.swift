@@ -317,6 +317,8 @@ final class RoomMediaUploadCoordinator: ObservableObject {
     }
 
     private let sessionId: String
+    /// The account whose room this is (`RoomSendOutbox.account(token:)`): its files are kept and restored under it.
+    private let account: String?
     private(set) var uploader: (any RoomMediaUploading)?
     private let preparer: any RoomMediaPreparing
     private let keepAlive: any RoomMediaKeepingAlive
@@ -332,6 +334,7 @@ final class RoomMediaUploadCoordinator: ObservableObject {
 
     init(
         sessionId: String,
+        account: String? = nil,
         uploader: (any RoomMediaUploading)?,
         preparer: any RoomMediaPreparing = RoomMediaPreparer(),
         keepAlive: any RoomMediaKeepingAlive = RoomMediaBackgroundTask(),
@@ -345,6 +348,7 @@ final class RoomMediaUploadCoordinator: ObservableObject {
         outboxRoot: URL = RoomMediaFiles.outbox
     ) {
         self.sessionId = sessionId
+        self.account = account
         self.uploader = uploader
         self.preparer = preparer
         self.keepAlive = keepAlive
@@ -372,18 +376,21 @@ final class RoomMediaUploadCoordinator: ObservableObject {
         self.uploader = uploader
     }
 
-    /// One coordinator per room for as long as the app runs: leaving the room never drops a message on its way, and
-    /// coming back shows it still uploading. Its uploader follows the room's current posting rights.
+    /// One coordinator per account and room for as long as the app runs: leaving the room never drops a message on
+    /// its way, and coming back shows it still uploading. Its uploader follows the room's current posting rights.
+    /// Another account signing in gets its own coordinator: it never sees, retries or posts the last one's files
+    /// (warden, #298 review), and those files' uploads only ever carry their own account's token.
     private static var rooms: [String: RoomMediaUploadCoordinator] = [:]
 
-    static func forRoom(_ sessionId: String, uploader: (any RoomMediaUploading)?,
+    static func forRoom(_ sessionId: String, account: String? = nil, uploader: (any RoomMediaUploading)?,
                         make: () -> RoomMediaUploadCoordinator) -> RoomMediaUploadCoordinator {
-        if let existing = rooms[sessionId] {
+        let key = "\(account ?? "")|\(sessionId)"
+        if let existing = rooms[key] {
             existing.updateUploader(uploader)
             return existing
         }
         let created = make()
-        rooms[sessionId] = created
+        rooms[key] = created
         return created
     }
 
@@ -927,6 +934,7 @@ final class RoomMediaUploadCoordinator: ObservableObject {
     private func persist(_ item: Item) {
         var entry = RoomMediaOutboxEntry(
             sessionId: sessionId,
+            account: account,
             itemId: item.id,
             filename: item.filename,
             kind: Self.kindName(item.kind),
@@ -968,7 +976,7 @@ final class RoomMediaUploadCoordinator: ObservableObject {
     private func restore() {
         var messages: [String: (text: String?, parts: [(position: Int, id: String)], createdAt: Date,
                                 mayBePosted: Bool)] = [:]
-        for (folder, entry) in RoomMediaOutbox.entries(for: sessionId, root: outboxRoot) {
+        for (folder, entry) in RoomMediaOutbox.entries(for: sessionId, account: account, root: outboxRoot) {
             if entry.withdrawn == true {
                 // Taken back just before the app closed: deleted on the server now, never shown again.
                 if entry.initiated, let uploader {

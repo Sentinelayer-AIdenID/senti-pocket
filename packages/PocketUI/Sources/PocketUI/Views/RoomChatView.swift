@@ -103,7 +103,7 @@ public struct RoomChatView: View {
                 replying: replyTarget,
                 onCancelReply: { replyTarget = nil },
                 onIntent: send,
-                draftKey: RoomComposerDraft.savedKey(sessionId: state.sessionId),
+                draftKey: state.draftKey,
                 media: media
             ) { text in
                 if let target = replyTarget {

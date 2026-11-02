@@ -495,6 +495,8 @@ public struct RoomComposerState: Equatable, Sendable {
 /// Everything the room screen renders, built from the coordinator's timeline in one pure step.
 public struct RoomChatPresentationState: Equatable, Sendable {
     public let sessionId: String
+    /// Where the composer keeps its unsent text (`RoomComposerDraft.savedKey(sessionId:account:)`), or nil to keep none.
+    public let draftKey: String?
     public let title: String
     public let rows: [RoomChatRow]
     public let isLoadingInitial: Bool
@@ -592,9 +594,11 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         expandedRepeats: Set<String> = [],
         files: [Int64: [RoomChatFileCard]] = [:],
         fileParts: [String: Int64] = [:],
+        draftKey: String? = nil,
         calendar: Calendar = .current
     ) {
         self.sessionId = sessionId
+        self.draftKey = draftKey
         self.title = title
         self.isLoadingInitial = isLoadingInitial
         self.notice = notice
@@ -1542,7 +1546,10 @@ public enum RoomComposerDraft {
         return (String(oldChars), inserted)
     }
 
-    /// Where a room's unsent text is kept on the phone.
+    /// Where a room's unsent text is kept on the phone, for one account: another account signing in here (after a
+    /// forced sign-in, say) never sees or sends it (warden, #298 review).
+    public static func savedKey(sessionId: String, account: String) -> String { savedKeyPrefix + account + "|" + sessionId }
+    /// The key from before drafts were kept per account: no one can tell whose it is, so it is only ever removed.
     public static func savedKey(sessionId: String) -> String { savedKeyPrefix + sessionId }
     static let savedKeyPrefix = "pocket.draft."
 
@@ -1569,7 +1576,11 @@ public enum RoomComposerDraft {
     /// Once a send is confirmed (or given up), its saved text goes, unless newer text was saved since (warden, #262:
     /// a crash just after a delivered send must not bring the text back to be sent twice).
     public static func forgetSaved(sessionId: String, sent: String, in defaults: UserDefaults = .standard) {
-        let key = savedKey(sessionId: sessionId)
+        forgetSaved(key: savedKey(sessionId: sessionId), sent: sent, in: defaults)
+    }
+
+    /// `forgetSaved` for the text kept under `key` (`savedKey(sessionId:account:)`).
+    public static func forgetSaved(key: String, sent: String, in defaults: UserDefaults = .standard) {
         guard let saved = defaults.string(forKey: key) else { return }
         let kept = saved.trimmingCharacters(in: .whitespacesAndNewlines)
         let gone = sent.trimmingCharacters(in: .whitespacesAndNewlines)

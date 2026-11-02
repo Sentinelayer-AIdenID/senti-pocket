@@ -365,9 +365,10 @@ final class RoomMediaUploadCoordinatorTests: XCTestCase {
     }
 
     private func coordinator(_ uploader: FakeUploader?, keepAlive: any RoomMediaKeepingAlive = NoKeepAlive(),
-                             session: String = "room_1") -> RoomMediaUploadCoordinator {
+                             session: String = "room_1", account: String? = nil) -> RoomMediaUploadCoordinator {
         RoomMediaUploadCoordinator(
             sessionId: session,
+            account: account,
             uploader: uploader,
             preparer: FakePreparer(),
             keepAlive: keepAlive,
@@ -722,6 +723,59 @@ final class RoomMediaUploadCoordinatorTests: XCTestCase {
         XCTAssertEqual(asked, 1)
         XCTAssertEqual(media.board.tray.first?.phase, .failed(reason: RoomSendError.reauthenticationRequired.userMessage,
                                                               canRetry: true))
+    }
+
+    /// Warden, #298 review: a file left unsent by one account (its upload failed, the app was closed) is never shown,
+    /// retried or posted by another account signing in on this phone; its own account gets it back.
+    func test_another_account_never_sees_or_retries_the_last_accounts_files() async throws {
+        let uploader = FakeUploader()
+        uploader.failingPuts = 1
+        let alice = coordinator(uploader, account: "sub:alice")
+        alice.add([try source("IMG_0001.jpg")])
+        alice.perform(.send(text: "Alice's photo"))
+        await until("failed", boards: [alice.board]) { alice.board.outgoing.first?.isFailed == true }
+
+        let bob = coordinator(FakeUploader(), account: "sub:bob")
+        XCTAssertTrue(bob.board.outgoing.isEmpty, "bob never sees alice's message")
+        XCTAssertTrue(bob.board.tray.isEmpty)
+
+        let aliceAgain = coordinator(FakeUploader(), account: "sub:alice")
+        XCTAssertEqual(aliceAgain.board.outgoing.count, 1, "alice signing back in gets it back")
+    }
+
+    func test_each_account_has_its_own_coordinator_for_a_room() {
+        let room = "room_accounts_" + UUID().uuidString
+        let forAlice = RoomMediaUploadCoordinator.forRoom(room, account: "sub:alice", uploader: FakeUploader()) {
+            RoomMediaUploadCoordinator(sessionId: room, account: "sub:alice", uploader: FakeUploader(),
+                                       keepAlive: NoKeepAlive(), outboxRoot: root)
+        }
+        let forBob = RoomMediaUploadCoordinator.forRoom(room, account: "sub:bob", uploader: FakeUploader()) {
+            RoomMediaUploadCoordinator(sessionId: room, account: "sub:bob", uploader: FakeUploader(),
+                                       keepAlive: NoKeepAlive(), outboxRoot: root)
+        }
+        XCTAssertFalse(forAlice === forBob, "bob never gets alice's uploads in flight")
+        let aliceAgain = RoomMediaUploadCoordinator.forRoom(room, account: "sub:alice", uploader: nil) {
+            XCTFail("alice's room keeps its coordinator")
+            return forAlice
+        }
+        XCTAssertTrue(aliceAgain === forAlice)
+    }
+
+    func test_the_launch_sweep_drops_files_no_one_can_tell_the_account_of() throws {
+        let sweepRoot = root.appendingPathComponent("sweep-\(UUID().uuidString)")
+        for (name, account) in [("kept", "sub:alice" as String?), ("old", nil)] {
+            let folder = sweepRoot.appendingPathComponent(name)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            var entry = RoomMediaOutboxEntry(sessionId: "room_1", account: account, itemId: name, filename: "a.jpg", kind: "image",
+                                             sizeBytes: 1, createdAt: Date(), initiated: false, previewDone: false)
+            entry.prepared = .init(file: "a.jpg", filename: "a.jpg", contentType: "image/jpeg", fileExtension: "jpg",
+                                   sizeBytes: 1, sha256: String(repeating: "0", count: 64), preview: nil)
+            RoomMediaOutbox.write(entry, in: folder)
+            FileManager.default.createFile(atPath: folder.appendingPathComponent("a.jpg").path, contents: Data([1]))
+        }
+        RoomMediaOutbox.sweep(root: sweepRoot)
+        let left = try FileManager.default.contentsOfDirectory(atPath: sweepRoot.path)
+        XCTAssertEqual(left, ["kept"])
     }
 
     func test_a_viewer_made_a_contributor_can_upload_without_relaunching() {

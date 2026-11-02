@@ -85,6 +85,44 @@ final class RoomMessageSenderTests: XCTestCase {
                        "no author field: the API authors human messages itself")
     }
 
+    /// Warden, #298 review: a sender bound to the account that queued the work sends only while that account is the
+    /// one signed in. After another account signs in (a forced sign-in on a shared phone), it sends nothing at all.
+    func test_a_sender_bound_to_one_account_never_sends_with_another_accounts_token() async throws {
+        func jwt(_ sub: String) -> String {
+            let payload = Data("{\"sub\":\"\(sub)\"}".utf8).base64EncodedString()
+                .replacingOccurrences(of: "=", with: "").replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+            return "e30.\(payload).sig"
+        }
+        final class Current: @unchecked Sendable { var token: String? }
+        let current = Current()
+        RoomSendURLProtocol.reset(status: 200, headers: [:])
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RoomSendURLProtocol.self]
+        let sender = HTTPRoomMessageSender(apiBaseURL: URL(string: "https://api.example.test"),
+                                           urlSession: URLSession(configuration: configuration),
+                                           tokenProvider: { current.token }).bound(toAccount: "sub:alice")
+        current.token = jwt("alice")
+        try await sender.sendHumanMessage(sessionId: "room_1", text: "from alice", clientId: "hm_1")
+        XCTAssertEqual(RoomSendURLProtocol.requests().count, 1, "sent while its account is signed in")
+
+        current.token = jwt("bob")
+        do {
+            try await sender.sendHumanMessage(sessionId: "room_1", text: "from alice", clientId: "hm_2")
+            XCTFail("never sent with another account's token")
+        } catch {
+            XCTAssertEqual(error as? RoomSendError, .reauthenticationRequired)
+        }
+        XCTAssertEqual(RoomSendURLProtocol.requests().count, 1, "nothing went out as bob")
+        let none = HTTPRoomMessageSender(apiBaseURL: URL(string: "https://api.example.test"),
+                                         urlSession: URLSession(configuration: configuration),
+                                         tokenProvider: { current.token }).bound(toAccount: nil)
+        do {
+            try await none.sendHumanMessage(sessionId: "room_1", text: "x", clientId: "hm_3")
+            XCTFail("a sender bound to no account never sends")
+        } catch {}
+        XCTAssertEqual(RoomSendURLProtocol.requests().count, 1)
+    }
+
     func test_status_classes_map_to_retry_or_stop() async {
         let cases: [(Int, [String: String], RoomSendError)] = [
             (401, [:], .reauthenticationRequired),
@@ -336,6 +374,19 @@ final class RoomComposerCoordinatorTests: XCTestCase {
         coordinator.send(.discardSend(clientId: sender.snapshot()[0].clientId))
         XCTAssertTrue(outbox.items(account: "sub:carter", sessionId: "room_1").isEmpty)
         coordinator.pause()
+    }
+
+    /// Warden, #298 review: unsent text is kept per account, so another account signing in on this phone (a forced
+    /// sign-in, say) never finds the last one's draft in its composer; the old key shared by everyone goes.
+    func test_drafts_are_kept_per_account_and_the_old_shared_key_goes() {
+        let legacy = RoomComposerDraft.savedKey(sessionId: "room_1")
+        UserDefaults.standard.set("the last person's text", forKey: legacy)
+        let coordinator = makeCoordinator(sender: ScriptedSender([]), outbox: temporaryOutbox())
+        XCTAssertEqual(coordinator.state.draftKey, RoomComposerDraft.savedKey(sessionId: "room_1", account: "sub:carter"))
+        XCTAssertNil(UserDefaults.standard.string(forKey: legacy), "no one can tell whose the old text was: it goes")
+        XCTAssertNotEqual(RoomComposerDraft.savedKey(sessionId: "room_1", account: "sub:carter"),
+                          RoomComposerDraft.savedKey(sessionId: "room_1", account: "sub:someone-else"))
+        XCTAssertNil(makeCoordinator(sender: ScriptedSender([])).state.draftKey, "no account, no draft kept")
     }
 
     func test_the_account_comes_from_the_tokens_subject() {

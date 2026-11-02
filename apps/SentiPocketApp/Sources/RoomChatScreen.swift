@@ -205,12 +205,17 @@ struct RoomChatScreen: View {
         ))
         // Files go up through the room's own sender (init, complete, the message) and straight to storage for the
         // bytes. A viewer cannot post, so has nothing to send them with.
+        // Bound to the account signed in now: its files are kept under it, and their uploads carry only its token, so
+        // another account signing in here never sees or posts them (warden, #298 review).
+        let account = RoomSendOutbox.account(token: SessionTokenStore.load())
         let mediaUploader: (any RoomMediaUploading)? = route.membershipRole.lowercased() == "viewer"
             ? nil
-            : (sender as? HTTPRoomMessageSender).map { HTTPRoomMediaUploader(api: $0) }
-        _media = StateObject(wrappedValue: RoomMediaUploadCoordinator.forRoom(route.sessionId, uploader: mediaUploader) {
+            : (sender as? HTTPRoomMessageSender).map { HTTPRoomMediaUploader(api: $0.bound(toAccount: account)) }
+        _media = StateObject(wrappedValue: RoomMediaUploadCoordinator.forRoom(route.sessionId, account: account,
+                                                                              uploader: mediaUploader) {
             RoomMediaUploadCoordinator(
                 sessionId: route.sessionId,
+                account: account,
                 uploader: mediaUploader,
                 canUseCamera: UIImagePickerController.isSourceTypeAvailable(.camera),
                 canPaste: { UIPasteboard.general.hasImages }

@@ -51,6 +51,17 @@ final class HTTPRoomMessageSender: RoomMessageSending, @unchecked Sendable {
         self.tokenProvider = tokenProvider
     }
 
+    /// The same sender, but sending only while `account` is the one signed in: after another account signs in it has
+    /// no token, so work queued by the last account (a file still uploading) can never go out as the new one (warden,
+    /// #298 review). With no account it never sends.
+    func bound(toAccount account: String?) -> HTTPRoomMessageSender {
+        let tokenProvider = self.tokenProvider
+        return HTTPRoomMessageSender(apiBaseURL: apiBaseURL, urlSession: urlSession, tokenProvider: {
+            guard let account, let token = tokenProvider(), RoomSendOutbox.account(token: token) == account else { return nil }
+            return token
+        })
+    }
+
     func sendHumanMessage(sessionId: String, text: String, clientId: String) async throws {
         guard let apiBaseURL,
               var components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false) else {

@@ -46,6 +46,9 @@ final class RoomChatCoordinator: ObservableObject {
     /// The account key the outbox is read and written under, fixed when the room opens (the ids learned later never
     /// move an item to a different key).
     private let outboxAccount: String?
+    /// Where this account keeps this room's unsent text (`RoomComposerDraft.savedKey(sessionId:account:)`): another
+    /// account signing in on this phone never sees or sends it (warden, #298 review). Nil keeps none.
+    private let draftKey: String?
     private var identityRequested = false
 
     // Replies and reactions (GET /actions projection), and the open thread.
@@ -285,6 +288,11 @@ final class RoomChatCoordinator: ObservableObject {
         self.ownAuthorIds = Set(ownAuthorIds.map { $0.lowercased() })
         // A send left unconfirmed by a kill comes back as it was: same client id, offered to Retry or Discard.
         self.outboxAccount = outbox == nil ? nil : (outboxAccount ?? RoomSendOutbox.account(self.ownAuthorIds))
+        let draftKey = (outbox == nil ? nil : (outboxAccount ?? RoomSendOutbox.account(self.ownAuthorIds)))
+            .map { RoomComposerDraft.savedKey(sessionId: sessionId, account: $0) }
+        self.draftKey = draftKey
+        // Text kept before drafts were per account cannot be told apart by whose it is: it goes.
+        if draftKey != nil { UserDefaults.standard.removeObject(forKey: RoomComposerDraft.savedKey(sessionId: sessionId)) }
         if let outbox, let account = outboxAccount {
             pending = outbox.items(account: account, sessionId: sessionId).map {
                 PendingSend(clientId: $0.clientId, text: $0.text, status: .failed(reason: Self.unconfirmedReason, canRetry: true))
@@ -310,7 +318,8 @@ final class RoomChatCoordinator: ObservableObject {
             pending: pending.map { RoomChatPendingRow(clientId: $0.clientId, text: $0.text, status: $0.status) },
             composer: initialComposer,
             canRename: canRename && sender is any RoomTitleSetting,
-            canInvite: canInvite && sender is any RoomInviting
+            canInvite: canInvite && sender is any RoomInviting,
+            draftKey: draftKey
         )
         if let receipts {
             receiptsTracker = RoomReceiptsTracker(
@@ -416,7 +425,7 @@ final class RoomChatCoordinator: ObservableObject {
             deliver(clientId)
         case .discardSend(let clientId):
             for given in pending where given.clientId == clientId {
-                RoomComposerDraft.forgetSaved(sessionId: sessionId, sent: given.text)
+                if let draftKey { RoomComposerDraft.forgetSaved(key: draftKey, sent: given.text) }
             }
             pending.removeAll { $0.clientId == clientId }
             pendingReplies.removeAll { $0.clientId == clientId }
@@ -1245,7 +1254,7 @@ final class RoomChatCoordinator: ObservableObject {
             do {
                 try await actionSender.sendAction(request)
                 guard let self else { return }
-                RoomComposerDraft.forgetSaved(sessionId: self.sessionId, sent: item.text)
+                if let draftKey = self.draftKey { RoomComposerDraft.forgetSaved(key: draftKey, sent: item.text) }
                 self.onFeedback?(.sent)
                 if self.openThreadSequence == item.targetSequenceId { await self.loadThread(item.targetSequenceId) }
                 self.pendingReplies.removeAll { $0.clientId == clientId }
@@ -1373,7 +1382,7 @@ final class RoomChatCoordinator: ObservableObject {
                 self.updatePending(clientId) { $0.status = .sent; $0.sentAt = self.now() }
                 self.forgetUnconfirmed(clientId)
                 self.sentCallbacks.removeValue(forKey: clientId)?()
-                RoomComposerDraft.forgetSaved(sessionId: sessionId, sent: item.text)
+                if let draftKey { RoomComposerDraft.forgetSaved(key: draftKey, sent: item.text) }
                 self.onFeedback?(.sent)
                 // Pull the echo now instead of waiting for the stream or the next poll.
                 await self.catchUp(self.generation)
@@ -2223,7 +2232,8 @@ final class RoomChatCoordinator: ObservableObject {
             replies: replyInputs,
             expandedRepeats: expandedRepeats,
             files: placedFiles?.cards ?? [:],
-            fileParts: placedFiles?.parts ?? [:]
+            fileParts: placedFiles?.parts ?? [:],
+            draftKey: draftKey
         )
         summarizeNextThread(replyInputs)
     }

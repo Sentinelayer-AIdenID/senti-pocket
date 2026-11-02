@@ -48,6 +48,9 @@ struct RoomMediaOutboxEntry: Codable, Equatable {
 
     var version = 1
     var sessionId: String
+    /// The signed-in account that queued it (`RoomSendOutbox.account(token:)`): only that account ever sees, retries
+    /// or posts it. Absent in entries from before accounts were kept; those are dropped at launch.
+    var account: String?
     /// The file's own id: its place in the outbox, and its first client attachment id.
     var itemId: String
     /// The client attachment id its upload goes under now, when the server withdrew `itemId` (absent: `itemId`).
@@ -88,22 +91,23 @@ enum RoomMediaOutbox {
         return try? decoder.decode(RoomMediaOutboxEntry.self, from: data)
     }
 
-    /// This room's entries, oldest first.
-    static func entries(for sessionId: String, root: URL) -> [(folder: URL, entry: RoomMediaOutboxEntry)] {
+    /// This room's entries for this account, oldest first: another account's files are never restored here.
+    static func entries(for sessionId: String, account: String?, root: URL) -> [(folder: URL, entry: RoomMediaOutboxEntry)] {
         let folders = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
         return folders.compactMap { folder in
-            guard let entry = read(in: folder), entry.sessionId == sessionId else { return nil }
+            guard let entry = read(in: folder), entry.sessionId == sessionId, entry.account == account else { return nil }
             return (folder, entry)
         }
         .sorted { $0.entry.createdAt < $1.entry.createdAt }
     }
 
     /// At launch: drops what should not stay on the phone. A folder with no entry (closed before it was written), an
-    /// entry never prepared (it would still hold the original, location and all), and an entry older than a day.
+    /// entry never prepared (it would still hold the original, location and all), an entry older than a day, and an
+    /// entry with no account (from before accounts were kept: no one could tell whose it is).
     static func sweep(root: URL = RoomMediaFiles.outbox, now: Date = Date()) {
         let folders = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
         for folder in folders {
-            guard let entry = read(in: folder), entry.prepared != nil,
+            guard let entry = read(in: folder), entry.prepared != nil, entry.account != nil,
                   now.timeIntervalSince(entry.createdAt) < maximumAge else {
                 try? FileManager.default.removeItem(at: folder)
                 continue
