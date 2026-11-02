@@ -277,6 +277,33 @@ private final class FirstTurnLostPoster: VoiceRoomPosting, @unchecked Sendable {
     func postCallEnded(sessionId: String, text: String, transcript: VoiceTranscriptAttachment?, clientId: String) async throws {}
 }
 
+/// A room that keeps the first turn but whose answer is lost, so the phone sees a failure. Like the real room, it keeps
+/// one copy per client ID.
+private final class AcceptedButResponseLostPoster: VoiceRoomPosting, @unchecked Sendable {
+    private let lock = NSLock()
+    private var answered = false
+    private var _log: [(clientId: String, text: String)] = []
+    var turns: [String] { lock.withLock { _log.map(\.text) } }
+
+    func postCallStarted(sessionId: String, text: String, clientId: String) async throws {}
+
+    func postVoiceTurn(sessionId: String, text: String, clientId: String) async throws {
+        let loses = lock.withLock { () -> Bool in
+            if !_log.contains(where: { $0.clientId == clientId }) { _log.append((clientId, text)) }
+            defer { answered = true }
+            return !answered
+        }
+        if loses { throw RoomSendError.retryable(retryAfterSeconds: nil) }
+    }
+
+    func uploadTranscript(sessionId: String, filename: String, markdown: String, clientId: String) async throws -> VoiceTranscriptAttachment {
+        VoiceTranscriptAttachment(attachmentId: "att-4", filename: filename, kind: "text", contentType: "text/markdown",
+                                  sizeBytes: markdown.utf8.count, status: "ready")
+    }
+
+    func postCallEnded(sessionId: String, text: String, transcript: VoiceTranscriptAttachment?, clientId: String) async throws {}
+}
+
 /// A clock only the test moves.
 private final class TestClock: @unchecked Sendable {
     private let lock = NSLock()
@@ -1359,8 +1386,9 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         await strict.hangUp()
     }
 
-    /// No words lost when the room missed the turn: the words that carry it on go with all of it.
-    func test_carrying_on_a_turn_the_room_never_got_sends_all_of_it() async {
+    /// No words lost when the room missed the turn: it goes again under its own client ID, then the words that carry
+    /// it on, in order.
+    func test_carrying_on_a_turn_the_room_never_got_sends_it_again_then_the_rest() async {
         let listener = FakeListener(), poster = FirstTurnLostPoster()
         let (room, microphone) = await listeningCall(listener, FakeSpeaker(), poster)
         microphone.loud(for: 0.5)
@@ -1372,9 +1400,30 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         microphone.loud(for: 0.4)
         listener.say("the dial?")
         microphone.quiet(for: VoiceRoomCoordinator.pauseAfterSentence + 0.1)
-        await until("all of it went") { poster.turns.count == 1 }
-        XCTAssertEqual(poster.turns, ["@pocket-forge What about the presence ring and The dial?"])
+        await until("all of it went") { poster.turns.count == 2 }
+        XCTAssertEqual(poster.turns, ["@pocket-forge What about the presence ring and", "@pocket-forge …The dial?"])
         await until("it is in the room after all") { room.state.notice == nil }
+        await room.hangUp()
+    }
+
+    /// The room kept the turn but its answer was lost (#290): carrying it on sends it again under the same
+    /// client ID, so the room has the first words once, then the rest.
+    func test_carrying_on_a_turn_whose_answer_was_lost_posts_no_word_twice() async {
+        let listener = FakeListener(), poster = AcceptedButResponseLostPoster()
+        let (room, microphone) = await listeningCall(listener, FakeSpeaker(), poster)
+        microphone.loud(for: 0.5)
+        listener.say("What about the presence ring and")
+        microphone.quiet(for: VoiceRoomCoordinator.pauseEndsTurn + 0.1)
+        await until("the answer was lost") { room.state.notice == VoiceRoomCoordinator.turnLost }
+        XCTAssertEqual(poster.turns, ["@pocket-forge What about the presence ring and"], "the room has it already")
+        await until("listening a moment") { listener.starts == 2 && room.state.isListening }
+        microphone.loud(for: 0.4)
+        listener.say("the dial?")
+        microphone.quiet(for: VoiceRoomCoordinator.pauseAfterSentence + 0.1)
+        await until("the rest went") { poster.turns.count == 2 }
+        await settle()
+        XCTAssertEqual(poster.turns, ["@pocket-forge What about the presence ring and", "@pocket-forge …The dial?"])
+        await until("the notice clears") { room.state.notice == nil }
         await room.hangUp()
     }
 }

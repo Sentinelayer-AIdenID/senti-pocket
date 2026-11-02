@@ -486,8 +486,15 @@ final class VoiceRoomCoordinator: ObservableObject {
         let id: String
         /// All of it so far.
         let text: String
-        /// Its latest post: true once all of it is in the room.
-        let posted: Task<Bool, Never>
+        /// Its posts so far: the ones the room has not confirmed once they are done. Empty means all of it is in.
+        let posted: Task<[TurnPost], Never>
+    }
+
+    /// One post of a turn, with the client ID it goes under. Sent again under the same ID, the room keeps one copy,
+    /// so a post whose answer was lost can be retried without its words reaching the room twice (#290).
+    private struct TurnPost {
+        let text: String
+        let clientId: String
     }
 
     /// `turn` is the turn that just went, when this listening is the moment after it: what you say joins that turn.
@@ -685,11 +692,12 @@ final class VoiceRoomCoordinator: ObservableObject {
         readyAfterSending()
         speakIfReady()
         askVoiceLine(text, turn: turn.id)
-        let posted = Task { [weak self] () -> Bool in
-            guard let self else { return false }
-            let inRoom = await self.post(text, stoppedTalking: stoppedTalking)
+        let first = TurnPost(text: text, clientId: Self.newClientId())
+        let posted = Task { [weak self] () -> [TurnPost] in
+            guard let self else { return [first] }
+            let inRoom = await self.post(first, stoppedTalking: stoppedTalking)
             if inRoom { self.awaitingAnswerSince = self.now() }
-            return inRoom
+            return inRoom ? [] : [first]
         }
         listenForMore(after: SentTurn(id: turn.id, text: text, posted: posted))
         _ = await posted.value
@@ -714,14 +722,21 @@ final class VoiceRoomCoordinator: ObservableObject {
         readyAfterSending()
         speakIfReady()
         askVoiceLine(whole, turn: sent.id)
-        let posted = Task { [weak self] () -> Bool in
-            // After the turn it carries on, so the room has them in order. If that never reached the room, all of it
-            // goes now, so nothing said is lost.
-            let inRoom = await sent.posted.value
-            guard let self else { return false }
-            let delivered = await self.post(inRoom ? Self.carriesOn + text : whole, stoppedTalking: stoppedTalking)
-            if delivered, !inRoom { self.awaitingAnswerSince = self.now() }
-            return delivered
+        let more = TurnPost(text: Self.carriesOn + text, clientId: Self.newClientId())
+        let posted = Task { [weak self] () -> [TurnPost] in
+            // After the turn it carries on, so the room has them in order. A post the room did not confirm may still
+            // have reached it (its answer lost), so it goes again under its own client ID, never inside a new message:
+            // the room keeps one copy, and nothing said is lost or posted twice (#290).
+            let unconfirmed = await sent.posted.value
+            guard let self else { return unconfirmed + [more] }
+            var left: [TurnPost] = []
+            for post in unconfirmed {
+                if !(await self.post(post, stoppedTalking: stoppedTalking)) { left.append(post) }
+            }
+            if !unconfirmed.isEmpty, left.count < unconfirmed.count { self.awaitingAnswerSince = self.now() }
+            if !(await self.post(more, stoppedTalking: stoppedTalking)) { left.append(more) }
+            if !left.isEmpty { self.state.notice = Self.turnLost }
+            return left
         }
         listenForMore(after: SentTurn(id: sent.id, text: whole, posted: posted))
         _ = await posted.value
@@ -810,17 +825,16 @@ final class VoiceRoomCoordinator: ObservableObject {
 
     /// Your turn in the room. It starts with the mentions of the agents you called, so their listeners know it is for
     /// them; a meeting is for everyone. True once the room has it.
-    private func post(_ text: String, stoppedTalking: Date) async -> Bool {
+    private func post(_ turnPost: TurnPost, stoppedTalking: Date) async -> Bool {
         let mentions = state.with.map { "@\($0)" }.joined(separator: " ")
-        let addressed = mentions.isEmpty ? text : "\(mentions) \(text)"
+        let addressed = mentions.isEmpty ? turnPost.text : "\(mentions) \(turnPost.text)"
         let sending = now()
         do {
-            try await poster.postVoiceTurn(sessionId: sessionId, text: addressed,
-                                           clientId: "voice-" + UUID().uuidString.lowercased())
+            try await poster.postVoiceTurn(sessionId: sessionId, text: addressed, clientId: turnPost.clientId)
             let posted = now()
             timings.record(.post, posted.timeIntervalSince(sending))
             timings.record(.endpoint, posted.timeIntervalSince(stoppedTalking))
-            // A turn that failed and was then carried on went whole: it is in the room after all.
+            // A turn that failed and was then sent again is in the room after all.
             if state.notice == Self.turnLost { state.notice = nil }
             return true
         } catch {
@@ -830,6 +844,8 @@ final class VoiceRoomCoordinator: ObservableObject {
     }
 
     static let turnLost = "That turn did not reach the room. Say it again."
+
+    static func newClientId() -> String { "voice-" + UUID().uuidString.lowercased() }
 
     // MARK: - Hanging up
 
