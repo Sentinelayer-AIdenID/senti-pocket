@@ -87,17 +87,31 @@ extension CrashReport {
         var frames: [String] = []
         var binaries: [String] = []
         var level = stack["callStackRootFrames"] as? [[String: Any]] ?? []
-        while frames.count < limit, let frame = level.max(by: { samples($0) < samples($1) }) {
+        var depth = 0
+        // The first `limit` frames, then, deeper on the same path, only the app's own frames (each with its depth): a
+        // freeze inside SwiftUI's update shows its first 30 frames all in the system, and the app's view that started
+        // it sits further down (10-02 freeze on build 2026110205).
+        while depth < deepest, let frame = level.max(by: { samples($0) < samples($1) }) {
             let name = frame["binaryName"] as? String ?? "?"
             let offset = (frame["offsetIntoBinaryTextSegment"] as? NSNumber)?.uint64Value ?? 0
-            frames.append("\(name) +0x\(String(offset, radix: 16))")
-            if let uuid = frame["binaryUUID"] as? String, !binaries.contains("\(name) \(uuid)") {
+            if depth < limit {
+                frames.append("\(name) +0x\(String(offset, radix: 16))")
+            } else if appBinaries.contains(name) {
+                frames.append("#\(depth) \(name) +0x\(String(offset, radix: 16))")
+            }
+            if depth < limit || appBinaries.contains(name), let uuid = frame["binaryUUID"] as? String,
+               !binaries.contains("\(name) \(uuid)") {
                 binaries.append("\(name) \(uuid)")
             }
             level = frame["subFrames"] as? [[String: Any]] ?? []
+            depth += 1
         }
         return (frames, binaries)
     }
+
+    /// How deep a stack is followed for the app's own frames, and which binaries are the app's.
+    static let deepest = 400
+    static let appBinaries: Set<String> = ["SentiPocketApp"]
 
     private static func samples(_ frame: [String: Any]) -> Int {
         (frame["sampleCount"] as? NSNumber)?.intValue ?? 0
