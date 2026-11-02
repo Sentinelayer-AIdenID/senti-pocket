@@ -1469,12 +1469,14 @@ struct RoomAvatar: View {
 /// twice under the keyboard while the new message arrived; both of Carter's freezes on 10-30 came right after a send,
 /// on a phone (the simulator's keyboard never moves), so the bounce is gone.
 @MainActor
-private func emptyComposer(_ draft: Binding<String>, sent: String) {
+private func emptyComposer(_ draft: Binding<String>, clears: @escaping (String) -> Bool) {
     draft.wrappedValue = ""
     DispatchQueue.main.async {
         draft.wrappedValue = ""
+        // Only the write-back the box's onChange saw land straight in the emptied box, still exactly as it landed
+        // (`RoomComposerWriteBack`): what was typed since is kept (#298 review).
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            if RoomComposerDraft.isWrittenBack(draft.wrappedValue, sent: sent) { draft.wrappedValue = "" }
+            if clears(draft.wrappedValue) { draft.wrappedValue = "" }
         }
     }
 }
@@ -1573,6 +1575,10 @@ private struct RoomThreadSheet: View {
     /// Where the reply text last changed (the field does not say where the caret is), for an @ anywhere in it.
     @State private var editOffset: Int?
     @State private var lastDraft = ""
+    /// The reply just sent, for a moment, and what the keyboard wrote back of it into the emptied box (see
+    /// `emptyComposer`).
+    @State private var replySent: String?
+    @State private var replyWrittenBack = RoomComposerWriteBack()
     /// The thread's file parts are shown; otherwise they fold behind the file's card.
     @State private var showsFileParts = false
 
@@ -1806,6 +1812,7 @@ private struct RoomThreadSheet: View {
                             .textFieldStyle(.plain)
                             .focused($isReplying)
                             .onChange(of: draft) { new in
+                                replyWrittenBack.changed(from: lastDraft, to: new, sent: replySent)
                                 editOffset = MentionSuggester.editOffset(from: lastDraft, to: new)
                                 lastDraft = new
                             }
@@ -1823,7 +1830,12 @@ private struct RoomThreadSheet: View {
                             } else {
                                 send(.sendReply(sequenceId: thread.parent.sequenceId, text: text))
                             }
-                            emptyComposer($draft, sent: typed)
+                            replySent = typed
+                            replyWrittenBack.sent()
+                            emptyComposer($draft) { replyWrittenBack.clears($0) }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                                if replySent == typed { replySent = nil }
+                            }
                             answering = nil
                         } label: {
                             Image(systemName: "arrow.up.circle.fill").font(.system(size: 32))
@@ -1995,6 +2007,9 @@ private struct RoomComposerBar: View {
     /// The text just sent, for a moment: the keyboard can write it back into the emptied box (dictation, a pending
     /// correction), and that is not a paste.
     @State private var justSent: String?
+    /// The sent text as the keyboard wrote it back into the emptied box, if it did: the only text the send's delayed
+    /// cleanup empties.
+    @State private var writtenBack = RoomComposerWriteBack()
     /// While a send settles, the sent text stays saved (see `sendDraft()`); which send that is.
     @State private var keepsSavedDraft = false
     @State private var sends = 0
@@ -2023,11 +2038,12 @@ private struct RoomComposerBar: View {
         ticketMode = false
         pasted = []
         justSent = text
+        writtenBack.sent()
         keepsSavedDraft = true
         sends += 1
         let sending = sends
         if let draftKey { UserDefaults.standard.set(text, forKey: draftKey) }
-        emptyComposer($draft, sent: text)
+        emptyComposer($draft) { writtenBack.clears($0) }
         DispatchQueue.main.async { send(message) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { if sends == sending { justSent = nil } }
         DispatchQueue.main.asyncAfter(deadline: .now() + RoomComposerDraft.savedAfterSend) {
@@ -2047,9 +2063,10 @@ private struct RoomComposerBar: View {
         if let draftKey { UserDefaults.standard.removeObject(forKey: draftKey) }
         if !text.isEmpty {
             justSent = text
+            writtenBack.sent()
             sends += 1
             let sending = sends
-            emptyComposer($draft, sent: text)
+            emptyComposer($draft) { writtenBack.clears($0) }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { if sends == sending { justSent = nil } }
         }
         DispatchQueue.main.async { media.perform(.send(text: text)) }
@@ -2257,8 +2274,10 @@ private struct RoomComposerBar: View {
                     .textFieldStyle(.plain)
                     .focused($isEditing)
                     .onChange(of: draft) { new in
-                        if let sent = justSent, RoomComposerDraft.isWrittenBack(new, sent: sent) {
-                            // The keyboard writing the sent text back: `emptyComposer` empties it again.
+                        writtenBack.changed(from: lastDraft, to: new, sent: justSent)
+                        if writtenBack.text != nil {
+                            // The keyboard writing the sent text back into the emptied box: `emptyComposer` empties
+                            // exactly this again. Words typed after a send never land here in one change.
                             lastDraft = new
                             return
                         }

@@ -1559,6 +1559,13 @@ public enum RoomComposerDraft {
         return back == whole || (back.count >= 3 && whole.hasSuffix(back))
     }
 
+    /// Whether a change to the box is the text just sent coming back: it lands in one change straight into the emptied
+    /// box (`previous` is empty), as the whole sent text or its end. Typing grows from a first keystroke, so a new word
+    /// that happens to end the sent text is never taken for it (#298 review).
+    public static func isWrittenBack(_ text: String, sent: String, after previous: String) -> Bool {
+        previous.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && isWrittenBack(text, sent: sent)
+    }
+
     /// Once a send is confirmed (or given up), its saved text goes, unless newer text was saved since (warden, #262:
     /// a crash just after a delivered send must not bring the text back to be sent twice).
     public static func forgetSaved(sessionId: String, sent: String, in defaults: UserDefaults = .standard) {
@@ -1588,6 +1595,29 @@ public enum RoomComposerDraft {
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
     }
+}
+
+/// After a send, the text the keyboard wrote back into the emptied box, if it did. The send's delayed cleanup empties
+/// exactly that text, unchanged, and nothing else: words typed since are kept (#298 review).
+public struct RoomComposerWriteBack: Equatable {
+    public private(set) var text: String?
+
+    public init() {}
+
+    /// A new send: nothing written back yet.
+    public mutating func sent() { text = nil }
+
+    /// The box changed from `previous` to `new`; `sent` is the text just sent while it is still fresh (nil after).
+    public mutating func changed(from previous: String, to new: String, sent: String?) {
+        if let sent, RoomComposerDraft.isWrittenBack(new, sent: sent, after: previous) {
+            text = new
+        } else {
+            text = nil
+        }
+    }
+
+    /// Whether the delayed cleanup empties the box holding `current`.
+    public func clears(_ current: String) -> Bool { text.map { $0 == current } ?? false }
 }
 
 /// A message too long to read in the room shows its start and a card that opens the whole of it (Carter, #55006).

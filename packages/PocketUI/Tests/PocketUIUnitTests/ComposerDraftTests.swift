@@ -97,6 +97,39 @@ final class ComposerDraftTests: XCTestCase {
         XCTAssertFalse(RoomComposerDraft.isWrittenBack("make sure", sent: sent), "the middle of it is not its end")
     }
 
+    /// #298 review: after sending "Please review the source", a NEW message typed at once that happens to be its last
+    /// word ("source") is typing, not the keyboard writing the sent text back: the send's delayed cleanup keeps it. Only
+    /// text landing in one change straight in the emptied box, unchanged since, is emptied again.
+    func test_a_new_word_typed_after_a_send_is_kept_even_when_it_ends_the_sent_text() {
+        for (sent, word) in [("Please review the source", "source"), ("Ship today's build", "build")] {
+            // Typed letter by letter into the emptied box.
+            var typed = RoomComposerWriteBack()
+            typed.sent()
+            var previous = ""
+            for count in 0...word.count {
+                let new = String(word.prefix(count))
+                typed.changed(from: previous, to: new, sent: sent)
+                previous = new
+            }
+            XCTAssertFalse(typed.clears(word), "\(word): typed, so kept")
+
+            // The keyboard writing the last word back in one change: emptied again, but only while it is unchanged.
+            var written = RoomComposerWriteBack()
+            written.sent()
+            written.changed(from: sent, to: "", sent: sent)
+            written.changed(from: "", to: word, sent: sent)
+            XCTAssertTrue(written.clears(word), "\(word): written back, so emptied")
+            XCTAssertFalse(written.clears(word + " and"), "\(word): typing after it keeps the box")
+            written.changed(from: word, to: word + " a", sent: sent)
+            XCTAssertFalse(written.clears(word + " a"), "\(word): a change after the write-back ends it")
+        }
+        var stale = RoomComposerWriteBack()
+        stale.changed(from: "", to: "source", sent: nil)
+        XCTAssertFalse(stale.clears("source"), "once the send is no longer fresh, nothing is a write-back")
+        XCTAssertFalse(RoomComposerDraft.isWrittenBack("source", sent: "Please review the source", after: "sourc"))
+        XCTAssertTrue(RoomComposerDraft.isWrittenBack("source", sent: "Please review the source", after: " "))
+    }
+
     /// Warden, #262: a confirmed send's saved text goes, but not newer text saved since; sign-out clears them all.
     func test_saved_text_goes_once_its_send_is_confirmed_and_all_of_it_on_sign_out() throws {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: "ComposerDraftTests"))
