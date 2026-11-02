@@ -791,10 +791,16 @@ final class VoiceRoomCoordinator: ObservableObject {
                                          history: Array(history))
         voiceLineAsk = Task { [weak self] in
             do {
+                var said = 0
                 for try await event in stream {
                     guard let self, !Task.isCancelled else { return }
-                    if case .sentence(let sentence) = event { self.takeVoiceLine(sentence, answerId: answerId, as: speaker) }
+                    if case .sentence(let sentence) = event {
+                        said += 1
+                        self.takeVoiceLine(sentence, answerId: answerId, as: speaker)
+                    }
                 }
+                // An answer that ended without a single sentence said nothing: the agent's posts are read instead.
+                if said == 0, !Task.isCancelled { self?.lineFailedThisTurn = true }
             } catch VoiceLineError.unavailable {
                 self?.voiceLineOff = true
             } catch VoiceLineError.notAllowed {
@@ -806,7 +812,9 @@ final class VoiceRoomCoordinator: ObservableObject {
             } catch is CancellationError {
                 // A newer turn or the hang-up dropped it.
             } catch {
-                // A failed voice line is quiet: this turn falls back to reading the agent's own answers.
+                // A failed voice line is quiet: this turn falls back to reading the agent's own answers. A cancelled
+                // ask (a newer turn, the hang-up) is not a failure, however the client reports it.
+                guard !Task.isCancelled else { return }
                 self?.lineFailedThisTurn = true
             }
         }

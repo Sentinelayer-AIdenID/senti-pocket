@@ -249,6 +249,22 @@ final class VoiceLineCallTests: XCTestCase {
         await room.hangUp()
     }
 
+    /// A voice line that answered with no sentences said nothing, so the agent's post is read instead of silence.
+    func test_a_voice_line_answer_with_no_sentences_falls_back_to_the_agents_post() async {
+        let line = GatedVoiceLine()
+        let listener = LineListener(), speaker = LineSpeaker(), poster = LinePoster()
+        let room = call(line, listener: listener, speaker: speaker, poster: poster)
+        room.begin()
+        await turn(room, listener, "What's new?")
+        await until("asked") { line.askCount == 1 }
+        line.release(0, [])
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        room.receive([agentPost("m1", "Build 15 is out.", in: room)])
+        await until("the agent is heard") { speaker.spoken.count == 1 }
+        XCTAssertEqual(speaker.spoken.map(\.text), ["Build 15 is out."])
+        await room.hangUp()
+    }
+
     /// An agent can call you with its reason and what it needs, and talk you through it. Answering an agent's call, the
     /// quick answers are asked with that call, whose reason and brief the server reads; the screen says what it is
     /// about until someone speaks.
