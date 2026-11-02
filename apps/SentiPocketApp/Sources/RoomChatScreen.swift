@@ -198,6 +198,9 @@ struct RoomChatScreen: View {
             readMark: route.readMark,
             readMarker: readMarker,
             onRead: { [sessionId = route.sessionId] sequence, caughtUp in onRead(sessionId, sequence, caughtUp) },
+            // A send cut off by a kill comes back after a relaunch under its own client id.
+            outbox: .standard,
+            outboxAccount: RoomSendOutbox.account(token: SessionTokenStore.load()),
             onReauthenticationRequired: onReauthenticationRequired
         ))
         // Files go up through the room's own sender (init, complete, the message) and straight to storage for the
