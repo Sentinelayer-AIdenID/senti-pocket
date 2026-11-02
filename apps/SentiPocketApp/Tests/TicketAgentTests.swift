@@ -82,7 +82,8 @@ final class TicketAgentTests: XCTestCase {
     func test_the_form_starts_from_the_ticket_and_starts_an_agent_assigned_to_it() async {
         let mint = FakeMint(models: models)
         var assigned: [String] = []
-        let model = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: mint) { assigned.append($0) }
+        let model = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: temporaryLedger(),
+                                     account: "sub:carter") { assigned.append($0) }
         XCTAssertEqual(model.agentName, "mint-36d92287", "named from the ticket's id, as on the web")
         XCTAssertTrue(model.job.hasPrefix("Ticket: 36d92287-aaaa-bbbb-cccc-000000000000\nTitle: Breakouts API fix"))
         XCTAssertTrue(model.job.contains("Closes-Ticket: 36d92287"))
@@ -107,7 +108,8 @@ final class TicketAgentTests: XCTestCase {
     func test_a_refusal_says_why_and_the_form_can_be_changed_and_sent_again() async {
         for (failure, words) in [(MintError.capacity, "No machine is free"), (.forbidden, "cannot start agents"),
                                  (.refused("agentName taken"), "agentName taken")] {
-            let model = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: FakeMint(models: models, failure: failure)) { _ in
+            let model = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: FakeMint(models: models, failure: failure),
+                                         ledger: temporaryLedger(), account: "sub:carter") { _ in
                 XCTFail("nothing is assigned when nothing started")
             }
             await model.load()
@@ -128,7 +130,8 @@ final class TicketAgentTests: XCTestCase {
     func test_every_start_carries_its_own_key() async throws {
         let mint = FakeMint(models: models)
         for _ in 0..<2 {
-            let model = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: mint) { _ in }
+            let model = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: temporaryLedger(),
+                                         account: "sub:carter") { _ in }
             await model.load()
             await model.start()
         }
@@ -202,21 +205,27 @@ final class TicketAgentTests: XCTestCase {
         XCTAssertEqual(stranger.phase, .ready, "another account's unconfirmed start is not shown")
     }
 
-    /// Starting another one anyway is the person's own choice: it forgets the unconfirmed start, and the next start
-    /// has a new key.
-    func test_starting_another_anyway_forgets_the_unconfirmed_start_and_uses_a_new_key() async throws {
-        let ledger = temporaryLedger()
-        defer { try? FileManager.default.removeItem(at: ledger.url) }
-        let mint = FakeMint(models: models, script: [.notConfirmed, nil])
-        let model = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger, account: "sub:carter") { _ in }
-        await model.load()
-        await model.start()
-        model.startAnother()
-        XCTAssertEqual(model.phase, .ready)
-        XCTAssertNil(ledger.pending(account: "sub:carter", sessionId: "room-1", ticketId: ticket.id))
-        await model.start()
-        XCTAssertEqual(mint.sent.count, 2)
-        XCTAssertNotEqual(mint.sent[0].idempotencyKey, mint.sent[1].idempotencyKey)
+    /// A start the phone cannot keep (no record on this phone, no signed-in account, or a write that fails) is never
+    /// sent: after a kill its key would be lost (#298 review). Nothing starts, and the person is told so.
+    func test_a_start_the_phone_cannot_keep_is_never_sent() async throws {
+        let blocked = FileManager.default.temporaryDirectory.appendingPathComponent("mint-starts-dir-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: blocked, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: blocked) }
+        let cases: [(String, MintStartLedger?, String?)] = [
+            ("no record on this phone", nil, "sub:carter"),
+            ("no signed-in account", temporaryLedger(), nil),
+            ("the write fails", MintStartLedger(url: blocked), "sub:carter"),
+        ]
+        for (name, ledger, account) in cases {
+            let mint = FakeMint(models: models)
+            let model = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger, account: account) { _ in
+                XCTFail("\(name): nothing starts")
+            }
+            await model.load()
+            await model.start()
+            XCTAssertTrue(mint.sent.isEmpty, "\(name): not sent")
+            XCTAssertEqual(model.phase, .failed(TicketAgentModel.notKeptMessage), name)
+        }
     }
 
     /// A refusal means nothing started under the key: the phone forgets the start.

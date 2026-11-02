@@ -38,16 +38,22 @@ struct MintStartLedger: Sendable {
         load()[Self.key(account, sessionId, ticketId)]?.request
     }
 
-    func keep(_ request: MintUpRequest, account: String, sessionId: String, ticketId: String) {
+    /// Writes the start to the phone, and throws if it could not: a start that is not kept is not sent, since after a
+    /// kill its key would be lost.
+    func keep(_ request: MintUpRequest, account: String, sessionId: String, ticketId: String) throws {
         var all = load()
         all[Self.key(account, sessionId, ticketId)] = Entry(request: request, createdAt: now())
-        save(all)
+        try save(all)
+        guard pending(account: account, sessionId: sessionId, ticketId: ticketId) == request else {
+            throw CocoaError(.fileWriteUnknown)
+        }
     }
 
     func forget(account: String, sessionId: String, ticketId: String) {
         var all = load()
         guard all.removeValue(forKey: Self.key(account, sessionId, ticketId)) != nil else { return }
-        save(all)
+        // A start left behind by a failed write comes back as unconfirmed, and checking it again is safe.
+        try? save(all)
     }
 
     private static func key(_ account: String, _ sessionId: String, _ ticketId: String) -> String {
@@ -61,9 +67,8 @@ struct MintStartLedger: Sendable {
         return all.filter { $0.value.createdAt >= oldest }
     }
 
-    private func save(_ all: [String: Entry]) {
-        guard let data = try? JSONEncoder().encode(all) else { return }
-        try? data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    private func save(_ all: [String: Entry]) throws {
+        try JSONEncoder().encode(all).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 }
 
@@ -83,7 +88,8 @@ final class TicketAgentModel: ObservableObject {
         case failed(String)
     }
 
-    static let unconfirmedMessage = "Not confirmed: the agent may already be starting. Check again before starting another."
+    static let unconfirmedMessage = "Not confirmed: the agent may already be starting. Check again; it can only bring back this one agent."
+    static let notKeptMessage = "This phone could not keep a record of the start, so it was not sent. Nothing started."
 
     @Published private(set) var phase: Phase = .loading
     @Published private(set) var models: [MintModel] = []
@@ -175,19 +181,18 @@ final class TicketAgentModel: ObservableObject {
         await send(pending, now: now)
     }
 
-    /// Give up on the unconfirmed start and make a new one. The person is told it may make a second agent.
-    func startAnother() {
-        guard phase == .unconfirmed else { return }
-        forgetPending()
-        phase = .ready
-    }
-
+    /// Sends a start that is kept on the phone first. One that cannot be kept (no record on this phone, no signed-in
+    /// account, or the write failed) is not sent: after a kill its key would be lost, and a second start could follow.
     private func send(_ request: MintUpRequest, now: Date) async {
+        do {
+            guard let ledger, let account else { throw CocoaError(.fileWriteUnknown) }
+            try ledger.keep(request, account: account, sessionId: sessionId, ticketId: ticket.id)
+        } catch {
+            phase = .failed(Self.notKeptMessage)
+            return
+        }
         phase = .starting(since: now)
         pending = request
-        if let ledger, let account {
-            ledger.keep(request, account: account, sessionId: sessionId, ticketId: ticket.id)
-        }
         do {
             let started = try await mint.startAgent(request)
             forgetPending()
@@ -350,11 +355,9 @@ struct TicketAgentSheet: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .accessibilityIdentifier("pocket.agent.checkAgain")
-                Button("Start another one anyway (this can make a second agent)", role: .destructive) {
-                    model.startAnother()
-                }
-                .font(.footnote)
-                .accessibilityIdentifier("pocket.agent.startAnother")
+                Text("Its box shows in the Flight record once it is up.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             } else {
                 Button {
                     Task { await model.start() }

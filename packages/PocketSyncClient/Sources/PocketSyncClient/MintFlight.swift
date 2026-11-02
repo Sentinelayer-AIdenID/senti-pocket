@@ -542,25 +542,56 @@ public final class HTTPMintClient: MintReading, MintStarting, @unchecked Sendabl
         return (json["models"]?.arrayValue ?? []).compactMap(MintModel.init(json:))
     }
 
-    /// Booting a machine takes a while: the web waits up to three minutes. The start's idempotency key goes with it. An
-    /// outcome that is not known (no answer, a server error, an unreadable answer, the start still running) is
-    /// `notConfirmed`, never a failure that invites a fresh start.
+    /// Booting a machine takes a while: the web waits up to three minutes. The start's idempotency key goes with it. Only
+    /// the statuses that mean nothing started are failures (400 and 422 refusals, 401, 403, 429). Anything else whose
+    /// outcome is not known (no answer, any 409 since the mint answers this start is still running, any server error,
+    /// an unreadable answer) is `notConfirmed`, whatever its body says, never a failure that invites a fresh start.
     public func startAgent(_ request: MintUpRequest) async throws -> MintUpResponse {
-        let json: JSONValue
+        let status: Int
+        let json: JSONValue?
         do {
-            json = try await get(path: "/api/mint/up", query: [], method: "POST", body: request.body, timeout: 180,
-                                 headers: request.idempotencyKey.map { ["Idempotency-Key": $0] } ?? [:])
+            (status, json) = try await perform(path: "/api/mint/up", query: [], method: "POST", body: request.body,
+                                               timeout: 180,
+                                               headers: request.idempotencyKey.map { ["Idempotency-Key": $0] } ?? [:])
         } catch MintError.unavailable {
             throw MintError.notConfirmed
-        } catch MintError.refused(let reason) where reason == "in_progress" {
-            throw MintError.notConfirmed
         }
-        guard let started = MintUpResponse(json: json) else { throw MintError.notConfirmed }
-        return started
+        switch status {
+        case 200..<300:
+            guard let json, let started = MintUpResponse(json: json) else { throw MintError.notConfirmed }
+            return started
+        case 401: throw MintError.reauthenticationRequired
+        case 403: throw MintError.forbidden
+        case 429: throw MintError.capacity
+        case 400, 422: throw MintError.refused(json?["error"]?.stringValue ?? json?["message"]?.stringValue)
+        default: throw MintError.notConfirmed
+        }
     }
 
     private func get(path: String, query: [URLQueryItem], method: String = "GET", body: [String: Any]? = nil,
-                     timeout: TimeInterval = 30, headers: [String: String] = [:]) async throws -> JSONValue {
+                     timeout: TimeInterval = 30) async throws -> JSONValue {
+        let (status, json) = try await perform(path: path, query: query, method: method, body: body, timeout: timeout)
+        switch status {
+        case 200..<300:
+            break
+        case 401:
+            throw MintError.reauthenticationRequired
+        case 403:
+            throw MintError.forbidden
+        case 429:
+            throw MintError.capacity
+        case 400, 409, 422:
+            throw MintError.refused(json?["error"]?.stringValue ?? json?["message"]?.stringValue)
+        default:
+            throw MintError.unavailable
+        }
+        guard let json else { throw MintError.unavailable }
+        return json
+    }
+
+    /// The request, sent: its status and its body when the body is JSON. No answer at all is `unavailable`.
+    private func perform(path: String, query: [URLQueryItem], method: String, body: [String: Any]?,
+                         timeout: TimeInterval, headers: [String: String] = [:]) async throws -> (Int, JSONValue?) {
         guard let baseURL else { throw MintError.notConfigured }
         guard let token = tokenProvider(), !token.isEmpty else { throw MintError.reauthenticationRequired }
         guard var request = Self.request(baseURL: baseURL, path: path, query: query, token: token) else {
@@ -580,22 +611,6 @@ public final class HTTPMintClient: MintReading, MintStarting, @unchecked Sendabl
         } catch {
             throw MintError.unavailable
         }
-        let json = try? JSONDecoder().decode(JSONValue.self, from: data)
-        switch (response as? HTTPURLResponse)?.statusCode ?? 0 {
-        case 200..<300:
-            break
-        case 401:
-            throw MintError.reauthenticationRequired
-        case 403:
-            throw MintError.forbidden
-        case 429:
-            throw MintError.capacity
-        case 400, 409, 422:
-            throw MintError.refused(json?["error"]?.stringValue ?? json?["message"]?.stringValue)
-        default:
-            throw MintError.unavailable
-        }
-        guard let json else { throw MintError.unavailable }
-        return json
+        return ((response as? HTTPURLResponse)?.statusCode ?? 0, try? JSONDecoder().decode(JSONValue.self, from: data))
     }
 }

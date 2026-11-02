@@ -268,9 +268,9 @@ final class RoomCallDesk: ObservableObject {
         }
     }
 
-    /// Tells the server an answered, verified call was answered, in order with the other reports. The room opens on
-    /// the server's yes. A refusal ends the call. A lost reply (no answer, or one that could not be read) is settled by
-    /// reading the call back: answered is a yes, anything else ends it.
+    /// Tells the server an answered, verified call was answered, in order with the other reports. The room opens only
+    /// on the server's yes. Anything else ends the call: a refusal, and a lost reply too, since reading the call back as
+    /// answered cannot tell this phone's answer from another device's (#298 review).
     private func sendAnswer(_ uuid: UUID) {
         guard var call = calls[uuid], call.answered, !call.answerSent, !call.finished, call.details != nil else { return }
         call.answerSent = true
@@ -283,13 +283,8 @@ final class RoomCallDesk: ObservableObject {
             do {
                 try await api.setStatus(sessionId: doorbell.sessionId, callId: doorbell.callId, status: "answered")
                 return true
-            } catch RoomCallsClient.Failure.refused(_) {
-                return false
             } catch {
-                guard let read = try? await api.call(sessionId: doorbell.sessionId, callId: doorbell.callId) else {
-                    return false
-                }
-                return read.callId == doorbell.callId && read.sessionId == doorbell.sessionId && read.status == "answered"
+                return false
             }
         }
         reporting = Task { _ = await confirming.value }

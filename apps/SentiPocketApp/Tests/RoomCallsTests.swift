@@ -550,17 +550,14 @@ final class RoomCallsTests: XCTestCase {
         XCTAssertNil(desk.takeWaiting(for: doorbell.sessionId))
     }
 
-    /// The answer's reply was lost: the call is read back. Answered is the server's yes; still ringing, or no read at
-    /// all, ends the call.
-    func test_a_lost_answer_reply_is_settled_by_reading_the_call_back() async {
-        let outcomes: [(String, RoomCallDetails?, Bool)] = [
-            ("read back answered", details(status: "answered"), true),
-            ("read back ringing", details(status: "ringing"), false),
-            ("read back another call", details(callId: "call_9", status: "answered"), false),
-            ("no read back", nil, false),
-        ]
-        for (name, readBack, connects) in outcomes {
-            let api = FakeCallsAPI(details: details(), answerFailure: RoomCallsClient.Failure.unreachable, readBack: readBack)
+    /// The answer's reply was lost (no answer, or an unreadable one). Reading the call back as answered cannot tell this
+    /// phone's answer from another device's (#298 review: device A's reply is lost while device B answers), so the call
+    /// ends whatever a read would say, and it is not read back at all.
+    func test_a_lost_answer_reply_ends_the_call_even_when_the_call_reads_as_answered() async {
+        let lost: [(String, any Error)] = [("no answer", RoomCallsClient.Failure.unreachable),
+                                           ("unreadable answer", RoomCallsClient.Failure.unreadable)]
+        for (name, failure) in lost {
+            let api = FakeCallsAPI(details: details(), answerFailure: failure, readBack: details(status: "answered"))
             let desk = RoomCallDesk(api: api, sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) })
             var opened: [String] = []
             var endedSystem: [UUID] = []
@@ -570,16 +567,11 @@ final class RoomCallsTests: XCTestCase {
             desk.received(doorbell, uuid: uuid)
             desk.answered(uuid)
             desk.audioActivated(uuid)
-            if connects {
-                await confirmed(desk)
-                XCTAssertEqual(opened, [doorbell.sessionId], name)
-                XCTAssertNotNil(desk.takeWaiting(for: doorbell.sessionId), name)
-            } else {
-                await until("\(name): the call ends") { endedSystem == [uuid] }
-                XCTAssertTrue(opened.isEmpty, name)
-                XCTAssertNil(desk.takeWaiting(for: doorbell.sessionId), name)
-            }
-            XCTAssertEqual(api.readCount, 2, "\(name): read, then read back once")
+            await until("\(name): the call ends") { endedSystem == [uuid] }
+            XCTAssertTrue(opened.isEmpty, "\(name): another device may have the call")
+            XCTAssertNil(desk.takeWaiting(for: doorbell.sessionId), name)
+            XCTAssertEqual(api.sent, ["answered"], "\(name): nothing else is told to the server")
+            XCTAssertEqual(api.readCount, 1, "\(name): not read back")
         }
     }
 }

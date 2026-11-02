@@ -231,6 +231,10 @@ final class MintFlightTests: XCTestCase {
             ("server error", .status(500, #"{"error": "mint_not_confirmed"}"#)),
             ("bad gateway", .status(502, "{}")),
             ("still running", .status(409, #"{"error": "in_progress"}"#)),
+            ("still running, error nested", .status(409, #"{"error": {"code": "in_progress"}}"#)),
+            ("still running, no error", .status(409, "{}")),
+            ("still running, not json", .status(409, "busy")),
+            ("unavailable", .status(503, "")),
             ("unreadable answer", .status(200, "not json")),
         ]
         for (name, answer) in unknown {
