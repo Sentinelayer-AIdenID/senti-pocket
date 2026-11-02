@@ -95,10 +95,11 @@ final class VoiceRoomCoordinator: ObservableObject {
     private var awaitingAnswerSince: Date?
     /// The first answer to your latest turn: when it is heard, the gap is measured.
     private var gapAnswerId: String?
-    /// Who answers your turn aloud, in a call with one agent: the fast voice line or the agent's own post, whichever
-    /// comes first. The other is kept in the transcript, not read, so nothing is said twice (Carter, 11-02).
-    private enum TurnVoice { case line, agent }
-    private var turnVoice: TurnVoice?
+    /// In a call with one agent, the fast voice line IS the agent's voice (Carter, 11-02): while it is on, it owns the
+    /// call's audio, and the agent's own posts are kept in the transcript, not read, so nothing is said twice and a
+    /// late post about an earlier turn never talks over the newer one. A turn whose voice line failed falls back to
+    /// reading the agent's posts.
+    private var lineFailedThisTurn = false
     /// In a meeting, who answered your latest turn first (lowercased), and whether the others were told.
     private var floorHolder: (id: String, name: String)?
     private var floorAnnounced = false
@@ -424,17 +425,10 @@ final class VoiceRoomCoordinator: ObservableObject {
             }
             floorHolder = (lowered, name)
         }
-        if !isHuman, !isAddedHello, state.with.count == 1, !state.sharesFloor {
-            if turnVoice == .line {
-                // The voice line already answered this turn as the agent: the post is the record, not read again.
-                state.turns.append(VoiceRoomTurn(id: id, speaker: name, isYou: false, text: text, at: at, isHeld: true))
-                return
-            }
-            if turnVoice == nil, turnStoppedAt != nil {
-                // The agent answered first: the voice line's answer to this turn is not read.
-                turnVoice = .agent
-                dropVoiceLineLeftovers()
-            }
+        if !isHuman, !isAddedHello, state.with.count == 1, !state.sharesFloor, turnStoppedAt != nil,
+           voiceLineSpeaks, !lineFailedThisTurn {
+            state.turns.append(VoiceRoomTurn(id: id, speaker: name, isYou: false, text: text, at: at, isHeld: true))
+            return
         }
         if !isAddedHello, let since = awaitingAnswerSince {
             timings.record(.answer, now().timeIntervalSince(since))
@@ -703,7 +697,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         floorHolder = nil
         floorAnnounced = false
         gapAnswerId = nil
-        turnVoice = nil
+        lineFailedThisTurn = false
         // What is left of the last quick answer goes first, so none of it plays after you spoke (warden, #274).
         dropVoiceLineLeftovers()
         readyAfterSending()
@@ -735,7 +729,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         // You stopped talking later than it seemed: the answer's gap is timed from now on.
         turnStoppedAt = stoppedTalking
         dropVoiceLineLeftovers()
-        turnVoice = nil
+        lineFailedThisTurn = false
         if let id = gapAnswerId, !queue.contains(where: { $0.id == id }) { gapAnswerId = nil }
         readyAfterSending()
         speakIfReady()
@@ -809,11 +803,17 @@ final class VoiceRoomCoordinator: ObservableObject {
             } catch VoiceLineError.rateLimited(let retryAfter) {
                 guard let self else { return }
                 self.voiceLineRestsUntil = self.now().addingTimeInterval(min(300, max(1, retryAfter ?? 30)))
+            } catch is CancellationError {
+                // A newer turn or the hang-up dropped it.
             } catch {
-                // A failed voice line is quiet: the agents' own answers still come.
+                // A failed voice line is quiet: this turn falls back to reading the agent's own answers.
+                self?.lineFailedThisTurn = true
             }
         }
     }
+
+    /// The voice line is on for this call (on the server, allowed for this person, and not resting after a 429).
+    private var voiceLineSpeaks: Bool { voiceLine != nil && !voiceLineOff && now() >= voiceLineRestsUntil }
 
     /// A new turn or hang-up: the last quick answer stops streaming and what is left of it is not read.
     private func dropVoiceLineLeftovers() {
@@ -824,8 +824,7 @@ final class VoiceRoomCoordinator: ObservableObject {
     }
 
     private func takeVoiceLine(_ sentence: String, answerId: String, as speaker: String) {
-        guard state.phase != .ending, state.phase != .ended, turnVoice != .agent else { return }
-        turnVoice = .line
+        guard state.phase != .ending, state.phase != .ended else { return }
         let pieceId = answerId + ":" + UUID().uuidString.lowercased()
         if gapAnswerId == nil, turnStoppedAt != nil { gapAnswerId = pieceId }
         queue.append(VoiceRoomTurn(id: pieceId, speaker: speaker, isYou: false, text: sentence, at: now()))

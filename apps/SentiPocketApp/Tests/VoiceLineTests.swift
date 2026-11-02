@@ -62,12 +62,13 @@ private final class GatedVoiceLine: VoiceLining, @unchecked Sendable {
         AsyncThrowingStream { continuation in self.lock.withLock { self.held.append(continuation) } }
     }
 
-    func release(_ sentences: [String]) {
-        for continuation in lock.withLock({ held }) {
-            for sentence in sentences { continuation.yield(.sentence(sentence)) }
-            continuation.yield(.done(speaker: "pocket-forge (voice)"))
-            continuation.finish()
-        }
+    /// Lets the `index`th ask (0 = the first) answer with `sentences`, or fail.
+    func release(_ index: Int, _ sentences: [String], failing: Bool = false) {
+        guard let continuation = lock.withLock({ index < held.count ? held[index] : nil }) else { return }
+        if failing { continuation.finish(throwing: VoiceLineError.failed); return }
+        for sentence in sentences { continuation.yield(.sentence(sentence)) }
+        continuation.yield(.done(speaker: "pocket-forge (voice)"))
+        continuation.finish()
     }
 }
 
@@ -188,9 +189,9 @@ final class VoiceLineCallTests: XCTestCase {
         await room.hangUp()
     }
 
-    /// The other order: the agent's post comes before the voice line, so the agent's words are read and the voice
-    /// line's answer to that turn is not.
-    func test_when_the_agent_answered_first_the_voice_lines_answer_to_that_turn_is_not_read() async {
+    /// The voice line owns the call's audio: an agent's post that comes first is kept as text, and the voice line's
+    /// answer is the one heard.
+    func test_an_agents_post_during_a_turn_is_kept_and_the_voice_line_is_heard() async {
         let line = GatedVoiceLine()
         let listener = LineListener(), speaker = LineSpeaker(), poster = LinePoster()
         let room = call(line, listener: listener, speaker: speaker, poster: poster)
@@ -198,12 +199,53 @@ final class VoiceLineCallTests: XCTestCase {
         await turn(room, listener, "What's new in the build?")
         await until("the voice line was asked") { line.askCount == 1 }
         room.receive([agentPost("m1", "Build 15 is out.", in: room)])
+        line.release(0, ["Build 15 is on TestFlight."])
+        await until("the voice line is heard") { speaker.spoken.count == 1 }
+        XCTAssertEqual(speaker.spoken.map(\.text), ["Build 15 is on TestFlight."])
+        speaker.finish()
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(speaker.spoken.count, 1, "the post is not read")
+        XCTAssertTrue(room.state.turns.contains { $0.text == "Build 15 is out." && $0.isHeld })
+        await room.hangUp()
+    }
+
+    /// A slow post about turn A that lands during turn B never cancels or talks over B's answer.
+    func test_a_late_post_about_an_earlier_turn_never_takes_the_newer_turns_voice() async {
+        let line = GatedVoiceLine()
+        let listener = LineListener(), speaker = LineSpeaker(), poster = LinePoster()
+        let room = call(line, listener: listener, speaker: speaker, poster: poster)
+        room.begin()
+        await turn(room, listener, "Turn A?")
+        await until("A asked") { line.askCount == 1 }
+        line.release(0, ["Answer to A."])
+        await until("A heard") { speaker.spoken.count == 1 }
+        speaker.finish()
+        await turn(room, listener, "Turn B?")
+        await until("B asked") { line.askCount == 2 }
+        room.receive([agentPost("late-a", "Late answer to A.", in: room)])
+        line.release(1, ["Answer to B."])
+        await until("B heard") { speaker.spoken.count == 2 }
+        XCTAssertEqual(speaker.spoken.map(\.text), ["Answer to A.", "Answer to B."])
+        speaker.finish()
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(speaker.spoken.count, 2, "the late post is text only")
+        XCTAssertTrue(room.state.turns.contains { $0.text == "Late answer to A." && $0.isHeld })
+        await room.hangUp()
+    }
+
+    /// A turn whose voice line failed falls back to reading the agent's own answer, so the person still hears one.
+    func test_when_the_voice_line_fails_for_a_turn_the_agents_post_is_read() async {
+        let line = GatedVoiceLine()
+        let listener = LineListener(), speaker = LineSpeaker(), poster = LinePoster()
+        let room = call(line, listener: listener, speaker: speaker, poster: poster)
+        room.begin()
+        await turn(room, listener, "What's new?")
+        await until("asked") { line.askCount == 1 }
+        line.release(0, [], failing: true)
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        room.receive([agentPost("m1", "Build 15 is out.", in: room)])
         await until("the agent is heard") { speaker.spoken.count == 1 }
         XCTAssertEqual(speaker.spoken.map(\.text), ["Build 15 is out."])
-        speaker.finish()
-        line.release(["Build 15 is on TestFlight."])
-        try? await Task.sleep(nanoseconds: 50_000_000)
-        XCTAssertEqual(speaker.spoken.count, 1, "the voice line's answer to the same turn is not read")
         await room.hangUp()
     }
 
