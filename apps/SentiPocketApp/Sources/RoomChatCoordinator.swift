@@ -1113,7 +1113,7 @@ final class RoomChatCoordinator: ObservableObject {
     }
 
     /// Sends a crash report the person chose to share, and calls `onSent` only once the room accepted it: a send that
-    /// fails or is cut off leaves the report unhandled, so it is offered again instead of being lost (#58491 review).
+    /// fails or is cut off leaves the report unhandled, so it is offered again instead of being lost.
     func sendCrashReport(_ text: String, onSent: @escaping () -> Void) {
         guard let clientId = enqueueSend(text) else { return }
         sentCallbacks[clientId] = onSent

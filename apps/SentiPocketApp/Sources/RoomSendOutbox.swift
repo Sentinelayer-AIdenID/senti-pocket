@@ -1,6 +1,6 @@
 import Foundation
 
-/// Room messages whose send did not finish, kept on the phone across an app kill (#58491 review). A message whose
+/// Room messages whose send did not finish, kept on the phone across an app kill. A message whose
 /// POST may have reached the room but whose answer was lost comes back after a relaunch under its original client
 /// id, so retrying it is the same request and the room keeps one copy; typing it again would make a new id the room
 /// cannot match. Kept per account and room, at most `kept` items for at most `maxAge`.

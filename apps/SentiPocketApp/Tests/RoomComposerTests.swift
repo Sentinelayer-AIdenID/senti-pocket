@@ -289,7 +289,7 @@ final class RoomComposerCoordinatorTests: XCTestCase {
         coordinator.pause()
     }
 
-    /// The room kept the message but the answer was lost, then the app was killed (#58491 review). After the relaunch
+    /// The room kept the message but the answer was lost, then the app was killed. After the relaunch
     /// the message comes back unconfirmed under its own client id; Retry sends that same id, so the room keeps one copy.
     func test_a_send_cut_off_by_a_kill_comes_back_under_its_own_client_id_and_retries_once() async {
         let outbox = temporaryOutbox()

@@ -157,7 +157,7 @@ struct RoomChatScreen: View {
             attachmentFetcher: attachmentFetcher,
             receipts: receipts,
             directory: ticketExtras,
-            // A send cut off by a kill comes back after a relaunch under its own client id (#58491 review).
+            // A send cut off by a kill comes back after a relaunch under its own client id.
             outbox: .standard,
             outboxAccount: RoomSendOutbox.account(token: SessionTokenStore.load()),
             onReauthenticationRequired: onReauthenticationRequired
