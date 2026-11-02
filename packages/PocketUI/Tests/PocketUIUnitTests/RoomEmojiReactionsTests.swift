@@ -125,5 +125,7 @@ final class RoomEmojiReactionsTests: XCTestCase {
         defaults.set(["abc", "🔥", "@here", "🙏", "😀", "😁", "😂", "😃", "😄", "😅"], forKey: RoomEmojiPicker.recentKey)
         XCTAssertEqual(RoomEmojiPicker.recent(in: defaults), ["🔥", "🙏", "😀", "😁", "😂", "😃"],
                        "what the phone kept is read as untrusted too")
+        RoomEmojiPicker.forgetRecent(in: defaults)
+        XCTAssertEqual(RoomEmojiPicker.recent(in: defaults), [], "signing out forgets the recent row")
     }
 }

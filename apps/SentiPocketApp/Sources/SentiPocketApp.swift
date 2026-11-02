@@ -135,6 +135,7 @@ struct SentiPocketApp: App {
                     // And nobody else signing in here sees what they were writing, sending or shown.
                     RoomComposerDraft.forgetAllSaved()
                     RoomMediaUploadCoordinator.forgetAll()
+                    RoomEmojiPicker.forgetRecent()
                     signIn.send(.signOut)
                 },
                 onReauthenticationRequired: { expectedEpoch in
@@ -158,6 +159,7 @@ struct SentiPocketApp: App {
                     // And nobody else signing in here sees what they were writing, sending or shown.
                     RoomComposerDraft.forgetAllSaved()
                     RoomMediaUploadCoordinator.forgetAll()
+                    RoomEmojiPicker.forgetRecent()
                     signIn.send(.signOut)
                 },
                 onReauthenticationRequired: { expectedEpoch in

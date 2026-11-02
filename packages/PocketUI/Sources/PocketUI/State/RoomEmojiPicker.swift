@@ -24,4 +24,9 @@ public enum RoomEmojiPicker {
         let kept = [emoji] + recent(in: defaults).filter { $0 != emoji }
         defaults.set(Array(kept.prefix(recentLimit)), forKey: recentKey)
     }
+
+    /// Forgets the recent row at sign-out: whoever signs in next never sees what the last person reacted with.
+    public static func forgetRecent(in defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: recentKey)
+    }
 }
