@@ -8,18 +8,24 @@ private final class FakeMint: MintStarting, @unchecked Sendable {
     private let lock = NSLock()
     let models: [MintModel]
     let failure: MintError?
+    /// Answers for the starts in turn (a failure, or nil to start); after them, `failure` or a start.
+    private var script: [MintError?]
     private var requests: [MintUpRequest] = []
 
-    init(models: [MintModel], failure: MintError? = nil) {
+    init(models: [MintModel], failure: MintError? = nil, script: [MintError?] = []) {
         self.models = models
         self.failure = failure
+        self.script = script
     }
 
     func models() async throws -> [MintModel] { models }
 
     func startAgent(_ request: MintUpRequest) async throws -> MintUpResponse {
-        lock.withLock { requests.append(request) }
-        if let failure { throw failure }
+        let answer = lock.withLock { () -> MintError? in
+            requests.append(request)
+            return script.isEmpty ? failure : script.removeFirst()
+        }
+        if let answer { throw answer }
         return MintUpResponse(lifeId: "life-1", agentName: request.agentName ?? "mint-auto", sessionId: request.sessionId,
                               phase: "booting", consoleURL: nil)
     }
@@ -111,6 +117,118 @@ final class TicketAgentTests: XCTestCase {
             model.edit()
             XCTAssertEqual(model.phase, .ready)
         }
+    }
+
+    private func temporaryLedger() -> MintStartLedger {
+        MintStartLedger(url: FileManager.default.temporaryDirectory
+            .appendingPathComponent("mint-starts-\(UUID().uuidString).json"))
+    }
+
+    /// Every start carries a key of its own; two starts never share one.
+    func test_every_start_carries_its_own_key() async throws {
+        let mint = FakeMint(models: models)
+        for _ in 0..<2 {
+            let model = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: mint) { _ in }
+            await model.load()
+            await model.start()
+        }
+        let keys = mint.sent.compactMap(\.idempotencyKey)
+        XCTAssertEqual(keys.count, 2)
+        XCTAssertNotEqual(keys[0], keys[1])
+        XCTAssertTrue(keys.allSatisfy { $0.count >= 16 && $0.count <= 128 })
+    }
+
+    /// The answer to a start was lost: it is not confirmed, never "failed, try again". Checking again sends the very same
+    /// start under the very same key, so the mint can only return that agent; once it does, the phone forgets the start.
+    func test_a_lost_answer_is_not_confirmed_and_checking_again_resends_the_same_start_under_the_same_key() async throws {
+        let ledger = temporaryLedger()
+        defer { try? FileManager.default.removeItem(at: ledger.url) }
+        let mint = FakeMint(models: models, script: [.notConfirmed, .notConfirmed, nil])
+        var assigned: [String] = []
+        let model = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger,
+                                     account: "sub:carter") { assigned.append($0) }
+        await model.load()
+        await model.start()
+        XCTAssertEqual(model.phase, .unconfirmed)
+        XCTAssertFalse(model.canStart, "no fresh start while one is unconfirmed")
+        XCTAssertTrue(assigned.isEmpty)
+        await model.start()
+        XCTAssertEqual(mint.sent.count, 1, "Start does nothing while unconfirmed")
+        XCTAssertEqual(ledger.pending(account: "sub:carter", sessionId: "room-1", ticketId: ticket.id), mint.sent.first)
+
+        await model.checkAgain()
+        XCTAssertEqual(model.phase, .unconfirmed, "still not confirmed")
+        await model.checkAgain()
+        guard case .started = model.phase else { return XCTFail("not started: \(model.phase)") }
+        XCTAssertEqual(mint.sent.count, 3)
+        XCTAssertEqual(Set(mint.sent.map(\.idempotencyKey)).count, 1, "one key for the one start")
+        XCTAssertEqual(mint.sent[2], mint.sent[0], "the same start, exactly")
+        XCTAssertEqual(assigned, ["mint-36d92287"])
+        XCTAssertNil(ledger.pending(account: "sub:carter", sessionId: "room-1", ticketId: ticket.id), "forgotten once started")
+    }
+
+    /// The sheet closed (or the app was killed) on an unconfirmed start: reopening it brings that start back, as it was
+    /// sent, to check again; another account on the phone never sees it.
+    func test_reopening_brings_the_unconfirmed_start_back_and_another_account_never_sees_it() async throws {
+        let ledger = temporaryLedger()
+        defer { try? FileManager.default.removeItem(at: ledger.url) }
+        let first = FakeMint(models: models, script: [.notConfirmed])
+        let closed = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: first, ledger: ledger, account: "sub:carter") { _ in }
+        await closed.load()
+        closed.select("model-b")
+        closed.job = "Edited job"
+        await closed.start()
+        XCTAssertEqual(closed.phase, .unconfirmed)
+        let sentKey = try XCTUnwrap(first.sent.first?.idempotencyKey)
+
+        let second = FakeMint(models: models)
+        let reopened = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: second, ledger: ledger, account: "sub:carter") { _ in }
+        await reopened.load()
+        XCTAssertEqual(reopened.phase, .unconfirmed)
+        XCTAssertEqual(reopened.modelId, "model-b")
+        XCTAssertEqual(reopened.job, "Edited job")
+        await reopened.checkAgain()
+        XCTAssertEqual(second.sent.first?.idempotencyKey, sentKey)
+        XCTAssertEqual(second.sent.first, first.sent.first)
+
+        let stranger = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: FakeMint(models: models), ledger: ledger,
+                                        account: "sub:someone-else") { _ in }
+        try? FileManager.default.removeItem(at: ledger.url)
+        let again = FakeMint(models: models, script: [.notConfirmed])
+        let carter = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: again, ledger: ledger, account: "sub:carter") { _ in }
+        await carter.load()
+        await carter.start()
+        await stranger.load()
+        XCTAssertEqual(stranger.phase, .ready, "another account's unconfirmed start is not shown")
+    }
+
+    /// Starting another one anyway is the person's own choice: it forgets the unconfirmed start, and the next start
+    /// has a new key.
+    func test_starting_another_anyway_forgets_the_unconfirmed_start_and_uses_a_new_key() async throws {
+        let ledger = temporaryLedger()
+        defer { try? FileManager.default.removeItem(at: ledger.url) }
+        let mint = FakeMint(models: models, script: [.notConfirmed, nil])
+        let model = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger, account: "sub:carter") { _ in }
+        await model.load()
+        await model.start()
+        model.startAnother()
+        XCTAssertEqual(model.phase, .ready)
+        XCTAssertNil(ledger.pending(account: "sub:carter", sessionId: "room-1", ticketId: ticket.id))
+        await model.start()
+        XCTAssertEqual(mint.sent.count, 2)
+        XCTAssertNotEqual(mint.sent[0].idempotencyKey, mint.sent[1].idempotencyKey)
+    }
+
+    /// A refusal means nothing started under the key: the phone forgets the start.
+    func test_a_refusal_forgets_the_start() async throws {
+        let ledger = temporaryLedger()
+        defer { try? FileManager.default.removeItem(at: ledger.url) }
+        let model = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: FakeMint(models: models, failure: .capacity),
+                                     ledger: ledger, account: "sub:carter") { _ in }
+        await model.load()
+        await model.start()
+        guard case .failed = model.phase else { return XCTFail("expected a failure") }
+        XCTAssertNil(ledger.pending(account: "sub:carter", sessionId: "room-1", ticketId: ticket.id))
     }
 
     func test_the_tickets_offer_starting_agents_only_when_the_mint_admits_the_account() async {

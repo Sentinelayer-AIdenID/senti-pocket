@@ -368,6 +368,9 @@ public enum MintError: Error, Equatable, Sendable {
     case capacity
     /// The service refused the request as it stands (a reason it gave, when it gave one).
     case refused(String?)
+    /// A start whose outcome is not known (no answer, a server error, an unreadable answer, or the start still running):
+    /// the agent may exist. Sending the same start again under the same idempotency key can only return that agent.
+    case notConfirmed
 }
 
 /// A model an agent can be started on (sentinelayer-web `MintModel`), with the efforts it offers.
@@ -403,7 +406,7 @@ public struct MintModel: Equatable, Identifiable, Sendable {
 }
 
 /// Start an agent on its own machine in a room (sentinelayer-web `MintUpRequest`), optionally for a ticket.
-public struct MintUpRequest: Equatable, Sendable {
+public struct MintUpRequest: Codable, Equatable, Sendable {
     public let model: String
     public let effort: String?
     public let jobDescription: String
@@ -411,9 +414,12 @@ public struct MintUpRequest: Equatable, Sendable {
     public let agentName: String?
     public let ticketId: String?
     public let ticketTitle: String?
+    /// One key per start the person means, sent unchanged on every retry (`Idempotency-Key`): the mint starts at most
+    /// one agent for it.
+    public let idempotencyKey: String?
 
     public init(model: String, effort: String? = nil, jobDescription: String, sessionId: String, agentName: String? = nil,
-                ticketId: String? = nil, ticketTitle: String? = nil) {
+                ticketId: String? = nil, ticketTitle: String? = nil, idempotencyKey: String? = nil) {
         self.model = model
         self.effort = effort
         self.jobDescription = jobDescription
@@ -421,6 +427,7 @@ public struct MintUpRequest: Equatable, Sendable {
         self.agentName = agentName
         self.ticketId = ticketId
         self.ticketTitle = ticketTitle
+        self.idempotencyKey = idempotencyKey
     }
 
     /// The body the service reads: empty optional fields are left out.
@@ -535,15 +542,25 @@ public final class HTTPMintClient: MintReading, MintStarting, @unchecked Sendabl
         return (json["models"]?.arrayValue ?? []).compactMap(MintModel.init(json:))
     }
 
-    /// Booting a machine takes a while: the web waits up to three minutes.
+    /// Booting a machine takes a while: the web waits up to three minutes. The start's idempotency key goes with it. An
+    /// outcome that is not known (no answer, a server error, an unreadable answer, the start still running) is
+    /// `notConfirmed`, never a failure that invites a fresh start.
     public func startAgent(_ request: MintUpRequest) async throws -> MintUpResponse {
-        let json = try await get(path: "/api/mint/up", query: [], method: "POST", body: request.body, timeout: 180)
-        guard let started = MintUpResponse(json: json) else { throw MintError.unavailable }
+        let json: JSONValue
+        do {
+            json = try await get(path: "/api/mint/up", query: [], method: "POST", body: request.body, timeout: 180,
+                                 headers: request.idempotencyKey.map { ["Idempotency-Key": $0] } ?? [:])
+        } catch MintError.unavailable {
+            throw MintError.notConfirmed
+        } catch MintError.refused(let reason) where reason == "in_progress" {
+            throw MintError.notConfirmed
+        }
+        guard let started = MintUpResponse(json: json) else { throw MintError.notConfirmed }
         return started
     }
 
     private func get(path: String, query: [URLQueryItem], method: String = "GET", body: [String: Any]? = nil,
-                     timeout: TimeInterval = 30) async throws -> JSONValue {
+                     timeout: TimeInterval = 30, headers: [String: String] = [:]) async throws -> JSONValue {
         guard let baseURL else { throw MintError.notConfigured }
         guard let token = tokenProvider(), !token.isEmpty else { throw MintError.reauthenticationRequired }
         guard var request = Self.request(baseURL: baseURL, path: path, query: query, token: token) else {
@@ -551,6 +568,7 @@ public final class HTTPMintClient: MintReading, MintStarting, @unchecked Sendabl
         }
         request.httpMethod = method
         request.timeoutInterval = timeout
+        for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
         if let body {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try? JSONSerialization.data(withJSONObject: body)

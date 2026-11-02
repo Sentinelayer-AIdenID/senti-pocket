@@ -208,4 +208,80 @@ final class MintFlightTests: XCTestCase {
         XCTAssertNil(HTTPMintClient(baseURL: nil, urlSession: .shared, tokenProvider: { "t" }).baseURLForTesting,
                      "a build without the service reads nothing")
     }
+
+    /// A start carries its idempotency key. An outcome that is not known (no answer, a server error, an unreadable
+    /// answer, the start still running) is `notConfirmed`, never a failure that invites a fresh start; a refusal is
+    /// still a refusal.
+    func test_a_start_carries_its_key_and_an_unknown_outcome_is_not_confirmed() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MintUpURLProtocol.self]
+        let client = HTTPMintClient(baseURL: URL(string: "https://mint.example.invalid"),
+                                    urlSession: URLSession(configuration: configuration), tokenProvider: { "t" })
+        let request = MintUpRequest(model: "model-a", jobDescription: "Do it", sessionId: "room-1",
+                                    idempotencyKey: "pocket-0123456789abcdef")
+        XCTAssertNil(request.body["idempotencyKey"], "the key travels as a header, not in the job")
+
+        MintUpURLProtocol.answer = .status(200, #"{"lifeId": "life-1", "agentName": "mint-1", "sessionId": "room-1", "phase": "booting"}"#)
+        let started = try await client.startAgent(request)
+        XCTAssertEqual(started.agentName, "mint-1")
+        XCTAssertEqual(MintUpURLProtocol.lastKey, "pocket-0123456789abcdef")
+
+        let unknown: [(String, MintUpURLProtocol.Answer)] = [
+            ("no answer", .dropped),
+            ("server error", .status(500, #"{"error": "mint_not_confirmed"}"#)),
+            ("bad gateway", .status(502, "{}")),
+            ("still running", .status(409, #"{"error": "in_progress"}"#)),
+            ("unreadable answer", .status(200, "not json")),
+        ]
+        for (name, answer) in unknown {
+            MintUpURLProtocol.answer = answer
+            do {
+                _ = try await client.startAgent(request)
+                XCTFail("\(name): expected not confirmed")
+            } catch {
+                XCTAssertEqual(error as? MintError, .notConfirmed, name)
+            }
+        }
+
+        let refusals: [(MintUpURLProtocol.Answer, MintError)] = [
+            (.status(429, #"{"error": "capacity"}"#), .capacity),
+            (.status(422, #"{"error": "idempotency_conflict"}"#), .refused("idempotency_conflict")),
+            (.status(403, "{}"), .forbidden),
+        ]
+        for (answer, expected) in refusals {
+            MintUpURLProtocol.answer = answer
+            do {
+                _ = try await client.startAgent(request)
+                XCTFail("expected \(expected)")
+            } catch {
+                XCTAssertEqual(error as? MintError, expected)
+            }
+        }
+    }
+}
+
+/// The mint's `/up` as a stub: records the start's key, then answers as told (or drops the connection).
+private final class MintUpURLProtocol: URLProtocol {
+    enum Answer { case status(Int, String), dropped }
+    nonisolated(unsafe) static var answer: Answer = .dropped
+    nonisolated(unsafe) static var lastKey: String?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.lastKey = request.value(forHTTPHeaderField: "Idempotency-Key")
+        switch Self.answer {
+        case .dropped:
+            client?.urlProtocol(self, didFailWithError: URLError(.networkConnectionLost))
+        case .status(let code, let body):
+            let response = HTTPURLResponse(url: request.url!, statusCode: code, httpVersion: nil,
+                                           headerFields: ["Content-Type": "application/json"])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(body.utf8))
+            client?.urlProtocolDidFinishLoading(self)
+        }
+    }
+
+    override func stopLoading() {}
 }
