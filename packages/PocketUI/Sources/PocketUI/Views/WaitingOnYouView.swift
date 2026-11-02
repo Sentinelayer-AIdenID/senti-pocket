@@ -93,17 +93,23 @@ public struct WaitingOnYouView: View {
             }
 
             if !row.options.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(row.options, id: \.self) { option in
-                            Button(option) { send(.answer(id: row.id, choice: option, detail: "")) }
-                                .buttonStyle(.bordered)
-                                .accessibilityIdentifier("pocket.waiting.option.\(row.id).\(option)")
+                // One full-width button per option, its words wrapped and shown whole: a tap posts exactly what is
+                // read, never words scrolled off the side (warden, #298 review).
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(row.options, id: \.self) { option in
+                        Button {
+                            send(.answer(id: row.id, choice: option, detail: ""))
+                        } label: {
+                            Text(option)
+                                .multilineTextAlignment(.leading)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        if row.custom {
-                            Button("Custom") { startWriting(row.askKey) }
-                                .buttonStyle(.bordered)
-                        }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("pocket.waiting.option.\(row.id).\(option)")
+                    }
+                    if row.custom {
+                        Button("Custom") { startWriting(row.askKey) }
+                            .buttonStyle(.bordered)
                     }
                 }
                 .disabled(isSending)
