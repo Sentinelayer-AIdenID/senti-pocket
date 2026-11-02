@@ -325,6 +325,8 @@ struct RoomChatScreen: View {
             // An agent's call you answered talks inside the system call, whose audio CallKit owns.
             audio: call == nil ? PhoneVoiceRoomAudioSession() : CallKitVoiceRoomAudioSession(),
             ringer: RingbackTone(),
+            // "Bring warden into this call": the same agents the Add button offers.
+            addable: { voicePartners },
             // Its Mute is the call screen's.
             callScreen: call.map { RoomCallScreen(desk: .shared, uuid: $0.uuid) },
             poster: voicePoster,
