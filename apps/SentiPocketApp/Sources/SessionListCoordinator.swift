@@ -20,6 +20,15 @@ final class SessionListCoordinator: ObservableObject {
     private var operation: Task<Void, Never>?
     private var revision: UInt64 = 0
     private var hasStarted = false
+    /// How far this phone has read each room since it was listed, as the server confirmed it (by session id): a count
+    /// the server made before that read shows no badge (`SessionRowPresentation`).
+    private var readThrough: [String: Int64] = [:]
+    /// Rooms this phone caught up on (the server said nothing it counts was left, thread replies included), with the
+    /// list's revision then: a count of replies alone, from a read of the list that started no later, was made before
+    /// it and shows no badge. A read of the list started after counts again.
+    private var caughtUpAt: [String: UInt64] = [:]
+    /// The revision of the read of the whole list the rows were counted in (more rows loaded keep the rest as counted).
+    private var snapshotRevision: UInt64 = 0
 
     init(
         repository: SessionRepository,
@@ -63,7 +72,7 @@ final class SessionListCoordinator: ObservableObject {
 
     @discardableResult
     func refreshSessions() -> Task<Void, Never> {
-        run { repository in
+        run(recounts: true) { repository in
             try await repository.refreshSessions()
         }
     }
@@ -84,6 +93,22 @@ final class SessionListCoordinator: ObservableObject {
         setSelectedSession(nil)
     }
 
+    /// The server took your read of a room through `sequence`, and `caughtUp` when nothing it counts was left after
+    /// it, thread replies included, so the badge follows your reading. The list draws again only when that clears a
+    /// badge it shows, once a visit, never at every read.
+    func noteRead(sessionId: String, through sequence: Int64, caughtUp: Bool = false) {
+        let moved = sequence > (readThrough[sessionId] ?? 0)
+        if moved { readThrough[sessionId] = sequence }
+        if caughtUp { caughtUpAt[sessionId] = revision }
+        guard moved || caughtUp,
+              let row = state.rows.first(where: { UTF8ExactIdentity.matches($0.sessionId, sessionId) }),
+              row.activity.unread > 0 else { return }
+        // Unread messages clear once the read reaches the first of them; replies alone, once the read caught up.
+        let clears = row.firstUnreadSequenceId.map { $0 <= sequence } ?? caughtUp
+        guard clears else { return }
+        state = render(snapshot: snapshot, provenance: provenance, isRefreshing: state.isRefreshing, failure: state.failure)
+    }
+
     /// A protected sibling client (reasoning/write) observed an expired bearer. Clear rows and selection
     /// synchronously before the outer sign-in gate transitions, then fence/reset the actor-owned repository.
     @discardableResult
@@ -91,6 +116,8 @@ final class SessionListCoordinator: ObservableObject {
         operation?.cancel()
         revision &+= 1
         snapshot = nil
+        readThrough = [:]
+        caughtUpAt = [:]
         provenance = .unavailable
         setSelectedSession(nil)
         state = render(
@@ -106,6 +133,7 @@ final class SessionListCoordinator: ObservableObject {
     }
 
     private func run(
+        recounts: Bool = false,
         _ request: @escaping @Sendable (SessionRepository) async throws -> SessionListSnapshot
     ) -> Task<Void, Never> {
         operation?.cancel()
@@ -126,6 +154,7 @@ final class SessionListCoordinator: ObservableObject {
                       !Task.isCancelled,
                       self.revision == operationRevision else { return }
                 self.snapshot = next
+                if recounts { self.snapshotRevision = operationRevision }
                 self.provenance = .network(lastUpdated: next.loadedAt)
                 if let selectedSessionId = self.selectedSessionId,
                    !next.sessions.contains(where: {
@@ -230,6 +259,8 @@ final class SessionListCoordinator: ObservableObject {
     private func clearProtectedState() async {
         await repository.reset()
         snapshot = nil
+        readThrough = [:]
+        caughtUpAt = [:]
         provenance = .unavailable
         setSelectedSession(nil)
     }
@@ -253,7 +284,9 @@ final class SessionListCoordinator: ObservableObject {
             hasMore: snapshot?.hasMore ?? false,
             provenance: provenance,
             isRefreshing: isRefreshing,
-            failure: failure
+            failure: failure,
+            readThrough: readThrough,
+            caughtUp: Set(caughtUpAt.filter { $0.value >= snapshotRevision }.keys)
         )
     }
 }

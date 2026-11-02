@@ -226,6 +226,8 @@ private struct AuthenticatedRootView: View {
     private let accountIdentity: any AccountIdentityProviding
     private let roomReceipts: any RoomReceiptsClient
     private let roomSearch: any RoomSearching
+    /// How far you have read each room, told to the server as you read, for the unread badges.
+    private let roomReadMarker: any RoomReadMarking
     private let authenticationRevision: UInt64
     private let onSignOut: @MainActor () -> Void
 
@@ -345,6 +347,7 @@ private struct AuthenticatedRootView: View {
         // Read receipts and presence, as yourself, like the web.
         self.roomReceipts = HTTPRoomReceipts(apiBaseURL: apiURL)
         self.roomSearch = transport
+        self.roomReadMarker = HTTPRoomReadMarker(apiBaseURL: apiURL)
         self.authenticationRevision = authenticationEpoch
         self.onSignOut = onSignOut
     }
@@ -430,10 +433,12 @@ private struct AuthenticatedRootView: View {
         // The logo at launch, while your rooms load underneath (Carter, #55287).
         .overlay { LaunchSplash(isReady: roomListSettled) }
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: drawerOpen)
-        // Opening the side panel reads the bell, so its count is never older than the panel.
+        // Opening the side panel reads the bell, so its count is never older than the panel; and the rooms, so who is
+        // online and their unread badges are not either.
         .onChange(of: drawerOpen) { open in
             if open { Task { await notifications.refresh(force: true) } }
             if open { Task { await waiting.refresh() } }
+            if open { sessions.send(.refreshSessions) }
         }
         .preferredColorScheme(theme.wrappedValue.colorScheme)
         .sheet(isPresented: $presentsPocket) {
@@ -620,7 +625,8 @@ private struct AuthenticatedRootView: View {
             membershipRole: row?.membershipRole ?? "",
             focusSequenceId: link.messageSequence,
             focusTicketId: link.ticketId,
-            opensAdmissions: link.admissionId != nil
+            opensAdmissions: link.admissionId != nil,
+            readMark: row.map(RoomReadMark.init(row:))
         ))
     }
 
@@ -632,7 +638,7 @@ private struct AuthenticatedRootView: View {
             sessions.send(.selectSession(sessionId: route.sessionId))
         }
         roomPath = []
-        currentRoom = route
+        currentRoom = RoomRoute.keepingOpenRoom(currentRoom, for: route)
         lastRoomId = route.sessionId
         closeDrawer()
     }
@@ -642,7 +648,8 @@ private struct AuthenticatedRootView: View {
         return RoomRoute(
             sessionId: sessionId,
             title: row?.title ?? "Room",
-            membershipRole: row?.membershipRole ?? ""
+            membershipRole: row?.membershipRole ?? "",
+            readMark: row.map(RoomReadMark.init(row:))
         )
     }
 
@@ -690,7 +697,8 @@ private struct AuthenticatedRootView: View {
                     title: row.title,
                     subtitle: row.summary,
                     lastActivity: row.lastActivity?.date,
-                    kind: row.roomTypeLabel
+                    kind: row.roomTypeLabel,
+                    activity: row.activity
                 )
             },
             currentRoomId: currentRoom?.sessionId,
@@ -752,10 +760,14 @@ private struct AuthenticatedRootView: View {
             openChildRoom: { child in roomPath.append(child) },
             receipts: roomReceipts,
             search: roomSearch,
+            readMarker: roomReadMarker,
             reader: messageReader,
             onRenamed: { sessions.send(.refreshSessions) },
             // What the room list has of the room's summary, for a member who reads it without making one.
             savedSummary: sessions.state.rows.first { UTF8ExactIdentity.matches($0.sessionId, route.sessionId) }?.summary,
+            onRead: { sessionId, sequence, caughtUp in
+                sessions.noteRead(sessionId: sessionId, through: sequence, caughtUp: caughtUp)
+            },
             onReauthenticationRequired: invalidateProtectedAuthentication
         )
     }

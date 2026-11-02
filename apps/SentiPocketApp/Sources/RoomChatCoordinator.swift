@@ -131,6 +131,30 @@ final class RoomChatCoordinator: ObservableObject {
     private var timeline = RoomTimeline()
     private var unread = RoomUnreadState()
     private var readerAtBottom = true
+    /// What the room list knew about your reading when the room was opened: it opens at your first unread message.
+    private let readMark: RoomReadMark?
+    /// How far you have read, told to the server forward only and at most every `RoomReadCursor.interval`.
+    private var readCursor: RoomReadCursor
+    private let readMarker: (any RoomReadMarking)?
+    /// The server took a read, holding you read through the position, and caught up (nothing it counts left after
+    /// it, thread replies included) when it said so: the room list's count for this room, made before it, is stale.
+    private let onRead: @MainActor (_ through: Int64, _ caughtUp: Bool) -> Void
+    /// The server counts something here as unread that no further position can read: thread replies, which have no
+    /// place in the room of their own. The room list's count says so when the room opens, and a reply from someone
+    /// else says so again; the same position, sent again at the bottom, reads them.
+    private var repliesUnread: Bool
+    /// The server answered that this credential cannot move the badge: nothing more is sent while the room is open.
+    private var readNotRecorded = false
+    private var readWait: Task<Void, Never>?
+    /// Rows on screen waiting out the dwell before they count as read, each with its appearance: a row that left and
+    /// came back starts again.
+    private var readAppearances: [String: UUID] = [:]
+    /// The reader at the bottom, waiting out the dwell.
+    private var bottomRead: UUID?
+    /// How long a row stays on screen, or the reader at the bottom, before it counts as read: as long as the view
+    /// receipts wait (`RoomReceiptsTracker.dwell`), so the rows that flash past while the room opens or scrolls never
+    /// count.
+    static let readDwell: TimeInterval = 0.75
     private var lastAppliedSequence: Int64 = 0
     private var nextBeforeSequence: Int64?
     private var connection: RoomConnectionState = .connecting
@@ -205,12 +229,22 @@ final class RoomChatCoordinator: ObservableObject {
         previewStore: any RoomMediaPreviewStoring = RoomMediaPreviewDiskCache.shared,
         receipts: (any RoomReceiptsClient)? = nil,
         directory: (any RoomTicketExtrasReading)? = nil,
+        readMark: RoomReadMark? = nil,
+        readMarker: (any RoomReadMarking)? = nil,
+        onRead: @escaping @MainActor (_ through: Int64, _ caughtUp: Bool) -> Void = { _, _ in },
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.attachmentFetcher = attachmentFetcher
         self.previewStore = previewStore
         self.linkCache = RoomMediaLinkCache(now: now)
         self.directory = directory
+        self.readMark = readMark
+        self.readCursor = RoomReadCursor(confirmed: readMark?.lastReadSequenceId)
+        self.repliesUnread = (readMark?.unreadCount ?? 0) > 0
+        // Only a member's reading is told (sentinelayer-api #1078): the server takes a read from anyone who may view
+        // the room, and would make someone passing through a public room from a link a member of it.
+        self.readMarker = (membershipRole ?? "").isEmpty ? nil : readMarker
+        self.onRead = onRead
         self.sessionId = sessionId
         self.title = title
         self.canRename = canRename && sender is any RoomTitleSetting
@@ -290,6 +324,7 @@ final class RoomChatCoordinator: ObservableObject {
         liveTasks.forEach { $0.cancel() }
         liveTasks.removeAll()
         receiptsTracker?.stop()
+        flushRead()
         if !failureIsTerminal { connection = .paused }
         publish()
     }
@@ -312,12 +347,15 @@ final class RoomChatCoordinator: ObservableObject {
                 publish()
             }
         case .readerAtBottom(let atBottom):
-            // Only a change is news: the same place told again never publishes, so it can never loop the room.
+            // Only a change is news: the same place told again never publishes, so it can never loop the room. The
+            // line the room opened at stays, so coming back to the bottom publishes only when arrivals were unread.
             guard atBottom != readerAtBottom else { return }
             readerAtBottom = atBottom
-            if atBottom, unread.unreadCount > 0 || unread.dividerSequence != nil {
-                unread.readerReachedBottom()
-                publish()
+            if atBottom {
+                if unread.readerReachedBottom() { publish() }
+                readAtBottomAfterDwell()
+            } else {
+                bottomRead = nil
             }
         case .retry:
             failure = nil
@@ -393,8 +431,9 @@ final class RoomChatCoordinator: ObservableObject {
         case .setPinned(let sequenceId, let isPinned):
             setPinned(isPinned, on: sequenceId)
         case .messageOnScreen(let id, let isOnScreen):
-            guard let message = timeline.messages.first(where: { $0.id == id }),
-                  message.kind == .message, message.eventType == "session_message",
+            guard let message = timeline.messages.first(where: { $0.id == id }) else { return }
+            readWhenSeen(message, isOnScreen: isOnScreen)
+            guard message.kind == .message, message.eventType == "session_message",
                   let target = RoomViewTarget(kind: .message, id: message.id, revision: message.revision) else { return }
             receiptsTracker?.setOnScreen(target, isOnScreen)
         case .toggleRepeats(let stack):
@@ -581,6 +620,7 @@ final class RoomChatCoordinator: ObservableObject {
                 self.reconcilePending(with: page.messages)
                 self.readerAtBottom = true
                 self.unread.readerReachedBottom()
+                self.readAtBottomAfterDwell()
                 // The newest page may have been answered before messages the stream has since shown (counted while
                 // the window was further back, never inserted): read on from where the page stops.
                 if let readThrough = page.maxSequence, readThrough < self.lastAppliedSequence {
@@ -923,6 +963,12 @@ final class RoomChatCoordinator: ObservableObject {
         if hasReadReplies, !unseen.isEmpty {
             onNewReplies?(unseen)
             arrivalFeedback(unseen.map { ($0.authorId, $0.text) })
+            // A reply from someone else is unread on the server until a position is sent after it: at the bottom,
+            // the same one goes again (your own replies never count).
+            if unseen.contains(where: { !ownAuthorIds.contains($0.authorId.lowercased()) }) {
+                repliesUnread = true
+                readAtBottomAfterDwell()
+            }
         }
         hasReadReplies = true
         // Replies stay as rows too (newest revision wins), the newest few thousand.
@@ -1241,8 +1287,10 @@ final class RoomChatCoordinator: ObservableObject {
         keepLatestForTheJumpDown()
         pending.append(PendingSend(clientId: clientId, text: text, status: .sending))
         readerAtBottom = true
-        unread.readerReachedBottom()
+        // Your message goes to the bottom, and so do you: no line is left to come back to.
+        unread.caughtUp()
         publish()
+        readAtBottomAfterDwell()
         deliver(clientId)
     }
 
@@ -1371,6 +1419,7 @@ final class RoomChatCoordinator: ObservableObject {
                 apply(page, older: true)
                 pages += 1
             }
+            guard await openAtFirstUnread(current, pagesLoaded: pages) else { return }
             hasLoadedInitial = true
             failure = nil
         } catch {
@@ -1379,6 +1428,92 @@ final class RoomChatCoordinator: ObservableObject {
         }
         isLoadingInitial = false
         publish()
+        // Opened at its latest messages: once they have stayed in view, the room is read through them.
+        if hasLoadedInitial, focusTarget == nil { readAtBottomAfterDwell() }
+    }
+
+    /// The most pages a room reads at its open to reach the first unread message, the newest included, as the web does.
+    static let pagesToFirstUnread = 5
+
+    /// Opened from the room list with messages you have not read, a room opens where you stopped reading: at the
+    /// first of them, behind the unread line,
+    /// and the view takes you there. One further back than the newest page is paged back to, as the web does, up to
+    /// `pagesToFirstUnread` pages in all, so the room is one stretch from the line to the latest; further back than
+    /// that, the room opens on the window around it, as a link does, and newer messages load as you scroll down. When
+    /// those cannot load, the room opens at its latest as before. A link's message decides where the room opens, and
+    /// then the line shows only when it is loaded. False when the room was paused meanwhile.
+    private func openAtFirstUnread(_ current: UInt64, pagesLoaded: Int) async -> Bool {
+        switch RoomOpening.choose(mark: readMark, focus: focusTarget, oldestLoaded: timeline.oldestSequence,
+                                  newestLoaded: timeline.newestSequence, hasMoreOlder: timeline.hasMoreOlder) {
+        case .latest:
+            return true
+        case .unreadLine(let line):
+            unread.opened(at: line)
+            if focusTarget == nil { readerAtBottom = false }
+            return true
+        case .unreadFurtherBack(let line):
+            do {
+                var pages = pagesLoaded
+                while pages < Self.pagesToFirstUnread, timeline.hasMoreOlder,
+                      let oldest = timeline.oldestSequence, line < oldest,
+                      let before = nextBeforeSequence ?? timeline.oldestSequence {
+                    let page = try await transport.roomEventsBefore(
+                        sessionId: sessionId,
+                        beforeSequence: before,
+                        limit: Self.pageSize
+                    )
+                    guard current == generation else { return false }
+                    apply(page, older: true)
+                    pages += 1
+                }
+                if let oldest = timeline.oldestSequence, line >= oldest || !timeline.hasMoreOlder {
+                    unread.opened(at: line)
+                    readerAtBottom = false
+                    return true
+                }
+            } catch {
+                // What the newest pages loaded stays: the room opens at its latest, as before.
+                return current == generation
+            }
+            return await openOnTheWindow(around: line, current)
+        }
+    }
+
+    /// The first unread is further back than the pages read at the open: the room opens on the window around it.
+    private func openOnTheWindow(around line: Int64, _ current: UInt64) async -> Bool {
+        do {
+            let before = try await transport.roomEventsBefore(
+                sessionId: sessionId,
+                beforeSequence: line + 1,
+                limit: Self.windowPageSize
+            )
+            let after = try await transport.roomEventsAfter(
+                sessionId: sessionId,
+                fromSequence: line,
+                limit: Self.windowPageSize
+            )
+            guard current == generation else { return false }
+            let window = before.messages + after.messages
+            guard !window.isEmpty else { return true }
+            let readThrough = max(line, after.maxSequence ?? line)
+            if let oldest = timeline.oldestSequence, after.rawCount < Self.windowPageSize || readThrough >= oldest {
+                // It reaches the newest page: one stretch from before the line to the latest.
+                timeline.merge(window, trimming: .newest)
+                noteNewestTrimmed()
+            } else {
+                timeline.replace(with: window, hasMoreOlder: before.hasMore, hasMoreNewer: true)
+                noteNewerRead(through: readThrough)
+            }
+            nextBeforeSequence = before.nextBeforeSequence ?? before.minSequence
+            timeline.hasMoreOlder = before.hasMore && nextBeforeSequence != nil
+            timeline.applyEdits(before.edits + after.edits)
+            reconcilePending(with: window)
+            unread.opened(at: line)
+            readerAtBottom = false
+            return true
+        } catch {
+            return current == generation
+        }
     }
 
     /// One page further back, when the reader scrolls to the top. (A message being sought loads as a window.)
@@ -1434,6 +1569,122 @@ final class RoomChatCoordinator: ObservableObject {
             }
             rounds += 1
         }
+    }
+
+    // MARK: - Reading
+
+    /// A message came on screen or left it. Once it has stayed on screen for the dwell, the room is read through it,
+    /// so the room list's badge follows what you read. A row that flashes past while the room opens or scrolls never
+    /// counts, and reading only moves forward.
+    private func readWhenSeen(_ message: RoomMessage, isOnScreen: Bool) {
+        guard marksReading else { return }
+        guard isOnScreen else {
+            readAppearances[message.id] = nil
+            return
+        }
+        guard message.sequenceId > readCursor.furthest else { return }
+        let appearance = UUID()
+        let id = message.id
+        let sequence = message.sequenceId
+        readAppearances[id] = appearance
+        Task { [weak self] in
+            await self?.sleep(Self.readDwell)
+            guard let self, self.readAppearances[id] == appearance else { return }
+            self.readAppearances[id] = nil
+            self.read(through: sequence)
+        }
+    }
+
+    /// At the bottom of the live room, once the reader has stayed there for the dwell, the room is read through its
+    /// newest message. That covers messages with no row of their own (a call's turns, folded into its card). With
+    /// thread replies unread and no newer message, the same position goes again, which reads the replies.
+    private func readAtBottomAfterDwell() {
+        guard marksReading, readerAtBottom, !timeline.hasMoreNewer,
+              let newest = timeline.newestSequence, newest > readCursor.furthest || repliesUnread else { return }
+        let wait = UUID()
+        bottomRead = wait
+        Task { [weak self] in
+            await self?.sleep(Self.readDwell)
+            guard let self, self.bottomRead == wait, self.marksReading, self.readerAtBottom,
+                  !self.timeline.hasMoreNewer, let newest = self.timeline.newestSequence else { return }
+            self.bottomRead = nil
+            if newest > self.readCursor.furthest {
+                self.read(through: newest)
+            } else if self.repliesUnread {
+                self.readCursor.readAgain(through: newest)
+                self.sendRead()
+            }
+        }
+    }
+
+    /// A member's room, and the server has not said this credential cannot move the badge.
+    private var marksReading: Bool { readMarker != nil && !readNotRecorded }
+
+    private func read(through sequence: Int64) {
+        guard readCursor.read(through: sequence) else { return }
+        sendRead()
+    }
+
+    /// Sends the furthest position read when the cursor allows, after its interval since the last one.
+    private func sendRead() {
+        guard let readMarker, !readNotRecorded else { return }
+        switch readCursor.next(at: now().timeIntervalSinceReferenceDate) {
+        case .idle:
+            return
+        case .wait(let seconds):
+            guard readWait == nil else { return }
+            readWait = Task { [weak self] in
+                await self?.sleep(seconds)
+                guard let self else { return }
+                self.readWait = nil
+                self.sendRead()
+            }
+        case .send(let sequence):
+            deliverRead(sequence, with: readMarker)
+        }
+    }
+
+    private func deliverRead(_ sequence: Int64, with readMarker: any RoomReadMarking) {
+        let sessionId = self.sessionId
+        Task { [weak self] in
+            var receipt: RoomReadReceipt?
+            var retryable = false
+            do {
+                receipt = try await readMarker.markRead(sessionId: sessionId, through: sequence)
+            } catch {
+                if case .retryable? = error as? RoomSendError { retryable = true }
+            }
+            guard let self else { return }
+            guard let receipt else {
+                self.readCursor.failed(sequence, retryable: retryable)
+                self.sendRead()
+                return
+            }
+            switch receipt.outcome {
+            case .notRecorded:
+                // Not this person's own signed-in session: the server moved nothing, and nothing would move later.
+                self.readCursor.failed(sequence, retryable: false)
+                self.readNotRecorded = true
+                self.readWait?.cancel()
+                self.readWait = nil
+                return
+            case .recorded, .unchanged:
+                self.readCursor.sent(sequence, serverHolds: receipt.lastReadSequenceId)
+                if receipt.caughtUp { self.repliesUnread = false }
+                self.onRead(max(sequence, receipt.lastReadSequenceId ?? 0), receipt.caughtUp)
+            }
+            self.sendRead()
+        }
+    }
+
+    /// The room closed or went to the background: what is read and not yet sent goes now, whatever the interval.
+    /// Rows still waiting out the dwell no longer count.
+    private func flushRead() {
+        readAppearances.removeAll()
+        bottomRead = nil
+        guard let readMarker, !readNotRecorded,
+              let sequence = readCursor.flush(at: now().timeIntervalSinceReferenceDate) else { return }
+        deliverRead(sequence, with: readMarker)
     }
 
     // MARK: - Live
@@ -1587,6 +1838,8 @@ final class RoomChatCoordinator: ObservableObject {
             unread.noteArrivals(result.inserted, readerIsAtBottom: readerAtBottom, selfAuthorIds: ownAuthorIds)
             if !result.inserted.isEmpty { onLiveMessages?(result.inserted) }
             arrivalFeedback(result.inserted.filter { $0.kind == .message }.map { ($0.authorId, $0.text) })
+            // At the bottom, what arrives is in view: read once it has stayed there.
+            if !result.inserted.isEmpty { readAtBottomAfterDwell() }
         }
     }
 

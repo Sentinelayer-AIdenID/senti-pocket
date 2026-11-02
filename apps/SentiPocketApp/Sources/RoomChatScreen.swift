@@ -18,6 +18,32 @@ struct RoomRoute: Hashable {
     var opensAdmissions = false
     /// A breakout's own room: no agent requests or tickets of its own in v1-a.
     var isBreakout = false
+    /// What the room list knew about your reading when the room was opened from it: the room opens at your first
+    /// unread message.
+    var readMark: RoomReadMark?
+}
+
+extension RoomRoute {
+    /// The room already open, asked for again with nothing new (picked again in the side panel), stays as it is,
+    /// where you are in it: an unread count the room list made before you read it there never reopens it at an old
+    /// unread line. Anything else opens as asked.
+    static func keepingOpenRoom(_ current: RoomRoute?, for route: RoomRoute) -> RoomRoute {
+        guard let current else { return route }
+        var same = route
+        same.readMark = current.readMark
+        return same == current ? current : route
+    }
+}
+
+extension RoomReadMark {
+    /// What the room list knows about your reading of a room, for opening it at your first unread message.
+    init(row: SessionRowPresentation) {
+        self.init(
+            unreadCount: row.activity.unread,
+            firstUnreadSequenceId: row.firstUnreadSequenceId,
+            lastReadSequenceId: row.lastReadSequenceId
+        )
+    }
 }
 
 /// A ticket opened from a link, shown over the room.
@@ -124,9 +150,11 @@ struct RoomChatScreen: View {
         attachmentFetcher: any AttachmentFileFetching = URLSessionAttachmentFetcher(),
         receipts: (any RoomReceiptsClient)? = nil,
         search: (any RoomSearching)? = nil,
+        readMarker: (any RoomReadMarking)? = nil,
         reader: MessageReader,
         onRenamed: @escaping @MainActor () -> Void = {},
         savedSummary: String? = nil,
+        onRead: @escaping @MainActor (_ sessionId: String, _ through: Int64, _ caughtUp: Bool) -> Void = { _, _, _ in },
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.route = route
@@ -167,6 +195,9 @@ struct RoomChatScreen: View {
             attachmentFetcher: attachmentFetcher,
             receipts: receipts,
             directory: ticketExtras,
+            readMark: route.readMark,
+            readMarker: readMarker,
+            onRead: { [sessionId = route.sessionId] sequence, caughtUp in onRead(sessionId, sequence, caughtUp) },
             onReauthenticationRequired: onReauthenticationRequired
         ))
         // Files go up through the room's own sender (init, complete, the message) and straight to storage for the
