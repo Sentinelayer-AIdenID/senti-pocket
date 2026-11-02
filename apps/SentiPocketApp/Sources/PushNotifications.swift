@@ -195,11 +195,21 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
     @AppStorage("pocket.push.token") private var storedToken = ""
     /// The PushKit token agents' calls ring, registered with the API while someone is signed in.
     @AppStorage("pocket.push.voipToken") private var storedVoipToken = ""
-    /// The rows the server keeps for this phone's bell and call tokens, by the ids its registrations returned.
-    @AppStorage("pocket.push.deviceId") private var deviceId = ""
-    @AppStorage("pocket.push.voipDeviceId") private var voipDeviceId = ""
+    /// The rows the server keeps for this phone's bell and call tokens, by the ids its registrations returned. Read
+    /// straight from the phone's settings each time, never a cached copy: a call checks `voipAccount` as it rings.
+    private var deviceId: String {
+        get { UserDefaults.standard.string(forKey: "pocket.push.deviceId") ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: "pocket.push.deviceId") }
+    }
+    private var voipDeviceId: String {
+        get { UserDefaults.standard.string(forKey: "pocket.push.voipDeviceId") ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: "pocket.push.voipDeviceId") }
+    }
     /// The account the call row was confirmed for: calls ring only for that account (`ringsForSignedInAccount`).
-    @AppStorage("pocket.push.voipAccount") private var voipAccount = ""
+    private var voipAccount: String {
+        get { UserDefaults.standard.string(forKey: "pocket.push.voipAccount") ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: "pocket.push.voipAccount") }
+    }
     /// Settings the server has not confirmed yet; sent again when the app comes back.
     @AppStorage("pocket.push.preferencesPending") private var preferencesPending = false
     private var activeObserver: NSObjectProtocol?
@@ -413,9 +423,10 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
     /// so each request carries the person's credential from now, and tries again a few times while the app runs: a
     /// dropped connection must not leave this phone registered for them (warden). The credential is held in memory only.
     func signOut(bearer: String? = SessionTokenStore.load()) {
-        // Both rows are owed until the server confirms: kept on the phone, so a sign-out that cannot reach the server
-        // (or a credential already refused) goes again with this account's next credential. The PushKit token itself
-        // is kept (PushKit does not re-send it); only this person's registration goes.
+        // Both rows are owed until the server confirms: kept on the phone and sent again while the app runs, with this
+        // sign-out's credential only (`PushUnregisterQueue`). A refused credential confirms nothing; the phone's own
+        // Apple registrations go regardless. The PushKit token itself is kept (PushKit does not re-send it); only this
+        // person's registration goes.
         owe([voipDeviceId, deviceId], account: RoomSendOutbox.account(token: bearer))
         voipDeviceId = ""
         voipAccount = ""
