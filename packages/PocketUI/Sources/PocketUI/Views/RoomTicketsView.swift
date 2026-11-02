@@ -95,7 +95,7 @@ public struct RoomTicketsView: View {
                         send: send
                     )
                 } label: {
-                    RoomTicketRowView(row: row)
+                    RoomTicketRowView(row: row, viewerId: state.viewerId, names: state.personNames)
                 }
                 .accessibilityIdentifier("pocket.tickets.row.\(row.id)")
             }
@@ -135,6 +135,9 @@ public struct RoomTicketsView: View {
 
 private struct RoomTicketRowView: View {
     let row: RoomTicketRow
+    /// Who is reading, and the room's people by user id: a person is named, never shown by user id.
+    var viewerId: String?
+    var names: [String: String] = [:]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -163,7 +166,7 @@ private struct RoomTicketRowView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(RoomTicketPalette.status(row.status))
                 if let assignee = row.assignee {
-                    Label(RoomTicketRow.displayName(assignee), systemImage: "person")
+                    Label(RoomTicketRow.actorLabel(assignee, viewerId: viewerId, names: names), systemImage: "person")
                         .font(.caption)
                         .foregroundStyle(PocketPalette.textSecondary)
                 }
@@ -181,7 +184,7 @@ private struct RoomTicketRowView: View {
                         .progressViewStyle(.linear)
                         .tint(RoomTicketPalette.status(row.status))
                     let holder = row.lease.flatMap { $0.isLive ? $0.holder : nil }
-                    let parts = [holder.map { "\(RoomTicketRow.displayName($0)) is on it" }, row.estimateBasis]
+                    let parts = [holder.map { "Held by \(RoomTicketRow.actorLabel($0, viewerId: viewerId, names: names))" }, row.estimateBasis]
                         .compactMap { $0 }
                     if !parts.isEmpty {
                         Text(parts.joined(separator: " · "))
