@@ -251,7 +251,8 @@ public struct PocketSidePanel: View {
                             .lineLimit(1)
                     }
                     if let subtitle = room.subtitle {
-                        Text(subtitle)
+                        SummaryPreviewText(subtitle, title: room.title, identifier: "pocket.drawer.room.\(room.id).summary",
+                                           moreInline: true)
                             .font(.caption)
                             .foregroundStyle(PocketPalette.textSecondary)
                             .lineLimit(1)
