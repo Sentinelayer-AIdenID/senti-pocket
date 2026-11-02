@@ -102,7 +102,7 @@ final class PushRegistrationTests: XCTestCase {
         }
         XCTAssertEqual(refused, [], "a refused credential confirms nothing: the row stays owed")
         let done = await PushUnregisterQueue.confirmed(of: loaded.due(for: "sub:a", now: now)) { _ in }
-        loaded.remove(deviceIds: done)
+        loaded.remove(deviceIds: done, account: "sub:a")
         loaded.save(to: defaults)
         XCTAssertEqual(PushUnregisterQueue.load(from: defaults).entries.map(\.account), ["sub:b"])
 
@@ -117,5 +117,106 @@ final class PushRegistrationTests: XCTestCase {
         XCTAssertFalse(PushRegistrar.rings(callAccount: "sub:a", signedIn: "sub:b"), "B signed in before B's row landed")
         XCTAssertFalse(PushRegistrar.rings(callAccount: "", signedIn: "sub:b"), "no confirmed row yet")
         XCTAssertFalse(PushRegistrar.rings(callAccount: "sub:a", signedIn: nil), "no one signed in")
+    }
+
+    /// Warden, #298 review of build 09: an owed row is never deleted from under the account that reclaimed it.
+    func test_a_row_is_owed_per_account_and_forgiven_when_reclaimed() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        var queue = PushUnregisterQueue()
+        queue.add(deviceId: rowId, account: "sub:a", now: now)
+        queue.add(deviceId: rowId, account: "sub:b", now: now)
+        XCTAssertEqual(queue.due(for: "sub:b", now: now).map(\.deviceId), [rowId], "A's stale entry never stands in for B's")
+        queue.remove(deviceIds: [rowId], account: "sub:b")
+        XCTAssertEqual(queue.entries.map(\.account), ["sub:a"], "B's confirmation is B's alone")
+        queue.add(deviceId: rowId, account: "sub:b", now: now)
+        queue.forgive(account: "sub:a")
+        XCTAssertEqual(queue.entries.map(\.account), ["sub:b"], "A signed in again: A's rows are A's again")
+        queue.forgive(deviceId: rowId)
+        XCTAssertEqual(queue.entries, [], "a registration returned the row: it is current, whoever owed it")
+    }
+
+    // MARK: - The registrar itself (its call sites, which the queue's own tests above cannot see)
+
+    private func bearer(_ sub: String) -> String {
+        let payload = Data(#"{"sub":"\#(sub)","exp":4102444800}"#.utf8).base64EncodedString()
+            .replacingOccurrences(of: "=", with: "").replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+        return "e30.\(payload).sig"
+    }
+
+    private let otherRow = "1d4c8b2a-0f3e-4a5b-8c7d-6e5f4a3b2c1d"
+    private let pushKeys = ["pocket.push.deviceId", "pocket.push.voipDeviceId", "pocket.push.voipAccount", "pocket.push.token",
+                            PushUnregisterQueue.key]
+
+    @MainActor
+    private func withRegistrar(status: Int, _ body: (PushRegistrar) async throws -> Void) async rethrows {
+        let registrar = PushRegistrar.shared
+        let saved = registrar.client
+        let keep = pushKeys.map { ($0, UserDefaults.standard.object(forKey: $0)) }
+        PushDeviceURLProtocol.reset(status: status)
+        registrar.client = client(bearer: nil)
+        defer {
+            registrar.client = saved
+            for (key, value) in keep { UserDefaults.standard.set(value, forKey: key) }
+        }
+        for key in pushKeys { UserDefaults.standard.removeObject(forKey: key) }
+        try await body(registrar)
+    }
+
+    @MainActor
+    func test_signing_out_owes_both_rows_and_sends_them_with_its_own_credential() async {
+        await withRegistrar(status: 503) { registrar in
+            UserDefaults.standard.set(rowId, forKey: "pocket.push.deviceId")
+            UserDefaults.standard.set(otherRow, forKey: "pocket.push.voipDeviceId")
+            registrar.signOut(bearer: bearer("a"))
+            var queue = PushUnregisterQueue.load()
+            XCTAssertEqual(Set(queue.due(for: "sub:a").map(\.deviceId)), [rowId, otherRow],
+                           "the server did not confirm: both rows stay owed, on the phone")
+            XCTAssertNil(UserDefaults.standard.string(forKey: "pocket.push.deviceId").flatMap { $0.isEmpty ? nil : $0 })
+
+            PushDeviceURLProtocol.reset(status: 204)
+            for _ in 0..<80 where !PushUnregisterQueue.load().entries.isEmpty {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            queue = PushUnregisterQueue.load()
+            XCTAssertEqual(queue.entries, [], "sent again while the app runs, and confirmed")
+            let deletes = PushDeviceURLProtocol.requests().filter {
+                $0.httpMethod == "DELETE" && $0.value(forHTTPHeaderField: "Authorization") == "Bearer \(bearer("a"))"
+            }
+            XCTAssertEqual(Set(deletes.compactMap { $0.url?.lastPathComponent }), [rowId, otherRow],
+                           "by id, with the credential of the sign-out that owed them")
+        }
+    }
+
+    @MainActor
+    func test_signing_in_again_reclaims_the_accounts_rows_and_a_late_registration_is_owed() async {
+        await withRegistrar(status: 503) { registrar in
+            let lateRow = "5b6c7d8e-9f0a-4b1c-8d2e-3f4a5b6c7d8e", movedRow = "2e3f4a5b-6c7d-4e8f-9a0b-1c2d3e4f5a6b"
+            var queue = PushUnregisterQueue()
+            queue.add(deviceId: lateRow, account: "sub:a")
+            queue.add(deviceId: movedRow, account: "sub:b")
+            queue.save()
+            registrar.signedIn(account: "sub:a")
+            XCTAssertEqual(PushUnregisterQueue.load().entries.map(\.account), ["sub:b"],
+                           "A is back: A's own rows are never deleted from under it")
+
+            // C's registration lands after the phone moved on (no one is signed in here now): owed at once, as C's.
+            // The server handed back the row B still owed, so B's entry goes: the row is C's now.
+            XCTAssertFalse(registrar.registered(movedRow, account: "sub:c", bearer: bearer("c"), stillCurrent: true))
+            let entries = PushUnregisterQueue.load().entries
+            XCTAssertFalse(entries.contains { $0.account == "sub:b" }, "B's stale entry never deletes C's row")
+            XCTAssertEqual(entries.filter { $0.account == "sub:c" }.map(\.deviceId), [movedRow])
+        }
+    }
+
+    @MainActor
+    func test_a_phone_no_one_is_signed_in_on_keeps_no_bell_registration() async {
+        await withRegistrar(status: 204) { registrar in
+            UserDefaults.standard.set("ab12", forKey: "pocket.push.token")
+            registrar.launched(signedIn: true)
+            XCTAssertTrue(registrar.hasToken)
+            registrar.launched(signedIn: false)
+            XCTAssertFalse(registrar.hasToken, "an older build's leftover registration goes at launch")
+        }
     }
 }

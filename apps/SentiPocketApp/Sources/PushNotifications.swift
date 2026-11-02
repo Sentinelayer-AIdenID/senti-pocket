@@ -88,9 +88,11 @@ struct PushDeviceClient: Sendable {
     }
 }
 
-/// Rows this phone still owes the server a sign-out for, with the account each belongs to: kept on the phone until
-/// the server confirms, and sent with that account's next credential. A sign-out, or a refused credential, that could
-/// not reach the server must not leave this phone registered for the last person (warden, #298 review).
+/// Rows this phone owes the server a sign-out for, with the account each belongs to, kept on the phone until the
+/// server confirms. They are sent with the credential of the sign-out that owed them, again while the app runs. They
+/// are never sent with a later credential: an account that signs in here again reclaims its rows by registering, and
+/// deleting them then would end its own bells and calls (warden, #298 review). A row a registration returns is
+/// current again, for whoever registered it.
 struct PushUnregisterQueue: Codable, Equatable {
     struct Entry: Codable, Equatable {
         let deviceId: String
@@ -104,10 +106,11 @@ struct PushUnregisterQueue: Codable, Equatable {
     static let keptFor: TimeInterval = 30 * 24 * 3600
     static let key = "pocket.push.pendingUnregisters"
 
-    /// A row whose account cannot be told is not kept: no credential could ever sign it out.
+    /// A row whose account cannot be told is not kept: no credential could ever sign it out. A row is owed once per
+    /// account: an older account's entry never stands in for a newer one's.
     mutating func add(deviceId: String, account: String?, now: Date = Date()) {
         guard let account, !account.isEmpty, UUID(uuidString: deviceId) != nil,
-              !entries.contains(where: { $0.deviceId == deviceId }) else { return }
+              !entries.contains(where: { $0.deviceId == deviceId && $0.account == account }) else { return }
         entries.append(Entry(deviceId: deviceId, account: account, since: now))
     }
 
@@ -118,8 +121,19 @@ struct PushUnregisterQueue: Codable, Equatable {
         return entries.filter { $0.account == account }
     }
 
-    mutating func remove(deviceIds: [String]) {
-        entries.removeAll { deviceIds.contains($0.deviceId) }
+    /// Signed out by `account`'s credential.
+    mutating func remove(deviceIds: [String], account: String) {
+        entries.removeAll { $0.account == account && deviceIds.contains($0.deviceId) }
+    }
+
+    /// `account` signed in here again: its registrations reclaim its rows.
+    mutating func forgive(account: String) {
+        entries.removeAll { $0.account == account }
+    }
+
+    /// A registration returned this row: it is current again, whoever owed it.
+    mutating func forgive(deviceId: String) {
+        entries.removeAll { $0.deviceId == deviceId }
     }
 
     static func load(from defaults: UserDefaults = .standard) -> PushUnregisterQueue {
@@ -205,7 +219,7 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
         }
     }
     private var openedEarly: [(link: SentiLink, id: String?)] = []
-    private var client = PushDeviceClient(apiBaseURL: GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_API_URL", "SENTI_GATEWAY_URL"]))
+    var client = PushDeviceClient(apiBaseURL: GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_API_URL", "SENTI_GATEWAY_URL"]))
     private var isRegistered = false
 
     var hasToken: Bool { !storedToken.isEmpty }
@@ -242,8 +256,7 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
                 Task { @MainActor in self?.cameBack() }
             }
         }
-        // Signed in: what this account still owes the server goes now.
-        sendOwedUnregisters(bearer: SessionTokenStore.load())
+        signedIn(account: RoomSendOutbox.account(token: SessionTokenStore.load()))
         let center = UNUserNotificationCenter.current()
         let settings = await center.notificationSettings()
         var allowed = settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional
@@ -283,12 +296,16 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
         // Again while the app runs if it fails: until it lands, calls do not ring here (`ringsForSignedInAccount`).
         for attempt in 0..<Self.registerAttempts {
-            guard let account = RoomSendOutbox.account(token: SessionTokenStore.load()), storedVoipToken == token else { return }
+            let bearer = SessionTokenStore.load()
+            guard let account = RoomSendOutbox.account(token: bearer), storedVoipToken == token else { return }
+            var registering = client
+            registering.tokenProvider = { bearer }
             do {
-                let id = try await client.register(token: token, environment: environment,
-                                                   bundleId: Bundle.main.bundleIdentifier ?? "", appVersion: version,
-                                                   kind: "voip")
-                guard storedVoipToken == token, RoomSendOutbox.account(token: SessionTokenStore.load()) == account else { return }
+                let id = try await registering.register(token: token, environment: environment,
+                                                        bundleId: Bundle.main.bundleIdentifier ?? "", appVersion: version,
+                                                        kind: "voip")
+                guard registered(id, account: account, bearer: bearer,
+                                 stillCurrent: storedVoipToken == token) else { return }
                 voipDeviceId = id ?? ""
                 voipAccount = account
                 return
@@ -296,6 +313,34 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
                 try? await Task.sleep(nanoseconds: UInt64(2 << attempt) * 1_000_000_000)
             }
         }
+    }
+
+    /// A registration landed for `account`. Its row is current again, so nothing owed may delete it. If this phone
+    /// has moved on since (signed out, or someone else), the row is owed at once, with the credential that made it.
+    /// Returns whether the row is this phone's current one.
+    func registered(_ deviceId: String?, account: String, bearer: String?, stillCurrent: Bool) -> Bool {
+        if let deviceId {
+            var queue = PushUnregisterQueue.load()
+            queue.forgive(deviceId: deviceId)
+            queue.save()
+        }
+        guard stillCurrent, RoomSendOutbox.account(token: SessionTokenStore.load()) == account else {
+            if let deviceId {
+                owe([deviceId], account: account)
+                sendOwedUnregisters(bearer: bearer, attempts: Self.unregisterAttempts)
+            }
+            return false
+        }
+        return true
+    }
+
+    /// Someone signed in here: the rows their earlier sign-out still owed are theirs again, reclaimed by the
+    /// registrations that follow (never deleted from under them: warden, #298 review).
+    func signedIn(account: String?) {
+        guard let account else { return }
+        var queue = PushUnregisterQueue.load()
+        queue.forgive(account: account)
+        queue.save()
     }
 
     func didRegister(deviceToken: Data) {
@@ -313,11 +358,14 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
         // Again while the app runs if it fails, and when the app comes back (warden, #298 review).
         for attempt in 0..<Self.registerAttempts {
-            guard SessionTokenStore.load()?.isEmpty == false, storedToken == token else { return }
+            let bearer = SessionTokenStore.load()
+            guard let account = RoomSendOutbox.account(token: bearer), storedToken == token else { return }
+            var registering = client
+            registering.tokenProvider = { bearer }
             do {
-                let id = try await client.register(token: token, environment: environment,
-                                                   bundleId: Bundle.main.bundleIdentifier ?? "", appVersion: version)
-                guard storedToken == token else { return }
+                let id = try await registering.register(token: token, environment: environment,
+                                                        bundleId: Bundle.main.bundleIdentifier ?? "", appVersion: version)
+                guard registered(id, account: account, bearer: bearer, stillCurrent: storedToken == token) else { return }
                 deviceId = id ?? ""
                 isRegistered = true
                 preferencesPending = true
@@ -334,7 +382,6 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
     private func cameBack() {
         sendPendingPreferences()
         guard SessionTokenStore.load()?.isEmpty == false else { return }
-        sendOwedUnregisters(bearer: SessionTokenStore.load())
         if !isRegistered, !storedToken.isEmpty { Task { await self.register(self.storedToken) } }
         if !storedVoipToken.isEmpty, !Self.rings(callAccount: voipAccount, signedIn: RoomSendOutbox.account(token: SessionTokenStore.load())) {
             Task { await self.registerVoip(self.storedVoipToken) }
@@ -365,8 +412,7 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
     /// Sign-out: this phone stops getting this person's notifications and calls. The sign-in goes right after this,
     /// so each request carries the person's credential from now, and tries again a few times while the app runs: a
     /// dropped connection must not leave this phone registered for them (warden). The credential is held in memory only.
-    func signOut() {
-        let bearer = SessionTokenStore.load()
+    func signOut(bearer: String? = SessionTokenStore.load()) {
         // Both rows are owed until the server confirms: kept on the phone, so a sign-out that cannot reach the server
         // (or a credential already refused) goes again with this account's next credential. The PushKit token itself
         // is kept (PushKit does not re-send it); only this person's registration goes.
@@ -392,9 +438,9 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
     /// Sends the sign-outs `bearer`'s account owes, again while the app runs if they fail; the ones the server
     /// confirms are dropped. The credential is held in memory only.
     private func sendOwedUnregisters(bearer: String?, attempts: Int = 1) {
-        guard let bearer, !bearer.isEmpty else { return }
+        guard let bearer, !bearer.isEmpty, let account = RoomSendOutbox.account(token: bearer) else { return }
         var queue = PushUnregisterQueue.load()
-        var owed = queue.due(for: RoomSendOutbox.account(token: bearer))
+        var owed = queue.due(for: account)
         queue.save()
         guard !owed.isEmpty else { return }
         var unregistering = client
@@ -403,7 +449,7 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
             for attempt in 0..<attempts {
                 let done = await PushUnregisterQueue.confirmed(of: owed) { try await unregistering.unregister(deviceId: $0) }
                 var stored = PushUnregisterQueue.load()
-                stored.remove(deviceIds: done)
+                stored.remove(deviceIds: done, account: account)
                 stored.save()
                 owed.removeAll { done.contains($0.deviceId) }
                 guard !owed.isEmpty, attempt < attempts - 1 else { return }
