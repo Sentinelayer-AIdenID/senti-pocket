@@ -265,6 +265,25 @@ final class VoiceLineCallTests: XCTestCase {
         await room.hangUp()
     }
 
+    /// Carter kept dialing busy agents and nobody answered. With the voice line on, the agent's fast voice picks up
+    /// the ring in about 2 s as that agent; the agent's own hello, when it comes, is kept as text, not read again.
+    func test_a_busy_agents_fast_voice_picks_up_the_ring_and_its_late_hello_is_kept_as_text() async {
+        let line = FakeVoiceLine([])
+        let listener = LineListener(), speaker = LineSpeaker(), poster = LinePoster()
+        let room = call(line, listener: listener, speaker: speaker, poster: poster)
+        room.begin()
+        for _ in 0..<250 where speaker.spoken.isEmpty { try? await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertEqual(speaker.spoken.first?.text, "Hi, it's pocket-forge. Go ahead.")
+        XCTAssertEqual(speaker.spoken.first?.speaker, "pocket-forge", "in the agent's own voice")
+        XCTAssertFalse(room.state.isRinging)
+        speaker.finish()
+        room.receive([agentPost("hello", "Hi Carter, forge here.", in: room)])
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(speaker.spoken.count, 1, "the agent's own hello is not read again")
+        XCTAssertTrue(room.state.turns.contains { $0.text == "Hi Carter, forge here." && $0.isHeld })
+        await room.hangUp()
+    }
+
     /// An agent can call you with its reason and what it needs, and talk you through it. Answering an agent's call, the
     /// quick answers are asked with that call, whose reason and brief the server reads; the screen says what it is
     /// about until someone speaks.

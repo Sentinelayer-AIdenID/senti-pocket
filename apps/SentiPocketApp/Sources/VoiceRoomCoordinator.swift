@@ -100,6 +100,8 @@ final class VoiceRoomCoordinator: ObservableObject {
     /// late post about an earlier turn never talks over the newer one. A turn whose voice line failed falls back to
     /// reading the agent's posts.
     private var lineFailedThisTurn = false
+    /// The agent's fast voice answered the ring; the agent's own hello, when it comes, is kept as text.
+    private var voicePickedUp = false
     /// In a meeting, who answered your latest turn first (lowercased), and whether the others were told.
     private var floorHolder: (id: String, name: String)?
     private var floorAnnounced = false
@@ -131,6 +133,9 @@ final class VoiceRoomCoordinator: ObservableObject {
 
     /// How long the call rings before the line opens without an answer.
     static let ringsFor: TimeInterval = 30
+    /// In a call to one agent with the voice line on, the agent's fast voice picks up this soon, as that agent, so
+    /// a busy agent (of any lab) never leaves you ringing (Carter, 11-02: "I kept dialing forge and warden").
+    static let voicePicksUpAfter: TimeInterval = 2
 
     init(
         sessionId: String,
@@ -228,6 +233,11 @@ final class VoiceRoomCoordinator: ObservableObject {
             while let self, !Task.isCancelled, self.state.isRinging {
                 await self.sleep(0.25)
                 guard !Task.isCancelled, self.state.isRinging else { return }
+                if self.voiceLineSpeaks, self.state.with.count == 1, !self.state.sharesFloor,
+                   self.now().timeIntervalSince(started) >= Self.voicePicksUpAfter {
+                    self.voicePickUp()
+                    return
+                }
                 guard self.now().timeIntervalSince(started) >= Self.ringsFor else { continue }
                 self.stopRinging()
                 if self.state.isHandsFree, self.state.phase == .ready { self.startListening() }
@@ -244,6 +254,21 @@ final class VoiceRoomCoordinator: ObservableObject {
         guard state.isRinging else { return }
         state.ringStopped = true
         ringer?.stopRinging()
+    }
+
+    /// The agent's fast voice answers the ring with a short hello in the agent's own voice, then the line is open.
+    private func voicePickUp() {
+        guard let agent = state.with.first else { return }
+        stopRinging()
+        voicePickedUp = true
+        state.notice = nil
+        if !state.joined.contains(where: { $0.lowercased() == agent.lowercased() }) { state.joined.append(agent) }
+        let hello = VoiceRoomTurn(id: "line:hello:" + UUID().uuidString.lowercased(), speaker: agent + Self.voiceSuffix,
+                                  isYou: false, text: "Hi, it's \(agent). Go ahead.", at: now())
+        queue.append(hello)
+        state.turns.append(hello)
+        state.waiting = queue.count
+        speakIfReady()
     }
 
     func send(_ intent: VoiceRoomIntent) {
@@ -425,7 +450,7 @@ final class VoiceRoomCoordinator: ObservableObject {
             }
             floorHolder = (lowered, name)
         }
-        if !isHuman, !isAddedHello, state.with.count == 1, !state.sharesFloor, turnStoppedAt != nil,
+        if !isHuman, !isAddedHello, state.with.count == 1, !state.sharesFloor, turnStoppedAt != nil || voicePickedUp,
            voiceLineSpeaks, !lineFailedThisTurn {
             state.turns.append(VoiceRoomTurn(id: id, speaker: name, isYou: false, text: text, at: at, isHeld: true))
             return
