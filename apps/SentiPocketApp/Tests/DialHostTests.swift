@@ -767,6 +767,9 @@ final class DialHostTests: XCTestCase {
         let signIn = SignInCoordinator(login: {}, isLoggedIn: { storedToken }, signOut: { storedToken = false },
                                        clearProtectedLocalState: {})
         var pushesEnded = 0
+        let recentKey = "pocket.emoji.recent", keptRecent = UserDefaults.standard.object(forKey: recentKey)
+        defer { UserDefaults.standard.set(keptRecent, forKey: recentKey) }
+        UserDefaults.standard.set(["👍"], forKey: recentKey)
         SentiPocketApp.wire(signIn, to: host, endPushes: { pushesEnded += 1 })
         XCTAssertEqual(host.callManager?.takesVoipPushes, true)
 
@@ -778,6 +781,7 @@ final class DialHostTests: XCTestCase {
         XCTAssertEqual(signIn.phase, .reauthenticationRequired)
         XCTAssertEqual(pushesEnded, 1, "the notifications go as on sign-out: someone else may sign in next")
         XCTAssertEqual(host.callManager?.takesVoipPushes, false, "and so do the calls")
+        XCTAssertNil(UserDefaults.standard.object(forKey: recentKey), "and the recent-emoji row (warden, #298 review)")
     }
 }
 #endif
