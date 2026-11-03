@@ -505,7 +505,8 @@ private final class EndPoster: VoiceRoomPosting, @unchecked Sendable {
 final class VoiceLineHangUpTests: XCTestCase {
     func test_hanging_up_stops_the_stream_and_the_end_does_not_ask_the_voice_line_to_sum_up() async {
         let line = StreamingVoiceLine(), listener = LineListener(), speaker = LineSpeaker(), poster = EndPoster()
-        let room = VoiceRoomCoordinator(sessionId: "room_meeting", with: [], invited: ["pocket-forge"], you: "mrrcarter",
+        // The voice line answers as the call's one agent (it never speaks for "the room" any more, #60982).
+        let room = VoiceRoomCoordinator(sessionId: "room_call", with: ["pocket-forge"], you: "mrrcarter",
                                         ownAuthorIds: ["human-mrrcarter"], listener: listener, speaker: speaker,
                                         audio: LineAudio(), poster: poster, voiceLine: line,
                                         sleep: { _ in try? await Task.sleep(nanoseconds: 1_000_000) })
@@ -516,12 +517,12 @@ final class VoiceLineHangUpTests: XCTestCase {
         listener.say("Who is working on the build?")
         room.send(.toggleTalk)
         for _ in 0..<400 where speaker.spoken.isEmpty { try? await Task.sleep(nanoseconds: 2_000_000) }
-        XCTAssertEqual(room.state.speaker, "room (voice)")
+        XCTAssertEqual(room.state.speaker, "pocket-forge (voice)")
         XCTAssertFalse(line.stopped)
         await room.hangUp()
         for _ in 0..<200 where !line.stopped { try? await Task.sleep(nanoseconds: 2_000_000) }
         XCTAssertTrue(line.stopped, "the stream ends with the call")
-        XCTAssertFalse(poster.endings.first?.contains("@room") == true, poster.endings.first ?? "")
+        XCTAssertFalse(poster.endings.first?.contains("(voice)") == true, poster.endings.first ?? "")
     }
 }
 
