@@ -191,7 +191,6 @@ struct RoomPeopleAvatars: View {
         .opacity(item.isIdle ? 0.78 : 1)
     }
 
-    /// The number online, with a green dot, in the middle; one that idles drops out of it.
     /// How long the ring holds on an agent that just did something before it turns by itself again.
     static let holdOnActivity: TimeInterval = 8
 
@@ -292,8 +291,6 @@ public extension EnvironmentValues {
     }
 }
 
-/// Where one logo sits for a turn of the ring. The turn itself is what animates, so a fling or an arrival moves each
-/// logo along the circle, not straight across it (warden, #265).
 /// The ring's count of who is here and active, with its green dot: on the ring, and again at the top of the people
 /// list, so the two read as one (Carter, #59940).
 struct RoomOnlineCountPill: View {
@@ -315,10 +312,13 @@ struct RoomOnlineCountPill: View {
         .background(Capsule().fill(PocketPalette.raised))
         .overlay(Capsule().strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
         .shadow(color: .black.opacity(0.35), radius: 3, y: 2)
-        .accessibilityHidden(true)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(online == "?" ? "Who is here is unavailable" : "\(online) active")
     }
 }
 
+/// Where one logo sits for a turn of the ring. The turn itself is what animates, so a fling or an arrival moves each
+/// logo along the circle, not straight across it (warden, #265).
 private struct RingPlacement: ViewModifier, Animatable {
     let index: Int
     let count: Int

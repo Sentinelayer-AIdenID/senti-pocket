@@ -3011,6 +3011,8 @@ private struct RoomPresenceSheet: View {
                 Section {
                     HStack(spacing: 10) {
                         RoomOnlineCountPill(online: online)
+                            // The room's line beside it says the same number aloud.
+                            .accessibilityHidden(!roster.members.isEmpty)
                         if !roster.members.isEmpty {
                             Text(roster.summary)
                                 .font(.subheadline.weight(.semibold))

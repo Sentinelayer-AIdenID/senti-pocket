@@ -126,8 +126,6 @@ public struct RoomRoster: Equatable, Sendable {
 
     /// Someone heard from within this long counts as idle rather than gone.
     public static let recent: TimeInterval = 60 * 60
-    /// A box active within this long counts as here.
-    public static let activeBox: TimeInterval = 5 * 60
 
     /// Each member's model where the room knows it, by lowercased id (a box's model, from the Flight record).
     public var modelsById: [String: String] {
@@ -237,11 +235,10 @@ public struct RoomRoster: Equatable, Sendable {
         let members = seen.map { key, entry -> Member in
             let here = presence[key]
             if let box = boxes[key] {
-                // Working now by its phase, which the room's one read of its boxes keeps fresh, or heard from lately:
-                // the ring's count no longer waits for the people list to be opened (Carter, #59940).
-                let active = FlightRecordState.isWorking(phase: box.phase)
-                    || (box.lastActivity.map { now.timeIntervalSince($0) <= activeBox } ?? false)
-                let status: Status = (here.map { !$0.isIdle } ?? false) || active ? .here : .idle
+                // Active exactly when the room's presence says so, as on the web. Presence is read live; a box's own
+                // record is read only when the people list or the Flight record opens, so counting its last activity
+                // moved the ring's number only when the list was opened (Carter, #59940).
+                let status: Status = (here.map { !$0.isIdle } ?? false) ? .here : .idle
                 return Member(id: key, name: box.name, kind: .box, status: status, model: box.model, effort: box.effort,
                               job: box.job, phase: box.phase, firstSeen: entry.first, lastSeen: latest(entry.last, box.lastActivity),
                               expiresAt: box.expiresAt, posts: entry.posts, isOnline: true)

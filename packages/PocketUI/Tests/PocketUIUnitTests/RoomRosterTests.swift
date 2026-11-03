@@ -37,7 +37,7 @@ final class RoomRosterTests: XCTestCase {
         XCTAssertEqual(byId["ds-old-box"]?.status, .ended)
         XCTAssertEqual(byId["ds-old-box"]?.kind, .box)
         let live = try XCTUnwrap(byId["ds-live-box"])
-        XCTAssertEqual(live.status, .here, "active a minute ago")
+        XCTAssertEqual(live.status, .idle, "running but not in the room's presence: online, not active (as on the web)")
         XCTAssertEqual(live.model, "deepseek-v4-pro")
         XCTAssertEqual(live.effort, "high")
         XCTAssertEqual(live.job, "Fix the bell")
@@ -111,7 +111,10 @@ final class RoomRosterTests: XCTestCase {
     func test_ended_boxes_are_out_of_the_counts_and_listed_apart() {
         let roster = RoomRoster.build(
             posts: [post("human-mrrcarter", 1, human: true), post("ds-old-1", 300), post("ds-old-2", 400)],
-            present: [RoomChatPresence.Person(id: "human-mrrcarter", name: "mrrcarter", isHuman: true, isIdle: false)],
+            present: [
+                RoomChatPresence.Person(id: "human-mrrcarter", name: "mrrcarter", isHuman: true, isIdle: false),
+                RoomChatPresence.Person(id: "ds-live", name: "ds-live", isHuman: false, isIdle: false, isBox: true)
+            ],
             runningBoxes: [RoomRoster.Box(name: "ds-live", model: "m", phase: "working", lastActivity: nil)],
             endedBoxes: ["ds-old-1", "ds-old-2", "ds-old-3"], now: now
         )
@@ -123,24 +126,29 @@ final class RoomRosterTests: XCTestCase {
         XCTAssertEqual(roster.members.count, 5, "everyone who came is still in the roster")
     }
 
-    /// Carter, #59940: the ring "doesn't get updated live unless I click on it". A box working now by its phase (the
-    /// room's every-minute read) is active without its record's last activity, which is read only when a list opens.
-    func test_a_running_box_is_active_by_its_phase_without_waiting_for_its_record() {
-        let stale = now.addingTimeInterval(-3600)
+    /// Carter, #59940: the ring "doesn't get updated live unless I click on it". A running box is active exactly when
+    /// the room's presence (read live) says so, as on the web: never by its phase or its record's last activity, which
+    /// is read only when the people list or the Flight record opens.
+    func test_a_running_box_is_active_exactly_when_the_rooms_presence_says_so() {
         let roster = RoomRoster.build(
-            posts: [], present: [],
+            posts: [],
+            present: [
+                RoomChatPresence.Person(id: "ds-posting", name: "ds-posting", isHuman: false, isIdle: false, isBox: true),
+                RoomChatPresence.Person(id: "ds-quiet", name: "ds-quiet", isHuman: false, isIdle: true, isBox: true)
+            ],
             runningBoxes: [
-                RoomRoster.Box(name: "ds-working", model: "m", phase: "working", lastActivity: stale),
-                RoomRoster.Box(name: "ds-waiting", model: "m", phase: "ready", lastActivity: stale),
-                RoomRoster.Box(name: "ds-recent", model: "m", phase: "ready", lastActivity: now.addingTimeInterval(-60))
+                RoomRoster.Box(name: "ds-posting", model: "m", phase: "ready", lastActivity: now.addingTimeInterval(-3600)),
+                RoomRoster.Box(name: "ds-quiet", model: "m", phase: "working", lastActivity: now.addingTimeInterval(-60)),
+                RoomRoster.Box(name: "ds-absent", model: "m", phase: "working", lastActivity: now.addingTimeInterval(-60))
             ],
             endedBoxes: [], now: now
         )
         let status = Dictionary(uniqueKeysWithValues: roster.members.map { ($0.id, $0.status) })
-        XCTAssertEqual(status["ds-working"], .here)
-        XCTAssertEqual(status["ds-waiting"], .idle, "waiting for its next turn and quiet for an hour")
-        XCTAssertEqual(status["ds-recent"], .here, "heard from a minute ago")
-        XCTAssertEqual(roster.activeCount, 2)
+        XCTAssertEqual(status["ds-posting"], .here)
+        XCTAssertEqual(status["ds-quiet"], .idle, "here but idle, though its phase says working")
+        XCTAssertEqual(status["ds-absent"], .idle, "running, so online, but not in presence: not active")
+        XCTAssertEqual(roster.activeCount, 1)
+        XCTAssertEqual(roster.summary, "1 active · 2 idle · 0 offline")
     }
 
     func test_a_box_that_ended_but_runs_again_under_its_name_is_listed_once_as_running() {

@@ -61,12 +61,9 @@ public struct FlightRecordState: Equatable, Sendable {
         }
 
         /// Working now (rather than waiting for its next turn): the line under its name shimmers.
-        public var isWorking: Bool { FlightRecordState.isWorking(phase: phase) }
-    }
-
-    /// Whether a box in this phase is working now, rather than waiting for its next turn.
-    public static func isWorking(phase: String) -> Bool {
-        ["working", "capturing", "booting", "probing"].contains(phase.lowercased())
+        public var isWorking: Bool {
+            ["working", "capturing", "booting", "probing"].contains(phase.lowercased())
+        }
     }
 
     /// An agent in the room without a box of its own (or whose box is not listed): its latest "working on" line.
