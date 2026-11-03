@@ -322,6 +322,7 @@ public struct RoomChatView: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.bottom, 8)
+                .modifier(OwnScrollStart())
             }
             // Dragging the messages lowers the keyboard with the finger, as in Messages.
             .scrollDismissesKeyboard(.interactively)
@@ -834,6 +835,19 @@ private struct StartsAtBottom: ViewModifier {
     func body(content: Content) -> some View {
         if #available(iOS 18.0, macOS 15.0, *) {
             content.defaultScrollAnchor(.bottom, for: .initialOffset)
+        } else {
+            content
+        }
+    }
+}
+
+/// What is inside the room keeps its own scroll start. `StartsAtBottom` is passed down to every scroll view within,
+/// and to a sideways one "bottom" means its middle: the pinned strip, a wide table or a code block opened scrolled
+/// halfway, cut off at both edges.
+private struct OwnScrollStart: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, macOS 15.0, *) {
+            content.defaultScrollAnchor(nil, for: .initialOffset)
         } else {
             content
         }
@@ -3267,6 +3281,7 @@ private struct RoomPinnedStrip: View {
             }
         }
         .accessibilityIdentifier("pocket.room.pinned")
+        .modifier(OwnScrollStart())
     }
 
     /// The room's leaderboard, in the strip's first row, right under the room's title: the navigation bar of a
