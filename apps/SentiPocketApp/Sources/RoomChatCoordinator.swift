@@ -290,12 +290,12 @@ final class RoomChatCoordinator: ObservableObject {
         self.ownAuthorIds = Set(ownAuthorIds.map { $0.lowercased() })
         // A send left unconfirmed by a kill comes back as it was: same client id, offered to Retry or Discard.
         self.outboxAccount = outbox == nil ? nil : (outboxAccount ?? RoomSendOutbox.account(self.ownAuthorIds))
-        let draftKey = (outbox == nil ? nil : (outboxAccount ?? RoomSendOutbox.account(self.ownAuthorIds)))
-            .map { RoomComposerDraft.savedKey(sessionId: sessionId, account: $0) }
+        let draftKey = self.outboxAccount.map { RoomComposerDraft.savedKey(sessionId: sessionId, account: $0) }
         self.draftKey = draftKey
         // Text kept before drafts were per account cannot be told apart by whose it is: it goes.
         if draftKey != nil { UserDefaults.standard.removeObject(forKey: RoomComposerDraft.savedKey(sessionId: sessionId)) }
-        if let outbox, let account = outboxAccount {
+        // The account sends are kept under (`self.`): the parameter is nil when it comes from the author ids.
+        if let outbox, let account = self.outboxAccount {
             pending = outbox.items(account: account, sessionId: sessionId).map {
                 PendingSend(clientId: $0.clientId, text: $0.text, status: .failed(reason: Self.unconfirmedReason, canRetry: true))
             }
@@ -1402,9 +1402,11 @@ final class RoomChatCoordinator: ObservableObject {
         jumpToLatest()
         keepLatestForTheJumpDown()
         pending.append(PendingSend(clientId: clientId, text: text, status: .sending))
-        if let outbox, let account = outboxAccount {
-            outbox.add(RoomSendOutbox.Item(clientId: clientId, text: text, createdAt: now()), account: account,
-                       sessionId: sessionId)
+        if let outbox, let account = outboxAccount,
+           !outbox.add(RoomSendOutbox.Item(clientId: clientId, text: text, createdAt: now()), account: account,
+                       sessionId: sessionId) {
+            // The send goes ahead; only its recovery after a kill is lost, and the crash report should say so.
+            CrashReporter.shared.note("unsent message not kept on the phone (write failed)")
         }
         readerAtBottom = true
         // Your message goes to the bottom, and so do you: no line is left to come back to.
