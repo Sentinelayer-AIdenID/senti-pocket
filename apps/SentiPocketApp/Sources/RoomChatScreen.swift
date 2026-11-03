@@ -1004,6 +1004,8 @@ struct RoomChatScreen: View {
             case .active:
                 coordinator.resume()
                 takeAnsweredCall()
+                // Back in front: a mint that gave no answer for New agent is asked again.
+                Task { await newAgentOffer.check() }
             // A call keeps the room live in the background: its answers come through the room.
             case .background where voiceRoom == nil: coordinator.pause()
             default: break

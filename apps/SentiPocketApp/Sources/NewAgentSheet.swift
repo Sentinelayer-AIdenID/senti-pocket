@@ -38,12 +38,22 @@ enum NewAgentChat {
 final class NewAgentOffer: ObservableObject {
     @Published private(set) var isOffered = false
 
+    /// The waits before asking again when the mint gave no answer (unreachable, or busy).
+    static let retryWaits: [TimeInterval] = [3, 10]
+
     /// Nil for anyone the room does not offer it to: they never ask the mint.
     private let mint: (any MintStarting)?
-    private var asked = false
+    private let sleep: @Sendable (TimeInterval) async -> Void
+    /// The mint answered for this account (its models, or a refusal): not asked again on this room screen.
+    private var answered = false
+    private var asking = false
 
-    init(role: String, isBreakout: Bool, mint: (any MintStarting)?) {
+    init(role: String, isBreakout: Bool, mint: (any MintStarting)?,
+         sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
+             try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+         }) {
         self.mint = Self.admits(role: role, isBreakout: isBreakout) ? mint : nil
+        self.sleep = sleep
     }
 
     /// Owners and admins (the API's roles), in a room that is not a breakout. An unknown role offers nothing.
@@ -51,12 +61,28 @@ final class NewAgentOffer: ObservableObject {
         !isBreakout && ["owner", "admin"].contains(role.lowercased())
     }
 
-    /// Asks the mint once per room screen.
+    /// Asks the mint until it answers for this account. No answer is asked again after a short wait, twice, and again
+    /// each time the room is shown, so a network blip does not hide the button for the whole visit.
     func check() async {
-        guard let mint, !asked else { return }
-        asked = true
-        let models = (try? await mint.models()) ?? []
-        isOffered = !models.isEmpty
+        guard let mint, !answered, !asking else { return }
+        asking = true
+        defer { asking = false }
+        for wait in [0] + Self.retryWaits {
+            if wait > 0 { await sleep(wait) }
+            if Task.isCancelled { return }
+            do {
+                let models = try await mint.models()
+                answered = true
+                isOffered = !models.isEmpty
+                return
+            } catch MintError.unavailable, MintError.capacity {
+                continue
+            } catch {
+                if Task.isCancelled { return }
+                answered = true
+                return
+            }
+        }
     }
 }
 

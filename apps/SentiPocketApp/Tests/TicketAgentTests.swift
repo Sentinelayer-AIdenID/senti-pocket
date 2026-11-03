@@ -349,6 +349,36 @@ final class TicketAgentTests: XCTestCase {
         guard case .started = model.phase else { return XCTFail("not started: \(model.phase)") }
     }
 
+    /// #303 review: a check again the mint refuses (sign-in, capacity, a refusal, not admitted) may follow a first send
+    /// that did start the agent. Only a refused first send is forgotten: this start stays kept under its key, Start makes
+    /// no new one, and the next check goes under the same key.
+    func test_a_refused_check_again_keeps_the_start_under_its_key() async throws {
+        for refusal in [MintError.reauthenticationRequired, .capacity, .refused("model gone"), .forbidden] {
+            let ledger = temporaryLedger()
+            defer { try? FileManager.default.removeItem(at: ledger.url) }
+            let mint = FakeMint(models: models, script: [.notConfirmed, refusal])
+            var assigned: [String] = []
+            let model = AgentStartModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger,
+                                        account: "sub:carter") { assigned.append($0) }
+            await model.load()
+            await model.start()
+            await model.checkAgain()
+            XCTAssertEqual(model.phase, .unconfirmed, "\(refusal)")
+            XCTAssertEqual(model.checkProblem, AgentStartModel.message(refusal))
+            XCTAssertEqual(ledger.pending(account: "sub:carter", sessionId: "room-1", ticketId: ticket.id), mint.sent.first)
+            model.edit()
+            await model.start()
+            XCTAssertEqual(mint.sent.count, 2, "\(refusal): Start sends nothing new")
+            await model.checkAgain()
+            guard case .started = model.phase else {
+                XCTFail("\(refusal): not started: \(model.phase)")
+                continue
+            }
+            XCTAssertTrue(mint.sent.allSatisfy { $0 == mint.sent.first }, "\(refusal): the one start, under its one key")
+            XCTAssertEqual(assigned, ["mint-36d92287"])
+        }
+    }
+
     /// A refusal means nothing started under the key: the phone forgets the start.
     func test_a_refusal_forgets_the_start() async throws {
         let ledger = temporaryLedger()

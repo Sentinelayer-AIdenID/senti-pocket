@@ -12,10 +12,10 @@ import SwiftUI
 /// mint's day, for clock skew), and is forgotten after `maxAge`. One start per ticket, and one New agent start per room:
 /// while one is unresolved, a new start for it takes it up instead of replacing it (#298 review).
 ///
-/// A New agent started in a new chat keeps that chat with its start, before the chat is made (sentinelayer-web
-/// `keepMintStart` keeps its `room`): its id and the create's key go unchanged with every try, and the API keeps one room
-/// per id for its owner, so the chat is made at most once, even across a kill. It stays kept for the next start until
-/// an agent starts.
+/// A New agent started in a new chat keeps that chat before the chat is made (sentinelayer-web `keepMintStart` keeps its
+/// `room`): its id and the create's key go unchanged with every try, and the API keeps one room per id for its owner, so
+/// the chat is made at most once, even across a kill. It stays kept for the next start until an agent starts. New chats
+/// are kept in a file of their own, so the starts' file stays as the release before New agent reads it.
 struct MintStartLedger: Sendable {
     /// The chat a New agent goes to when it starts in a new chat.
     struct NewChat: Codable, Equatable, Sendable {
@@ -28,17 +28,19 @@ struct MintStartLedger: Sendable {
     }
 
     struct Entry: Codable, Equatable {
-        /// The start in flight or not confirmed. Nil while only a new chat is kept: the mint refused the start, or the
-        /// chat was not made, so no agent started under its key.
-        let request: MintUpRequest?
+        let request: MintUpRequest
         /// When this start was first kept; never moved by a check.
         let createdAt: Date
-        /// The new chat a New agent start goes to, made or about to be.
-        var chat: NewChat?
+    }
+
+    /// A New agent's new chat, with when a start was last kept with it: it outlives each of its starts.
+    private struct KeptChat: Codable {
+        let chat: NewChat
+        let keptAt: Date
     }
 
     enum Refusal: Error, Equatable {
-        /// Another start for this ticket (or the room's New agent) is still unresolved, or it keeps another new chat.
+        /// Another start for this ticket (or the room's New agent) is still unresolved, or another new chat is kept.
         case anotherStartPending
     }
 
@@ -46,6 +48,8 @@ struct MintStartLedger: Sendable {
     static let checkHorizon: TimeInterval = 23 * 60 * 60
 
     let url: URL
+    /// New agents' new chats, beside the starts.
+    var chatsURL: URL { url.deletingPathExtension().appendingPathExtension("new-chats.json") }
     private let now: @Sendable () -> Date
 
     init(url: URL, now: @escaping @Sendable () -> Date = { Date() }) {
@@ -68,6 +72,11 @@ struct MintStartLedger: Sendable {
         entry(account: account, sessionId: sessionId, ticketId: ticketId)?.request
     }
 
+    /// The room's New agent's new chat, made or about to be.
+    func chat(account: String, sessionId: String) -> NewChat? {
+        loadChats()[Self.key(account, sessionId, nil)]?.chat
+    }
+
     /// Whether the start may still be sent again: the mint still knows its key.
     func isCheckable(_ entry: Entry) -> Bool {
         now().timeIntervalSince(entry.createdAt) < Self.checkHorizon
@@ -75,51 +84,56 @@ struct MintStartLedger: Sendable {
 
     /// Writes the start to the phone before it is sent, and throws if it could not: a start that is not kept is not
     /// sent, since after a kill its key would be lost. The same start kept again keeps its first time; a different start
-    /// for a ticket with one still unresolved is refused. A new chat already kept stays the one: a start naming another
-    /// is refused, and one naming none leaves it kept for a later start.
+    /// for a ticket with one still unresolved is refused. A start in a new chat writes its chat first, and a new chat
+    /// already kept stays the one: a start naming another is refused.
     func keep(_ request: MintUpRequest, chat: NewChat? = nil, account: String, sessionId: String, ticketId: String?) throws {
         var all = load()
         let slot = Self.key(account, sessionId, ticketId)
-        let existing = all[slot]
-        if let kept = existing?.request {
-            guard kept == request else { throw Refusal.anotherStartPending }
+        if let existing = all[slot] {
+            guard existing.request == request else { throw Refusal.anotherStartPending }
             return
         }
-        if let keptChat = existing?.chat, let chat, chat.sessionId != keptChat.sessionId {
-            throw Refusal.anotherStartPending
+        if let chat {
+            var chats = loadChats()
+            let kept = chats[slot]?.chat
+            if let kept, kept.sessionId != chat.sessionId { throw Refusal.anotherStartPending }
+            chats[slot] = KeptChat(chat: kept ?? chat, keptAt: now())
+            try saveChats(chats)
+            guard loadChats()[slot]?.chat.sessionId == chat.sessionId else { throw CocoaError(.fileWriteUnknown) }
         }
-        let written = Entry(request: request, createdAt: now(), chat: existing?.chat ?? chat)
-        all[slot] = written
+        all[slot] = Entry(request: request, createdAt: now())
         try save(all)
-        let read = entry(account: account, sessionId: sessionId, ticketId: ticketId)
-        guard read?.request == request, read?.chat == written.chat else {
+        guard pending(account: account, sessionId: sessionId, ticketId: ticketId) == request else {
             throw CocoaError(.fileWriteUnknown)
         }
     }
 
-    /// The new chat is made, so a next try goes straight to the mint. Left unwritten, the next try asks the API again,
-    /// which answers for the same chat.
-    func chatMade(account: String, sessionId: String, ticketId: String?) {
+    /// Records that the room's new chat is made, so a next try goes straight to the mint. Throws when that could not be
+    /// written: then the agent is not sent, and the next try asks the API for the same chat again first.
+    func chatMade(account: String, sessionId: String) throws {
+        var chats = loadChats()
+        let slot = Self.key(account, sessionId, nil)
+        guard let kept = chats[slot] else { throw CocoaError(.fileWriteUnknown) }
+        var chat = kept.chat
+        chat.made = true
+        chats[slot] = KeptChat(chat: chat, keptAt: kept.keptAt)
+        try saveChats(chats)
+        guard loadChats()[slot]?.chat.made == true else { throw CocoaError(.fileWriteUnknown) }
+    }
+
+    /// Forgets the start; a new chat kept for it stays, for the next start.
+    func forget(account: String, sessionId: String, ticketId: String?) {
         var all = load()
-        let slot = Self.key(account, sessionId, ticketId)
-        guard all[slot]?.chat != nil else { return }
-        all[slot]?.chat?.made = true
+        guard all.removeValue(forKey: Self.key(account, sessionId, ticketId)) != nil else { return }
+        // A start left behind by a failed write comes back as unconfirmed, and checking it again is safe.
         try? save(all)
     }
 
-    /// `keepingChat`: the start's new chat, made or not, stays kept for the next start (the mint refused this one, or
-    /// the chat was not made, so no agent started under its key).
-    func forget(account: String, sessionId: String, ticketId: String?, keepingChat: Bool = false) {
-        var all = load()
-        let slot = Self.key(account, sessionId, ticketId)
-        guard let existing = all[slot] else { return }
-        if keepingChat, let chat = existing.chat {
-            all[slot] = Entry(request: nil, createdAt: existing.createdAt, chat: chat)
-        } else {
-            all.removeValue(forKey: slot)
-        }
-        // A start left behind by a failed write comes back as unconfirmed, and checking it again is safe.
-        try? save(all)
+    /// Forgets the room's new chat: an agent started.
+    func forgetChat(account: String, sessionId: String) {
+        var chats = loadChats()
+        guard chats.removeValue(forKey: Self.key(account, sessionId, nil)) != nil else { return }
+        try? saveChats(chats)
     }
 
     /// A ticket's start keeps the slot it always had; the room's New agent has the slot of an empty ticket id, which no
@@ -137,6 +151,34 @@ struct MintStartLedger: Sendable {
 
     private func save(_ all: [String: Entry]) throws {
         try JSONEncoder().encode(all).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    }
+
+    private func loadChats() -> [String: KeptChat] {
+        guard let data = try? Data(contentsOf: chatsURL),
+              let all = try? JSONDecoder().decode([String: KeptChat].self, from: data) else { return [:] }
+        let oldest = now().addingTimeInterval(-Self.maxAge)
+        return all.filter { $0.value.keptAt >= oldest }
+    }
+
+    private func saveChats(_ all: [String: KeptChat]) throws {
+        try JSONEncoder().encode(all).write(to: chatsURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    }
+}
+
+/// What the mint takes in a start (respawn `/up`): a name of letters, digits, `_`, `.` and `-` up to 48 characters
+/// (it drops anything else), and a job of up to 20,000 characters, counted as the mint counts them (UTF-16).
+enum MintStartLimits {
+    static let nameLength = 48
+    static let jobLength = 20_000
+    private static let nameCharacters = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")
+
+    /// The name the mint will use; empty when it will make one.
+    static func name(_ typed: String) -> String {
+        String(String.UnicodeScalarView(typed.unicodeScalars.filter { nameCharacters.contains($0) }.prefix(nameLength)))
+    }
+
+    static func jobFits(_ job: String) -> Bool {
+        job.utf16.count <= jobLength
     }
 }
 
@@ -168,6 +210,7 @@ final class AgentStartModel: ObservableObject {
     static let unconfirmedMessage = "Not confirmed: the agent may already be starting. Check again; it can only bring back this one agent."
     static let tooOldMessage = "Not confirmed, and too old to check again safely. Look for its agent in the Flight record before starting another; this start clears a day after it was made."
     static let notKeptMessage = "This phone could not keep a record of the start, so it was not sent. Nothing started."
+    static let chatNotRecordedMessage = "The new chat is made, but this phone could not record it, so the agent was not sent. Nothing started; starting again uses that chat."
 
     @Published private(set) var phase: Phase = .loading
     @Published private(set) var models: [MintModel] = []
@@ -180,6 +223,8 @@ final class AgentStartModel: ObservableObject {
     @Published private(set) var keptChat: MintStartLedger.NewChat?
     /// The new chat the started agent works in; nil when it works in this room.
     @Published private(set) var startedChat: MintStartLedger.NewChat?
+    /// Why the last check again did not go through; the start stays unconfirmed.
+    @Published private(set) var checkProblem: String?
 
     private let mint: any MintStarting
     private let sessionId: String
@@ -227,8 +272,21 @@ final class AgentStartModel: ObservableObject {
     /// Only the room's New agent offers a new chat, and only where chats can be made.
     var offersNewChat: Bool { ticket == nil && chats != nil }
 
+    /// Longer than the mint takes: nothing is made or sent.
+    var jobTooLong: Bool { !MintStartLimits.jobFits(job.trimmingCharacters(in: .whitespacesAndNewlines)) }
+
+    /// What the mint will call the agent, when that is not the name as typed.
+    var nameNote: String? {
+        let typed = agentName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = MintStartLimits.name(typed)
+        guard name != typed else { return nil }
+        return name.isEmpty
+            ? "The mint keeps only letters, digits, _ . and -, so it will make the name."
+            : "It will be named \(name): the mint keeps letters, digits, _ . and -, up to 48."
+    }
+
     var canStart: Bool {
-        phase == .ready && !modelId.isEmpty && !job.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        phase == .ready && !modelId.isEmpty && !job.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !jobTooLong
     }
 
     func load() async {
@@ -260,7 +318,7 @@ final class AgentStartModel: ObservableObject {
     func start(now: Date = Date()) async {
         guard canStart else { return }
         if adoptKeptStart() { return }
-        let name = agentName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = MintStartLimits.name(agentName)
         let jobText = job.trimmingCharacters(in: .whitespacesAndNewlines)
         // In a new chat: the one kept from an earlier try, or one named now (the web's `newMintRoomId`) and kept with
         // the start before it is made.
@@ -282,7 +340,7 @@ final class AgentStartModel: ObservableObject {
             ticketTitle: ticket.map { TicketSignal.publicTitle($0.title) },
             idempotencyKey: "pocket-" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         )
-        await send(request, chat: chat, now: now)
+        await send(request, chat: chat, now: now, again: false)
     }
 
     /// The unconfirmed start, sent again exactly as it was, under its own key: the mint returns that agent if it
@@ -297,16 +355,16 @@ final class AgentStartModel: ObservableObject {
             phase = .unconfirmedTooOld
             return
         }
-        await send(pending, chat: kept.chat, now: now)
+        await send(pending, chat: nil, now: now, again: true)
     }
 
     /// Takes up this ticket's (or the room's New agent's) kept, unresolved start: its fields, and the phase it calls
     /// for. False when there is none. A kept new chat alone is noted for the next start.
     private func adoptKeptStart() -> Bool {
-        guard let ledger, let account,
-              let kept = ledger.entry(account: account, sessionId: sessionId, ticketId: ticket?.id) else { return false }
-        keptChat = kept.chat
-        guard let request = kept.request else { return false }
+        guard let ledger, let account else { return false }
+        if ticket == nil { keptChat = ledger.chat(account: account, sessionId: sessionId) }
+        guard let kept = ledger.entry(account: account, sessionId: sessionId, ticketId: ticket?.id) else { return false }
+        let request = kept.request
         pending = request
         if models.contains(where: { $0.id == request.model }) { modelId = request.model }
         effort = request.effort
@@ -319,7 +377,8 @@ final class AgentStartModel: ObservableObject {
 
     /// Sends a start that is kept on the phone first. One that cannot be kept (no record on this phone, no signed-in
     /// account, or the write failed) is not sent: after a kill its key would be lost, and a second start could follow.
-    private func send(_ request: MintUpRequest, chat: MintStartLedger.NewChat?, now: Date) async {
+    /// `again`: a check again, whose first send may have started the agent.
+    private func send(_ request: MintUpRequest, chat: MintStartLedger.NewChat?, now: Date, again: Bool) async {
         guard let ledger, let account else {
             phase = .failed(Self.notKeptMessage)
             return
@@ -336,46 +395,73 @@ final class AgentStartModel: ObservableObject {
         }
         phase = .starting(since: now)
         pending = request
-        // A new chat is made before the agent is sent to it, under the id and key kept with the start: made again, it is
-        // the same chat.
-        let newChat = ledger.entry(account: account, sessionId: sessionId, ticketId: ticket?.id)?.chat ?? chat
-        let target = newChat?.sessionId == request.sessionId ? newChat : nil
+        checkProblem = nil
+        // A start in a new chat goes there once the chat is made, under the id and key kept with it: made again, it is the
+        // same chat. With that record gone, whether the chat was made is not known, so the start is never sent.
+        var target: MintStartLedger.NewChat?
+        if request.sessionId != sessionId {
+            guard let kept = ledger.chat(account: account, sessionId: sessionId), kept.sessionId == request.sessionId else {
+                if again {
+                    phase = .unconfirmedTooOld
+                } else {
+                    notThrough(Self.notKeptMessage, again: false)
+                }
+                return
+            }
+            target = kept
+        }
         if let target, !target.made {
             do {
                 guard let chats else { throw RoomSendError.notConfigured }
                 try await chats.createAgentChat(sessionId: target.sessionId, title: target.title,
                                                 idempotencyKey: target.createKey)
-                ledger.chatMade(account: account, sessionId: sessionId, ticketId: ticket?.id)
             } catch {
-                // The mint was not asked, so no agent started under the key. The chat stays kept: the next start makes
-                // it under the same id and key, never a second one.
-                forgetPending(keepingChat: true)
-                phase = .failed(Self.chatMessage(error))
+                notThrough(again ? "The new chat could not be reached." : Self.chatMessage(error), again: again)
+                return
+            }
+            do {
+                try ledger.chatMade(account: account, sessionId: sessionId)
+            } catch {
+                notThrough(again ? "This phone could not record the new chat." : Self.chatNotRecordedMessage, again: again)
                 return
             }
         }
         do {
             let started = try await mint.startAgent(request)
             forgetPending()
+            if ticket == nil { ledger.forgetChat(account: account, sessionId: sessionId) }
+            keptChat = nil
             startedChat = target
             phase = .started(started)
             onStarted(started)
         } catch MintError.notConfirmed {
             phase = .unconfirmed
         } catch {
-            // Refused outright (capacity, refusal, sign-in, not admitted): nothing started under this key. A new chat made
-            // for it stays kept for the next start.
-            forgetPending(keepingChat: true)
             let message = Self.message(error)
-            phase = .failed(target == nil ? message : message + " The new chat is made; starting again uses it.")
+            notThrough(target == nil || again ? message : message + " The new chat is made; starting again uses it.",
+                       again: again)
         }
     }
 
-    private func forgetPending(keepingChat: Bool = false) {
+    /// A send that did not go through. The first send of a start refused (by the mint, or before it: its chat not made or
+    /// not recorded): nothing started under its key, so it is forgotten, and the form can be changed and sent again; a new
+    /// chat made for it stays kept. A check again refused: the first send may have started the agent, so the start stays
+    /// as it was, to be checked again under its own key, never replaced by a new one.
+    private func notThrough(_ message: String, again: Bool) {
+        if again {
+            checkProblem = message
+            phase = .unconfirmed
+        } else {
+            forgetPending()
+            phase = .failed(message)
+        }
+    }
+
+    private func forgetPending() {
         pending = nil
         guard let ledger, let account else { return }
-        ledger.forget(account: account, sessionId: sessionId, ticketId: ticket?.id, keepingChat: keepingChat)
-        keptChat = ledger.entry(account: account, sessionId: sessionId, ticketId: ticket?.id)?.chat
+        ledger.forget(account: account, sessionId: sessionId, ticketId: ticket?.id)
+        if ticket == nil { keptChat = ledger.chat(account: account, sessionId: sessionId) }
     }
 
     /// After a failure: change something and try again.
@@ -401,6 +487,11 @@ final class AgentStartModel: ObservableObject {
         case .notAllowed?: return "This account can't make chats right now. Nothing started."
         default: return "The new chat could not be made, so nothing started. Try again: it makes that same chat, never a second one."
         }
+    }
+
+    /// Under an unconfirmed start whose check again did not go through.
+    static func checkProblemMessage(_ problem: String) -> String {
+        "Checking again did not go through: \(problem) The first try may have started it, so this start stays as it is; check again later."
     }
 
     /// The web's names for efforts.
@@ -521,6 +612,12 @@ struct AgentStartForm: View {
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .accessibilityIdentifier("pocket.agent.name")
+            if let note = model.nameNote {
+                Text(note)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("pocket.agent.nameNote")
+            }
         } header: {
             Text("Its name in the room")
         }
@@ -539,6 +636,12 @@ struct AgentStartForm: View {
                     }
                 }
                 .accessibilityIdentifier("pocket.agent.job")
+            if model.jobTooLong {
+                Text("The mint takes a job of up to 20,000 characters; this one has \(model.job.trimmingCharacters(in: .whitespacesAndNewlines).utf16.count).")
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier("pocket.agent.jobTooLong")
+            }
         } header: {
             Text("Its job")
         } footer: {
@@ -557,6 +660,12 @@ struct AgentStartForm: View {
                 Text(AgentStartModel.unconfirmedMessage)
                     .font(.footnote)
                     .foregroundStyle(.orange)
+                if let problem = model.checkProblem {
+                    Text(AgentStartModel.checkProblemMessage(problem))
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                        .accessibilityIdentifier("pocket.agent.checkProblem")
+                }
                 Button {
                     Task { await model.checkAgain() }
                 } label: {
