@@ -210,7 +210,7 @@ final class RoomSearchModel: ObservableObject {
             author: result.message?.authorName,
             isHuman: result.message?.isHuman ?? false,
             date: result.message.flatMap { ParsedSessionTimestamp($0.timestamp).date },
-            snippet: result.snippet
+            snippet: RoomSearchPresentationState.plainSnippet(result.snippet)
         )
     }
 }

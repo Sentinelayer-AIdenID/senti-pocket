@@ -136,6 +136,28 @@ public struct RoomSearchPresentationState: Equatable, Sendable {
         return (matchedPeople, matchedArtifacts)
     }
 
+    /// A snippet as it reads, not as it was typed: one line, without markdown's marks. **Bold** is bold, a link
+    /// is its words, and code fences, a table's divider row and pipes, headings', quotes' and lists' marks are gone.
+    public static func plainSnippet(_ snippet: String) -> String {
+        var lines: [String] = []
+        for raw in snippet.components(separatedBy: .newlines) {
+            var line = raw.trimmingCharacters(in: .whitespaces)
+            // A fence's own line, a table's divider row and a horizontal rule say nothing.
+            if line.hasPrefix("```") || line.hasPrefix("~~~") { continue }
+            if line.count >= 3, line.allSatisfy({ "|-: ".contains($0) }) || line.allSatisfy({ "*_ ".contains($0) }) { continue }
+            line = line.replacingOccurrences(of: #"^(>\s?)+"#, with: "", options: .regularExpression)
+            line = line.replacingOccurrences(of: #"^(#{1,6}\s+|[-*+]\s+(\[[ xX]\]\s+)?|\d+[.)]\s+)"#, with: "",
+                                             options: .regularExpression)
+            line = line.replacingOccurrences(of: "|", with: " ")
+            let inline = try? AttributedString(markdown: line,
+                                               options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
+            lines.append(inline.map { String($0.characters) } ?? line)
+        }
+        return lines.joined(separator: " ")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+    }
+
     /// The text before the match, the match, and the text after it (case-insensitive, first match), so a list can
     /// mark what was found; nil when the query is not in the snippet.
     public static func highlight(_ snippet: String, query: String) -> (before: String, match: String, after: String)? {

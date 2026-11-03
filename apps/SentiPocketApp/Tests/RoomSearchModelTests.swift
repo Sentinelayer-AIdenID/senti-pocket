@@ -91,6 +91,12 @@ final class RoomSearchModelTests: XCTestCase {
         XCTFail("timed out waiting for: \(description)")
     }
 
+    /// A match's row reads as text: the snippet's markdown marks are not shown.
+    func test_a_match_row_shows_the_snippet_without_markdown() {
+        let row = RoomSearchModel.row(result(7, "**Deploy** is `green`"))
+        XCTAssertEqual(row.snippet, "Deploy is green")
+    }
+
     func test_a_short_query_asks_for_more_and_sends_nothing() {
         let search = ScriptedSearch([])
         let model = RoomSearchModel(sessionId: "room_1", searcher: search, onReauthenticationRequired: {})

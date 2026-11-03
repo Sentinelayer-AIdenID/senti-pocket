@@ -3,6 +3,26 @@ import XCTest
 @testable import PocketUI
 
 final class RoomSearchPresentationTests: XCTestCase {
+    /// App Store screenshots: a search result showed its message as typed (**, ##, |, backticks).
+    func test_a_snippet_reads_as_text_not_as_markdown() {
+        let cases: [(String, String)] = [
+            ("**Build** is _green_: see [PR 12](https://example.com/12) and `make test`",
+             "Build is green: see PR 12 and make test"),
+            ("## Status" + "\n" + "- one" + "\n" + "- [x] two" + "\n" + "3. three", "Status one two three"),
+            ("```swift" + "\n" + "let x = 1" + "\n" + "```", "let x = 1"),
+            ("| a | b |" + "\n" + "|---|:-:|" + "\n" + "| 1 | 2 |", "a b 1 2"),
+            ("> quoted **text**" + "\n" + "> > deeper", "quoted text deeper"),
+            ("above" + "\n" + "---" + "\n" + "below", "above below"),
+            ("nothing to see here, 3 - 2 = 1", "nothing to see here, 3 - 2 = 1"),
+        ]
+        for (typed, reads) in cases {
+            XCTAssertEqual(RoomSearchPresentationState.plainSnippet(typed), reads, typed)
+        }
+        let plain = RoomSearchPresentationState.plainSnippet("The **deploy** went _green_")
+        XCTAssertEqual(RoomSearchPresentationState.highlight(plain, query: "deploy went")?.match, "deploy went",
+                       "the match is found across what were marks")
+    }
+
     func test_the_first_match_is_marked_whatever_its_case() {
         let parts = RoomSearchPresentationState.highlight("Validation runs on PASTE and on paste", query: " paste ")
         XCTAssertEqual(parts?.before, "Validation runs on ")
