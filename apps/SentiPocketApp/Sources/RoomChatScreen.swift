@@ -132,6 +132,11 @@ struct RoomChatScreen: View {
     private let onReauthenticationRequired: @MainActor () -> Void
     /// The room was renamed here: the room list reads the new name.
     private let onRenamed: @MainActor () -> Void
+    /// This account's OK for what it shares to reach the room's AI agents. The room's box and threads ask in place;
+    /// a call, a ticket's answer and a crash report ask here.
+    private let aiConsent: AIConsent?
+    /// What waits on that answer.
+    @State private var consentHeld: AIConsentHeld?
 
     init(
         route: RoomRoute,
@@ -155,9 +160,12 @@ struct RoomChatScreen: View {
         onRenamed: @escaping @MainActor () -> Void = {},
         savedSummary: String? = nil,
         onRead: @escaping @MainActor (_ sessionId: String, _ through: Int64, _ caughtUp: Bool) -> Void = { _, _, _ in },
+        blocks: BlockList? = nil,
+        aiConsent: AIConsent? = nil,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.route = route
+        self.aiConsent = aiConsent
         self.reader = reader
         self.search = search
         self.ticketsTransport = ticketsTransport
@@ -203,6 +211,10 @@ struct RoomChatScreen: View {
             outboxAccount: RoomSendOutbox.account(token: SessionTokenStore.load()),
             // Off unless this build turns them on (the `SentiEmojiReactions` Info.plist key).
             emojiReactions: RoomEmojiReactions.isEnabled,
+            // Report and Block (App Store guideline 1.2): reports go through the room's own sender, as you.
+            reporter: sender as? any RoomReporting,
+            blocks: blocks,
+            aiConsent: aiConsent,
             onReauthenticationRequired: onReauthenticationRequired
         ))
         // Files go up through the room's own sender (init, complete, the message) and straight to storage for the
@@ -399,6 +411,8 @@ struct RoomChatScreen: View {
             // A turn names the call only when the server said its voice line reads call briefs.
             ringCallId: call?.details?.briefsVoiceLine == true ? call?.doorbell.callId : nil,
             about: call?.details?.reason,
+            // Asked before the call starts (`afterAIConsent`); without it the call posts nothing.
+            mayShareWithAgents: { [aiConsent] in aiConsent?.isGiven ?? true },
             onEnded: { endVoiceRoom() },
             onRecordFailed: { [weak coordinator] failure in coordinator?.show(notice: failure) }
         )
@@ -461,7 +475,35 @@ struct RoomChatScreen: View {
               let partner = call.partner else { return }
         answeredCall = call
         CrashReporter.shared.note("call answered")
-        startVoiceRoom(with: [partner], answering: call)
+        // An agent's call answered before this account said OK: nothing is said to it until you do, and Not now ends
+        // the call.
+        afterAIConsent(roomHasAgents: true, {
+            guard RoomCallDesk.shared.isLive(call.uuid) else {
+                answeredCall = nil
+                return
+            }
+            startVoiceRoom(with: [partner], answering: call)
+        }, onDecline: {
+            RoomCallDesk.shared.voiceRoomEnded(call)
+            answeredCall = nil
+        })
+    }
+
+    /// Runs `action` once this account has said OK to what it shares reaching the room's AI agents (App Store guideline
+    /// 5.1.2(i)), asking first where the room has agents and it has not. Asked `after` a moment when something else
+    /// is leaving the screen (an alert), so the question is never dropped.
+    private func afterAIConsent(roomHasAgents: Bool, after: TimeInterval = 0, _ action: @escaping () -> Void,
+                                onDecline: @escaping () -> Void = {}) {
+        guard let aiConsent, aiConsent.asks(roomHasAgents: roomHasAgents) else {
+            action()
+            return
+        }
+        let held = AIConsentHeld(action, onDecline: onDecline)
+        if after > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + after) { consentHeld = held }
+        } else {
+            consentHeld = held
+        }
     }
 
     /// Contributors and above file and change tickets (the API's `min_role="contributor"`). An unknown role offers
@@ -553,9 +595,12 @@ struct RoomChatScreen: View {
             if voicePoster != nil {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
-                        choosesVoicePartner = true
-                        // Which boxes still run, so the picker offers no box that ended.
-                        Task { await flight.refresh() }
+                        // A call shares what you say with the agents: the first one asks first.
+                        afterAIConsent(roomHasAgents: true) {
+                            choosesVoicePartner = true
+                            // Which boxes still run, so the picker offers no box that ended.
+                            Task { await flight.refresh() }
+                        }
                     } label: {
                         Label("Talk", systemImage: "waveform")
                     }
@@ -707,6 +752,7 @@ struct RoomChatScreen: View {
             })
             .presentationDetents([.medium, .large])
         }
+        .aiConsentPrompt($consentHeld) { coordinator.send(.allowAIAgents) }
         .onDisappear {
             if let voiceRoom { Task { await voiceRoom.hangUp() } }
             coordinator.onFeedback = nil
@@ -784,6 +830,8 @@ struct RoomChatScreen: View {
                         extras: ticketExtras,
                         mint: writesTickets ? ticketMint : nil,
                         startsFiling: ticketsStartFiling,
+                        aiConsent: aiConsent,
+                        roomHasAgents: { [coordinator] in coordinator.roomHasAgents },
                         onOpenMessage: { sequence in
                             // The sheet closes first, then the room goes to the message.
                             showsTickets = false
@@ -900,7 +948,11 @@ struct RoomChatScreen: View {
                 // Once the alert has gone, as a typed send waits a turn: the alert leaving and the new row are never
                 // laid out in one update. Handled only once the room has it: a lost send offers it again next time.
                 DispatchQueue.main.async {
-                    coordinator.sendCrashReport(CrashReportText.message(reports)) { crashes.markHandled(reports) }
+                    // Posted to the room, so its agents read it too: the first send there asks first. Not now leaves
+                    // the reports to be offered again.
+                    afterAIConsent(roomHasAgents: coordinator.roomHasAgents, after: 0.4) {
+                        coordinator.sendCrashReport(CrashReportText.message(reports)) { crashes.markHandled(reports) }
+                    }
                 }
             }
             Button("Not now", role: .cancel) { crashes.markHandled(crashes.unhandled) }
@@ -937,6 +989,8 @@ struct RoomChatScreen: View {
                     assignRoster: ticketAssignRoster,
                     extras: ticketExtras,
                     mint: writesTickets ? ticketMint : nil,
+                    aiConsent: aiConsent,
+                    roomHasAgents: { [coordinator] in coordinator.roomHasAgents },
                     onOpenMessage: { sequence in focus(on: sequence) },
                     onReauthenticationRequired: onReauthenticationRequired
                 )

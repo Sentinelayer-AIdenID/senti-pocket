@@ -69,6 +69,9 @@ final class VoiceRoomCoordinator: ObservableObject {
     private let now: @Sendable () -> Date
     private let sleep: @Sendable (TimeInterval) async -> Void
     private let onEnded: @MainActor () -> Void
+    /// This account said OK to its words reaching the room's AI agents (`AIConsent`, asked before a call starts):
+    /// without it nothing of the call is posted or listened to.
+    private let mayShareWithAgents: @MainActor () -> Bool
     /// The call's record could not be saved after the call screen went: said in the room instead.
     private let onRecordFailed: @MainActor (String) -> Void
 
@@ -160,6 +163,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         finishedAt: Double = VoiceRoomCoordinator.finishedAt,
         ringCallId: String? = nil,
         about: String? = nil,
+        mayShareWithAgents: @escaping @MainActor () -> Bool = { true },
         now: @escaping @Sendable () -> Date = { Date() },
         sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
             try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
@@ -182,6 +186,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         self.endpointer = endpointer
         finishedLine = finishedAt
         self.ringCallId = ringCallId
+        self.mayShareWithAgents = mayShareWithAgents
         self.now = now
         self.sleep = sleep
         self.onEnded = onEnded
@@ -194,6 +199,13 @@ final class VoiceRoomCoordinator: ObservableObject {
     /// Rings the agents (one message that mentions them and opens the call's card), takes the phone's audio and plays
     /// the ring until an agent picks up. Answering an agent's own call there is nothing to ring: the line is open.
     func begin(rings: Bool = true) {
+        // The room asks for the OK before a call starts; a call that got here without it rings nobody and listens to
+        // nothing.
+        guard mayShareWithAgents() else {
+            state.ringStopped = true
+            state.notice = Self.needsConsent
+            return
+        }
         do {
             try audio.activate()
         } catch {
@@ -543,7 +555,7 @@ final class VoiceRoomCoordinator: ObservableObject {
 
     /// `turn` is the turn that just went, when this listening is the moment after it: what you say joins that turn.
     private func startListening(joining turn: SentTurn? = nil) {
-        guard !state.isMuted, state.phase == .ready || state.speaker != nil else { return }
+        guard !state.isMuted, state.phase == .ready || state.speaker != nil, mayShareWithAgents() else { return }
         // Talking while it rings: no need to keep ringing.
         stopRinging()
         if state.speaker != nil {
@@ -723,6 +735,10 @@ final class VoiceRoomCoordinator: ObservableObject {
     }
 
     private func sendTurn(_ text: String, stoppedTalking: Date) async {
+        guard mayShareWithAgents() else {
+            state.notice = Self.needsConsent
+            return
+        }
         // "Bring warden into this call": adding someone is a control, not a turn for the room or the voice line.
         if state.canAdd, let agent = VoiceAddIntent.agent(in: text, among: addable()) {
             state.turns.append(VoiceRoomTurn(id: "you:\(UUID().uuidString.lowercased())", speaker: you, isYou: true,
@@ -946,6 +962,7 @@ final class VoiceRoomCoordinator: ObservableObject {
     }
 
     static let turnLost = "That turn did not reach the room. Say it again."
+    static let needsConsent = "Calls share what you say with the room's AI agents. Hang up, and say OK when the room asks."
 
     static func newClientId() -> String { "voice-" + UUID().uuidString.lowercased() }
 

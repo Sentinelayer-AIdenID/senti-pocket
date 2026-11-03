@@ -56,6 +56,10 @@ public struct RoomChatView: View {
     @State private var renameDraft = ""
     /// A failed message the reader chose to edit: its text goes back into the composer.
     @State private var restoredDraft: RoomComposerRestore?
+    /// Someone the reader chose to block from a message's menu, while the room asks to be sure.
+    @State private var blockingTarget: RoomBlockTarget?
+    /// A send from the room's box, held for the AI consent question.
+    @State private var consentHeld: AIConsentHeld?
 
     /// What the composer's "+" offers besides mentioning: filing a ticket and searching, where the room has them.
     private let composerActions: RoomComposerActions
@@ -108,7 +112,9 @@ public struct RoomChatView: View {
                 onCancelReply: { replyTarget = nil },
                 onIntent: send,
                 draftKey: state.draftKey,
-                media: media
+                media: media,
+                asksAIConsent: state.asksAIConsent,
+                askAIConsent: { consentHeld = $0 }
             ) { text in
                 if let target = replyTarget {
                     send(target.replyIntent(text))
@@ -130,6 +136,10 @@ public struct RoomChatView: View {
                     mentionCandidates: state.mentionCandidates,
                     canReact: state.canReact,
                     actions: composerActions,
+                    canReport: state.canReport,
+                    canBlock: state.canBlock,
+                    report: state.report,
+                    asksAIConsent: state.asksAIConsent,
                     send: send,
                     draft: threadDraft(thread.parent.sequenceId)
                 )
@@ -182,6 +192,17 @@ public struct RoomChatView: View {
                 reactingRow = nil
             }
         }
+        // A report opened from the room; one opened in a thread shows over the thread (`RoomThreadSheet`).
+        .sheet(isPresented: Binding(
+            get: { state.report != nil && state.thread == nil },
+            set: { presented in if !presented { send(.closeReport) } }
+        )) {
+            if let report = state.report {
+                RoomReportSheet(report: report, send: send)
+            }
+        }
+        .roomBlockConfirmation($blockingTarget, send: send)
+        .aiConsentPrompt($consentHeld) { send(.allowAIAgents) }
         .safeAreaInset(edge: .top, spacing: 0) {
             if let notice = state.notice {
                 HStack(spacing: 8) {
@@ -532,6 +553,8 @@ public struct RoomChatView: View {
             canReact: state.canReact,
             canAddEmoji: state.canAddEmoji,
             canReply: state.composer.canPost,
+            canReport: state.canReport,
+            canBlock: state.canBlock,
             canPin: state.canPin,
             isPinned: state.isPinned(message),
             pinsFull: state.pinned.count >= state.pinLimit,
@@ -555,6 +578,12 @@ public struct RoomChatView: View {
             onOpenLong: { longRow = $0 },
             onReply: { replyTarget = $0 },
             onAddReaction: { reactingRow = $0 },
+            onBlock: { row in
+                // Once the menu that offered it has gone, so the question is never dropped.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    blockingTarget = RoomBlockTarget(actorId: row.authorId, name: row.authorName)
+                }
+            },
             isMinimized: message.isInlineReply && message.replyToSequenceId.map { minimizedThreads.contains($0) } == true,
             onToggleMinimized: {
                 guard let thread = message.replyToSequenceId else { return }
@@ -848,6 +877,9 @@ private struct RoomMessageRowView: View {
     /// The emoji picker is offered.
     var canAddEmoji = false
     var canReply = false
+    /// Someone else's message offers Report and Block.
+    var canReport = false
+    var canBlock = false
     var canPin = false
     var isPinned = false
     /// The room holds as many pins as it can: Pin waits until one is unpinned.
@@ -872,6 +904,8 @@ private struct RoomMessageRowView: View {
     var onReply: (RoomChatMessageRow) -> Void = { _ in }
     /// Open the emoji picker for this row.
     var onAddReaction: (RoomChatMessageRow) -> Void = { _ in }
+    /// Block this row's author (the room asks first).
+    var onBlock: (RoomChatMessageRow) -> Void = { _ in }
     /// A thread's answer shown in the room, minimized to the line over it: what it answers and who replied.
     var isMinimized = false
     var onToggleMinimized: () -> Void = {}
@@ -948,7 +982,12 @@ private struct RoomMessageRowView: View {
             // A checkpoint is a boundary in the room: the same wide break as a change of turn.
             .padding(.vertical, 12)
         case .message:
-            if let call = row.call {
+            if row.hidesAsBlocked {
+                // Someone you blocked: one line in its place, and Show opens this one.
+                RoomBlockedLine(identifier: "pocket.room.blocked.\(row.id)") {
+                    send(.revealBlocked(key: RoomBlocking.revealKey(row)))
+                }
+            } else if let call = row.call {
                 // The call's card answers like a message (Carter, #55058): swipe to reply, its menu, a like, a thread.
                 messageChrome(
                     VStack(alignment: .leading, spacing: 4) {
@@ -1067,7 +1106,7 @@ private struct RoomMessageRowView: View {
         .simultaneousGesture(TapGesture(count: 2).onEnded { showsOptions = true })
         .confirmationDialog("Message options", isPresented: $showsOptions, titleVisibility: .hidden) {
             ForEach(rowOptions) { option in
-                Button(option.title) { perform(option) }
+                Button(option.title, role: option.isDestructive ? .destructive : nil) { perform(option) }
                     .disabled(!option.isEnabled)
             }
         }
@@ -1447,7 +1486,7 @@ private struct RoomMessageRowView: View {
     /// This row's options, for its action row, its long-press menu and its double-tap options.
     private var rowOptions: [RoomRowOption] {
         row.options(canReply: canReply, canReact: canReact, canPin: canPin, isPinned: isPinned, pinsFull: pinsFull,
-                    canEdit: canReply, canAddEmoji: canAddEmoji)
+                    canEdit: canReply, canAddEmoji: canAddEmoji, canReport: canReport, canBlock: canBlock)
     }
 
     private func perform(_ option: RoomRowOption) {
@@ -1457,6 +1496,8 @@ private struct RoomMessageRowView: View {
             onAddReaction(row)
         } else if option.kind == .edit {
             onEdit(row)
+        } else if option.kind == .block {
+            onBlock(row)
         } else if option.kind == .copy {
             copyToPasteboard(row.text)
         } else if let intent = option.intent {
@@ -1480,7 +1521,7 @@ private struct RoomMessageRowView: View {
     /// message it answers.
     private var messageMenu: some View {
         ForEach(rowOptions) { option in
-            Button {
+            Button(role: option.isDestructive ? .destructive : nil) {
                 perform(option)
             } label: {
                 Label(option.title, systemImage: option.symbol)
@@ -1825,10 +1866,21 @@ private struct RoomThreadSheet: View {
     /// What the room's "+" offers, offered here too (Carter, 10-30: "everything I'd have in the chatbox ... inside a
     /// reply too").
     var actions = RoomComposerActions()
+    /// Someone else's reply offers Report and Block.
+    var canReport = false
+    var canBlock = false
+    /// The room's report sheet: one opened here shows over the thread.
+    var report: RoomReportState?
+    /// The first reply in a room with AI agents asks your OK first (`RoomChatPresentationState.asksAIConsent`).
+    var asksAIConsent = false
     let send: (RoomChatIntent) -> Void
     @Binding var draft: String
     /// The reply being answered (a reply to a reply nests under it); nil answers the message.
     @State private var answering: RoomChatReplyRow?
+    /// Someone the reader chose to block from a reply's menu, while the thread asks to be sure.
+    @State private var blocking: RoomBlockTarget?
+    /// A reply held for the AI consent question.
+    @State private var consentHeld: AIConsentHeld?
     /// "File as a ticket": the reply goes to the room's ticket keeper as a ticket request.
     @State private var ticketMode = false
     @FocusState private var isReplying: Bool
@@ -1885,11 +1937,17 @@ private struct RoomThreadSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(thread.parent.authorName)
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(thread.parent.isHuman ? PocketPalette.listening : PocketPalette.textPrimary)
-                        if thread.parent.filePartOf == nil || showsFileParts {
-                            ChatMarkdownView(text: thread.parent.text, ownHandles: ownHandles)
+                        if thread.parent.hidesAsBlocked {
+                            RoomBlockedLine(identifier: "pocket.thread.blocked.parent") {
+                                send(.revealBlocked(key: RoomBlocking.revealKey(thread.parent)))
+                            }
+                        } else {
+                            Text(thread.parent.authorName)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(thread.parent.isHuman ? PocketPalette.listening : PocketPalette.textPrimary)
+                            if thread.parent.filePartOf == nil || showsFileParts {
+                                ChatMarkdownView(text: thread.parent.text, ownHandles: ownHandles)
+                            }
                         }
                     }
                     .padding(12)
@@ -1906,46 +1964,14 @@ private struct RoomThreadSheet: View {
                         Text(failure).font(.footnote).foregroundStyle(PocketPalette.warning)
                     }
                     ForEach(thread.replies.filter { showsFileParts || $0.filePartOf == nil }) { reply in
-                        VStack(alignment: .leading, spacing: 3) {
-                            HStack(spacing: 6) {
-                                Text(reply.authorName)
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(reply.isHuman ? PocketPalette.listening : PocketPalette.textPrimary)
-                                if let date = reply.date {
-                                    Text(date, style: .time).font(.caption).foregroundStyle(PocketPalette.textSecondary)
-                                }
-                                if reply.isEdited {
-                                    Text("edited").font(.caption2).foregroundStyle(PocketPalette.textSecondary)
-                                }
+                        if reply.hidesAsBlocked {
+                            RoomBlockedLine(identifier: "pocket.thread.blocked.\(reply.id)") {
+                                send(.revealBlocked(key: RoomBlocking.revealKey(reply: reply.id)))
                             }
-                            ChatMarkdownView(text: reply.text, ownHandles: ownHandles)
-                            if let views = reply.views {
-                                RoomViewedLine(views: views)
-                            }
+                            .padding(.leading, 12 + CGFloat(reply.depth) * 16)
+                        } else {
+                            replyRow(reply)
                         }
-                        .onAppear { send(.replyOnScreen(id: reply.id, isOnScreen: true)) }
-                        .onDisappear { send(.replyOnScreen(id: reply.id, isOnScreen: false)) }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .overlay(alignment: .topTrailing) {
-                            if readingAloudId == RoomReadAloud.reply(reply.id) {
-                                RoomReadingAloudMark { send(.stopReadingAloud) }
-                            }
-                        }
-                        .contentShape(Rectangle())
-                        .contextMenu { replyMenu(reply) }
-                        .gesture(DragGesture(minimumDistance: 30).onEnded { value in
-                            // Swipe right to answer this reply, as in Messages.
-                            if thread.canReply, value.translation.width > 60,
-                               abs(value.translation.width) > abs(value.translation.height) * 1.8 {
-                                answer(reply)
-                            }
-                        })
-                        .padding(.leading, 12)
-                        .overlay(alignment: .leading) {
-                            Rectangle().fill(PocketPalette.separator).frame(width: 2)
-                        }
-                        .padding(.leading, CGFloat(reply.depth) * 16)
-                        .accessibilityAction(named: "Reply") { answer(reply) }
                     }
                     ForEach(thread.pending) { pending in
                         RoomPendingRowView(
@@ -1968,6 +1994,16 @@ private struct RoomThreadSheet: View {
                     send(.editReply(sequenceId: thread.parent.sequenceId, replyId: reply.id, text: text))
                 }
             }
+            .sheet(isPresented: Binding(
+                get: { report != nil },
+                set: { presented in if !presented { send(.closeReport) } }
+            )) {
+                if let report {
+                    RoomReportSheet(report: report, send: send)
+                }
+            }
+            .roomBlockConfirmation($blocking, send: send)
+            .aiConsentPrompt($consentHeld) { send(.allowAIAgents) }
             .navigationTitle(thread.replies.count == 1 ? "1 reply" : "\(thread.replies.count) replies")
             .navigationBarTitleDisplayModeInlineIfAvailable()
             .toolbar {
@@ -2076,22 +2112,7 @@ private struct RoomThreadSheet: View {
                             .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                             .accessibilityIdentifier("pocket.thread.composer")
                         Button {
-                            let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-                            guard canSendReply else { return }
-                            let text = ticketMode ? RoomComposerDraft.ticketRequest(typed) : typed
-                            ticketMode = false
-                            if let answering {
-                                send(.sendReplyToReply(sequenceId: thread.parent.sequenceId, replyId: answering.id, text: text))
-                            } else {
-                                send(.sendReply(sequenceId: thread.parent.sequenceId, text: text))
-                            }
-                            replySent = typed
-                            replyWrittenBack.sent()
-                            emptyComposer($draft) { replyWrittenBack.clears($0) }
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                                if replySent == typed { replySent = nil }
-                            }
-                            answering = nil
+                            sendReply()
                         } label: {
                             Image(systemName: "arrow.up.circle.fill").font(.system(size: 32))
                         }
@@ -2111,8 +2132,77 @@ private struct RoomThreadSheet: View {
         }
     }
 
+    /// One reply in the thread, with its menu and swipe to answer.
+    private func replyRow(_ reply: RoomChatReplyRow) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Text(reply.authorName)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(reply.isHuman ? PocketPalette.listening : PocketPalette.textPrimary)
+                if let date = reply.date {
+                    Text(date, style: .time).font(.caption).foregroundStyle(PocketPalette.textSecondary)
+                }
+                if reply.isEdited {
+                    Text("edited").font(.caption2).foregroundStyle(PocketPalette.textSecondary)
+                }
+            }
+            ChatMarkdownView(text: reply.text, ownHandles: ownHandles)
+            if let views = reply.views {
+                RoomViewedLine(views: views)
+            }
+        }
+        .onAppear { send(.replyOnScreen(id: reply.id, isOnScreen: true)) }
+        .onDisappear { send(.replyOnScreen(id: reply.id, isOnScreen: false)) }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .topTrailing) {
+            if readingAloudId == RoomReadAloud.reply(reply.id) {
+                RoomReadingAloudMark { send(.stopReadingAloud) }
+            }
+        }
+        .contentShape(Rectangle())
+        .contextMenu { replyMenu(reply) }
+        .gesture(DragGesture(minimumDistance: 30).onEnded { value in
+            // Swipe right to answer this reply, as in Messages.
+            if thread.canReply, value.translation.width > 60,
+               abs(value.translation.width) > abs(value.translation.height) * 1.8 {
+                answer(reply)
+            }
+        })
+        .padding(.leading, 12)
+        .overlay(alignment: .leading) {
+            Rectangle().fill(PocketPalette.separator).frame(width: 2)
+        }
+        .padding(.leading, CGFloat(reply.depth) * 16)
+        .accessibilityAction(named: "Reply") { answer(reply) }
+    }
+
     private var canSendReply: Bool {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && thread.replyLengthProblem(for: draft) == nil
+    }
+
+    /// Sends what is in the reply box. In a room with AI agents the first reply asks your OK first, before the box
+    /// empties: Not now leaves what you wrote, and who it answers, as they were.
+    private func sendReply(allowed: Bool = false) {
+        let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard canSendReply else { return }
+        if asksAIConsent, !allowed {
+            consentHeld = AIConsentHeld { sendReply(allowed: true) }
+            return
+        }
+        let text = ticketMode ? RoomComposerDraft.ticketRequest(typed) : typed
+        ticketMode = false
+        if let answering {
+            send(.sendReplyToReply(sequenceId: thread.parent.sequenceId, replyId: answering.id, text: text))
+        } else {
+            send(.sendReply(sequenceId: thread.parent.sequenceId, text: text))
+        }
+        replySent = typed
+        replyWrittenBack.sent()
+        emptyComposer($draft) { replyWrittenBack.clears($0) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            if replySent == typed { replySent = nil }
+        }
+        answering = nil
     }
 
     /// The same choices as a message in the room: reply, react, listen, copy.
@@ -2158,6 +2248,25 @@ private struct RoomThreadSheet: View {
             copyToPasteboard(reply.text)
         } label: {
             Label("Copy text", systemImage: "doc.on.doc")
+        }
+        if let target = reply.reportTarget(inThread: thread.parent.sequenceId) {
+            if canReport {
+                Button {
+                    send(.openReport(target))
+                } label: {
+                    Label("Report…", systemImage: "exclamationmark.bubble")
+                }
+            }
+            if canBlock, !reply.isAuthorBlocked {
+                Button(role: .destructive) {
+                    // Once the menu has gone, so the question is never dropped.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        blocking = RoomBlockTarget(actorId: reply.authorId, name: reply.authorName)
+                    }
+                } label: {
+                    Label("Block \(reply.authorName)", systemImage: "hand.raised")
+                }
+            }
         }
     }
 }
@@ -2257,6 +2366,10 @@ private struct RoomComposerBar: View {
     var draftKey: String?
     /// Photos, videos and files for the next message, where the room takes them.
     var media: RoomMediaBoard?
+    /// The first send in a room with AI agents asks your OK first (`RoomChatPresentationState.asksAIConsent`); the
+    /// room asks, and the send goes after OK.
+    var asksAIConsent = false
+    var askAIConsent: (AIConsentHeld) -> Void = { _ in }
     let send: (String) -> Void
     @State private var draft = ""
     /// The text just sent, for a moment: the keyboard can write it back into the emptied box (dictation, a pending
@@ -2304,8 +2417,14 @@ private struct RoomComposerBar: View {
     /// so the emptied box, the new row and the scroll to it are not all laid out in one update (every freeze on 10-30
     /// began at a send). The text stays saved on the phone for a few seconds more, long enough to be on its way: if
     /// the app is closed before then, it is back in the box at the next launch.
-    private func sendDraft() {
+    private func sendDraft(allowed: Bool = false) {
         let text = outgoing
+        // In a room with AI agents the first send asks your OK, before the box empties: Not now keeps what you wrote,
+        // your files and who you were answering, as they were.
+        if asksAIConsent, !allowed, !text.isEmpty || media?.tray.isEmpty == false {
+            askAIConsent(AIConsentHeld { sendDraft(allowed: true) })
+            return
+        }
         if !text.isEmpty || media?.tray.isEmpty == false { onIntent(.sendTapped(characters: text.count)) }
         if let media, !media.tray.isEmpty {
             sendWithMedia(media, text: text)

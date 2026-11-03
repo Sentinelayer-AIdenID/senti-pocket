@@ -4,6 +4,9 @@ import SwiftUI
 @MainActor
 struct WhisperModelSettingsView: View {
     @ObservedObject var coordinator: WhisperModelProvisioningCoordinator
+    /// The signed-in account's blocks and AI consent, under Account.
+    let blocks: BlockList?
+    let aiConsent: AIConsent?
     let onSignOut: (@MainActor () -> Void)?
 
     @Environment(\.dismiss) private var dismiss
@@ -14,9 +17,13 @@ struct WhisperModelSettingsView: View {
 
     init(
         coordinator: WhisperModelProvisioningCoordinator,
+        blocks: BlockList? = nil,
+        aiConsent: AIConsent? = nil,
         onSignOut: (@MainActor () -> Void)? = nil
     ) {
         _coordinator = ObservedObject(wrappedValue: coordinator)
+        self.blocks = blocks
+        self.aiConsent = aiConsent
         self.onSignOut = onSignOut
     }
 
@@ -242,6 +249,7 @@ struct WhisperModelSettingsView: View {
     private var accountSection: some View {
         if let onSignOut {
             Section("Account") {
+                AccountSafetyRows(blocks: blocks, aiConsent: aiConsent)
                 Button("Sign out on this device", role: .destructive) {
                     dismiss()
                     onSignOut()

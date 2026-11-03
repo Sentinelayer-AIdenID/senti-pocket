@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import PocketSyncClient
 import PocketUI
@@ -50,6 +51,19 @@ final class RoomChatCoordinator: ObservableObject {
     /// account signing in on this phone never sees or sends it (warden, #298 review). Nil keeps none.
     private let draftKey: String?
     private var identityRequested = false
+
+    // Report and Block (App Store guideline 1.2), and the AI consent (5.1.2(i)).
+    private let reporter: (any RoomReporting)?
+    /// This account's blocks, shared by every room and Settings.
+    private let blocks: BlockList?
+    /// This account's OK for what it sends to reach a room's AI agents.
+    private let aiConsent: AIConsent?
+    private var report: RoomReportState?
+    /// Messages and replies from someone you blocked that you chose to see (`RoomBlocking.revealKey`), while the room
+    /// is open.
+    private var revealedBlocked: Set<String> = []
+    /// A block or unblock elsewhere (another room, Settings), or the consent given or withdrawn, shows here at once.
+    private var safetyWatch: Set<AnyCancellable> = []
 
     // Replies and reactions (GET /actions projection), and the open thread.
     private let actionSender: (any RoomActionSending)?
@@ -260,9 +274,15 @@ final class RoomChatCoordinator: ObservableObject {
         outbox: RoomSendOutbox? = nil,
         outboxAccount: String? = nil,
         emojiReactions: Bool = false,
+        reporter: (any RoomReporting)? = nil,
+        blocks: BlockList? = nil,
+        aiConsent: AIConsent? = nil,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.emojiReactions = emojiReactions
+        self.reporter = reporter
+        self.blocks = blocks
+        self.aiConsent = aiConsent
         self.outbox = outbox
         self.attachmentFetcher = attachmentFetcher
         self.previewStore = previewStore
@@ -335,6 +355,13 @@ final class RoomChatCoordinator: ObservableObject {
                 onChange: { [weak self] in self?.publish() }
             )
         }
+        // Published before the new value is set: the room redraws on the next turn, with it.
+        blocks?.$actorIds.dropFirst().sink { [weak self] _ in
+            Task { @MainActor in self?.publish() }
+        }.store(in: &safetyWatch)
+        aiConsent?.$givenAt.dropFirst().sink { [weak self] _ in
+            Task { @MainActor in self?.publish() }
+        }.store(in: &safetyWatch)
     }
 
     // MARK: - Lifecycle
@@ -499,8 +526,69 @@ final class RoomChatCoordinator: ObservableObject {
             receiptsTracker?.setOnScreen(target, isOnScreen)
         case .attachmentAppeared(let attachmentId):
             loadPreview(attachmentId)
+        case .openReport(let target):
+            guard reporter != nil else { return }
+            report = RoomReportState(target: target)
+            publish()
+        case .sendReport(let reason, let note):
+            sendReport(reason: reason, note: note)
+        case .closeReport:
+            report = nil
+            publish()
+        case .block(let target):
+            blocks?.block(target)
+            publish()
+        case .revealBlocked(let key):
+            revealedBlocked.insert(key)
+            publish()
+        case .allowAIAgents:
+            aiConsent?.grant()
+            publish()
         }
     }
+
+    // MARK: - Report, Block and the AI consent
+
+    /// Sends the open report (`POST /api/v1/sessions/{id}/reports`). When it does not go (offline, or the API without
+    /// the route yet) the sheet says it couldn't be sent right now, and keeps the reason and note to send again.
+    private func sendReport(reason: RoomReportReason, note: String) {
+        guard let reporter, let open = report, open.phase != .sending, open.phase != .sent else { return }
+        report?.phase = .sending
+        publish()
+        let request = RoomReportRequest(target: open.target, reason: reason, note: note)
+        let sessionId = self.sessionId
+        Task { [weak self] in
+            var phase = RoomReportState.Phase.sent
+            do {
+                try await reporter.report(sessionId: sessionId, request)
+            } catch RoomSendError.reauthenticationRequired {
+                phase = .failed
+                self?.onReauthenticationRequired()
+            } catch {
+                phase = .failed
+            }
+            guard let self, self.report?.target == open.target else { return }
+            self.report?.phase = phase
+            self.publish()
+        }
+    }
+
+    /// The room has AI agents, as far as the phone can tell: one in its presence (agents and boxes are marked there,
+    /// as on the people list), or one that wrote a message or a reply in what is loaded.
+    var roomHasAgents: Bool {
+        if receiptsTracker?.presence?.participants.contains(where: { !$0.isHuman && !$0.id.isEmpty }) == true { return true }
+        if timeline.messages.contains(where: { $0.kind == .message && !$0.isHuman && !$0.authorId.isEmpty }) { return true }
+        return inlineReplies.values.contains { !$0.isHuman } || threadReplies.contains { !$0.isHuman }
+    }
+
+    /// A send here asks first (`RoomChatPresentationState.asksAIConsent`): the room has agents, and this account has
+    /// not said OK.
+    private var asksAIConsent: Bool {
+        guard let aiConsent, !aiConsent.isGiven else { return false }
+        return aiConsent.asks(roomHasAgents: roomHasAgents)
+    }
+
+    static let consentReason = "Not sent. Edit it and send again to say whether the room's AI agents may read it."
 
     /// Brings a message into view and highlights it: a link, a notification, a search result, a pinned message or a
     /// reply's parent. One further back than the loaded rows is loaded as a window around it in one step, however far
@@ -1253,6 +1341,14 @@ final class RoomChatCoordinator: ObservableObject {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard actionSender != nil, postingRefusedReason == nil, !text.isEmpty else { return }
         let nonce = UUID().uuidString.lowercased()
+        // Never to a room's AI agents without your OK (see `enqueueSend`).
+        guard !asksAIConsent else {
+            pendingReplies.append(PendingReply(nonce: nonce, targetSequenceId: sequenceId, toReply: toReply, text: text,
+                                               status: .failed(reason: Self.consentReason, canRetry: false)))
+            publish()
+            noteReplyFailedOutOfSight(sequenceId)
+            return
+        }
         guard text.unicodeScalars.count <= RoomActionRequest.replyLimit else {
             // The reply box holds this before sending; this is the backstop. The full text is kept (only the row's
             // display is cut), so nothing typed is lost.
@@ -1389,6 +1485,14 @@ final class RoomChatCoordinator: ObservableObject {
     private func enqueueSend(_ raw: String) -> String? {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard sender != nil, postingRefusedReason == nil, !text.isEmpty else { return nil }
+        // Never to a room's AI agents without your OK. The room asks before its box empties; a send that came another
+        // way is kept here, whole, to edit and send again.
+        guard !asksAIConsent else {
+            pending.append(PendingSend(clientId: Self.makeClientId(), text: text,
+                                       status: .failed(reason: Self.consentReason, canRetry: false)))
+            publish()
+            return nil
+        }
         guard text.unicodeScalars.count <= HTTPRoomMessageSender.maximumLength else {
             // The composer refuses this before sending; this is the backstop. The full text is kept (only the row's
             // display is cut), so nothing typed is lost.
@@ -1510,6 +1614,9 @@ final class RoomChatCoordinator: ObservableObject {
         accountId = account.accountId
         ownLogin = account.login
         ownAuthorIds.insert(account.authorId)
+        // Without a verified GitHub login your messages carry the account-bound id: still yours, so never offered to
+        // report or block.
+        if let bound = account.accountBoundAuthorId { ownAuthorIds.insert(bound) }
         publish()
     }
 
@@ -2174,9 +2281,15 @@ final class RoomChatCoordinator: ObservableObject {
                            pinnedMessages[pin.targetSequenceId]]
                 .compactMap { $0 }.max { $0.revision < $1.revision }
             let by = pin.pinnedBy.lowercased().hasPrefix("human-") ? String(pin.pinnedBy.dropFirst("human-".count)) : pin.pinnedBy
+            // A pinned message from someone you blocked shows as their one line, as in the room.
+            let hidden = message.map { message in
+                blocks?.isBlocked(message.authorId) == true
+                    && !revealedBlocked.contains(RoomBlocking.revealKey(message: message.id))
+            } ?? false
             return RoomChatPinned(
                 sequenceId: pin.targetSequenceId,
-                snippet: message.map { Self.pinSnippet($0.text) } ?? "Message #\(pin.targetSequenceId)",
+                snippet: hidden ? RoomBlocking.hiddenLine
+                    : message.map { Self.pinSnippet($0.text) } ?? "Message #\(pin.targetSequenceId)",
                 pinnedBy: by,
                 text: message?.text ?? "",
                 board: message.flatMap { message in
@@ -2262,7 +2375,8 @@ final class RoomChatCoordinator: ObservableObject {
                         isEdited: reply.isEdited,
                         views: views(of: reply.id, at: reply.revision, author: viewAuthor(reply.authorId, isHuman: reply.isHuman)),
                         authorHandle: reply.isHuman ? String(reply.authorId.dropFirst("human-".count)) : reply.authorId,
-                        parentReplyId: reply.targetActionId
+                        parentReplyId: reply.targetActionId,
+                        authorId: reply.authorId
                     )
                 },
                 pending: pendingReplies.filter { $0.targetSequenceId == sequence }.map {
@@ -2318,7 +2432,18 @@ final class RoomChatCoordinator: ObservableObject {
             expandedRepeats: expandedRepeats,
             files: placedFiles?.cards ?? [:],
             fileParts: placedFiles?.parts ?? [:],
-            draftKey: draftKey
+            draftKey: draftKey,
+            blockedAuthorIds: blocks?.actorIds ?? [],
+            revealedBlocked: revealedBlocked,
+            canReport: reporter != nil && !failureIsTerminal,
+            canBlock: blocks != nil,
+            report: report.map { open in
+                var shown = open
+                shown.canBlock = blocks != nil
+                shown.authorIsBlocked = blocks?.isBlocked(open.target.authorId) == true
+                return shown
+            },
+            asksAIConsent: asksAIConsent
         )
         summarizeNextThread(replyInputs, messages: inputs)
     }

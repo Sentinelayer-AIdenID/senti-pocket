@@ -346,6 +346,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
                       callScreen: FakeCallScreen? = nil,
                       poster: any VoiceRoomPosting, endpointer: (any VoiceEndpointing)? = nil,
                       finishedAt: Double = VoiceRoomCoordinator.finishedAt,
+                      mayShareWithAgents: @escaping @MainActor () -> Bool = { true },
                       onEnded: @escaping @MainActor () -> Void = {},
                       onRecordFailed: @escaping @MainActor (String) -> Void = { _ in }) -> VoiceRoomCoordinator {
         let clock = self.clock
@@ -362,6 +363,7 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
             poster: poster,
             endpointer: endpointer,
             finishedAt: finishedAt,
+            mayShareWithAgents: mayShareWithAgents,
             now: { clock.now },
             // Time moves only when a test moves it; the pause watcher just polls.
             sleep: { _ in try? await Task.sleep(nanoseconds: 1_000_000) },
@@ -394,10 +396,11 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
     /// A one-agent call, hands-free and listening, with its microphone.
     private func listeningCall(_ listener: FakeListener, _ speaker: FakeSpeaker, _ poster: any VoiceRoomPosting,
                                endpointer: (any VoiceEndpointing)? = nil,
-                               finishedAt: Double = VoiceRoomCoordinator.finishedAt) async
+                               finishedAt: Double = VoiceRoomCoordinator.finishedAt,
+                               mayShareWithAgents: @escaping @MainActor () -> Bool = { true }) async
         -> (VoiceRoomCoordinator, FakeMicrophone) {
         let room = room(with: ["pocket-forge"], listener: listener, speaker: speaker, audio: FakeAudio(), poster: poster,
-                        endpointer: endpointer, finishedAt: finishedAt)
+                        endpointer: endpointer, finishedAt: finishedAt, mayShareWithAgents: mayShareWithAgents)
         room.begin(rings: false)
         await until("listening") { listener.partial != nil }
         return (room, FakeMicrophone(room: room, clock: clock))
@@ -1426,6 +1429,43 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         await until("the notice clears") { room.state.notice == nil }
         await room.hangUp()
     }
+
+    /// Calls are covered by the same AI consent as typed messages (App Store guideline 5.1.2(i)): the room asks before
+    /// a call starts, and a call that got here without it rings nobody, listens to nothing and posts no turn.
+    func test_a_call_without_the_ai_consent_rings_nobody_and_posts_no_turn() async {
+        let consent = ConsentFlag(given: false)
+        let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), poster = FakePoster()
+        let refused = VoiceRoomCoordinator(
+            sessionId: "room_1", with: ["review-agent"], you: "me", ownAuthorIds: ["human-me"],
+            listener: listener, speaker: speaker, audio: audio, poster: poster,
+            mayShareWithAgents: { consent.given },
+            now: { [clock] in clock.now }, sleep: { _ in try? await Task.sleep(nanoseconds: 1_000_000) }
+        )
+        refused.begin()
+        refused.send(.toggleTalk)
+        await settle()
+        XCTAssertTrue(poster.starts.isEmpty, "nobody was rung")
+        XCTAssertEqual(listener.starts, 0, "nothing was listened to")
+        XCTAssertFalse(audio.active)
+        XCTAssertEqual(refused.state.notice, VoiceRoomCoordinator.needsConsent)
+
+        // Given, the call goes; taken back mid-call, the next turn is not posted.
+        consent.given = true
+        let (room, microphone) = await listeningCall(listener, speaker, poster, mayShareWithAgents: { consent.given })
+        consent.given = false
+        microphone.loud(for: 0.4)
+        listener.say("Ship it tonight")
+        microphone.quiet(for: VoiceRoomCoordinator.pauseEndsTurn + 0.1)
+        await until("refused") { room.state.notice == VoiceRoomCoordinator.needsConsent }
+        XCTAssertTrue(poster.turns.isEmpty, "no turn reached the room")
+        await room.hangUp()
+    }
+}
+
+@MainActor
+private final class ConsentFlag {
+    var given: Bool
+    init(given: Bool) { self.given = given }
 }
 
 

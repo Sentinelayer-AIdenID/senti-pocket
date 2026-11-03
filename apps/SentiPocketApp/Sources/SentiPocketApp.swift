@@ -222,6 +222,12 @@ private struct AuthenticatedRootView: View {
     /// What waits on your decision across your rooms (ticket 931e1d2e).
     @StateObject private var waiting: WaitingOnYouCoordinator
     @State private var presentsWaiting = false
+    /// Who this account blocked, for every room and Settings (App Store guideline 1.2).
+    @StateObject private var blocks: BlockList
+    /// This account's OK for what it sends to reach a room's AI agents (App Store guideline 5.1.2(i)).
+    @StateObject private var aiConsent: AIConsent
+    /// An answer from Waiting on you, held for that OK.
+    @State private var waitingConsentHeld: AIConsentHeld?
     @Environment(\.scenePhase) private var rootScenePhase
     @ObservedObject private var whisperModelCoordinator: WhisperModelProvisioningCoordinator
     @ObservedObject private var incomingLinks: IncomingLinkInbox
@@ -348,6 +354,11 @@ private struct AuthenticatedRootView: View {
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
         )
         _notifications = StateObject(wrappedValue: notifications)
+        // Both belong to the account signed in now: another account signing in on this phone gets its own.
+        let account = RoomSendOutbox.account(token: SessionTokenStore.load())
+        _blocks = StateObject(wrappedValue: BlockList(account: account, store: .standard,
+                                                      client: HTTPBlockListClient(apiBaseURL: apiURL, account: account)))
+        _aiConsent = StateObject(wrappedValue: AIConsent(account: account))
         _callLog = StateObject(wrappedValue: CallLogCoordinator(
             transport: transport,
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
@@ -547,13 +558,21 @@ private struct AuthenticatedRootView: View {
         }
         .sheet(isPresented: $presentsWaiting) {
             WaitingOnYouView(state: waiting.state, send: { intent in
+                // An answer goes to the room that asked, where its agents read it: the first asks this account's OK.
+                if case .answer = intent, aiConsent.asks(roomHasAgents: true) {
+                    waitingConsentHeld = AIConsentHeld { _ = waiting.send(intent) }
+                    return
+                }
                 guard let link = waiting.send(intent) else { return }
                 presentsWaiting = false
                 open(link)
             }, onDone: { presentsWaiting = false })
+            .aiConsentPrompt($waitingConsentHeld) { aiConsent.grant() }
         }
         .onChange(of: rootScenePhase) { phase in
             if phase == .active { notifications.startPolling() } else { notifications.stopPolling() }
+            // Blocks made on the web, or here while offline, catch up when Pocket comes back.
+            if phase == .active { Task { await blocks.sync() } }
             if phase == .active { waiting.startPolling() } else { waiting.stopPolling() }
         }
         .onChange(of: incomingLinks.revision) { _ in openPendingLinkIfReady() }
@@ -563,6 +582,8 @@ private struct AuthenticatedRootView: View {
         .sheet(isPresented: $presentsSettings) {
             WhisperModelSettingsView(
                 coordinator: whisperModelCoordinator,
+                blocks: blocks,
+                aiConsent: aiConsent,
                 onSignOut: {
                     presentsSettings = false
                     onSignOut()
@@ -594,6 +615,7 @@ private struct AuthenticatedRootView: View {
             )
             sessions.start()
             notifications.startPolling()
+            Task { await blocks.sync() }
             // Waiting on you is read from sign-in on, not only once the app comes back to the front (warden, #270).
             waiting.startPolling()
             // Apple push: a tap opens its room at the message; the room on screen gets no banner.
@@ -796,6 +818,8 @@ private struct AuthenticatedRootView: View {
             onRead: { sessionId, sequence, caughtUp in
                 sessions.noteRead(sessionId: sessionId, through: sequence, caughtUp: caughtUp)
             },
+            blocks: blocks,
+            aiConsent: aiConsent,
             onReauthenticationRequired: invalidateProtectedAuthentication
         )
     }

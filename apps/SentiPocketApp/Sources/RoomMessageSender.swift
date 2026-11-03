@@ -144,6 +144,13 @@ struct SignedInAccount: Equatable, Sendable {
         self.accountId = id.isEmpty ? nil : id.lowercased()
         login = username.isEmpty ? nil : username
     }
+
+    /// The author id the API writes your messages under when the account has no verified GitHub login: bound to the
+    /// account, `human-g.<account id as hex>` (sentinelayer-api #1105). Nil without an account id.
+    var accountBoundAuthorId: String? {
+        guard let accountId, let id = UUID(uuidString: accountId) else { return nil }
+        return "human-g." + id.uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+    }
 }
 
 protocol AccountIdentityProviding: Sendable {
