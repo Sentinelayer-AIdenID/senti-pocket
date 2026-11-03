@@ -5,6 +5,8 @@ import SwiftUI
 struct WhisperModelSettingsView: View {
     @ObservedObject var coordinator: WhisperModelProvisioningCoordinator
     let onSignOut: (@MainActor () -> Void)?
+    /// Offers "Delete account" under Account once the server says it can.
+    let accountDeletion: AccountDeletionCoordinator?
 
     @Environment(\.dismiss) private var dismiss
     @State private var presentsPicker = false
@@ -14,10 +16,12 @@ struct WhisperModelSettingsView: View {
 
     init(
         coordinator: WhisperModelProvisioningCoordinator,
-        onSignOut: (@MainActor () -> Void)? = nil
+        onSignOut: (@MainActor () -> Void)? = nil,
+        accountDeletion: AccountDeletionCoordinator? = nil
     ) {
         _coordinator = ObservedObject(wrappedValue: coordinator)
         self.onSignOut = onSignOut
+        self.accountDeletion = accountDeletion
     }
 
     var body: some View {
@@ -247,6 +251,9 @@ struct WhisperModelSettingsView: View {
                     onSignOut()
                 }
                 .accessibilityIdentifier("settings.account.sign-out")
+                if let accountDeletion {
+                    AccountDeletionRow(coordinator: accountDeletion, onSignOut: onSignOut)
+                }
             }
         }
     }
