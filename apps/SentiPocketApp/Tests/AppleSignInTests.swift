@@ -65,7 +65,7 @@ final class AppleSignInTests: XCTestCase {
         XCTAssertFalse(AppleSignInSetting.isEnabled(in: ["SentiAppleSignIn": NSNumber(value: 1)]))
         XCTAssertFalse(AppleSignInSetting.isEnabled(in: [:]))
         XCTAssertFalse(AppleSignInSetting.isEnabled(in: nil))
-        XCTAssertFalse(AppleSignInSetting.isEnabled(in: Bundle.main.infoDictionary), "this build does not offer it")
+        XCTAssertTrue(AppleSignInSetting.isEnabled(in: Bundle.main.infoDictionary), "this build offers it")
     }
 }
 
