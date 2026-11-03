@@ -196,22 +196,45 @@ private final class Gate: @unchecked Sendable {
     }
 }
 
+/// What happened, in order, across the client and the call-ring steps.
+private final class EventLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String] = []
+
+    var events: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func note(_ event: String) {
+        lock.lock()
+        storage.append(event)
+        lock.unlock()
+    }
+}
+
+private struct RevokeFailure: Error {}
+
 private final class ScriptedDeletionClient: AccountDeleting, @unchecked Sendable {
     private let lock = NSLock()
     private var statusAnswers: [Result<AccountDeletionStatus, AccountDeletionError>]
     private let requestAnswer: Result<AccountDeletionStatus, AccountDeletionError>
     private let cancelAnswer: Result<Void, AccountDeletionError>
     private let requestGate: Gate?
+    private let log: EventLog?
     private var counts: [String: Int] = [:]
 
     init(status: [Result<AccountDeletionStatus, AccountDeletionError>] = [.success(.unrequested)],
          request: Result<AccountDeletionStatus, AccountDeletionError> = .success(.scheduled),
          cancel: Result<Void, AccountDeletionError> = .success(()),
-         requestGate: Gate? = nil) {
+         requestGate: Gate? = nil,
+         log: EventLog? = nil) {
         statusAnswers = status
         requestAnswer = request
         cancelAnswer = cancel
         self.requestGate = requestGate
+        self.log = log
     }
 
     func count(_ call: String) -> Int {
@@ -236,6 +259,7 @@ private final class ScriptedDeletionClient: AccountDeleting, @unchecked Sendable
 
     func requestDeletion() async throws -> AccountDeletionStatus {
         note("request")
+        log?.note("post")
         await requestGate?.wait()
         return try requestAnswer.get()
     }
@@ -363,6 +387,83 @@ final class AccountDeletionCoordinatorTests: XCTestCase {
         await request.value
         XCTAssertEqual(signOuts.count, 0)
         XCTAssertNil(coordinator.scheduled)
+    }
+
+    /// The call-ring steps, logged; either can be made to fail, and the last can be held.
+    private func wireCallRing(_ coordinator: AccountDeletionCoordinator, log: EventLog, beginFails: Bool = false,
+                              finishFails: Bool = false, finishGate: Gate? = nil) {
+        coordinator.beginCallRingRevoke = {
+            log.note("begin")
+            if beginFails { throw RevokeFailure() }
+        }
+        coordinator.finishCallRingRevoke = {
+            await finishGate?.wait()
+            log.note("finish")
+            if finishFails { throw RevokeFailure() }
+        }
+        coordinator.rearmCallRing = { log.note("rearm") }
+    }
+
+    func test_calls_stop_ringing_before_the_request_and_sign_out_follows_its_202() async {
+        let log = EventLog()
+        let coordinator = AccountDeletionCoordinator(client: ScriptedDeletionClient(log: log))
+        wireCallRing(coordinator, log: log)
+        await coordinator.start().value
+
+        await coordinator.requestDeletion(signOut: { log.note("signOut") })
+        XCTAssertEqual(log.events, ["begin", "finish", "post", "signOut"])
+    }
+
+    func test_a_revoke_that_fails_sends_no_request_and_keeps_the_person_signed_in() async {
+        let cases: [(beginFails: Bool, finishFails: Bool, events: [String])] = [
+            (true, false, ["begin", "rearm"]),
+            (false, true, ["begin", "finish", "rearm"])
+        ]
+        for (beginFails, finishFails, events) in cases {
+            let log = EventLog()
+            let client = ScriptedDeletionClient(log: log)
+            let coordinator = AccountDeletionCoordinator(client: client)
+            wireCallRing(coordinator, log: log, beginFails: beginFails, finishFails: finishFails)
+            await coordinator.start().value
+
+            await coordinator.requestDeletion(signOut: { log.note("signOut") })
+            XCTAssertEqual(log.events, events, "no request, no sign-out, and calls ring again")
+            XCTAssertEqual(client.count("request"), 0)
+            XCTAssertEqual(coordinator.request, .failed(AccountDeletionCopy.requestFailure(.unreachable)))
+            XCTAssertNil(coordinator.scheduled)
+        }
+    }
+
+    func test_a_request_that_fails_after_the_revoke_turns_calls_back_on_and_keeps_the_person_signed_in() async {
+        for failure in [AccountDeletionError.unreachable, .notOffered, .signedOut, .failed] {
+            let log = EventLog()
+            let coordinator = AccountDeletionCoordinator(client: ScriptedDeletionClient(
+                request: .failure(failure), log: log))
+            wireCallRing(coordinator, log: log)
+            await coordinator.start().value
+
+            await coordinator.requestDeletion(signOut: { log.note("signOut") })
+            XCTAssertEqual(log.events, ["begin", "finish", "post", "rearm"], "\(failure)")
+            XCTAssertEqual(coordinator.request, .failed(AccountDeletionCopy.requestFailure(failure)))
+            XCTAssertNil(coordinator.scheduled)
+        }
+    }
+
+    func test_a_new_sign_in_while_calls_are_being_stopped_sends_no_request() async {
+        let log = EventLog()
+        let gate = Gate()
+        let client = ScriptedDeletionClient(log: log)
+        let coordinator = AccountDeletionCoordinator(client: client)
+        wireCallRing(coordinator, log: log, finishGate: gate)
+        await coordinator.start().value
+
+        let request = Task { await coordinator.requestDeletion(signOut: { log.note("signOut") }) }
+        await settle { log.events == ["begin"] }
+        await coordinator.start().value
+        gate.open()
+        await request.value
+        XCTAssertEqual(log.events, ["begin", "finish"], "the new sign-in's token never carries the request")
+        XCTAssertEqual(client.count("request"), 0)
     }
 
     func test_a_pending_status_after_sign_in_shows_the_notice_with_its_date() async {
@@ -494,3 +595,61 @@ final class AccountDeletionPendingRefusalTests: XCTestCase {
         XCTAssertEqual(client.count("status"), 1)
     }
 }
+
+#if canImport(CallKit) && canImport(PushKit)
+/// The app's call host, wired as the app wires it: calls stop before the request, and ring again if it fails.
+@MainActor
+final class AccountDeletionCallRingTests: XCTestCase {
+    private func signedInHost() -> DialHost {
+        let host = DialHost(
+            gatewayURL: URL(string: "https://api.pocket.test")!,
+            registryStateStore: DeviceRingRegistryStateStore(
+                storage: TestDeviceRingSecureStorage(),
+                authorityDenyStore: TestDeviceRingAuthorityDenyStore()
+            ),
+            isSignedIn: { true }
+        )
+        host.onLoginCompleted()
+        host.selectSession("room-1")
+        return host
+    }
+
+    func test_calls_are_off_while_the_request_is_on_its_way_and_ring_again_for_the_same_room_if_it_fails() async {
+        let host = signedInHost()
+        let gate = Gate()
+        let client = ScriptedDeletionClient(request: .failure(.unreachable), requestGate: gate)
+        let coordinator = AccountDeletionCoordinator(client: client)
+        SentiPocketApp.wire(coordinator, to: host)
+        await coordinator.start().value
+        XCTAssertEqual(host.callManager?.takesVoipPushes, true)
+        XCTAssertEqual(host.selectedSession, "room-1")
+
+        let signOuts = Calls()
+        let request = Task { await coordinator.requestDeletion(signOut: { signOuts.count += 1 }) }
+        await settle { client.count("request") == 1 }
+        XCTAssertEqual(host.callManager?.takesVoipPushes, false, "calls stop before the request goes")
+        XCTAssertNil(host.selectedSession)
+
+        gate.open()
+        await request.value
+        XCTAssertEqual(signOuts.count, 0)
+        XCTAssertEqual(host.callManager?.takesVoipPushes, true, "still signed in, so calls ring again")
+        XCTAssertEqual(host.selectedSession, "room-1")
+    }
+
+    func test_after_a_202_calls_stay_off_and_the_sign_out_that_follows_has_nothing_left_to_remove() async throws {
+        let host = signedInHost()
+        let coordinator = AccountDeletionCoordinator(client: ScriptedDeletionClient(request: .success(.scheduled)))
+        SentiPocketApp.wire(coordinator, to: host)
+        await coordinator.start().value
+
+        let signOuts = Calls()
+        await coordinator.requestDeletion(signOut: { signOuts.count += 1 })
+        XCTAssertEqual(signOuts.count, 1)
+        XCTAssertEqual(host.callManager?.takesVoipPushes, false)
+        XCTAssertNil(host.selectedSession)
+        try host.beginSignOut()
+        try await host.prepareForSignOut()
+    }
+}
+#endif

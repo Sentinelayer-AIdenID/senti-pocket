@@ -157,6 +157,13 @@ final class AccountDeletionCoordinator: ObservableObject {
     @Published private(set) var pending: AccountDeletionPendingNotice?
     @Published private(set) var scheduled: AccountDeletionScheduled?
 
+    /// Stops this phone's call ringing and marks its registration for removal, as sign-out starts.
+    var beginCallRingRevoke: (() throws -> Void)?
+    /// Removes the call-ring registration while the token still works, as sign-out does.
+    var finishCallRingRevoke: (() async throws -> Void)?
+    /// Turns call ringing back on when the deletion was not requested.
+    var rearmCallRing: (() -> Void)?
+
     private let client: any AccountDeleting
     /// Moves on each sign-in, so an answer for the last account changes nothing.
     private var generation: UInt64 = 0
@@ -208,11 +215,23 @@ final class AccountDeletionCoordinator: ObservableObject {
         refresh()
     }
 
-    /// Asks the server to delete the account. Only its 202 signs this phone out, once the date is set to show.
+    /// Asks the server to delete the account. Calls stop ringing here first, while the token still works (the 202
+    /// ends it); only that 202 signs this phone out, once the date is set to show. Otherwise calls ring again.
     func requestDeletion(signOut: @escaping @MainActor () -> Void) async {
         guard request != .sending else { return }
         request = .sending
         let generation = self.generation
+        do {
+            try beginCallRingRevoke?()
+            try await finishCallRingRevoke?()
+        } catch {
+            guard self.generation == generation else { return }
+            rearmCallRing?()
+            request = .failed(AccountDeletionCopy.requestFailure(.unreachable))
+            return
+        }
+        // Another sign-in since: its token must never carry this request.
+        guard self.generation == generation else { return }
         do {
             let status = try await client.requestDeletion()
             guard self.generation == generation else { return }
@@ -221,6 +240,7 @@ final class AccountDeletionCoordinator: ObservableObject {
             signOut()
         } catch {
             guard self.generation == generation else { return }
+            rearmCallRing?()
             request = .failed(AccountDeletionCopy.requestFailure(error as? AccountDeletionError ?? .failed))
         }
     }

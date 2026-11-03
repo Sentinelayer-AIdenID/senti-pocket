@@ -90,7 +90,26 @@ struct SentiPocketApp: App {
     private func wireRegistrarToLogin() {
         #if !DEBUG
         Self.wire(signIn, to: dialHost, endPushes: { PushRegistrar.shared.signOut() })
+        Self.wire(accountDeletion, to: dialHost)
         #endif
+    }
+
+    /// A deletion request ends this phone's call ringing first, the same way sign-out does, because the server's 202
+    /// revokes the token that removal needs. If the request does not go through, calls ring again for the same room.
+    @MainActor
+    static func wire(_ deletion: AccountDeletionCoordinator, to host: DialHost) {
+        var ringingSession: String?
+        deletion.beginCallRingRevoke = {
+            ringingSession = host.selectedSession
+            try host.beginSignOut()
+        }
+        deletion.finishCallRingRevoke = {
+            try await host.prepareForSignOut()
+        }
+        deletion.rearmCallRing = {
+            host.onLoginCompleted()
+            host.selectSession(ringingSession)
+        }
     }
 
     /// The release wiring above, separate so a test runs it with a test host.
