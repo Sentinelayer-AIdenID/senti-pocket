@@ -60,9 +60,15 @@ enum RoomPreview {
     }
 
     /// The long message's text: made up, the shape of a real design packet.
+    /// `-PocketRoomLongMessageSections N` sets how many sections (52 by default, about 27,000 characters), and
+    /// `-PocketRoomLongMessageNoTables YES` leaves the tables out, to tell what costs what.
     static let longMarkdown: String = {
+        let defaults = UserDefaults.standard
+        let asked = defaults.integer(forKey: "PocketRoomLongMessageSections")
+        let sections = asked > 0 ? asked : 52
+        let tables = !defaults.bool(forKey: "PocketRoomLongMessageNoTables")
         var parts = ["# Design packet: room continuity", "A preview packet. Every section has the same shape."]
-        for section in 1...52 {
+        for section in 1...sections {
             parts.append("## Section \(section): flow and checks")
             parts.append("This section covers the **design** of step \(section), with `check\(section)()` and "
                 + "[its notes](https://example.com/notes/\(section)). @review-agent please confirm, and @alex has the "
@@ -70,7 +76,7 @@ enum RoomPreview {
             parts.append("- First point of section \(section)\n- Second point, with **bold** and _italic_\n"
                 + "  - A nested point\n1. Ordered one\n2. Ordered two")
             parts.append("```swift\nfunc check\(section)() -> Bool {\n    value > \(section)\n}\n```")
-            parts.append("| Field | Value |\n|---|---|\n| id | \(section) |\n| state | ready |")
+            if tables { parts.append("| Field | Value |\n|---|---|\n| id | \(section) |\n| state | ready |") }
         }
         return parts.joined(separator: "\n\n")
     }()
