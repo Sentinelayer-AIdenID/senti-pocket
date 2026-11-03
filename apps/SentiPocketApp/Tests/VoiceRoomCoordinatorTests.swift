@@ -894,6 +894,32 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
                      "a word every agent's id shares is no name")
     }
 
+    /// Review of the first cut: a name counts only where it addresses someone, the agent with the most of its words
+    /// said wins, and a turn for several agents is everyone's, never the sole-hello agent's.
+    func test_a_turn_is_for_the_agent_it_addresses_not_a_name_said_in_passing() {
+        let both = ["pocket-forge", "claude-warden"]
+        XCTAssertEqual(VoiceTurnAddressee.of("Warden, is the Pocket build ready?", with: both, joined: both),
+                       "claude-warden", "addressed first; Pocket is only mentioned")
+        XCTAssertEqual(VoiceTurnAddressee.of("Warden, is the Pocket build ready?", with: both, joined: ["pocket-forge"]),
+                       "claude-warden", "a name addressed beats the only one that has said hello")
+        XCTAssertNil(VoiceTurnAddressee.of("How is Pocket doing today?", with: both, joined: both), "a word in passing")
+        XCTAssertEqual(VoiceTurnAddressee.of("How is Pocket doing today?", with: both, joined: ["pocket-forge"]),
+                       "pocket-forge", "no one addressed: the only one that has said hello")
+        XCTAssertNil(VoiceTurnAddressee.of("Warden and Forge, both of you", with: both, joined: ["pocket-forge"]),
+                     "several addressed is everyone, never the sole-hello agent")
+        XCTAssertEqual(VoiceTurnAddressee.of("Hi pocket forge", with: ["pocket-forge", "forge-helper"],
+                                             joined: ["pocket-forge", "forge-helper"]),
+                       "pocket-forge", "the most of its words said")
+        XCTAssertEqual(VoiceTurnAddressee.of("What's next, Forge?", with: both, joined: both), "pocket-forge",
+                       "addressed at the end")
+        XCTAssertEqual(VoiceTurnAddressee.of("Okay so... Forge, what is next?", with: both, joined: both), "pocket-forge")
+        XCTAssertEqual(VoiceTurnAddressee.of("Hi build", with: ["build_bot", "docs.writer"],
+                                             joined: ["build_bot", "docs.writer"]),
+                       "build_bot", "ids with _ and . have words too")
+        XCTAssertEqual(VoiceTurnAddressee.nameWords(of: "pocket-forge"), ["pocket", "forge"])
+        XCTAssertEqual(VoiceTurnAddressee.nameWords(of: "review-agent"), ["review"], "agent is no name")
+    }
+
     /// Add an agent mid-call. One message rings it; from then on its answers are read, and your turns
     /// mention it too.
     func test_adding_an_agent_mid_call_rings_it_and_its_answers_are_read() async {

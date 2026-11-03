@@ -351,6 +351,31 @@ final class VoiceLineCallTests: XCTestCase {
         await room.hangUp()
     }
 
+    /// Review of the first cut: agents post well after the voice line. Forge's post for a turn the line answered as Forge
+    /// comes during the next turn: it is kept (heard once already), and it does not take that turn's floor.
+    func test_a_late_post_the_voice_line_already_answered_for_is_kept_and_takes_no_floor() async {
+        let line = FakeVoiceLine([.success(["Next up is the build."])])
+        let listener = LineListener(), speaker = LineSpeaker(), poster = LinePoster()
+        let room = call(line, listener: listener, speaker: speaker, poster: poster, with: ["claude-warden", "pocket-forge"])
+        room.begin()
+        room.receive([agentPost("h1", "Warden here.", in: room, author: "claude-warden"),
+                      agentPost("h2", "Forge here.", in: room)])
+        await until("both have said hello") { room.state.joined.count == 2 }
+        speaker.finish()
+
+        await turn(room, listener, "Forge, what's next?")
+        await until("the line answered as Forge") { speaker.spoken.contains { $0.text == "Next up is the build." } }
+        speaker.finish()
+        await turn(room, listener, "Who ships tonight?")
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        room.receive([agentPost("f1", "Next up is the build, then QA.", in: room),
+                      agentPost("w1", "I ship tonight.", in: room, author: "claude-warden")])
+        await until("Warden is heard") { speaker.spoken.contains { $0.text == "I ship tonight." } }
+        XCTAssertFalse(speaker.spoken.contains { $0.text == "Next up is the build, then QA." }, "heard once, from the line")
+        XCTAssertTrue(room.state.turns.contains { $0.text == "Next up is the build, then QA." && $0.isHeld })
+        await room.hangUp()
+    }
+
     /// An ask a newer turn cancelled can still come back with a typed error. It turns the line off or rests it, but it
     /// must not release the newer turn's held posts: that turn's own ask answers, and the post would be heard twice.
     func test_a_cancelled_asks_typed_error_never_releases_the_next_turns_held_post() async {
@@ -522,6 +547,7 @@ final class VoiceLineHangUpTests: XCTestCase {
         await room.hangUp()
         for _ in 0..<200 where !line.stopped { try? await Task.sleep(nanoseconds: 2_000_000) }
         XCTAssertTrue(line.stopped, "the stream ends with the call")
+        XCTAssertTrue(poster.endings.first?.contains("@pocket-forge") == true, "the end asks the agent itself")
         XCTAssertFalse(poster.endings.first?.contains("(voice)") == true, poster.endings.first ?? "")
     }
 }

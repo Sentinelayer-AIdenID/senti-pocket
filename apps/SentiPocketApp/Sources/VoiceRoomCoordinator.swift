@@ -110,6 +110,10 @@ final class VoiceRoomCoordinator: ObservableObject {
     private var turnFor: String?
     /// The agent the voice line answered this turn as, lowercased: that agent's own post is kept, not read again.
     private var lineAgentThisTurn: String?
+    /// On a call with several agents, the agents the voice line has already answered a turn as and whose own post for
+    /// it has not come yet: that post is kept whenever it comes (agents post well after the line), and it takes no
+    /// turn's floor.
+    private var lineOwes: Set<String> = []
     /// The agent's fast voice answered the ring; the agent's own hello, when it comes, is kept as text.
     private var voicePickedUp = false
     /// In a meeting, who answered your latest turn first (lowercased), and whether the others were told.
@@ -451,6 +455,13 @@ final class VoiceRoomCoordinator: ObservableObject {
             state.notice = nil
             self.addingNotice = nil
         }
+        // The voice line already answered for this agent (a turn or more ago): its post is kept, and it is no answer
+        // to the turn going now, so it takes no floor.
+        if !isHuman, !isAddedHello, state.with.count > 1, lineOwes.remove(lowered) != nil {
+            state.turns.append(VoiceRoomTurn(id: id, speaker: name, isYou: false, text: text, at: at, isHeld: true))
+            state.answeredByLine.insert(id)
+            return
+        }
         // With more than one agent (a meeting, or several picked or added) the first to answer a turn has the floor;
         // the others are kept, not read.
         if state.sharesFloor, !isHuman, !isAddedHello {
@@ -784,6 +795,9 @@ final class VoiceRoomCoordinator: ObservableObject {
         turnStoppedAt = stoppedTalking
         dropVoiceLineLeftovers()
         lineFailedThisTurn = false
+        // The words added may name who it is for ("Okay so… Forge, what is next?").
+        turnFor = VoiceTurnAddressee.of(whole, with: state.with, joined: state.joined)
+        if let turnFor { floorHolder = (turnFor.lowercased(), turnFor) }
         if let id = gapAnswerId, !queue.contains(where: { $0.id == id }) { gapAnswerId = nil }
         readyAfterSending()
         speakIfReady()
@@ -858,6 +872,7 @@ final class VoiceRoomCoordinator: ObservableObject {
                     guard let self, !Task.isCancelled else { return }
                     if case .sentence(let sentence) = event {
                         said += 1
+                        if said == 1, self.state.with.count > 1 { self.lineOwes.insert(agent.lowercased()) }
                         self.takeVoiceLine(sentence, answerId: answerId, as: speaker)
                     }
                 }
@@ -891,6 +906,8 @@ final class VoiceRoomCoordinator: ObservableObject {
     /// was being asked too, in order. They used to stay held when they beat the failure, and the turn went silent.
     private func lineDidNotAnswer() {
         lineFailedThisTurn = true
+        // An answer cut short is no answer: the agent's own post is read.
+        if let lineAgentThisTurn { lineOwes.remove(lineAgentThisTurn) }
         let ids = heldForLine
         heldForLine = []
         var released = false
@@ -1141,28 +1158,86 @@ enum VoiceAddIntent {
 
 /// Who a spoken turn is for on a call with several agents (Carter's call, #60982).
 enum VoiceTurnAddressee {
-    /// Who a turn is for on a call with several agents: the one it names ("Hi Forge" is pocket-forge's), or else the
-    /// only one that has said hello. Nil is everyone, and so is a call with one agent or none (a meeting).
+    /// Who a turn is for: the one agent it addresses by name, or, when it addresses no one, the only agent that has said
+    /// hello. Nil is everyone: a turn addressing several agents (or naming two equally), a call with one agent, a meeting.
     static func of(_ text: String, with agents: [String], joined: [String]) -> String? {
         guard agents.count > 1 else { return nil }
-        if let named = named(in: text, among: agents) { return named }
-        let here = agents.filter { agent in joined.contains { $0.lowercased() == agent.lowercased() } }
-        return here.count == 1 ? here[0] : nil
+        switch addressed(in: text, among: agents) {
+        case .one(let agent):
+            return agent
+        case .several:
+            return nil
+        case .none:
+            let here = agents.filter { agent in joined.contains { $0.lowercased() == agent.lowercased() } }
+            return here.count == 1 ? here[0] : nil
+        }
     }
 
-    /// Words of an agent's id too common to call it by.
-    private static let notNames: Set<String> = ["agent", "bot", "box", "the", "and", "for"]
+    enum Addressed: Equatable {
+        case none
+        case one(String)
+        case several
+    }
 
-    /// The one agent a spoken turn names, by any word of its id (`pocket-forge` is "Forge" or "Pocket"); nil when it
-    /// names none, or more than one.
-    static func named(in text: String, among agents: [String]) -> String? {
-        let words = Set(text.lowercased()
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { !$0.isEmpty })
-        let matches = agents.filter { agent in
-            agent.lowercased().split(separator: "-").map(String.init)
-                .contains { $0.count >= 3 && !notNames.contains($0) && words.contains($0) }
+    /// Words a turn may start with before the name it addresses.
+    private static let openers: Set<String> = ["hi", "hey", "hello", "ok", "okay", "so", "yo", "and", "um", "uh", "well",
+                                               "right", "alright", "now", "oh", "thanks", "thank", "you", "then"]
+    /// Words that join two names ("Warden and Forge").
+    private static let joiners: Set<String> = ["and", "or"]
+    /// Words of an agent's id too common to address it by.
+    private static let notNames: Set<String> = ["agent", "bot", "box", "the", "and", "for", "you"]
+
+    /// The words an agent can be addressed by: its id's words (`pocket-forge` is "pocket" and "forge").
+    static func nameWords(of agent: String) -> Set<String> {
+        Set(agent.lowercased().split(whereSeparator: { "-_. ".contains($0) }).map(String.init)
+            .filter { $0.count >= 3 && !notNames.contains($0) })
+    }
+
+    /// The agents a turn addresses by name: names said where one calls someone, never a word in passing ("How is Pocket
+    /// doing?" addresses no one). That is the run of names the turn starts with (after "hi", "okay so"…), or the
+    /// names after its last comma when they end it ("what's next, Forge?"). The agent with the most of its words said
+    /// is the one; two agents said equally ("Warden and Forge") are everyone.
+    static func addressed(in text: String, among agents: [String]) -> Addressed {
+        // Words, each marked when a comma follows it.
+        var words: [(word: String, comma: Bool)] = []
+        var current = ""
+        for character in text.lowercased() {
+            if character.isLetter || character.isNumber {
+                current.append(character)
+            } else {
+                if !current.isEmpty { words.append((current, false)); current = "" }
+                if character == ",", !words.isEmpty { words[words.count - 1].comma = true }
+            }
         }
-        return matches.count == 1 ? matches[0] : nil
+        if !current.isEmpty { words.append((current, false)) }
+        let names = Dictionary(uniqueKeysWithValues: agents.map { ($0, nameWords(of: $0)) })
+        let isName: (String) -> Bool = { word in names.values.contains { $0.contains(word) } }
+
+        // The run of names (and joiners) starting at `index`.
+        func run(from index: Int) -> [String] {
+            var said: [String] = []
+            var i = index
+            while i < words.count, isName(words[i].word) || (joiners.contains(words[i].word) && !said.isEmpty) {
+                if isName(words[i].word) { said.append(words[i].word) }
+                if words[i].comma { break }
+                i += 1
+            }
+            return said
+        }
+        var said: [String] = []
+        // At the start, after any opening words.
+        var first = 0
+        while first < words.count, openers.contains(words[first].word), !isName(words[first].word) { first += 1 }
+        said += run(from: first)
+        // At the end, after the last comma, when only names follow it.
+        if let lastComma = words.lastIndex(where: { $0.comma }), lastComma + 1 < words.count,
+           words[(lastComma + 1)...].allSatisfy({ isName($0.word) || joiners.contains($0.word) }) {
+            said += run(from: lastComma + 1)
+        }
+        guard !said.isEmpty else { return .none }
+        let scores = agents.map { agent in (agent, Set(said).intersection(names[agent] ?? []).count) }.filter { $0.1 > 0 }
+        guard let best = scores.map(\.1).max() else { return .none }
+        let top = scores.filter { $0.1 == best }
+        return top.count == 1 ? .one(top[0].0) : .several
     }
 }
