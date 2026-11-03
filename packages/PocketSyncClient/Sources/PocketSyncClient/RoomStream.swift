@@ -183,7 +183,8 @@ extension HTTPSessionTransport {
             case 403:
                 // After an account's deletion is scheduled the server ends its streams, and the reconnect is
                 // refused with the deletion code: report it as the other reads do.
-                if AccountDeletionPendingRefusal.matches(statusCode: 403, body: await Self.head(of: bytes)) {
+                if AccountDeletionPendingRefusal.matches(statusCode: 403, body: await Self.head(of: bytes)),
+                   currentToken() == token {   // not for an account that signed in while the body was read
                     onAccountDeletionPending()
                 }
                 return .accessDenied
