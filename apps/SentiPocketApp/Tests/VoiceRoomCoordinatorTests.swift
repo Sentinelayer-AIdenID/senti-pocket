@@ -842,8 +842,9 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         await until("listening") { listener.partial != nil }
         listener.say("Hi Forge")
         room.send(.toggleTalk)
-        await until("posted") { poster.turns.count == 1 }
-        XCTAssertEqual(poster.turns, ["@pocket-forge Hi Forge"], "only the agent named")
+        // The hellos already posted who had the floor then; wait for this turn itself.
+        await until("posted") { poster.turns.last?.hasSuffix("Hi Forge") == true }
+        XCTAssertEqual(poster.turns.last, "@pocket-forge Hi Forge", "only the agent named")
 
         room.receive([message("w1", from: "claude-warden", "Hey Carter.", secondsAfterStart: 5),
                       message("f1", from: "pocket-forge", "Hi Carter, Forge here.", secondsAfterStart: 6)])
