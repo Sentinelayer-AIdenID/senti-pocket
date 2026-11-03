@@ -847,7 +847,7 @@ private struct StartsAtBottom: ViewModifier {
 private struct OwnScrollStart: ViewModifier {
     func body(content: Content) -> some View {
         if #available(iOS 18.0, macOS 15.0, *) {
-            content.defaultScrollAnchor(nil, for: .initialOffset)
+            content.defaultScrollAnchor(.topLeading, for: .initialOffset)
         } else {
             content
         }
