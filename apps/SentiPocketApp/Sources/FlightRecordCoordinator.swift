@@ -152,7 +152,9 @@ final class FlightRecordCoordinator: ObservableObject {
                 id: life.id,
                 name: life.agentName,
                 model: life.model,
-                phase: record?.phase ?? life.phase,
+                // The room's read of its boxes is the fresher one (every minute, while each box's record is read only
+                // when the people list or the Flight record opens), so its phase wins.
+                phase: life.phase.isEmpty ? (record?.phase ?? "") : life.phase,
                 job: life.ticketTitle ?? life.jobDescription.map { $0.split(whereSeparator: \.isNewline).first.map(String.init) ?? $0 },
                 current: newestThought ?? newestCommand,
                 lastActivity: (record?.lastActivity).flatMap { ParsedSessionTimestamp($0).date },

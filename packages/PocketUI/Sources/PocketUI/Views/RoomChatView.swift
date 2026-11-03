@@ -2988,6 +2988,13 @@ private struct RoomPresenceSheet: View {
     var onInvite: (() -> Void)?
     @Environment(\.dismiss) private var dismiss
 
+    /// The ring's number: who is here and active, counted as the ring counts them.
+    private var online: String {
+        guard presence?.isAvailable != false else { return "?" }
+        if !roster.members.isEmpty { return String(roster.activeCount) }
+        return String(presence?.people.filter { !$0.isIdle }.count ?? 0)
+    }
+
     var body: some View {
         NavigationStack {
             List {
@@ -2999,22 +3006,33 @@ private struct RoomPresenceSheet: View {
                         .accessibilityIdentifier("pocket.room.people.invite")
                     }
                 }
+                // The ring's own count leads, then the whole room's line; the connection is a quiet note beside them
+                // (Carter, #59940: the list did not read as the ring's).
                 Section {
-                    HStack(spacing: 8) {
-                        Circle()
-                            .fill(RoomConnectionPill.color(for: connection))
-                            .frame(width: 8, height: 8)
-                            .accessibilityHidden(true)
-                        Text(connection.label)
+                    HStack(spacing: 10) {
+                        RoomOnlineCountPill(online: online)
+                        if !roster.members.isEmpty {
+                            Text(roster.summary)
+                                .font(.subheadline.weight(.semibold))
+                                .lineLimit(2)
+                                .accessibilityIdentifier("pocket.room.people.summary")
+                        }
+                        Spacer(minLength: 8)
+                        HStack(spacing: 5) {
+                            Circle()
+                                .fill(RoomConnectionPill.color(for: connection))
+                                .frame(width: 7, height: 7)
+                                .accessibilityHidden(true)
+                            Text(connection.label)
+                                .font(.caption)
+                                .foregroundStyle(PocketPalette.textSecondary)
+                        }
+                        .fixedSize()
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("pocket.room.presence.connection")
                     }
-                    .accessibilityElement(children: .combine)
-                    .accessibilityIdentifier("pocket.room.presence.connection")
                 }
                 if !roster.members.isEmpty {
-                    // The whole room first, the same active number as the ring outside the people list.
-                    Text(roster.summary)
-                        .font(.subheadline.weight(.semibold))
-                        .accessibilityIdentifier("pocket.room.people.summary")
                     // People, live agents and agents in boxes apart, each with its counts.
                     ForEach(roster.sides, id: \.title) { side in
                         Section {
@@ -3029,6 +3047,21 @@ private struct RoomPresenceSheet: View {
                         } header: {
                             Text(side.header)
                                 .accessibilityIdentifier("pocket.room.people.side.\(side.title.lowercased())")
+                        }
+                    }
+                    // Boxes that ended are gone for good: listed last and folded, out of every count.
+                    if !roster.endedBoxes.isEmpty {
+                        Section {
+                            DisclosureGroup("Ended boxes · \(roster.endedBoxes.count)") {
+                                ForEach(roster.endedBoxes) { member in
+                                    NavigationLink {
+                                        RoomMemberDetail(member: member)
+                                    } label: {
+                                        RoomMemberRow(member: member)
+                                    }
+                                }
+                            }
+                            .accessibilityIdentifier("pocket.room.people.ended")
                         }
                     }
                 } else if let people = presence?.people, !people.isEmpty {
@@ -3053,7 +3086,7 @@ private struct RoomPresenceSheet: View {
                     }
                 }
             }
-            .navigationTitle(presence?.label ?? "Who is here")
+            .navigationTitle("Who is here")
             .navigationBarTitleDisplayModeInlineIfAvailable()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

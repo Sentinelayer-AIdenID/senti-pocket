@@ -60,6 +60,8 @@ struct RoomPeopleAvatars: View {
 
     /// How fast the ring turns by itself, in radians a second.
     static let drift = 0.22
+    /// How far above the ring's middle its count sits, in points: over the back of the ring, clear of the front coins.
+    static let ringCountLift: CGFloat = -18
     /// Taps never come closer together than this (warden, #265: a 100-member ring tapped about three times a second).
     static let tickSpacing: TimeInterval = 0.08
 
@@ -111,8 +113,11 @@ struct RoomPeopleAvatars: View {
                     ringItem(item)
                         .modifier(RingPlacement(index: index, count: items.count, rotation: turned))
                 }
-                onlineCount(online)
-                    .zIndex(isRing ? 0.2 : 2)
+                // On the ring the count sits on its top edge, in front of every coin: in the middle the front coins
+                // covered it (Carter, #59940: "I cannot see the online indicator and number").
+                RoomOnlineCountPill(online: online)
+                    .offset(y: isRing ? Self.ringCountLift : 0)
+                    .zIndex(isRing ? 3 : 2)
             }
         }
         .frame(width: PresenceRingLayout.radius(items.count) * 2 + 32, height: isRing ? 56 : 44)
@@ -187,25 +192,6 @@ struct RoomPeopleAvatars: View {
     }
 
     /// The number online, with a green dot, in the middle; one that idles drops out of it.
-    private func onlineCount(_ online: String) -> some View {
-        HStack(spacing: 4) {
-            Circle()
-                .fill(online != "0" && online != "?" ? PocketPalette.verified : PocketPalette.textSecondary)
-                .frame(width: 7, height: 7)
-            Text(online)
-                .font(.caption.weight(.bold))
-                .monospacedDigit()
-                .foregroundStyle(PocketPalette.textPrimary)
-                .contentTransition(.numericText())
-        }
-        .padding(.horizontal, 8)
-        .frame(height: 22)
-        .background(Capsule().fill(PocketPalette.raised))
-        .overlay(Capsule().strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.35), radius: 3, y: 2)
-        .accessibilityHidden(true)
-    }
-
     /// How long the ring holds on an agent that just did something before it turns by itself again.
     static let holdOnActivity: TimeInterval = 8
 
@@ -308,6 +294,31 @@ public extension EnvironmentValues {
 
 /// Where one logo sits for a turn of the ring. The turn itself is what animates, so a fling or an arrival moves each
 /// logo along the circle, not straight across it (warden, #265).
+/// The ring's count of who is here and active, with its green dot: on the ring, and again at the top of the people
+/// list, so the two read as one (Carter, #59940).
+struct RoomOnlineCountPill: View {
+    let online: String
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(online != "0" && online != "?" ? PocketPalette.verified : PocketPalette.textSecondary)
+                .frame(width: 7, height: 7)
+            Text(online)
+                .font(.caption.weight(.bold))
+                .monospacedDigit()
+                .foregroundStyle(PocketPalette.textPrimary)
+                .contentTransition(.numericText())
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 22)
+        .background(Capsule().fill(PocketPalette.raised))
+        .overlay(Capsule().strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.35), radius: 3, y: 2)
+        .accessibilityHidden(true)
+    }
+}
+
 private struct RingPlacement: ViewModifier, Animatable {
     let index: Int
     let count: Int

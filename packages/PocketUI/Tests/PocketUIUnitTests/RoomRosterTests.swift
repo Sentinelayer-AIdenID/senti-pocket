@@ -106,6 +106,43 @@ final class RoomRosterTests: XCTestCase {
         XCTAssertEqual(roster.summary, "1 active · 2 idle · 3 offline", "the whole room's line leads with the ring's number")
     }
 
+    /// Carter, #59940: "the numbers look weird" (16 active · 0 idle · 138 offline, 136 of them boxes that ended).
+    /// Ended boxes leave every count and are listed apart.
+    func test_ended_boxes_are_out_of_the_counts_and_listed_apart() {
+        let roster = RoomRoster.build(
+            posts: [post("human-mrrcarter", 1, human: true), post("ds-old-1", 300), post("ds-old-2", 400)],
+            present: [RoomChatPresence.Person(id: "human-mrrcarter", name: "mrrcarter", isHuman: true, isIdle: false)],
+            runningBoxes: [RoomRoster.Box(name: "ds-live", model: "m", phase: "working", lastActivity: nil)],
+            endedBoxes: ["ds-old-1", "ds-old-2", "ds-old-3"], now: now
+        )
+        XCTAssertEqual(roster.summary, "2 active · 0 idle · 0 offline")
+        XCTAssertEqual(roster.endedBoxes.map(\.id).sorted(), ["ds-old-1", "ds-old-2", "ds-old-3"])
+        let boxes = roster.sides.first { $0.title == "Agents in boxes" }
+        XCTAssertEqual(boxes?.members.map(\.id), ["ds-live"])
+        XCTAssertEqual(boxes?.header, "Agents in boxes · 1 active · 0 idle · 0 offline")
+        XCTAssertEqual(roster.members.count, 5, "everyone who came is still in the roster")
+    }
+
+    /// Carter, #59940: the ring "doesn't get updated live unless I click on it". A box working now by its phase (the
+    /// room's every-minute read) is active without its record's last activity, which is read only when a list opens.
+    func test_a_running_box_is_active_by_its_phase_without_waiting_for_its_record() {
+        let stale = now.addingTimeInterval(-3600)
+        let roster = RoomRoster.build(
+            posts: [], present: [],
+            runningBoxes: [
+                RoomRoster.Box(name: "ds-working", model: "m", phase: "working", lastActivity: stale),
+                RoomRoster.Box(name: "ds-waiting", model: "m", phase: "ready", lastActivity: stale),
+                RoomRoster.Box(name: "ds-recent", model: "m", phase: "ready", lastActivity: now.addingTimeInterval(-60))
+            ],
+            endedBoxes: [], now: now
+        )
+        let status = Dictionary(uniqueKeysWithValues: roster.members.map { ($0.id, $0.status) })
+        XCTAssertEqual(status["ds-working"], .here)
+        XCTAssertEqual(status["ds-waiting"], .idle, "waiting for its next turn and quiet for an hour")
+        XCTAssertEqual(status["ds-recent"], .here, "heard from a minute ago")
+        XCTAssertEqual(roster.activeCount, 2)
+    }
+
     func test_a_box_that_ended_but_runs_again_under_its_name_is_listed_once_as_running() {
         let roster = RoomRoster.build(
             posts: [], present: [],

@@ -248,6 +248,49 @@ final class RoomChatCoordinatorTests: XCTestCase {
         coordinator.pause()
     }
 
+    /// Carter, #59940: "it keeps saying connecting". The room is Live once the server takes the stream, with no frame.
+    func test_the_room_is_live_once_the_stream_opens_before_any_frame() async {
+        let transport = ScriptedRoomTransport(before: [.success(page([1]))], streams: [[.opened]])
+        let coordinator = makeCoordinator(transport)
+        coordinator.resume()
+        await waitUntil("live") { coordinator.state.connection == .live }
+        XCTAssertEqual(messageSequences(coordinator), [1])
+        coordinator.pause()
+    }
+
+    /// A stream that stayed open and then closed is the server's periodic close: back at once, still Live. One that
+    /// closes as soon as it opens still waits before trying again.
+    func test_a_stream_that_stayed_open_reconnects_at_once_and_a_quick_close_still_waits() async {
+        for (openFor, waits) in [(TimeInterval(60), false), (TimeInterval(1), true)] {
+            let transport = ScriptedRoomTransport(
+                before: [.success(page([1]))],
+                streams: [[.opened, .ended(.closed)], [.opened]]
+            )
+            let clock = SteppingClock(step: openFor)
+            let sleeps = SleepLog()
+            let coordinator = RoomChatCoordinator(
+                sessionId: "room_1",
+                title: "Room",
+                transport: transport,
+                ownAuthorIds: ["human-mrrcarter"],
+                sleep: { seconds in
+                    sleeps.add(seconds)
+                    if seconds > 5 { try? await Task.sleep(nanoseconds: 3_600_000_000_000) }
+                },
+                now: { clock.next() },
+                onReauthenticationRequired: {}
+            )
+            coordinator.resume()
+            await waitUntil("reconnected") { transport.snapshot().streams.count == 2 }
+            await waitUntil("live") { coordinator.state.connection == .live }
+            // The first wait after a failed stream (the room's other loops wait 3, 15 or 60 seconds, never this).
+            var fresh = RoomStreamBackoff()
+            let firstWait = fresh.delayAfter(.closed, deliveredEvents: false)
+            XCTAssertEqual(sleeps.values.contains { $0 == firstWait }, waits, "open for \(openFor) s: \(sleeps.values)")
+            coordinator.pause()
+        }
+    }
+
     func test_a_dropped_stream_catches_up_then_reconnects_from_the_new_high_water_mark() async {
         let transport = ScriptedRoomTransport(
             before: [.success(page([1, 2]))],
@@ -722,4 +765,24 @@ final class RoomChatCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.state.focusFallbackCount, 1)
         coordinator.pause()
     }
+}
+
+/// Each reading is `step` seconds after the last: a stream opened at one reading has been open `step` seconds at the next.
+private final class SteppingClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current = Date(timeIntervalSince1970: 1_800_000_000)
+    private let step: TimeInterval
+    init(step: TimeInterval) { self.step = step }
+    func next() -> Date {
+        lock.lock(); defer { lock.unlock() }
+        current = current.addingTimeInterval(step)
+        return current
+    }
+}
+
+private final class SleepLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [TimeInterval] = []
+    func add(_ seconds: TimeInterval) { lock.lock(); stored.append(seconds); lock.unlock() }
+    var values: [TimeInterval] { lock.lock(); defer { lock.unlock() }; return stored }
 }

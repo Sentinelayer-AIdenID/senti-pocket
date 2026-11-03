@@ -153,7 +153,6 @@ public struct RoomRoster: Equatable, Sendable {
         public var header: String { "\(title) · \(active) active · \(idle) idle · \(offline) offline" }
     }
 
-    /// Agents, then people; a side with nobody is left out.
     /// How many are in the room and active: the ring's number, the same as the people list's.
     public var activeCount: Int { members.filter(\.isActive).count }
 
@@ -166,16 +165,24 @@ public struct RoomRoster: Equatable, Sendable {
         return person.id.lowercased()
     }
 
+    /// Everyone but the boxes that ended: they are not offline, they are gone for good, so they leave the counts
+    /// (Carter, #59940: a room once read "16 active · 0 idle · 138 offline").
+    public var current: [Member] { members.filter { $0.status != .ended } }
+
+    /// The room's boxes that ended, newest first, listed apart under the people.
+    public var endedBoxes: [Member] { members.filter { $0.status == .ended } }
+
     /// "4 active · 6 idle · 3 offline": the whole room, the ring's number first.
     public var summary: String {
-        let online = members.filter(\.isOnline).count
-        return "\(activeCount) active · \(online - activeCount) idle · \(members.count - online) offline"
+        let online = current.filter(\.isOnline).count
+        return "\(activeCount) active · \(online - activeCount) idle · \(current.count - online) offline"
     }
 
+    /// People, live agents and agents in boxes, apart; a side with nobody is left out, and so are ended boxes.
     public var sides: [Side] {
-        let people = members.filter { $0.kind == .person }
-        let agents = members.filter { $0.kind == .agent }
-        let boxes = members.filter { $0.kind == .box }
+        let people = current.filter { $0.kind == .person }
+        let agents = current.filter { $0.kind == .agent }
+        let boxes = current.filter { $0.kind == .box }
         func ordered(_ list: [Member]) -> [Member] {
             list.enumerated().sorted { a, b in
                 if a.element.isOnline != b.element.isOnline { return a.element.isOnline }
@@ -230,7 +237,10 @@ public struct RoomRoster: Equatable, Sendable {
         let members = seen.map { key, entry -> Member in
             let here = presence[key]
             if let box = boxes[key] {
-                let active = box.lastActivity.map { now.timeIntervalSince($0) <= activeBox } ?? false
+                // Working now by its phase, which the room's one read of its boxes keeps fresh, or heard from lately:
+                // the ring's count no longer waits for the people list to be opened (Carter, #59940).
+                let active = FlightRecordState.isWorking(phase: box.phase)
+                    || (box.lastActivity.map { now.timeIntervalSince($0) <= activeBox } ?? false)
                 let status: Status = (here.map { !$0.isIdle } ?? false) || active ? .here : .idle
                 return Member(id: key, name: box.name, kind: .box, status: status, model: box.model, effort: box.effort,
                               job: box.job, phase: box.phase, firstSeen: entry.first, lastSeen: latest(entry.last, box.lastActivity),
