@@ -138,6 +138,7 @@ extension HTTPSessionTransport {
                 let end = await self.runRoomStream(
                     sessionId: sessionId,
                     fromSequence: fromSequence,
+                    opened: { continuation.yield(.opened) },
                     yield: { continuation.yield(.frame($0)) }
                 )
                 continuation.yield(.ended(end))
@@ -150,6 +151,7 @@ extension HTTPSessionTransport {
     private func runRoomStream(
         sessionId: String,
         fromSequence: Int64?,
+        opened: () -> Void,
         yield: (RoomStreamFrame) -> Void
     ) async -> RoomStreamEnd {
         #if canImport(FoundationNetworking)
@@ -177,7 +179,7 @@ extension HTTPSessionTransport {
             guard let http = response as? HTTPURLResponse else { return .retryable(retryAfterSeconds: nil) }
             switch http.statusCode {
             case 200..<300:
-                break
+                opened()
             case 401:
                 return .reauthenticationRequired
             case 403:
@@ -244,8 +246,10 @@ extension HTTPSessionTransport {
     #endif
 }
 
-/// What `roomStream` yields: frames, then exactly one `ended`.
+/// What `roomStream` yields: `opened` once the server accepts the stream, frames, then exactly one `ended`.
 public enum RoomStreamEvent: Equatable, Sendable {
+    /// The server accepted the stream: the room is live now, before its first frame (a quiet room may send none).
+    case opened
     case frame(RoomStreamFrame)
     case ended(RoomStreamEnd)
 }

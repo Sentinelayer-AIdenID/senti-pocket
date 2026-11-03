@@ -226,6 +226,9 @@ final class RoomChatCoordinator: ObservableObject {
     static let windowPageSize = 50
     static let composingLifetime: TimeInterval = 20
     static let pollWhileLive: TimeInterval = 60
+    /// A stream that stayed open this long and then closed was the server's periodic close, not a failure: the room
+    /// reconnects at once and stays Live (Carter, #59940: "it keeps saying connecting"). A sooner close still backs off.
+    static let healthyStreamTime: TimeInterval = 20
     static let pollWhileDown: TimeInterval = 15
 
     init(
@@ -1846,10 +1849,19 @@ final class RoomChatCoordinator: ObservableObject {
                 publish()
             }
             var delivered = false
+            var openedAt: Date?
             var end: RoomStreamEnd = .closed
             for await event in transport.roomStream(sessionId: sessionId, fromSequence: lastAppliedSequence) {
                 guard current == generation, !Task.isCancelled else { return }
                 switch event {
+                case .opened:
+                    // Live as soon as the server takes the stream, as the web's is on open: a quiet room may not
+                    // send a frame for a long while.
+                    openedAt = now()
+                    if connection != .live {
+                        connection = .live
+                        publish()
+                    }
                 case .frame(let frame):
                     if handle(frame) { delivered = true }
                 case .ended(let reason):
@@ -1870,7 +1882,8 @@ final class RoomChatCoordinator: ObservableObject {
             case .closed, .retryable:
                 break
             }
-            guard let delay = backoff.delayAfter(end, deliveredEvents: delivered) else { return }
+            let stayedOpen = openedAt.map { now().timeIntervalSince($0) >= Self.healthyStreamTime } ?? false
+            guard let delay = backoff.delayAfter(end, deliveredEvents: delivered || stayedOpen) else { return }
             if delay > 0 {
                 connection = .reconnecting
                 publish()
