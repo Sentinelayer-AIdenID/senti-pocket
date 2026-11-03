@@ -88,6 +88,8 @@ targets:
         # Optional: the Flight record's service, also an explicit HTTPS origin from the build. Without it the Flight
         # record shows the room's agents and no boxes.
         SENTI_MINT_URL: "$(SENTI_MINT_URL)"
+        # Emoji reactions in rooms stay hidden until this is true, as on the web (`RoomEmojiReactions`).
+        SentiEmojiReactions: false
     settings:
       base:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

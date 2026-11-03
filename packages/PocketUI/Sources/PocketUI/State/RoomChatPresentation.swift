@@ -26,7 +26,7 @@ public struct RoomChatMessageInput: Equatable, Sendable {
     public let isEdited: Bool
     /// Parsed `timestamp`. Callers that render many rows pass a cached value; otherwise it is parsed here.
     public let date: Date?
-    public let reactions: RoomChatReactions?
+    public var reactions: RoomChatReactions?
     public let attachments: [RoomAttachmentChip]
     /// Who has viewed this revision, once the room has read it.
     public let views: RoomChatViews?
@@ -161,7 +161,7 @@ public struct RoomChatReactions: Equatable, Sendable {
 
     public let chips: [Chip]
     /// Emoji reactions after the chips, in the order they were first used.
-    public let emojiChips: [EmojiChip]
+    public var emojiChips: [EmojiChip]
     /// "Acked by a, b, c +N" (web parity: three names, sorted).
     public let ackedBy: String?
     /// "Working: a, b".
@@ -557,7 +557,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     public let composer: RoomComposerState
     /// Whether you can react (ack, like, dislike): any member, including a viewer, when actions are wired.
     public let canReact: Bool
-    /// Whether the emoji picker is offered: you can react, and the room has not refused emoji reactions.
+    /// Whether the emoji picker is offered: emoji reactions are on in this build, you can react, and the room has not
+    /// refused them.
     public let canAddEmoji: Bool
     public let thread: RoomChatThreadState?
     /// Counts links whose message could not be loaded (before the start of the room, or the room could not be
@@ -592,6 +593,15 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     /// Same-author rows closer together than this share one header.
     public static let groupingWindow: TimeInterval = 5 * 60
 
+    /// The rows with no emoji reactions.
+    static func withoutEmoji(_ inputs: [RoomChatMessageInput]) -> [RoomChatMessageInput] {
+        inputs.map { input in
+            var input = input
+            input.reactions?.emojiChips = []
+            return input
+        }
+    }
+
     public init(
         sessionId: String,
         title: String,
@@ -613,6 +623,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         composer: RoomComposerState = .hidden,
         canReact: Bool = false,
         canAddEmoji: Bool = false,
+        emojiReactions: Bool = false,
         thread threadInput: RoomChatThreadInput? = nil,
         focusFallbackCount: Int = 0,
         focusSequenceId: Int64? = nil,
@@ -634,6 +645,10 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         draftKey: String? = nil,
         calendar: Calendar = .current
     ) {
+        // Emoji reactions show only in a build that turns them on (`RoomEmojiReactions`), and never on a reply shown
+        // in the room: they are not read for replies, so one there could be neither seen nor taken back.
+        let messages = emojiReactions ? messages : Self.withoutEmoji(messages)
+        let replies = Self.withoutEmoji(replies)
         self.sessionId = sessionId
         self.draftKey = draftKey
         self.title = title
@@ -653,7 +668,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         self.pending = protectedFailure ? [] : pending
         self.composer = protectedFailure ? .hidden : composer
         self.canReact = protectedFailure ? false : canReact
-        self.canAddEmoji = protectedFailure ? false : canAddEmoji
+        self.canAddEmoji = protectedFailure ? false : emojiReactions && canAddEmoji
         self.focusFallbackCount = focusFallbackCount
         self.focusSequenceId = protectedFailure ? nil : focusSequenceId
         self.mentionCandidates = protectedFailure ? [] : mentionCandidates
@@ -1408,8 +1423,8 @@ extension RoomChatMessageRow {
             options.append(RoomRowOption(kind: .acknowledge, title: "Acknowledge", symbol: "checkmark.circle",
                                          intent: reaction("ack")))
         }
-        // The view opens the emoji picker.
-        if canAddEmoji {
+        // The view opens the emoji picker; a reply shown in the room takes no emoji reactions.
+        if canAddEmoji, !isInlineReply {
             options.append(RoomRowOption(kind: .emoji, title: "Add reaction", symbol: "face.smiling", intent: nil))
         }
         if canPin, !isInlineReply {

@@ -1667,6 +1667,7 @@ private struct RoomReactionBar: View {
                                 chip.isMine ? PocketPalette.accent.opacity(0.7) : PocketPalette.separator.opacity(0.6),
                                 lineWidth: chip.isMine ? 1 : 0.5
                             ))
+                            .modifier(RoomReactionTapArea())
                         }
                         .buttonStyle(.plain)
                         .disabled(!canReact)
@@ -1683,6 +1684,7 @@ private struct RoomReactionBar: View {
                                 .padding(.vertical, 4)
                                 .background(Capsule().fill(PocketPalette.raised))
                                 .overlay(Capsule().stroke(PocketPalette.separator.opacity(0.6), lineWidth: 0.5))
+                                .modifier(RoomReactionTapArea())
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("Add reaction")
@@ -1707,6 +1709,15 @@ private struct RoomReactionBar: View {
             }
         }
         .padding(.top, 2)
+    }
+}
+
+/// A compact chip with a full-size tap area: at least 44 by 44 points, the chip drawn in its middle.
+private struct RoomReactionTapArea: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .frame(minWidth: 44, minHeight: 44)
+            .contentShape(Rectangle())
     }
 }
 

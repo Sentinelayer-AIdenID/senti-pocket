@@ -58,7 +58,7 @@ final class RoomEmojiReactionsTests: XCTestCase {
             input("m1", seq: 1, at: 0, text: notice(1)),
             input("m2", seq: 2, at: 60, text: notice(2), reactions: line),
             input("m3", seq: 3, at: 120, text: notice(3))
-        ])
+        ], emojiReactions: true)
         XCTAssertEqual(state.rows.compactMap { row -> String? in
             if case .message(let message) = row { return message.id }
             return nil
@@ -84,7 +84,7 @@ final class RoomEmojiReactionsTests: XCTestCase {
 
     func test_add_reaction_is_offered_with_the_reactions_only_where_the_picker_is_allowed() throws {
         let state = RoomChatPresentationState(sessionId: "room", title: "Room", messages: [input("m7", seq: 7, at: 0)],
-                                              canReact: true, canAddEmoji: true)
+                                              canReact: true, canAddEmoji: true, emojiReactions: true)
         XCTAssertTrue(state.canAddEmoji)
         let row = try XCTUnwrap(messageRow(state, "m7"))
         let offered = row.options(canReply: true, canReact: true, canPin: false, isPinned: false, pinsFull: false,
@@ -96,8 +96,58 @@ final class RoomEmojiReactionsTests: XCTestCase {
         XCTAssertFalse(refused.contains { $0.kind == .emoji })
 
         let denied = RoomChatPresentationState(sessionId: "room", title: "Room", messages: [input("m7", seq: 7, at: 0)],
-                                               failure: .accessDenied, canReact: true, canAddEmoji: true)
+                                               failure: .accessDenied, canReact: true, canAddEmoji: true,
+                                               emojiReactions: true)
         XCTAssertFalse(denied.canAddEmoji, "nothing is offered beside an access failure")
+    }
+
+    /// A reply's emoji reactions are not read, so one added to a reply shown in the room could be neither seen nor taken
+    /// back.
+    func test_a_reply_shown_in_the_room_offers_no_emoji_reaction_and_shows_none() throws {
+        let line = RoomChatReactions(chips: [.init(type: "like", count: 1, isMine: false)],
+                                     emojiChips: [.init(emoji: "👀", count: 1, isMine: true)])
+        let state = RoomChatPresentationState(
+            sessionId: "room", title: "Room", messages: [input("m7", seq: 7, at: 0)],
+            canReact: true, canAddEmoji: true, emojiReactions: true,
+            replies: [input("reply-r1", seq: 7, at: 60, reactions: line, replyTo: 7, inlineReplyId: "r1")]
+        )
+        let reply = try XCTUnwrap(messageRow(state, "reply-r1"))
+        XCTAssertEqual(reply.reactions?.emojiChips, [], "no chip, so no add chip beside them")
+        XCTAssertEqual(reply.reactions?.chips.map(\.type), ["like"], "its other reactions still show")
+        let options = reply.options(canReply: true, canReact: true, canPin: false, isPinned: false, pinsFull: false,
+                                    canAddEmoji: state.canAddEmoji)
+        XCTAssertFalse(options.contains { $0.kind == .emoji }, "no Add reaction in its menu or action row, so no picker")
+        XCTAssertTrue(options.contains { $0.kind == .like })
+    }
+
+    func test_the_build_flag_is_on_only_for_a_boolean_true() {
+        XCTAssertTrue(RoomEmojiReactions.isEnabled(in: ["SentiEmojiReactions": true]))
+        XCTAssertFalse(RoomEmojiReactions.isEnabled(in: ["SentiEmojiReactions": false]))
+        XCTAssertFalse(RoomEmojiReactions.isEnabled(in: [:]), "a missing key is off")
+        XCTAssertFalse(RoomEmojiReactions.isEnabled(in: nil), "no Info.plist is off")
+        XCTAssertFalse(RoomEmojiReactions.isEnabled(in: ["SentiEmojiReactions": "YES"]), "a string is not a boolean")
+        XCTAssertFalse(RoomEmojiReactions.isEnabled(in: ["SentiEmojiReactions": NSNumber(value: 1)]),
+                       "a number is not a boolean, even 1")
+    }
+
+    func test_with_emoji_reactions_off_no_chip_add_chip_or_add_reaction_shows() throws {
+        let line = RoomChatReactions(chips: [.init(type: "like", count: 1, isMine: false)],
+                                     emojiChips: [.init(emoji: "🎉", count: 2, isMine: true)])
+        let messages = [input("m7", seq: 7, at: 0, reactions: line)]
+        let off = RoomChatPresentationState(sessionId: "room", title: "Room", messages: messages,
+                                            canReact: true, canAddEmoji: true, emojiReactions: false)
+        let row = try XCTUnwrap(messageRow(off, "m7"))
+        XCTAssertEqual(row.reactions?.emojiChips, [], "no chip, so no add chip beside them either")
+        XCTAssertEqual(row.reactions?.chips.map(\.type), ["like"], "the other reactions still show")
+        XCTAssertFalse(off.canAddEmoji, "no picker")
+        XCTAssertFalse(row.options(canReply: true, canReact: off.canReact, canPin: false, isPinned: false, pinsFull: false,
+                                   canAddEmoji: off.canAddEmoji).contains { $0.kind == .emoji },
+                       "no Add reaction in the menu or the action row")
+
+        let on = RoomChatPresentationState(sessionId: "room", title: "Room", messages: messages,
+                                           canReact: true, canAddEmoji: true, emojiReactions: true)
+        XCTAssertEqual(messageRow(on, "m7")?.reactions?.emojiChips.map(\.emoji), ["🎉"])
+        XCTAssertTrue(on.canAddEmoji)
     }
 
     func test_the_picker_offers_two_dozen_common_emoji_each_one_emoji() {

@@ -9,11 +9,13 @@ import XCTest
 private final class EmojiActionURLProtocol: URLProtocol {
     private static let lock = NSLock()
     private static var status = 200
+    private static var answer = Data(#"{"ok":true}"#.utf8)
     private static var captured: [(URLRequest, Data)] = []
 
-    static func reset(status: Int) {
+    static func reset(status: Int, body: String = #"{"ok":true}"#) {
         lock.lock()
         self.status = status
+        answer = Data(body.utf8)
         captured = []
         lock.unlock()
     }
@@ -42,10 +44,11 @@ private final class EmojiActionURLProtocol: URLProtocol {
         Self.lock.lock()
         Self.captured.append((request, body))
         let status = Self.status
+        let answer = Self.answer
         Self.lock.unlock()
         let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: [:])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: Data(#"{"ok":true}"#.utf8))
+        client?.urlProtocol(self, didLoad: answer)
         client?.urlProtocolDidFinishLoading(self)
     }
 
@@ -53,8 +56,8 @@ private final class EmojiActionURLProtocol: URLProtocol {
 }
 
 final class RoomEmojiActionSenderTests: XCTestCase {
-    private func makeSender(status: Int = 200) -> HTTPRoomActionSender {
-        EmojiActionURLProtocol.reset(status: status)
+    private func makeSender(status: Int = 200, body: String = #"{"ok":true}"#) -> HTTPRoomActionSender {
+        EmojiActionURLProtocol.reset(status: status, body: body)
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [EmojiActionURLProtocol.self]
         return HTTPRoomActionSender(
@@ -73,6 +76,7 @@ final class RoomEmojiActionSenderTests: XCTestCase {
         let sender = makeSender()
         try await sender.sendAction(.emoji("🎉", isOn: true, sessionId: "room_1", sequenceId: 42, actor: "alex"))
         try await sender.sendAction(.emoji("🎉", isOn: false, sessionId: "room_1", sequenceId: 42, actor: "alex"))
+        try await sender.sendAction(.emoji("🎉", isOn: true, sessionId: "room_1", sequenceId: 42, actor: "alex"))
 
         let (http, _) = try XCTUnwrap(EmojiActionURLProtocol.requests().first)
         XCTAssertEqual(http.url?.absoluteString, "https://api.example.test/api/v1/sessions/room_1/actions")
@@ -86,9 +90,10 @@ final class RoomEmojiActionSenderTests: XCTestCase {
         let unreact = try body(1)
         XCTAssertEqual(unreact["actionType"] as? String, "unreact")
         XCTAssertEqual(unreact["metadata"] as? [String: String], ["emoji": "🎉"])
-        let keys = [react["idempotencyKey"] as? String, unreact["idempotencyKey"] as? String].compactMap { $0 }
-        XCTAssertEqual(keys.count, 2)
-        XCTAssertNotEqual(keys[0], keys[1], "react, unreact, react again must not collapse")
+        let reactAgain = try body(2)
+        let keys = [react, unreact, reactAgain].compactMap { $0["idempotencyKey"] as? String }
+        XCTAssertEqual(keys.count, 3)
+        XCTAssertNotEqual(keys[0], keys[2], "the same emoji reacted again has its own key: react, unreact, react never collapse")
         XCTAssertTrue(keys[0].hasPrefix("react:room_1:42:alex:"), keys[0])
         XCTAssertTrue(keys.allSatisfy { $0.unicodeScalars.allSatisfy(\.isASCII) }, "the emoji never goes in a header")
         XCTAssertEqual(http.value(forHTTPHeaderField: "Idempotency-Key"), keys[0])
@@ -123,34 +128,48 @@ final class RoomEmojiActionSenderTests: XCTestCase {
         XCTAssertTrue(EmojiActionURLProtocol.requests().isEmpty)
     }
 
-    func test_a_full_message_and_an_api_without_emoji_reactions_are_told_apart() async {
-        let cases: [(Int, Error)] = [
-            (409, RoomEmojiRefusal.full),
-            (422, RoomEmojiRefusal.unavailable),
-            (400, RoomEmojiRefusal.unavailable),
-            (401, RoomSendError.reauthenticationRequired),
-            (403, RoomSendError.notAllowed),
-            (429, RoomSendError.retryable(retryAfterSeconds: nil)),
-            (503, RoomSendError.retryable(retryAfterSeconds: nil))
+    func test_a_refused_emoji_reaction_is_read_by_its_code_then_its_status() async {
+        let validation = #"{"detail":[{"loc":["body","actionType"],"msg":"Value error, unsupported message action type"}]}"#
+        let cases: [(Int, String, Error, String)] = [
+            (409, #"{"error":{"code":"EMOJI_MESSAGE_LIMIT","message":"Message has 20"}}"#, RoomEmojiRefusal.full,
+             "the message holds 20 emoji"),
+            (409, #"{"detail":{"error":{"code":"EMOJI_ACTOR_LIMIT"}}}"#, RoomEmojiRefusal.full, "10 of yours, wrapped"),
+            (409, #"{"detail":{"code":"EMOJI_ACTOR_LIMIT"}}"#, RoomEmojiRefusal.full, "10 of yours, as detail.code"),
+            (409, #"{"error":{"code":"REACTION_NOT_ACTIVE"}}"#, RoomEmojiRefusal.notActive, "nothing of yours to take back"),
+            (409, #"{"error":{"code":"IDEMPOTENCY_KEY_CONFLICT"}}"#, RoomSendError.retryable(retryAfterSeconds: nil),
+             "another conflict is not a full message"),
+            (409, "", RoomSendError.retryable(retryAfterSeconds: nil), "a 409 without a code is not a full message"),
+            (422, validation, RoomEmojiRefusal.unavailable, "an API without the action type refuses it in validation"),
+            (422, #"{"error":{"code":"INVALID_SESSION_TITLE"}}"#, RoomEmojiRefusal.unavailable, "a 422 with no emoji code"),
+            (400, #"{"error":{"code":"INVALID_REQUEST","message":"unsupported message action type"}}"#,
+             RoomEmojiRefusal.unavailable, "a 400 naming the action type"),
+            (400, #"{"error":{"code":"INVALID_REQUEST","message":"emoji must be exactly one emoji"}}"#,
+             RoomSendError.rejected, "a 400 about the request itself"),
+            (401, "", RoomSendError.reauthenticationRequired, "sign in again"),
+            (403, "", RoomSendError.notAllowed, "not allowed"),
+            (429, "", RoomSendError.retryable(retryAfterSeconds: nil), "too many"),
+            (503, "", RoomSendError.retryable(retryAfterSeconds: nil), "unavailable for now")
         ]
-        for (status, expected) in cases {
-            let sender = makeSender(status: status)
+        for (status, body, expected, why) in cases {
+            let sender = makeSender(status: status, body: body)
             do {
                 try await sender.sendAction(.emoji("🎉", isOn: true, sessionId: "room_1", sequenceId: 1, actor: "a"))
-                XCTFail("expected \(expected) for \(status)")
+                XCTFail("expected \(expected): \(why)")
             } catch {
-                XCTAssertEqual(String(reflecting: error), String(reflecting: expected), "status \(status)")
+                XCTAssertEqual(String(reflecting: error), String(reflecting: expected), why)
             }
         }
         // A like keeps its own meaning of the same answers.
         do {
-            try await makeSender(status: 409).sendAction(.reaction("like", sessionId: "room_1", sequenceId: 1, actor: "a"))
+            try await makeSender(status: 409, body: #"{"error":{"code":"EMOJI_MESSAGE_LIMIT"}}"#)
+                .sendAction(.reaction("like", sessionId: "room_1", sequenceId: 1, actor: "a"))
             XCTFail("expected a retryable 409")
         } catch {
             XCTAssertEqual(error as? RoomSendError, .retryable(retryAfterSeconds: nil))
         }
         do {
-            try await makeSender(status: 422).sendAction(.reaction("like", sessionId: "room_1", sequenceId: 1, actor: "a"))
+            try await makeSender(status: 422)
+                .sendAction(.reaction("like", sessionId: "room_1", sequenceId: 1, actor: "a"))
             XCTFail("expected a rejection")
         } catch {
             XCTAssertEqual(error as? RoomSendError, .rejected)
@@ -263,7 +282,8 @@ final class RoomEmojiReactionsCoordinatorTests: XCTestCase {
         )
     }
 
-    private func makeCoordinator(_ transport: EmojiRoomTransport, actions: EmojiActionSender) -> RoomChatCoordinator {
+    private func makeCoordinator(_ transport: EmojiRoomTransport, actions: EmojiActionSender,
+                                 emojiReactions: Bool = true) -> RoomChatCoordinator {
         RoomChatCoordinator(
             sessionId: "room_1",
             title: "Room",
@@ -274,6 +294,7 @@ final class RoomEmojiReactionsCoordinatorTests: XCTestCase {
             sleep: { seconds in
                 if seconds > 5 { try? await Task.sleep(nanoseconds: 3_600_000_000_000) }
             },
+            emojiReactions: emojiReactions,
             onReauthenticationRequired: {}
         )
     }
@@ -296,8 +317,9 @@ final class RoomEmojiReactionsCoordinatorTests: XCTestCase {
         return nil
     }
 
-    private func opened(_ transport: EmojiRoomTransport, _ actions: EmojiActionSender) async -> RoomChatCoordinator {
-        let coordinator = makeCoordinator(transport, actions: actions)
+    private func opened(_ transport: EmojiRoomTransport, _ actions: EmojiActionSender,
+                        emojiReactions: Bool = true) async -> RoomChatCoordinator {
+        let coordinator = makeCoordinator(transport, actions: actions, emojiReactions: emojiReactions)
         coordinator.resume()
         await waitUntil("first projection") { transport.actionReads() >= 1 && !coordinator.state.isLoadingInitial }
         return coordinator
@@ -423,7 +445,7 @@ final class RoomEmojiReactionsCoordinatorTests: XCTestCase {
         coordinator.pause()
     }
 
-    func test_an_emoji_on_a_reply_shown_in_the_room_targets_the_reply_and_anything_else_is_never_sent() async {
+    func test_an_emoji_on_a_reply_shown_in_the_room_or_anything_but_one_emoji_is_never_sent() async {
         let transport = EmojiRoomTransport(history: [message(5)])
         let sender = EmojiActionSender()
         let coordinator = await opened(transport, sender)
@@ -431,12 +453,76 @@ final class RoomEmojiReactionsCoordinatorTests: XCTestCase {
         coordinator.send(.setEmojiReaction(sequenceId: 5, replyId: nil, emoji: "@all", isOn: true))
         coordinator.send(.setEmojiReaction(sequenceId: 5, replyId: nil, emoji: "abc", isOn: true))
         XCTAssertNil(emoji(coordinator, 5), "nothing shows for what is not one emoji")
+        // A reply's emoji reactions are not read: one sent there could be neither seen nor taken back.
         coordinator.send(.setEmojiReaction(sequenceId: 5, replyId: "r-1", emoji: "👀", isOn: true))
-        XCTAssertNil(emoji(coordinator, 5), "a reaction on a reply never shows on the message it answers")
-        await waitUntil("sent") { sender.requests().count == 1 }
-        XCTAssertEqual(sender.requests().first?.targetActionId, "r-1")
-        XCTAssertEqual(sender.requests().first?.emoji, "👀")
+        coordinator.send(.setEmojiReaction(sequenceId: 5, replyId: "r-1", emoji: "👀", isOn: false))
+        XCTAssertNil(emoji(coordinator, 5), "nor on the message it answers")
+        coordinator.send(.react(sequenceId: 5, type: "like"))
+        await waitUntil("the like sent") { !sender.requests().isEmpty }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(sender.requests().map(\.actionType), ["like"])
         coordinator.pause()
+    }
+
+    func test_taking_back_a_reaction_that_was_not_there_is_undone_quietly() async {
+        let transport = EmojiRoomTransport(history: [message(5)],
+                                           page: Self.summary([RoomEmojiReaction(emoji: "🎉", count: 1, viewerReacted: true)]))
+        let sender = EmojiActionSender(failures: [RoomEmojiRefusal.notActive])
+        let coordinator = await opened(transport, sender)
+        await waitUntil("emoji") { self.emoji(coordinator, 5)?.isEmpty == false }
+        transport.answer(RoomActionsPage(), fails: true)
+
+        coordinator.send(.setEmojiReaction(sequenceId: 5, replyId: nil, emoji: "🎉", isOn: false))
+        XCTAssertEqual(emoji(coordinator, 5), [], "the tap shows at once")
+        await waitUntil("undone") { self.emoji(coordinator, 5) == [.init(emoji: "🎉", count: 1, isMine: true)] }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertNil(coordinator.state.notice, "nothing to say")
+        XCTAssertTrue(coordinator.state.canAddEmoji)
+        coordinator.pause()
+    }
+
+    func test_once_the_room_refuses_emoji_reactions_nothing_more_is_sent() async {
+        let transport = EmojiRoomTransport(history: [message(5)],
+                                           page: Self.summary([RoomEmojiReaction(emoji: "👀", count: 1, viewerReacted: true)]))
+        let sender = EmojiActionSender(failures: [RoomEmojiRefusal.unavailable])
+        let coordinator = await opened(transport, sender)
+        await waitUntil("emoji") { self.emoji(coordinator, 5)?.isEmpty == false }
+
+        coordinator.send(.setEmojiReaction(sequenceId: 5, replyId: nil, emoji: "🎉", isOn: true))
+        await waitUntil("refused") { coordinator.state.notice != nil }
+        // The picker is gone, but the chips are still there to tap.
+        coordinator.send(.setEmojiReaction(sequenceId: 5, replyId: nil, emoji: "👀", isOn: false))
+        coordinator.send(.react(sequenceId: 5, type: "like"))
+        await waitUntil("the like sent") { sender.requests().count >= 2 }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(sender.requests().map(\.actionType), ["react", "like"])
+        coordinator.pause()
+    }
+
+    func test_with_emoji_reactions_off_no_chip_or_picker_shows_and_no_react_or_unreact_is_sent() async {
+        let transport = EmojiRoomTransport(history: [message(5)],
+                                           page: Self.summary([RoomEmojiReaction(emoji: "🎉", count: 2, viewerReacted: true)]))
+        let sender = EmojiActionSender()
+        let coordinator = await opened(transport, sender, emojiReactions: false)
+        await waitUntil("the like") { self.emoji(coordinator, 5) != nil }
+        XCTAssertEqual(emoji(coordinator, 5), [], "the summary's emoji reactions never show")
+        XCTAssertFalse(coordinator.state.canAddEmoji, "no picker, no Add reaction")
+        XCTAssertTrue(coordinator.state.canReact)
+
+        coordinator.send(.setEmojiReaction(sequenceId: 5, replyId: nil, emoji: "👀", isOn: true))
+        coordinator.send(.setEmojiReaction(sequenceId: 5, replyId: nil, emoji: "🎉", isOn: false))
+        coordinator.send(.setEmojiReaction(sequenceId: 5, replyId: "r-1", emoji: "👀", isOn: true))
+        coordinator.send(.react(sequenceId: 5, type: "like"))
+        await waitUntil("the like sent") { !sender.requests().isEmpty }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(sender.requests().map(\.actionType), ["like"], "react and unreact are never sent")
+        coordinator.pause()
+    }
+
+    func test_the_app_ships_with_emoji_reactions_off() {
+        XCTAssertEqual(Bundle.main.object(forInfoDictionaryKey: RoomEmojiReactions.infoKey) as? Bool, false,
+                       "the Info.plist says so, as a boolean")
+        XCTAssertFalse(RoomEmojiReactions.isEnabled)
     }
 
     func test_nothing_is_sent_from_a_room_this_account_may_not_read() async {
