@@ -239,6 +239,9 @@ final class VoiceLineCallTests: XCTestCase {
         XCTAssertEqual(room.state.turns.last?.text, "Build 15 is on TestFlight with the call fixes.", "kept in the transcript")
         XCTAssertEqual(room.state.turns.last?.isHeld, true)
         await room.hangUp()
+        let transcript = poster.uploads.first ?? ""
+        XCTAssertTrue(transcript.contains("not read: the voice line answered"), "the transcript says why it was not read")
+        XCTAssertFalse(transcript.contains("another agent had the floor"))
     }
 
     /// The voice line owns the call's audio: an agent's post that comes first is kept as text, and the voice line's

@@ -105,9 +105,6 @@ final class VoiceRoomCoordinator: ObservableObject {
     /// The agent's posts held back this turn because the voice line was to answer it, by turn id: read after all if
     /// the line does not answer.
     private var heldForLine: [String] = []
-    /// Every post the voice line's answer stood in for, this call: the transcript says so rather than "another agent
-    /// had the floor".
-    private var answeredByLine: Set<String> = []
     /// The agent's fast voice answered the ring; the agent's own hello, when it comes, is kept as text.
     private var voicePickedUp = false
     /// In a meeting, who answered your latest turn first (lowercased), and whether the others were told.
@@ -464,7 +461,7 @@ final class VoiceRoomCoordinator: ObservableObject {
            voiceLineSpeaks, !lineFailedThisTurn {
             state.turns.append(VoiceRoomTurn(id: id, speaker: name, isYou: false, text: text, at: at, isHeld: true))
             heldForLine.append(id)
-            answeredByLine.insert(id)
+            state.answeredByLine.insert(id)
             return
         }
         if !isAddedHello, let since = awaitingAnswerSince {
@@ -890,7 +887,7 @@ final class VoiceRoomCoordinator: ObservableObject {
             let turn = VoiceRoomTurn(id: held.id, speaker: held.speaker, isYou: false, text: held.text, at: held.at)
             state.turns[index] = turn
             queue.append(turn)
-            answeredByLine.remove(id)
+            state.answeredByLine.remove(id)
             released = true
         }
         guard released else { return }
@@ -1029,7 +1026,7 @@ final class VoiceRoomCoordinator: ObservableObject {
             lines.append("")
         }
         for turn in state.turns.sorted(by: { $0.at < $1.at }) {
-            let held = answeredByLine.contains(turn.id) ? " · not read: the voice line answered" : " · held: another agent had the floor"
+            let held = state.answeredByLine.contains(turn.id) ? " · not read: the voice line answered" : " · held: another agent had the floor"
             lines.append("**\(turn.speaker)** · \(Self.clock(turn.at))" + (turn.isHeld ? held : ""))
             lines.append(turn.text.trimmingCharacters(in: .whitespacesAndNewlines))
             lines.append("")

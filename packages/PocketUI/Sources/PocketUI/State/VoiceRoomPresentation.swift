@@ -154,6 +154,9 @@ public struct VoiceRoomState: Equatable, Sendable {
     public var joined: [String] = []
     /// The ring has stopped: an agent picked up, nobody did for a while, or you started talking.
     public var ringStopped = false
+    /// The agents' posts not read because the voice line answered their turn, by turn id: the transcript says so,
+    /// rather than "another agent had the floor".
+    public var answeredByLine: Set<String> = []
     /// Why the agent called, when you answered its call; shown until someone speaks.
     public var about: String?
     /// Muted, by the panel's Mute or on the phone's call screen: nothing you say is heard or posted until unmuted.
