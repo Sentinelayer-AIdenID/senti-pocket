@@ -249,6 +249,26 @@ final class VoiceLineCallTests: XCTestCase {
         await room.hangUp()
     }
 
+    /// The agent's post can beat the voice line's failure (a slow network, a slow phone): it is held while the line may
+    /// still answer, then read when the line fails, not left held and the turn silent.
+    func test_an_agent_post_that_beats_the_voice_lines_failure_is_read_when_it_fails() async {
+        for failing in [true, false] {
+            let line = GatedVoiceLine()
+            let listener = LineListener(), speaker = LineSpeaker(), poster = LinePoster()
+            let room = call(line, listener: listener, speaker: speaker, poster: poster)
+            room.begin()
+            await turn(room, listener, "What's new?")
+            await until("asked") { line.askCount == 1 }
+            room.receive([agentPost("m1", "Build 15 is out.", in: room)])
+            XCTAssertTrue(speaker.spoken.isEmpty, "held while the voice line may still answer")
+            line.release(0, [], failing: failing)   // a failure, or an answer with no sentences
+            await until("the agent is heard") { speaker.spoken.count == 1 }
+            XCTAssertEqual(speaker.spoken.map(\.text), ["Build 15 is out."], "failing: \(failing)")
+            XCTAssertEqual(room.state.turns.filter(\.isHeld).count, 0, "nothing left held")
+            await room.hangUp()
+        }
+    }
+
     /// A voice line that answered with no sentences said nothing, so the agent's post is read instead of silence.
     func test_a_voice_line_answer_with_no_sentences_falls_back_to_the_agents_post() async {
         let line = GatedVoiceLine()

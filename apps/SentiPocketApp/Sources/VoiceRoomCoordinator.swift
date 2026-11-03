@@ -102,6 +102,9 @@ final class VoiceRoomCoordinator: ObservableObject {
     /// late post about an earlier turn never talks over the newer one. A turn whose voice line failed falls back to
     /// reading the agent's posts.
     private var lineFailedThisTurn = false
+    /// The agent's posts held back this turn because the voice line was to answer it, by turn id: read after all if
+    /// the line does not answer.
+    private var heldForLine: [String] = []
     /// The agent's fast voice answered the ring; the agent's own hello, when it comes, is kept as text.
     private var voicePickedUp = false
     /// In a meeting, who answered your latest turn first (lowercased), and whether the others were told.
@@ -457,6 +460,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         if !isHuman, !isAddedHello, state.with.count == 1, !state.sharesFloor, turnStoppedAt != nil || voicePickedUp,
            voiceLineSpeaks, !lineFailedThisTurn {
             state.turns.append(VoiceRoomTurn(id: id, speaker: name, isYou: false, text: text, at: at, isHeld: true))
+            heldForLine.append(id)
             return
         }
         if !isAddedHello, let since = awaitingAnswerSince {
@@ -736,6 +740,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         floorAnnounced = false
         gapAnswerId = nil
         lineFailedThisTurn = false
+        heldForLine = []
         // What is left of the last quick answer goes first, so none of it plays after you spoke (warden, #274).
         dropVoiceLineLeftovers()
         readyAfterSending()
@@ -838,24 +843,48 @@ final class VoiceRoomCoordinator: ObservableObject {
                     }
                 }
                 // An answer that ended without a single sentence said nothing: the agent's posts are read instead.
-                if said == 0, !Task.isCancelled { self?.lineFailedThisTurn = true }
+                if said == 0, !Task.isCancelled { self?.lineDidNotAnswer() }
             } catch VoiceLineError.unavailable {
                 self?.voiceLineOff = true
+                self?.lineDidNotAnswer()
             } catch VoiceLineError.notAllowed {
                 // Not this person's to use (warden, #274): off for the rest of the call.
                 self?.voiceLineOff = true
+                self?.lineDidNotAnswer()
             } catch VoiceLineError.rateLimited(let retryAfter) {
                 guard let self else { return }
                 self.voiceLineRestsUntil = self.now().addingTimeInterval(min(300, max(1, retryAfter ?? 30)))
+                self.lineDidNotAnswer()
             } catch is CancellationError {
                 // A newer turn or the hang-up dropped it.
             } catch {
                 // A failed voice line is quiet: this turn falls back to reading the agent's own answers. A cancelled
                 // ask (a newer turn, the hang-up) is not a failure, however the client reports it.
                 guard !Task.isCancelled else { return }
-                self?.lineFailedThisTurn = true
+                self?.lineDidNotAnswer()
             }
         }
+    }
+
+    /// The voice line will not answer this turn: the agent's own posts are read instead, those that came in while it
+    /// was being asked too, in order. They used to stay held when they beat the failure, and the turn went silent.
+    private func lineDidNotAnswer() {
+        lineFailedThisTurn = true
+        let ids = heldForLine
+        heldForLine = []
+        var released = false
+        for id in ids {
+            guard let index = state.turns.firstIndex(where: { $0.id == id && $0.isHeld }) else { continue }
+            let held = state.turns[index]
+            let turn = VoiceRoomTurn(id: held.id, speaker: held.speaker, isYou: false, text: held.text, at: held.at)
+            state.turns[index] = turn
+            queue.append(turn)
+            released = true
+        }
+        guard released else { return }
+        state.waiting = queue.count
+        yieldIfNotTalking()
+        speakIfReady()
     }
 
     /// The voice line is on for this call (on the server, allowed for this person, and not resting after a 429).
