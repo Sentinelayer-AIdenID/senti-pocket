@@ -69,6 +69,19 @@ final class SessionHTTPTransportTests: XCTestCase {
         )
     }
 
+    /// The room is live once the server takes the stream, before any frame (a quiet room may send none).
+    func test_a_room_stream_the_server_takes_says_so_before_any_frame() async {
+        let transport = makeTransport { request in (self.http(request, status: 200), Data()) }
+        var events: [RoomStreamEvent] = []
+        for await event in transport.roomStream(sessionId: "room_1", fromSequence: nil) { events.append(event) }
+        XCTAssertEqual(events, [.opened, .ended(.closed)])
+
+        let refused = makeTransport { request in (self.http(request, status: 404), Data()) }
+        var refusedEvents: [RoomStreamEvent] = []
+        for await event in refused.roomStream(sessionId: "room_1", fromSequence: nil) { refusedEvents.append(event) }
+        XCTAssertEqual(refusedEvents, [.ended(.accessDenied)], "a refused stream never says it opened")
+    }
+
     func test_session_list_uses_exact_route_query_and_bearer() async throws {
         let body = Data("""
         {"sessions":[{"sessionId":"room_1","status":"active","archiveStatus":"active",
