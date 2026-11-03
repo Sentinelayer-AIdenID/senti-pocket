@@ -53,6 +53,28 @@ enum RoomPreview {
         ProcessInfo.processInfo.arguments.contains("-PocketRoomFilesPreview")
     }
 
+    /// `-PocketRoomLongMessage` adds, last in the room, a design packet of about 27,000 characters of markdown
+    /// (headings, lists, code, tables, links, mentions): the kind of message a phone stalled on with build 2026110306.
+    static var isLongMessageRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-PocketRoomLongMessage")
+    }
+
+    /// The long message's text: made up, the shape of a real design packet.
+    static let longMarkdown: String = {
+        var parts = ["# Design packet: room continuity", "A preview packet. Every section has the same shape."]
+        for section in 1...52 {
+            parts.append("## Section \(section): flow and checks")
+            parts.append("This section covers the **design** of step \(section), with `check\(section)()` and "
+                + "[its notes](https://example.com/notes/\(section)). @review-agent please confirm, and @alex has the "
+                + "final say. Plain words follow so the paragraph wraps across several lines on a phone screen.")
+            parts.append("- First point of section \(section)\n- Second point, with **bold** and _italic_\n"
+                + "  - A nested point\n1. Ordered one\n2. Ordered two")
+            parts.append("```swift\nfunc check\(section)() -> Bool {\n    value > \(section)\n}\n```")
+            parts.append("| Field | Value |\n|---|---|\n| id | \(section) |\n| state | ready |")
+        }
+        return parts.joined(separator: "\n\n")
+    }()
+
     @MainActor
     @ViewBuilder
     static var rootView: some View {
@@ -457,7 +479,9 @@ private struct RoomPreviewTransport: RoomTransport {
 
     private var allHistory: [RoomMessage] {
         let files = RoomPreview.isFilesRequested ? Self.fileRoots : []
-        return (anchorScenario ? Self.earlier + Self.history : Self.history) + files
+        let long = RoomPreview.isLongMessageRequested
+            ? [Self.row(130, "review-agent", minutesAgo: 1, RoomPreview.longMarkdown)] : []
+        return (anchorScenario ? Self.earlier + Self.history : Self.history) + files + long
     }
 
     /// The files' messages: each says what its replies hold.
