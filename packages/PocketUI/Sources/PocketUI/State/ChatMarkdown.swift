@@ -412,10 +412,12 @@ public enum ChatReferences {
             cursor = range.upperBound
         }
         prose += paragraph[cursor...]
-        // The separators that stood between the links go with them.
+        // The separators that stood between the links go with them. Possessive (`*+`, `++`), so a run of separators
+        // that is not at the end fails in one pass: the nested `(\s*·\s*)+$` tried every way to share the spaces
+        // between the separators: in a list of tickets followed by more text, the cost about tripled with each ticket.
         let cleaned = prose
-            .replacingOccurrences(of: #"(\s*·\s*)+$"#, with: "", options: .regularExpression)
-            .replacingOccurrences(of: #"(\s*·\s*){2,}"#, with: " · ", options: .regularExpression)
+            .replacingOccurrences(of: #"(?:\s*+·)++\s*+$"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\s*+·(?:\s*+·)++\s*+"#, with: " · ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return (cleaned, tickets)
     }
