@@ -750,7 +750,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         lineAgentThisTurn = nil
         // With more than one agent, a turn that names one of them (or comes when only one has said hello) is that
         // agent's: it alone is mentioned, it has the floor, and the voice line answers as it.
-        turnFor = Self.addressee(of: text, with: state.with, joined: state.joined)
+        turnFor = VoiceTurnAddressee.of(text, with: state.with, joined: state.joined)
         if let turnFor { floorHolder = (turnFor.lowercased(), turnFor) }
         // What is left of the last quick answer goes first, so none of it plays after you spoke (warden, #274).
         dropVoiceLineLeftovers()
@@ -1120,9 +1120,30 @@ enum VoiceAddIntent {
     private static let stops: Set<String> = ["in", "into", "on", "onto", "to", "this", "the", "call", "too", "also",
                                               "please", "here", "now", "and", "me"]
 
+    static func agent(in text: String, among agents: [String]) -> String? {
+        let words = text.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-")).inverted)
+            .filter { !$0.isEmpty }
+        guard let verb = words.firstIndex(where: { verbs.contains($0) }) else { return nil }
+        // A request to add someone mentions the call (or is short: "add warden").
+        guard words.contains("call") || words.count <= 4 else { return nil }
+        let name = words[(verb + 1)...].prefix { !stops.contains($0) }
+        guard !name.isEmpty else { return nil }
+        let joined = name.joined(separator: "-")
+        let matches = agents.filter { agent in
+            let id = agent.lowercased()
+            return id == joined || id.hasSuffix("-" + joined) || id.split(separator: "-").map(String.init).contains(joined)
+                || name.allSatisfy { part in id.split(separator: "-").contains(Substring(part)) }
+        }
+        return matches.count == 1 ? matches[0] : nil
+    }
+}
+
+/// Who a spoken turn is for on a call with several agents (Carter's call, #60982).
+enum VoiceTurnAddressee {
     /// Who a turn is for on a call with several agents: the one it names ("Hi Forge" is pocket-forge's), or else the
     /// only one that has said hello. Nil is everyone, and so is a call with one agent or none (a meeting).
-    static func addressee(of text: String, with agents: [String], joined: [String]) -> String? {
+    static func of(_ text: String, with agents: [String], joined: [String]) -> String? {
         guard agents.count > 1 else { return nil }
         if let named = named(in: text, among: agents) { return named }
         let here = agents.filter { agent in joined.contains { $0.lowercased() == agent.lowercased() } }
@@ -1141,24 +1162,6 @@ enum VoiceAddIntent {
         let matches = agents.filter { agent in
             agent.lowercased().split(separator: "-").map(String.init)
                 .contains { $0.count >= 3 && !notNames.contains($0) && words.contains($0) }
-        }
-        return matches.count == 1 ? matches[0] : nil
-    }
-
-    static func agent(in text: String, among agents: [String]) -> String? {
-        let words = text.lowercased()
-            .components(separatedBy: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-")).inverted)
-            .filter { !$0.isEmpty }
-        guard let verb = words.firstIndex(where: { verbs.contains($0) }) else { return nil }
-        // A request to add someone mentions the call (or is short: "add warden").
-        guard words.contains("call") || words.count <= 4 else { return nil }
-        let name = words[(verb + 1)...].prefix { !stops.contains($0) }
-        guard !name.isEmpty else { return nil }
-        let joined = name.joined(separator: "-")
-        let matches = agents.filter { agent in
-            let id = agent.lowercased()
-            return id == joined || id.hasSuffix("-" + joined) || id.split(separator: "-").map(String.init).contains(joined)
-                || name.allSatisfy { part in id.split(separator: "-").contains(Substring(part)) }
         }
         return matches.count == 1 ? matches[0] : nil
     }

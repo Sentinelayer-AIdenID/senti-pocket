@@ -877,18 +877,18 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
 
     func test_who_a_turn_is_for_on_a_call_with_several_agents() {
         let both = ["claude-warden", "pocket-forge"]
-        XCTAssertEqual(VoiceRoomCoordinator.addressee(of: "Hi Forge", with: both, joined: both), "pocket-forge")
-        XCTAssertEqual(VoiceRoomCoordinator.addressee(of: "Warden, ship it", with: both, joined: both), "claude-warden")
-        XCTAssertNil(VoiceRoomCoordinator.addressee(of: "Who ships tonight?", with: both, joined: both), "everyone's")
-        XCTAssertEqual(VoiceRoomCoordinator.addressee(of: "Who ships tonight?", with: both, joined: ["claude-warden"]),
+        XCTAssertEqual(VoiceTurnAddressee.of("Hi Forge", with: both, joined: both), "pocket-forge")
+        XCTAssertEqual(VoiceTurnAddressee.of("Warden, ship it", with: both, joined: both), "claude-warden")
+        XCTAssertNil(VoiceTurnAddressee.of("Who ships tonight?", with: both, joined: both), "everyone's")
+        XCTAssertEqual(VoiceTurnAddressee.of("Who ships tonight?", with: both, joined: ["claude-warden"]),
                        "claude-warden", "the only one that has said hello")
-        XCTAssertNil(VoiceRoomCoordinator.addressee(of: "Warden and Forge, both of you", with: both, joined: both),
+        XCTAssertNil(VoiceTurnAddressee.of("Warden and Forge, both of you", with: both, joined: both),
                      "two named is everyone's")
-        XCTAssertNil(VoiceRoomCoordinator.addressee(of: "It is forged now", with: both, joined: both), "a word, not a name")
-        XCTAssertNil(VoiceRoomCoordinator.addressee(of: "Hi Forge", with: ["pocket-forge"], joined: []),
+        XCTAssertNil(VoiceTurnAddressee.of("It is forged now", with: both, joined: both), "a word, not a name")
+        XCTAssertNil(VoiceTurnAddressee.of("Hi Forge", with: ["pocket-forge"], joined: []),
                      "a call with one agent is that agent's already")
-        XCTAssertNil(VoiceRoomCoordinator.addressee(of: "Hi Forge", with: [], joined: []), "a meeting is everyone's")
-        XCTAssertNil(VoiceRoomCoordinator.addressee(of: "Hey agent", with: ["review-agent", "build-agent"],
+        XCTAssertNil(VoiceTurnAddressee.of("Hi Forge", with: [], joined: []), "a meeting is everyone's")
+        XCTAssertNil(VoiceTurnAddressee.of("Hey agent", with: ["review-agent", "build-agent"],
                                                     joined: ["review-agent", "build-agent"]),
                      "a word every agent's id shares is no name")
     }
