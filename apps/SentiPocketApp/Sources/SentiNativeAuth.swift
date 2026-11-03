@@ -10,6 +10,7 @@
 // logged, never printed, never returned to a caller for storage elsewhere. `login()` returns it once so the
 // composition root can hand it straight to the write client; it is also persisted to the Keychain here.
 
+import CryptoKit
 import Foundation
 import Security
 #if canImport(AuthenticationServices)
@@ -39,6 +40,16 @@ private struct CliPollResponse: Decodable {
     let auth_token: String?     // present IFF status == "approved"
 }
 
+// Sign in with Apple: sentinelayer-api docs/apple-native-sign-in.md (POST /api/v1/auth/apple/native → AuthResponse).
+private struct AppleNativeRequest: Encodable {
+    let identityToken: String
+    let authorizationCode: String
+    let nonce: String
+}
+private struct AppleNativeResponse: Decodable {
+    let token: String
+}
+
 enum NativeAuthError: LocalizedError, Equatable {
     case network(String)
     case rejected               // the user denied / cancelled / the session expired at the server
@@ -46,6 +57,7 @@ enum NativeAuthError: LocalizedError, Equatable {
     case malformedResponse
     case rateLimited
     case userCancelledWeb
+    case appleUnavailable       // Apple's sheet failed (not a cancel) or returned no usable credential
     var errorDescription: String? {
         switch self {
         case .network(let m):    return "Login network error: \(m)"
@@ -54,6 +66,7 @@ enum NativeAuthError: LocalizedError, Equatable {
         case .malformedResponse: return "The login server returned an unexpected response."
         case .rateLimited:       return "Too many login attempts — please wait a moment and retry."
         case .userCancelledWeb:  return "Login was cancelled."
+        case .appleUnavailable:  return "Sign in with Apple is unavailable right now."
         }
     }
 }
@@ -67,6 +80,27 @@ enum PKCE {
         let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
         precondition(status == errSecSuccess, "SecRandomCopyBytes failed")
         return Data(bytes).base64URLEncodedNoPadding()
+    }
+}
+
+/// The nonce Sign in with Apple binds into its identity token: Apple is given its SHA-256 (lowercase hex) and the API
+/// the raw value, and the API checks they match, so a token from one sign-in cannot be replayed in another.
+enum AppleSignInNonce {
+    static func make() -> String { PKCE.makeVerifier() }   // 32 random bytes, 43 characters
+
+    static func digest(_ nonce: String) -> String {
+        SHA256.hash(data: Data(nonce.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+/// Sign in with Apple is offered only when the build's `SentiAppleSignIn` Info.plist key is a boolean true: after the
+/// API route is on and the app carries Apple's sign-in entitlement.
+enum AppleSignInSetting {
+    static let infoKey = "SentiAppleSignIn"
+
+    static func isEnabled(in info: [String: Any]?) -> Bool {
+        guard let value = info?[infoKey] as? NSNumber, CFGetTypeID(value) == CFBooleanGetTypeID() else { return false }
+        return value.boolValue
     }
 }
 
@@ -147,20 +181,27 @@ final class SentiNativeAuth: NSObject {
     /// aborting. Matches the sl-CLI reference device flow (create-sentinelayer auth/service.js) (relay #256742).
     private let pollInterval: Duration
     private let overallTimeout: Duration
+    private let saveToken: (String) throws -> Void
     private var webSession: ASWebAuthenticationSession?
+    #if canImport(AuthenticationServices)
+    private var appleController: ASAuthorizationController?
+    private var appleContinuation: CheckedContinuation<ASAuthorizationAppleIDCredential, Error>?
+    #endif
 
     init(apiBaseURL: URL,
          appVersion: String,
          ideLabel: String = "Senti Pocket",
          urlSession: URLSession = SentiHTTPTransportPolicy.liveSession,
          pollInterval: Duration = .seconds(2),
-         overallTimeout: Duration = .seconds(180)) {
+         overallTimeout: Duration = .seconds(180),
+         saveToken: @escaping (String) throws -> Void = { try SessionTokenStore.save($0) }) {
         self.apiBaseURL = apiBaseURL
         self.appVersion = appVersion
         self.ideLabel = ideLabel
         self.urlSession = urlSession
         self.pollInterval = pollInterval
         self.overallTimeout = overallTimeout
+        self.saveToken = saveToken
     }
 
     /// Full native-door flow: start → browser-approve (ASWebAuthenticationSession) → poll → USER token → Keychain.
@@ -174,7 +215,34 @@ final class SentiNativeAuth: NSObject {
         defer { cancelWeb() }
         let token = try await pollUntilApproved(sessionId: start.session_id, challenge: verifier)
         try Task.checkCancellation()
-        try SessionTokenStore.save(token)
+        try saveToken(token)
+    }
+
+    #if canImport(AuthenticationServices)
+    /// Sign in with Apple: Apple's sheet → POST /api/v1/auth/apple/native → USER token → Keychain (never returned).
+    /// Asks Apple for no name or email: the Senti account needs neither.
+    func loginWithApple() async throws {
+        let nonce = AppleSignInNonce.make()
+        let credential = try await appleCredential(nonceDigest: AppleSignInNonce.digest(nonce))
+        try Task.checkCancellation()
+        guard let identityToken = credential.identityToken.flatMap({ String(data: $0, encoding: .utf8) }),
+              let code = credential.authorizationCode.flatMap({ String(data: $0, encoding: .utf8) }),
+              !identityToken.isEmpty, !code.isEmpty else {
+            throw NativeAuthError.appleUnavailable
+        }
+        try await finishAppleSignIn(identityToken: identityToken, authorizationCode: code, nonce: nonce)
+    }
+    #endif
+
+    /// The API half of Sign in with Apple, apart from Apple's sheet so it can be tested on its own.
+    func finishAppleSignIn(identityToken: String, authorizationCode: String, nonce: String) async throws {
+        let response: AppleNativeResponse = try await postJSON(
+            path: "/api/v1/auth/apple/native",
+            body: AppleNativeRequest(identityToken: identityToken, authorizationCode: authorizationCode, nonce: nonce)
+        )
+        guard !response.token.isEmpty else { throw NativeAuthError.malformedResponse }
+        try Task.checkCancellation()
+        try saveToken(response.token)
     }
 
     /// True once a session token is present in the Keychain (the app is logged in for the native door).
@@ -266,7 +334,58 @@ final class SentiNativeAuth: NSObject {
         webSession = nil
         #endif
     }
+
+    // MARK: Apple's sheet
+
+    #if canImport(AuthenticationServices)
+    private func appleCredential(nonceDigest: String) async throws -> ASAuthorizationAppleIDCredential {
+        let request = ASAuthorizationAppleIDProvider().createRequest()
+        request.requestedScopes = []
+        request.nonce = nonceDigest
+        let controller = ASAuthorizationController(authorizationRequests: [request])
+        controller.delegate = self
+        controller.presentationContextProvider = self
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                appleContinuation = continuation
+                appleController = controller
+                controller.performRequests()
+            }
+        } onCancel: {
+            // Cancel on the sign-in screen closes Apple's sheet; its delegate call then ends the wait.
+            Task { @MainActor in self.appleController?.cancel() }
+        }
+    }
+
+    private func finishApple(_ result: Result<ASAuthorizationAppleIDCredential, Error>) {
+        let continuation = appleContinuation
+        appleContinuation = nil
+        appleController = nil
+        continuation?.resume(with: result)
+    }
+    #endif
 }
+
+#if canImport(AuthenticationServices)
+extension SentiNativeAuth: ASAuthorizationControllerDelegate, ASAuthorizationControllerPresentationContextProviding {
+    func authorizationController(controller: ASAuthorizationController,
+                                 didCompleteWithAuthorization authorization: ASAuthorization) {
+        guard let credential = authorization.credential as? ASAuthorizationAppleIDCredential else {
+            return finishApple(.failure(NativeAuthError.appleUnavailable))
+        }
+        finishApple(.success(credential))
+    }
+
+    func authorizationController(controller: ASAuthorizationController, didCompleteWithError error: Error) {
+        let cancelled = (error as? ASAuthorizationError)?.code == .canceled
+        finishApple(.failure(cancelled ? NativeAuthError.userCancelledWeb : NativeAuthError.appleUnavailable))
+    }
+
+    func presentationAnchor(for controller: ASAuthorizationController) -> ASPresentationAnchor {
+        keyWindow()
+    }
+}
+#endif
 
 #if canImport(AuthenticationServices)
 extension SentiNativeAuth: ASWebAuthenticationPresentationContextProviding {
@@ -276,6 +395,10 @@ extension SentiNativeAuth: ASWebAuthenticationPresentationContextProviding {
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
         // ASWebAuthenticationSession calls this on the main thread. Return the app's active key window so the
         // approval sheet presents over the current UI. (Forge: verify the anchor on-device — sim/headless can't.)
+        keyWindow()
+    }
+
+    fileprivate func keyWindow() -> ASPresentationAnchor {
         #if canImport(UIKit)
         let keyWindow = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
