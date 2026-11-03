@@ -59,6 +59,11 @@ enum RoomPreview {
         ProcessInfo.processInfo.arguments.contains("-PocketRoomLongMessage")
     }
 
+    /// `-PocketRoomLongMessageReply` adds a short reply to the long message after it, so the reply's quote of it shows.
+    static var isLongMessageReplyRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-PocketRoomLongMessageReply")
+    }
+
     /// The long message's text: made up, the shape of a real design packet.
     /// `-PocketRoomLongMessageSections N` sets how many sections (52 by default, about 27,000 characters), and
     /// `-PocketRoomLongMessageNoTables YES` leaves the tables out, to tell what costs what.
@@ -491,8 +496,11 @@ private struct RoomPreviewTransport: RoomTransport {
 
     private var allHistory: [RoomMessage] {
         let files = RoomPreview.isFilesRequested ? Self.fileRoots : []
-        let long = RoomPreview.isLongMessageRequested
+        var long = RoomPreview.isLongMessageRequested
             ? [Self.row(130, "review-agent", minutesAgo: 1, RoomPreview.longMarkdown)] : []
+        if RoomPreview.isLongMessageReplyRequested {
+            long.append(Self.row(131, "human-alex", minutesAgo: 0.5, "Looks good, merging it now.", replyTo: 130))
+        }
         return (anchorScenario ? Self.earlier + Self.history : Self.history) + files + long
     }
 
