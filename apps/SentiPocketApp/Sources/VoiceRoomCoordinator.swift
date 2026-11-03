@@ -105,6 +105,11 @@ final class VoiceRoomCoordinator: ObservableObject {
     /// The agent's posts held back this turn because the voice line was to answer it, by turn id: read after all if
     /// the line does not answer.
     private var heldForLine: [String] = []
+    /// Who this turn is for when more than one agent is on the call: the one it names, or the only one that has said
+    /// hello. Nil is everyone. It gets the turn's mention, the floor and the voice line (Carter's call, #60982).
+    private var turnFor: String?
+    /// The agent the voice line answered this turn as, lowercased: that agent's own post is kept, not read again.
+    private var lineAgentThisTurn: String?
     /// The agent's fast voice answered the ring; the agent's own hello, when it comes, is kept as text.
     private var voicePickedUp = false
     /// In a meeting, who answered your latest turn first (lowercased), and whether the others were told.
@@ -457,7 +462,7 @@ final class VoiceRoomCoordinator: ObservableObject {
             }
             floorHolder = (lowered, name)
         }
-        if !isHuman, !isAddedHello, state.with.count == 1, !state.sharesFloor, turnStoppedAt != nil || voicePickedUp,
+        if !isHuman, !isAddedHello, lineSpeaks(for: lowered), turnStoppedAt != nil || voicePickedUp,
            voiceLineSpeaks, !lineFailedThisTurn {
             state.turns.append(VoiceRoomTurn(id: id, speaker: name, isYou: false, text: text, at: at, isHeld: true))
             heldForLine.append(id)
@@ -742,6 +747,11 @@ final class VoiceRoomCoordinator: ObservableObject {
         gapAnswerId = nil
         lineFailedThisTurn = false
         heldForLine = []
+        lineAgentThisTurn = nil
+        // With more than one agent, a turn that names one of them (or comes when only one has said hello) is that
+        // agent's: it alone is mentioned, it has the floor, and the voice line answers as it.
+        turnFor = Self.addressee(of: text, with: state.with, joined: state.joined)
+        if let turnFor { floorHolder = (turnFor.lowercased(), turnFor) }
         // What is left of the last quick answer goes first, so none of it plays after you spoke (warden, #274).
         dropVoiceLineLeftovers()
         readyAfterSending()
@@ -826,12 +836,15 @@ final class VoiceRoomCoordinator: ObservableObject {
     private func askVoiceLine(_ text: String, turn: String) {
         // Not asked (off, or resting after a 429): nothing will answer this turn, so the agent's posts are read, even
         // when the rest ends before they come.
-        guard let voiceLine, !voiceLineOff, now() >= voiceLineRestsUntil else {
+        // It answers as one agent only: the call's one agent, or the one this turn is for. It never speaks for "the
+        // room": on Carter's call with two agents it answered every turn as the room while the agents waited.
+        guard let voiceLine, !voiceLineOff, now() >= voiceLineRestsUntil,
+              let agent = state.with.count == 1 ? state.with.first : turnFor else {
             lineDidNotAnswer()
             return
         }
-        let agent = state.with.count == 1 ? state.with[0] : nil
-        let speaker = (agent ?? "room") + Self.voiceSuffix
+        lineAgentThisTurn = agent.lowercased()
+        let speaker = agent + Self.voiceSuffix
         let history = state.turns.filter { $0.id != turn }.suffix(12)
             .map { VoiceLineHistory(speaker: $0.speaker, text: $0.text) }
         let answerId = "line:" + UUID().uuidString.lowercased()
@@ -896,6 +909,12 @@ final class VoiceRoomCoordinator: ObservableObject {
         speakIfReady()
     }
 
+    /// Whether the voice line speaks for this agent: the call's one agent, or the agent it answered this turn as.
+    private func lineSpeaks(for lowered: String) -> Bool {
+        if state.with.count == 1 { return state.with[0].lowercased() == lowered }
+        return lineAgentThisTurn == lowered
+    }
+
     /// The voice line is on for this call (on the server, allowed for this person, and not resting after a 429).
     private var voiceLineSpeaks: Bool { voiceLine != nil && !voiceLineOff && now() >= voiceLineRestsUntil }
 
@@ -928,7 +947,7 @@ final class VoiceRoomCoordinator: ObservableObject {
     /// Your turn in the room. It starts with the mentions of the agents you called, so their listeners know it is for
     /// them; a meeting is for everyone. True once the room has it.
     private func post(_ turnPost: TurnPost, stoppedTalking: Date) async -> Bool {
-        let mentions = state.with.map { "@\($0)" }.joined(separator: " ")
+        let mentions = (turnFor.map { [$0] } ?? state.with).map { "@\($0)" }.joined(separator: " ")
         let addressed = mentions.isEmpty ? turnPost.text : "\(mentions) \(turnPost.text)"
         let sending = now()
         do {
@@ -1100,6 +1119,31 @@ enum VoiceAddIntent {
     private static let verbs: Set<String> = ["bring", "add", "invite", "get", "pull", "loop"]
     private static let stops: Set<String> = ["in", "into", "on", "onto", "to", "this", "the", "call", "too", "also",
                                               "please", "here", "now", "and", "me"]
+
+    /// Who a turn is for on a call with several agents: the one it names ("Hi Forge" is pocket-forge's), or else the
+    /// only one that has said hello. Nil is everyone, and so is a call with one agent or none (a meeting).
+    static func addressee(of text: String, with agents: [String], joined: [String]) -> String? {
+        guard agents.count > 1 else { return nil }
+        if let named = named(in: text, among: agents) { return named }
+        let here = agents.filter { agent in joined.contains { $0.lowercased() == agent.lowercased() } }
+        return here.count == 1 ? here[0] : nil
+    }
+
+    /// Words of an agent's id too common to call it by.
+    private static let notNames: Set<String> = ["agent", "bot", "box", "the", "and", "for"]
+
+    /// The one agent a spoken turn names, by any word of its id (`pocket-forge` is "Forge" or "Pocket"); nil when it
+    /// names none, or more than one.
+    static func named(in text: String, among agents: [String]) -> String? {
+        let words = Set(text.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty })
+        let matches = agents.filter { agent in
+            agent.lowercased().split(separator: "-").map(String.init)
+                .contains { $0.count >= 3 && !notNames.contains($0) && words.contains($0) }
+        }
+        return matches.count == 1 ? matches[0] : nil
+    }
 
     static func agent(in text: String, among agents: [String]) -> String? {
         let words = text.lowercased()

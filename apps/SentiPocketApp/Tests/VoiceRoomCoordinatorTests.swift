@@ -824,6 +824,75 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         XCTAssertTrue(poster.endings.first?.text.contains("@pocket-forge @claude-warden please post") == true)
     }
 
+    /// Carter's call (#60982): with two agents on the call, "Hi Forge" is pocket-forge's turn. Only it is mentioned and
+    /// it has the floor, so the other agent's answer to that turn is kept, not read.
+    func test_a_turn_naming_one_agent_goes_to_that_agent_and_it_has_the_floor() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), poster = FakePoster()
+        let room = room(with: ["claude-warden", "pocket-forge"], handsFree: false, listener: listener, speaker: speaker,
+                        audio: audio, poster: poster)
+        room.begin()
+        await until("rang") { poster.starts.count == 1 }
+        room.receive([message("h1", from: "claude-warden", "Warden here.", secondsAfterStart: 1),
+                      message("h2", from: "pocket-forge", "Forge here.", secondsAfterStart: 2)])
+        await until("both have said hello") { room.state.joined.count == 2 }
+        await until("hello read") { speaker.spoken.count == 1 }
+        speaker.finish()
+
+        room.send(.toggleTalk)
+        await until("listening") { listener.partial != nil }
+        listener.say("Hi Forge")
+        room.send(.toggleTalk)
+        await until("posted") { poster.turns.count == 1 }
+        XCTAssertEqual(poster.turns, ["@pocket-forge Hi Forge"], "only the agent named")
+
+        room.receive([message("w1", from: "claude-warden", "Hey Carter.", secondsAfterStart: 5),
+                      message("f1", from: "pocket-forge", "Hi Carter, Forge here.", secondsAfterStart: 6)])
+        await until("forge speaks") { room.state.speaker == "pocket-forge" }
+        XCTAssertTrue(room.state.turns.contains { $0.speaker == "claude-warden" && $0.text == "Hey Carter." && $0.isHeld },
+                      "the agent not named is kept, not read")
+        await room.hangUp()
+    }
+
+    /// Only one agent has said hello (the other was just added): a turn that names no one is that agent's.
+    func test_an_unnamed_turn_goes_to_the_only_agent_that_has_said_hello() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), poster = FakePoster()
+        let room = room(with: ["claude-warden"], handsFree: false, listener: listener, speaker: speaker, audio: audio,
+                        poster: poster)
+        room.begin()
+        await until("rang") { poster.starts.count == 1 }
+        room.receive([message("h1", from: "claude-warden", "Warden here.")])
+        await until("hello") { room.state.speaker == "claude-warden" }
+        speaker.finish()
+        room.send(.add("pocket-forge"))
+        await until("the add went out") { poster.starts.count == 2 }
+
+        room.send(.toggleTalk)
+        await until("listening") { listener.partial != nil }
+        listener.say("How is the release going?")
+        room.send(.toggleTalk)
+        await until("posted") { poster.turns.count == 1 }
+        XCTAssertEqual(poster.turns, ["@claude-warden How is the release going?"])
+        await room.hangUp()
+    }
+
+    func test_who_a_turn_is_for_on_a_call_with_several_agents() {
+        let both = ["claude-warden", "pocket-forge"]
+        XCTAssertEqual(VoiceRoomCoordinator.addressee(of: "Hi Forge", with: both, joined: both), "pocket-forge")
+        XCTAssertEqual(VoiceRoomCoordinator.addressee(of: "Warden, ship it", with: both, joined: both), "claude-warden")
+        XCTAssertNil(VoiceRoomCoordinator.addressee(of: "Who ships tonight?", with: both, joined: both), "everyone's")
+        XCTAssertEqual(VoiceRoomCoordinator.addressee(of: "Who ships tonight?", with: both, joined: ["claude-warden"]),
+                       "claude-warden", "the only one that has said hello")
+        XCTAssertNil(VoiceRoomCoordinator.addressee(of: "Warden and Forge, both of you", with: both, joined: both),
+                     "two named is everyone's")
+        XCTAssertNil(VoiceRoomCoordinator.addressee(of: "It is forged now", with: both, joined: both), "a word, not a name")
+        XCTAssertNil(VoiceRoomCoordinator.addressee(of: "Hi Forge", with: ["pocket-forge"], joined: []),
+                     "a call with one agent is that agent's already")
+        XCTAssertNil(VoiceRoomCoordinator.addressee(of: "Hi Forge", with: [], joined: []), "a meeting is everyone's")
+        XCTAssertNil(VoiceRoomCoordinator.addressee(of: "Hey agent", with: ["review-agent", "build-agent"],
+                                                    joined: ["review-agent", "build-agent"]),
+                     "a word every agent's id shares is no name")
+    }
+
     /// Add an agent mid-call. One message rings it; from then on its answers are read, and your turns
     /// mention it too.
     func test_adding_an_agent_mid_call_rings_it_and_its_answers_are_read() async {

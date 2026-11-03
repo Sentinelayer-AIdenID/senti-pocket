@@ -175,9 +175,9 @@ final class VoiceLineCallTests: XCTestCase {
     }
 
     private func call(_ line: any VoiceLining, listener: LineListener, speaker: LineSpeaker, poster: LinePoster,
-                      ringCallId: String? = nil, about: String? = nil,
+                      with agents: [String] = ["pocket-forge"], ringCallId: String? = nil, about: String? = nil,
                       now: @escaping @Sendable () -> Date = { Date() }) -> VoiceRoomCoordinator {
-        let room = VoiceRoomCoordinator(sessionId: "room_line", with: ["pocket-forge"], you: "mrrcarter",
+        let room = VoiceRoomCoordinator(sessionId: "room_line", with: agents, you: "mrrcarter",
                                         ownAuthorIds: ["human-mrrcarter"], listener: listener, speaker: speaker,
                                         audio: LineAudio(), poster: poster, voiceLine: line, ringCallId: ringCallId,
                                         about: about, now: now,
@@ -217,10 +217,11 @@ final class VoiceLineCallTests: XCTestCase {
         XCTAssertTrue(poster.uploads.first?.contains("Turns marked (voice) are the fast voice line") == true)
     }
 
-    private func agentPost(_ id: String, _ text: String, in room: VoiceRoomCoordinator) -> RoomMessage {
+    private func agentPost(_ id: String, _ text: String, in room: VoiceRoomCoordinator,
+                           author: String = "pocket-forge") -> RoomMessage {
         let stamp = ISO8601DateFormatter().string(from: room.state.startedAt.addingTimeInterval(2))
-        return RoomMessage(id: id, sequenceId: Int64(abs(id.hashValue % 100_000)) + 1, kind: .message, authorId: "pocket-forge",
-                           authorName: "pocket-forge", isHuman: false, text: text, timestamp: stamp)
+        return RoomMessage(id: id, sequenceId: Int64(abs(id.hashValue % 100_000)) + 1, kind: .message, authorId: author,
+                           authorName: author, isHuman: false, text: text, timestamp: stamp)
     }
 
     /// Carter heard every answer twice: the voice line spoke as the agent, then the agent's own post was read too.
@@ -322,6 +323,32 @@ final class VoiceLineCallTests: XCTestCase {
             XCTAssertEqual(room.state.turns.filter(\.isHeld).count, 0, "nothing left held")
             await room.hangUp()
         }
+    }
+
+    /// Carter's call (#60982): with two agents on the call the voice line answered every turn "as the room" while the
+    /// agents waited. It now answers only as the agent a turn is for, and not at all when the turn is everyone's.
+    func test_on_a_call_with_two_agents_the_voice_line_answers_only_as_the_agent_named() async {
+        let line = FakeVoiceLine([.success(["Next up is the build."])])
+        let listener = LineListener(), speaker = LineSpeaker(), poster = LinePoster()
+        let room = call(line, listener: listener, speaker: speaker, poster: poster, with: ["claude-warden", "pocket-forge"])
+        room.begin()
+        room.receive([agentPost("h1", "Warden here.", in: room, author: "claude-warden"),
+                      agentPost("h2", "Forge here.", in: room)])
+        await until("both have said hello") { room.state.joined.count == 2 }
+        speaker.finish()
+
+        await turn(room, listener, "Who ships tonight?")
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(line.askCount, 0, "a turn for everyone is not answered by the voice line")
+
+        await turn(room, listener, "Forge, what's next?")
+        await until("asked") { line.askCount == 1 }
+        XCTAssertEqual(line.asks.first?.agentId, "pocket-forge")
+        await until("heard") { speaker.spoken.contains { $0.text == "Next up is the build." } }
+        XCTAssertEqual(speaker.spoken.first { $0.text == "Next up is the build." }?.speaker, "pocket-forge",
+                       "in Forge's voice, never the room's")
+        XCTAssertFalse(room.state.turns.contains { $0.speaker == "room (voice)" })
+        await room.hangUp()
     }
 
     /// An ask a newer turn cancelled can still come back with a typed error. It turns the line off or rests it, but it
