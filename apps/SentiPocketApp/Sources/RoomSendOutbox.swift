@@ -59,22 +59,25 @@ struct RoomSendOutbox: Sendable {
         load()[Self.key(account, sessionId)] ?? []
     }
 
-    func add(_ item: Item, account: String, sessionId: String) {
+    /// False when the phone could not keep it (the send itself is not affected).
+    @discardableResult
+    func add(_ item: Item, account: String, sessionId: String) -> Bool {
         var all = load()
         var items = all[Self.key(account, sessionId)] ?? []
         items.removeAll { $0.clientId == item.clientId }
         items.append(item)
         all[Self.key(account, sessionId)] = Array(items.suffix(Self.kept))
-        save(all)
+        return save(all)
     }
 
-    func remove(clientId: String, account: String, sessionId: String) {
+    @discardableResult
+    func remove(clientId: String, account: String, sessionId: String) -> Bool {
         var all = load()
         let key = Self.key(account, sessionId)
-        guard var items = all[key], items.contains(where: { $0.clientId == clientId }) else { return }
+        guard var items = all[key], items.contains(where: { $0.clientId == clientId }) else { return true }
         items.removeAll { $0.clientId == clientId }
         all[key] = items.isEmpty ? nil : items
-        save(all)
+        return save(all)
     }
 
     private static func key(_ account: String, _ sessionId: String) -> String { account + "|" + sessionId }
@@ -89,8 +92,13 @@ struct RoomSendOutbox: Sendable {
         }
     }
 
-    private func save(_ all: [String: [Item]]) {
-        guard let data = try? JSONEncoder().encode(all) else { return }
-        try? data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    private func save(_ all: [String: [Item]]) -> Bool {
+        do {
+            let data = try JSONEncoder().encode(all)
+            try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            return true
+        } catch {
+            return false
+        }
     }
 }
