@@ -62,14 +62,64 @@ private final class GatedVoiceLine: VoiceLining, @unchecked Sendable {
         AsyncThrowingStream { continuation in self.lock.withLock { self.held.append(continuation) } }
     }
 
-    /// Lets the `index`th ask (0 = the first) answer with `sentences`, or fail.
-    func release(_ index: Int, _ sentences: [String], failing: Bool = false) {
+    /// Lets the `index`th ask (0 = the first) answer with `sentences`, or fail (with `error`, or a plain failure).
+    func release(_ index: Int, _ sentences: [String], failing: Bool = false, error: VoiceLineError? = nil) {
         guard let continuation = lock.withLock({ index < held.count ? held[index] : nil }) else { return }
+        if let error { continuation.finish(throwing: error); return }
         if failing { continuation.finish(throwing: VoiceLineError.failed); return }
         for sentence in sentences { continuation.yield(.sentence(sentence)) }
         continuation.yield(.done(speaker: "pocket-forge (voice)"))
         continuation.finish()
     }
+}
+
+/// A voice line whose answers ignore cancellation, like a request already on the wire: an ask a newer turn cancelled
+/// can still come back, late, with an error.
+private final class LateVoiceLine: VoiceLining, @unchecked Sendable {
+    private let lock = NSLock()
+    private var waiting: [CheckedContinuation<VoiceLineEvent?, Error>?] = []
+    private var asks = 0
+    var askCount: Int { lock.withLock { asks } }
+
+    func voiceLine(sessionId: String, agentId: String?, text: String, callId: String, ringCallId: String?,
+                   history: [VoiceLineHistory]) -> AsyncThrowingStream<VoiceLineEvent, Error> {
+        let index = lock.withLock { () -> Int in asks += 1; waiting.append(nil); return asks - 1 }
+        var sent = 0
+        return AsyncThrowingStream(unfolding: { [self] in
+            sent += 1
+            if sent > 2 { return nil }
+            return try await withCheckedThrowingContinuation { continuation in
+                lock.withLock { waiting[index] = continuation }
+            }
+        })
+    }
+
+    private func take(_ index: Int) -> CheckedContinuation<VoiceLineEvent?, Error>? {
+        lock.withLock { () -> CheckedContinuation<VoiceLineEvent?, Error>? in
+            defer { if index < waiting.count { waiting[index] = nil } }
+            return index < waiting.count ? waiting[index] : nil
+        }
+    }
+
+    func fail(_ index: Int, _ error: VoiceLineError) { take(index)?.resume(throwing: error) }
+
+    /// One sentence, then (on the stream's next pull) the end.
+    func answer(_ index: Int, _ sentence: String) {
+        take(index)?.resume(returning: .sentence(sentence))
+        Task {
+            for _ in 0..<200 {
+                if let next = take(index) { next.resume(returning: nil); return }
+                try? await Task.sleep(nanoseconds: 1_000_000)
+            }
+        }
+    }
+}
+
+private final class ManualClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current = Date(timeIntervalSince1970: 1_800_000_000)
+    var now: Date { lock.withLock { current } }
+    func advance(_ seconds: TimeInterval) { lock.withLock { current = current.addingTimeInterval(seconds) } }
 }
 
 @MainActor
@@ -125,11 +175,13 @@ final class VoiceLineCallTests: XCTestCase {
     }
 
     private func call(_ line: any VoiceLining, listener: LineListener, speaker: LineSpeaker, poster: LinePoster,
-                      ringCallId: String? = nil, about: String? = nil) -> VoiceRoomCoordinator {
+                      ringCallId: String? = nil, about: String? = nil,
+                      now: @escaping @Sendable () -> Date = { Date() }) -> VoiceRoomCoordinator {
         let room = VoiceRoomCoordinator(sessionId: "room_line", with: ["pocket-forge"], you: "mrrcarter",
                                         ownAuthorIds: ["human-mrrcarter"], listener: listener, speaker: speaker,
                                         audio: LineAudio(), poster: poster, voiceLine: line, ringCallId: ringCallId,
-                                        about: about, sleep: { _ in try? await Task.sleep(nanoseconds: 1_000_000) })
+                                        about: about, now: now,
+                                        sleep: { _ in try? await Task.sleep(nanoseconds: 1_000_000) })
         room.send(.setHandsFree(false))
         return room
     }
@@ -267,6 +319,53 @@ final class VoiceLineCallTests: XCTestCase {
             XCTAssertEqual(room.state.turns.filter(\.isHeld).count, 0, "nothing left held")
             await room.hangUp()
         }
+    }
+
+    /// An ask a newer turn cancelled can still come back with a typed error. It turns the line off or rests it, but it
+    /// must not release the newer turn's held posts: that turn's own ask answers, and the post would be heard twice.
+    func test_a_cancelled_asks_typed_error_never_releases_the_next_turns_held_post() async {
+        let errors: [VoiceLineError] = [.unavailable, .notAllowed, .rateLimited(retryAfter: 1)]
+        for error in errors {
+            let line = LateVoiceLine()
+            let listener = LineListener(), speaker = LineSpeaker(), poster = LinePoster()
+            let room = call(line, listener: listener, speaker: speaker, poster: poster)
+            room.begin()
+            await turn(room, listener, "What's new?")
+            await until("first ask") { line.askCount == 1 }
+            await turn(room, listener, "And the build?")   // cancels the first ask
+            await until("second ask") { line.askCount == 2 }
+            room.receive([agentPost("m1", "Build 15 is out.", in: room)])
+            line.fail(0, error)                             // the cancelled ask's error arrives late
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            XCTAssertTrue(speaker.spoken.isEmpty, "\(error): the newer turn's post stays held for its own ask")
+            line.answer(1, "Build 15 shipped this morning.")
+            await until("the second ask is heard") { speaker.spoken.count == 1 }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            XCTAssertEqual(speaker.spoken.map(\.text), ["Build 15 shipped this morning."], "\(error): heard once")
+            await room.hangUp()
+        }
+    }
+
+    /// A turn sent while the line rests is never asked. If the rest ends before the agent's post comes, the post used
+    /// to be held for an ask that was never made, and the turn went silent.
+    func test_a_turn_sent_while_the_line_rests_reads_the_agents_post_after_the_rest_ends() async {
+        let clock = ManualClock()
+        let line = GatedVoiceLine()
+        let listener = LineListener(), speaker = LineSpeaker(), poster = LinePoster()
+        let room = call(line, listener: listener, speaker: speaker, poster: poster, now: { clock.now })
+        room.begin()
+        await turn(room, listener, "What's new?")
+        await until("asked") { line.askCount == 1 }
+        line.release(0, [], error: .rateLimited(retryAfter: 30))
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        await turn(room, listener, "And the build?")       // resting: not asked
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(line.askCount, 1, "not asked while resting")
+        clock.advance(60)                                   // the rest is over before the post comes
+        room.receive([agentPost("m2", "Build 15 is out.", in: room)])
+        await until("the agent is heard") { speaker.spoken.count == 1 }
+        XCTAssertEqual(speaker.spoken.map(\.text), ["Build 15 is out."])
+        await room.hangUp()
     }
 
     /// A voice line that answered with no sentences said nothing, so the agent's post is read instead of silence.

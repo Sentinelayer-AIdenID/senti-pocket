@@ -105,6 +105,9 @@ final class VoiceRoomCoordinator: ObservableObject {
     /// The agent's posts held back this turn because the voice line was to answer it, by turn id: read after all if
     /// the line does not answer.
     private var heldForLine: [String] = []
+    /// Every post the voice line's answer stood in for, this call: the transcript says so rather than "another agent
+    /// had the floor".
+    private var answeredByLine: Set<String> = []
     /// The agent's fast voice answered the ring; the agent's own hello, when it comes, is kept as text.
     private var voicePickedUp = false
     /// In a meeting, who answered your latest turn first (lowercased), and whether the others were told.
@@ -461,6 +464,7 @@ final class VoiceRoomCoordinator: ObservableObject {
            voiceLineSpeaks, !lineFailedThisTurn {
             state.turns.append(VoiceRoomTurn(id: id, speaker: name, isYou: false, text: text, at: at, isHeld: true))
             heldForLine.append(id)
+            answeredByLine.insert(id)
             return
         }
         if !isAddedHello, let since = awaitingAnswerSince {
@@ -823,7 +827,12 @@ final class VoiceRoomCoordinator: ObservableObject {
     /// as it arrives, and the agent's own answer still comes in the room after. A new turn drops what is left of the
     /// last quick answer. `turn` is your turn being asked about, which the history leaves out.
     private func askVoiceLine(_ text: String, turn: String) {
-        guard let voiceLine, !voiceLineOff, now() >= voiceLineRestsUntil else { return }
+        // Not asked (off, or resting after a 429): nothing will answer this turn, so the agent's posts are read, even
+        // when the rest ends before they come.
+        guard let voiceLine, !voiceLineOff, now() >= voiceLineRestsUntil else {
+            lineDidNotAnswer()
+            return
+        }
         let agent = state.with.count == 1 ? state.with[0] : nil
         let speaker = (agent ?? "room") + Self.voiceSuffix
         let history = state.turns.filter { $0.id != turn }.suffix(12)
@@ -845,16 +854,18 @@ final class VoiceRoomCoordinator: ObservableObject {
                 // An answer that ended without a single sentence said nothing: the agent's posts are read instead.
                 if said == 0, !Task.isCancelled { self?.lineDidNotAnswer() }
             } catch VoiceLineError.unavailable {
+                // Off for the call either way; only this turn's own ask may release its held posts (a cancelled one
+                // belongs to a turn already gone).
                 self?.voiceLineOff = true
-                self?.lineDidNotAnswer()
+                if !Task.isCancelled { self?.lineDidNotAnswer() }
             } catch VoiceLineError.notAllowed {
                 // Not this person's to use (warden, #274): off for the rest of the call.
                 self?.voiceLineOff = true
-                self?.lineDidNotAnswer()
+                if !Task.isCancelled { self?.lineDidNotAnswer() }
             } catch VoiceLineError.rateLimited(let retryAfter) {
                 guard let self else { return }
                 self.voiceLineRestsUntil = self.now().addingTimeInterval(min(300, max(1, retryAfter ?? 30)))
-                self.lineDidNotAnswer()
+                if !Task.isCancelled { self.lineDidNotAnswer() }
             } catch is CancellationError {
                 // A newer turn or the hang-up dropped it.
             } catch {
@@ -879,6 +890,7 @@ final class VoiceRoomCoordinator: ObservableObject {
             let turn = VoiceRoomTurn(id: held.id, speaker: held.speaker, isYou: false, text: held.text, at: held.at)
             state.turns[index] = turn
             queue.append(turn)
+            answeredByLine.remove(id)
             released = true
         }
         guard released else { return }
@@ -1017,7 +1029,8 @@ final class VoiceRoomCoordinator: ObservableObject {
             lines.append("")
         }
         for turn in state.turns.sorted(by: { $0.at < $1.at }) {
-            lines.append("**\(turn.speaker)** · \(Self.clock(turn.at))" + (turn.isHeld ? " · held: another agent had the floor" : ""))
+            let held = answeredByLine.contains(turn.id) ? " · not read: the voice line answered" : " · held: another agent had the floor"
+            lines.append("**\(turn.speaker)** · \(Self.clock(turn.at))" + (turn.isHeld ? held : ""))
             lines.append(turn.text.trimmingCharacters(in: .whitespacesAndNewlines))
             lines.append("")
         }
