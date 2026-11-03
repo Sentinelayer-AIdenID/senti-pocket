@@ -180,7 +180,14 @@ extension HTTPSessionTransport {
                 break
             case 401:
                 return .reauthenticationRequired
-            case 403, 404, 410:
+            case 403:
+                // After an account's deletion is scheduled the server ends its streams, and the reconnect is
+                // refused with the deletion code: report it as the other reads do.
+                if AccountDeletionPendingRefusal.matches(statusCode: 403, body: await Self.head(of: bytes)) {
+                    onAccountDeletionPending()
+                }
+                return .accessDenied
+            case 404, 410:
                 return .accessDenied
             case 409, 429:
                 let retryAfter = http.value(forHTTPHeaderField: "Retry-After").flatMap(Int.init)
@@ -220,6 +227,20 @@ extension HTTPSessionTransport {
         }
         #endif
     }
+
+    #if !canImport(FoundationNetworking)
+    /// The first bytes of a refusal's body; a refusal is a small JSON object.
+    private static func head(of bytes: URLSession.AsyncBytes, limit: Int = 4096) async -> Data {
+        var data = Data()
+        do {
+            for try await byte in bytes {
+                data.append(byte)
+                if data.count >= limit { break }
+            }
+        } catch {}
+        return data
+    }
+    #endif
 }
 
 /// What `roomStream` yields: frames, then exactly one `ended`.

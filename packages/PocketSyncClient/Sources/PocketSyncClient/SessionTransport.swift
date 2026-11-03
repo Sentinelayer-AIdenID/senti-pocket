@@ -105,7 +105,7 @@ public final class HTTPSessionTransport: SessionTransport, @unchecked Sendable {
     private let streamingURLSession: URLSession
     private let tokenProvider: @Sendable () -> String?
     /// Told when a read is refused because the account is scheduled for deletion; the read still fails as denied.
-    private let onAccountDeletionPending: @Sendable () -> Void
+    let onAccountDeletionPending: @Sendable () -> Void
 
     /// `streamingSession` carries the long-lived room stream. It needs a long resource timeout (the server keeps a
     /// stream open for hours) and an idle timeout above the server's 15-second keep-alive ticks; it defaults to

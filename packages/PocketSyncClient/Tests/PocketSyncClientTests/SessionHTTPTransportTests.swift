@@ -315,6 +315,27 @@ final class SessionHTTPTransportTests: XCTestCase {
         }
     }
 
+    /// The server ends a scheduled-for-deletion account's room streams; the reconnect is refused with the code.
+    func test_a_room_stream_refused_because_the_account_is_scheduled_for_deletion_is_reported_and_denied() async {
+        let answers: [(String, Int)] = [
+            (#"{"error":{"code":"ACCOUNT_DELETION_PENDING","message":"x"}}"#, 1),
+            (#"{"error":{"code":"FORBIDDEN"}}"#, 0),
+            ("", 0)
+        ]
+        for (body, expected) in answers {
+            let reported = LockedCounter()
+            let transport = makeTransport(onAccountDeletionPending: { reported.increment() }) { request in
+                (self.http(request, status: 403), Data(body.utf8))
+            }
+            var ends: [RoomStreamEnd] = []
+            for await event in transport.roomStream(sessionId: "room_1", fromSequence: nil) {
+                if case .ended(let end) = event { ends.append(end) }
+            }
+            XCTAssertEqual(ends, [.accessDenied], body)
+            XCTAssertEqual(reported.value, expected, body)
+        }
+    }
+
     func test_a_deletion_pending_refusal_for_a_bearer_replaced_in_flight_is_not_reported() async {
         let reported = LockedCounter()
         let token = LockedToken("principal-a")
