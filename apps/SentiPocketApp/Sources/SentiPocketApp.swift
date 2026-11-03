@@ -96,8 +96,9 @@ struct SentiPocketApp: App {
         signIn.onAuthenticationRevoked = {
             host.onAuthenticationInvalidated()
             // A refused credential ends this account's notifications on this phone too, as signing out does: someone
-            // else may sign in next (warden, #298 review).
+            // else may sign in next (warden, #298 review). So does the recent-emoji row.
             endPushes()
+            RoomEmojiPicker.forgetRecent()
         }
         signIn.onSignOutStarted = {
             try host.beginSignOut()
