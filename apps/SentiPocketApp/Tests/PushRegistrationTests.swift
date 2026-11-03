@@ -120,6 +120,26 @@ final class PushRegistrationTests: XCTestCase {
     }
 
     /// Warden, #298 review of build 09: an owed row is never deleted from under the account that reclaimed it.
+    /// Warden, #298 review of build 11: the reclaim check runs before each request, not once per attempt.
+    func test_a_row_reclaimed_while_others_are_being_signed_out_is_never_deleted() async {
+        let defaults = UserDefaults(suiteName: "push-queue-\(UUID().uuidString)")!
+        let second = "1d4c8b2a-0f3e-4a5b-8c7d-6e5f4a3b2c1d"
+        var queue = PushUnregisterQueue()
+        queue.add(deviceId: rowId, account: "sub:a")
+        queue.add(deviceId: second, account: "sub:a")
+        queue.save(to: defaults)
+        var sent: [String] = []
+        let done = await PushUnregisterQueue.confirmed(of: queue.due(for: "sub:a"), account: "sub:a", from: defaults) { id in
+            sent.append(id)
+            // A reclaim lands while the first request is out: the second row is current again.
+            var stored = PushUnregisterQueue.load(from: defaults)
+            stored.forgive(deviceId: second)
+            stored.save(to: defaults)
+        }
+        XCTAssertEqual(sent, [rowId], "the reclaimed row is never sent")
+        XCTAssertEqual(done, [rowId])
+    }
+
     func test_a_row_is_owed_per_account_and_forgiven_when_reclaimed() {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         var queue = PushUnregisterQueue()

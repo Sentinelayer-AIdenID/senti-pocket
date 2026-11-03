@@ -150,10 +150,15 @@ struct PushUnregisterQueue: Codable, Equatable {
         }
     }
 
-    /// Signs each entry out; returns the ones the server confirmed.
-    static func confirmed(of entries: [Entry], unregister: (String) async throws -> Void) async -> [String] {
+    /// Signs each entry out; returns the ones the server confirmed. With `account`, each entry is checked against the
+    /// stored queue right before its request: one reclaimed meanwhile is skipped, never deleted (warden, #298 review).
+    static func confirmed(of entries: [Entry], account: String? = nil, from defaults: UserDefaults = .standard,
+                          unregister: (String) async throws -> Void) async -> [String] {
         var done: [String] = []
         for entry in entries {
+            if let account, !load(from: defaults).entries.contains(where: { $0.deviceId == entry.deviceId && $0.account == account }) {
+                continue
+            }
             if (try? await unregister(entry.deviceId)) != nil { done.append(entry.deviceId) }
         }
         return done
@@ -476,7 +481,9 @@ final class PushRegistrar: NSObject, ObservableObject, UNUserNotificationCenterD
                 let stillOwed = PushUnregisterQueue.load().entries
                 owed.removeAll { !stillOwed.contains($0) }
                 guard !owed.isEmpty else { return }
-                let done = await PushUnregisterQueue.confirmed(of: owed) { try await unregistering.unregister(deviceId: $0) }
+                let done = await PushUnregisterQueue.confirmed(of: owed, account: account) {
+                    try await unregistering.unregister(deviceId: $0)
+                }
                 var stored = PushUnregisterQueue.load()
                 stored.remove(deviceIds: done, account: account)
                 stored.save()

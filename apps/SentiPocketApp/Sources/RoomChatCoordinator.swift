@@ -256,8 +256,10 @@ final class RoomChatCoordinator: ObservableObject {
         reassembleFiles: @escaping @Sendable ([RoomFilePost]) -> [RoomBase64File] = { RoomBase64Files.reassemble($0) },
         outbox: RoomSendOutbox? = nil,
         outboxAccount: String? = nil,
+        emojiReactions: Bool = false,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
+        self.emojiReactions = emojiReactions
         self.outbox = outbox
         self.attachmentFetcher = attachmentFetcher
         self.previewStore = previewStore
@@ -727,6 +729,8 @@ final class RoomChatCoordinator: ObservableObject {
     private var canReact: Bool { actionSender != nil && !failureIsTerminal }
     /// The API refused an emoji reaction as something it does not take: the picker is hidden in this room.
     private var emojiUnavailable = false
+    /// Emoji reactions are on in this build (`RoomEmojiReactions`); off, none is ever sent or shown.
+    private let emojiReactions: Bool
     static let emojiUnavailableNotice = "Emoji reactions aren't available yet."
     static let emojiFullNotice = "That message has as many reactions as it can take."
     /// Pinning is a contributor's action (the API refuses viewers).
@@ -1151,15 +1155,15 @@ final class RoomChatCoordinator: ObservableObject {
         publish()
     }
 
-    /// Adds your emoji reaction to a message (or a reply shown in the room), or takes it back. A message shows the tap
-    /// at once; if the API does not take it, that is undone, and a refusal is said in the room's notice line.
+    /// Adds your emoji reaction to a message, or takes it back. The message shows the tap at once; if the API does not
+    /// take it, that is undone, and a refusal is said in the room's notice line.
     private func setEmojiReaction(_ emoji: String, isOn: Bool, on sequenceId: Int64, reply replyId: String?) {
-        guard let actionSender, canReact, ReactionEmoji.isValid(emoji) else { return }
+        // Never on a reply shown in the room: its emoji reactions are not read, so one could be neither seen nor taken
+        // back. Nothing more is sent once the room has refused emoji reactions.
+        guard emojiReactions, replyId == nil, !emojiUnavailable, let actionSender, canReact,
+              ReactionEmoji.isValid(emoji) else { return }
         let before = summaries[sequenceId]
-        // A reply shown in the room shows no reactions, so only a message shows the tap before the API answers.
-        let shown = replyId == nil
-            ? (before ?? RoomReactionSummary(targetSequenceId: sequenceId)).settingEmoji(emoji, isOn: isOn)
-            : nil
+        let shown = (before ?? RoomReactionSummary(targetSequenceId: sequenceId)).settingEmoji(emoji, isOn: isOn)
         if let shown {
             summaries[sequenceId] = shown
             publish()
@@ -1172,7 +1176,7 @@ final class RoomChatCoordinator: ObservableObject {
             if let actor = await self?.resolvedActorRef() {
                 do {
                     try await actionSender.sendAction(.emoji(
-                        emoji, isOn: isOn, sessionId: sessionId, sequenceId: sequenceId, actor: actor, toReply: replyId
+                        emoji, isOn: isOn, sessionId: sessionId, sequenceId: sequenceId, actor: actor
                     ))
                     landed = true
                 } catch RoomSendError.reauthenticationRequired {
@@ -1199,8 +1203,8 @@ final class RoomChatCoordinator: ObservableObject {
         case .unavailable:
             emojiUnavailable = true
             notice = Self.emojiUnavailableNotice
-        case nil:
-            break
+        case .notActive, nil:
+            break   // nothing to say: the refresh shows what is there
         }
         publish()
     }
@@ -2280,6 +2284,7 @@ final class RoomChatCoordinator: ObservableObject {
             composer: composerState,
             canReact: canReact,
             canAddEmoji: canReact && !emojiUnavailable,
+            emojiReactions: emojiReactions,
             thread: threadInput,
             focusFallbackCount: focusFallbackCount,
             focusSequenceId: focusTarget,

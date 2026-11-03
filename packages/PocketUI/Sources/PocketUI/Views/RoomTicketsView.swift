@@ -450,8 +450,12 @@ public struct RoomTicketDetailView: View {
                             .tint(PocketPalette.accent)
                         }
                     }
-                    Text(row.assignee.map { "Your answer goes to the room as one line, mentioning @\(RoomTicketRow.displayName($0))." }
-                         ?? "Your answer goes to the room as one line.")
+                    Text(row.assignee.map { assignee in
+                        // A person is named, never mentioned by user id (the answer itself says "for <name>").
+                        UUID(uuidString: assignee) != nil
+                            ? "Your answer goes to the room as one line, for \(RoomTicketRow.actorLabel(assignee, viewerId: viewerId, names: names))."
+                            : "Your answer goes to the room as one line, mentioning @\(RoomTicketRow.displayName(assignee))."
+                    } ?? "Your answer goes to the room as one line.")
                         .font(.caption)
                         .foregroundStyle(PocketPalette.textSecondary)
                 } else {
@@ -510,7 +514,8 @@ public struct RoomTicketDetailView: View {
                             .accessibilityIdentifier("pocket.ticket.lease")
                     }
                     if !row.createdBy.isEmpty {
-                        Label("Requested by \(RoomTicketRow.displayName(row.createdBy))", systemImage: "person.wave.2")
+                        Label("Requested by \(RoomTicketRow.actorLabel(row.createdBy, viewerId: viewerId, names: names))",
+                              systemImage: "person.wave.2")
                     }
                     if let created = row.createdDate {
                         Label {

@@ -194,10 +194,35 @@ protocol RoomActionSending: Sendable {
 
 /// Why the API refused an emoji reaction.
 enum RoomEmojiRefusal: Error, Equatable {
-    /// 409: the message holds as many emoji reactions as it can, or as many of yours.
+    /// `EMOJI_MESSAGE_LIMIT` or `EMOJI_ACTOR_LIMIT`: the message holds as many emoji reactions as it can, or as many
+    /// of yours.
     case full
-    /// Any other refusal of the request itself (400, 422, ...): the API does not take emoji reactions.
+    /// `REACTION_NOT_ACTIVE`: there was no reaction of yours to take back.
+    case notActive
+    /// The API does not take emoji reactions: it refuses the action type itself.
     case unavailable
+
+    /// What a refused emoji reaction means: the API's error code first, then its status. Only a 422 with no emoji
+    /// code, or a 400 that names the action type, is the API not taking emoji reactions; anything else is the
+    /// request's own failure.
+    static func reading(status: Int, body: Data) -> Error {
+        let json = try? JSONDecoder().decode(JSONValue.self, from: body)
+        switch HTTPRoomTicketWriter.errorCode(json) ?? json?["detail"]?["code"]?.stringValue {
+        case "EMOJI_MESSAGE_LIMIT", "EMOJI_ACTOR_LIMIT": return full
+        case "REACTION_NOT_ACTIVE": return notActive
+        default: break
+        }
+        // An API without emoji reactions refuses the type in validation (422) or in its own check ("unsupported
+        // message action type", 400).
+        let namesActionType = String(decoding: body, as: UTF8.self).lowercased().contains("action type")
+        if status == 422 || (status == 400 && namesActionType) { return unavailable }
+        switch status {
+        case 401: return RoomSendError.reauthenticationRequired
+        case 403, 404: return RoomSendError.notAllowed
+        case 409, 425, 429, 500..<600: return RoomSendError.retryable(retryAfterSeconds: nil)
+        default: return RoomSendError.rejected
+        }
+    }
 }
 
 struct RoomActionRequest: Equatable, Sendable {
@@ -345,22 +370,24 @@ final class HTTPRoomActionSender: RoomActionSending, @unchecked Sendable {
         request.setValue(action.idempotencyKey, forHTTPHeaderField: "Idempotency-Key")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
+        let data: Data
         let response: URLResponse
         do {
-            (_, response) = try await urlSession.data(for: request)
+            (data, response) = try await urlSession.data(for: request)
         } catch {
             throw RoomSendError.retryable(retryAfterSeconds: nil)
         }
         guard let http = response as? HTTPURLResponse else { throw RoomSendError.retryable(retryAfterSeconds: nil) }
+        if isEmoji, !(200..<300).contains(http.statusCode) {
+            throw RoomEmojiRefusal.reading(status: http.statusCode, body: data)
+        }
         switch http.statusCode {
         case 200..<300: return
         case 401: throw RoomSendError.reauthenticationRequired
         case 403, 404: throw RoomSendError.notAllowed
-        case 409 where isEmoji: throw RoomEmojiRefusal.full
         case 409, 425, 429, 500..<600:
             throw RoomSendError.retryable(retryAfterSeconds: http.value(forHTTPHeaderField: "Retry-After").flatMap(Int.init))
-        // An API without emoji reactions refuses the action type itself.
-        default: throw isEmoji ? RoomEmojiRefusal.unavailable : RoomSendError.rejected
+        default: throw RoomSendError.rejected
         }
     }
 }

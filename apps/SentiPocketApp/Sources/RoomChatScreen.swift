@@ -201,6 +201,8 @@ struct RoomChatScreen: View {
             // A send cut off by a kill comes back after a relaunch under its own client id.
             outbox: .standard,
             outboxAccount: RoomSendOutbox.account(token: SessionTokenStore.load()),
+            // Off unless this build turns them on (the `SentiEmojiReactions` Info.plist key).
+            emojiReactions: RoomEmojiReactions.isEnabled,
             onReauthenticationRequired: onReauthenticationRequired
         ))
         // Files go up through the room's own sender (init, complete, the message) and straight to storage for the
