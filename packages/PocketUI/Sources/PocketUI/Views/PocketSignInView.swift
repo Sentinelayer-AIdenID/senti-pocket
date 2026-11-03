@@ -18,6 +18,12 @@ public struct PocketSignInView: View {
         self.send = send
     }
 
+    /// With Apple's own button on screen, the card's button says it is the GitHub or Google sign-in, so "Try again"
+    /// after a failed Sign in with Apple never quietly opens a different one.
+    static func browserButtonTitle(_ title: String, offersApple: Bool) -> String {
+        offersApple ? "\(title) with GitHub or Google" : title
+    }
+
     /// The phases with a sign-in button, where Apple is offered beside it.
     static func showsApple(in phase: PocketSignInPhase, offersApple: Bool) -> Bool {
         guard offersApple else { return false }
@@ -47,25 +53,22 @@ public struct PocketSignInView: View {
                 }
 
                 ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 18) {
-                        providerLabel("GitHub", systemImage: "chevron.left.forwardslash.chevron.right")
-                        providerLabel("Google", systemImage: "g.circle.fill")
-                    }
-                    VStack(spacing: 10) {
-                        providerLabel("GitHub", systemImage: "chevron.left.forwardslash.chevron.right")
-                        providerLabel("Google", systemImage: "g.circle.fill")
-                    }
+                    HStack(spacing: 18) { providerLabels }
+                    VStack(spacing: 10) { providerLabels }
                 }
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel("Sign-in providers: GitHub or Google")
+                .accessibilityLabel(offersApple ? "Sign-in providers: Apple, GitHub or Google" : "Sign-in providers: GitHub or Google")
 
-                phaseCard
-
+                // Apple's button comes first, above the fold on every phone (Apple: never make people scroll to it).
                 if Self.showsApple(in: phase, offersApple: offersApple) {
                     appleButton
                 }
 
-                Text("Sign-in opens Senti’s secure authorization page. Pocket never asks for or stores your GitHub or Google password.")
+                phaseCard
+
+                Text(offersApple
+                     ? "GitHub and Google sign-in open Senti’s secure authorization page. Pocket never asks for or stores your password."
+                     : "Sign-in opens Senti’s secure authorization page. Pocket never asks for or stores your GitHub or Google password.")
                     .font(.footnote)
                     .foregroundStyle(PocketPalette.textSecondary)
                     .multilineTextAlignment(.center)
@@ -123,7 +126,7 @@ public struct PocketSignInView: View {
             actionCard(
                 title: "Sign in again",
                 detail: "Your authorization is no longer valid. Protected cached content stays hidden until you sign in.",
-                buttonTitle: "Sign in again",
+                buttonTitle: Self.browserButtonTitle("Sign in again", offersApple: offersApple),
                 intent: .retryAuthentication,
                 color: PocketPalette.warning
             )
@@ -145,7 +148,7 @@ public struct PocketSignInView: View {
             actionCard(
                 title: "Secure sign-in unavailable",
                 detail: reason.userMessage,
-                buttonTitle: "Try again",
+                buttonTitle: Self.browserButtonTitle("Try again", offersApple: offersApple),
                 intent: .retryAuthentication,
                 color: PocketPalette.danger
             )
@@ -190,6 +193,15 @@ public struct PocketSignInView: View {
         Button("Sign in with Apple") { send(.beginAppleSignIn) }
             .accessibilityIdentifier("pocket.signin.apple")
         #endif
+    }
+
+    @ViewBuilder
+    private var providerLabels: some View {
+        if offersApple {
+            providerLabel("Apple", systemImage: "apple.logo")
+        }
+        providerLabel("GitHub", systemImage: "chevron.left.forwardslash.chevron.right")
+        providerLabel("Google", systemImage: "g.circle.fill")
     }
 
     private func providerLabel(_ title: String, systemImage: String) -> some View {

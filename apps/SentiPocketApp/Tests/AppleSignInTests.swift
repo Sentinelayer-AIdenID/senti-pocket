@@ -30,8 +30,8 @@ final class AppleSignInTests: XCTestCase {
 
     func test_a_refusal_or_an_empty_token_keeps_nothing() async {
         let answers: [(Int, String, NativeAuthError)] = [
-            (404, #"{"detail":"Not Found"}"#, .network("HTTP 404")),
-            (401, #"{"detail":"x"}"#, .network("HTTP 401")),
+            (404, #"{"detail":"Not Found"}"#, .refused(404)),
+            (401, #"{"detail":"x"}"#, .refused(401)),
             (429, "{}", .rateLimited),
             (200, #"{"token":""}"#, .malformedResponse),
             (200, "not json", .malformedResponse)

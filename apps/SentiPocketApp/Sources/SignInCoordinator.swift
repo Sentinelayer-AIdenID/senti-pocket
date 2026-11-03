@@ -289,7 +289,7 @@ final class SignInCoordinator: ObservableObject {
         switch e {
         case .network:                      return .unavailable(.network)
         case .userCancelledWeb, .rejected:  return .signedOut          // user cancelled / denied → clean retry
-        case .timedOut, .rateLimited, .malformedResponse, .appleUnavailable: return .unavailable(.service)
+        case .timedOut, .rateLimited, .malformedResponse, .appleUnavailable, .refused: return .unavailable(.service)
         }
     }
 }

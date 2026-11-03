@@ -58,6 +58,7 @@ enum NativeAuthError: LocalizedError, Equatable {
     case rateLimited
     case userCancelledWeb
     case appleUnavailable       // Apple's sheet failed (not a cancel) or returned no usable credential
+    case refused(Int)           // the sign-in server answered, but not with a session (its HTTP status)
     var errorDescription: String? {
         switch self {
         case .network(let m):    return "Login network error: \(m)"
@@ -67,6 +68,7 @@ enum NativeAuthError: LocalizedError, Equatable {
         case .rateLimited:       return "Too many login attempts — please wait a moment and retry."
         case .userCancelledWeb:  return "Login was cancelled."
         case .appleUnavailable:  return "Sign in with Apple is unavailable right now."
+        case .refused:           return "The sign-in server could not sign you in right now."
         }
     }
 }
@@ -307,7 +309,7 @@ final class SentiNativeAuth: NSObject {
         catch { throw NativeAuthError.network(error.localizedDescription) }
         if let http = response as? HTTPURLResponse {
             if http.statusCode == 429 { throw NativeAuthError.rateLimited }
-            guard (200..<300).contains(http.statusCode) else { throw NativeAuthError.network("HTTP \(http.statusCode)") }
+            guard (200..<300).contains(http.statusCode) else { throw NativeAuthError.refused(http.statusCode) }
         }
         do { return try JSONDecoder().decode(Res.self, from: data) }
         catch { throw NativeAuthError.malformedResponse }

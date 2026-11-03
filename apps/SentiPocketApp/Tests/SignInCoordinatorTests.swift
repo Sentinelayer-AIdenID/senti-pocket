@@ -440,7 +440,8 @@ final class SignInCoordinatorTests: XCTestCase {
         let cases: [(NativeAuthError, PocketSignInPhase)] = [
             (.userCancelledWeb, .signedOut),
             (.appleUnavailable, .unavailable(.service)),
-            (.network("HTTP 404"), .unavailable(.network))
+            (.network("offline"), .unavailable(.network)),
+            (.refused(404), .unavailable(.service))
         ]
         for (error, phase) in cases {
             let coord = makeCoordinator(probe: LoginProbe(), appleLogin: { throw error })

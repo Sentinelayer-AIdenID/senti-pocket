@@ -664,6 +664,12 @@ SIGNED_APPLICATION_ID="$(/usr/libexec/PlistBuddy -c 'Print :application-identifi
 SIGNED_APS_ENVIRONMENT="$(/usr/libexec/PlistBuddy -c 'Print :aps-environment' "$SIGNED_ENTITLEMENTS")"
 [[ "$SIGNED_APS_ENVIRONMENT" == "$APS_ENVIRONMENT" ]] \
   || fail "signed aps-environment is $SIGNED_APS_ENVIRONMENT, expected $APS_ENVIRONMENT"
+# An app that offers Sign in with Apple (SentiAppleSignIn) must carry its entitlement, or the button fails at runtime.
+if [[ "$(/usr/libexec/PlistBuddy -c 'Print :SentiAppleSignIn' "$APP_PATH/Info.plist" 2>/dev/null)" == "true" ]]; then
+  SIGNED_APPLE_SIGN_IN="$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.applesignin:0' "$SIGNED_ENTITLEMENTS" 2>/dev/null || true)"
+  [[ "$SIGNED_APPLE_SIGN_IN" == "Default" ]] \
+    || fail "Sign in with Apple is offered but the signed app does not carry com.apple.developer.applesignin"
+fi
 
 # The exported IPA must carry a decodable provisioning profile whose fields bind this exact app, team, capability set,
 # signing leaf, and distribution channel. The device/OS remains the authority that verifies Apple's CMS trust chain.
