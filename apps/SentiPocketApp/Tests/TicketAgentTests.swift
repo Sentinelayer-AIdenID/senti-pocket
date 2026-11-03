@@ -93,7 +93,7 @@ final class TicketAgentTests: XCTestCase {
     func test_the_form_starts_from_the_ticket_and_starts_an_agent_assigned_to_it() async {
         let mint = FakeMint(models: models)
         var assigned: [String] = []
-        let model = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: temporaryLedger(),
+        let model = AgentStartModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: temporaryLedger(),
                                      account: "sub:carter") { assigned.append($0) }
         XCTAssertEqual(model.agentName, "mint-36d92287", "named from the ticket's id, as on the web")
         XCTAssertTrue(model.job.hasPrefix("Ticket: 36d92287-aaaa-bbbb-cccc-000000000000\nTitle: Breakouts API fix"))
@@ -119,7 +119,7 @@ final class TicketAgentTests: XCTestCase {
     func test_a_refusal_says_why_and_the_form_can_be_changed_and_sent_again() async {
         for (failure, words) in [(MintError.capacity, "No machine is free"), (.forbidden, "cannot start agents"),
                                  (.refused("agentName taken"), "agentName taken")] {
-            let model = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: FakeMint(models: models, failure: failure),
+            let model = AgentStartModel(ticket: ticket, sessionId: "room-1", mint: FakeMint(models: models, failure: failure),
                                          ledger: temporaryLedger(), account: "sub:carter") { _ in
                 XCTFail("nothing is assigned when nothing started")
             }
@@ -142,7 +142,7 @@ final class TicketAgentTests: XCTestCase {
     func test_every_start_carries_its_own_key() async throws {
         let mint = FakeMint(models: models)
         for _ in 0..<2 {
-            let model = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: temporaryLedger(),
+            let model = AgentStartModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: temporaryLedger(),
                                          account: "sub:carter") { _ in }
             await model.load()
             await model.start()
@@ -160,7 +160,7 @@ final class TicketAgentTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: ledger.url) }
         let mint = FakeMint(models: models, script: [.notConfirmed, .notConfirmed, nil])
         var assigned: [String] = []
-        let model = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger,
+        let model = AgentStartModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger,
                                      account: "sub:carter") { assigned.append($0) }
         await model.load()
         await model.start()
@@ -188,7 +188,7 @@ final class TicketAgentTests: XCTestCase {
         let ledger = temporaryLedger()
         defer { try? FileManager.default.removeItem(at: ledger.url) }
         let first = FakeMint(models: models, script: [.notConfirmed])
-        let closed = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: first, ledger: ledger, account: "sub:carter") { _ in }
+        let closed = AgentStartModel(ticket: ticket, sessionId: "room-1", mint: first, ledger: ledger, account: "sub:carter") { _ in }
         await closed.load()
         closed.select("model-b")
         closed.job = "Edited job"
@@ -197,7 +197,7 @@ final class TicketAgentTests: XCTestCase {
         let sentKey = try XCTUnwrap(first.sent.first?.idempotencyKey)
 
         let second = FakeMint(models: models)
-        let reopened = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: second, ledger: ledger, account: "sub:carter") { _ in }
+        let reopened = AgentStartModel(ticket: ticket, sessionId: "room-1", mint: second, ledger: ledger, account: "sub:carter") { _ in }
         await reopened.load()
         XCTAssertEqual(reopened.phase, .unconfirmed)
         XCTAssertEqual(reopened.modelId, "model-b")
@@ -206,11 +206,11 @@ final class TicketAgentTests: XCTestCase {
         XCTAssertEqual(second.sent.first?.idempotencyKey, sentKey)
         XCTAssertEqual(second.sent.first, first.sent.first)
 
-        let stranger = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: FakeMint(models: models), ledger: ledger,
+        let stranger = AgentStartModel(ticket: ticket, sessionId: "room-1", mint: FakeMint(models: models), ledger: ledger,
                                         account: "sub:someone-else") { _ in }
         try? FileManager.default.removeItem(at: ledger.url)
         let again = FakeMint(models: models, script: [.notConfirmed])
-        let carter = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: again, ledger: ledger, account: "sub:carter") { _ in }
+        let carter = AgentStartModel(ticket: ticket, sessionId: "room-1", mint: again, ledger: ledger, account: "sub:carter") { _ in }
         await carter.load()
         await carter.start()
         await stranger.load()
@@ -230,13 +230,13 @@ final class TicketAgentTests: XCTestCase {
         ]
         for (name, ledger, account) in cases {
             let mint = FakeMint(models: models)
-            let model = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger, account: account) { _ in
+            let model = AgentStartModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger, account: account) { _ in
                 XCTFail("\(name): nothing starts")
             }
             await model.load()
             await model.start()
             XCTAssertTrue(mint.sent.isEmpty, "\(name): not sent")
-            XCTAssertEqual(model.phase, .failed(TicketAgentModel.notKeptMessage), name)
+            XCTAssertEqual(model.phase, .failed(AgentStartModel.notKeptMessage), name)
         }
     }
 
@@ -249,7 +249,7 @@ final class TicketAgentTests: XCTestCase {
         let ledger = temporaryLedger(clock)
         defer { try? FileManager.default.removeItem(at: ledger.url) }
         let mint = FakeMint(models: models, script: [.notConfirmed, .notConfirmed, .notConfirmed])
-        let model = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger, account: "sub:carter") { _ in }
+        let model = AgentStartModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger, account: "sub:carter") { _ in }
         await model.load()
         await model.start()
         XCTAssertEqual(model.phase, .unconfirmed)
@@ -266,7 +266,7 @@ final class TicketAgentTests: XCTestCase {
         XCTAssertEqual(model.phase, .unconfirmedTooOld)
 
         clock.date = start.addingTimeInterval(23.5 * 3600)
-        let reopened = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger, account: "sub:carter") { _ in }
+        let reopened = AgentStartModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger, account: "sub:carter") { _ in }
         await reopened.load()
         XCTAssertEqual(reopened.phase, .unconfirmedTooOld)
         await reopened.checkAgain()
@@ -274,7 +274,7 @@ final class TicketAgentTests: XCTestCase {
         XCTAssertEqual(mint.sent.count, 2, "neither checked nor started again")
 
         clock.date = start.addingTimeInterval(24 * 3600 + 1)
-        let dayLater = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger, account: "sub:carter") { _ in }
+        let dayLater = AgentStartModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger, account: "sub:carter") { _ in }
         await dayLater.load()
         XCTAssertEqual(dayLater.phase, .ready, "forgotten after a day")
     }
@@ -288,7 +288,7 @@ final class TicketAgentTests: XCTestCase {
             let ledger = temporaryLedger(clock)
             defer { try? FileManager.default.removeItem(at: ledger.url) }
             let mint = FakeMint(models: models, script: [.notConfirmed])
-            let model = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger, account: "sub:carter") { _ in }
+            let model = AgentStartModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger, account: "sub:carter") { _ in }
             await model.load()
             await model.start()
             XCTAssertEqual(model.phase, .unconfirmed, gone)
@@ -311,8 +311,8 @@ final class TicketAgentTests: XCTestCase {
         let ledger = temporaryLedger()
         defer { try? FileManager.default.removeItem(at: ledger.url) }
         let mint = FakeMint(models: models, script: [.notConfirmed, .notConfirmed])
-        let first = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger, account: "sub:carter") { _ in }
-        let second = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger, account: "sub:carter") { _ in }
+        let first = AgentStartModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger, account: "sub:carter") { _ in }
+        let second = AgentStartModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger, account: "sub:carter") { _ in }
         await first.load()
         await second.load()
         XCTAssertEqual(second.phase, .ready)
@@ -341,7 +341,7 @@ final class TicketAgentTests: XCTestCase {
                                  ticketId: ticket.id, ticketTitle: "Breakouts API fix", idempotencyKey: "pocket-kept-00000000000")
         try ledger.keep(kept, account: "sub:carter", sessionId: "room-1", ticketId: ticket.id)
         let mint = FakeMint(models: models)
-        let model = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger, account: "sub:carter") { _ in }
+        let model = AgentStartModel(ticket: ticket, sessionId: "room-1", mint: mint, ledger: ledger, account: "sub:carter") { _ in }
         await model.load()
         XCTAssertEqual(model.phase, .unconfirmed)
         await model.checkAgain()
@@ -353,7 +353,7 @@ final class TicketAgentTests: XCTestCase {
     func test_a_refusal_forgets_the_start() async throws {
         let ledger = temporaryLedger()
         defer { try? FileManager.default.removeItem(at: ledger.url) }
-        let model = TicketAgentModel(ticket: ticket, sessionId: "room-1", mint: FakeMint(models: models, failure: .capacity),
+        let model = AgentStartModel(ticket: ticket, sessionId: "room-1", mint: FakeMint(models: models, failure: .capacity),
                                      ledger: ledger, account: "sub:carter") { _ in }
         await model.load()
         await model.start()

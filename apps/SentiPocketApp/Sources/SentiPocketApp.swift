@@ -786,6 +786,11 @@ private struct AuthenticatedRootView: View {
             admissionDecider: admissionDecider,
             openRoom: { link in open(link) },
             openChildRoom: { child in roomPath.append(child) },
+            // A New agent's new chat: the room list reads it, and it opens as the room on screen, as a new room does.
+            openNewRoom: { route in
+                sessions.send(.refreshSessions)
+                show(route)
+            },
             receipts: roomReceipts,
             search: roomSearch,
             readMarker: roomReadMarker,

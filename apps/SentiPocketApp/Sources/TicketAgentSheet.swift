@@ -3,23 +3,42 @@ import PocketSyncClient
 import PocketUI
 import SwiftUI
 
-/// Starts of an agent whose outcome is not known yet, kept on the phone per account, room and ticket with the key the
-/// mint knows them by. Checking again sends the same start under the same key, so it can only return that agent, even
-/// after the sheet closed, the app was killed, or the person signed out and in again.
+/// Starts of an agent whose outcome is not known yet, kept on the phone per account, room and ticket (or the room's
+/// New agent) with the key the mint knows them by. Checking again sends the same start under the same key, so it can
+/// only return that agent, even after the sheet closed, the app was killed, or the person signed out and in again.
 ///
 /// The mint keeps a key for 24 hours from its first use, and a replay does not extend that. So a start keeps the time it
 /// was first kept (never refreshed by a check), is sent again only within `checkHorizon` of it (an hour inside the
-/// mint's day, for clock skew), and is forgotten after `maxAge`. One start per ticket: while one is unresolved, a new
-/// start for that ticket takes it up instead of replacing it (#298 review).
+/// mint's day, for clock skew), and is forgotten after `maxAge`. One start per ticket, and one New agent start per room:
+/// while one is unresolved, a new start for it takes it up instead of replacing it (#298 review).
+///
+/// A New agent started in a new chat keeps that chat with its start, before the chat is made (sentinelayer-web
+/// `keepMintStart` keeps its `room`): its id and the create's key go unchanged with every try, and the API keeps one room
+/// per id for its owner, so the chat is made at most once, even across a kill. It stays kept for the next start until
+/// an agent starts.
 struct MintStartLedger: Sendable {
+    /// The chat a New agent goes to when it starts in a new chat.
+    struct NewChat: Codable, Equatable, Sendable {
+        let sessionId: String
+        let title: String
+        /// The create's `Idempotency-Key`, the same on every try.
+        let createKey: String
+        /// The API answered that it is made.
+        var made: Bool
+    }
+
     struct Entry: Codable, Equatable {
-        let request: MintUpRequest
+        /// The start in flight or not confirmed. Nil while only a new chat is kept: the mint refused the start, or the
+        /// chat was not made, so no agent started under its key.
+        let request: MintUpRequest?
         /// When this start was first kept; never moved by a check.
         let createdAt: Date
+        /// The new chat a New agent start goes to, made or about to be.
+        var chat: NewChat?
     }
 
     enum Refusal: Error, Equatable {
-        /// Another start for this ticket is still unresolved.
+        /// Another start for this ticket (or the room's New agent) is still unresolved, or it keeps another new chat.
         case anotherStartPending
     }
 
@@ -40,11 +59,12 @@ struct MintStartLedger: Sendable {
         return MintStartLedger(url: base.appendingPathComponent("mint-starts.json"))
     }
 
-    func entry(account: String, sessionId: String, ticketId: String) -> Entry? {
+    /// `ticketId` nil: the room's New agent.
+    func entry(account: String, sessionId: String, ticketId: String?) -> Entry? {
         load()[Self.key(account, sessionId, ticketId)]
     }
 
-    func pending(account: String, sessionId: String, ticketId: String) -> MintUpRequest? {
+    func pending(account: String, sessionId: String, ticketId: String?) -> MintUpRequest? {
         entry(account: account, sessionId: sessionId, ticketId: ticketId)?.request
     }
 
@@ -55,30 +75,57 @@ struct MintStartLedger: Sendable {
 
     /// Writes the start to the phone before it is sent, and throws if it could not: a start that is not kept is not
     /// sent, since after a kill its key would be lost. The same start kept again keeps its first time; a different start
-    /// for a ticket with one still unresolved is refused.
-    func keep(_ request: MintUpRequest, account: String, sessionId: String, ticketId: String) throws {
+    /// for a ticket with one still unresolved is refused. A new chat already kept stays the one: a start naming another
+    /// is refused, and one naming none leaves it kept for a later start.
+    func keep(_ request: MintUpRequest, chat: NewChat? = nil, account: String, sessionId: String, ticketId: String?) throws {
         var all = load()
         let slot = Self.key(account, sessionId, ticketId)
-        if let existing = all[slot] {
-            guard existing.request == request else { throw Refusal.anotherStartPending }
+        let existing = all[slot]
+        if let kept = existing?.request {
+            guard kept == request else { throw Refusal.anotherStartPending }
             return
         }
-        all[slot] = Entry(request: request, createdAt: now())
+        if let keptChat = existing?.chat, let chat, chat.sessionId != keptChat.sessionId {
+            throw Refusal.anotherStartPending
+        }
+        let written = Entry(request: request, createdAt: now(), chat: existing?.chat ?? chat)
+        all[slot] = written
         try save(all)
-        guard pending(account: account, sessionId: sessionId, ticketId: ticketId) == request else {
+        let read = entry(account: account, sessionId: sessionId, ticketId: ticketId)
+        guard read?.request == request, read?.chat == written.chat else {
             throw CocoaError(.fileWriteUnknown)
         }
     }
 
-    func forget(account: String, sessionId: String, ticketId: String) {
+    /// The new chat is made, so a next try goes straight to the mint. Left unwritten, the next try asks the API again,
+    /// which answers for the same chat.
+    func chatMade(account: String, sessionId: String, ticketId: String?) {
         var all = load()
-        guard all.removeValue(forKey: Self.key(account, sessionId, ticketId)) != nil else { return }
+        let slot = Self.key(account, sessionId, ticketId)
+        guard all[slot]?.chat != nil else { return }
+        all[slot]?.chat?.made = true
+        try? save(all)
+    }
+
+    /// `keepingChat`: the start's new chat, made or not, stays kept for the next start (the mint refused this one, or
+    /// the chat was not made, so no agent started under its key).
+    func forget(account: String, sessionId: String, ticketId: String?, keepingChat: Bool = false) {
+        var all = load()
+        let slot = Self.key(account, sessionId, ticketId)
+        guard let existing = all[slot] else { return }
+        if keepingChat, let chat = existing.chat {
+            all[slot] = Entry(request: nil, createdAt: existing.createdAt, chat: chat)
+        } else {
+            all.removeValue(forKey: slot)
+        }
         // A start left behind by a failed write comes back as unconfirmed, and checking it again is safe.
         try? save(all)
     }
 
-    private static func key(_ account: String, _ sessionId: String, _ ticketId: String) -> String {
-        [account, sessionId, ticketId].joined(separator: "|")
+    /// A ticket's start keeps the slot it always had; the room's New agent has the slot of an empty ticket id, which no
+    /// ticket has.
+    private static func key(_ account: String, _ sessionId: String, _ ticketId: String?) -> String {
+        [account, sessionId, ticketId ?? ""].joined(separator: "|")
     }
 
     private func load() -> [String: Entry] {
@@ -93,12 +140,19 @@ struct MintStartLedger: Sendable {
     }
 }
 
-/// Starting an agent for a ticket (Carter: custom agents for tickets, as on the web; sentinelayer-web
-/// `NewAgentDialog` with `ticketMintPrefill`): a model and effort from the mint's list, a name, and a job that starts
-/// from the ticket. Once it starts, the ticket is assigned to it. A start whose outcome is not known is never sent as a
+/// Starting an agent on the mint (sentinelayer-web `MintForm` in `NewAgentDialog`): a model and effort from the mint's
+/// list, a name, and a job. For a ticket (Carter: custom agents for tickets, as on the web; `ticketMintPrefill`) the job
+/// starts from the ticket and, once the agent starts, the ticket is assigned to it. From the room's New agent the job
+/// starts empty, and the agent works in this chat or in a new one. A start whose outcome is not known is never sent as a
 /// new one: it is checked again under its own key.
 @MainActor
-final class TicketAgentModel: ObservableObject {
+final class AgentStartModel: ObservableObject {
+    /// Where a New agent works (the web's "Where the agent works"). A ticket's agent works in the ticket's room.
+    enum Place: Equatable {
+        case thisChat
+        case newChat
+    }
+
     enum Phase: Equatable {
         case loading
         case ready
@@ -121,13 +175,21 @@ final class TicketAgentModel: ObservableObject {
     @Published var effort: String?
     @Published var agentName: String
     @Published var job: String
+    @Published var place: Place = .thisChat
+    /// The new chat kept from an earlier try: a start in a new chat goes there, never to a second one.
+    @Published private(set) var keptChat: MintStartLedger.NewChat?
+    /// The new chat the started agent works in; nil when it works in this room.
+    @Published private(set) var startedChat: MintStartLedger.NewChat?
 
     private let mint: any MintStarting
     private let sessionId: String
-    private let ticket: RoomTicketsCoordinator.AgentTicket
+    /// The ticket the agent is for; nil for the room's New agent.
+    private let ticket: RoomTicketsCoordinator.AgentTicket?
+    /// Makes a New agent's new chat; nil where none can be made.
+    private let chats: (any AgentChatCreating)?
     private let ledger: MintStartLedger?
     private let account: String?
-    private let onStarted: @MainActor (String) -> Void
+    private let onStarted: @MainActor (MintUpResponse) -> Void
     /// The start in flight or not confirmed, with its key.
     private var pending: MintUpRequest?
 
@@ -136,15 +198,34 @@ final class TicketAgentModel: ObservableObject {
         self.ticket = ticket
         self.sessionId = sessionId
         self.mint = mint
+        self.chats = nil
         self.ledger = ledger
         self.account = account
-        self.onStarted = onStarted
+        self.onStarted = { onStarted($0.agentName) }
         agentName = TicketAgent.agentName(for: ticket.id)
         job = TicketAgent.jobDescription(ticketId: ticket.id, title: ticket.title, status: ticket.status,
                                          sessionId: sessionId, body: ticket.body)
     }
 
+    /// The room's New agent: no ticket, an empty job, and a name the mint makes when none is given.
+    init(newAgentIn sessionId: String, mint: any MintStarting, chats: (any AgentChatCreating)?,
+         ledger: MintStartLedger? = nil, account: String? = nil,
+         onStarted: @escaping @MainActor (MintUpResponse) -> Void = { _ in }) {
+        self.ticket = nil
+        self.sessionId = sessionId
+        self.mint = mint
+        self.chats = chats
+        self.ledger = ledger
+        self.account = account
+        self.onStarted = onStarted
+        agentName = ""
+        job = ""
+    }
+
     var selectedModel: MintModel? { models.first { $0.id == modelId } }
+
+    /// Only the room's New agent offers a new chat, and only where chats can be made.
+    var offersNewChat: Bool { ticket == nil && chats != nil }
 
     var canStart: Bool {
         phase == .ready && !modelId.isEmpty && !job.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -180,17 +261,28 @@ final class TicketAgentModel: ObservableObject {
         guard canStart else { return }
         if adoptKeptStart() { return }
         let name = agentName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let jobText = job.trimmingCharacters(in: .whitespacesAndNewlines)
+        // In a new chat: the one kept from an earlier try, or one named now (the web's `newMintRoomId`) and kept with
+        // the start before it is made.
+        let chat = place == .newChat && offersNewChat
+            ? keptChat ?? MintStartLedger.NewChat(
+                sessionId: UUID().uuidString.lowercased(),
+                title: NewAgentChat.title(agentName: name, job: jobText),
+                createKey: "create-" + UUID().uuidString.lowercased(),
+                made: false
+            )
+            : nil
         let request = MintUpRequest(
             model: modelId,
             effort: effort,
-            jobDescription: job.trimmingCharacters(in: .whitespacesAndNewlines),
-            sessionId: sessionId,
+            jobDescription: jobText,
+            sessionId: chat?.sessionId ?? sessionId,
             agentName: name.isEmpty ? nil : name,
-            ticketId: ticket.id,
-            ticketTitle: TicketSignal.publicTitle(ticket.title),
+            ticketId: ticket?.id,
+            ticketTitle: ticket.map { TicketSignal.publicTitle($0.title) },
             idempotencyKey: "pocket-" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         )
-        await send(request, now: now)
+        await send(request, chat: chat, now: now)
     }
 
     /// The unconfirmed start, sent again exactly as it was, under its own key: the mint returns that agent if it
@@ -200,33 +292,40 @@ final class TicketAgentModel: ObservableObject {
         // Sent again only while the phone still holds this very start, inside the horizon. A record gone (pruned after a
         // day, deleted, unreadable) or replaced means the mint may have forgotten the key: never sent (#298 review).
         guard let ledger, let account,
-              let kept = ledger.entry(account: account, sessionId: sessionId, ticketId: ticket.id), kept.request == pending,
+              let kept = ledger.entry(account: account, sessionId: sessionId, ticketId: ticket?.id), kept.request == pending,
               ledger.isCheckable(kept) else {
             phase = .unconfirmedTooOld
             return
         }
-        await send(pending, now: now)
+        await send(pending, chat: kept.chat, now: now)
     }
 
-    /// Takes up this ticket's kept, unresolved start: its fields, and the phase it calls for. False when there is none.
+    /// Takes up this ticket's (or the room's New agent's) kept, unresolved start: its fields, and the phase it calls
+    /// for. False when there is none. A kept new chat alone is noted for the next start.
     private func adoptKeptStart() -> Bool {
         guard let ledger, let account,
-              let kept = ledger.entry(account: account, sessionId: sessionId, ticketId: ticket.id) else { return false }
-        pending = kept.request
-        if models.contains(where: { $0.id == kept.request.model }) { modelId = kept.request.model }
-        effort = kept.request.effort
-        agentName = kept.request.agentName ?? ""
-        job = kept.request.jobDescription
+              let kept = ledger.entry(account: account, sessionId: sessionId, ticketId: ticket?.id) else { return false }
+        keptChat = kept.chat
+        guard let request = kept.request else { return false }
+        pending = request
+        if models.contains(where: { $0.id == request.model }) { modelId = request.model }
+        effort = request.effort
+        agentName = request.agentName ?? ""
+        job = request.jobDescription
+        place = request.sessionId == sessionId ? .thisChat : .newChat
         phase = ledger.isCheckable(kept) ? .unconfirmed : .unconfirmedTooOld
         return true
     }
 
     /// Sends a start that is kept on the phone first. One that cannot be kept (no record on this phone, no signed-in
     /// account, or the write failed) is not sent: after a kill its key would be lost, and a second start could follow.
-    private func send(_ request: MintUpRequest, now: Date) async {
+    private func send(_ request: MintUpRequest, chat: MintStartLedger.NewChat?, now: Date) async {
+        guard let ledger, let account else {
+            phase = .failed(Self.notKeptMessage)
+            return
+        }
         do {
-            guard let ledger, let account else { throw CocoaError(.fileWriteUnknown) }
-            try ledger.keep(request, account: account, sessionId: sessionId, ticketId: ticket.id)
+            try ledger.keep(request, chat: chat, account: account, sessionId: sessionId, ticketId: ticket?.id)
         } catch MintStartLedger.Refusal.anotherStartPending {
             // Another sheet made a start for this ticket meanwhile: that one is checked, never a second.
             _ = adoptKeptStart()
@@ -237,23 +336,46 @@ final class TicketAgentModel: ObservableObject {
         }
         phase = .starting(since: now)
         pending = request
+        // A new chat is made before the agent is sent to it, under the id and key kept with the start: made again, it is
+        // the same chat.
+        let newChat = ledger.entry(account: account, sessionId: sessionId, ticketId: ticket?.id)?.chat ?? chat
+        let target = newChat?.sessionId == request.sessionId ? newChat : nil
+        if let target, !target.made {
+            do {
+                guard let chats else { throw RoomSendError.notConfigured }
+                try await chats.createAgentChat(sessionId: target.sessionId, title: target.title,
+                                                idempotencyKey: target.createKey)
+                ledger.chatMade(account: account, sessionId: sessionId, ticketId: ticket?.id)
+            } catch {
+                // The mint was not asked, so no agent started under the key. The chat stays kept: the next start makes
+                // it under the same id and key, never a second one.
+                forgetPending(keepingChat: true)
+                phase = .failed(Self.chatMessage(error))
+                return
+            }
+        }
         do {
             let started = try await mint.startAgent(request)
             forgetPending()
+            startedChat = target
             phase = .started(started)
-            onStarted(started.agentName)
+            onStarted(started)
         } catch MintError.notConfirmed {
             phase = .unconfirmed
         } catch {
-            // Refused outright (capacity, refusal, sign-in, not admitted): nothing started under this key.
-            forgetPending()
-            phase = .failed(Self.message(error))
+            // Refused outright (capacity, refusal, sign-in, not admitted): nothing started under this key. A new chat made
+            // for it stays kept for the next start.
+            forgetPending(keepingChat: true)
+            let message = Self.message(error)
+            phase = .failed(target == nil ? message : message + " The new chat is made; starting again uses it.")
         }
     }
 
-    private func forgetPending() {
+    private func forgetPending(keepingChat: Bool = false) {
         pending = nil
-        if let ledger, let account { ledger.forget(account: account, sessionId: sessionId, ticketId: ticket.id) }
+        guard let ledger, let account else { return }
+        ledger.forget(account: account, sessionId: sessionId, ticketId: ticket?.id, keepingChat: keepingChat)
+        keptChat = ledger.entry(account: account, sessionId: sessionId, ticketId: ticket?.id)?.chat
     }
 
     /// After a failure: change something and try again.
@@ -272,6 +394,15 @@ final class TicketAgentModel: ObservableObject {
         }
     }
 
+    /// The new chat was not made, and the agent not sent.
+    static func chatMessage(_ error: Error) -> String {
+        switch error as? RoomSendError {
+        case .reauthenticationRequired?: return "Sign in again to make the new chat. Nothing started."
+        case .notAllowed?: return "This account can't make chats right now. Nothing started."
+        default: return "The new chat could not be made, so nothing started. Try again: it makes that same chat, never a second one."
+        }
+    }
+
     /// The web's names for efforts.
     static func effortLabel(_ effort: String) -> String {
         switch effort {
@@ -286,14 +417,14 @@ final class TicketAgentModel: ObservableObject {
 }
 
 struct TicketAgentSheet: View {
-    @StateObject private var model: TicketAgentModel
+    @StateObject private var model: AgentStartModel
     @Environment(\.dismiss) private var dismiss
     private let title: String
 
     init(ticket: RoomTicketsCoordinator.AgentTicket, sessionId: String, mint: any MintStarting,
          onStarted: @escaping @MainActor (String) -> Void) {
         title = TicketSignal.publicTitle(ticket.title)
-        _model = StateObject(wrappedValue: TicketAgentModel(
+        _model = StateObject(wrappedValue: AgentStartModel(
             ticket: ticket, sessionId: sessionId, mint: mint,
             ledger: .standard, account: RoomSendOutbox.account(token: SessionTokenStore.load()), onStarted: onStarted
         ))
@@ -312,7 +443,11 @@ struct TicketAgentSheet: View {
                 case .started(let started):
                     startedSection(started)
                 default:
-                    formSections
+                    AgentStartForm(
+                        model: model,
+                        namePrompt: "Name",
+                        jobFooter: "It starts from the ticket. It posts a plan in the room, works on its own machine, and the ticket is assigned to it."
+                    )
                 }
             }
             .navigationTitle("Start an agent")
@@ -338,8 +473,29 @@ struct TicketAgentSheet: View {
         return false
     }
 
-    @ViewBuilder
-    private var formSections: some View {
+    private func startedSection(_ started: MintUpResponse) -> some View {
+        Section {
+            Label("\(started.agentName) is starting on its own machine.", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.teal)
+            Text("It will post a short plan in the room. The ticket is assigned to it; its box shows in the Flight record.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// The start form both sheets share (the web's `MintForm`): the model and its effort, the name, the job, and Start with
+/// what became of it.
+struct AgentStartForm: View {
+    @ObservedObject var model: AgentStartModel
+    /// The name field's prompt.
+    let namePrompt: String
+    /// Under the job.
+    let jobFooter: String
+    /// Shown while the job is empty.
+    var jobPlaceholder: String?
+
+    var body: some View {
         Section("Model") {
             Picker("Model", selection: Binding(get: { model.modelId }, set: { model.select($0) })) {
                 ForEach(model.models) { item in
@@ -353,7 +509,7 @@ struct TicketAgentSheet: View {
             if let efforts = model.selectedModel?.efforts, !efforts.isEmpty {
                 Picker("Effort", selection: $model.effort) {
                     ForEach(efforts, id: \.self) { effort in
-                        Text(TicketAgentModel.effortLabel(effort)).tag(Optional(effort))
+                        Text(AgentStartModel.effortLabel(effort)).tag(Optional(effort))
                     }
                 }
                 .pickerStyle(.segmented)
@@ -361,7 +517,7 @@ struct TicketAgentSheet: View {
             }
         }
         Section {
-            TextField("Name", text: $model.agentName)
+            TextField(namePrompt, text: $model.agentName)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .accessibilityIdentifier("pocket.agent.name")
@@ -372,23 +528,33 @@ struct TicketAgentSheet: View {
             TextEditor(text: $model.job)
                 .font(.callout)
                 .frame(minHeight: 200)
+                .overlay(alignment: .topLeading) {
+                    if let jobPlaceholder, model.job.isEmpty {
+                        Text(jobPlaceholder)
+                            .font(.callout)
+                            .foregroundStyle(.tertiary)
+                            .padding(.top, 8)
+                            .padding(.leading, 5)
+                            .allowsHitTesting(false)
+                    }
+                }
                 .accessibilityIdentifier("pocket.agent.job")
         } header: {
             Text("Its job")
         } footer: {
-            Text("It starts from the ticket. It posts a plan in the room, works on its own machine, and the ticket is assigned to it.")
+            Text(jobFooter)
         }
         Section {
             if case .starting(let since) = model.phase {
                 TimelineView(.periodic(from: since, by: 1)) { context in
                     HStack(spacing: 10) {
                         ProgressView()
-                        Text("Starting \(model.agentName): booting its machine (\(Int(context.date.timeIntervalSince(since))) s)")
+                        Text("Starting \(model.agentName.isEmpty ? "the agent" : model.agentName): booting its machine (\(Int(context.date.timeIntervalSince(since))) s)")
                             .font(.footnote)
                     }
                 }
             } else if model.phase == .unconfirmed {
-                Text(TicketAgentModel.unconfirmedMessage)
+                Text(AgentStartModel.unconfirmedMessage)
                     .font(.footnote)
                     .foregroundStyle(.orange)
                 Button {
@@ -403,7 +569,7 @@ struct TicketAgentSheet: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else if model.phase == .unconfirmedTooOld {
-                Text(TicketAgentModel.tooOldMessage)
+                Text(AgentStartModel.tooOldMessage)
                     .font(.footnote)
                     .foregroundStyle(.orange)
                     .accessibilityIdentifier("pocket.agent.tooOld")
@@ -428,16 +594,6 @@ struct TicketAgentSheet: View {
                         .font(.footnote)
                 }
             }
-        }
-    }
-
-    private func startedSection(_ started: MintUpResponse) -> some View {
-        Section {
-            Label("\(started.agentName) is starting on its own machine.", systemImage: "checkmark.circle.fill")
-                .foregroundStyle(.teal)
-            Text("It will post a short plan in the room. The ticket is assigned to it; its box shows in the Flight record.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
         }
     }
 }
