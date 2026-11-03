@@ -28,6 +28,9 @@ final class SignInCoordinator: ObservableObject {
     /// The REAL login (device flow → SessionTokenStore.save). Injected so the composition binds the auth-API config
     /// and tests stay hermetic. Throws on failure (NativeAuthError, mapped to a phase below).
     private let login: () async throws -> Void
+    /// Sign in with Apple (Apple's sheet → the API → SessionTokenStore.save), when the build offers it. It runs through
+    /// the same gate as `login`: only a real stored token counts.
+    private let appleLogin: (() async throws -> Void)?
     /// Truth source for "is a real token in the store" — defaults to the Keychain-backed SentiNativeAuth.isLoggedIn.
     private let isLoggedIn: () -> Bool
     /// Sign-out side effect — defaults to clearing the Keychain token and reports secure-storage failure.
@@ -53,6 +56,7 @@ final class SignInCoordinator: ObservableObject {
     private var pendingSignOutRequiresReauthentication = false
 
     init(login: @escaping () async throws -> Void,
+         appleLogin: (() async throws -> Void)? = nil,
          // NB: default is the nonisolated `SessionTokenStore.load() != nil` (exactly what SentiNativeAuth.isLoggedIn
          // computes) — referencing the @MainActor `SentiNativeAuth.isLoggedIn` from this nonisolated default-arg
          // context is a concurrency error (caught on the Mac build).
@@ -65,6 +69,7 @@ final class SignInCoordinator: ObservableObject {
          },
          clearProtectedLocalState: @escaping () -> Void = { OutboxStore.clear() }) {
         self.login = login
+        self.appleLogin = appleLogin
         self.isLoggedIn = isLoggedIn
         self.signOutAction = signOut
         self.clearProtectedLocalState = clearProtectedLocalState
@@ -76,6 +81,9 @@ final class SignInCoordinator: ObservableObject {
             clearProtectedLocalState()
         }
     }
+
+    /// Whether the sign-in screen offers Sign in with Apple.
+    var offersApple: Bool { appleLogin != nil }
 
     /// The gate SentiPocketApp reads: the authed surfaces are reachable ONLY when this is true.
     var isAuthenticated: Bool { phase == .signedIn }
@@ -138,16 +146,23 @@ final class SignInCoordinator: ObservableObject {
     @discardableResult
     func handle(_ intent: PocketProductIntent) -> Task<Void, Never>? {
         switch intent {
-        case .beginSignIn, .retryAuthentication:
+        case .beginSignIn, .retryAuthentication, .beginAppleSignIn:
+            let run: () async throws -> Void
+            if intent == .beginAppleSignIn {
+                guard let appleLogin else { return nil }
+                run = appleLogin
+            } else {
+                run = login
+            }
             if signOutPending {
                 guard phase != .signingOut else { return nil }
                 if pendingSignOutRequiresReauthentication {
-                    return startLogin(resumingPendingSignOut: true)
+                    return startLogin(resumingPendingSignOut: true, using: run)
                 }
                 return startSignOut()
             }
             guard phase != .authorizing, phase != .signingOut else { return nil }
-            return startLogin()
+            return startLogin(using: run)
         case .cancelSignIn:
             guard phase == .authorizing else { return nil }
             loginTask?.cancel(); loginTask = nil
@@ -161,7 +176,8 @@ final class SignInCoordinator: ObservableObject {
         }
     }
 
-    private func startLogin(resumingPendingSignOut: Bool = false) -> Task<Void, Never> {
+    private func startLogin(resumingPendingSignOut: Bool = false,
+                            using run: @escaping () async throws -> Void) -> Task<Void, Never> {
         if !resumingPendingSignOut {
             signOutPending = false
             pendingSignOutRequiresReauthentication = false
@@ -170,7 +186,7 @@ final class SignInCoordinator: ObservableObject {
         let task = Task { [weak self] in
             guard let self else { return }
             do {
-                try await self.login()
+                try await run()
                 if Task.isCancelled { return }
                 // GATE #2: only a REAL stored token counts as signed-in — never fake success.
                 if self.isLoggedIn() {
@@ -264,7 +280,7 @@ final class SignInCoordinator: ObservableObject {
         switch e {
         case .network:                      return .unavailable(.network)
         case .userCancelledWeb, .rejected:  return .signedOut          // user cancelled / denied → clean retry
-        case .timedOut, .rateLimited, .malformedResponse: return .unavailable(.service)
+        case .timedOut, .rateLimited, .malformedResponse, .appleUnavailable: return .unavailable(.service)
         }
     }
 }

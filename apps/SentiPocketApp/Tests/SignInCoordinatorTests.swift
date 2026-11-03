@@ -37,11 +37,13 @@ final class SignInCoordinatorTests: XCTestCase {
 
     private func makeCoordinator(
         probe: LoginProbe,
-        login: (() async throws -> Void)? = nil   // optional closures are already escaping — no @escaping here
+        login: (() async throws -> Void)? = nil,   // optional closures are already escaping — no @escaping here
+        appleLogin: (() async throws -> Void)? = nil
     ) -> SignInCoordinator {
         let defaultLogin: () async throws -> Void = { probe.loginCalls += 1; probe.storedToken = true }
         let coord = SignInCoordinator(
             login: login ?? defaultLogin,
+            appleLogin: appleLogin,
             isLoggedIn: { probe.storedToken },
             signOut: { probe.storedToken = false },
             clearProtectedLocalState: { probe.protectedStateClears += 1 })
@@ -401,6 +403,69 @@ final class SignInCoordinatorTests: XCTestCase {
 
         XCTAssertTrue(coord.isAuthenticated, "a delayed callback retained by principal A must not sign principal B out")
         XCTAssertTrue(probe.storedToken)
+    }
+
+    // MARK: - Sign in with Apple
+
+    func test_apple_sign_in_runs_only_the_apple_login_and_passes_the_same_gate() async {
+        let probe = LoginProbe()
+        var appleCalls = 0
+        let coord = makeCoordinator(probe: probe, appleLogin: { appleCalls += 1; probe.storedToken = true })
+        XCTAssertTrue(coord.offersApple)
+        await coord.handle(.beginAppleSignIn)?.value
+        XCTAssertEqual(coord.phase, .signedIn)
+        XCTAssertEqual(appleCalls, 1)
+        XCTAssertEqual(probe.loginCalls, 0, "the device flow never ran")
+        XCTAssertEqual(probe.authFired, 1)
+    }
+
+    func test_apple_sign_in_is_ignored_when_the_build_does_not_offer_it() {
+        let probe = LoginProbe()
+        let coord = makeCoordinator(probe: probe)
+        XCTAssertFalse(coord.offersApple)
+        XCTAssertNil(coord.handle(.beginAppleSignIn))
+        XCTAssertEqual(coord.phase, .signedOut)
+        XCTAssertEqual(probe.loginCalls, 0, "it never falls back to another sign-in")
+    }
+
+    func test_an_apple_sign_in_that_stores_no_token_is_not_signed_in() async {
+        let probe = LoginProbe()
+        let coord = makeCoordinator(probe: probe, appleLogin: { /* no token stored */ })
+        await coord.handle(.beginAppleSignIn)?.value
+        XCTAssertEqual(coord.phase, .unavailable(.secureStorage))
+        XCTAssertEqual(probe.authFired, 0)
+    }
+
+    func test_apple_sheet_failures_map_to_the_sign_in_phases() async {
+        let cases: [(NativeAuthError, PocketSignInPhase)] = [
+            (.userCancelledWeb, .signedOut),
+            (.appleUnavailable, .unavailable(.service)),
+            (.network("HTTP 404"), .unavailable(.network))
+        ]
+        for (error, phase) in cases {
+            let coord = makeCoordinator(probe: LoginProbe(), appleLogin: { throw error })
+            await coord.handle(.beginAppleSignIn)?.value
+            XCTAssertEqual(coord.phase, phase, "\(error)")
+        }
+    }
+
+    func test_apple_sign_in_while_authorizing_is_ignored() async {
+        let probe = LoginProbe()
+        let gate = AsyncGate()
+        var appleCalls = 0
+        let coord = makeCoordinator(probe: probe, appleLogin: {
+            appleCalls += 1
+            await gate.wait()
+            probe.storedToken = true
+        })
+        let first = coord.handle(.beginAppleSignIn)
+        XCTAssertNil(coord.handle(.beginAppleSignIn))
+        XCTAssertNil(coord.handle(.beginSignIn), "nor does the device flow start beside it")
+        gate.open()
+        await first?.value
+        XCTAssertEqual(coord.phase, .signedIn)
+        XCTAssertEqual(appleCalls, 1)
+        XCTAssertEqual(probe.loginCalls, 0)
     }
 
     func test_beginSignIn_while_authorizing_is_ignored() async {

@@ -1,13 +1,30 @@
 #if canImport(SwiftUI)
 import SwiftUI
+#if canImport(UIKit) && canImport(AuthenticationServices)
+import AuthenticationServices
+import UIKit
+#endif
 
 public struct PocketSignInView: View {
     private let phase: PocketSignInPhase
+    private let offersApple: Bool
     private let send: (PocketProductIntent) -> Void
+    @Environment(\.colorScheme) private var colorScheme
 
-    public init(phase: PocketSignInPhase, send: @escaping (PocketProductIntent) -> Void) {
+    /// `offersApple` adds Sign in with Apple wherever a sign-in can start; the build turns it on.
+    public init(phase: PocketSignInPhase, offersApple: Bool = false, send: @escaping (PocketProductIntent) -> Void) {
         self.phase = phase
+        self.offersApple = offersApple
         self.send = send
+    }
+
+    /// The phases with a sign-in button, where Apple is offered beside it.
+    static func showsApple(in phase: PocketSignInPhase, offersApple: Bool) -> Bool {
+        guard offersApple else { return false }
+        switch phase {
+        case .signedOut, .reauthenticationRequired, .unavailable: return true
+        case .authorizing, .signedIn, .signingOut: return false
+        }
     }
 
     public var body: some View {
@@ -43,6 +60,10 @@ public struct PocketSignInView: View {
                 .accessibilityLabel("Sign-in providers: GitHub or Google")
 
                 phaseCard
+
+                if Self.showsApple(in: phase, offersApple: offersApple) {
+                    appleButton
+                }
 
                 Text("Sign-in opens Senti’s secure authorization page. Pocket never asks for or stores your GitHub or Google password.")
                     .font(.footnote)
@@ -158,10 +179,50 @@ public struct PocketSignInView: View {
         .pocketCard()
     }
 
+    @ViewBuilder
+    private var appleButton: some View {
+        #if canImport(UIKit) && canImport(AuthenticationServices)
+        AppleSignInButton(style: colorScheme == .dark ? .white : .black) { send(.beginAppleSignIn) }
+            .frame(maxWidth: .infinity, minHeight: 50, maxHeight: 50)
+            .id(colorScheme)   // the button's style is set once, so a new appearance makes a new button
+            .accessibilityIdentifier("pocket.signin.apple")
+        #else
+        Button("Sign in with Apple") { send(.beginAppleSignIn) }
+            .accessibilityIdentifier("pocket.signin.apple")
+        #endif
+    }
+
     private func providerLabel(_ title: String, systemImage: String) -> some View {
         Label(title, systemImage: systemImage)
             .font(.subheadline.weight(.semibold))
             .foregroundStyle(PocketPalette.textSecondary)
+    }
+}
+#endif
+
+#if canImport(SwiftUI) && canImport(UIKit) && canImport(AuthenticationServices)
+/// Apple's own Sign in with Apple button (its look is Apple's to set); a tap only sends the intent.
+private struct AppleSignInButton: UIViewRepresentable {
+    let style: ASAuthorizationAppleIDButton.Style
+    let action: () -> Void
+
+    func makeCoordinator() -> Tap { Tap(action: action) }
+
+    func makeUIView(context: Context) -> ASAuthorizationAppleIDButton {
+        let button = ASAuthorizationAppleIDButton(authorizationButtonType: .signIn, authorizationButtonStyle: style)
+        button.cornerRadius = 12
+        button.addTarget(context.coordinator, action: #selector(Tap.fire), for: .touchUpInside)
+        return button
+    }
+
+    func updateUIView(_ button: ASAuthorizationAppleIDButton, context: Context) {
+        context.coordinator.action = action
+    }
+
+    final class Tap: NSObject {
+        var action: () -> Void
+        init(action: @escaping () -> Void) { self.action = action }
+        @objc func fire() { action() }
     }
 }
 #endif

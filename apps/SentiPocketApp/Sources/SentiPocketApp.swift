@@ -31,7 +31,8 @@ struct SentiPocketApp: App {
     /// The login GATE (Atlas, 322268 — closes the gate≠live gap): makes SentiNativeAuth LIVE. Signed-out →
     /// PocketSignInView; signed-in → the authenticated three-tab app. Every authed client (sync/hydrate/reason/write) is
     /// unreachable until a REAL token is stored (warden gate #1). DEBUG stays on the fixture flow (no real auth).
-    @StateObject private var signIn = SignInCoordinator(login: SentiPocketApp.makeLogin())
+    @StateObject private var signIn = SignInCoordinator(login: SentiPocketApp.makeLogin(),
+                                                        appleLogin: SentiPocketApp.makeAppleLogin())
     #endif
 
     var body: some Scene {
@@ -170,7 +171,7 @@ struct SentiPocketApp: App {
             .id(signIn.authenticationEpoch)
             #endif
         } else {
-            PocketSignInView(phase: signIn.phase, send: signIn.send)
+            PocketSignInView(phase: signIn.phase, offersApple: signIn.offersApple, send: signIn.send)
         }
         #endif
     }
@@ -187,6 +188,20 @@ struct SentiPocketApp: App {
                 throw GatewayEndpointError.notConfigured
             }
             try await SentiNativeAuth(apiBaseURL: base, appVersion: version).login()
+        }
+    }
+
+    /// Sign in with Apple through the same API origin, or nil (not offered) unless the build turns it on.
+    private static func makeAppleLogin() -> (() async throws -> Void)? {
+        guard AppleSignInSetting.isEnabled(in: Bundle.main.infoDictionary) else { return nil }
+        let version = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.1"
+        return {
+            guard let base = GatewayEndpoint.resolve(
+                infoPlistKeys: ["SENTI_API_URL", "SENTI_GATEWAY_URL"]
+            ) else {
+                throw GatewayEndpointError.notConfigured
+            }
+            try await SentiNativeAuth(apiBaseURL: base, appVersion: version).loginWithApple()
         }
     }
     #endif
