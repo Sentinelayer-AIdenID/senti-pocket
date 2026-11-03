@@ -322,7 +322,6 @@ public struct RoomChatView: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.bottom, 8)
-                .modifier(OwnScrollStart())
             }
             // Dragging the messages lowers the keyboard with the finger, as in Messages.
             .scrollDismissesKeyboard(.interactively)
@@ -841,10 +840,11 @@ private struct StartsAtBottom: ViewModifier {
     }
 }
 
-/// What is inside the room keeps its own scroll start. `StartsAtBottom` is passed down to every scroll view within,
-/// and to a sideways one "bottom" means its middle: the pinned strip, a wide table or a code block opened scrolled
-/// halfway, cut off at both edges.
-private struct OwnScrollStart: ViewModifier {
+/// A sideways scroll view inside the room starts at its beginning. The room's list starts at its bottom
+/// (`StartsAtBottom`), that anchor is passed down to every scroll view within, and to a sideways one "bottom" means its
+/// middle: the pinned strip, a wide table or a code block opened scrolled halfway, cut off at both edges. Applied to
+/// each sideways scroll view itself, never to the list's content (the list must keep its own start).
+struct ScrollStartsAtLeading: ViewModifier {
     func body(content: Content) -> some View {
         if #available(iOS 18.0, macOS 15.0, *) {
             content.defaultScrollAnchor(.topLeading, for: .initialOffset)
@@ -2468,6 +2468,7 @@ private struct RoomComposerBar: View {
                     .padding(.horizontal, 12)
                     .padding(.top, 8)
                 }
+                .modifier(ScrollStartsAtLeading())
                 .accessibilityIdentifier("pocket.room.composer.pasted")
             }
             if let media {
@@ -3281,7 +3282,7 @@ private struct RoomPinnedStrip: View {
             }
         }
         .accessibilityIdentifier("pocket.room.pinned")
-        .modifier(OwnScrollStart())
+        .modifier(ScrollStartsAtLeading())
     }
 
     /// The room's leaderboard, in the strip's first row, right under the room's title: the navigation bar of a

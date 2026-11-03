@@ -119,6 +119,7 @@ private struct ChatMarkdownBlocksView: View {
                     .textSelection(.enabled)
                     .padding(10)
             }
+            .modifier(ScrollStartsAtLeading())
             .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -159,6 +160,7 @@ private struct ChatMarkdownTableView: View {
         Group {
             if fit.scrolls {
                 ScrollView(.horizontal, showsIndicators: true) { grid(fit.widths) }
+                    .modifier(ScrollStartsAtLeading())
             } else {
                 grid(fit.widths)
             }

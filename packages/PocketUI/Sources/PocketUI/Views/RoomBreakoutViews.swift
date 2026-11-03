@@ -106,6 +106,7 @@ struct RoomBreakoutOutcomeView: View {
                         }
                     }
                 }
+                .modifier(ScrollStartsAtLeading())
             }
             HStack {
                 Text(outcome.acknowledgementSummary)
