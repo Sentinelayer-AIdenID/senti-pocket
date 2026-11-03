@@ -64,6 +64,12 @@ enum RoomPreview {
     /// `-PocketRoomLongMessageNoTables YES` leaves the tables out, to tell what costs what.
     static let longMarkdown: String = {
         let defaults = UserDefaults.standard
+        // `-PocketRoomLongMessageFile <path>`: a real message's text, read from a file on the machine running the
+        // simulator, so a stall can be tried on the exact text without that text ever being in the app.
+        if let path = defaults.string(forKey: "PocketRoomLongMessageFile"),
+           let text = try? String(contentsOfFile: path, encoding: .utf8), !text.isEmpty {
+            return text
+        }
         let asked = defaults.integer(forKey: "PocketRoomLongMessageSections")
         let sections = asked > 0 ? asked : 52
         let tables = !defaults.bool(forKey: "PocketRoomLongMessageNoTables")
