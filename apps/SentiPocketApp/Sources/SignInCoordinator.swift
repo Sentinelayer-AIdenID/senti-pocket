@@ -57,7 +57,12 @@ final class SignInCoordinator: ObservableObject {
          // computes) — referencing the @MainActor `SentiNativeAuth.isLoggedIn` from this nonisolated default-arg
          // context is a concurrency error (caught on the Mac build).
          isLoggedIn: @escaping () -> Bool = { SessionTokenStore.load() != nil },
-         signOut: @escaping () throws -> Void = { try SessionTokenStore.delete() },
+         signOut: @escaping () throws -> Void = {
+             try SessionTokenStore.delete()
+             RoomSendOutbox.clearStandard()
+             // Unconfirmed agent starts stay (MintStartLedger): only the same account sees them, and forgetting one
+             // could let a second paid agent start after signing back in.
+         },
          clearProtectedLocalState: @escaping () -> Void = { OutboxStore.clear() }) {
         self.login = login
         self.isLoggedIn = isLoggedIn

@@ -56,6 +56,21 @@ final class RoomViewsTests: XCTestCase {
         XCTAssertEqual(healthy.humansOnline, 1)
         XCTAssertEqual(healthy.ttlSeconds, 90)
 
+        // API #1055: each agent's lab, whether it is working and until when, whether it runs in a box; a person's login.
+        let rich = try JSONDecoder().decode(RoomPresence.self, from: Data("""
+        {"status":"ok","present":[
+          {"agentId":"human-6c1f2a9e","kind":"human","displayName":"mrrCarter","login":"mrrCarter","state":"active"},
+          {"agentId":"astra-brand-s","kind":"agent","lab":"openai","working":true,"workingUntilMs":1793400060000,
+           "runtime":"codex","box":true,"state":"active"},
+          {"agentId":"sol-max","kind":"agent","lab":"other","working":false,"workingUntilMs":null,"box":false}
+        ],"humansOnline":1,"agentsOnline":2,"ttlSeconds":90}
+        """.utf8))
+        XCTAssertEqual(rich.participants.map(\.login), ["mrrCarter", nil, nil])
+        XCTAssertEqual(rich.participants.map(\.lab), [nil, "openai", "other"])
+        XCTAssertEqual(rich.participants.map(\.isWorking), [false, true, false])
+        XCTAssertEqual(rich.participants[1].workingUntilMs, 1_793_400_060_000)
+        XCTAssertEqual(rich.participants.map(\.isBox), [false, true, false])
+
         let degraded = try JSONDecoder().decode(RoomPresence.self, from: Data("""
         {"status":"degraded","present":[],"humansOnline":null,"agentsOnline":null,"ttlSeconds":90}
         """.utf8))

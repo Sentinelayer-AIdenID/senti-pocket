@@ -39,6 +39,26 @@ private final class MembersRoomTransport: RoomTransport, @unchecked Sendable {
     }
 }
 
+/// A room where some only answer in threads: their replies come from the actions read.
+private final class RepliesRoomTransport: RoomTransport, @unchecked Sendable {
+    let history: [RoomMessage]
+    let actions: RoomActionsPage
+
+    init(history: [RoomMessage], actions: RoomActionsPage) {
+        self.history = history
+        self.actions = actions
+    }
+
+    func roomEventsBefore(sessionId: String, beforeSequence: Int64?, limit: Int) async throws -> RoomEventPage {
+        RoomEventPage(messages: beforeSequence == nil ? history : [])
+    }
+    func roomEventsAfter(sessionId: String, fromSequence: Int64, limit: Int) async throws -> RoomEventPage {
+        RoomEventPage(messages: [])
+    }
+    func roomStream(sessionId: String, fromSequence: Int64?) -> AsyncStream<RoomStreamEvent> { AsyncStream { _ in } }
+    func roomActions(sessionId: String, targetSequenceId: Int64?, limit: Int) async throws -> RoomActionsPage { actions }
+}
+
 private struct AcceptingSender: RoomMessageSending {
     func sendHumanMessage(sessionId: String, text: String, clientId: String) async throws {}
 }
@@ -84,6 +104,37 @@ final class RoomMembersMentionTests: XCTestCase {
         await waitUntil("member offered") { coordinator.state.mentionCandidates.contains { $0.handle == "newperson1" } }
         XCTAssertFalse(coordinator.state.mentionCandidates.contains { $0.handle == "owner1" }, "you are never offered")
         XCTAssertTrue(coordinator.state.mentionCandidates.contains { $0.handle == "review-agent" }, "people who posted stay")
+        coordinator.pause()
+    }
+
+    /// Carter: an agent that answers in threads (most agents and boxes) was missing from the @ list.
+    func test_people_and_agents_who_only_answer_in_threads_can_be_mentioned() async {
+        let transport = RepliesRoomTransport(
+            history: Self.history,
+            actions: RoomActionsPage(replies: [
+                RoomReply(id: "r1", targetSequenceId: 1, authorId: "pocket-agent", text: "on it",
+                          createdAt: "2026-10-28T20:05:00Z"),
+                RoomReply(id: "r2", targetSequenceId: 1, authorId: "human-griff", text: "thanks",
+                          createdAt: "2026-10-28T20:06:00Z"),
+                RoomReply(id: "r3", targetSequenceId: 1, authorId: "human-owner1", text: "mine",
+                          createdAt: "2026-10-28T20:07:00Z")
+            ])
+        )
+        let coordinator = RoomChatCoordinator(
+            sessionId: "room_1",
+            title: "Room",
+            transport: transport,
+            sender: AcceptingSender(),
+            ownAuthorIds: ["human-owner1"],
+            sleep: { seconds in if seconds > 5 { try? await Task.sleep(nanoseconds: 3_600_000_000_000) } },
+            onReauthenticationRequired: {}
+        )
+        coordinator.resume()
+        await waitUntil("reply authors offered") { coordinator.state.mentionCandidates.contains { $0.handle == "pocket-agent" } }
+        let handles = coordinator.state.mentionCandidates.map(\.handle)
+        XCTAssertTrue(handles.contains("griff"), "a person who only replied, by login")
+        XCTAssertTrue(handles.contains("review-agent"), "people who posted stay")
+        XCTAssertFalse(handles.contains("owner1"), "you are never offered")
         coordinator.pause()
     }
 

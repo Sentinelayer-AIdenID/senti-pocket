@@ -62,9 +62,9 @@ APP_EXECUTABLE_NAME = "SentiPocketApp"
 APP_DISPLAY_NAME = "Senti Pocket"
 APP_ICON_NAME = "AppIcon"
 APP_ICON_FILENAME = "SentiPocketAppIcon.png"
-APP_ICON_SHA256 = "495904bf6d5a1fc41cfebfaa1fe1e67cb20a3c6882194408406210c2097a1b8f"
+APP_ICON_SHA256 = "b3f463a44915661d153effb65066892339496aeb8d387be29246b9d42ad98f4c"
 PROJECT_SPEC_RELATIVE = Path("apps/SentiPocketApp/project.yml")
-PROJECT_SPEC_SHA256 = "957966359162332844f836876f08df15ac82b7147a2dc90e8a42c6106eb72be0"
+PROJECT_SPEC_SHA256 = "468557a406df6505b6aa3cc396793e40329e0ef7fc6119971aa2438a7f5c27ca"
 APP_ICON_WIDTH = 1024
 APP_ICON_HEIGHT = 1024
 APP_ICON_CHANNELS = 3
@@ -78,6 +78,14 @@ APPROVED_RESOURCE_REFERENCES = frozenset(
         PurePosixPath("Resources/Assets.xcassets"),
         PurePosixPath("Resources/PrivacyInfo.xcprivacy"),
         PurePosixPath(f"Resources/{FIXTURE_NAME}"),
+        # Notification and in-app sounds: rendered by scripts/ios/make_sounds.py (the web's chime, a silent file so a
+        # soundless push still vibrates, and the room's send and receive sounds).
+        PurePosixPath("Resources/chime.caf"),
+        PurePosixPath("Resources/silence.caf"),
+        PurePosixPath("Resources/receive.caf"),
+        PurePosixPath("Resources/send.caf"),
+        # The ringtone CallKit plays for an agent's call (make_sounds.py ring).
+        PurePosixPath("Resources/ring.caf"),
     }
 )
 APPROVED_PACKAGE_PRODUCTS = frozenset(
@@ -101,7 +109,7 @@ APPROVED_PACKAGE_MANIFEST_SHA256 = {
     "PocketContracts": "e779465a333d13948fb7d41ad56556b7a93bea5e7be72371908f9bcdc125698a",
     "PocketDialVoice": "952cdccd2cc1d9556506b20cace12e32387f2cba37697c17d7c512ac630ab672",
     "PocketReasoning": "36599039c7a777c9dd1fa5545a33677ef3bd8a670d1c5f026d95703d75cd7c33",
-    "PocketSyncClient": "7423e66396fc78d3c5046dc1364f8402895566ef7c0c29d32f045a516f6b45c4",
+    "PocketSyncClient": "98e4c0dbf0aab1eaf98de579e99fa59775962ef7877c9d0e8359ec9569190590",
     "PocketUI": "b2de263525ed7a590116d40716d673fa13b43ba4ffa5597532c1daacb111c491",
     "PocketVoice": "9523bb5a305632c5d462c963101009dc7f015235cce8ff6197e511873e351534",
 }
@@ -182,7 +190,7 @@ APPROVED_BUILT_ICON_SIZES = {
     "AppIcon83.5x83.5": 83.5,
 }
 PBX_ID_RE = re.compile(r"^[A-F0-9]{24}$")
-SENSITIVE_SETTING_KEYS = frozenset({"SENTI_API_URL", "SENTI_GATEWAY_URL"})
+SENSITIVE_SETTING_KEYS = frozenset({"SENTI_API_URL", "SENTI_GATEWAY_URL", "SENTI_MINT_URL"})
 EMPTY_EXECUTION_OVERRIDE_KEYS = frozenset(
     {
         "C_COMPILER_LAUNCHER",
@@ -328,6 +336,8 @@ class Expectations:
     developer_dir: PurePosixPath
     sdk_root: PurePosixPath
     sdk_version: str
+    # Optional: the Flight record's service. Empty means the build carries none (empty or absent everywhere).
+    mint_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -338,6 +348,7 @@ class BundleExpectations:
     api_url: str
     gateway_url: str
     deployment_target: str
+    mint_url: str = ""
 
 
 def _safe_repr(value: Any) -> str:
@@ -578,6 +589,10 @@ def validate_expectations(expected: Expectations) -> list[str]:
         error = _https_origin_error(name, value)
         if error:
             errors.append(error)
+    if expected.mint_url:
+        error = _https_origin_error("mint_url", expected.mint_url)
+        if error:
+            errors.append(error)
     products_root = expected.products_root
     if (
         not isinstance(products_root, Path)
@@ -645,6 +660,10 @@ def validate_bundle_expectations(expected: BundleExpectations) -> list[str]:
         ("gateway_url", expected.gateway_url),
     ):
         error = _https_origin_error(name, value)
+        if error:
+            errors.append(error)
+    if expected.mint_url:
+        error = _https_origin_error("mint_url", expected.mint_url)
         if error:
             errors.append(error)
     return errors
@@ -2412,6 +2431,16 @@ def _require_exact(
                 )
 
 
+def _require_optional_origin(
+    values: Mapping[str, Any], key: str, wanted: str, errors: list[str]
+) -> None:
+    """An optional origin: exactly the requested one, or empty or absent when none was requested."""
+    if wanted:
+        _require_exact(values, {key: wanted}, errors)
+    else:
+        _require_empty_or_absent(values, {key}, errors)
+
+
 def _require_empty_or_absent(
     values: Mapping[str, Any], keys: Iterable[str], errors: list[str]
 ) -> None:
@@ -2557,6 +2586,7 @@ def verify_settings_file(
         },
         errors,
     )
+    _require_optional_origin(settings, "SENTI_MINT_URL", expected.mint_url, errors)
     optional_empty_settings = set(OPTIONAL_EMPTY_RESOLVED_SETTINGS)
     if expected.configuration == "Debug":
         optional_empty_settings.add("EXCLUDED_SOURCE_FILE_NAMES")
@@ -3680,6 +3710,7 @@ def _verify_app_bundle_contents(
             },
             errors,
         )
+        _require_optional_origin(info, "SENTI_MINT_URL", expected.mint_url, errors)
         background_modes = info.get("UIBackgroundModes")
         if (
             not isinstance(background_modes, list)
@@ -3767,6 +3798,7 @@ def _add_expectation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--build-number", required=True)
     parser.add_argument("--api-url", required=True)
     parser.add_argument("--gateway-url", required=True)
+    parser.add_argument("--mint-url", default="")
     parser.add_argument("--deployment-target", default="16.0")
     parser.add_argument("--products-root", required=True, type=Path)
     parser.add_argument("--developer-dir", required=True, type=PurePosixPath)
@@ -3790,6 +3822,7 @@ def _expectations_from_args(args: argparse.Namespace) -> Expectations:
         developer_dir=args.developer_dir,
         sdk_root=args.sdk_root,
         sdk_version=args.sdk_version,
+        mint_url=args.mint_url,
     )
 
 
@@ -3799,6 +3832,7 @@ def _add_bundle_identity_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--build-number", required=True)
     parser.add_argument("--api-url", required=True)
     parser.add_argument("--gateway-url", required=True)
+    parser.add_argument("--mint-url", default="")
     parser.add_argument("--deployment-target", default="16.0")
 
 
@@ -3810,6 +3844,7 @@ def _bundle_expectations_from_args(args: argparse.Namespace) -> BundleExpectatio
         api_url=args.api_url,
         gateway_url=args.gateway_url,
         deployment_target=args.deployment_target,
+        mint_url=args.mint_url,
     )
 
 

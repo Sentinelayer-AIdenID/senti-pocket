@@ -61,6 +61,48 @@ public struct RoomReply: Equatable, Identifiable, Sendable {
     }
 }
 
+/// One emoji reaction on a message: the emoji, how many reacted with it, whether you did, and some of who did.
+public struct RoomEmojiReaction: Equatable, Sendable {
+    public let emoji: String
+    public let count: Int
+    public let viewerReacted: Bool
+    /// Public ids of who reacted, at most `actorLimit`.
+    public let actors: [String]
+
+    /// The most distinct emoji a message holds (the API's limit).
+    public static let limit = 20
+    /// The most reactors the API lists per emoji.
+    public static let actorLimit = 10
+
+    public init(emoji: String, count: Int, viewerReacted: Bool, actors: [String] = []) {
+        self.emoji = emoji
+        self.count = count
+        self.viewerReacted = viewerReacted
+        self.actors = actors
+    }
+
+    /// One entry of the summary's `emojiReactions`, or nil unless it holds exactly one emoji and a count.
+    init?(json: JSONValue) {
+        guard let emoji = json["emoji"]?.stringValue, ReactionEmoji.isValid(emoji),
+              let count = json["count"]?.intValue, count > 0 else { return nil }
+        let actors = (json["actors"]?.arrayValue ?? []).compactMap(\.stringValue).filter { !$0.isEmpty }
+        self.init(
+            emoji: emoji,
+            count: Int(clamping: count),
+            viewerReacted: json["viewerReacted"]?.boolValue ?? false,
+            actors: Array(actors.prefix(Self.actorLimit))
+        )
+    }
+
+    /// The summary's `emojiReactions` in first-use order: entries that are not one emoji are dropped, an emoji
+    /// listed twice counts once, and at most `limit` are kept.
+    static func list(_ json: JSONValue?) -> [RoomEmojiReaction] {
+        var seen = Set<String>()
+        let entries = (json?.arrayValue ?? []).compactMap(RoomEmojiReaction.init(json:))
+        return Array(entries.filter { seen.insert($0.emoji).inserted }.prefix(limit))
+    }
+}
+
 /// What the room shows under one message: reaction counts, who reacted, who is working on it, and its replies.
 public struct RoomReactionSummary: Equatable, Sendable {
     public let targetSequenceId: Int64
@@ -76,6 +118,8 @@ public struct RoomReactionSummary: Equatable, Sendable {
     public let latestReplies: [RoomReply]
     public let hasMoreReplies: Bool
     public let isPinned: Bool
+    /// Emoji reactions, in the order they were first used.
+    public let emojiReactions: [RoomEmojiReaction]
 
     public init(
         targetSequenceId: Int64,
@@ -87,7 +131,8 @@ public struct RoomReactionSummary: Equatable, Sendable {
         replyTotal: Int = 0,
         latestReplies: [RoomReply] = [],
         hasMoreReplies: Bool = false,
-        isPinned: Bool = false
+        isPinned: Bool = false,
+        emojiReactions: [RoomEmojiReaction] = []
     ) {
         self.targetSequenceId = targetSequenceId
         self.counts = counts
@@ -99,6 +144,7 @@ public struct RoomReactionSummary: Equatable, Sendable {
         self.latestReplies = latestReplies
         self.hasMoreReplies = hasMoreReplies
         self.isPinned = isPinned
+        self.emojiReactions = emojiReactions
     }
 
     init?(json: JSONValue) {
@@ -132,9 +178,41 @@ public struct RoomReactionSummary: Equatable, Sendable {
             replyTotal: max(Int(clamping: json["replyTotal"]?.intValue ?? 0), counts["reply"] ?? 0, replies.count),
             latestReplies: replies,
             hasMoreReplies: json["hasMoreReplies"]?.boolValue ?? false,
-            isPinned: json["isPinned"]?.boolValue ?? false
+            isPinned: json["isPinned"]?.boolValue ?? false,
+            emojiReactions: RoomEmojiReaction.list(json["emojiReactions"])
         )
     }
+}
+
+/// An agent saying what it is doing about a message (an action of type `working_on`), e.g. "drafting the fix" or
+/// "done: filed 1 ticket".
+public struct RoomWorkingOn: Equatable, Identifiable, Sendable {
+    public let id: String
+    public let targetSequenceId: Int64
+    public let actorId: String
+    public let note: String
+    public let createdAt: String
+
+    public init(id: String, targetSequenceId: Int64, actorId: String, note: String, createdAt: String) {
+        self.id = id
+        self.targetSequenceId = targetSequenceId
+        self.actorId = actorId
+        self.note = note
+        self.createdAt = createdAt
+    }
+
+    init?(json: JSONValue) {
+        guard json["actionType"]?.stringValue == "working_on",
+              let id = json["id"]?.stringValue, !id.isEmpty,
+              let target = json["targetSequenceId"]?.intValue, target > 0,
+              let actor = json["actorId"]?.stringValue, !actor.isEmpty else { return nil }
+        let note = (json["note"]?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        self.init(id: id, targetSequenceId: target, actorId: actor, note: note.isEmpty ? "working on it" : note,
+                  createdAt: json["createdAt"]?.stringValue ?? "")
+    }
+
+    /// Finished: the agent's note says so.
+    public var isDone: Bool { note.lowercased().hasPrefix("done") }
 }
 
 /// A message pinned for the room (`projection.pinnedMessages`): newest pin first, at most the room's pin limit.
@@ -170,6 +248,10 @@ public struct RoomPinnedMessage: Equatable, Identifiable, Sendable {
 public struct RoomActionsPage: Decodable, Equatable, Sendable {
     public let byTarget: [Int64: RoomReactionSummary]
     public let replies: [RoomReply]
+    /// "Working on" updates in the page, oldest first.
+    public let workingOn: [RoomWorkingOn]
+    /// How long a "working on" stays current without a newer one (the API's `workingOnStaleAfterSeconds`).
+    public let workingOnStaleAfter: TimeInterval
     /// The room's pinned messages, newest pin first.
     public let pinned: [RoomPinnedMessage]
     /// How many messages the room can pin at once (the API's limit).
@@ -178,11 +260,15 @@ public struct RoomActionsPage: Decodable, Equatable, Sendable {
     public init(
         byTarget: [Int64: RoomReactionSummary] = [:],
         replies: [RoomReply] = [],
+        workingOn: [RoomWorkingOn] = [],
+        workingOnStaleAfter: TimeInterval = 900,
         pinned: [RoomPinnedMessage] = [],
         pinLimit: Int = 10
     ) {
         self.byTarget = byTarget
         self.replies = replies
+        self.workingOn = workingOn
+        self.workingOnStaleAfter = workingOnStaleAfter
         self.pinned = pinned
         self.pinLimit = pinLimit
     }
@@ -209,6 +295,8 @@ public struct RoomActionsPage: Decodable, Equatable, Sendable {
             if let existing = latest[reply.id], existing.revision >= reply.revision { continue }
             latest[reply.id] = reply
         }
+        self.workingOn = actions.compactMap(RoomWorkingOn.init(json:)).sorted { ($0.createdAt, $0.id) < ($1.createdAt, $1.id) }
+        self.workingOnStaleAfter = TimeInterval(max(60, min(86_400, projection["workingOnStaleAfterSeconds"]?.intValue ?? 900)))
         self.replies = latest.values.sorted {
             ($0.createdAt, $0.id) < ($1.createdAt, $1.id)
         }

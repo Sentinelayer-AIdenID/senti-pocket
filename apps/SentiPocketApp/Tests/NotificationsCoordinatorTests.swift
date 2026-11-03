@@ -37,13 +37,43 @@ private final class RecordingMarker: NotificationReadMarking, @unchecked Sendabl
     }
 }
 
+/// Fails the first marks, then lets them through; counts how many are in flight at once.
+private final class TroubledMarker: NotificationReadMarking, @unchecked Sendable {
+    private let lock = NSLock()
+    private var failures: Int
+    private var inFlight = 0
+    private(set) var mostAtOnce = 0
+    private var ids: [String] = []
+
+    init(failures: Int = 0) { self.failures = failures }
+
+    func markRead(id: String) async throws {
+        let fail: Bool = lock.withLock {
+            inFlight += 1
+            mostAtOnce = max(mostAtOnce, inFlight)
+            if failures > 0 { failures -= 1; return true }
+            return false
+        }
+        try? await Task.sleep(nanoseconds: 5_000_000)
+        lock.withLock {
+            inFlight -= 1
+            if !fail { ids.append(id) }
+        }
+        if fail { throw RoomSendError.retryable(retryAfterSeconds: nil) }
+    }
+
+    func marked() -> [String] { lock.withLock { ids } }
+    func peak() -> Int { lock.withLock { mostAtOnce } }
+}
+
 @MainActor
 final class NotificationsCoordinatorTests: XCTestCase {
-    private func note(_ id: String, read: Bool = false, url: String? = nil, at: String = "2026-10-28T18:00:00Z") -> SentiNotification {
+    private func note(_ id: String, read: Bool = false, url: String? = nil, at: String = "2026-10-28T18:00:00Z",
+                      room: String = "room_1") -> SentiNotification {
         SentiNotification(
             id: id,
             kind: "mention",
-            sessionId: "room_1",
+            sessionId: room,
             title: "cobalt-warden mentioned you",
             link: url.flatMap(SentiLink.init(string:)),
             isRead: read,
@@ -58,6 +88,146 @@ final class NotificationsCoordinatorTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 2_000_000)
         }
         XCTFail("timed out waiting for: \(description)")
+    }
+
+    /// Opening a push or a banner reads that notification, and only that one: nothing is marked read by itself.
+    func test_opening_a_push_reads_only_its_own_notification() async {
+        let marker = RecordingMarker()
+        let coordinator = NotificationsCoordinator(
+            transport: ScriptedNotifications([.success(SentiNotificationsPage(notifications: [
+                note("m1", url: "https://sentinelayer.com/dashboard/sessions/room_1?message=10"),
+                note("m2", url: "https://sentinelayer.com/dashboard/sessions/room_1?message=11"),
+                note("j1"),
+                note("o1", room: "room_2")
+            ]))]),
+            marker: marker,
+            onReauthenticationRequired: {}
+        )
+        await coordinator.refresh()
+        XCTAssertEqual(coordinator.unreadCount, 4)
+
+        coordinator.markOpened(SentiLink(sessionId: "room_1", messageSequence: 11))
+        XCTAssertEqual(Set(coordinator.state.unread.map(\.id)), ["m1", "j1", "o1"], "the room's other ones stay unread")
+        await waitUntil("m2 marked on the server") { marker.marked() == ["m2"] }
+
+        coordinator.markOpened(SentiLink(sessionId: "room_1"))
+        XCTAssertEqual(Set(coordinator.state.unread.map(\.id)), ["m1", "o1"], "a room link reads the room's own notice")
+    }
+
+    func test_a_push_opened_before_the_bell_loads_is_read_once_it_has() async {
+        let marker = RecordingMarker()
+        let coordinator = NotificationsCoordinator(
+            transport: ScriptedNotifications([.success(SentiNotificationsPage(notifications: [
+                note("m1", url: "https://sentinelayer.com/dashboard/sessions/room_1?message=10"),
+                note("m2", url: "https://sentinelayer.com/dashboard/sessions/room_1?message=11")
+            ]))]),
+            marker: marker,
+            onReauthenticationRequired: {}
+        )
+        coordinator.markOpened(SentiLink(sessionId: "room_1", messageSequence: 10))
+        await coordinator.refresh()
+        XCTAssertEqual(coordinator.state.unread.map(\.id), ["m2"])
+        await waitUntil("m1 marked") { marker.marked() == ["m1"] }
+    }
+
+    /// Warden (#275): a banner tapped seconds after its notice was made, before the bell's next read, is read when the
+    /// notice arrives; a push carrying its notification id reads exactly that one; a room link reads one notice only.
+    func test_a_tapped_banner_is_read_when_its_notice_arrives_and_ids_and_links_pick_one() async {
+        let marker = RecordingMarker()
+        let coordinator = NotificationsCoordinator(
+            transport: ScriptedNotifications([
+                .success(SentiNotificationsPage(notifications: [note("old1")])),
+                .success(SentiNotificationsPage(notifications: [
+                    note("new1", url: "https://sentinelayer.com/dashboard/sessions/room_1?message=42"),
+                    note("join2"), note("join1"),
+                    note("t1", url: "https://sentinelayer.com/dashboard/sessions/room_1?ticket=tk-9"),
+                    note("byid"), note("old1")
+                ]))
+            ]),
+            marker: marker,
+            onReauthenticationRequired: {}
+        )
+        await coordinator.refresh()
+        coordinator.markOpened(SentiLink(sessionId: "room_1", messageSequence: 42))
+        XCTAssertEqual(coordinator.unreadCount, 1, "not in the bell yet: nothing else is read")
+        await coordinator.refresh()
+        XCTAssertFalse(coordinator.state.unread.map(\.id).contains("new1"), "read once it arrived")
+
+        coordinator.markOpened(SentiLink(sessionId: "room_1", ticketId: "tk-9"))
+        XCTAssertFalse(coordinator.state.unread.map(\.id).contains("t1"))
+        coordinator.markOpened(SentiLink(sessionId: "room_1"), notificationId: "byid")
+        XCTAssertFalse(coordinator.state.unread.map(\.id).contains("byid"), "by its id")
+        coordinator.markOpened(SentiLink(sessionId: "room_1"))
+        let unread = coordinator.state.unread.map(\.id)
+        XCTAssertTrue(unread.contains("join2") && unread.contains("join1"),
+                      "two room notices could be it: neither is guessed (warden, #275)")
+    }
+
+    /// Warden (#275): without an id, one room notice is read only when it alone matches, and never one made after
+    /// the tap.
+    func test_a_room_link_reads_its_only_notice_and_never_a_later_one() async {
+        let marker = RecordingMarker()
+        let coordinator = NotificationsCoordinator(
+            transport: ScriptedNotifications([
+                .success(SentiNotificationsPage(notifications: [
+                    note("joined", at: "2026-10-30T18:00:00Z"), note("other", at: "2026-10-30T18:00:00Z", room: "room_2")
+                ])),
+                .success(SentiNotificationsPage(notifications: [
+                    note("later", at: "2026-10-30T20:00:00Z"),
+                    note("other", at: "2026-10-30T18:00:00Z", room: "room_2")
+                ]))
+            ]),
+            marker: marker,
+            now: { ISO8601DateFormatter().date(from: "2026-10-30T19:00:00Z")! },
+            onReauthenticationRequired: {}
+        )
+        await coordinator.refresh()
+        coordinator.markOpened(SentiLink(sessionId: "room_1"))
+        XCTAssertEqual(coordinator.state.unread.map(\.id), ["other"], "the only one is read")
+
+        coordinator.markOpened(SentiLink(sessionId: "room_3"))
+        await coordinator.refresh()
+        coordinator.markOpened(SentiLink(sessionId: "room_1"))
+        XCTAssertTrue(coordinator.state.unread.map(\.id).contains("later"), "made after the tap: not the one tapped")
+    }
+
+    /// Warden (#275): a mark the server refused is sent again on the next read of the bell.
+    func test_a_refused_mark_is_sent_again_on_the_next_read() async {
+        let marker = TroubledMarker(failures: 1)
+        let page = SentiNotificationsPage(notifications: [note("n1")])
+        let coordinator = NotificationsCoordinator(
+            transport: ScriptedNotifications([.success(page)]),
+            marker: marker,
+            onReauthenticationRequired: {}
+        )
+        await coordinator.refresh()
+        _ = coordinator.open("n1")
+        await waitUntil("tried") { coordinator.unreadCount == 1 }
+        XCTAssertTrue(marker.marked().isEmpty)
+        await coordinator.refresh()
+        await waitUntil("sent again") { marker.marked() == ["n1"] }
+        XCTAssertEqual(coordinator.unreadCount, 0)
+    }
+
+    /// Warden (#267): one PATCH each, never fifty at once, and a failed one is retried rather than hidden.
+    func test_marks_go_a_few_at_a_time_and_a_failed_one_is_unread_again_for_the_next_try() async {
+        let marker = TroubledMarker(failures: 1)
+        let page = SentiNotificationsPage(notifications: (0..<12).map { note("n\($0)") })
+        let coordinator = NotificationsCoordinator(
+            transport: ScriptedNotifications([.success(page)]),
+            marker: marker,
+            onReauthenticationRequired: {}
+        )
+        await coordinator.refresh()
+        coordinator.markAllRead()
+        XCTAssertEqual(coordinator.unreadCount, 0)
+        await waitUntil("all tried") { marker.marked().count == 11 }
+        XCTAssertLessThanOrEqual(marker.peak(), NotificationsCoordinator.concurrentMarks)
+        XCTAssertEqual(coordinator.unreadCount, 1, "the one that failed is unread again")
+
+        coordinator.markAllRead()
+        await waitUntil("retried") { marker.marked().count == 12 }
+        XCTAssertEqual(coordinator.unreadCount, 0)
     }
 
     func test_refresh_counts_unread_and_opening_marks_read_and_returns_the_message() async {
@@ -108,5 +278,59 @@ final class NotificationsCoordinatorTests: XCTestCase {
         await coordinator.refresh()
         XCTAssertEqual(asked, 1, "a signed-out bell asks once and stops")
         XCTAssertEqual(coordinator.state.failure, .reauthenticationRequired)
+    }
+
+    /// Carter: the phone's bell stopped updating while the server had new mentions. A failed read must say so, and
+    /// a later read must recover.
+    func test_a_failed_read_keeps_the_list_says_so_and_the_next_read_recovers() async {
+        let stamp = Date(timeIntervalSince1970: 1_793_300_000)
+        let coordinator = NotificationsCoordinator(
+            transport: ScriptedNotifications([
+                .success(SentiNotificationsPage(notifications: [note("n1")])),
+                .failure(URLError(.timedOut)),
+                .success(SentiNotificationsPage(notifications: [note("n2", at: "2026-10-28T19:00:00Z"), note("n1")]))
+            ]),
+            marker: nil,
+            now: { stamp },
+            onReauthenticationRequired: {}
+        )
+        await coordinator.refresh()
+        XCTAssertEqual(coordinator.state.updatedAt, stamp)
+        XCTAssertFalse(coordinator.state.couldNotUpdate)
+        await coordinator.refresh()
+        XCTAssertEqual(coordinator.state.unread.map(\.id), ["n1"], "the list stays")
+        XCTAssertTrue(coordinator.state.couldNotUpdate, "and says it could not update")
+        XCTAssertNil(coordinator.state.failure)
+        await coordinator.refresh()
+        XCTAssertEqual(coordinator.state.unread.map(\.id), ["n2", "n1"])
+        XCTAssertFalse(coordinator.state.couldNotUpdate)
+    }
+
+    func test_after_an_expired_sign_in_opening_the_bell_reads_again_and_a_success_brings_it_back() async {
+        var asked = 0
+        let coordinator = NotificationsCoordinator(
+            transport: ScriptedNotifications([
+                .failure(SessionTransportError.reauthenticationRequired),
+                .success(SentiNotificationsPage(notifications: [note("n1")]))
+            ]),
+            marker: nil,
+            sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) },
+            onReauthenticationRequired: { asked += 1 }
+        )
+        await coordinator.refresh()
+        await coordinator.refresh()
+        XCTAssertEqual(coordinator.state.failure, .reauthenticationRequired, "the poll does not keep asking")
+        await coordinator.refresh(force: true)
+        XCTAssertNil(coordinator.state.failure, "opening the bell tries again")
+        XCTAssertEqual(coordinator.state.unread.map(\.id), ["n1"])
+        XCTAssertEqual(asked, 1)
+        coordinator.stopPolling()
+    }
+
+    func test_the_bell_reads_as_often_as_the_web_and_says_how_fresh_it_is() {
+        XCTAssertEqual(NotificationsCoordinator.pollInterval, 30)
+        let now = Date(timeIntervalSince1970: 1_793_300_000)
+        XCTAssertEqual(NotificationsPresentationState.freshness(updatedAt: now.addingTimeInterval(-20), now: now), "Updated just now")
+        XCTAssertEqual(NotificationsPresentationState.freshness(updatedAt: now.addingTimeInterval(-250), now: now), "Updated 4 min ago")
     }
 }

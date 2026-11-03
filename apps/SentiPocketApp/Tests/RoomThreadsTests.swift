@@ -130,6 +130,19 @@ final class RoomActionSenderTests: XCTestCase {
         XCTAssertLessThanOrEqual(long.idempotencyKey.count, 180, "the API caps the key at 180")
     }
 
+    func test_a_reaction_on_a_reply_targets_the_reply_inside_its_thread() {
+        let onReply = RoomActionRequest.reaction("ack", sessionId: "s", sequenceId: 9, actor: "human-a", toReply: "r-1")
+        XCTAssertEqual(onReply.targetSequenceId, 9, "the thread's message")
+        XCTAssertEqual(onReply.targetActionId, "r-1", "the reply itself")
+        XCTAssertEqual(onReply.idempotencyKey, "ack:s:9:r-1:human-a", "an ack on one reply is not an ack on another")
+        XCTAssertNotEqual(
+            onReply.idempotencyKey,
+            RoomActionRequest.reaction("ack", sessionId: "s", sequenceId: 9, actor: "human-a", toReply: "r-2").idempotencyKey
+        )
+        let answer = RoomActionRequest.reply(sessionId: "s", sequenceId: 9, toReply: "r-1", text: "yes", actor: "human-a")
+        XCTAssertEqual(answer.targetActionId, "r-1", "a reply to a reply nests under it")
+    }
+
     func test_invalid_actions_are_refused_before_the_network() async {
         let sender = makeSender()
         let invalid = [
@@ -408,6 +421,22 @@ final class RoomThreadsCoordinatorTests: XCTestCase {
         coordinator.send(.react(sequenceId: 3, type: "ack"))
         await waitUntil("ack sent") { sender.requests().count == 1 }
         XCTAssertEqual(sender.requests().map(\.actionType), ["ack"], "the viewer's reply was never sent")
+        coordinator.pause()
+    }
+
+    /// Carter (#55074): a reply written from the room's box goes to its thread without opening it, and if it fails
+    /// the room says so, since the thread that shows the failure is closed.
+    func test_a_reply_from_the_room_box_that_fails_says_so_in_the_room() async {
+        let transport = ActionsRoomTransport(history: [message(9)], projections: [RoomActionsPage()])
+        let sender = RecordingActionSender(failFirst: [.retryable(retryAfterSeconds: nil)])
+        let coordinator = makeCoordinator(transport, actions: sender)
+        coordinator.resume()
+        await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
+
+        coordinator.send(.sendReply(sequenceId: 9, text: "on it"))
+        await waitUntil("said so") { coordinator.state.notice != nil }
+        XCTAssertEqual(coordinator.state.notice, "Your reply did not send. Open its thread to try again.")
+        XCTAssertNil(coordinator.state.thread, "the room stays where it was")
         coordinator.pause()
     }
 

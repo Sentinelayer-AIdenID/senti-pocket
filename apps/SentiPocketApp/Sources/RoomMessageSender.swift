@@ -1,4 +1,5 @@
 import Foundation
+import PocketContracts
 
 /// Why a room message did not post. Response bodies are never surfaced, only their class.
 enum RoomSendError: Error, Equatable {
@@ -49,6 +50,17 @@ final class HTTPRoomMessageSender: RoomMessageSending, @unchecked Sendable {
         self.apiBaseURL = apiBaseURL
         self.urlSession = urlSession
         self.tokenProvider = tokenProvider
+    }
+
+    /// The same sender, but sending only while `account` is the one signed in: after another account signs in it has
+    /// no token, so work queued by the last account (a file still uploading) can never go out as the new one (warden,
+    /// #298 review). With no account it never sends.
+    func bound(toAccount account: String?) -> HTTPRoomMessageSender {
+        let tokenProvider = self.tokenProvider
+        return HTTPRoomMessageSender(apiBaseURL: apiBaseURL, urlSession: urlSession, tokenProvider: {
+            guard let account, let token = tokenProvider(), RoomSendOutbox.account(token: token) == account else { return nil }
+            return token
+        })
     }
 
     func sendHumanMessage(sessionId: String, text: String, clientId: String) async throws {
@@ -180,6 +192,39 @@ protocol RoomActionSending: Sendable {
     func sendAction(_ action: RoomActionRequest) async throws
 }
 
+/// Why the API refused an emoji reaction.
+enum RoomEmojiRefusal: Error, Equatable {
+    /// `EMOJI_MESSAGE_LIMIT` or `EMOJI_ACTOR_LIMIT`: the message holds as many emoji reactions as it can, or as many
+    /// of yours.
+    case full
+    /// `REACTION_NOT_ACTIVE`: there was no reaction of yours to take back.
+    case notActive
+    /// The API does not take emoji reactions: it refuses the action type itself.
+    case unavailable
+
+    /// What a refused emoji reaction means: the API's error code first, then its status. Only a 422 with no emoji
+    /// code, or a 400 that names the action type, is the API not taking emoji reactions; anything else is the
+    /// request's own failure.
+    static func reading(status: Int, body: Data) -> Error {
+        let json = try? JSONDecoder().decode(JSONValue.self, from: body)
+        switch HTTPRoomTicketWriter.errorCode(json) ?? json?["detail"]?["code"]?.stringValue {
+        case "EMOJI_MESSAGE_LIMIT", "EMOJI_ACTOR_LIMIT": return full
+        case "REACTION_NOT_ACTIVE": return notActive
+        default: break
+        }
+        // An API without emoji reactions refuses the type in validation (422) or in its own check ("unsupported
+        // message action type", 400).
+        let namesActionType = String(decoding: body, as: UTF8.self).lowercased().contains("action type")
+        if status == 422 || (status == 400 && namesActionType) { return unavailable }
+        switch status {
+        case 401: return RoomSendError.reauthenticationRequired
+        case 403, 404: return RoomSendError.notAllowed
+        case 409, 425, 429, 500..<600: return RoomSendError.retryable(retryAfterSeconds: nil)
+        default: return RoomSendError.rejected
+        }
+    }
+}
+
 struct RoomActionRequest: Equatable, Sendable {
     let sessionId: String
     let actionType: String
@@ -187,10 +232,13 @@ struct RoomActionRequest: Equatable, Sendable {
     let targetActionId: String?
     let note: String?
     let idempotencyKey: String
+    /// The emoji a `react` or `unreact` carries, sent as `metadata.emoji`.
+    var emoji: String? = nil
 
     static let replyLimit = 4_000
     static let reactionTypes: Set<String> = ["ack", "like", "dislike", "unlike", "undislike"]
     static let pinTypes: Set<String> = ["pin", "unpin"]
+    static let emojiTypes: Set<String> = ["react", "unreact"]
 
     /// A reply to a message (or, with `targetActionId`, to a reply). `nonce` is minted once per reply, so a retry
     /// sends the same key and the API de-duplicates it.
@@ -214,16 +262,39 @@ struct RoomActionRequest: Equatable, Sendable {
 
     /// A reaction. `ack` is not retractable, so its key is stable per person and message (a second tap is a
     /// duplicate, as on the web). Like and dislike can be undone and redone, so each tap gets its own key.
-    static func reaction(_ type: String, sessionId: String, sequenceId: Int64, actor: String) -> RoomActionRequest {
-        let base = "\(type):\(sessionId):\(sequenceId):\(actor)"
+    static func reaction(
+        _ type: String,
+        sessionId: String,
+        sequenceId: Int64,
+        actor: String,
+        toReply: String? = nil
+    ) -> RoomActionRequest {
+        // A reaction on a reply targets the reply (`targetActionId`) inside its message's thread.
+        let base = "\(type):\(sessionId):\(sequenceId):\(toReply.map { "\($0):" } ?? "")\(actor)"
         return RoomActionRequest(
             sessionId: sessionId,
             actionType: type,
             targetSequenceId: sequenceId,
-            targetActionId: nil,
+            targetActionId: toReply,
             note: nil,
             idempotencyKey: boundedKey(type == "ack" ? base : "\(base):\(UUID().uuidString.lowercased())")
         )
+    }
+
+    /// Your emoji reaction (`react`), or taking it back (`unreact`). Like a like, each tap gets its own key; the emoji
+    /// is never in the key, which also goes in a header.
+    static func emoji(
+        _ emoji: String,
+        isOn: Bool,
+        sessionId: String,
+        sequenceId: Int64,
+        actor: String,
+        toReply: String? = nil
+    ) -> RoomActionRequest {
+        var request = reaction(isOn ? "react" : "unreact", sessionId: sessionId, sequenceId: sequenceId, actor: actor,
+                               toReply: toReply)
+        request.emoji = emoji
+        return request
     }
 
     /// Pin a message for the room, or unpin it. Each tap gets its own key, as on the web, so pin, unpin, pin again do
@@ -267,11 +338,13 @@ final class HTTPRoomActionSender: RoomActionSending, @unchecked Sendable {
         }
         guard let token = tokenProvider(), !token.isEmpty else { throw RoomSendError.reauthenticationRequired }
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        let isEmoji = RoomActionRequest.emojiTypes.contains(action.actionType)
         guard !action.sessionId.isEmpty, action.sessionId.utf8.count <= 256,
               let encodedSession = action.sessionId.addingPercentEncoding(withAllowedCharacters: allowed),
               action.targetSequenceId > 0,
               action.actionType == "reply" || RoomActionRequest.reactionTypes.contains(action.actionType)
-                || RoomActionRequest.pinTypes.contains(action.actionType),
+                || RoomActionRequest.pinTypes.contains(action.actionType) || isEmoji,
+              !isEmoji || action.emoji.map(ReactionEmoji.isValid) == true,
               (action.note?.unicodeScalars.count ?? 0) <= RoomActionRequest.replyLimit,
               action.actionType != "reply" || !(action.note ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw RoomSendError.rejected
@@ -287,6 +360,7 @@ final class HTTPRoomActionSender: RoomActionSending, @unchecked Sendable {
         ]
         if let target = action.targetActionId { body["targetActionId"] = target }
         if let note = action.note { body["note"] = note }
+        if let emoji = action.emoji { body["metadata"] = ["emoji": emoji] }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -296,13 +370,17 @@ final class HTTPRoomActionSender: RoomActionSending, @unchecked Sendable {
         request.setValue(action.idempotencyKey, forHTTPHeaderField: "Idempotency-Key")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
+        let data: Data
         let response: URLResponse
         do {
-            (_, response) = try await urlSession.data(for: request)
+            (data, response) = try await urlSession.data(for: request)
         } catch {
             throw RoomSendError.retryable(retryAfterSeconds: nil)
         }
         guard let http = response as? HTTPURLResponse else { throw RoomSendError.retryable(retryAfterSeconds: nil) }
+        if isEmoji, !(200..<300).contains(http.statusCode) {
+            throw RoomEmojiRefusal.reading(status: http.statusCode, body: data)
+        }
         switch http.statusCode {
         case 200..<300: return
         case 401: throw RoomSendError.reauthenticationRequired
@@ -311,5 +389,457 @@ final class HTTPRoomActionSender: RoomActionSending, @unchecked Sendable {
             throw RoomSendError.retryable(retryAfterSeconds: http.value(forHTTPHeaderField: "Retry-After").flatMap(Int.init))
         default: throw RoomSendError.rejected
         }
+    }
+}
+
+/// A saved transcript, as a message references it.
+struct VoiceTranscriptAttachment: Equatable, Sendable {
+    let attachmentId: String
+    let filename: String
+    let kind: String?
+    let contentType: String?
+    let sizeBytes: Int?
+    let status: String?
+
+    /// The attachment as the API's message payload takes it.
+    var reference: [String: Any] {
+        var json: [String: Any] = ["attachmentId": attachmentId, "filename": filename]
+        if let kind { json["kind"] = kind }
+        if let contentType { json["contentType"] = contentType }
+        if let sizeBytes { json["sizeBytes"] = sizeBytes }
+        if let status { json["status"] = status }
+        return json
+    }
+}
+
+/// What a voice room writes to the room, as you: your spoken turns (`channel: "voice"`, so the room shows them as
+/// transcript), the transcript as a Markdown file, and the message that closes the call with it attached.
+protocol VoiceRoomPosting: Sendable {
+    /// The message that rings the agents: it mentions them, and opens the call's card in the room.
+    func postCallStarted(sessionId: String, text: String, clientId: String) async throws
+    func postVoiceTurn(sessionId: String, text: String, clientId: String) async throws
+    func uploadTranscript(sessionId: String, filename: String, markdown: String, clientId: String) async throws -> VoiceTranscriptAttachment
+    func postCallEnded(sessionId: String, text: String, transcript: VoiceTranscriptAttachment?, clientId: String) async throws
+}
+
+extension HTTPRoomMessageSender: VoiceRoomPosting {
+    func postCallStarted(sessionId: String, text: String, clientId: String) async throws {
+        _ = try await post(sessionId: sessionId, path: "human-message", idempotencyKey: clientId, body: [
+            "text": text, "clientId": clientId
+        ])
+    }
+
+    func postVoiceTurn(sessionId: String, text: String, clientId: String) async throws {
+        _ = try await post(sessionId: sessionId, path: "human-message", idempotencyKey: clientId, body: [
+            "text": text, "clientId": clientId, "channel": "voice"
+        ])
+    }
+
+    func uploadTranscript(sessionId: String, filename: String, markdown: String, clientId: String) async throws -> VoiceTranscriptAttachment {
+        let data = try await post(sessionId: sessionId, path: "attachments", idempotencyKey: clientId, body: [
+            "filename": filename, "content": markdown, "contentType": "text/markdown", "clientAttachmentId": clientId
+        ])
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let attachment = (root["attachment"] as? [String: Any]) ?? (root["attachmentId"] != nil ? root : nil),
+              let id = attachment["attachmentId"] as? String, !id.isEmpty else {
+            throw RoomSendError.rejected
+        }
+        return VoiceTranscriptAttachment(
+            attachmentId: id,
+            filename: (attachment["filename"] as? String) ?? filename,
+            kind: attachment["kind"] as? String,
+            contentType: attachment["contentType"] as? String,
+            sizeBytes: attachment["sizeBytes"] as? Int,
+            status: attachment["status"] as? String
+        )
+    }
+
+    func postCallEnded(sessionId: String, text: String, transcript: VoiceTranscriptAttachment?, clientId: String) async throws {
+        var body: [String: Any] = ["text": text, "clientId": clientId]
+        if let transcript { body["attachments"] = [transcript.reference] }
+        _ = try await post(sessionId: sessionId, path: "human-message", idempotencyKey: clientId, body: body)
+    }
+
+    /// One authenticated POST under the room, with the same rules and errors as a typed message.
+    /// One room write. `session` replaces the live deadlines for a slow call (the room summary).
+    func post(sessionId: String, path: String, idempotencyKey: String, body: [String: Any],
+              session: URLSession? = nil) async throws -> Data {
+        let (data, http) = try await postAnswer(sessionId: sessionId, path: path, idempotencyKey: idempotencyKey, body: body,
+                                                session: session)
+        switch http.statusCode {
+        case 200..<300:
+            return data
+        case 401:
+            throw RoomSendError.reauthenticationRequired
+        case 403, 404:
+            throw RoomSendError.notAllowed
+        case 409, 425, 429, 500..<600:
+            throw RoomSendError.retryable(retryAfterSeconds: http.value(forHTTPHeaderField: "Retry-After").flatMap(Int.init))
+        default:
+            throw RoomSendError.rejected
+        }
+    }
+
+    /// The same POST, answered as it came back: the caller reads the status and the request id. `query` is already
+    /// percent-encoded ("cachedOnly=true").
+    func postAnswer(sessionId: String, path: String, idempotencyKey: String, body: [String: Any],
+                    query: String? = nil, session: URLSession? = nil) async throws -> (Data, HTTPURLResponse) {
+        guard let apiBaseURL,
+              var components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false) else {
+            throw RoomSendError.notConfigured
+        }
+        guard let token = tokenProvider(), !token.isEmpty else { throw RoomSendError.reauthenticationRequired }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        guard !sessionId.isEmpty, sessionId.utf8.count <= 256,
+              let encodedSession = sessionId.addingPercentEncoding(withAllowedCharacters: allowed),
+              idempotencyKey.utf8.count <= 120 else {
+            throw RoomSendError.rejected
+        }
+        components.percentEncodedPath = "/api/v1/sessions/\(encodedSession)/\(path)"
+        components.percentEncodedQuery = query
+        guard let url = components.url else { throw RoomSendError.notConfigured }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key")
+        request.setValue(UUID().uuidString.lowercased(), forHTTPHeaderField: "X-Request-Id")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await (session ?? urlSession).data(for: request)
+        } catch {
+            throw RoomSendError.retryable(retryAfterSeconds: nil)
+        }
+        guard let http = response as? HTTPURLResponse else { throw RoomSendError.retryable(retryAfterSeconds: nil) }
+        if !(200..<300).contains(http.statusCode) {
+            ClientProblems.shared.roomRequestFailed(path: path, status: http.statusCode, response: http)
+        }
+        return (data, http)
+    }
+}
+
+extension HTTPRoomMessageSender {
+    /// A DELETE under the room, answered as it came back: an upload taken back before any message named it.
+    func deleteAnswer(sessionId: String, path: String) async throws -> HTTPURLResponse {
+        guard let apiBaseURL,
+              var components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false) else {
+            throw RoomSendError.notConfigured
+        }
+        guard let token = tokenProvider(), !token.isEmpty else { throw RoomSendError.reauthenticationRequired }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        guard !sessionId.isEmpty, sessionId.utf8.count <= 256,
+              let encodedSession = sessionId.addingPercentEncoding(withAllowedCharacters: allowed) else {
+            throw RoomSendError.rejected
+        }
+        components.percentEncodedPath = "/api/v1/sessions/\(encodedSession)/\(path)"
+        components.query = nil
+        guard let url = components.url else { throw RoomSendError.notConfigured }
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue(UUID().uuidString.lowercased(), forHTTPHeaderField: "X-Request-Id")
+        let response: URLResponse
+        do {
+            (_, response) = try await urlSession.data(for: request)
+        } catch {
+            throw RoomSendError.retryable(retryAfterSeconds: nil)
+        }
+        guard let http = response as? HTTPURLResponse else { throw RoomSendError.retryable(retryAfterSeconds: nil) }
+        return http
+    }
+}
+
+/// Editing your own message or reply (web `editSessionMessage`).
+protocol RoomMessageEditing: Sendable {
+    func editMessage(sessionId: String, messageId: String, isReply: Bool, text: String, expectedRevision: Int64) async throws
+}
+
+extension HTTPRoomMessageSender: RoomMessageEditing {
+    /// `PATCH /api/v1/sessions/{id}/messages/{message_id}` (or `/replies/{action_id}`) with the revision being edited,
+    /// so an edit never lands over someone else's, an idempotency key, and the route-bound mutation token.
+    func editMessage(sessionId: String, messageId: String, isReply: Bool, text: String, expectedRevision: Int64) async throws {
+        guard let apiBaseURL,
+              var components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false) else {
+            throw RoomSendError.notConfigured
+        }
+        guard let token = tokenProvider(), !token.isEmpty else { throw RoomSendError.reauthenticationRequired }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        guard !sessionId.isEmpty, sessionId.utf8.count <= 256,
+              let encodedSession = sessionId.addingPercentEncoding(withAllowedCharacters: allowed),
+              let encodedId = messageId.addingPercentEncoding(withAllowedCharacters: allowed), !encodedId.isEmpty,
+              !text.isEmpty, text.unicodeScalars.count <= Self.maximumLength else {
+            throw RoomSendError.rejected
+        }
+        let resource = isReply ? "replies" : "messages"
+        components.percentEncodedPath = "/api/v1/sessions/\(encodedSession)/\(resource)/\(encodedId)"
+        components.query = nil
+        guard let url = components.url else { throw RoomSendError.notConfigured }
+        let key = "edit-" + UUID().uuidString.lowercased()
+        let template = isReply
+            ? "PATCH /api/v1/sessions/{session_id}/replies/{action_id}"
+            : "PATCH /api/v1/sessions/{session_id}/messages/{message_id}"
+        guard let csrf = SessionMutationCSRF.token(bearer: token, sessionId: sessionId, routeTemplate: template,
+                                                   idempotencyKey: key) else {
+            throw RoomSendError.notConfigured
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "PATCH"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue(key, forHTTPHeaderField: "Idempotency-Key")
+        request.setValue("session-mutation", forHTTPHeaderField: "X-Sentinelayer-Session-Mutation")
+        request.setValue(csrf, forHTTPHeaderField: "X-CSRF-Token")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["text": text, "expectedRevision": expectedRevision])
+        let response: URLResponse
+        do {
+            (_, response) = try await urlSession.data(for: request)
+        } catch {
+            throw RoomSendError.retryable(retryAfterSeconds: nil)
+        }
+        switch (response as? HTTPURLResponse)?.statusCode ?? 0 {
+        case 200..<300: return
+        case 401: throw RoomSendError.reauthenticationRequired
+        case 403, 404: throw RoomSendError.notAllowed
+        case 409, 412: throw RoomSendError.rejected   // it changed since: the room has the newer text
+        case 425, 429, 500..<600: throw RoomSendError.retryable(retryAfterSeconds: nil)
+        default: throw RoomSendError.rejected
+        }
+    }
+}
+
+/// Renaming a room (web `setSessionTitle`): its owner only, never a breakout.
+protocol RoomTitleSetting: Sendable {
+    /// The name as the API saved it.
+    func setTitle(sessionId: String, title: String) async throws -> String
+}
+
+extension HTTPRoomMessageSender: RoomTitleSetting {
+    /// `POST /api/v1/sessions/{id}/title` with `{"title": ...}`, under an idempotency key.
+    func setTitle(sessionId: String, title: String) async throws -> String {
+        let data = try await post(sessionId: sessionId, path: "title", idempotencyKey: "title-" + UUID().uuidString.lowercased(),
+                                  body: ["title": title])
+        let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        guard let saved = json?["title"] as? String, !saved.isEmpty else { return title }
+        return saved
+    }
+}
+
+extension HTTPRoomMessageSender {
+    /// A POST to a member or invitation route under the room: the bearer, the native mutation intent header, an
+    /// idempotency key and the route-bound mutation token (`SessionMutationCSRF`), as editing and admissions send
+    /// them. Answered as it came back; the caller reads the status.
+    func sessionMutation(sessionId: String, path: String, routeTemplate: String, keyPrefix: String,
+                         body: [String: Any]) async throws -> (Data, HTTPURLResponse) {
+        guard let apiBaseURL,
+              var components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false) else {
+            throw RoomSendError.notConfigured
+        }
+        guard let token = tokenProvider(), !token.isEmpty else { throw RoomSendError.reauthenticationRequired }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        guard !sessionId.isEmpty, sessionId.utf8.count <= 256,
+              let encodedSession = sessionId.addingPercentEncoding(withAllowedCharacters: allowed) else {
+            throw RoomSendError.rejected
+        }
+        components.percentEncodedPath = "/api/v1/sessions/\(encodedSession)/\(path)"
+        components.query = nil
+        guard let url = components.url else { throw RoomSendError.notConfigured }
+        let key = keyPrefix + "-" + UUID().uuidString.lowercased()
+        guard let csrf = SessionMutationCSRF.token(bearer: token, sessionId: sessionId, routeTemplate: routeTemplate,
+                                                   idempotencyKey: key) else {
+            throw RoomSendError.notConfigured
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue(key, forHTTPHeaderField: "Idempotency-Key")
+        request.setValue("session-mutation", forHTTPHeaderField: "X-Sentinelayer-Session-Mutation")
+        request.setValue(csrf, forHTTPHeaderField: "X-CSRF-Token")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await urlSession.data(for: request)
+        } catch {
+            throw RoomSendError.retryable(retryAfterSeconds: nil)
+        }
+        guard let http = response as? HTTPURLResponse else { throw RoomSendError.retryable(retryAfterSeconds: nil) }
+        if http.statusCode == 401 { throw RoomSendError.reauthenticationRequired }
+        if !(200..<300).contains(http.statusCode) {
+            ClientProblems.shared.roomRequestFailed(path: path, status: http.statusCode, response: http)
+        }
+        return (data, http)
+    }
+}
+
+extension HTTPRoomMessageSender {
+    /// `POST /api/v1/sessions`: a new private room you own, of a type (Carter, #55287: "rooms optimized just for
+    /// specific things like study together"). The id is made here; the mutation token is signed over it and the
+    /// route, as the API checks before anything else.
+    func createRoom(title: String, roomType: String, maxMembers: Int = 25) async throws -> String {
+        guard let apiBaseURL,
+              var components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false) else {
+            throw RoomSendError.notConfigured
+        }
+        guard let token = tokenProvider(), !token.isEmpty else { throw RoomSendError.reauthenticationRequired }
+        components.percentEncodedPath = "/api/v1/sessions"
+        components.query = nil
+        guard let url = components.url else { throw RoomSendError.notConfigured }
+        let sessionId = UUID().uuidString.lowercased()
+        let key = "create-" + UUID().uuidString.lowercased()
+        guard let csrf = SessionMutationCSRF.token(bearer: token, sessionId: sessionId, routeTemplate: "POST /api/v1/sessions",
+                                                   idempotencyKey: key) else {
+            throw RoomSendError.notConfigured
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue(key, forHTTPHeaderField: "Idempotency-Key")
+        request.setValue("session-mutation", forHTTPHeaderField: "X-Sentinelayer-Session-Mutation")
+        request.setValue(csrf, forHTTPHeaderField: "X-CSRF-Token")
+        var body: [String: Any] = ["sessionId": sessionId, "title": title, "visibility": "private", "maxMembers": maxMembers]
+        // A general room is the API's default; only another kind is sent (warden).
+        if roomType != "general" { body["roomType"] = roomType }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await urlSession.data(for: request)
+        } catch {
+            throw RoomSendError.retryable(retryAfterSeconds: nil)
+        }
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        switch status {
+        case 200..<300:
+            let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            return (object?["sessionId"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? sessionId
+        case 401: throw RoomSendError.reauthenticationRequired
+        case 403: throw RoomSendError.notAllowed
+        case 429, 500..<600: throw RoomSendError.retryable(retryAfterSeconds: nil)
+        default: throw RoomSendError.rejected
+        }
+    }
+}
+
+extension HTTPRoomMessageSender: VoiceLining {
+    /// `POST /api/v1/sessions/{id}/voice/turn` (API #1062) with your own bearer; the answer streams back as events.
+    func voiceLine(sessionId: String, agentId: String?, text: String, callId: String, ringCallId: String?,
+                   history: [VoiceLineHistory]) -> AsyncThrowingStream<VoiceLineEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    guard let apiBaseURL,
+                          var components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false) else {
+                        throw VoiceLineError.unavailable
+                    }
+                    guard let token = tokenProvider(), !token.isEmpty else { throw VoiceLineError.notAllowed }
+                    let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+                    guard !sessionId.isEmpty, sessionId.utf8.count <= 256,
+                          let encodedSession = sessionId.addingPercentEncoding(withAllowedCharacters: allowed) else {
+                        throw VoiceLineError.failed
+                    }
+                    components.percentEncodedPath = "/api/v1/sessions/\(encodedSession)/voice/turn"
+                    components.query = nil
+                    guard let url = components.url else { throw VoiceLineError.unavailable }
+                    var request = URLRequest(url: url)
+                    request.httpMethod = "POST"
+                    request.timeoutInterval = 25
+                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                    // The route's limits: 2,000 characters a turn, 12 earlier turns, 4,000 characters of them.
+                    var budget = 4_000
+                    var context: [[String: String]] = []
+                    for turn in history.suffix(12).reversed() {
+                        let piece = String(turn.text.prefix(2_000))
+                        guard budget - piece.count >= 0, !piece.isEmpty else { break }
+                        budget -= piece.count
+                        context.insert(["speaker": String(turn.speaker.prefix(80)), "text": piece], at: 0)
+                    }
+                    var body: [String: Any] = ["text": String(text.prefix(2_000)), "callId": callId, "history": context]
+                    body["agentId"] = agentId.map { $0.lowercased() } ?? NSNull()
+                    if let ringCallId { body["ringCallId"] = ringCallId }
+                    request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+                    // A refused turn (422 included) is never asked again without its call: the caller only names the
+                    // call when the server said it reads call briefs.
+                    let (bytes, response) = try await urlSession.bytes(for: request)
+                    let http = response as? HTTPURLResponse
+                    switch http?.statusCode ?? 0 {
+                    case 200: break
+                    case 503, 404: throw VoiceLineError.unavailable
+                    case 429:
+                        throw VoiceLineError.rateLimited(
+                            retryAfter: http?.value(forHTTPHeaderField: "Retry-After").flatMap(TimeInterval.init))
+                    case 401, 403: throw VoiceLineError.notAllowed
+                    default: throw VoiceLineError.failed
+                    }
+                    var reader = VoiceLineEventReader()
+                    for try await line in bytes.lines {
+                        switch reader.read(line) {
+                        case .none: continue
+                        case .failed: throw VoiceLineError.failed
+                        case .event(let event):
+                            continuation.yield(event)
+                            if case .done = event {
+                                continuation.finish()
+                                return
+                            }
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error is VoiceLineError ? error : VoiceLineError.failed)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+}
+
+extension HTTPRoomMessageSender: VoiceEndpointing {
+    /// `POST /api/v1/sessions/{id}/voice/endpoint` with your own bearer: `{"done": 0..1}`.
+    func finished(sessionId: String, text: String, callId: String) async throws -> Double {
+        guard let apiBaseURL, var components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false) else {
+            throw VoiceLineError.unavailable
+        }
+        guard let token = tokenProvider(), !token.isEmpty else { throw VoiceLineError.notAllowed }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        guard !sessionId.isEmpty, sessionId.utf8.count <= 256,
+              let encodedSession = sessionId.addingPercentEncoding(withAllowedCharacters: allowed) else {
+            throw VoiceLineError.failed
+        }
+        components.percentEncodedPath = "/api/v1/sessions/\(encodedSession)/voice/endpoint"
+        components.query = nil
+        guard let url = components.url else { throw VoiceLineError.unavailable }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        // On the critical path of a conversation: an answer later than this is no faster than the plain pause.
+        request.timeoutInterval = 1.5
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["text": String(text.prefix(500)), "callId": callId])
+        let (data, response) = try await urlSession.data(for: request)
+        switch (response as? HTTPURLResponse)?.statusCode ?? 0 {
+        case 200: break
+        case 503, 404: throw VoiceLineError.unavailable
+        case 429: throw VoiceLineError.rateLimited(retryAfter: nil)
+        case 401, 403: throw VoiceLineError.notAllowed
+        default: throw VoiceLineError.failed
+        }
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let done = (json["done"] as? NSNumber)?.doubleValue, done >= 0, done <= 1 else {
+            throw VoiceLineError.failed
+        }
+        return done
     }
 }

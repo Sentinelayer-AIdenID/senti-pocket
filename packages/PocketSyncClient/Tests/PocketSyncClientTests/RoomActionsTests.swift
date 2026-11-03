@@ -77,4 +77,50 @@ final class RoomActionsTests: XCTestCase {
         XCTAssertEqual(page.pinned.first?.pinnedBy, "human-mrrcarter")
         XCTAssertEqual(page.pinLimit, 10)
     }
+
+    func test_emoji_reactions_come_in_first_use_order_with_your_own_marked() throws {
+        let page = try decode(#"""
+        {"projection":{"byTarget":[
+          {"targetSequenceId":5,"reactions":{"like":{"count":1,"byViewer":false}},
+           "emojiReactions":[
+             {"emoji":"🎉","count":3,"viewerReacted":true,"actors":["human-alex","review-agent",""]},
+             {"emoji":"👀","count":1,"actors":["build-agent",7]}
+           ]},
+          {"targetSequenceId":6,"counts":{"ack":1}}
+        ]}}
+        """#)
+        XCTAssertEqual(page.byTarget[5]?.emojiReactions, [
+            RoomEmojiReaction(emoji: "🎉", count: 3, viewerReacted: true, actors: ["human-alex", "review-agent"]),
+            RoomEmojiReaction(emoji: "👀", count: 1, viewerReacted: false, actors: ["build-agent"])
+        ], "an actor that is empty or not text is dropped; not saying you reacted means you did not")
+        XCTAssertEqual(page.byTarget[5]?.counts, ["like": 1], "the like count is unchanged")
+        XCTAssertEqual(page.byTarget[6]?.emojiReactions, [], "a summary without emoji reactions has none")
+    }
+
+    func test_an_emoji_reaction_that_is_not_one_emoji_or_has_no_count_is_dropped() throws {
+        let page = try decode(#"""
+        {"projection":{"byTarget":[{"targetSequenceId":5,"emojiReactions":[
+          {"emoji":"@all","count":2},
+          {"emoji":"abc","count":2},
+          {"emoji":"👍👍","count":2},
+          {"count":2},
+          {"emoji":"🔥","count":0},
+          {"emoji":"🔥"},
+          {"emoji":"✅","count":2},
+          {"emoji":"✅","count":9,"viewerReacted":true}
+        ]}]}}
+        """#)
+        XCTAssertEqual(page.byTarget[5]?.emojiReactions.map(\.emoji), ["✅"])
+        XCTAssertEqual(page.byTarget[5]?.emojiReactions.first?.count, 2, "an emoji listed twice keeps its first entry")
+    }
+
+    func test_emoji_reactions_are_capped_at_twenty_per_message_and_ten_reactors_each() throws {
+        let emoji = (0..<25).map { String(UnicodeScalar(0x1F600 + $0)!) }
+        let actors = (0..<12).map { "\"agent-\($0)\"" }.joined(separator: ",")
+        let entries = emoji.map { #"{"emoji":"\#($0)","count":1,"actors":[\#(actors)]}"# }.joined(separator: ",")
+        let page = try decode(#"{"projection":{"byTarget":[{"targetSequenceId":5,"emojiReactions":[\#(entries)]}]}}"#)
+        let reactions = try XCTUnwrap(page.byTarget[5]?.emojiReactions)
+        XCTAssertEqual(reactions.map(\.emoji), Array(emoji.prefix(20)), "the first twenty, in order")
+        XCTAssertEqual(reactions.first?.actors, (0..<10).map { "agent-\($0)" })
+    }
 }

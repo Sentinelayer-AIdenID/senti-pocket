@@ -11,11 +11,71 @@ public enum ChatMarkdownBlock: Equatable, Sendable {
     case quote([ChatMarkdownBlock])
     case code(language: String?, text: String)
     case rule
+    case table(ChatMarkdownTable)
+}
+
+/// A GitHub-style table: a header row, a delimiter row that sets each column's alignment, then body rows. Every row
+/// has the header's number of cells (short rows are filled, extra cells dropped), as GitHub renders them.
+public struct ChatMarkdownTable: Equatable, Sendable {
+    public enum Alignment: Equatable, Sendable { case leading, center, trailing }
+
+    public let header: [String]
+    public let alignments: [Alignment]
+    public let rows: [[String]]
+
+    /// A column's width on screen: as wide as its longest cell reads, up to `maximum`, so long cells wrap.
+    public func columnWidths(perCharacter: Double = 7.6, padding: Double = 20, minimum: Double = 56, maximum: Double = 240) -> [Double] {
+        header.indices.map { column in
+            let longest = ([header] + rows).map { $0[column].count }.max() ?? 0
+            return min(max(Double(longest) * perCharacter + padding, minimum), maximum)
+        }
+    }
+
+    /// The widths for a screen `available` wide (Carter, #55517: "if they are only 2 or 3 cells they stay within the
+    /// bounds of the screen ... and if more then they can move with slider"). A table that fits keeps its widths. One
+    /// whose columns can each have `readable` points is narrowed to the screen, its widest columns giving way first and
+    /// their cells wrapping. Wider than that, it keeps its widths and scrolls sideways.
+    public func fittedWidths(available: Double, readable: Double = 90) -> (widths: [Double], scrolls: Bool) {
+        let natural = columnWidths()
+        guard natural.reduce(0, +) > available else { return (natural, false) }
+        guard Double(natural.count) * readable <= available else { return (natural, true) }
+        var widths = natural
+        var held = Set<Int>()
+        while true {
+            let heldWidth = held.reduce(0) { $0 + widths[$1] }
+            let free = natural.indices.filter { !held.contains($0) }
+            let scale = (available - heldWidth) / free.reduce(0) { $0 + natural[$1] }
+            var narrowed = false
+            for column in free {
+                let floor = min(natural[column], readable)
+                if natural[column] * scale < floor {
+                    widths[column] = floor
+                    held.insert(column)
+                    narrowed = true
+                } else {
+                    widths[column] = natural[column] * scale
+                }
+            }
+            if !narrowed { return (widths, false) }
+        }
+    }
 }
 
 public struct ChatMarkdownListItem: Equatable, Sendable {
     public let depth: Int
     public let text: String
+
+    /// A GitHub task item's state and text: "[ ] open" or "[x] done".
+    public static func task(_ text: String) -> (done: Bool, text: String)? {
+        guard text.count >= 4, text.hasPrefix("["), text.dropFirst(2).first == "]", text.dropFirst(3).first == " " else {
+            return nil
+        }
+        switch text.dropFirst().first {
+        case " ": return (false, String(text.dropFirst(4)))
+        case "x", "X": return (true, String(text.dropFirst(4)))
+        default: return nil
+        }
+    }
 }
 
 public enum ChatMarkdown {
@@ -34,6 +94,43 @@ public enum ChatMarkdown {
         var blocks = parseLines(text.components(separatedBy: "\n"))
         if let overflow, !overflow.isEmpty { blocks.append(.paragraph(overflow)) }
         return blocks
+    }
+
+    /// A message as it is copied (Carter, #55517: "if I copy that message im not copying some really weirdly formatted
+    /// message just because there's a table on there right?"): its text as written, except that each table becomes
+    /// plain rows of tab-separated cells, which paste as columns into Notes, Mail or a spreadsheet, without its pipes
+    /// or delimiter row. Code blocks are left as they are.
+    public static func copyText(_ source: String) -> String {
+        let lines = source.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+            .components(separatedBy: "\n")
+        var copied: [String] = []
+        var fence: String?
+        var index = 0
+        while index < lines.count {
+            let line = lines[index]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if let open = fence {
+                if trimmed.hasPrefix(open), trimmed.allSatisfy({ $0 == open.first }) { fence = nil }
+            } else if let opened = codeFence(trimmed) {
+                fence = opened.marker
+            } else if let found = table(lines, at: index) {
+                for row in [found.table.header] + found.table.rows {
+                    copied.append(row.map(plainCell).joined(separator: "\t"))
+                }
+                index = found.next
+                continue
+            }
+            copied.append(line)
+            index += 1
+        }
+        return copied.joined(separator: "\n")
+    }
+
+    /// A cell's words without the Markdown marks that would show as characters once pasted.
+    private static func plainCell(_ cell: String) -> String {
+        var text = cell
+        for mark in ["**", "__", "`"] { text = text.replacingOccurrences(of: mark, with: "") }
+        return text.replacingOccurrences(of: "<br>", with: " ")
     }
 
     private static func parseLines(_ lines: [String]) -> [ChatMarkdownBlock] {
@@ -103,6 +200,13 @@ public enum ChatMarkdown {
                 continue
             }
 
+            if let table = table(lines, at: index) {
+                flushParagraph()
+                blocks.append(.table(table.table))
+                index = table.next
+                continue
+            }
+
             if let first = listItem(line) {
                 flushParagraph()
                 var items: [ChatMarkdownListItem] = [ChatMarkdownListItem(depth: first.depth, text: first.text)]
@@ -145,6 +249,74 @@ public enum ChatMarkdown {
         let compact = line.replacingOccurrences(of: " ", with: "")
         guard compact.count >= 3, let first = compact.first, "-*_".contains(first) else { return false }
         return compact.allSatisfy { $0 == first }
+    }
+
+    /// A table starts where a line with a pipe is followed by a delimiter row of as many cells (`| --- | :-: |`), and
+    /// runs until a blank line or the start of another block.
+    private static func table(_ lines: [String], at index: Int) -> (table: ChatMarkdownTable, next: Int)? {
+        guard index + 1 < lines.count, lines[index].contains("|") else { return nil }
+        let header = tableCells(lines[index])
+        guard !header.isEmpty, let alignments = tableAlignments(lines[index + 1]), alignments.count == header.count else {
+            return nil
+        }
+        var rows: [[String]] = []
+        var next = index + 2
+        while next < lines.count {
+            let line = lines[next]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            // As on GitHub, a table runs to a blank line or the start of another block; a line without a pipe there
+            // is a row of one cell.
+            guard !trimmed.isEmpty, heading(trimmed) == nil, codeFence(trimmed) == nil, !trimmed.hasPrefix(">"),
+                  !isRule(trimmed), listItem(line) == nil else { break }
+            let cells = tableCells(line)
+            rows.append(Array((cells + Array(repeating: "", count: max(0, header.count - cells.count))).prefix(header.count)))
+            next += 1
+        }
+        return (ChatMarkdownTable(header: header, alignments: alignments, rows: rows), next)
+    }
+
+    /// A row's cells: split on pipes not escaped with a backslash, the outer pipes optional, each cell trimmed.
+    private static func tableCells(_ line: String) -> [String] {
+        var cells: [String] = []
+        var cell = ""
+        var escaped = false
+        for character in line.trimmingCharacters(in: .whitespaces) {
+            if escaped {
+                // An escaped pipe is a pipe in the cell; any other escape stays for the inline Markdown.
+                if character != "|" { cell.append("\\") }
+                cell.append(character)
+                escaped = false
+            } else if character == "\\" {
+                escaped = true
+            } else if character == "|" {
+                cells.append(cell)
+                cell = ""
+            } else {
+                cell.append(character)
+            }
+        }
+        if escaped { cell.append("\\") }
+        cells.append(cell)
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("|"), !cells.isEmpty { cells.removeFirst() }
+        if trimmed.hasSuffix("|"), !trimmed.hasSuffix("\\|"), !cells.isEmpty { cells.removeLast() }
+        return cells.map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    /// The delimiter row's alignments (`---`, `:--`, `:-:`, `--:`), or nil when the line is not one.
+    private static func tableAlignments(_ line: String) -> [ChatMarkdownTable.Alignment]? {
+        guard line.contains("-") else { return nil }
+        let cells = tableCells(line)
+        guard !cells.isEmpty, line.contains("|") else { return nil }
+        var alignments: [ChatMarkdownTable.Alignment] = []
+        for cell in cells {
+            let left = cell.hasPrefix(":")
+            let right = cell.hasSuffix(":")
+            let dashes = cell.dropFirst(left ? 1 : 0).dropLast(right && cell.count > 1 ? 1 : 0)
+            guard !dashes.isEmpty, dashes.allSatisfy({ $0 == "-" }) else { return nil }
+            alignments.append(left && right ? .center : (right ? .trailing : .leading))
+        }
+        return alignments
     }
 
     private static func listItem(_ line: String) -> (ordered: Bool, number: Int?, depth: Int, text: String)? {
@@ -194,6 +366,60 @@ public enum ChatReferences {
         return PullRequest(owner: owner, repo: repo, number: number)
     }
 
+    /// A ticket link in a message, shown as its own row (the web's ticket chip).
+    public struct TicketLink: Equatable, Sendable {
+        /// The link's text without a leading "Ticket: ".
+        public let title: String
+        public let ticketId: String
+        /// Absolute, so the room's link handling opens the ticket in the app.
+        public let url: URL
+    }
+
+    /// Compiled once: a row's paragraphs are checked for ticket links on every redraw.
+    private static let ticketLinkExpression = try? NSRegularExpression(
+        pattern: #"\[([^\]\n]{1,300})\]\(((?:https://(?:www\.)?sentinelayer\.com)?/dashboard/sessions/[^)\s]+)\)"#
+    )
+
+    /// Pulls a paragraph's ticket links (`[Ticket: title](/dashboard/sessions/<room>?ticket=<id>)`, also with
+    /// `https://sentinelayer.com` in front) out of the text, with the "·" between them: the ticket keeper writes
+    /// several on one line, and they read better one per row. Returns the text that is left and the links, in order.
+    public static func ticketLinks(in paragraph: String) -> (prose: String, tickets: [TicketLink]) {
+        guard paragraph.contains("?ticket="), let regex = ticketLinkExpression else { return (paragraph, []) }
+        let whole = NSRange(paragraph.startIndex..., in: paragraph)
+        var tickets: [TicketLink] = []
+        var removed: [Range<String.Index>] = []
+        for match in regex.matches(in: paragraph, range: whole) {
+            guard let all = Range(match.range, in: paragraph),
+                  let labelRange = Range(match.range(at: 1), in: paragraph),
+                  let hrefRange = Range(match.range(at: 2), in: paragraph) else { continue }
+            var href = String(paragraph[hrefRange])
+            for prefix in ["https://sentinelayer.com", "https://www.sentinelayer.com"] where href.hasPrefix(prefix) {
+                href = String(href.dropFirst(prefix.count))
+            }
+            guard let found = ticket(href), let url = URL(string: "https://sentinelayer.com" + href) else { continue }
+            var title = String(paragraph[labelRange]).trimmingCharacters(in: .whitespaces)
+            if title.lowercased().hasPrefix("ticket:") {
+                title = String(title.dropFirst("ticket:".count)).trimmingCharacters(in: .whitespaces)
+            }
+            tickets.append(TicketLink(title: title.isEmpty ? "Ticket" : title, ticketId: found.ticketId, url: url))
+            removed.append(all)
+        }
+        guard !tickets.isEmpty else { return (paragraph, []) }
+        var prose = ""
+        var cursor = paragraph.startIndex
+        for range in removed {
+            prose += paragraph[cursor..<range.lowerBound]
+            cursor = range.upperBound
+        }
+        prose += paragraph[cursor...]
+        // The separators that stood between the links go with them.
+        let cleaned = prose
+            .replacingOccurrences(of: #"(\s*·\s*)+$"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"(\s*·\s*){2,}"#, with: " · ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (cleaned, tickets)
+    }
+
     /// The Senti ticket a link opens, for in-app links of the form `/dashboard/sessions/<room>?ticket=<id>`.
     public static func ticket(_ href: String) -> (sessionId: String, ticketId: String)? {
         guard href.range(of: #"^/dashboard/sessions/[^/?#]+\?ticket=[^&#]+$"#, options: .regularExpression) != nil,
@@ -206,11 +432,13 @@ public enum ChatReferences {
         return (sessionId, ticketId)
     }
 
+    private static let mentionExpression = try? NSRegularExpression(pattern: #"(?:^|\s)@([A-Za-z0-9_-]+)"#)
+
     /// Ranges of `@handle` mentions: an `@` at the start or after whitespace, then letters, digits, `_` or `-`
     /// (web `extractMentions.ts`). Returned as UTF-16 offsets for AttributedString styling.
     public static func mentionHandles(in text: String) -> [String] {
-        let pattern = #"(?:^|\s)@([A-Za-z0-9_-]+)"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        // Most messages mention no one: skip the expression entirely (this runs for every agent message per update).
+        guard text.contains("@"), let regex = mentionExpression else { return [] }
         let range = NSRange(text.startIndex..., in: text)
         var seen = Set<String>()
         var handles: [String] = []

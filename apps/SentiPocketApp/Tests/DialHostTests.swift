@@ -733,5 +733,55 @@ final class DialHostTests: XCTestCase {
         XCTAssertEqual(startedCallUUIDs, [first.id, second.id])
         XCTAssertNotNil(host.callManager)
     }
+
+    // MARK: - This phone's pushes end with the sign-in (warden, #298 review)
+
+    private func liveHost(signedIn: Bool) -> DialHost {
+        DialHost(
+            gatewayURL: URL(string: "https://api.pocket.test")!,
+            registryStateStore: DeviceRingRegistryStateStore(
+                storage: TestDeviceRingSecureStorage(),
+                authorityDenyStore: TestDeviceRingAuthorityDenyStore()
+            ),
+            isSignedIn: { signedIn }
+        )
+    }
+
+    func test_calls_ring_from_launch_only_if_someone_is_signed_in() {
+        XCTAssertEqual(liveHost(signedIn: false).callManager?.takesVoipPushes, false,
+                       "a phone no one is signed in on takes no calls, whatever the server still holds")
+        XCTAssertEqual(liveHost(signedIn: true).callManager?.takesVoipPushes, true)
+    }
+
+    func test_signing_out_stops_calls_and_signing_in_starts_them_again() throws {
+        let host = liveHost(signedIn: true)
+        try host.beginSignOut()
+        XCTAssertEqual(host.callManager?.takesVoipPushes, false, "a failed unregister must not leave calls ringing here")
+        host.onLoginCompleted()
+        XCTAssertEqual(host.callManager?.takesVoipPushes, true)
+    }
+
+    func test_a_refused_credential_ends_this_accounts_calls_and_notifications_here() {
+        let host = liveHost(signedIn: true)
+        var storedToken = true
+        let signIn = SignInCoordinator(login: {}, isLoggedIn: { storedToken }, signOut: { storedToken = false },
+                                       clearProtectedLocalState: {})
+        var pushesEnded = 0
+        let recentKey = "pocket.emoji.recent", keptRecent = UserDefaults.standard.object(forKey: recentKey)
+        defer { UserDefaults.standard.set(keptRecent, forKey: recentKey) }
+        UserDefaults.standard.set(["👍"], forKey: recentKey)
+        SentiPocketApp.wire(signIn, to: host, endPushes: { pushesEnded += 1 })
+        XCTAssertEqual(host.callManager?.takesVoipPushes, true)
+
+        signIn.invalidateAuthentication(expectedEpoch: signIn.authenticationEpoch &+ 1)
+        XCTAssertEqual(pushesEnded, 0, "a 401 from an earlier sign-in changes nothing")
+        XCTAssertEqual(host.callManager?.takesVoipPushes, true)
+
+        signIn.invalidateAuthentication(expectedEpoch: signIn.authenticationEpoch)
+        XCTAssertEqual(signIn.phase, .reauthenticationRequired)
+        XCTAssertEqual(pushesEnded, 1, "the notifications go as on sign-out: someone else may sign in next")
+        XCTAssertEqual(host.callManager?.takesVoipPushes, false, "and so do the calls")
+        XCTAssertNil(UserDefaults.standard.object(forKey: recentKey), "and the recent-emoji row (warden, #298 review)")
+    }
 }
 #endif

@@ -185,3 +185,35 @@ final class RoomTicketsPresentationTests: XCTestCase {
                      "a protected failure shows no ticket")
     }
 }
+
+/// Carter, #55238: "When I click on tickets to view the list, the ones that are currently being worked on should be
+/// atop with a progress bar."
+final class RoomTicketsWorkedOnTests: XCTestCase {
+    func test_tickets_being_worked_on_come_first_whatever_their_priority() {
+        let live = RoomTicketInput.Lease(holder: "ds-box", isLive: true)
+        let tickets = [
+            RoomTicketInput(id: "p0-open", title: "A", body: "", status: "open", updatedAt: "2026-10-30T08:00:00Z", priority: 0),
+            RoomTicketInput(id: "p3-working", title: "B", body: "", status: "working", updatedAt: "2026-10-30T07:00:00Z", priority: 3),
+            RoomTicketInput(id: "p2-review", title: "C", body: "", status: "in_review", updatedAt: "2026-10-30T06:00:00Z", priority: 2),
+            RoomTicketInput(id: "p1-leased", title: "D", body: "", status: "assigned", updatedAt: "2026-10-30T05:00:00Z", priority: 1,
+                            lease: live)
+        ]
+        let state = RoomTicketsPresentationState(tickets: tickets)
+        XCTAssertEqual(state.rows.map(\.id), ["p1-leased", "p2-review", "p3-working", "p0-open"])
+        XCTAssertEqual(state.rows.map(\.stageProgress), [0.45, 0.85, 0.45, nil])
+    }
+
+    func test_the_servers_estimate_replaces_the_stage_when_there_is_one() {
+        let estimated = RoomTicketRow(id: "e", title: "E", status: "working", estimate: 0.72, estimateBasis: "stage: working; 4 notes")
+        XCTAssertEqual(estimated.barProgress, 0.72)
+        XCTAssertEqual(estimated.estimateBasis, "stage: working; 4 notes")
+        XCTAssertEqual(RoomTicketRow(id: "s", title: "S", status: "in_review").barProgress, 0.85)
+        XCTAssertNil(RoomTicketRow(id: "d", title: "D", status: "done", estimate: 0.9).barProgress, "a finished ticket has no bar")
+    }
+
+    func test_a_finished_or_stale_ticket_has_no_bar() {
+        XCTAssertNil(RoomTicketRow(id: "d", title: "D", status: "done").stageProgress)
+        XCTAssertNil(RoomTicketRow(id: "s", title: "S", status: "assigned",
+                                   lease: RoomTicketInput.Lease(holder: "x", isLive: false)).stageProgress)
+    }
+}

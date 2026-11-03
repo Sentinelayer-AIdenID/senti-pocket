@@ -52,6 +52,8 @@ public enum RoomStreamFrame: Equatable, Sendable {
     case message(RoomMessage)
     /// A durable event the room does not display; carries its sequence so the resume point still advances.
     case nonDisplayable(sequenceId: Int64)
+    /// A message was edited: the message as it reads now, and the edit's own sequence for the resume point.
+    case edited(RoomMessage, sequenceId: Int64)
     /// `agent_composing` control: an agent is preparing a reply. Never enters the transcript.
     case composing(agentId: String, targetSequenceId: Int64?)
     /// Any other control frame (for example an observability tick).
@@ -79,6 +81,7 @@ public enum RoomStreamFrame: Equatable, Sendable {
         default:
             if let message = RoomMessage(json: json) { return .message(message) }
             if let sequence = json["sequenceId"]?.intValue ?? json["sequence_id"]?.intValue, sequence > 0 {
+                if let edited = RoomMessage.edited(from: json) { return .edited(edited, sequenceId: sequence) }
                 return .nonDisplayable(sequenceId: sequence)
             }
             return nil

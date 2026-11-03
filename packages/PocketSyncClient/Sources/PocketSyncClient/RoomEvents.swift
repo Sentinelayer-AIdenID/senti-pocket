@@ -38,6 +38,10 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
     public let breakout: RoomBreakoutEvent?
     /// Files attached to this message, in order.
     public let attachments: [RoomAttachment]
+    /// "voice" for a turn spoken in a voice room (the room shows it as transcript); nil for a typed post.
+    public let channel: String?
+    /// A checkpoint's summary (its title is the text).
+    public let checkpointSummary: String?
     /// The wire event type. Only `session_message` rows take view receipts (the API refuses the others).
     public let eventType: String
 
@@ -56,7 +60,9 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         isEdited: Bool = false,
         breakout: RoomBreakoutEvent? = nil,
         attachments: [RoomAttachment] = [],
-        eventType: String = "session_message"
+        eventType: String = "session_message",
+        channel: String? = nil,
+        checkpointSummary: String? = nil
     ) {
         self.id = id
         self.sequenceId = sequenceId
@@ -73,6 +79,8 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         self.breakout = breakout
         self.attachments = attachments
         self.eventType = eventType
+        self.channel = channel
+        self.checkpointSummary = checkpointSummary
     }
 
     /// Projects one wire event. Returns nil for events a room does not display (control, presence, edit
@@ -104,7 +112,16 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
             text = (payload["message"]?.stringValue ?? payload["text"]?.stringValue ?? "")
         case .checkpoint:
             text = (payload["title"]?.stringValue ?? payload["summary"]?.stringValue ?? "Checkpoint")
-        case .memberJoined, .breakoutOpened:
+        case .memberJoined:
+            // The server posts a join as itself; who joined is the payload's name (the web named the person where the
+            // phone said "senti joined"). One line, as the web shows it.
+            // Direction overrides and isolates are dropped, so a name can't reorder the line it sits in (warden, #273).
+            let bidi: Set<Unicode.Scalar> = Set((0x202A...0x202E).compactMap(Unicode.Scalar.init)
+                + (0x2066...0x2069).compactMap(Unicode.Scalar.init) + [0x200E, 0x200F, 0x061C].compactMap(Unicode.Scalar.init))
+            let name = String(String.UnicodeScalarView((payload["displayName"]?.stringValue ?? "").unicodeScalars
+                .filter { !bidi.contains($0) }))
+            text = String(name.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).joined(separator: " ").prefix(80))
+        case .breakoutOpened:
             text = ""
         case .breakoutOutcome:
             text = payload["text"]?.stringValue ?? ""
@@ -140,7 +157,28 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         self.isEdited = json["editedAt"]?.stringValue.map { !$0.isEmpty } ?? false
         self.breakout = breakout
         self.attachments = kind == .message ? RoomAttachment.list(from: payload) : []
+        self.channel = payload["channel"]?.stringValue.flatMap { value in
+            value.isEmpty || value.count > 16 ? nil : value.lowercased()
+        }
+        self.checkpointSummary = kind == .checkpoint
+            ? payload["summary"]?.stringValue.flatMap { $0.isEmpty ? nil : String($0.prefix(20_000)) }
+            : nil
         self.eventType = event
+    }
+
+    /// The message as it reads now, from a `session_message_edited` envelope (`session-message-edit:v1`). The
+    /// server alone writes these (it refuses one from any client) and carries the edited message whole in
+    /// `payload.event`, at the message's own sequence, revision and `editedAt`. Nil for a reply's edit, or when
+    /// the message inside is not the one the envelope names.
+    public static func edited(from json: JSONValue) -> RoomMessage? {
+        guard json["event"]?.stringValue == "session_message_edited",
+              let payload = json["payload"], payload["reply"]?.objectValue == nil,
+              let inner = payload["event"], let message = RoomMessage(json: inner), message.kind == .message,
+              message.sequenceId == payload["targetSequenceId"]?.intValue,
+              message.id == payload["targetMessageId"]?.stringValue else {
+            return nil
+        }
+        return message
     }
 
     /// Human identities are server-authored as `human-<user>`; agents can never claim that prefix.
@@ -165,6 +203,9 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
 /// One page of room events from `GET /events/before` or `GET /events`, decoded row by row.
 public struct RoomEventPage: Decodable, Equatable, Sendable {
     public let messages: [RoomMessage]
+    /// Messages edited in this page's span, as they read now (`RoomMessage.edited(from:)`). They replace rows
+    /// already shown and never add one.
+    public let edits: [RoomMessage]
     /// Rows present on the wire (displayable or not). Lets the caller tell "nothing displayable" from "empty".
     public let rawCount: Int
     /// Rows that carried an identity the app could not read. Never silently zero when rows were dropped.
@@ -189,6 +230,7 @@ public struct RoomEventPage: Decodable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let rows = try container.decode([JSONValue].self, forKey: .events)
         var messages: [RoomMessage] = []
+        var edits: [RoomMessage] = []
         var undecodable = 0
         var maxSequence: Int64?
         var minSequence: Int64?
@@ -200,9 +242,14 @@ public struct RoomEventPage: Decodable, Equatable, Sendable {
                 undecodable += 1
                 continue
             }
-            if let message = RoomMessage(json: row) { messages.append(message) }
+            if let message = RoomMessage(json: row) {
+                messages.append(message)
+            } else if let edited = RoomMessage.edited(from: row) {
+                edits.append(edited)
+            }
         }
         self.messages = messages
+        self.edits = edits
         self.rawCount = rows.count
         self.undecodableCount = undecodable
         self.maxSequence = maxSequence
@@ -216,6 +263,7 @@ public struct RoomEventPage: Decodable, Equatable, Sendable {
 
     public init(
         messages: [RoomMessage],
+        edits: [RoomMessage] = [],
         rawCount: Int? = nil,
         undecodableCount: Int = 0,
         maxSequence: Int64? = nil,
@@ -224,6 +272,7 @@ public struct RoomEventPage: Decodable, Equatable, Sendable {
         hasMore: Bool = false
     ) {
         self.messages = messages
+        self.edits = edits
         self.rawCount = rawCount ?? messages.count
         self.undecodableCount = undecodableCount
         self.maxSequence = maxSequence ?? messages.map(\.sequenceId).max()
@@ -301,6 +350,28 @@ public struct RoomTimeline: Equatable, Sendable {
         return result
     }
 
+    /// Keeps only the newest `count` rows (older ones load again on demand). Returns whether any were dropped.
+    @discardableResult
+    public mutating func keepNewest(_ count: Int) -> Bool {
+        guard messages.count > max(count, 0) else { return false }
+        messages.removeFirst(messages.count - max(count, 0))
+        hasMoreOlder = true
+        return true
+    }
+
+    /// Edited messages replace the rows they edit, at a higher revision only. A message not loaded is left alone:
+    /// it shows edited when its part of the room loads. Returns the ids replaced.
+    @discardableResult
+    public mutating func applyEdits(_ edits: [RoomMessage]) -> [String] {
+        var replaced: [String] = []
+        for message in edits {
+            guard let index = indexOfSameMessage(as: message), message.revision > messages[index].revision else { continue }
+            messages[index] = message
+            replaced.append(message.id)
+        }
+        return replaced
+    }
+
     /// Replaces the loaded rows with a window around a message further back. Older and newer neighbours then load
     /// on demand; `hasMoreNewer` says whether the window stops short of the live tail.
     public mutating func replace(with window: [RoomMessage], hasMoreOlder: Bool, hasMoreNewer: Bool) {
@@ -347,11 +418,31 @@ public struct RoomTimeline: Equatable, Sendable {
 /// Unread tracking for one open room, mirroring the web's client-only divider: while the reader is away from the
 /// bottom, arriving rows from OTHER people count as unread and the divider sits at the first of them. Reaching
 /// the bottom clears both.
+///
+/// A room opened from the room list with messages you had not read opens at the first of them: that
+/// line stays while the room is open, wherever you scroll, as Discord's does. Only a send, which takes
+/// you to your own message at the bottom, lets it go.
 public struct RoomUnreadState: Equatable, Sendable {
     public private(set) var unreadCount = 0
-    public private(set) var dividerSequence: Int64?
+    /// The first message you had not read when the room opened.
+    public private(set) var openedAt: Int64?
+    /// The first message from others that arrived while you were away from the bottom.
+    private var arrivedAt: Int64?
 
     public init() {}
+
+    /// Where the unread line sits: the earlier of where the room opened and the first arrival while you were away.
+    public var dividerSequence: Int64? {
+        switch (openedAt, arrivedAt) {
+        case let (opened?, arrived?): return min(opened, arrived)
+        case let (opened, arrived): return opened ?? arrived
+        }
+    }
+
+    /// The room opened at the first message you had not read.
+    public mutating func opened(at sequence: Int64) {
+        openedAt = sequence
+    }
 
     public mutating func noteArrivals(_ inserted: [RoomMessage], readerIsAtBottom: Bool, selfAuthorIds: Set<String>) {
         guard !readerIsAtBottom else { return }
@@ -359,12 +450,24 @@ public struct RoomUnreadState: Equatable, Sendable {
         guard !fromOthers.isEmpty else { return }
         unreadCount += fromOthers.count
         let first = fromOthers.map(\.sequenceId).min()!
-        dividerSequence = min(dividerSequence ?? first, first)
+        arrivedAt = min(arrivedAt ?? first, first)
     }
 
-    public mutating func readerReachedBottom() {
+    /// The reader came back to the bottom: arrivals are read. The line the room opened at stays. Whether anything
+    /// changed, so the same place told again never redraws the room.
+    @discardableResult
+    public mutating func readerReachedBottom() -> Bool {
+        guard unreadCount != 0 || arrivedAt != nil else { return false }
         unreadCount = 0
-        dividerSequence = nil
+        arrivedAt = nil
+        return true
+    }
+
+    /// You sent a message: you are at the newest, and every line goes.
+    public mutating func caughtUp() {
+        unreadCount = 0
+        arrivedAt = nil
+        openedAt = nil
     }
 }
 

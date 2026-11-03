@@ -21,6 +21,10 @@ public enum RoomTicketsIntent: Equatable, Sendable {
     case comment(ticketId: String, body: String)
     /// Posts the ticket's last comment again, with the same key.
     case retryComment(ticketId: String)
+    /// "Chat about it" (web): the ticket's card and a note, posted to this room as you.
+    case chatAboutIt(ticketId: String, note: String)
+    /// Start an agent on its own machine for the ticket (web "Mint for this ticket").
+    case startAgent(ticketId: String)
 }
 
 /// The room's Tickets tab: Active / Archived (N), search across all tickets, ranked by impact. Tapping a ticket
@@ -31,9 +35,11 @@ public struct RoomTicketsView: View {
     @State private var query = ""
     @State private var filing = false
 
-    public init(state: RoomTicketsPresentationState, send: @escaping (RoomTicketsIntent) -> Void) {
+    /// `startsFiling` opens the new-ticket sheet at once (the composer's "File a ticket").
+    public init(state: RoomTicketsPresentationState, startsFiling: Bool = false, send: @escaping (RoomTicketsIntent) -> Void) {
         self.state = state
         self.send = send
+        _filing = State(initialValue: startsFiling)
     }
 
     public var body: some View {
@@ -85,10 +91,11 @@ public struct RoomTicketsView: View {
                         canComment: state.canFileTickets,
                         commentStatus: state.commentStatus[row.id],
                         canRetryComment: state.retryableComments.contains(row.id),
+                        canStartAgent: state.canStartAgents,
                         send: send
                     )
                 } label: {
-                    RoomTicketRowView(row: row)
+                    RoomTicketRowView(row: row, viewerId: state.viewerId, names: state.personNames)
                 }
                 .accessibilityIdentifier("pocket.tickets.row.\(row.id)")
             }
@@ -128,6 +135,9 @@ public struct RoomTicketsView: View {
 
 private struct RoomTicketRowView: View {
     let row: RoomTicketRow
+    /// Who is reading, and the room's people by user id: a person is named, never shown by user id.
+    var viewerId: String?
+    var names: [String: String] = [:]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -140,7 +150,7 @@ private struct RoomTicketRowView: View {
                         .background(RoomTicketPalette.priority(row.priority).opacity(0.18), in: Capsule())
                         .foregroundStyle(RoomTicketPalette.priority(row.priority))
                 }
-                Text(row.title)
+                Text(row.displayTitle)
                     .font(.body.weight(.semibold))
                     .lineLimit(2)
             }
@@ -156,7 +166,7 @@ private struct RoomTicketRowView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(RoomTicketPalette.status(row.status))
                 if let assignee = row.assignee {
-                    Label(RoomTicketRow.displayName(assignee), systemImage: "person")
+                    Label(RoomTicketRow.actorLabel(assignee, viewerId: viewerId, names: names), systemImage: "person")
                         .font(.caption)
                         .foregroundStyle(PocketPalette.textSecondary)
                 }
@@ -166,6 +176,26 @@ private struct RoomTicketRowView: View {
                         .font(.caption)
                         .foregroundStyle(PocketPalette.textSecondary)
                 }
+            }
+            // Being worked on: how far along, and who holds it (Carter, #55238).
+            if let progress = row.barProgress {
+                VStack(alignment: .leading, spacing: 3) {
+                    ProgressView(value: progress)
+                        .progressViewStyle(.linear)
+                        .tint(RoomTicketPalette.status(row.status))
+                    let holder = row.lease.flatMap { $0.isLive ? $0.holder : nil }
+                    let parts = [holder.map { "Held by \(RoomTicketRow.actorLabel($0, viewerId: viewerId, names: names))" }, row.estimateBasis]
+                        .compactMap { $0 }
+                    if !parts.isEmpty {
+                        Text(parts.joined(separator: " · "))
+                            .font(.caption2)
+                            .foregroundStyle(PocketPalette.textSecondary)
+                            .lineLimit(2)
+                    }
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("\(Int(progress * 100)) percent along")
+                .accessibilityIdentifier("pocket.tickets.row.progress")
             }
         }
         .padding(.vertical, 4)
@@ -187,11 +217,14 @@ public struct RoomTicketDetailView: View {
     var canComment = false
     var commentStatus: String?
     var canRetryComment = false
+    /// Agents can be started from here: the room takes ticket writes and the mint admits this account.
+    var canStartAgent = false
     let send: (RoomTicketsIntent) -> Void
     @State private var customAnswer = ""
     @State private var assigning = false
     @State private var editing = false
     @State private var draftComment = ""
+    @State private var chatNote = ""
 
     public init(
         row: RoomTicketRow,
@@ -207,9 +240,11 @@ public struct RoomTicketDetailView: View {
         canComment: Bool = false,
         commentStatus: String? = nil,
         canRetryComment: Bool = false,
+        canStartAgent: Bool = false,
         send: @escaping (RoomTicketsIntent) -> Void
     ) {
         self.row = row
+        self.canStartAgent = canStartAgent
         self.canAnswer = canAnswer
         self.decisionStatus = decisionStatus
         self.canRetryDecision = canRetryDecision
@@ -327,6 +362,17 @@ public struct RoomTicketDetailView: View {
                                 .accessibilityIdentifier("pocket.ticket.edit")
                         }
                     }
+                    if canStartAgent {
+                        Button {
+                            send(.startAgent(ticketId: row.id))
+                        } label: {
+                            Label("Start an agent on this", systemImage: "cpu")
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(PocketPalette.listening)
+                        .accessibilityHint("Starts an agent on its own machine for this ticket, then assigns it")
+                        .accessibilityIdentifier("pocket.ticket.startAgent")
+                    }
                     if actions.claim == .takeOver {
                         Text("The lease lapsed without a release. Taking over makes the ticket yours.")
                             .font(.caption)
@@ -340,6 +386,34 @@ public struct RoomTicketDetailView: View {
                         .accessibilityIdentifier("pocket.ticket.writeStatus")
                 }
             }
+        }
+    }
+
+    /// "Chat about it", as on the web: the ticket's card goes to the room with your note, so everyone and every agent
+    /// sees it and an agent can pick it up.
+    @ViewBuilder
+    private var chatCard: some View {
+        if canAnswer {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Chat about it")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(PocketPalette.textPrimary)
+                TextField("Add a note (optional)", text: $chatNote, axis: .vertical)
+                    .lineLimit(1...4)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("pocket.ticket.chatNote")
+                Button {
+                    send(.chatAboutIt(ticketId: row.id, note: chatNote))
+                    chatNote = ""
+                } label: {
+                    Label("Post to this room", systemImage: "bubble.left.and.text.bubble.right")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(PocketPalette.accent)
+                .accessibilityIdentifier("pocket.ticket.chatAboutIt")
+            }
+            .padding(12)
+            .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
     }
 
@@ -376,8 +450,12 @@ public struct RoomTicketDetailView: View {
                             .tint(PocketPalette.accent)
                         }
                     }
-                    Text(row.assignee.map { "Your answer goes to the room as one line, mentioning @\(RoomTicketRow.displayName($0))." }
-                         ?? "Your answer goes to the room as one line.")
+                    Text(row.assignee.map { assignee in
+                        // A person is named, never mentioned by user id (the answer itself says "for <name>").
+                        UUID(uuidString: assignee) != nil
+                            ? "Your answer goes to the room as one line, for \(RoomTicketRow.actorLabel(assignee, viewerId: viewerId, names: names))."
+                            : "Your answer goes to the room as one line, mentioning @\(RoomTicketRow.displayName(assignee))."
+                    } ?? "Your answer goes to the room as one line.")
                         .font(.caption)
                         .foregroundStyle(PocketPalette.textSecondary)
                 } else {
@@ -408,7 +486,7 @@ public struct RoomTicketDetailView: View {
     public var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                Text(row.title)
+                Text(row.displayTitle)
                     .font(.title3.bold())
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
@@ -436,7 +514,8 @@ public struct RoomTicketDetailView: View {
                             .accessibilityIdentifier("pocket.ticket.lease")
                     }
                     if !row.createdBy.isEmpty {
-                        Label("Requested by \(RoomTicketRow.displayName(row.createdBy))", systemImage: "person.wave.2")
+                        Label("Requested by \(RoomTicketRow.actorLabel(row.createdBy, viewerId: viewerId, names: names))",
+                              systemImage: "person.wave.2")
                     }
                     if let created = row.createdDate {
                         Label {
@@ -453,6 +532,8 @@ public struct RoomTicketDetailView: View {
 
                 decisionCard
 
+                chatCard
+
                 if let sequence = row.sourceSequenceId {
                     Button {
                         send(.openSourceMessage(sequenceId: sequence))
@@ -463,7 +544,7 @@ public struct RoomTicketDetailView: View {
                 }
 
                 Divider()
-                ChatMarkdownView(text: row.body.isEmpty ? "_No description._" : row.body)
+                ChatMarkdownView(text: row.body.isEmpty ? "_No description._" : row.displayBody)
                     .font(.body)
                 Divider()
                 commentsSection

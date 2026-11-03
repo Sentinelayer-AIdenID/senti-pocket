@@ -36,6 +36,23 @@ enum RoomPreview {
         ProcessInfo.processInfo.arguments.contains("-PocketTicketsPreview")
     }
 
+    /// `-PocketRoomLeaderboardPreview` adds a leaderboard to the room's pins, far up its history, so its Leaderboard
+    /// button shows.
+    static var isLeaderboardRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-PocketRoomLeaderboardPreview") || isLeaderboardSheetRequested
+    }
+
+    /// `-PocketRoomLeaderboardSheetPreview` also opens the leaderboard's sheet once the room has the board.
+    static var isLeaderboardSheetRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-PocketRoomLeaderboardSheetPreview")
+    }
+
+    /// `-PocketRoomFilesPreview` adds two files posted as base64 parts in replies: one whose parts are all there and
+    /// match its declared hash, and one with a part missing.
+    static var isFilesRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-PocketRoomFilesPreview")
+    }
+
     @MainActor
     @ViewBuilder
     static var rootView: some View {
@@ -280,7 +297,27 @@ private struct RoomPreviewTickets: RoomTicketsTransport {
 }
 
 /// Accepts every message after a short delay, so the composer's pending states can be seen in the preview.
-private struct RoomPreviewSender: RoomMessageSending, RoomActionSending {
+private struct RoomPreviewSender: RoomMessageSending, RoomActionSending, RoomSummaryGenerating {
+    func generateSummary(sessionId: String) async throws -> RoomSummary? {
+        try? await Task.sleep(nanoseconds: 1_200_000_000)
+        // The server's prose summary (`format: "prose-v2"`), with the fields its quiet line reads.
+        let text = "Alex asked the team to fix two findings in the onboarding flow before the next build. "
+            + "Paste validation is fixed and build 319 is green; Alex asked for a look on a device. "
+            + "The retry counter is next, once that ships, and a breakout is ordering the fixes."
+        let iso = ISO8601DateFormatter()
+        let body: [String: Any] = ["ok": true, "summary": [
+            "format": "prose-v2", "title": "Design review: onboarding fixes", "summary": text, "model": "preview",
+            "participants": ["human-alex", "review-agent", "build-agent"], "mode": "llm",
+            "timeRange": ["start": iso.string(from: Date().addingTimeInterval(-5_400)), "end": iso.string(from: Date())]
+        ] as [String: Any]]
+        guard let summary = RoomSummary(json: try JSONSerialization.data(withJSONObject: body)) else { throw RoomSendError.rejected }
+        return summary
+    }
+
+    func readSummary(sessionId: String) async throws -> RoomSummary? {
+        try await generateSummary(sessionId: sessionId)
+    }
+
     func sendHumanMessage(sessionId: String, text: String, clientId: String) async throws {
         try? await Task.sleep(nanoseconds: 600_000_000)
     }
@@ -288,6 +325,20 @@ private struct RoomPreviewSender: RoomMessageSending, RoomActionSending {
     func sendAction(_ action: RoomActionRequest) async throws {
         try? await Task.sleep(nanoseconds: 300_000_000)
     }
+}
+
+/// The voice room in the preview: turns and the transcript go nowhere.
+extension RoomPreviewSender: VoiceRoomPosting {
+    func postCallStarted(sessionId: String, text: String, clientId: String) async throws {}
+
+    func postVoiceTurn(sessionId: String, text: String, clientId: String) async throws {}
+
+    func uploadTranscript(sessionId: String, filename: String, markdown: String, clientId: String) async throws -> VoiceTranscriptAttachment {
+        VoiceTranscriptAttachment(attachmentId: "preview-transcript", filename: filename, kind: "text",
+                                  contentType: "text/markdown", sizeBytes: markdown.utf8.count, status: "ready")
+    }
+
+    func postCallEnded(sessionId: String, text: String, transcript: VoiceTranscriptAttachment?, clientId: String) async throws {}
 }
 
 /// Scripted rows for the preview: a day of history, then one agent starts composing and posts while you watch.
@@ -404,21 +455,66 @@ private struct RoomPreviewTransport: RoomTransport {
             "Earlier note \(seq): checking the onboarding copy, step \(seq).")
     }
 
-    private var allHistory: [RoomMessage] { anchorScenario ? Self.earlier + Self.history : Self.history }
+    private var allHistory: [RoomMessage] {
+        let files = RoomPreview.isFilesRequested ? Self.fileRoots : []
+        return (anchorScenario ? Self.earlier + Self.history : Self.history) + files
+    }
+
+    /// The files' messages: each says what its replies hold.
+    private static let fileRoots = [
+        row(124, "review-agent", minutesAgo: 3, "The onboarding checks as CSV, in 3 parts below."),
+        row(125, "build-agent", minutesAgo: 2, "The fixture pack, in 3 parts below.")
+    ]
+
+    /// Each file in envelope parts, as replies to its message by the agent who posted it: every part of the checks,
+    /// and two of the pack's three.
+    private static let fileParts: [RoomReply] = {
+        let checks = Data((["step,check,result"] + (1...24).map { "\($0),field \($0) validates on paste,pass" })
+            .joined(separator: "\n").utf8)
+        let pack = Data([0x50, 0x4b, 0x03, 0x04] + (0..<3_000).map { UInt8(($0 * 37 + 11) % 256) })
+        func parts(_ file: Data, name: String, to root: Int64, keep: [Int]) -> [RoomReply] {
+            let encoded = file.base64EncodedString()
+            let size = (encoded.count + 2) / 3
+            return keep.map { index in
+                let chunk = String(encoded.dropFirst(index * size).prefix(size))
+                let body = (try? JSONSerialization.data(withJSONObject: [
+                    "artifact": name, "sha256": RoomBase64Files.sha256Hex(file), "bytes": file.count,
+                    "part": index + 1, "parts": 3, "data": chunk
+                ], options: [.sortedKeys])).map { String(decoding: $0, as: UTF8.self) } ?? ""
+                // A few seconds apart, after the message they answer.
+                let posted = base.addingTimeInterval((root == 124 ? -180 : -120) + Double(index + 1) * 10)
+                let stamp = ISO8601DateFormatter().string(from: posted)
+                return RoomReply(id: "file-\(root)-\(index + 1)", targetSequenceId: root,
+                                 authorId: root == 124 ? "review-agent" : "build-agent",
+                                 text: body, createdAt: stamp)
+            }
+        }
+        return parts(checks, name: "onboarding-checks.csv", to: 124, keep: [0, 1, 2])
+            + parts(pack, name: "fixture-pack.zip", to: 125, keep: [0, 2])
+    }()
 
     func roomEventsBefore(sessionId: String, beforeSequence: Int64?, limit: Int) async throws -> RoomEventPage {
         try? await Task.sleep(nanoseconds: 300_000_000)
+        if RoomPreview.isLeaderboardRequested, beforeSequence == Self.leaderboard.sequenceId + 1 {
+            return RoomEventPage(messages: [Self.leaderboard], nextBeforeSequence: nil, hasMore: false)
+        }
         let rows = beforeSequence.map { before in allHistory.filter { $0.sequenceId < before } } ?? allHistory
         return RoomEventPage(messages: rows, nextBeforeSequence: nil, hasMore: false)
     }
 
     private static let threadReplies: [RoomReply] = [
         RoomReply(id: "r1", targetSequenceId: 111, authorId: "human-alex", text: "Is finding 2 also in the onboarding module?", createdAt: "2026-10-28T13:25:00Z"),
-        RoomReply(id: "r2", targetSequenceId: 111, authorId: "review-agent", text: "Yes, `OnboardingForm.swift`. Same PR.", createdAt: "2026-10-28T13:27:00Z")
+        RoomReply(id: "r2", targetSequenceId: 111, authorId: "review-agent", text: "Yes, `OnboardingForm.swift`. Same PR.", createdAt: "2026-10-28T13:27:00Z"),
+        // The keeper files the thread after the answer: its receipt is a line under the answer, never the row.
+        RoomReply(id: "r3", targetSequenceId: 111, authorId: "ticket-keeper", text: "Tickets for this message: [Ticket: Validate the email step on paste](/dashboard/sessions/preview-room?ticket=t1)", createdAt: "2026-10-28T13:28:00Z")
     ]
 
     func roomActions(sessionId: String, targetSequenceId: Int64?, limit: Int) async throws -> RoomActionsPage {
         if targetSequenceId == 111 { return RoomActionsPage(replies: Self.threadReplies) }
+        let files = RoomPreview.isFilesRequested ? Self.fileParts : []
+        if let targetSequenceId, targetSequenceId == 124 || targetSequenceId == 125 {
+            return RoomActionsPage(replies: files.filter { $0.targetSequenceId == targetSequenceId })
+        }
         return RoomActionsPage(byTarget: [
             111: RoomReactionSummary(
                 targetSequenceId: 111,
@@ -426,20 +522,46 @@ private struct RoomPreviewTransport: RoomTransport {
                 actorsByType: ["ack": ["build-agent", "human-alex"]],
                 likedByViewer: true,
                 replyTotal: 2,
-                latestReplies: Self.threadReplies
+                latestReplies: Self.threadReplies,
+                emojiReactions: [
+                    RoomEmojiReaction(emoji: "🎉", count: 3, viewerReacted: true),
+                    RoomEmojiReaction(emoji: "👀", count: 1, viewerReacted: false)
+                ]
             ),
-            113: RoomReactionSummary(targetSequenceId: 113, counts: ["like": 1]),
+            113: RoomReactionSummary(targetSequenceId: 113, counts: ["like": 1],
+                                     emojiReactions: [RoomEmojiReaction(emoji: "🚀", count: 2, viewerReacted: false)]),
             120: RoomReactionSummary(
                 targetSequenceId: 120,
                 counts: ["ack": 1, "working_on": 1],
                 actorsByType: ["ack": ["review-agent"]],
                 activeOwners: ["review-agent"]
             )
-        ], pinned: [
+        ], replies: files, pinned: (RoomPreview.isLeaderboardRequested
+                    ? [RoomPinnedMessage(id: "preview-pin-board", targetSequenceId: Self.leaderboard.sequenceId,
+                                         pinnedBy: "board-keeper")]
+                    : []) + [
             RoomPinnedMessage(id: "preview-pin-2", targetSequenceId: 120, pinnedBy: "human-alex"),
             RoomPinnedMessage(id: "preview-pin-1", targetSequenceId: 111, pinnedBy: "review-agent")
         ])
     }
+
+    /// The leaderboard a host process keeps pinned and edits as the scores change: far before the loaded history, so
+    /// the room reads it on its own.
+    static let leaderboard = row(
+        3,
+        "board-keeper",
+        minutesAgo: 3 * 24 * 60,
+        "🏆 Who's helping most in this room\n\n"
+            + "🥇 **review-agent** · SentiLab team · 127.5 pts · 56 helpful\n"
+            + "🥈 **build-agent** · SentiLab team · 72.1 pts · 25 helpful\n"
+            + "🥉 **alex** (person) · 44.8 pts · 15 helpful ▲1\n"
+            + "4. **box-host** · SentiLab team · 34.9 pts · 14 helpful ▼1\n"
+            + "5. **design-agent** · 33.2 pts · 11 helpful\n"
+            + "6. **a-very-long-agent-name-from-a-team-36** · 18.0 pts · 7 helpful 🆕\n\n"
+            + "How it works: each message and reply is scored once for how much concrete help it gives someone "
+            + "else, from 0 to 4 points. An author's best 10 messages per hour count, so volume doesn't buy rank. "
+            + "Updated every 10 minutes when scores change (last 09:40 UTC)."
+    )
 
     func roomEventsAfter(sessionId: String, fromSequence: Int64, limit: Int) async throws -> RoomEventPage {
         RoomEventPage(messages: [])

@@ -41,6 +41,19 @@ final class RoomAttachmentsTests: XCTestCase {
         XCTAssertEqual(message.attachments.map(\.attachmentId), ["plan-0001"], "the same file named twice shows once")
     }
 
+    /// A file taken back after it was sent: the API marks its pointer `removed: true`, and the room reads it so.
+    func test_a_file_taken_back_after_it_was_sent_reads_as_removed() throws {
+        let page = try events("""
+        {"events": [{"id": "e3", "sequenceId": 12, "event": "session_message", "agent": {"id": "human-mrrcarter"},
+          "ts": "2026-10-28T20:52:00Z", "payload": {"message": "Two photos", "attachments": [
+            {"attachmentId": "pm_photo_000001", "filename": "IMG_0001.jpg", "kind": "image", "removed": true},
+            {"attachmentId": "pm_photo_000002", "filename": "IMG_0002.jpg", "kind": "image", "removed": false}
+          ]}}]}
+        """)
+        let files = try XCTUnwrap(page.messages.first?.attachments)
+        XCTAssertEqual(files.map(\.isRemoved), [true, false])
+    }
+
     func test_only_an_https_download_link_is_accepted() throws {
         let good = try JSONDecoder().decode(RoomAttachmentDownload.self, from: Data("""
         {"ok": true, "download": {"url": "https://storage.example/obj?sig=1", "expiresIn": 300, "method": "GET"}}

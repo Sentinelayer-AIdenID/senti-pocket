@@ -69,6 +69,29 @@ final class ChatMarkdownTests: XCTestCase {
         XCTAssertEqual(exact?.sessionId, "0b1c2d3e")
         XCTAssertEqual(exact?.ticketId, "c0ffee08-1234")
         XCTAssertNil(ChatReferences.ticket("/dashboard/sessions/x?ticket=a&evil=1"))
+    }
+
+    /// Carter and warden: the keeper's ticket links sat side by side; each is its own row now.
+    func test_ticket_links_come_out_of_the_text_one_per_row() {
+        let keeper = "🎫 Tickets for this message: [Ticket: Fix Phone notifications that stop updating]"
+            + "(/dashboard/sessions/11111111-2222-4333-8444-555555555555?ticket=aaaaaaaa-1111-4222-8333-444444444444) · "
+            + "[Ticket: Keep Phone and web notifications synchronized]"
+            + "(/dashboard/sessions/11111111-2222-4333-8444-555555555555?ticket=bbbbbbbb-1111-4222-8333-444444444444)"
+        let split = ChatReferences.ticketLinks(in: keeper)
+        XCTAssertEqual(split.prose, "🎫 Tickets for this message:")
+        XCTAssertEqual(split.tickets.map(\.title), ["Fix Phone notifications that stop updating",
+                                                    "Keep Phone and web notifications synchronized"])
+        XCTAssertEqual(split.tickets.first?.ticketId, "aaaaaaaa-1111-4222-8333-444444444444")
+        XCTAssertEqual(split.tickets.first?.url.absoluteString,
+                       "https://sentinelayer.com/dashboard/sessions/11111111-2222-4333-8444-555555555555?ticket=aaaaaaaa-1111-4222-8333-444444444444")
+
+        let inline = ChatReferences.ticketLinks(in: "🎫 1 new from #54924: P2 [Ticket: Lower the text box](https://sentinelayer.com/dashboard/sessions/1111aaaa?ticket=cccc1111)")
+        XCTAssertEqual(inline.prose, "🎫 1 new from #54924: P2")
+        XCTAssertEqual(inline.tickets.map(\.ticketId), ["cccc1111"])
+
+        let other = "See [the docs](https://example.com/dashboard/sessions/x?ticket=y) and nothing else"
+        XCTAssertTrue(ChatReferences.ticketLinks(in: other).tickets.isEmpty, "only Senti's own ticket links")
+        XCTAssertEqual(ChatReferences.ticketLinks(in: "plain text").prose, "plain text")
 
         XCTAssertEqual(
             ChatReferences.mentionHandles(in: "@cobalt-warden ping @all and email a@b.com @Cobalt-Warden"),

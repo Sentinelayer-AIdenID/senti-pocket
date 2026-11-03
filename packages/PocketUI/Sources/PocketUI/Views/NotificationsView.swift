@@ -19,6 +19,12 @@ public struct NotificationsView: View {
                 if let failure = state.failure {
                     Text(failure.detail).foregroundStyle(PocketPalette.warning)
                 }
+                if state.couldNotUpdate {
+                    Label("Couldn't update. Pull down to try again.", systemImage: "exclamationmark.arrow.triangle.2.circlepath")
+                        .font(.footnote)
+                        .foregroundStyle(PocketPalette.warning)
+                        .accessibilityIdentifier("pocket.notifications.stale")
+                }
                 if !state.unread.isEmpty {
                     Section("New") {
                         ForEach(state.unread) { row in rowButton(row) }
@@ -32,6 +38,15 @@ public struct NotificationsView: View {
                 if state.unread.isEmpty && state.earlier.isEmpty && !state.isLoading && state.failure == nil {
                     Text("Nothing yet. Mentions and invites will show here.")
                         .foregroundStyle(PocketPalette.textSecondary)
+                }
+                if let updatedAt = state.updatedAt {
+                    TimelineView(.periodic(from: updatedAt, by: 30)) { context in
+                        Text(NotificationsPresentationState.freshness(updatedAt: updatedAt, now: context.date))
+                            .font(.caption)
+                            .foregroundStyle(PocketPalette.textSecondary)
+                    }
+                    .listRowBackground(Color.clear)
+                    .accessibilityIdentifier("pocket.notifications.updated")
                 }
             }
             .overlay {
