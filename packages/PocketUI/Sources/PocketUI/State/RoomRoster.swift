@@ -218,8 +218,15 @@ public struct RoomRoster: Equatable, Sendable {
         // the handle their posts carry (`human-<login>`, API #1055): a person here is one member with their posts, not
         // one here and one idle (Carter, #55524: "it kept my name in idle still").
         let keyed = present.map { (presenceKey($0), $0) }
+        // Active as the web counts it: here and not idle, or an agent the server says is working with a deadline still
+        // ahead (a box working quietly after its last post). A working agent with no deadline does not count.
+        func isActive(_ person: RoomChatPresence.Person) -> Bool {
+            if !person.isIdle { return true }
+            guard !person.isHuman, person.isWorking, let until = person.workingUntilMs else { return false }
+            return Double(until) / 1000 > now.timeIntervalSince1970
+        }
         // One person on two devices or tabs is here if either is (as the server merges them).
-        let presence = Dictionary(keyed, uniquingKeysWith: { first, second in first.isIdle ? second : first })
+        let presence = Dictionary(keyed, uniquingKeysWith: { first, second in isActive(first) ? first : second })
         for (key, person) in keyed where seen[key] == nil && !RoomChatQuiet.systemAuthors.contains(key) {
             seen[key] = Seen(name: person.name, isHuman: person.isHuman)
         }
@@ -235,13 +242,14 @@ public struct RoomRoster: Equatable, Sendable {
         let members = seen.map { key, entry -> Member in
             let here = presence[key]
             if let box = boxes[key] {
-                // Active exactly when the room's presence says so, as on the web. Presence is read live; a box's own
-                // record is read only when the people list or the Flight record opens, so counting its last activity
-                // moved the ring's number only when the list was opened (Carter, #59940).
-                let status: Status = (here.map { !$0.isIdle } ?? false) ? .here : .idle
+                // Active and online exactly when the room's presence says so, as on the web: a running box missing from
+                // presence is offline. Presence is read live; a box's own record is read only when the people list or
+                // the Flight record opens, so counting its last activity moved the ring's number only then (Carter,
+                // #59940).
+                let status: Status = here.map(isActive) == true ? .here : .idle
                 return Member(id: key, name: box.name, kind: .box, status: status, model: box.model, effort: box.effort,
                               job: box.job, phase: box.phase, firstSeen: entry.first, lastSeen: latest(entry.last, box.lastActivity),
-                              expiresAt: box.expiresAt, posts: entry.posts, isOnline: true)
+                              expiresAt: box.expiresAt, posts: entry.posts, isOnline: here != nil)
             }
             if ended.contains(key) {
                 return Member(id: key, name: entry.name, kind: .box, status: .ended, phase: "ended",
@@ -249,7 +257,7 @@ public struct RoomRoster: Equatable, Sendable {
             }
             let status: Status
             if let here {
-                status = here.isIdle ? .idle : .here
+                status = isActive(here) ? .here : .idle
             } else if let last = entry.last, now.timeIntervalSince(last) <= recent {
                 status = .idle
             } else {

@@ -37,7 +37,8 @@ final class RoomRosterTests: XCTestCase {
         XCTAssertEqual(byId["ds-old-box"]?.status, .ended)
         XCTAssertEqual(byId["ds-old-box"]?.kind, .box)
         let live = try XCTUnwrap(byId["ds-live-box"])
-        XCTAssertEqual(live.status, .idle, "running but not in the room's presence: online, not active (as on the web)")
+        XCTAssertEqual(live.status, .idle, "running but not in the room's presence: not active (as on the web)")
+        XCTAssertFalse(live.isOnline, "and offline, as on the web")
         XCTAssertEqual(live.model, "deepseek-v4-pro")
         XCTAssertEqual(live.effort, "high")
         XCTAssertEqual(live.job, "Fix the bell")
@@ -101,9 +102,9 @@ final class RoomRosterTests: XCTestCase {
         XCTAssertTrue(agents.members.first?.isOnline == true, "online first")
         let boxes = sides[2]
         XCTAssertEqual(boxes.members.map(\.name), ["astra-brand-s"])
-        XCTAssertEqual(boxes.online, 1)
+        XCTAssertEqual(boxes.online, 0, "running but not in the room's presence: offline, as on the web")
         XCTAssertEqual(roster.activeCount, 1, "Sam only: forge idles and the box has done nothing yet")
-        XCTAssertEqual(roster.summary, "1 active · 2 idle · 3 offline", "the whole room's line leads with the ring's number")
+        XCTAssertEqual(roster.summary, "1 active · 1 idle · 4 offline", "the whole room's line leads with the ring's number")
     }
 
     /// Carter, #59940: "the numbers look weird" (16 active · 0 idle · 138 offline, 136 of them boxes that ended).
@@ -146,9 +147,37 @@ final class RoomRosterTests: XCTestCase {
         let status = Dictionary(uniqueKeysWithValues: roster.members.map { ($0.id, $0.status) })
         XCTAssertEqual(status["ds-posting"], .here)
         XCTAssertEqual(status["ds-quiet"], .idle, "here but idle, though its phase says working")
-        XCTAssertEqual(status["ds-absent"], .idle, "running, so online, but not in presence: not active")
+        XCTAssertEqual(status["ds-absent"], .idle, "running but not in presence: not active")
+        XCTAssertEqual(roster.members.first { $0.id == "ds-absent" }?.isOnline, false, "and offline, as on the web")
         XCTAssertEqual(roster.activeCount, 1)
-        XCTAssertEqual(roster.summary, "1 active · 2 idle · 0 offline")
+        XCTAssertEqual(roster.summary, "1 active · 1 idle · 1 offline")
+    }
+
+    /// A box working quietly after its last post: presence says idle but the server says it is working until a time
+    /// still ahead. The web counts it active, so the ring does too; a deadline passed, or none, does not count.
+    func test_a_quiet_box_working_to_a_deadline_still_ahead_is_active_as_on_the_web() {
+        let ahead = Int64((now.timeIntervalSince1970 + 120) * 1000)
+        let passed = Int64((now.timeIntervalSince1970 - 120) * 1000)
+        func box(_ id: String, until: Int64?) -> RoomChatPresence.Person {
+            RoomChatPresence.Person(id: id, name: id, isHuman: false, isIdle: true, isWorking: true,
+                                    workingUntilMs: until, isBox: true)
+        }
+        let roster = RoomRoster.build(
+            posts: [],
+            present: [box("ds-ahead", until: ahead), box("ds-passed", until: passed), box("ds-none", until: nil),
+                      RoomChatPresence.Person(id: "pocket-forge", name: "pocket-forge", isHuman: false, isIdle: true,
+                                              isWorking: true, workingUntilMs: ahead)],
+            runningBoxes: ["ds-ahead", "ds-passed", "ds-none"].map {
+                RoomRoster.Box(name: $0, model: "m", phase: "working", lastActivity: nil)
+            },
+            endedBoxes: [], now: now
+        )
+        let status = Dictionary(uniqueKeysWithValues: roster.members.map { ($0.id, $0.status) })
+        XCTAssertEqual(status["ds-ahead"], .here)
+        XCTAssertEqual(status["ds-passed"], .idle, "its deadline has passed")
+        XCTAssertEqual(status["ds-none"], .idle, "working with no deadline does not count, as on the web")
+        XCTAssertEqual(status["pocket-forge"], .here, "a live agent working to a deadline ahead too")
+        XCTAssertEqual(roster.activeCount, 2)
     }
 
     func test_a_box_that_ended_but_runs_again_under_its_name_is_listed_once_as_running() {
