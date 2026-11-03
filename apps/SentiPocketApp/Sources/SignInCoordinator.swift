@@ -51,6 +51,9 @@ final class SignInCoordinator: ObservableObject {
     var onWillSignOut: (() async throws -> Void)?
 
     private var loginTask: Task<Void, Never>?
+    /// Which login attempt may still land. Moved on whenever an attempt is ended or replaced, so a result that comes
+    /// back after that is dropped even if it already finished.
+    private var loginAttempt: UInt64 = 0
     private var signOutTask: Task<Void, Never>?
     private var signOutPending = false
     private var pendingSignOutRequiresReauthentication = false
@@ -111,8 +114,7 @@ final class SignInCoordinator: ObservableObject {
             // ordinary signed-in flow.
             pendingSignOutRequiresReauthentication = true
             authenticationEpoch &+= 1
-            loginTask?.cancel()
-            loginTask = nil
+            endLogin()
             signOutTask?.cancel()
             signOutTask = nil
             clearProtectedLocalState()
@@ -127,8 +129,7 @@ final class SignInCoordinator: ObservableObject {
         guard phase == .signedIn else { return }
         if let expectedEpoch, authenticationEpoch != expectedEpoch { return }
         authenticationEpoch &+= 1
-        loginTask?.cancel()
-        loginTask = nil
+        endLogin()
         signOutTask?.cancel()
         signOutTask = nil
         onAuthenticationRevoked?()
@@ -154,18 +155,18 @@ final class SignInCoordinator: ObservableObject {
             } else {
                 run = login
             }
+            // One sign-in at a time (the cleanup one for a pending sign-out included), and none while signing out.
+            guard phase != .authorizing, phase != .signingOut else { return nil }
             if signOutPending {
-                guard phase != .signingOut else { return nil }
                 if pendingSignOutRequiresReauthentication {
                     return startLogin(resumingPendingSignOut: true, using: run)
                 }
                 return startSignOut()
             }
-            guard phase != .authorizing, phase != .signingOut else { return nil }
             return startLogin(using: run)
         case .cancelSignIn:
             guard phase == .authorizing else { return nil }
-            loginTask?.cancel(); loginTask = nil
+            endLogin()
             phase = .signedOut
             return nil
         case .signOut:
@@ -182,12 +183,14 @@ final class SignInCoordinator: ObservableObject {
             signOutPending = false
             pendingSignOutRequiresReauthentication = false
         }
+        endLogin()
+        let attempt = loginAttempt
         phase = .authorizing
         let task = Task { [weak self] in
             guard let self else { return }
             do {
                 try await run()
-                if Task.isCancelled { return }
+                if Task.isCancelled || self.loginAttempt != attempt { return }
                 // GATE #2: only a REAL stored token counts as signed-in — never fake success.
                 if self.isLoggedIn() {
                     self.authenticationEpoch &+= 1
@@ -205,7 +208,7 @@ final class SignInCoordinator: ObservableObject {
                     self.phase = .unavailable(.secureStorage)   // login returned but no token persisted
                 }
             } catch {
-                if Task.isCancelled { return }
+                if Task.isCancelled || self.loginAttempt != attempt { return }
                 self.phase = Self.mappedPhase(for: error)
             }
         }
@@ -213,10 +216,16 @@ final class SignInCoordinator: ObservableObject {
         return task
     }
 
+    /// Ends any login in flight: cancelled, and its result no longer accepted even if it has already come back.
+    private func endLogin() {
+        loginTask?.cancel()
+        loginTask = nil
+        loginAttempt &+= 1
+    }
+
     private func startSignOut() -> Task<Void, Never> {
         if !signOutPending {
-            loginTask?.cancel()
-            loginTask = nil
+            endLogin()
             authenticationEpoch &+= 1
             signOutPending = true
         }

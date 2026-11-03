@@ -468,6 +468,114 @@ final class SignInCoordinatorTests: XCTestCase {
         XCTAssertEqual(probe.loginCalls, 0)
     }
 
+    // MARK: - one sign-in at a time, and an ended one never lands
+
+    /// A coordinator whose sign-out is pending and needs a fresh sign-in to finish it (the old bearer was refused).
+    private func pendingCleanupCoordinator(
+        probe: LoginProbe,
+        login: @escaping () async throws -> Void,
+        appleLogin: @escaping () async throws -> Void
+    ) async -> SignInCoordinator {
+        probe.storedToken = true
+        var revokes = 0
+        var coordinator: SignInCoordinator!
+        coordinator = SignInCoordinator(
+            login: login,
+            appleLogin: appleLogin,
+            isLoggedIn: { probe.storedToken },
+            signOut: { probe.storedToken = false },
+            clearProtectedLocalState: {}
+        )
+        coordinator.onAuthenticated = { probe.authFired += 1 }
+        coordinator.onWillSignOut = {
+            revokes += 1
+            if revokes == 1 {
+                coordinator.invalidateAuthentication()
+                throw DeviceRingRegistrationError.reauthenticationRequired
+            }
+        }
+        await coordinator.handle(.signOut)?.value
+        XCTAssertEqual(coordinator.phase, .reauthenticationRequired)
+        XCTAssertTrue(coordinator.isSignOutPending)
+        return coordinator
+    }
+
+    func test_a_second_sign_in_during_the_cleanup_sign_in_is_refused() async {
+        for second in [PocketProductIntent.retryAuthentication, .beginAppleSignIn, .beginSignIn] {
+            let probe = LoginProbe()
+            let gate = AsyncGate()
+            let coord = await pendingCleanupCoordinator(
+                probe: probe,
+                login: { probe.loginCalls += 1; await gate.wait(); probe.storedToken = true },
+                appleLogin: { probe.loginCalls += 1; await gate.wait(); probe.storedToken = true })
+            let first = coord.handle(.retryAuthentication)
+            XCTAssertEqual(coord.phase, .authorizing)
+            XCTAssertNil(coord.handle(second), "\(second) while the cleanup sign-in runs")
+            gate.open()
+            await first?.value
+            XCTAssertEqual(probe.loginCalls, 1, "\(second)")
+            XCTAssertEqual(coord.phase, .signedOut, "the sign-out finished, \(second)")
+            XCTAssertFalse(coord.isSignOutPending)
+        }
+    }
+
+    /// An attempt that was cancelled but still comes back, before or after the one that replaced it, never signs in:
+    /// the pending sign-out finishes and stays finished.
+    func test_an_ended_cleanup_sign_in_that_comes_back_late_never_signs_in() async {
+        for endedFinishesFirst in [false, true] {
+            let probe = LoginProbe()
+            let gates = [AsyncGate(), AsyncGate()]
+            var started = 0
+            // Like a request already on the wire: it ignores cancellation and stores its token when it returns.
+            let attempt: () async throws -> Void = {
+                let gate = gates[started]
+                started += 1
+                await gate.wait()
+                probe.storedToken = true
+            }
+            let coord = await pendingCleanupCoordinator(probe: probe, login: attempt, appleLogin: attempt)
+            let ended = coord.handle(.retryAuthentication)
+            coord.handle(.cancelSignIn)
+            XCTAssertEqual(coord.phase, .signedOut)
+            let replacement = coord.handle(.beginAppleSignIn)
+            XCTAssertNotNil(replacement)
+            if endedFinishesFirst {
+                gates[0].open(); await ended?.value
+                XCTAssertEqual(coord.phase, .authorizing, "the ended attempt changed nothing")
+                gates[1].open(); await replacement?.value
+            } else {
+                gates[1].open(); await replacement?.value
+                XCTAssertEqual(coord.phase, .signedOut)
+                gates[0].open(); await ended?.value
+            }
+            XCTAssertEqual(coord.phase, .signedOut, "ended first: \(endedFinishesFirst)")
+            XCTAssertFalse(coord.isSignOutPending)
+            XCTAssertEqual(probe.authFired, 1, "only the replacement handed a bearer to the cleanup")
+        }
+    }
+
+    func test_an_ended_sign_in_that_comes_back_after_its_replacement_changes_nothing() async {
+        let probe = LoginProbe()
+        let gates = [AsyncGate(), AsyncGate()]
+        var started = 0
+        let attempt: () async throws -> Void = {
+            let index = started
+            started += 1
+            await gates[index].wait()
+            if index == 1 { throw NativeAuthError.network("down") }   // the replacement fails…
+            probe.storedToken = true
+        }
+        let coord = makeCoordinator(probe: probe, login: attempt, appleLogin: attempt)
+        let ended = coord.handle(.beginSignIn)
+        coord.handle(.cancelSignIn)
+        let replacement = coord.handle(.beginAppleSignIn)
+        gates[1].open(); await replacement?.value
+        XCTAssertEqual(coord.phase, .unavailable(.network))
+        gates[0].open(); await ended?.value   // …and the ended one returning later does not sign in
+        XCTAssertEqual(coord.phase, .unavailable(.network))
+        XCTAssertEqual(probe.authFired, 0)
+    }
+
     func test_beginSignIn_while_authorizing_is_ignored() async {
         let probe = LoginProbe()
         let gate = AsyncGate()
