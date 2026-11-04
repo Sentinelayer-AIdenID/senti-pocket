@@ -39,6 +39,8 @@ struct RoomPeopleAvatars: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.roomIsCovered) private var roomIsCovered
+    /// Where direct messages are on, a coin opens its profile card.
+    @Environment(\.roomProfileOpener) private var profileOpener
     @State private var notes: [Note] = []
     @State private var agents = 0
     @State private var humans = 0
@@ -70,6 +72,8 @@ struct RoomPeopleAvatars: View {
         let id: String
         let agent: AgentLab.Present?
         let isIdle: Bool
+        /// Whose card the coin opens.
+        let profile: RoomProfileTarget
     }
 
     /// Agents first, then people, each once (warden, #265: a person seen twice was drawn twice).
@@ -77,12 +81,14 @@ struct RoomPeopleAvatars: View {
         // Grey exactly when the count leaves it out, so a coin is never counted but grey (warden, #269).
         func idle(_ key: String, _ own: Bool) -> Bool { activeKeys.map { !$0.contains(key) } ?? own }
         let agents = agentsHere.map {
-            RingItem(id: "a:" + $0.id.lowercased(), agent: $0, isIdle: idle($0.id.lowercased(), $0.isIdle))
+            RingItem(id: "a:" + $0.id.lowercased(), agent: $0, isIdle: idle($0.id.lowercased(), $0.isIdle),
+                     profile: RoomProfileTarget(senderId: $0.id, name: $0.id, isAgent: true))
         }
         var seen = Set<String>()
         let people = presence.people.filter(\.isHuman)
             .filter { seen.insert(RoomRoster.presenceKey($0)).inserted }
-            .map { RingItem(id: "p:" + RoomRoster.presenceKey($0), agent: nil, isIdle: idle(RoomRoster.presenceKey($0), $0.isIdle)) }
+            .map { RingItem(id: "p:" + RoomRoster.presenceKey($0), agent: nil, isIdle: idle(RoomRoster.presenceKey($0), $0.isIdle),
+                            profile: RoomProfileTarget(senderId: RoomRoster.presenceKey($0), name: $0.name, isAgent: false)) }
         return agents + people
     }
 
@@ -160,6 +166,8 @@ struct RoomPeopleAvatars: View {
         .accessibilityHint("Opens the people list")
         .accessibilityAddTraits(.isButton)
         .accessibilityAction(.default, onOpen)
+        .modifier(RingProfileActions(items: profileOpener == nil ? [] : items.map(\.profile)
+            .filter { profileOpener?.opens($0.senderId) == true }, open: { _ = profileOpener?.callAsFunction($0) }))
         .accessibilityIdentifier("pocket.room.presence")
         .onAppear {
             shown = presence
@@ -175,6 +183,17 @@ struct RoomPeopleAvatars: View {
 
     @ViewBuilder
     private func ringItem(_ item: RingItem) -> some View {
+        if let profileOpener, profileOpener.opens(item.profile.senderId) {
+            coin(item)
+                // The coin's own tap wins over the ring's: its card. The rest of the ring still opens the people list.
+                .onTapGesture { profileOpener(item.profile) }
+        } else {
+            coin(item)
+        }
+    }
+
+    @ViewBuilder
+    private func coin(_ item: RingItem) -> some View {
         Group {
             if let agent = item.agent {
                 AgentLogo(agent: agent, reduceMotion: reduceMotion)
@@ -275,6 +294,18 @@ struct RoomPeopleAvatars: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + Self.noteLifetime) {
                 withAnimation(.easeIn(duration: 0.5)) { notes.removeAll { $0.id == note.id } }
             }
+        }
+    }
+}
+
+/// VoiceOver reads the ring as one button (the people list); where profile cards open, each one on it is also an action.
+private struct RingProfileActions: ViewModifier {
+    let items: [RoomProfileTarget]
+    let open: (RoomProfileTarget) -> Void
+
+    func body(content: Content) -> some View {
+        items.reduce(AnyView(content)) { view, item in
+            AnyView(view.accessibilityAction(named: Text("\(item.name)'s profile")) { open(item) })
         }
     }
 }
