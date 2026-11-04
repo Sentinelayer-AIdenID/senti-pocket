@@ -482,6 +482,9 @@ private struct AuthenticatedRootView: View {
         // and Waiting on you's polling, and never over a read still going.
         .task(id: DrawerPoll(open: drawerOpen, active: rootScenePhase == .active)) {
             guard DrawerPoll(open: drawerOpen, active: rootScenePhase == .active).runs else { return }
+            // Back in front with the panel open: read at once, not 15 s later (opening it reads too, and a quiet
+            // read never starts over that one).
+            sessions.refreshSessions(quietly: true)
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: Self.openDrawerRefresh)
                 guard !Task.isCancelled, drawerOpen, rootScenePhase == .active else { return }
