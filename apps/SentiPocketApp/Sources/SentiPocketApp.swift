@@ -208,6 +208,13 @@ struct SentiPocketApp: App {
 }
 
 /// Release composition of the authenticated repository-backed Sessions surface and the selected-session Pocket flow.
+/// When the open side panel reads its rooms again: open, with the app in front.
+struct DrawerPoll: Equatable {
+    let open: Bool
+    let active: Bool
+    var runs: Bool { open && active }
+}
+
 private struct AuthenticatedRootView: View {
     @StateObject private var sessions: SessionListCoordinator
     @StateObject private var details: SelectedSessionDetailCoordinator
@@ -471,13 +478,14 @@ private struct AuthenticatedRootView: View {
             if open { sessions.send(.refreshSessions) }
         }
         // While the side panel stays open its rooms keep up: a message that arrives in another room shows its unread
-        // badge without closing and opening the panel again (Carter, #61188).
-        .task(id: drawerOpen) {
-            guard drawerOpen else { return }
+        // badge without closing and opening the panel again (Carter, #61188). Only with the app in front, as the bell's
+        // and Waiting on you's polling, and never over a read still going.
+        .task(id: DrawerPoll(open: drawerOpen, active: rootScenePhase == .active)) {
+            guard DrawerPoll(open: drawerOpen, active: rootScenePhase == .active).runs else { return }
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: Self.openDrawerRefresh)
-                guard !Task.isCancelled, drawerOpen else { return }
-                sessions.send(.refreshSessions)
+                guard !Task.isCancelled, drawerOpen, rootScenePhase == .active else { return }
+                sessions.refreshSessions(quietly: true)
             }
         }
         .preferredColorScheme(theme.wrappedValue.colorScheme)
