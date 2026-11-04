@@ -17,6 +17,7 @@ struct RoomWorkingRows: View {
 
     /// Steps a box's own record adds, by lowercased name, read while its row is open.
     @Environment(\.roomBoxSteps) private var boxSteps
+    @Environment(\.dynamicTypeSize) private var typeSize
     @State private var open: Set<String> = []
     @State private var showsAll = false
 
@@ -78,16 +79,18 @@ struct RoomWorkingRows: View {
                         .font(.caption2)
                         .foregroundStyle(PocketPalette.textSecondary)
                 }
-                Text(session.agentId)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(PocketPalette.textPrimary)
-                    .lineLimit(1)
-                    .layoutPriority(1)
-                Text(session.isLive ? session.latestStep : session.workedFor.map(RoomWorkSession.workedForLabel) ?? "Done")
-                    .font(.caption)
-                    .foregroundStyle(PocketPalette.textSecondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                // At the largest text sizes the name and its step take a line each, so neither is cut to a sliver;
+                // live or finished, the row keeps the same height.
+                if typeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: 2) {
+                        name(session)
+                        status(session)
+                    }
+                } else {
+                    name(session)
+                        .layoutPriority(1)
+                    status(session)
+                }
                 Spacer(minLength: 0)
                 Image(systemName: isOpen ? "chevron.up" : "chevron.down")
                     .font(.caption2.weight(.semibold))
@@ -104,6 +107,21 @@ struct RoomWorkingRows: View {
         .accessibilityHint(isOpen ? "Hides the steps" : "Shows every step")
         .accessibilityAddTraits(.isButton)
         .accessibilityIdentifier("pocket.room.working.\(sequenceId).\(session.id)")
+    }
+
+    private func name(_ session: RoomWorkSession) -> some View {
+        Text(session.agentId)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(PocketPalette.textPrimary)
+            .lineLimit(1)
+    }
+
+    private func status(_ session: RoomWorkSession) -> some View {
+        Text(session.isLive ? session.latestStep : session.workedFor.map(RoomWorkSession.workedForLabel) ?? "Done")
+            .font(.caption)
+            .foregroundStyle(PocketPalette.textSecondary)
+            .lineLimit(1)
+            .truncationMode(.tail)
     }
 
     static func accessibilityLabel(_ session: RoomWorkSession) -> String {

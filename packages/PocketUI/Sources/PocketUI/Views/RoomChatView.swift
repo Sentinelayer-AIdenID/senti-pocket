@@ -1342,14 +1342,22 @@ private struct RoomMessageRowView: View {
                     footer(showsAttachments: false)
                 }
                 if row.endsRun || row.isEdited {
-                    HStack(spacing: 6) {
-                        if row.isEdited { Text("edited") }
-                        if let date = row.date { Text(date, style: .time) }
-                        if let views = row.views { RoomReadTicks(views: views) }
+                    Group {
                         if row.isSeenByAddressee {
-                            Text("Seen")
-                                .fontWeight(.semibold)
-                                .accessibilityIdentifier("pocket.room.seen")
+                            // "Seen" beside the time where it fits, under it where it does not (the largest text
+                            // sizes), so the time is never broken across lines.
+                            ViewThatFits(in: .horizontal) {
+                                HStack(spacing: 6) {
+                                    ownTimeLine
+                                    seenMark
+                                }
+                                VStack(alignment: .trailing, spacing: 2) {
+                                    ownTimeLine
+                                    seenMark
+                                }
+                            }
+                        } else {
+                            ownTimeLine
                         }
                     }
                     .font(.caption2)
@@ -1361,6 +1369,23 @@ private struct RoomMessageRowView: View {
             }
         }
         .padding(.top, gapAbove)
+    }
+
+    /// When your message was sent, whether it was edited, and its ticks.
+    private var ownTimeLine: some View {
+        HStack(spacing: 6) {
+            if row.isEdited { Text("edited") }
+            if let date = row.date { Text(date, style: .time) }
+            if let views = row.views { RoomReadTicks(views: views) }
+        }
+    }
+
+    /// Your newest message was read by the agent it is for, or by Senti.
+    private var seenMark: some View {
+        Text("Seen")
+            .fontWeight(.semibold)
+            .lineLimit(1)
+            .accessibilityIdentifier("pocket.room.seen")
     }
 
     /// Another person: a warm bubble on the left with their name.
