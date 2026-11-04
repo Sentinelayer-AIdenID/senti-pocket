@@ -156,7 +156,19 @@ struct NewAgentSheet: View {
             }
             .interactiveDismissDisabled(isStarting)
             .task { await model.load() }
+            // Started in a new chat: Pocket goes there by itself (Carter, #60742); the button stays for a sheet that
+            // opens on a start already made.
+            .onChange(of: Self.chatToOpen(model.phase, startedChat: model.startedChat)) { route in
+                if let route { onOpenChat(route) }
+            }
         }
+    }
+
+    /// The chat Pocket opens once the agent started in a new one; nil for a start in this chat or one not started.
+    /// You made the chat, so you own it.
+    static func chatToOpen(_ phase: AgentStartModel.Phase, startedChat: MintStartLedger.NewChat?) -> RoomRoute? {
+        guard case .started = phase, let chat = startedChat else { return nil }
+        return RoomRoute(sessionId: chat.sessionId, title: chat.title, membershipRole: "owner")
     }
 
     @ViewBuilder
@@ -237,8 +249,7 @@ struct NewAgentSheet: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 Button {
-                    // You made it, so you own it.
-                    onOpenChat(RoomRoute(sessionId: chat.sessionId, title: chat.title, membershipRole: "owner"))
+                    if let route = Self.chatToOpen(model.phase, startedChat: chat) { onOpenChat(route) }
                 } label: {
                     Label("Go to the new chat", systemImage: "arrow.right.circle")
                         .frame(maxWidth: .infinity)

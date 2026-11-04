@@ -202,14 +202,19 @@ final class NewAgentTests: XCTestCase {
         XCTAssertEqual(journal.all, ["chat \(chat.sessionId)", "mint \(chat.sessionId)"], "the chat is made first")
         XCTAssertEqual(model.startedChat?.sessionId, chat.sessionId)
         XCTAssertEqual(model.startedChat?.title, chat.title)
+        XCTAssertEqual(NewAgentSheet.chatToOpen(model.phase, startedChat: model.startedChat),
+                       RoomRoute(sessionId: chat.sessionId, title: chat.title, membershipRole: "owner"),
+                       "Pocket goes to the new chat by itself, as its owner")
         XCTAssertNil(ledger.entry(account: account, sessionId: "room-1", ticketId: nil), "forgotten once started")
 
         // The same start in this chat makes no chat.
         let here = newAgent(ScriptedMint(models: models), chats: chats, ledger: ledger)
         await here.load()
         here.job = "Stay here."
+        XCTAssertNil(NewAgentSheet.chatToOpen(here.phase, startedChat: here.startedChat), "nothing to open before a start")
         await here.start()
         XCTAssertEqual(chats.tries.count, 1)
+        XCTAssertNil(NewAgentSheet.chatToOpen(here.phase, startedChat: here.startedChat), "a start in this chat stays here")
     }
 
     /// Only the room's New agent offers a new chat, and only with a way to make one.
