@@ -4,80 +4,87 @@ import SwiftUI
 import UIKit
 #endif
 
-/// A small view moved by Core Animation alone (Carter: the app must not get slower). The motion runs in the render
+/// Small shapes moved by Core Animation alone (Carter: the app must not get slower). The motion runs in the render
 /// server: the room's views are not drawn again for it, frame by frame, and the main thread does nothing while it runs.
-/// It is still with Reduce Motion, while the room is covered (a sheet, the side panel, a call), and while the app is not
-/// active. A new `fadeKey` fades the content in, the same way, unless Reduce Motion is on.
-struct LayerMotion<Content: View>: View {
+/// The shapes are drawn by UIKit, not hosted SwiftUI, so laying out the room never re-lays them out (a hosted view's
+/// size, asked again and again at the largest text sizes, kept the main thread busy). They are still with Reduce Motion,
+/// while the room is covered (a sheet, the side panel, a call), and while the app is not active.
+enum LayerMotion {
     enum Kind: Equatable {
         /// Fading down and back, about once a second: something working now.
         case pulse
-        /// Growing a little and lifting, then settling: someone thinking.
+        /// Growing a little, lifting and tilting, then settling: someone thinking.
         case breathe
-        /// No motion of its own; only the fade between contents.
-        case still
-    }
-
-    let kind: Kind
-    var fadeKey: AnyHashable = 0
-    let content: Content
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.roomIsCovered) private var roomIsCovered
-    @Environment(\.scenePhase) private var scenePhase
-
-    init(_ kind: Kind, fadeKey: AnyHashable = 0, @ViewBuilder content: () -> Content) {
-        self.kind = kind
-        self.fadeKey = fadeKey
-        self.content = content()
     }
 
     /// Whether the motion runs now.
     static func runs(reduceMotion: Bool, roomIsCovered: Bool, scenePhase: ScenePhase) -> Bool {
         !reduceMotion && !roomIsCovered && scenePhase == .active
     }
+}
+
+/// The Working row's dot, pulsing while its agent works.
+struct PulsingDot: View {
+    let color: Color
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.roomIsCovered) private var roomIsCovered
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         #if os(iOS)
-        LayerMotionHost(kind: kind,
-                        isRunning: Self.runs(reduceMotion: reduceMotion, roomIsCovered: roomIsCovered, scenePhase: scenePhase),
-                        fades: !reduceMotion, fadeKey: fadeKey, content: content)
+        LayerMotionHost(kind: .pulse, look: .dot(UIColor(color)),
+                        isRunning: LayerMotion.runs(reduceMotion: reduceMotion, roomIsCovered: roomIsCovered,
+                                                    scenePhase: scenePhase))
         #else
-        content
+        Circle().fill(color)
+        #endif
+    }
+}
+
+/// An agent's avatar (as `RoomAvatar` draws it) moving a little while it thinks.
+struct MovingAvatar: View {
+    let name: String
+    var size: CGFloat = 26
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.roomIsCovered) private var roomIsCovered
+    @Environment(\.scenePhase) private var scenePhase
+
+    var body: some View {
+        #if os(iOS)
+        LayerMotionHost(kind: .breathe,
+                        look: .badge(text: RoomAvatar.initials(for: name), color: UIColor(RoomAvatar.tint(for: name)),
+                                     cornerRadius: (size * 0.27).rounded(), fontSize: (size * 0.42).rounded()),
+                        isRunning: LayerMotion.runs(reduceMotion: reduceMotion, roomIsCovered: roomIsCovered,
+                                                    scenePhase: scenePhase))
+            .frame(width: size, height: size)
+        #else
+        RoomAvatar(name: name, isHuman: false, size: size)
         #endif
     }
 }
 
 #if os(iOS)
-private struct LayerMotionHost<Content: View>: UIViewRepresentable {
-    let kind: LayerMotion<Content>.Kind
+private struct LayerMotionHost: UIViewRepresentable {
+    let kind: LayerMotion.Kind
+    let look: LayerMotionView.Look
     let isRunning: Bool
-    let fades: Bool
-    let fadeKey: AnyHashable
-    let content: Content
 
     func makeUIView(context: Context) -> LayerMotionView {
-        let view = LayerMotionView(content: AnyView(content))
-        view.fadeKey = fadeKey
+        let view = LayerMotionView()
+        view.show(look)
         view.setMotion(Self.animation(kind), running: isRunning)
         return view
     }
 
     func updateUIView(_ view: LayerMotionView, context: Context) {
-        view.show(AnyView(content), fadeKey: fadeKey, fades: fades)
+        view.show(look)
         view.setMotion(Self.animation(kind), running: isRunning)
     }
 
-    @available(iOS 16.0, *)
-    func sizeThatFits(_ proposal: ProposedViewSize, uiView: LayerMotionView, context: Context) -> CGSize? {
-        uiView.host.sizeThatFits(in: CGSize(width: proposal.width ?? .greatestFiniteMagnitude,
-                                            height: proposal.height ?? .greatestFiniteMagnitude))
-    }
-
-    static func animation(_ kind: LayerMotion<Content>.Kind) -> CAAnimation? {
+    static func animation(_ kind: LayerMotion.Kind) -> CAAnimation {
         switch kind {
-        case .still:
-            return nil
         case .pulse:
             let fade = CABasicAnimation(keyPath: "opacity")
             fade.fromValue = 1
@@ -108,23 +115,28 @@ private struct LayerMotionHost<Content: View>: UIViewRepresentable {
     }
 }
 
-/// Hosts the SwiftUI content once, and moves its layer.
+/// A dot or an avatar's badge drawn by UIKit, and its layer's motion.
 final class LayerMotionView: UIView {
+    enum Look: Equatable {
+        case dot(UIColor)
+        /// Initials on a rounded square, as `RoomAvatar` draws an agent.
+        case badge(text: String, color: UIColor, cornerRadius: CGFloat, fontSize: CGFloat)
+    }
+
     static let motionKey = "pocket.layerMotion"
-    let host: UIHostingController<AnyView>
-    var fadeKey: AnyHashable = 0
+    private var look: Look?
     private var motion: CAAnimation?
     private var running = false
+    private lazy var label: UILabel = {
+        let label = UILabel()
+        label.textColor = .white
+        label.textAlignment = .center
+        addSubview(label)
+        return label
+    }()
 
-    init(content: AnyView) {
-        host = UIHostingController(rootView: content)
+    init() {
         super.init(frame: .zero)
-        // A small piece of a row: never inset by the screen's edges.
-        if #available(iOS 16.4, *) { host.safeAreaRegions = [] }
-        host.view.backgroundColor = .clear
-        host.view.frame = bounds
-        host.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        addSubview(host.view)
         isAccessibilityElement = false
         accessibilityElementsHidden = true
         // Only something to look at: a tap goes to the row it sits in.
@@ -134,21 +146,31 @@ final class LayerMotionView: UIView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
 
-    /// New content; a new `fadeKey` fades it in.
-    func show(_ content: AnyView, fadeKey: AnyHashable, fades: Bool) {
-        if fadeKey != self.fadeKey {
-            self.fadeKey = fadeKey
-            if fades, window != nil {
-                let fade = CATransition()
-                fade.type = .fade
-                fade.duration = 0.25
-                host.view.layer.add(fade, forKey: "pocket.layerFade")
-            }
+    /// What it shows; the same look again changes nothing.
+    func show(_ look: Look) {
+        guard look != self.look else { return }
+        self.look = look
+        switch look {
+        case .dot(let color):
+            backgroundColor = color
+            layer.cornerCurve = .circular
+        case .badge(let text, let color, let cornerRadius, let fontSize):
+            backgroundColor = color
+            layer.cornerRadius = cornerRadius
+            layer.cornerCurve = .continuous
+            label.text = text
+            label.font = .systemFont(ofSize: fontSize, weight: .bold)
         }
-        host.rootView = content
+        setNeedsLayout()
     }
 
-    func setMotion(_ animation: CAAnimation?, running: Bool) {
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        if case .dot = look { layer.cornerRadius = min(bounds.width, bounds.height) / 2 }
+        if case .badge = look { label.frame = bounds }
+    }
+
+    func setMotion(_ animation: CAAnimation, running: Bool) {
         motion = animation
         self.running = running
         apply()

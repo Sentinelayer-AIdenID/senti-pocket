@@ -236,10 +236,10 @@ final class AgentActivityTests: XCTestCase {
 
     /// The pulse and Senti's avatar stop with Reduce Motion, while the room is covered, and while the app is away.
     func test_motion_runs_only_while_it_can_be_seen_and_is_wanted() {
-        XCTAssertTrue(LayerMotion<EmptyView>.runs(reduceMotion: false, roomIsCovered: false, scenePhase: .active))
-        XCTAssertFalse(LayerMotion<EmptyView>.runs(reduceMotion: true, roomIsCovered: false, scenePhase: .active))
-        XCTAssertFalse(LayerMotion<EmptyView>.runs(reduceMotion: false, roomIsCovered: true, scenePhase: .active))
-        XCTAssertFalse(LayerMotion<EmptyView>.runs(reduceMotion: false, roomIsCovered: false, scenePhase: .inactive))
-        XCTAssertFalse(LayerMotion<EmptyView>.runs(reduceMotion: false, roomIsCovered: false, scenePhase: .background))
+        XCTAssertTrue(LayerMotion.runs(reduceMotion: false, roomIsCovered: false, scenePhase: .active))
+        XCTAssertFalse(LayerMotion.runs(reduceMotion: true, roomIsCovered: false, scenePhase: .active))
+        XCTAssertFalse(LayerMotion.runs(reduceMotion: false, roomIsCovered: true, scenePhase: .active))
+        XCTAssertFalse(LayerMotion.runs(reduceMotion: false, roomIsCovered: false, scenePhase: .inactive))
+        XCTAssertFalse(LayerMotion.runs(reduceMotion: false, roomIsCovered: false, scenePhase: .background))
     }
 }

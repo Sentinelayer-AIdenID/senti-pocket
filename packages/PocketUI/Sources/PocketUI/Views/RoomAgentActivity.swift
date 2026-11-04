@@ -71,10 +71,8 @@ struct RoomWorkingRows: View {
         } label: {
             HStack(spacing: 6) {
                 if session.isLive {
-                    LayerMotion(.pulse) {
-                        Circle().fill(PocketPalette.listening)
-                    }
-                    .frame(width: 7, height: 7)
+                    PulsingDot(color: PocketPalette.listening)
+                        .frame(width: 7, height: 7)
                 } else {
                     Image(systemName: "checkmark.circle")
                         .font(.caption2)
@@ -153,7 +151,6 @@ struct RoomWorkingRows: View {
 /// time, the next about every 2 s, until its message lands. VoiceOver reads "Senti is thinking", never each phrase.
 struct SentiThinkingLine: View {
     @Environment(\.sentiPhrases) private var phrases
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.roomIsCovered) private var roomIsCovered
     @Environment(\.scenePhase) private var scenePhase
     @State private var turn = 0
@@ -169,18 +166,14 @@ struct SentiThinkingLine: View {
         #endif
         let phrase = phrases.phrase(turn: turn, seed: seed)
         HStack(spacing: 8) {
-            LayerMotion(.breathe) {
-                RoomAvatar(name: "Senti", isHuman: false)
-            }
-            .frame(width: 26, height: 26)
-            LayerMotion(.still, fadeKey: turn) {
-                Text(phrase + "…")
-                    .font(.caption)
-                    .foregroundStyle(PocketPalette.textSecondary)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            MovingAvatar(name: "Senti")
+            // One line, whatever the phrase: the room below the reader never grows with it. It changes without an
+            // animation, so nothing but the avatar moves.
+            Text(phrase + "…")
+                .font(.caption)
+                .foregroundStyle(PocketPalette.textSecondary)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)

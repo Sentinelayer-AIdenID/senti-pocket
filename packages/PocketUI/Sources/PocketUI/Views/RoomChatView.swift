@@ -1562,7 +1562,10 @@ struct RoomAvatar: View {
             .accessibilityHidden(true)
     }
 
-    private var initials: String {
+    private var initials: String { Self.initials(for: name) }
+
+    /// Up to two initials: "Senti" is "S", "build-agent" is "BA".
+    static func initials(for name: String) -> String {
         let parts = name.replacingOccurrences(of: "human-", with: "")
             .split(whereSeparator: { $0 == " " || $0 == "-" || $0 == "_" })
         let letters = parts.prefix(2).compactMap { $0.first.map(String.init) }

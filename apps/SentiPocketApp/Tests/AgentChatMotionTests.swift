@@ -70,8 +70,8 @@ final class AgentChatMotionTests: XCTestCase {
         self.window = window
         run(1.5)
 
-        XCTAssertGreaterThanOrEqual(RoomRenderProbe.motions(in: window).count, 5,
-                                    "three pulses, Senti's avatar and its phrase are on screen")
+        XCTAssertGreaterThanOrEqual(RoomRenderProbe.motions(in: window).count, 4,
+                                    "three pulses and Senti's avatar are on screen")
         let moving = RoomRenderProbe.motions(in: window).filter { $0 }.count
         XCTAssertGreaterThanOrEqual(moving, 4, "three pulses and Senti's avatar move")
 
