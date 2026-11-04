@@ -36,13 +36,32 @@ private final class FakePlansServer: AppleSubscriptionsServing, @unchecked Senda
     ])
     /// Answers to the transactions posted, first to last; past the end the server applies them and answers "pro".
     var submitAnswers: [Result<String, AppleSubscriptionsServerError>] = []
-    /// `GET /billing/status`: the account's tier, and whether a subscription is running.
+    /// `GET /billing/status`: the account's tier, its web and App Store subscriptions, or a failure to read it.
     var tier: String?
-    var isActive = false
+    var hasWeb = false
+    var hasApple = false
+    var statusFails = false
+    /// Holds every post until released, so a delivery can be caught in flight.
+    var holdSubmits = false
+    private var held: [CheckedContinuation<Void, Never>] = []
     private let lock = NSLock()
 
     init(events: Events) {
         self.events = events
+    }
+
+    var heldCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return held.count
+    }
+
+    func releaseHeld() {
+        lock.lock()
+        let waiting = held
+        held = []
+        lock.unlock()
+        waiting.forEach { $0.resume() }
     }
 
     func plans() async throws -> [AppleSubscriptionPlan] {
@@ -56,6 +75,13 @@ private final class FakePlansServer: AppleSubscriptionsServing, @unchecked Senda
 
     func submit(signedTransactionInfo: String) async throws -> String {
         events.append("post \(signedTransactionInfo)")
+        if holdSubmits {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                lock.lock()
+                held.append(continuation)
+                lock.unlock()
+            }
+        }
         lock.lock()
         let answer = submitAnswers.isEmpty ? .success("pro") : submitAnswers.removeFirst()
         lock.unlock()
@@ -63,7 +89,8 @@ private final class FakePlansServer: AppleSubscriptionsServing, @unchecked Senda
     }
 
     func accountStatus() async throws -> AppleSubscriptionsAccountStatus {
-        AppleSubscriptionsAccountStatus(tier: tier, hasActiveSubscription: isActive)
+        if statusFails { throw AppleSubscriptionsServerError.unavailable }
+        return AppleSubscriptionsAccountStatus(tier: tier, hasWebSubscription: hasWeb, hasAppleSubscription: hasApple)
     }
 }
 
@@ -145,6 +172,14 @@ private func eventually(timeout: TimeInterval = 3, _ condition: () -> Bool) asyn
 }
 
 @MainActor
+private func plans(_ coordinator: AppleSubscriptionsCoordinator) -> AppleSubscriptionsPlans? {
+    switch coordinator.state {
+    case .ready(let plans), .purchasing(let plans): return plans
+    case .hidden, .loading, .failed: return nil
+    }
+}
+
+@MainActor
 final class AppleSubscriptionsCoordinatorTests: XCTestCase {
     private let events = Events()
     private lazy var server = FakePlansServer(events: events)
@@ -160,28 +195,22 @@ final class AppleSubscriptionsCoordinatorTests: XCTestCase {
         return coordinator
     }
 
-    private func currentTier(_ coordinator: AppleSubscriptionsCoordinator) -> String? {
-        if case .ready(_, let tier, _) = coordinator.state { return tier }
-        return nil
-    }
-
-    private func isActive(_ coordinator: AppleSubscriptionsCoordinator) -> Bool? {
-        if case .ready(_, _, let active) = coordinator.state { return active }
-        return nil
+    private func buyable(_ coordinator: AppleSubscriptionsCoordinator) -> [String] {
+        guard let shown = plans(coordinator) else { return [] }
+        return shown.offers.filter(shown.canBuy).map(\.productId)
     }
 
     func test_the_plans_show_each_offer_at_the_app_store_price_cheapest_first() async {
         server.tier = "free"
         let coordinator = await readyCoordinator()
-        guard case .ready(let offers, let tier, let active) = coordinator.state else {
-            return XCTFail("\(coordinator.state)")
-        }
-        XCTAssertEqual(offers.map(\.tier), ["pro", "max"])
-        XCTAssertEqual(offers.map(\.name), ["Pro", "Max"])
-        XCTAssertEqual(offers.map(\.priceLine), ["$29.00 per month", "$99.00 per month"])
-        XCTAssertFalse(offers[0].summary.isEmpty)
-        XCTAssertEqual(tier, "free")
-        XCTAssertFalse(active)
+        guard let shown = plans(coordinator) else { return XCTFail("\(coordinator.state)") }
+        XCTAssertEqual(shown.offers.map(\.tier), ["pro", "max"])
+        XCTAssertEqual(shown.offers.map(\.name), ["Pro", "Max"])
+        XCTAssertEqual(shown.offers.map(\.priceLine), ["$29.00 per month", "$99.00 per month"])
+        XCTAssertFalse(shown.offers[0].summary.isEmpty)
+        XCTAssertEqual(shown.currentTier, "free")
+        XCTAssertEqual(shown.standing, .open)
+        XCTAssertEqual(buyable(coordinator), [proId, maxId])
         XCTAssertTrue(coordinator.isOffered)
     }
 
@@ -204,6 +233,20 @@ final class AppleSubscriptionsCoordinatorTests: XCTestCase {
         XCTAssertTrue(SubscriptionsView.renewalTerms(for: [monthly]).contains("renews every month"))
     }
 
+    func test_each_subscribe_button_names_its_plan_and_price() async {
+        server.tier = "max"
+        let atMax = await readyCoordinator()
+        guard let maxPlans = plans(atMax) else { return XCTFail("\(atMax.state)") }
+        XCTAssertEqual(SubscriptionsView.buttonLabel(for: maxPlans.offers[0], in: maxPlans), "Pro, included in your plan")
+        XCTAssertEqual(SubscriptionsView.buttonLabel(for: maxPlans.offers[1], in: maxPlans), "Max, your plan, $99.00 per month")
+
+        server.tier = "free"
+        let free = await readyCoordinator()
+        guard let freePlans = plans(free) else { return XCTFail("\(free.state)") }
+        XCTAssertEqual(freePlans.offers.map { SubscriptionsView.buttonLabel(for: $0, in: freePlans) },
+                       ["Subscribe to Pro, $29.00 per month", "Subscribe to Max, $99.00 per month"])
+    }
+
     func test_a_purchase_is_posted_then_finished_and_the_plan_marked() async throws {
         let coordinator = await readyCoordinator()
         store.purchaseOutcome = .purchased(store.transaction(1))
@@ -216,22 +259,8 @@ final class AppleSubscriptionsCoordinatorTests: XCTestCase {
         let all = events.all
         XCTAssertLessThan(try XCTUnwrap(all.firstIndex(of: "post jws-1")), try XCTUnwrap(all.firstIndex(of: "finish 1")),
                           "finished only after the server took it")
-        XCTAssertEqual(currentTier(coordinator), "pro")
+        XCTAssertEqual(plans(coordinator)?.currentTier, "pro")
         XCTAssertNil(coordinator.notice)
-    }
-
-    func test_a_purchase_the_server_refuses_is_not_finished() async {
-        let coordinator = await readyCoordinator()
-        store.purchaseOutcome = .purchased(store.transaction(2))
-        server.submitAnswers = [.failure(.refused)]
-
-        await coordinator.subscribe(to: proId)
-
-        XCTAssertEqual(events.posted, ["jws-2"])
-        XCTAssertEqual(events.finished, [], "a refused transaction stays with the App Store")
-        XCTAssertNotNil(coordinator.notice)
-        XCTAssertNil(currentTier(coordinator))
-        guard case .ready = coordinator.state else { return XCTFail("\(coordinator.state)") }
     }
 
     func test_a_purchase_the_server_never_got_is_not_finished_so_it_comes_back() async {
@@ -246,6 +275,18 @@ final class AppleSubscriptionsCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.notice?.contains("next time Pocket opens"), true)
     }
 
+    func test_a_404_after_a_charge_says_so_and_keeps_the_plans() async {
+        let coordinator = await readyCoordinator()
+        store.purchaseOutcome = .purchased(store.transaction(71))
+        server.submitAnswers = [.failure(.off)]
+
+        await coordinator.subscribe(to: proId)
+
+        guard case .ready = coordinator.state else { return XCTFail("the plans stay: \(coordinator.state)") }
+        XCTAssertEqual(coordinator.notice?.hasPrefix("Your purchase went through, but Senti can't apply it right now."), true)
+        XCTAssertEqual(events.finished, [], "kept with the App Store")
+    }
+
     func test_a_submit_that_needs_sign_in_again_never_finishes() async {
         var asked = 0
         let coordinator = AppleSubscriptionsCoordinator(server: server, store: store,
@@ -256,8 +297,9 @@ final class AppleSubscriptionsCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(delivery, .signedOut)
         XCTAssertEqual(events.posted, ["jws-15"])
-        XCTAssertEqual(events.finished, [], "a 401 is not the server taking it")
+        XCTAssertEqual(events.finished, [], "a 401, or a session the server will not take, is not the server taking it")
         XCTAssertEqual(asked, 1)
+        XCTAssertNil(coordinator.line)
     }
 
     func test_an_answer_for_an_account_no_longer_signed_in_never_finishes() async {
@@ -277,6 +319,87 @@ final class AppleSubscriptionsCoordinatorTests: XCTestCase {
         XCTAssertEqual(events.finished, ["16"])
     }
 
+    // MARK: The server's refusals, code by code
+
+    private func refuse(_ error: AppleSubscriptionsServerError, finishes: Bool,
+                        shows expected: AppleSubscriptionsCoordinator.Line,
+                        file: StaticString = #filePath, line: UInt = #line) async {
+        let coordinator = await readyCoordinator()
+        store.purchaseOutcome = .purchased(store.transaction(80))
+        server.submitAnswers = [.failure(error)]
+
+        await coordinator.subscribe(to: proId)
+
+        XCTAssertEqual(events.posted, ["jws-80"], file: file, line: line)
+        XCTAssertEqual(events.finished, finishes ? ["80"] : [], "finished: \(finishes)", file: file, line: line)
+        XCTAssertEqual(coordinator.line, expected, file: file, line: line)
+        XCTAssertNil(coordinator.notice, "said in a line on the screen, not an alert", file: file, line: line)
+        guard case .ready = coordinator.state else {
+            return XCTFail("the plans stay: \(coordinator.state)", file: file, line: line)
+        }
+    }
+
+    func test_account_not_found_is_left_unfinished_with_its_line() async {
+        await refuse(.accountNotFound, finishes: false, shows: .accountNotFound)
+    }
+
+    func test_another_accounts_subscription_is_left_unfinished_with_its_line() async {
+        await refuse(.linkedToAnotherAccount, finishes: false, shows: .linkedToAnotherAccount)
+        XCTAssertEqual(AppleSubscriptionsCoordinator.Line.linkedToAnotherAccount.text,
+                       "This Apple ID's subscription is linked to another Senti account. Contact help@plexaura.io.")
+    }
+
+    func test_an_ownership_conflict_is_left_unfinished_for_support() async {
+        await refuse(.ownershipConflict, finishes: false, shows: .ownershipConflict)
+        XCTAssertTrue(AppleSubscriptionsCoordinator.Line.ownershipConflict.text.contains("Contact help@plexaura.io."))
+    }
+
+    func test_a_test_purchase_from_an_account_not_allowed_is_left_unfinished() async {
+        await refuse(.sandboxNotAllowed, finishes: false, shows: .sandboxNotAllowed)
+        XCTAssertEqual(AppleSubscriptionsCoordinator.Line.sandboxNotAllowed.text,
+                       "Test purchases aren't enabled for this account.")
+    }
+
+    func test_family_sharing_is_finished_and_says_it_is_not_supported() async {
+        await refuse(.familySharingNotSupported, finishes: true, shows: .familySharingNotSupported)
+        XCTAssertTrue(AppleSubscriptionsCoordinator.Line.familySharingNotSupported.text.contains("Family Sharing isn't supported"))
+    }
+
+    func test_a_product_the_server_does_not_sell_is_finished() async {
+        await refuse(.productNotAllowed, finishes: true, shows: .notApplied)
+    }
+
+    func test_an_invalid_transaction_is_finished() async {
+        await refuse(.invalidTransaction, finishes: true, shows: .notApplied)
+    }
+
+    func test_any_other_refusal_is_left_unfinished_without_naming_an_account() async {
+        await refuse(.refused, finishes: false, shows: .notApplied)
+        XCTAssertFalse(AppleSubscriptionsCoordinator.Line.notApplied.text.contains("signed in"))
+    }
+
+    func test_a_refusal_is_never_posted_again_this_session() async {
+        for (index, error) in [AppleSubscriptionsServerError.refused, .linkedToAnotherAccount, .sandboxNotAllowed,
+                               .ownershipConflict, .accountNotFound].enumerated() {
+            let id = UInt64(40 + index)
+            let coordinator = await readyCoordinator()
+            server.submitAnswers = [.failure(error)]
+            _ = await coordinator.deliver(store.transaction(id))
+
+            let again = await coordinator.deliver(store.transaction(id))
+            store.unfinishedTransactions = [store.transaction(id)]
+            await coordinator.retryUnfinished()
+            store.entitlements = [store.transaction(id)]
+            await coordinator.restore()
+            store.unfinishedTransactions = []
+            store.entitlements = []
+
+            XCTAssertEqual(again, .refused(error))
+            XCTAssertEqual(events.posted.filter { $0 == "jws-\(id)" }.count, 1, "\(error): posted once this session")
+        }
+        XCTAssertEqual(events.finished, [])
+    }
+
     func test_an_unverified_transaction_is_never_posted_or_finished() async {
         let coordinator = await readyCoordinator()
         store.purchaseOutcome = .purchased(store.transaction(4, verified: false))
@@ -290,66 +413,6 @@ final class AppleSubscriptionsCoordinatorTests: XCTestCase {
         XCTAssertEqual(events.posted, [])
         XCTAssertEqual(events.finished, [])
         XCTAssertNotNil(coordinator.notice)
-    }
-
-    func test_a_refused_transaction_is_never_posted_again_this_session() async {
-        let coordinator = await readyCoordinator()
-        store.purchaseOutcome = .purchased(store.transaction(40))
-        server.submitAnswers = [.failure(.refused)]
-        await coordinator.subscribe(to: proId)
-        coordinator.dismissNotice()
-
-        let fromUpdates = await coordinator.deliver(store.transaction(40))
-        store.unfinishedTransactions = [store.transaction(40)]
-        await coordinator.retryUnfinished()
-        store.entitlements = [store.transaction(40)]
-        await coordinator.restore()
-
-        XCTAssertEqual(fromUpdates, .refused)
-        XCTAssertEqual(events.posted, ["jws-40"], "posted once; refused for the rest of the session")
-        XCTAssertEqual(events.finished, [])
-    }
-
-    func test_another_accounts_subscription_is_left_unfinished() async {
-        let coordinator = await readyCoordinator()
-        server.submitAnswers = [.failure(.linkedToAnotherAccount)]
-
-        let delivery = await coordinator.deliver(store.transaction(60))
-
-        XCTAssertEqual(delivery, .linkedToAnotherAccount)
-        XCTAssertEqual(events.posted, ["jws-60"])
-        XCTAssertEqual(events.finished, [], "another account's subscription stays with the App Store")
-    }
-
-    func test_another_accounts_subscription_is_not_sent_again_this_session() async {
-        let coordinator = await readyCoordinator()
-        server.submitAnswers = [.failure(.linkedToAnotherAccount)]
-        _ = await coordinator.deliver(store.transaction(61))
-
-        let again = await coordinator.deliver(store.transaction(61))
-        store.unfinishedTransactions = [store.transaction(61)]
-        await coordinator.retryUnfinished()
-        store.entitlements = [store.transaction(61)]
-        await coordinator.restore()
-
-        XCTAssertEqual(again, .linkedToAnotherAccount)
-        XCTAssertEqual(events.posted, ["jws-61"], "a refusal, not a passing failure: posted once")
-        XCTAssertEqual(events.finished, [])
-    }
-
-    func test_another_accounts_subscription_is_said_in_one_line_on_the_plans_screen() async {
-        let coordinator = await readyCoordinator()
-        XCTAssertFalse(coordinator.isLinkedToAnotherAccount)
-        store.entitlements = [store.transaction(62)]
-        server.submitAnswers = [.failure(.linkedToAnotherAccount)]
-
-        await coordinator.restore()
-
-        XCTAssertTrue(coordinator.isLinkedToAnotherAccount)
-        XCTAssertEqual(AppleSubscriptionsCoordinator.linkedToAnotherAccountLine,
-                       "This Apple ID's subscription is linked to another Senti account. Contact help@plexaura.io.")
-        XCTAssertNil(coordinator.notice, "said on the screen, not in an alert")
-        guard case .ready = coordinator.state else { return XCTFail("\(coordinator.state)") }
     }
 
     func test_pending_and_cancelled_are_quiet_outcomes() async {
@@ -375,41 +438,115 @@ final class AppleSubscriptionsCoordinatorTests: XCTestCase {
         XCTAssertEqual(events.finished, [])
     }
 
-    func test_no_purchase_while_a_subscription_is_active() async {
-        server.isActive = true
-        server.tier = "pro"
+    // MARK: Nothing sold twice
+
+    func test_an_unread_plan_sells_nothing_until_it_is_read() async {
+        server.statusFails = true
         let coordinator = await readyCoordinator()
-        XCTAssertEqual(isActive(coordinator), true, "the screen offers nothing for sale")
+        XCTAssertEqual(plans(coordinator)?.standing, .unknown)
+        XCTAssertEqual(buyable(coordinator), [], "an unknown plan is no sale")
+        XCTAssertEqual(SubscriptionsView.standingText(.unknown), "Couldn't check your plan. Try again.")
+
+        await coordinator.subscribe(to: maxId)
+        XCTAssertTrue(store.purchases.isEmpty, "a web subscriber whose status did not load is never sold Max")
+
+        server.statusFails = false
+        await coordinator.refresh()
+        XCTAssertEqual(plans(coordinator)?.standing, .open, "trying again reads it")
+        await coordinator.subscribe(to: maxId)
+        XCTAssertEqual(store.purchases.map { $0.productId }, [maxId])
+    }
+
+    func test_a_status_that_fails_right_before_the_purchase_stops_it() async {
+        let coordinator = await readyCoordinator()
+        XCTAssertEqual(plans(coordinator)?.standing, .open)
+        server.statusFails = true
 
         await coordinator.subscribe(to: maxId)
 
-        XCTAssertTrue(store.purchases.isEmpty, "no second purchase while one is running")
-        XCTAssertEqual(coordinator.notice, AppleSubscriptionsCoordinator.alreadySubscribed)
-        XCTAssertEqual(isActive(coordinator), true)
+        XCTAssertTrue(store.purchases.isEmpty)
+        XCTAssertEqual(plans(coordinator)?.standing, .unknown)
+    }
+
+    func test_every_plan_at_or_below_the_accounts_tier_is_closed() async {
+        let cases: [(String?, [String])] = [
+            ("team", []), ("enterprise", []), ("business", []), ("max", []), ("pro", [maxId]), ("free", [proId, maxId]),
+            (nil, [proId, maxId]),
+        ]
+        for (tier, expected) in cases {
+            server.tier = tier
+            let coordinator = await readyCoordinator()
+            XCTAssertEqual(buyable(coordinator), expected, "tier \(tier ?? "none")")
+        }
+    }
+
+    func test_a_team_seat_or_an_admin_set_max_buys_nothing() async {
+        server.tier = "team"
+        let seat = await readyCoordinator()
+        await seat.subscribe(to: proId)
+        await seat.subscribe(to: maxId)
+        server.tier = "max"
+        let floor = await readyCoordinator()
+        await floor.subscribe(to: proId)
+        XCTAssertTrue(store.purchases.isEmpty, "never charged for a plan the account already has or exceeds")
+    }
+
+    func test_an_admin_set_pro_can_still_buy_max() async {
+        server.tier = "pro"
+        let coordinator = await readyCoordinator()
+        await coordinator.subscribe(to: maxId)
+        XCTAssertEqual(store.purchases.map { $0.productId }, [maxId])
+    }
+
+    func test_a_web_subscription_sells_nothing_and_points_to_the_website() async {
+        server.hasWeb = true
+        server.tier = "pro"
+        let coordinator = await readyCoordinator()
+        XCTAssertEqual(plans(coordinator)?.standing, .webSubscription)
+
+        await coordinator.subscribe(to: maxId)
+
+        XCTAssertTrue(store.purchases.isEmpty, "no App Store Max on top of a web Pro")
+        let text = SubscriptionsView.standingText(.webSubscription) ?? ""
+        XCTAssertTrue(text.contains("website"))
+        XCTAssertFalse(text.contains("Settings"), "a web plan is not managed in the iPhone's Settings")
     }
 
     func test_a_subscription_started_since_the_plans_loaded_blocks_the_purchase() async {
         let coordinator = await readyCoordinator()
-        XCTAssertEqual(isActive(coordinator), false)
-        server.isActive = true
+        XCTAssertEqual(plans(coordinator)?.standing, .open)
+        server.hasWeb = true
 
         await coordinator.subscribe(to: proId)
 
         XCTAssertTrue(store.purchases.isEmpty, "the status is read again before the App Store is asked")
-        XCTAssertEqual(isActive(coordinator), true)
+        XCTAssertEqual(plans(coordinator)?.standing, .webSubscription)
     }
 
-    func test_a_plan_this_apple_id_holds_counts_as_active() async {
+    func test_this_accounts_app_store_subscription_on_another_apple_id_blocks_the_sale() async {
+        server.hasApple = true
+        server.tier = "pro"
+        let coordinator = await readyCoordinator()
+        XCTAssertEqual(plans(coordinator)?.standing, .appleSubscription, "the server's word, whatever this Apple ID holds")
+        await coordinator.subscribe(to: maxId)
+        XCTAssertTrue(store.purchases.isEmpty)
+        XCTAssertEqual(SubscriptionsView.standingText(.appleSubscription)?.hasPrefix("Your plan is active."), true)
+    }
+
+    func test_an_apple_id_subscription_that_is_not_this_accounts_is_not_called_yours() async {
         store.entitlements = [store.transaction(30, productId: maxId, verified: false)]
         let unverified = await readyCoordinator()
-        XCTAssertEqual(isActive(unverified), false, "an unverified entitlement proves nothing")
+        XCTAssertEqual(plans(unverified)?.standing, .open, "an unverified entitlement proves nothing")
 
         store.entitlements = [store.transaction(31, productId: maxId)]
         let holder = await readyCoordinator()
-        XCTAssertEqual(isActive(holder), true, "the server's status does not list subscriptions bought here")
+        XCTAssertEqual(plans(holder)?.standing, .appleIDHoldsAnother)
+        XCTAssertEqual(SubscriptionsView.standingText(.appleIDHoldsAnother)?.contains("Your plan is active"), false)
         await holder.subscribe(to: proId)
-        XCTAssertTrue(store.purchases.isEmpty)
+        XCTAssertTrue(store.purchases.isEmpty, "not a second subscription on this Apple ID")
     }
+
+    // MARK: Restore, updates, unfinished
 
     func test_restore_syncs_then_posts_every_current_entitlement() async throws {
         let coordinator = await readyCoordinator()
@@ -422,8 +559,8 @@ final class AppleSubscriptionsCoordinatorTests: XCTestCase {
         XCTAssertEqual(events.finished, ["7", "8"])
         let all = events.all
         XCTAssertLessThan(try XCTUnwrap(all.firstIndex(of: "sync")), try XCTUnwrap(all.firstIndex(of: "post jws-7")))
-        XCTAssertEqual(currentTier(coordinator), "max")
-        XCTAssertEqual(isActive(coordinator), true, "a restored plan is a running one")
+        XCTAssertEqual(plans(coordinator)?.currentTier, "max")
+        XCTAssertNotEqual(plans(coordinator)?.standing, .open, "nothing more is sold once a plan is restored")
     }
 
     func test_restore_with_nothing_to_restore_says_so_and_a_cancelled_sync_is_quiet() async {
@@ -438,6 +575,23 @@ final class AppleSubscriptionsCoordinatorTests: XCTestCase {
         XCTAssertNil(coordinator.notice)
         XCTAssertEqual(events.posted, [], "nothing posted after a cancelled sync")
         guard case .ready = coordinator.state else { return XCTFail("\(coordinator.state)") }
+    }
+
+    func test_restore_while_that_purchase_is_still_being_applied_does_not_say_restored() async {
+        let coordinator = await readyCoordinator()
+        server.holdSubmits = true
+        let inFlight = Task { await coordinator.deliver(self.store.transaction(70)) }
+        let held = await eventually { self.server.heldCount == 1 }
+        XCTAssertTrue(held)
+
+        store.entitlements = [store.transaction(70)]
+        await coordinator.restore()
+
+        XCTAssertEqual(coordinator.notice, "A purchase is still being applied. Check again in a moment.")
+        server.holdSubmits = false
+        server.releaseHeld()
+        _ = await inFlight.value
+        XCTAssertEqual(events.posted, ["jws-70"], "posted once")
     }
 
     func test_updates_and_unfinished_transactions_are_posted_from_sign_in() async {
@@ -500,6 +654,8 @@ final class AppleSubscriptionsCoordinatorTests: XCTestCase {
         XCTAssertNotNil(coordinator.notice)
     }
 
+    // MARK: Off
+
     func test_off_hides_everything_and_nothing_is_asked_of_the_app_store() async {
         server.plansAnswer = .failure(.off)
         let coordinator = AppleSubscriptionsCoordinator(server: server, store: store)
@@ -521,10 +677,9 @@ final class AppleSubscriptionsCoordinatorTests: XCTestCase {
 
         server.plansAnswer = .success([AppleSubscriptionPlan(productId: proId, tier: "pro")])
         await coordinator.refresh()
-        store.purchaseOutcome = .purchased(store.transaction(14))
         server.submitAnswers = [.failure(.off)]
-        await coordinator.subscribe(to: proId)
-        XCTAssertEqual(coordinator.state, .hidden, "a 404 on a transaction hides the plans too")
+        _ = await coordinator.deliver(store.transaction(14))
+        XCTAssertEqual(coordinator.state, .hidden, "a 404 on a transaction outside a purchase hides the plans too")
         XCTAssertEqual(events.finished, [])
     }
 
@@ -660,6 +815,10 @@ final class AppleSubscriptionsHTTPTests: XCTestCase {
         }
     }
 
+    private static func errorBody(_ code: String) -> String {
+        #"{"detail":{"error":{"code":"\#(code)","message":"m","request_id":"r"}}}"#
+    }
+
     func test_plans_are_read_with_the_bearer_and_bad_rows_skipped() async throws {
         let server = makeServer([Self.products: (200, Self.plansBody)])
         let plans = try await server.plans()
@@ -744,51 +903,63 @@ final class AppleSubscriptionsHTTPTests: XCTestCase {
         XCTAssertEqual(events.finished, ["50", "50"])
     }
 
-    func test_the_status_gives_the_tier_and_whether_a_subscription_is_running() async throws {
-        let running = #"{"membership_tier":"pro","active_subscription":{"status":"active","current_period_end":null,"#
-            + #""cancel_at_period_end":false},"unlimited_runs":false}"#
-        let active = try await makeServer([Self.status: (200, running)]).accountStatus()
-        XCTAssertEqual(active, AppleSubscriptionsAccountStatus(tier: "pro", hasActiveSubscription: true))
-        let none = try await makeServer([Self.status: (200, #"{"membership_tier":"free","active_subscription":null}"#)])
-            .accountStatus()
-        XCTAssertEqual(none, AppleSubscriptionsAccountStatus(tier: "free", hasActiveSubscription: false))
+    func test_the_status_gives_the_tier_and_which_subscriptions_are_running() async throws {
+        let web = #"{"membership_tier":"pro","active_subscription":{"status":"active","current_period_end":null,"#
+            + #""cancel_at_period_end":false},"apple_subscription":null,"unlimited_runs":false}"#
+        let apple = #"{"membership_tier":"max","active_subscription":null,"apple_subscription":{"tier":"max","#
+            + #""status":"grace_period","active_until":"2026-12-04T12:00:00Z","environment":"Production"}}"#
+        let none = #"{"membership_tier":"free","active_subscription":null,"apple_subscription":null}"#
+        let readWeb = try await makeServer([Self.status: (200, web)]).accountStatus()
+        XCTAssertEqual(readWeb, AppleSubscriptionsAccountStatus(tier: "pro", hasWebSubscription: true, hasAppleSubscription: false))
+        let readApple = try await makeServer([Self.status: (200, apple)]).accountStatus()
+        XCTAssertEqual(readApple, AppleSubscriptionsAccountStatus(tier: "max", hasWebSubscription: false, hasAppleSubscription: true))
+        let readNone = try await makeServer([Self.status: (200, none)]).accountStatus()
+        XCTAssertEqual(readNone, AppleSubscriptionsAccountStatus(tier: "free", hasWebSubscription: false, hasAppleSubscription: false))
         XCTAssertEqual(PlansURLProtocol.requests().first?.0.url?.path, Self.status)
+        let broken = await error { _ = try await self.makeServer([Self.status: (500, "{}")]).accountStatus() }
+        XCTAssertEqual(broken, .unavailable)
     }
 
-    func test_the_servers_answers_map_to_what_the_coordinator_does() async {
-        let cases: [(Int, AppleSubscriptionsServerError)] = [
-            (401, .reauthenticationRequired),
-            // 403: another account's token or subscription, or not a signed-in session; 409: bound to another account.
-            (400, .refused), (403, .refused), (409, .refused), (422, .refused),
-            (404, .off),
-            (408, .unavailable), (429, .unavailable), (500, .unavailable), (503, .unavailable),
+    func test_the_servers_codes_map_to_what_the_app_does() async {
+        let cases: [(Int, String, AppleSubscriptionsServerError)] = [
+            (403, Self.errorBody("APPLE_IAP_SIGNED_IN_SESSION_REQUIRED"), .reauthenticationRequired),
+            (409, Self.errorBody("APPLE_IAP_ACCOUNT_NOT_FOUND"), .accountNotFound),
+            (403, Self.errorBody("APPLE_IAP_ACCOUNT_TOKEN_MISMATCH"), .linkedToAnotherAccount),
+            (403, Self.errorBody("APPLE_IAP_TRANSACTION_ACCOUNT_MISMATCH"), .linkedToAnotherAccount),
+            (409, Self.errorBody("APPLE_IAP_TRANSACTION_ACCOUNT_MISMATCH"), .linkedToAnotherAccount),
+            (409, Self.errorBody("APPLE_IAP_OWNERSHIP_CONFLICT"), .ownershipConflict),
+            (403, Self.errorBody("APPLE_IAP_SANDBOX_NOT_ALLOWED"), .sandboxNotAllowed),
+            (403, Self.errorBody("APPLE_IAP_FAMILY_SHARING_NOT_SUPPORTED"), .familySharingNotSupported),
+            (400, Self.errorBody("APPLE_IAP_PRODUCT_NOT_ALLOWED"), .productNotAllowed),
+            (400, Self.errorBody("APPLE_IAP_INVALID_TRANSACTION"), .invalidTransaction),
+            // A finishing code with any other status is a plain refusal: it never finishes a transaction.
+            (409, Self.errorBody("APPLE_IAP_FAMILY_SHARING_NOT_SUPPORTED"), .refused),
+            (403, Self.errorBody("APPLE_IAP_PRODUCT_NOT_ALLOWED"), .refused),
+            (422, Self.errorBody("APPLE_IAP_INVALID_TRANSACTION"), .refused),
+            (400, Self.errorBody("APPLE_IAP_PRODUCT_TYPE_NOT_ALLOWED"), .refused),
+            (400, Self.errorBody("APPLE_IAP_INVALID_SIGNED_DATA"), .refused),
+            (403, #"{"detail":"Forbidden"}"#, .refused),
+            (401, "{}", .reauthenticationRequired),
+            (404, #"{"detail":"Not Found"}"#, .off),
+            (408, "{}", .unavailable), (429, "{}", .unavailable), (500, "{}", .unavailable), (503, "{}", .unavailable),
         ]
-        for (status, expected) in cases {
+        for (status, body, expected) in cases {
             let result = await error {
-                _ = try await self.makeServer([Self.transactions: (status, "{}")]).submit(signedTransactionInfo: "jws")
+                _ = try await self.makeServer([Self.transactions: (status, body)]).submit(signedTransactionInfo: "jws")
             }
-            XCTAssertEqual(result, expected, "status \(status)")
+            XCTAssertEqual(result, expected, "\(status) \(body)")
         }
         let offline = await error { _ = try await self.makeServer([:]).submit(signedTransactionInfo: "jws") }
         XCTAssertEqual(offline, .unavailable)
     }
 
-    func test_the_servers_account_mismatch_codes_read_as_another_account() async {
-        func body(_ code: String) -> String { #"{"detail":{"error":{"code":"\#(code)","message":"m","request_id":"r"}}}"# }
-        let cases: [(Int, String, AppleSubscriptionsServerError)] = [
-            (403, body("APPLE_IAP_ACCOUNT_TOKEN_MISMATCH"), .linkedToAnotherAccount),
-            (403, body("APPLE_IAP_TRANSACTION_ACCOUNT_MISMATCH"), .linkedToAnotherAccount),
-            (409, body("APPLE_IAP_TRANSACTION_ACCOUNT_MISMATCH"), .linkedToAnotherAccount),
-            (403, #"{"detail":"Apple purchases require a signed-in user session"}"#, .refused),
-            (403, body("APPLE_IAP_PRODUCT_NOT_ALLOWED"), .refused),
-            (400, body("APPLE_IAP_ACCOUNT_TOKEN_MISMATCH"), .refused),
-        ]
-        for (status, answer, expected) in cases {
-            let result = await error {
-                _ = try await self.makeServer([Self.transactions: (status, answer)]).submit(signedTransactionInfo: "jws")
-            }
-            XCTAssertEqual(result, expected, "\(status) \(answer)")
-        }
+    func test_only_three_codes_finish_a_transaction() {
+        let finishing: [AppleSubscriptionsServerError] = [.familySharingNotSupported, .productNotAllowed, .invalidTransaction]
+        let kept: [AppleSubscriptionsServerError] = [.sandboxNotAllowed, .ownershipConflict, .accountNotFound,
+                                                     .linkedToAnotherAccount, .refused, .off, .reauthenticationRequired,
+                                                     .accountChanged, .unavailable]
+        XCTAssertTrue(finishing.allSatisfy(\.finishesTransaction))
+        XCTAssertFalse(kept.contains(where: \.finishesTransaction))
     }
 
     func test_a_web_subscription_blocks_buying_another_plan_here() async {
@@ -796,19 +967,43 @@ final class AppleSubscriptionsHTTPTests: XCTestCase {
         // sell one.
         let web = #"{"membership_tier":"pro","unlimited_prompt_builder":false,"unlimited_runs":false,"#
             + #""donation_total_usd":0.0,"active_subscription":{"status":"active","#
-            + #""current_period_end":"2026-12-03T00:00:00Z","cancel_at_period_end":false},"monthly_membership_usd":29}"#
+            + #""current_period_end":"2026-12-03T00:00:00Z","cancel_at_period_end":false},"apple_subscription":null,"#
+            + #""monthly_membership_usd":29}"#
         let server = makeServer([Self.products: (200, Self.plansBody), Self.status: (200, web)])
         let store = FakeStore(events: Events())
         let coordinator = AppleSubscriptionsCoordinator(server: server, store: store)
         await coordinator.refresh()
-        guard case .ready(_, let tier, let active) = coordinator.state else { return XCTFail("\(coordinator.state)") }
-        XCTAssertEqual(tier, "pro")
-        XCTAssertTrue(active, "a web subscription is a running one")
+        XCTAssertEqual(plans(coordinator)?.standing, .webSubscription, "a web subscription is a running one")
 
         await coordinator.subscribe(to: maxId)
 
         XCTAssertTrue(store.purchases.isEmpty, "no App Store Max on top of a web Pro")
-        XCTAssertEqual(coordinator.notice, AppleSubscriptionsCoordinator.alreadySubscribed)
+    }
+
+    func test_an_app_store_subscription_on_another_apple_id_blocks_buying_here() async {
+        let apple = #"{"membership_tier":"pro","active_subscription":null,"apple_subscription":{"tier":"pro","#
+            + #""status":"active","active_until":"2026-12-04T12:00:00Z","environment":"Production"}}"#
+        let server = makeServer([Self.products: (200, Self.plansBody), Self.status: (200, apple)])
+        let store = FakeStore(events: Events())
+        let coordinator = AppleSubscriptionsCoordinator(server: server, store: store)
+        await coordinator.refresh()
+        XCTAssertEqual(plans(coordinator)?.standing, .appleSubscription)
+
+        await coordinator.subscribe(to: maxId)
+
+        XCTAssertTrue(store.purchases.isEmpty, "not a second App Store subscription on another Apple ID")
+    }
+
+    func test_a_status_the_server_cannot_give_sells_nothing() async {
+        let server = makeServer([Self.products: (200, Self.plansBody), Self.status: (500, Self.errorBody("BILLING_STATUS_ERROR"))])
+        let store = FakeStore(events: Events())
+        let coordinator = AppleSubscriptionsCoordinator(server: server, store: store)
+        await coordinator.refresh()
+        XCTAssertEqual(plans(coordinator)?.standing, .unknown)
+
+        await coordinator.subscribe(to: maxId)
+
+        XCTAssertTrue(store.purchases.isEmpty)
     }
 
     func test_an_answer_for_an_account_no_longer_signed_in_is_not_used() async {

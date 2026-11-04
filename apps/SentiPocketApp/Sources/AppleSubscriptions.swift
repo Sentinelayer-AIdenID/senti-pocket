@@ -15,27 +15,56 @@ struct AppleSubscriptionPlan: Equatable, Sendable {
 struct AppleSubscriptionsAccountStatus: Equatable, Sendable {
     /// `membership_tier`: the account's plan, however it was bought or granted.
     let tier: String?
-    /// `active_subscription` is set: a subscription is running, so the app never sells a second one.
-    let hasActiveSubscription: Bool
+    /// `active_subscription` is set: a subscription billed through the Senti website is running.
+    let hasWebSubscription: Bool
+    /// `apple_subscription` is set: this account's own App Store subscription is running, on any Apple ID.
+    let hasAppleSubscription: Bool
 }
 
-/// Why a call to the server's in-app plans gave no answer the app can use.
+/// Why a call to the server's in-app plans gave no answer the app can use. The transaction refusals follow the
+/// server's codes (`{"detail": {"error": {"code"}}}`); only three of them finish the transaction.
 enum AppleSubscriptionsServerError: Error, Equatable {
-    /// 404, the feature off, or no API configured: purchases are off, so the app shows nothing.
+    /// 404 (the route is missing: the feature is off or not deployed), or no API configured: the app shows nothing.
     case off
-    /// 401: the sign-in is no longer valid.
+    /// 401, or 403 `APPLE_IAP_SIGNED_IN_SESSION_REQUIRED`: sign in again.
     case reauthenticationRequired
     /// Another account signed in while the call was out, so its answer belongs to nobody on screen.
     case accountChanged
-    /// 403 or 409 with `APPLE_IAP_ACCOUNT_TOKEN_MISMATCH` (the transaction carries another account's token) or
-    /// `APPLE_IAP_TRANSACTION_ACCOUNT_MISMATCH` (Apple's subscription, by its original transaction, already belongs to
-    /// another Senti account): a refusal, never sent again this session.
+    /// `APPLE_IAP_ACCOUNT_TOKEN_MISMATCH` (another account's token) or `APPLE_IAP_TRANSACTION_ACCOUNT_MISMATCH` (Apple's
+    /// subscription already belongs to another Senti account).
     case linkedToAnotherAccount
-    /// The server read the request and would not take it: 403 (not a signed-in session), 409, 400 or 422 (a
-    /// transaction it will not apply).
+    /// 409 `APPLE_IAP_OWNERSHIP_CONFLICT`: the server's ownership records disagree; a support case.
+    case ownershipConflict
+    /// 409 `APPLE_IAP_ACCOUNT_NOT_FOUND`: the signed-in account is missing or deleted.
+    case accountNotFound
+    /// 403 `APPLE_IAP_SANDBOX_NOT_ALLOWED`: a test purchase from an account not allowed to make them. Recorded, and
+    /// credited if the account is allowed later and the app sends it again.
+    case sandboxNotAllowed
+    /// 403 `APPLE_IAP_FAMILY_SHARING_NOT_SUPPORTED`: recorded; never grants a plan.
+    case familySharingNotSupported
+    /// 400 `APPLE_IAP_PRODUCT_NOT_ALLOWED`: recorded; never grants a plan.
+    case productNotAllowed
+    /// 400 `APPLE_IAP_INVALID_TRANSACTION`: never grants a plan.
+    case invalidTransaction
+    /// Any other 4xx: the server would not take it.
     case refused
     /// Network, 408, 425, 429 or 5xx, or an answer the app could not read: nothing changed; try again later.
     case unavailable
+
+    /// Whether a transaction the server answered this way is finished. Only when the server says it will never grant
+    /// a plan (family sharing, a product not sold, an invalid transaction), so the App Store stops delivering it. Every
+    /// other answer leaves it unfinished, so it comes back: a test purchase is credited once the account is allowed,
+    /// and a support case keeps its transaction.
+    var finishesTransaction: Bool {
+        switch self {
+        case .familySharingNotSupported, .productNotAllowed, .invalidTransaction:
+            return true
+        case .sandboxNotAllowed, .ownershipConflict, .accountNotFound, .linkedToAnotherAccount, .refused:
+            return false
+        case .off, .reauthenticationRequired, .accountChanged, .unavailable:
+            return false
+        }
+    }
 }
 
 /// The server half of in-app plans, as the signed-in person. A protocol so the coordinator is testable without a
@@ -48,7 +77,7 @@ protocol AppleSubscriptionsServing: Sendable {
     /// Hands a verified transaction's signed form to the server. Returns the account's tier after it; an answer that
     /// carries no readable entitlement throws, because only that answer means the server applied the transaction.
     func submit(signedTransactionInfo: String) async throws -> String
-    /// The account's plan now, and whether a subscription is running.
+    /// The account's plan now, and which subscriptions are running.
     func accountStatus() async throws -> AppleSubscriptionsAccountStatus
 }
 
@@ -106,15 +135,19 @@ final class HTTPAppleSubscriptionsServer: AppleSubscriptionsServing, @unchecked 
         return tier
     }
 
-    /// `GET /api/v1/billing/status` → `membership_tier`, and `active_subscription` when one is running.
+    /// `GET /api/v1/billing/status` → `membership_tier`; `active_subscription` (web) and `apple_subscription` (App
+    /// Store), each an object while that subscription is running and null otherwise.
     func accountStatus() async throws -> AppleSubscriptionsAccountStatus {
         let data = try await send("GET", path: "/api/v1/billing/status")
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw AppleSubscriptionsServerError.unavailable
         }
         let tier = (object["membership_tier"] as? String).flatMap { $0.isEmpty ? nil : $0.lowercased() }
-        return AppleSubscriptionsAccountStatus(tier: tier,
-                                               hasActiveSubscription: object["active_subscription"] is [String: Any])
+        return AppleSubscriptionsAccountStatus(
+            tier: tier,
+            hasWebSubscription: object["active_subscription"] is [String: Any],
+            hasAppleSubscription: object["apple_subscription"] is [String: Any]
+        )
     }
 
     /// The `tier` of an entitlements answer, or nil when the answer carries none.
@@ -122,6 +155,31 @@ final class HTTPAppleSubscriptionsServer: AppleSubscriptionsServing, @unchecked 
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let tier = object["tier"] as? String, !tier.isEmpty else { return nil }
         return tier.lowercased()
+    }
+
+    /// A 4xx answer, by the server's code. The three codes that finish a transaction count only with the status the
+    /// server sends them with; any other pairing is a plain refusal, which leaves the transaction unfinished.
+    static func refusal(status: Int, code: String?) -> AppleSubscriptionsServerError {
+        switch (status, code ?? "") {
+        case (_, "APPLE_IAP_SIGNED_IN_SESSION_REQUIRED"): return .reauthenticationRequired
+        case (_, "APPLE_IAP_ACCOUNT_TOKEN_MISMATCH"), (_, "APPLE_IAP_TRANSACTION_ACCOUNT_MISMATCH"):
+            return .linkedToAnotherAccount
+        case (_, "APPLE_IAP_OWNERSHIP_CONFLICT"): return .ownershipConflict
+        case (_, "APPLE_IAP_ACCOUNT_NOT_FOUND"): return .accountNotFound
+        case (_, "APPLE_IAP_SANDBOX_NOT_ALLOWED"): return .sandboxNotAllowed
+        case (403, "APPLE_IAP_FAMILY_SHARING_NOT_SUPPORTED"): return .familySharingNotSupported
+        case (400, "APPLE_IAP_PRODUCT_NOT_ALLOWED"): return .productNotAllowed
+        case (400, "APPLE_IAP_INVALID_TRANSACTION"): return .invalidTransaction
+        default: return .refused
+        }
+    }
+
+    /// The code of an error answer: `{"detail": {"error": {"code": ...}}}`.
+    static func errorCode(in data: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let detail = object["detail"] as? [String: Any],
+              let error = detail["error"] as? [String: Any] else { return nil }
+        return error["code"] as? String
     }
 
     private func send(_ method: String, path: String, body: [String: String]? = nil) async throws -> Data {
@@ -157,24 +215,8 @@ final class HTTPAppleSubscriptionsServer: AppleSubscriptionsServing, @unchecked 
         case 401: throw AppleSubscriptionsServerError.reauthenticationRequired
         case 404: throw AppleSubscriptionsServerError.off
         case 408, 425, 429, 500..<600: throw AppleSubscriptionsServerError.unavailable
-        case 403, 409:
-            let linkedElsewhere = Self.accountMismatchCodes.contains(Self.errorCode(in: data) ?? "")
-            throw linkedElsewhere ? AppleSubscriptionsServerError.linkedToAnotherAccount : .refused
-        default: throw AppleSubscriptionsServerError.refused
+        default: throw Self.refusal(status: http.statusCode, code: Self.errorCode(in: data))
         }
-    }
-
-    /// The server's codes for a purchase that belongs to another Senti account.
-    static let accountMismatchCodes: Set<String> = [
-        "APPLE_IAP_ACCOUNT_TOKEN_MISMATCH", "APPLE_IAP_TRANSACTION_ACCOUNT_MISMATCH",
-    ]
-
-    /// The code of an error answer: `{"detail": {"error": {"code": ...}}}`.
-    static func errorCode(in data: Data) -> String? {
-        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let detail = object["detail"] as? [String: Any],
-              let error = detail["error"] as? [String: Any] else { return nil }
-        return error["code"] as? String
     }
 }
 
@@ -378,21 +420,63 @@ struct AppleSubscriptionOffer: Equatable, Identifiable, Sendable {
     ]
 }
 
+/// Why the plans screen sells nothing right now, or `.open` when a plan above the account's can be bought.
+enum AppleSubscriptionsStanding: Equatable, Sendable {
+    /// Nothing is running and the account's plan was read: plans above it are for sale.
+    case open
+    /// The account's plan could not be read: nothing is sold until it is (a web subscriber must never be sold a
+    /// second plan because a status call failed).
+    case unknown
+    /// This account's own App Store subscription is running (the server's word, on any Apple ID).
+    case appleSubscription
+    /// A subscription billed through the Senti website is running.
+    case webSubscription
+    /// This Apple ID holds a subscription to these plans that the server does not list for this account.
+    case appleIDHoldsAnother
+}
+
+/// The plans on screen, the account's tier, and what may be bought.
+struct AppleSubscriptionsPlans: Equatable, Sendable {
+    let offers: [AppleSubscriptionOffer]
+    let currentTier: String?
+    let standing: AppleSubscriptionsStanding
+
+    /// Only a plan above the account's tier, and only while nothing is running and the plan was read. A Team or
+    /// Enterprise seat, or an admin-set tier, never buys a plan it already has or exceeds.
+    func canBuy(_ offer: AppleSubscriptionOffer) -> Bool {
+        standing == .open && Self.rank(offer.tier) > Self.rank(currentTier)
+    }
+
+    /// The plan is the account's own tier, or below it.
+    func isIncluded(_ offer: AppleSubscriptionOffer) -> Bool {
+        Self.rank(offer.tier) <= Self.rank(currentTier)
+    }
+
+    /// Free (or none) 0, Pro 1, Max 2. Any other paid tier (Team, Enterprise, one this app does not know) ranks above
+    /// every plan sold here.
+    static func rank(_ tier: String?) -> Int {
+        switch (tier ?? "").lowercased() {
+        case "", "free": return 0
+        case "pro": return 1
+        case "max": return 2
+        default: return Int.max
+        }
+    }
+}
+
 /// In-app plans for the signed-in account. The server decides whether there is anything to sell: until it lists
 /// plans, the state stays hidden and the app shows nothing. Every verified transaction (a purchase here, an update
 /// from the App Store, a restore, anything left unfinished) goes to the server, and is finished only once the server
-/// answered with the account's entitlements, so one the server never applied comes back until it does.
+/// answered with the account's entitlements, or said it will never grant a plan.
 @MainActor
 final class AppleSubscriptionsCoordinator: ObservableObject {
     enum State: Equatable {
         /// Nothing to show: the server sells no plans here, or has not said yet.
         case hidden
         case loading
-        /// `hasActiveSubscription`: a subscription is running (the server says so, or this Apple ID holds one of these
-        /// plans), so no plan is offered for sale.
-        case ready(offers: [AppleSubscriptionOffer], currentTier: String?, hasActiveSubscription: Bool)
+        case ready(AppleSubscriptionsPlans)
         /// A purchase or restore is with the App Store or the server; the plans stay on screen.
-        case purchasing(offers: [AppleSubscriptionOffer], currentTier: String?, hasActiveSubscription: Bool)
+        case purchasing(AppleSubscriptionsPlans)
         case failed(message: String)
     }
 
@@ -400,21 +484,58 @@ final class AppleSubscriptionsCoordinator: ObservableObject {
     enum Delivery: Equatable {
         case accepted
         case unverified
-        case refused
+        /// The server would not apply it, with its reason.
+        case refused(AppleSubscriptionsServerError)
         case unavailable
         case off
         case signedOut
-        /// The App Store subscription belongs to another Senti account.
-        case linkedToAnotherAccount
         /// The same transaction is already on its way.
         case alreadyDelivering
     }
 
+    /// One plain line on the plans screen after the server refused a transaction.
+    enum Line: Equatable {
+        case linkedToAnotherAccount
+        case ownershipConflict
+        case accountNotFound
+        case sandboxNotAllowed
+        case familySharingNotSupported
+        case notApplied
+
+        init?(_ error: AppleSubscriptionsServerError) {
+            switch error {
+            case .linkedToAnotherAccount: self = .linkedToAnotherAccount
+            case .ownershipConflict: self = .ownershipConflict
+            case .accountNotFound: self = .accountNotFound
+            case .sandboxNotAllowed: self = .sandboxNotAllowed
+            case .familySharingNotSupported: self = .familySharingNotSupported
+            case .productNotAllowed, .invalidTransaction, .refused: self = .notApplied
+            case .off, .reauthenticationRequired, .accountChanged, .unavailable: return nil
+            }
+        }
+
+        var text: String {
+            switch self {
+            case .linkedToAnotherAccount:
+                return "This Apple ID's subscription is linked to another Senti account. Contact help@plexaura.io."
+            case .ownershipConflict:
+                return "This purchase needs a look from support. Contact help@plexaura.io."
+            case .accountNotFound:
+                return "Senti couldn't find your account to apply this purchase. Sign in again, then tap Restore purchases."
+            case .sandboxNotAllowed:
+                return "Test purchases aren't enabled for this account."
+            case .familySharingNotSupported:
+                return "Family Sharing isn't supported for Senti plans. Subscribe with your own Apple ID."
+            case .notApplied:
+                return "Senti couldn't apply this purchase. If you were charged, contact help@plexaura.io."
+            }
+        }
+    }
+
     @Published private(set) var state: State = .hidden
-    /// The server refused a transaction because this Apple ID's subscription belongs to another Senti account; the
-    /// plans screen says so in one line.
-    @Published private(set) var isLinkedToAnotherAccount = false
-    /// A word after a purchase or restore (waiting for approval, restored, not applied), shown once.
+    /// The server's last refusal, said in one line on the plans screen.
+    @Published private(set) var line: Line?
+    /// A word after a purchase or restore (waiting for approval, restored, not reached), shown once.
     @Published private(set) var notice: String?
 
     private let server: any AppleSubscriptionsServing
@@ -425,8 +546,10 @@ final class AppleSubscriptionsCoordinator: ObservableObject {
     private var accountToken: UUID?
     private var offers: [AppleSubscriptionOffer] = []
     private var currentTier: String?
-    private var serverSaysActive = false
-    private var storeSaysActive = false
+    private var statusKnown = false
+    private var hasWebSubscription = false
+    private var hasAppleSubscription = false
+    private var appleIDHoldsPlan = false
     private var delivering: Set<UInt64> = []
     /// Transactions the server refused, or this device could not verify, this session: never sent again.
     private var notTaken: [UInt64: Delivery] = [:]
@@ -451,7 +574,17 @@ final class AppleSubscriptionsCoordinator: ObservableObject {
     /// Whether Settings shows its Plan row: only once the server has listed plans.
     var isOffered: Bool { state != .hidden }
 
-    private var hasActiveSubscription: Bool { serverSaysActive || storeSaysActive }
+    private var standing: AppleSubscriptionsStanding {
+        if !statusKnown { return .unknown }
+        if hasAppleSubscription { return .appleSubscription }
+        if hasWebSubscription { return .webSubscription }
+        if appleIDHoldsPlan { return .appleIDHoldsAnother }
+        return .open
+    }
+
+    private var plans: AppleSubscriptionsPlans {
+        AppleSubscriptionsPlans(offers: offers, currentTier: currentTier, standing: standing)
+    }
 
     /// From sign-in on: the App Store's updates go to the server, the plans load, and anything left unfinished is sent
     /// again now and each time the app comes back to the front.
@@ -508,7 +641,7 @@ final class AppleSubscriptionsCoordinator: ObservableObject {
             guard !offers.isEmpty else { return fail(Self.storeUnavailable) }
             self.offers = offers
             await refreshAccount()
-            state = .ready(offers: offers, currentTier: currentTier, hasActiveSubscription: hasActiveSubscription)
+            state = .ready(self.plans)
         } catch let error as AppleSubscriptionsServerError {
             switch error {
             case .unavailable where wasShown:
@@ -525,17 +658,14 @@ final class AppleSubscriptionsCoordinator: ObservableObject {
     }
 
     func subscribe(to productId: String) async {
-        guard case .ready(let offers, let tier, let isActive) = state,
-              offers.contains(where: { $0.productId == productId }) else { return }
-        state = .purchasing(offers: offers, currentTier: tier, hasActiveSubscription: isActive)
+        guard case .ready(let shown) = state,
+              let offer = shown.offers.first(where: { $0.productId == productId }) else { return }
+        state = .purchasing(shown)
         defer { settle() }
-        // A subscription that is running, including one started since the plans loaded (on the web or another
-        // device), is never sold a second time.
+        // Read again right before the App Store is asked: a plan bought since the screen loaded (on the web or another
+        // device), or a status that cannot be read, stops the sale. The screen then says why.
         await refreshAccount()
-        guard !hasActiveSubscription else {
-            notice = Self.alreadySubscribed
-            return
-        }
+        guard plans.canBuy(offer) else { return }
         do {
             let token = try await purchaseToken()
             switch try await store.purchase(productId: productId, appAccountToken: token) {
@@ -557,8 +687,8 @@ final class AppleSubscriptionsCoordinator: ObservableObject {
 
     /// Restore purchases: `AppStore.sync`, then every current entitlement goes to the server.
     func restore() async {
-        guard case .ready(let offers, let tier, let isActive) = state else { return }
-        state = .purchasing(offers: offers, currentTier: tier, hasActiveSubscription: isActive)
+        guard case .ready(let shown) = state else { return }
+        state = .purchasing(shown)
         defer { settle() }
         do {
             try await store.sync()
@@ -579,8 +709,8 @@ final class AppleSubscriptionsCoordinator: ObservableObject {
         notice = nil
     }
 
-    /// Hands one transaction to the server, and finishes it only once the server answered with the account's
-    /// entitlements.
+    /// Hands one transaction to the server. It is finished only once the server answered with the account's
+    /// entitlements, or said it will never grant a plan.
     @discardableResult
     func deliver(_ transaction: AppleStoreTransaction) async -> Delivery {
         // Refused by the server, or unverifiable on this device, earlier this session: never sent again.
@@ -602,37 +732,43 @@ final class AppleSubscriptionsCoordinator: ObservableObject {
         } catch let error as AppleSubscriptionsServerError {
             switch error {
             case .off:
-                hide()
+                // During a purchase or restore the screen stays and says what happened; otherwise the feature is off.
+                if case .purchasing = state {} else { hide() }
                 return .off
             case .reauthenticationRequired:
                 onReauthenticationRequired()
                 return .signedOut
             case .accountChanged:
                 return .signedOut
-            case .linkedToAnotherAccount:
-                notTaken[transaction.id] = .linkedToAnotherAccount
-                isLinkedToAnotherAccount = true
-                return .linkedToAnotherAccount
-            case .refused:
-                notTaken[transaction.id] = .refused
-                return .refused
             case .unavailable:
                 return .unavailable
+            case .linkedToAnotherAccount, .ownershipConflict, .accountNotFound, .sandboxNotAllowed,
+                 .familySharingNotSupported, .productNotAllowed, .invalidTransaction, .refused:
+                if error.finishesTransaction { await transaction.finish() }
+                notTaken[transaction.id] = .refused(error)
+                line = Line(error)
+                return .refused(error)
             }
         } catch {
             return .unavailable
         }
     }
 
-    /// The account's plan and whether a subscription is running: the server's word, and this Apple ID's own current
-    /// entitlements to these plans (the server's status does not list subscriptions bought here).
+    /// The account's plan and what is running: the server's status (web and App Store subscriptions), and this Apple
+    /// ID's own verified entitlements to these plans. A status that cannot be read sells nothing.
     private func refreshAccount() async {
-        if let status = try? await server.accountStatus() {
-            if let tier = status.tier { currentTier = tier }
-            serverSaysActive = status.hasActiveSubscription
+        do {
+            let status = try await server.accountStatus()
+            currentTier = status.tier
+            hasWebSubscription = status.hasWebSubscription
+            hasAppleSubscription = status.hasAppleSubscription
+            statusKnown = true
+        } catch {
+            statusKnown = false
+            if (error as? AppleSubscriptionsServerError) == .reauthenticationRequired { onReauthenticationRequired() }
         }
         let offered = Set(offers.map(\.productId))
-        storeSaysActive = await store.currentEntitlements().contains { $0.isVerified && offered.contains($0.productId) }
+        appleIDHoldsPlan = await store.currentEntitlements().contains { $0.isVerified && offered.contains($0.productId) }
     }
 
     private func purchaseToken() async throws -> UUID {
@@ -647,19 +783,20 @@ final class AppleSubscriptionsCoordinator: ObservableObject {
         case .off: hide()
         case .reauthenticationRequired: onReauthenticationRequired()
         case .accountChanged: break
-        case .linkedToAnotherAccount: isLinkedToAnotherAccount = true
-        case .refused: notice = "Purchases aren't available for this account."
         case .unavailable: notice = "Could not reach Senti. Check your connection and try again."
+        default: notice = "Purchases aren't available for this account right now."
         }
     }
 
     private static func notice(after deliveries: [Delivery], restoring: Bool) -> String? {
-        // Another account's subscription is said in one line on the plans screen, not in an alert.
-        if deliveries.contains(.off) || deliveries.contains(.signedOut) || deliveries.contains(.linkedToAnotherAccount) {
-            return nil
-        }
-        if deliveries.contains(.refused) {
-            return "A purchase could not be added to this account. Restore it while signed in to the account that bought it."
+        if deliveries.contains(.signedOut) { return nil }
+        // A refusal is said in one line on the plans screen, not in an alert.
+        if deliveries.contains(where: { if case .refused = $0 { return true } else { return false } }) { return nil }
+        if deliveries.contains(.off) {
+            return restoring
+                ? "Senti can't apply purchases right now. Try again later."
+                : "Your purchase went through, but Senti can't apply it right now. It stays with the App Store and is "
+                    + "applied once Senti is back."
         }
         if deliveries.contains(.unavailable) {
             return "Senti could not be reached to apply your purchase. It is kept with the App Store and applied the "
@@ -668,14 +805,13 @@ final class AppleSubscriptionsCoordinator: ObservableObject {
         if deliveries.contains(.unverified) {
             return "The App Store could not confirm a purchase, so it was not applied. Try Restore purchases later."
         }
+        if deliveries.contains(.alreadyDelivering) {
+            return "A purchase is still being applied. Check again in a moment."
+        }
         guard restoring else { return nil }
         return deliveries.isEmpty ? "No subscription to restore for this Apple ID." : "Your purchases are restored."
     }
 
-    static let linkedToAnotherAccountLine = "This Apple ID's subscription is linked to another Senti account. "
-        + "Contact help@plexaura.io."
-    static let alreadySubscribed = "Your plan is active. To change or cancel it, open Settings, tap your name, then "
-        + "Subscriptions."
     private static let storeUnavailable = "Plans could not be loaded from the App Store. Try again later."
 
     private func hide() {
@@ -690,19 +826,14 @@ final class AppleSubscriptionsCoordinator: ObservableObject {
 
     private func showAccount() {
         switch state {
-        case .ready(let offers, _, _):
-            state = .ready(offers: offers, currentTier: currentTier, hasActiveSubscription: hasActiveSubscription)
-        case .purchasing(let offers, _, _):
-            state = .purchasing(offers: offers, currentTier: currentTier, hasActiveSubscription: hasActiveSubscription)
-        case .hidden, .loading, .failed:
-            break
+        case .ready: state = .ready(plans)
+        case .purchasing: state = .purchasing(plans)
+        case .hidden, .loading, .failed: break
         }
     }
 
     /// After a purchase or restore, back to the plans with the account as it is now.
     private func settle() {
-        if case .purchasing(let offers, _, _) = state {
-            state = .ready(offers: offers, currentTier: currentTier, hasActiveSubscription: hasActiveSubscription)
-        }
+        if case .purchasing = state { state = .ready(plans) }
     }
 }
