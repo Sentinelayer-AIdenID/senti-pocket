@@ -136,26 +136,68 @@ public struct RoomSearchPresentationState: Equatable, Sendable {
         return (matchedPeople, matchedArtifacts)
     }
 
-    /// A snippet as it reads, not as it was typed: one line, without markdown's marks. **Bold** is bold, a link
-    /// is its words, and code fences, a table's divider row and pipes, headings', quotes' and lists' marks are gone.
-    public static func plainSnippet(_ snippet: String) -> String {
-        var lines: [String] = []
-        for raw in snippet.components(separatedBy: .newlines) {
-            var line = raw.trimmingCharacters(in: .whitespaces)
-            // A fence's own line, a table's divider row and a horizontal rule say nothing.
-            if line.hasPrefix("```") || line.hasPrefix("~~~") { continue }
-            if line.count >= 3, line.allSatisfy({ "|-: ".contains($0) }) || line.allSatisfy({ "*_ ".contains($0) }) { continue }
-            line = line.replacingOccurrences(of: #"^(>\s?)+"#, with: "", options: .regularExpression)
-            line = line.replacingOccurrences(of: #"^(#{1,6}\s+|[-*+]\s+(\[[ xX]\]\s+)?|\d+[.)]\s+)"#, with: "",
-                                             options: .regularExpression)
-            line = line.replacingOccurrences(of: "|", with: " ")
-            let inline = try? AttributedString(markdown: line,
-                                               options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
-            lines.append(inline.map { String($0.characters) } ?? line)
+    /// A snippet as it reads, not as it was typed. The server sends one line of about 80 characters around the match,
+    /// cut anywhere. Only marks that cannot be anything else go: bold's `**`, a link's brackets and address, a code span's
+    /// backticks, a fence's ``` wherever it stands, heading, quote and list marks where a line starts, a table's pipes
+    /// and divider. Code is left as written (`2*3*4`, `__init__.py`, `packages/*/Sources`, `>= 3`, pipes inside
+    /// backticks). When cleaning would hide a word that was searched for, or leave nothing, the snippet is shown as it
+    /// came. A long text (a whole message, when the server sent no snippet) is cut to the part around the match first.
+    public static func plainSnippet(_ snippet: String, query: String = "") -> String {
+        let raw = collapse(window(snippet, around: query))
+        var unfenced = raw
+        for fence in [#"```[A-Za-z0-9_+.-]*"#, #"~~~[A-Za-z0-9_+.-]*"#] {
+            unfenced = unfenced.replacingOccurrences(of: fence, with: " ", options: .regularExpression)
         }
-        return lines.joined(separator: " ")
-            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespaces)
+        // Between backticks is code, kept as written without its backticks; the rest is cleaned.
+        var cleaned = ""
+        for (index, part) in unfenced.components(separatedBy: "`").enumerated() {
+            cleaned += index.isMultiple(of: 2) ? clean(part, atStart: index == 0) : part
+        }
+        let plain = collapse(cleaned)
+        guard !plain.isEmpty else { return raw }
+        let words = query.split(whereSeparator: \.isWhitespace).map(String.init)
+        let hidden = words.contains { contains(raw, $0) && !contains(plain, $0) }
+        return hidden ? raw : plain
+    }
+
+    /// Marks anywhere: a link or image (its words), **bold**, a table's divider row and its pipes.
+    private static let inlineMarks: [(String, String)] = [
+        (#"!?\[([^\]\n]*)\]\([^)\s]*\)"#, "$1"),
+        (#"(?<![\w*])\*\*(?=\S)([^*\n]+?)(?<=\S)\*\*(?![\w*])"#, "$1"),
+        (#"\|?(?:[ \t]*:?-+:?[ \t]*\|)+[ \t]*:?-+:?[ \t]*\|?"#, " "),
+        (#"(?:^|(?<=[ \t]))\|(?=[ \t]|$)"#, " "),
+    ]
+    /// Marks only where the snippet starts: a heading's, a quote's, a list's.
+    private static let startMarks: [(String, String)] = [
+        (#"^[ \t]*#{1,6}[ \t]+"#, ""),
+        (#"^[ \t]*(?:>[ \t]+)+"#, ""),
+        (#"^[ \t]*(?:[-*+]|\d{1,3}[.)])[ \t]+(?:\[[ xX]\][ \t]+)?"#, ""),
+    ]
+
+    private static func clean(_ text: String, atStart: Bool) -> String {
+        (atStart ? startMarks + inlineMarks : inlineMarks)
+            .reduce(text) { $0.replacingOccurrences(of: $1.0, with: $1.1, options: .regularExpression) }
+    }
+
+    private static func collapse(_ text: String) -> String {
+        text.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression).trimmingCharacters(in: .whitespaces)
+    }
+
+    private static func contains(_ text: String, _ word: String) -> Bool {
+        text.range(of: word, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+    }
+
+    /// At most about 320 characters of a long text: around the first match, else its start.
+    static func window(_ text: String, around query: String, radius: Int = 160) -> String {
+        guard text.count > 2 * radius + 80 else { return text }
+        let needle = query.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? ""
+        guard !needle.isEmpty,
+              let match = text.range(of: needle, options: [.caseInsensitive, .diacriticInsensitive]) else {
+            return String(text.prefix(2 * radius))
+        }
+        let lower = text.index(match.lowerBound, offsetBy: -radius, limitedBy: text.startIndex) ?? text.startIndex
+        let upper = text.index(match.upperBound, offsetBy: radius, limitedBy: text.endIndex) ?? text.endIndex
+        return String(text[lower..<upper])
     }
 
     /// The text before the match, the match, and the text after it (case-insensitive, first match), so a list can

@@ -93,7 +93,7 @@ final class RoomSearchModelTests: XCTestCase {
 
     /// A match's row reads as text: the snippet's markdown marks are not shown.
     func test_a_match_row_shows_the_snippet_without_markdown() {
-        let row = RoomSearchModel.row(result(7, "**Deploy** is `green`"))
+        let row = RoomSearchModel.row(result(7, "**Deploy** is `green`"), query: "deploy")
         XCTAssertEqual(row.snippet, "Deploy is green")
     }
 
