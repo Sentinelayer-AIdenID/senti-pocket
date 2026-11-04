@@ -67,6 +67,26 @@ enum RoomPreview {
     /// The long message's text: made up, the shape of a real design packet.
     /// `-PocketRoomLongMessageSections N` sets how many sections (52 by default, about 27,000 characters), and
     /// `-PocketRoomLongMessageNoTables YES` leaves the tables out, to tell what costs what.
+    /// `-PocketRoomLongMessageSet YES`: several long packets in a row before the last one, of the sizes a room that
+    /// stalled held (about 60k, 39k, 32k, 31k and 18k characters, made up), so the room is as heavy as that one.
+    static var isLongMessageSetRequested: Bool { UserDefaults.standard.bool(forKey: "PocketRoomLongMessageSet") }
+
+    /// A made-up packet of `sections` sections (about 520 characters each).
+    static func longMarkdown(sections: Int, tables: Bool = true) -> String {
+        var parts = ["# Design packet: room continuity", "A preview packet. Every section has the same shape."]
+        for section in 1...max(1, sections) {
+            parts.append("## Section \(section): flow and checks")
+            parts.append("This section covers the **design** of step \(section), with `check\(section)()` and "
+                + "[its notes](https://example.com/notes/\(section)). @review-agent please confirm, and @alex has the "
+                + "final say. Plain words follow so the paragraph wraps across several lines on a phone screen.")
+            parts.append("- First point of section \(section)\n- Second point, with **bold** and _italic_\n"
+                + "  - A nested point\n1. Ordered one\n2. Ordered two")
+            parts.append("```swift\nfunc check\(section)() -> Bool {\n    value > \(section)\n}\n```")
+            if tables { parts.append("| Field | Value |\n|---|---|\n| id | \(section) |\n| state | ready |") }
+        }
+        return parts.joined(separator: "\n\n")
+    }
+
     static let longMarkdown: String = {
         let defaults = UserDefaults.standard
         // `-PocketRoomLongMessageFile <path>`: a real message's text, read from a file on the machine running the
@@ -498,6 +518,13 @@ private struct RoomPreviewTransport: RoomTransport {
         let files = RoomPreview.isFilesRequested ? Self.fileRoots : []
         var long = RoomPreview.isLongMessageRequested
             ? [Self.row(130, "review-agent", minutesAgo: 1, RoomPreview.longMarkdown)] : []
+        if RoomPreview.isLongMessageSetRequested {
+            let earlier = [115, 74, 62, 60, 35].enumerated().map { index, sections in
+                Self.row(Int64(125 + index), "review-agent", minutesAgo: Double(6 - index),
+                         RoomPreview.longMarkdown(sections: sections))
+            }
+            long = earlier + long
+        }
         if RoomPreview.isLongMessageReplyRequested {
             long.append(Self.row(131, "human-alex", minutesAgo: 0.5, "Looks good, merging it now.", replyTo: 130))
         }
