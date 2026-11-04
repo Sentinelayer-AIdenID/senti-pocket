@@ -87,6 +87,39 @@ final class RoomFoldersClientTests: XCTestCase {
         XCTAssertEqual(PersonalRoutesURLProtocol.requests.map(\.idempotencyKey), [nil], "a bad key is left out")
     }
 
+    /// Review of #331: "New folder inside" a folder deleted a moment ago (elsewhere) is that folder gone, not folders
+    /// turned off; a new top-level folder's 404 is still "off".
+    func test_a_404_on_a_new_folder_inside_is_the_parent_gone() async {
+        for (parent, expected) in [("f-gone", RoomFolderError.gone), (nil, RoomFolderError.unavailable)] as [(String?, RoomFolderError)] {
+            let folders = client { _ in (404, #"{"error": {"code": "NOT_FOUND"}}"#) }
+            do {
+                _ = try await folders.createFolder(named: "Inside", in: parent, idempotencyKey: nil)
+                XCTFail("made a folder on a 404")
+            } catch {
+                XCTAssertEqual(error as? RoomFolderError, expected, parent ?? "top level")
+            }
+        }
+    }
+
+    /// Review of #331: a 403 that is about the account (blocked, banned, inactive, being deleted) asks to sign in
+    /// again, where the reason is said, instead of "that folder is no longer there"; any other 403 is still gone.
+    func test_a_403_about_the_account_is_not_a_folder_that_is_gone() async {
+        let cases: [(String, RoomFolderError)] = [
+            (#"{"error": {"code": "ACCOUNT_BLOCKED"}}"#, .reauthenticationRequired),
+            (#"{"detail": {"error": {"code": "ACCOUNT_INACTIVE"}}}"#, .reauthenticationRequired),
+            (#"{"error": {"code": "FORBIDDEN"}}"#, .gone),
+        ]
+        for (body, expected) in cases {
+            let folders = client { _ in (403, body) }
+            do {
+                try await folders.deleteFolder("f-a")
+                XCTFail("deleted on a 403")
+            } catch {
+                XCTAssertEqual(error as? RoomFolderError, expected, body)
+            }
+        }
+    }
+
     /// Each 409 code is its own refusal. A 409 with no code at all is a taken name, as the first servers sent it; a
     /// code this build does not know (a reused key) is a refusal, never "that name is taken".
     func test_each_409_code_is_its_own_refusal() async {

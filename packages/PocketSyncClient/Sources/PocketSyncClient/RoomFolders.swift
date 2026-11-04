@@ -117,8 +117,10 @@ public final class HTTPRoomFoldersClient: RoomFoldersServing, @unchecked Sendabl
         var body: [String: Any] = ["name": name]
         if let parentFolderId { body["parentFolderId"] = parentFolderId }
         let key = idempotencyKey.flatMap { Self.isIdempotencyKey($0) ? $0 : nil }
+        // Made inside a folder, a 404 is that folder gone (deleted elsewhere a moment ago), not folders turned off.
         return try folder(in: await send("POST", Self.base, body: body,
-                                         headers: key.map { ["Idempotency-Key": $0] } ?? [:], notFound: .unavailable))
+                                         headers: key.map { ["Idempotency-Key": $0] } ?? [:],
+                                         notFound: parentFolderId == nil ? .unavailable : .gone))
     }
 
     public func renameFolder(_ folderId: String, to name: String) async throws -> RoomFolder {
@@ -209,6 +211,10 @@ public final class HTTPRoomFoldersClient: RoomFoldersServing, @unchecked Sendabl
         switch answer.status {
         case 200..<300: return answer.json
         case 401: throw RoomFolderError.reauthenticationRequired
+        // The account itself refused (blocked, banned, inactive, being deleted): what signing in again says, not a
+        // folder that is gone.
+        case 403 where Self.errorCode(answer.json)?.hasPrefix("ACCOUNT_") == true:
+            throw RoomFolderError.reauthenticationRequired
         case 403, 404: throw notFound
         case 409: throw Self.conflict(answer.json)
         case 408, 425, 429, 500..<600: throw RoomFolderError.retryable

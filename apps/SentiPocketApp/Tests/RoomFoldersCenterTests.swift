@@ -15,6 +15,33 @@ private final class FakeRoomFolders: RoomFoldersServing, @unchecked Sendable {
     private var _keys: [String?] = []
     private var _failNext: RoomFolderError?
     private var next = 1
+    /// Holds the next list read or move until the test lets it go (a slow link).
+    private var _holdNextList = false
+    private var _holdNextMove = false
+    private var held: [CheckedContinuation<Void, Never>] = []
+    var holdNextList: Bool { get { lock.withLock { _holdNextList } } set { lock.withLock { _holdNextList = newValue } } }
+    var holdNextMove: Bool { get { lock.withLock { _holdNextMove } } set { lock.withLock { _holdNextMove = newValue } } }
+    var holding: Int { lock.withLock { held.count } }
+
+    func releaseHeld() {
+        let waiting: [CheckedContinuation<Void, Never>] = lock.withLock {
+            defer { held = [] }
+            return held
+        }
+        waiting.forEach { $0.resume() }
+    }
+
+    private func pause(if flag: ReferenceWritableKeyPath<FakeRoomFolders, Bool>) async {
+        let hold: Bool = lock.withLock {
+            let value = self[keyPath: flag]
+            return value
+        }
+        guard hold else { return }
+        lock.withLock { self[keyPath: flag] = false }
+        await withCheckedContinuation { continuation in lock.withLock { held.append(continuation) } }
+    }
+
+    func setFolders(_ folders: [RoomFolder]) { lock.withLock { _folders = folders } }
 
     var on: Bool { get { lock.withLock { _on } } set { lock.withLock { _on = newValue } } }
     var failNext: RoomFolderError? { get { lock.withLock { _failNext } } set { lock.withLock { _failNext = newValue } } }
@@ -37,7 +64,9 @@ private final class FakeRoomFolders: RoomFoldersServing, @unchecked Sendable {
 
     func folders() async throws -> [RoomFolder] {
         try note("list")
-        return lock.withLock { _folders }
+        let seen = lock.withLock { _folders }  // what the server had when the read was made
+        await pause(if: \._holdNextList)
+        return seen
     }
 
     func createFolder(named name: String, in parentFolderId: String?, idempotencyKey: String?) async throws -> RoomFolder {
@@ -58,6 +87,7 @@ private final class FakeRoomFolders: RoomFoldersServing, @unchecked Sendable {
 
     func moveFolder(_ folderId: String, to position: Int) async throws -> RoomFolder {
         try note("move \(folderId) \(position)")
+        await pause(if: \._holdNextMove)
         return RoomFolder(id: folderId, name: "moved", position: position)
     }
 
@@ -375,6 +405,51 @@ final class RoomFoldersCenterTests: XCTestCase {
         XCTAssertNil(folders.deleting)
         XCTAssertEqual(fake.calls, ["list", "delete f-a", "list"])
         XCTAssertEqual(roomReads, 1)
+    }
+
+    /// Review of #331: an older read of the folders that lands after a newer one never puts back what it saw.
+    func test_an_older_folders_read_landing_late_never_replaces_a_newer_one() async {
+        let fake = FakeRoomFolders(three)
+        let folders = center(fake)
+        fake.holdNextList = true
+        let older = Task { await folders.refresh() }
+        while fake.holding == 0 { await Task.yield() }
+        fake.setFolders(Array(three.prefix(2)))  // a folder was deleted elsewhere
+        await folders.refresh()                   // the newer read lands first
+        XCTAssertEqual(folders.folders?.map(\.id), ["f-a", "f-b"])
+        fake.releaseHeld()
+        await older.value
+        XCTAssertEqual(folders.folders?.map(\.id), ["f-a", "f-b"], "the late, older read is dropped")
+    }
+
+    /// Review of #331: two fast taps on Move up move the folder once, not twice from the old order.
+    func test_two_fast_moves_move_the_folder_once() async {
+        let fake = FakeRoomFolders(three)
+        let folders = center(fake)
+        await folders.refresh()
+        fake.holdNextMove = true
+        folders.send(.move(folderId: "f-c", up: true))
+        while fake.holding == 0 { await Task.yield() }
+        folders.send(.move(folderId: "f-c", up: true))  // a second tap while the first is on its way
+        for _ in 0..<20 { await Task.yield() }
+        fake.releaseHeld()
+        for _ in 0..<200 where fake.calls.filter({ $0.hasPrefix("list") }).count < 2 { await Task.yield() }
+        XCTAssertEqual(fake.calls.filter { $0.hasPrefix("move") }, ["move f-c 1"])
+    }
+
+    /// The alert's Delete, in the order SwiftUI runs it: the tap, then the alert closing (which clears `deleting`),
+    /// then the task the tap started. The folder is still deleted (review of #331: a task that read `deleting` itself
+    /// found it cleared and deleted nothing, with no error).
+    func test_the_alerts_delete_still_deletes_after_the_alert_has_closed() async {
+        let fake = FakeRoomFolders(nested)
+        let folders = center(fake)
+        await folders.refresh()
+        folders.send(.delete(folderId: "f-a"))
+        let task = folders.deleteFromAlert()
+        folders.deleting = nil  // the alert's binding, as it closes
+        await task?.value
+        XCTAssertEqual(fake.calls, ["list", "delete f-a", "list"])
+        XCTAssertNil(folders.deleting)
     }
 
     /// The server refuses a delete that would put a folder inside it beside one of the same name: the folder stays,

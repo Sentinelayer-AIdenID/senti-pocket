@@ -45,6 +45,9 @@ final class RoomFoldersCenter: ObservableObject {
     @Published private(set) var isSaving = false
     /// The folder whose delete waits on your confirmation.
     @Published var deleting: RoomFolder?
+    /// Which read of the folders is the newest, and whether a move is on its way.
+    private var readRevision = 0
+    private var moving = false
 
     let client: any RoomFoldersServing
     /// Reads the room list again: where each room is filed is its `folderId` there.
@@ -97,8 +100,12 @@ final class RoomFoldersCenter: ObservableObject {
     /// nothing either way keeps what is shown. A read that finds what is shown writes nothing, so the root and the side
     /// panel draw only for a change.
     func refresh() async {
+        // Only the newest read is shown: an older one that lands late (a slow link) never puts back what it saw.
+        readRevision += 1
+        let revision = readRevision
         do {
             let read = try await client.folders()
+            guard revision == readRevision else { return }
             readAt = Date()
             if read != folders { folders = read }
         } catch RoomFolderError.unavailable {
@@ -278,12 +285,28 @@ final class RoomFoldersCenter: ObservableObject {
     /// it with the name of one already at that level keeps it from being deleted, and says so.
     func confirmDelete() async {
         guard let folder = deleting else { return }
+        await delete(folder)
+    }
+
+    /// The alert's "Delete folder": the folder is taken at the tap. The alert clears `deleting` as it closes, before a
+    /// task started by the tap runs, so a task that read `deleting` itself found nothing and deleted nothing.
+    @discardableResult
+    func deleteFromAlert() -> Task<Void, Never>? {
+        guard let folder = deleting else { return nil }
+        return Task { await delete(folder) }
+    }
+
+    private func delete(_ folder: RoomFolder) async {
         deleting = nil
         await change(deleting: true) { try await self.client.deleteFolder(folder.id) }
     }
 
-    /// One place up or down among the folders beside it: its new place, counted from 0, is its position.
+    /// One place up or down among the folders beside it: its new place, counted from 0, is its position. One move at a
+    /// time: a second tap while the first is on its way would count from the old order and move the folder twice.
     private func move(_ id: String, up: Bool) async {
+        guard !moving else { return }
+        moving = true
+        defer { moving = false }
         let beside = tree.siblings(of: id)
         guard let index = beside.firstIndex(where: { $0.id == id }) else { return }
         let target = up ? index - 1 : index + 1
@@ -379,7 +402,7 @@ struct RoomFolderSheets: ViewModifier {
                 center.deleting.map { "Delete “\($0.name)”?" } ?? "Delete folder?",
                 isPresented: Binding(get: { center.deleting != nil }, set: { if !$0 { center.deleting = nil } })
             ) {
-                Button("Delete folder", role: .destructive) { Task { await center.confirmDelete() } }
+                Button("Delete folder", role: .destructive) { center.deleteFromAlert() }
                 Button("Cancel", role: .cancel) { center.deleting = nil }
             } message: {
                 Text(RoomFolderName.deleteMessage)
