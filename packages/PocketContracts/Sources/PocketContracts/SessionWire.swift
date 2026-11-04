@@ -47,11 +47,23 @@ public struct SessionSummary: Codable, Equatable, Sendable, Identifiable {
     public let unread: SessionUnreadSummary?
     /// How far the server holds you have read the room (absent from older servers, and before you read it).
     public let lastReadSequenceId: Int64?
+    /// "room" or "direct" (a direct message with one person or agent). Absent from servers without direct messages.
+    public let kind: String?
+    /// A direct room's other side, as you see it. Nil for a room.
+    public let counterpart: SessionCounterpart?
+    /// The room a direct room was opened from, or nil when that room is gone or no longer visible to you.
+    public let originRoomId: String?
+    /// Your folder for this room, or nil when it is in none (folders are yours alone).
+    public let folderId: String?
+
+    /// A direct message with one person or agent, which the room list nests under the room it was opened from.
+    public var isDirect: Bool { kind == "direct" && counterpart != nil }
 
     enum CodingKeys: String, CodingKey {
         case sessionId, status, archiveStatus, visibility, membershipRole, title, summaryText, summaryGeneratedAt
         case summaryModel, agentCount, eventCount, totalCostUsd, createdAt, lastActivityAt, expiresAt, killedAt
         case templateName, codebasePath, s3ArchivePath, roomType, online, unread, lastReadSequenceId
+        case kind, counterpart, originRoomId, folderId
     }
 
     /// The room's own fields decode exactly as the wire guarantees them (a missing required key fails the list).
@@ -83,6 +95,43 @@ public struct SessionSummary: Codable, Equatable, Sendable, Identifiable {
         online = try? container.decodeIfPresent(SessionOnlineCounts.self, forKey: .online)
         unread = try? container.decodeIfPresent(SessionUnreadSummary.self, forKey: .unread)
         lastReadSequenceId = SessionTolerant.sequence(in: container, .lastReadSequenceId)
+        // Where a room sits in your list (direct or not, nested under which room, in which folder) never fails the
+        // list: missing, null or malformed, a row reads as an ordinary room, unfiled.
+        kind = SessionTolerant.identifier(in: container, .kind)?.lowercased()
+        counterpart = try? container.decodeIfPresent(SessionCounterpart.self, forKey: .counterpart)
+        originRoomId = SessionTolerant.identifier(in: container, .originRoomId)
+        folderId = SessionTolerant.identifier(in: container, .folderId)
+    }
+}
+
+/// The other side of a direct room, as the viewer sees it: who, a person or an agent, and the name to show.
+public struct SessionCounterpart: Codable, Equatable, Hashable, Sendable {
+    /// The id the room's messages carry for them (`human-<login>` for a person, the agent's id for an agent).
+    public let senderId: String
+    /// "human" or "agent".
+    public let kind: String
+    public let displayName: String
+
+    public var isAgent: Bool { kind == "agent" }
+
+    public init(senderId: String, kind: String, displayName: String) {
+        self.senderId = senderId
+        self.kind = kind
+        self.displayName = displayName
+    }
+
+    enum CodingKeys: String, CodingKey { case senderId, kind, displayName }
+
+    /// A counterpart needs an id; a kind other than "agent" reads as a person, and a missing name shows the id.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        guard let senderId = SessionTolerant.identifier(in: container, .senderId) else {
+            throw DecodingError.dataCorruptedError(forKey: .senderId, in: container, debugDescription: "no sender id")
+        }
+        let kind = SessionTolerant.identifier(in: container, .kind)?.lowercased() == "agent" ? "agent" : "human"
+        let name = (try? container.decodeIfPresent(String.self, forKey: .displayName))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        self.init(senderId: senderId, kind: kind, displayName: name.flatMap { $0.isEmpty ? nil : $0 } ?? senderId)
     }
 }
 
@@ -136,6 +185,13 @@ enum SessionTolerant {
     static func sequence<Key: CodingKey>(in container: KeyedDecodingContainer<Key>?, _ key: Key) -> Int64? {
         guard let value = try? container?.decodeIfPresent(Int64.self, forKey: key), value > 0 else { return nil }
         return value
+    }
+
+    /// A non-blank string of at most 256 bytes, trimmed; anything else (missing, null, not a string) is nil.
+    static func identifier<Key: CodingKey>(in container: KeyedDecodingContainer<Key>?, _ key: Key) -> String? {
+        guard let value = try? container?.decodeIfPresent(String.self, forKey: key) else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty || trimmed.utf8.count > 256 ? nil : trimmed
     }
 }
 

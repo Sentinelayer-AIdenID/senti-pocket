@@ -21,6 +21,8 @@ struct RoomRoute: Hashable {
     /// What the room list knew about your reading when the room was opened from it: the room opens at your first
     /// unread message.
     var readMark: RoomReadMark?
+    /// A direct message: whom it is with and the room it started from. Nil for a room.
+    var direct: DirectRoomInfo?
 }
 
 extension RoomRoute {
@@ -134,6 +136,10 @@ struct RoomChatScreen: View {
     private let onReauthenticationRequired: @MainActor () -> Void
     /// The room was renamed here: the room list reads the new name.
     private let onRenamed: @MainActor () -> Void
+    /// Direct messages, where they are on: avatars open profile cards, and a direct message gets its switch.
+    private let directContext: RoomDirectContext?
+    /// The profile card open over the room.
+    @State private var profileTarget: RoomProfileTarget?
 
     init(
         route: RoomRoute,
@@ -159,9 +165,11 @@ struct RoomChatScreen: View {
         onRenamed: @escaping @MainActor () -> Void = {},
         savedSummary: String? = nil,
         onRead: @escaping @MainActor (_ sessionId: String, _ through: Int64, _ caughtUp: Bool) -> Void = { _, _, _ in },
+        direct: RoomDirectContext? = nil,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.route = route
+        self.directContext = direct
         self.reader = reader
         self.search = search
         self.ticketsTransport = ticketsTransport
@@ -444,7 +452,7 @@ struct RoomChatScreen: View {
     }
 
     /// Something covers the room: a sheet or the side panel (from the app), or this room's call.
-    private var isCovered: Bool { coveredFromOutside || voiceRoom != nil }
+    private var isCovered: Bool { coveredFromOutside || voiceRoom != nil || profileTarget != nil }
 
     /// The called agent's lab as the room's presence reports it, for the call screen's logo; nil in a meeting.
     private func partnerLab(of room: VoiceRoomCoordinator) -> AgentLab? {
@@ -515,6 +523,27 @@ struct RoomChatScreen: View {
         OpenURLAction { url in handle(url) }
     }
 
+    /// Where direct messages are on and the room knows who you are, an avatar opens its card: never yours, never the
+    /// room's voice. Otherwise avatars are not buttons, and the online ring opens the people list as before.
+    private var profileOpener: RoomProfileOpener? {
+        RoomProfileOpener.forRoom(directMessagesOn: directContext != nil,
+                                  ownMentionHandles: coordinator.state.ownMentionHandles) { target in
+            CrashReporter.shared.note("profile card opened")
+            profileTarget = target
+        }
+    }
+
+    /// The room the card names as shared before the server lists them: this room, or in a direct message the room it
+    /// started from.
+    private var profileSharedRoom: String? {
+        route.direct == nil ? coordinator.state.title : route.direct?.originTitle
+    }
+
+    /// In a direct message, its other side's card has nothing to open: you are already here.
+    private func isCounterpart(_ target: RoomProfileTarget) -> Bool {
+        route.direct?.counterpart.senderId.lowercased() == target.senderId.lowercased()
+    }
+
     var body: some View {
         RoomChatView(
             state: coordinator.state,
@@ -564,6 +593,33 @@ struct RoomChatScreen: View {
         // A sheet, the side panel or a call's window covers the room: its moving parts (the presence ring) rest
         // underneath (warden, #265, #269).
         .environment(\.roomIsCovered, isCovered)
+        .environment(\.roomProfileOpener, profileOpener)
+        // A direct message: whom it is with, the room you share, and for an agent whether it may use this chat there.
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if let info = route.direct {
+                DirectRoomHeaderHost(
+                    info: info,
+                    sessionId: route.sessionId,
+                    lastMessageIsOwn: DirectRoomActivity.lastMessageIsOwn(coordinator.state.rows),
+                    center: directContext?.center,
+                    openRoom: { openRoom(SentiLink(sessionId: $0)) }
+                )
+            }
+        }
+        .sheet(item: $profileTarget) { target in
+            if let directContext {
+                RoomProfileSheet(
+                    target: target,
+                    roomId: route.sessionId,
+                    sharedRoom: profileSharedRoom,
+                    canMessage: !isCounterpart(target),
+                    context: directContext,
+                    // Block comes with the room's block flow (#312) once it lands; until then the card has none.
+                    onBlock: nil,
+                    onClose: { profileTarget = nil }
+                )
+            }
+        }
         .toolbar {
             // New agent (Carter: "I don't think I see a new agent button on mobile, put that"), beside the title as on
             // the web, for owners and admins the mint admits. The first of the room's buttons: iOS keeps the title whole

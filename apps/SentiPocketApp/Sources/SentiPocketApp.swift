@@ -229,6 +229,10 @@ private struct AuthenticatedRootView: View {
     /// What waits on your decision across your rooms (ticket 931e1d2e).
     @StateObject private var waiting: WaitingOnYouCoordinator
     @State private var presentsWaiting = false
+    /// Direct messages: on when the server answers their settings (DIRECT_MESSAGES_ENABLED), else nothing shows.
+    @StateObject private var directMessages: DirectMessagesCenter
+    /// Your room folders: on when the server lists them (ROOM_FOLDERS_ENABLED), else nothing shows.
+    @StateObject private var roomFolders: RoomFoldersCenter
     @Environment(\.scenePhase) private var rootScenePhase
     @ObservedObject private var whisperModelCoordinator: WhisperModelProvisioningCoordinator
     @ObservedObject private var incomingLinks: IncomingLinkInbox
@@ -366,6 +370,19 @@ private struct AuthenticatedRootView: View {
             sender: HTTPRoomMessageSender(apiBaseURL: apiURL),
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
         ))
+        // Yours alone, as you: no cache, no cookies, the bearer per request.
+        _directMessages = StateObject(wrappedValue: DirectMessagesCenter(
+            client: HTTPDirectMessagesClient(apiBaseURL: apiURL, urlSession: SentiHTTPTransportPolicy.protectedReadSession,
+                                             tokenProvider: { SessionTokenStore.load() }),
+            onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
+        ))
+        _roomFolders = StateObject(wrappedValue: RoomFoldersCenter(
+            client: HTTPRoomFoldersClient(apiBaseURL: apiURL, urlSession: SentiHTTPTransportPolicy.protectedReadSession,
+                                          tokenProvider: { SessionTokenStore.load() }),
+            // Where each room is filed is the room list's: it is read again after every change.
+            onRoomsChanged: { sessions.send(.refreshSessions) },
+            onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
+        ))
         _whisperModelCoordinator = ObservedObject(wrappedValue: whisperModelCoordinator)
         _incomingLinks = ObservedObject(wrappedValue: incomingLinks)
         self.roomTransport = transport
@@ -412,7 +429,8 @@ private struct AuthenticatedRootView: View {
                         roomScreen(currentRoom)
                             .id(currentRoom)
                     } else {
-                        SessionListView(state: sessions.state) { intent in
+                        SessionListView(state: sessions.state, folders: roomFolders.items,
+                                        onFolder: { roomFolders.send($0) }) { intent in
                             sessions.send(intent)
                             if case .selectSession(let sessionId) = intent,
                                UTF8ExactIdentity.matches(sessions.selectedSessionId, sessionId) {
@@ -476,6 +494,9 @@ private struct AuthenticatedRootView: View {
             if open { Task { await notifications.refresh(force: true) } }
             if open { Task { await waiting.refresh() } }
             if open { sessions.send(.refreshSessions) }
+            // Whether folders and direct messages are on, and your folders, as the panel opens.
+            if open { Task { await roomFolders.refresh() } }
+            if open { Task { await directMessages.refresh() } }
         }
         // While the side panel stays open its rooms keep up: a message that arrives in another room shows its unread
         // badge without closing and opening the panel again (Carter, #61188). Only with the app in front, as the bell's
@@ -586,12 +607,14 @@ private struct AuthenticatedRootView: View {
         .sheet(isPresented: $presentsSettings) {
             WhisperModelSettingsView(
                 coordinator: whisperModelCoordinator,
+                directMessages: directMessages,
                 onSignOut: {
                     presentsSettings = false
                     onSignOut()
                 }
             )
         }
+        .modifier(RoomFolderSheets(center: roomFolders))
         .sheet(isPresented: $presentsNewRoom) {
             if let creator = roomSender as? any RoomCreating {
                 NewRoomSheet(
@@ -616,6 +639,8 @@ private struct AuthenticatedRootView: View {
                 authenticationRevision: authenticationRevision
             )
             sessions.start()
+            Task { await directMessages.refresh() }
+            Task { await roomFolders.refresh() }
             notifications.startPolling()
             // Waiting on you is read from sign-in on, not only once the app comes back to the front (warden, #270).
             waiting.startPolling()
@@ -677,8 +702,35 @@ private struct AuthenticatedRootView: View {
             focusSequenceId: link.messageSequence,
             focusTicketId: link.ticketId,
             opensAdmissions: link.admissionId != nil,
-            readMark: row.map(RoomReadMark.init(row:))
+            readMark: row.map(RoomReadMark.init(row:)),
+            // A direct message (from its push, too) opens as one: whom it is with, and its room.
+            direct: DirectRoomInfo(row: row, rows: sessions.state.rows)
         ))
+    }
+
+    /// A direct message the server opened from a profile card: the room on screen, and the room list reads it.
+    @MainActor
+    private func openDirect(_ dm: DirectMessage) {
+        let row = sessions.state.rows.first { UTF8ExactIdentity.matches($0.sessionId, dm.sessionId) }
+        show(RoomRoute(
+            sessionId: dm.sessionId,
+            title: dm.counterpart.displayName,
+            membershipRole: row?.membershipRole ?? "",
+            readMark: row.map(RoomReadMark.init(row:)),
+            direct: DirectRoomInfo(dm)
+        ))
+        sessions.send(.refreshSessions)
+    }
+
+    /// What a room screen needs for direct messages, where they are on.
+    private var directContext: RoomDirectContext? {
+        RoomDirectContext.ifAvailable(
+            directMessages,
+            existing: { senderId in
+                sessions.state.rows.first { $0.counterpart?.senderId.lowercased() == senderId.lowercased() }?.sessionId
+            },
+            open: { dm in openDirect(dm) }
+        )
     }
 
     /// Puts a room on screen as the root (no back button: the side panel is the way between rooms), keeps the
@@ -700,7 +752,8 @@ private struct AuthenticatedRootView: View {
             sessionId: sessionId,
             title: row?.title ?? "Room",
             membershipRole: row?.membershipRole ?? "",
-            readMark: row.map(RoomReadMark.init(row:))
+            readMark: row.map(RoomReadMark.init(row:)),
+            direct: DirectRoomInfo(row: row, rows: sessions.state.rows)
         )
     }
 
@@ -749,7 +802,11 @@ private struct AuthenticatedRootView: View {
                     subtitle: row.summary,
                     lastActivity: row.lastActivity?.date,
                     kind: row.roomTypeLabel,
-                    activity: row.activity
+                    activity: row.activity,
+                    direct: row.counterpart.map {
+                        PocketSidePanel.Direct(name: $0.displayName, isAgent: $0.isAgent, originRoomId: row.originRoomId)
+                    },
+                    folderId: row.folderId
                 )
             },
             currentRoomId: currentRoom?.sessionId,
@@ -785,11 +842,15 @@ private struct AuthenticatedRootView: View {
             onSettings: {
                 closeDrawer()
                 presentsSettings = true
+                Task { await directMessages.refresh() }
             },
             onNewRoom: roomSender is any RoomCreating ? {
                 closeDrawer()
                 presentsNewRoom = true
-            } : nil
+            } : nil,
+            folders: roomFolders.items,
+            folderNotice: roomFolders.notice,
+            onFolder: { roomFolders.send($0) }
         )
     }
 
@@ -824,6 +885,7 @@ private struct AuthenticatedRootView: View {
             onRead: { sessionId, sequence, caughtUp in
                 sessions.noteRead(sessionId: sessionId, through: sequence, caughtUp: caughtUp)
             },
+            direct: directContext,
             onReauthenticationRequired: invalidateProtectedAuthentication
         )
     }
@@ -837,7 +899,7 @@ private struct AuthenticatedRootView: View {
     /// Something over the room: a sheet, or the side panel.
     private var roomCovered: Bool {
         drawerOpen || presentsNotifications || presentsWaiting || presentsPocket || presentsActivity || presentsSettings
-            || presentsNewRoom || presentsCallLog
+            || presentsNewRoom || presentsCallLog || roomFolders.sheet != nil
     }
 
     /// The room list has loaded or failed, so a room opened from a link knows its title and your role in it.
