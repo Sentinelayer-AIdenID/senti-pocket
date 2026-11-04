@@ -1033,20 +1033,21 @@ final class RoomSafetyTests: XCTestCase {
             blocks: blocks, onReauthenticationRequired: {}
         )
         room.resume()
-        room.handle(.message(message(2, author: "human-sam", text: "Opening words")))
+        // Pat started the thread and wrote nothing in it since.
+        room.handle(.message(message(2, author: "human-pat", text: "Opening words")))
         await waitUntil("summarized") { !summarizer.threads.isEmpty }
-        let read = summarizer.threads.joined().joined(separator: " ")
-        XCTAssertFalse(read.contains("Something unkind"), "a blocked person's reply is left out")
-        XCTAssertFalse(read.contains("Opening words"), "and the message of theirs the thread answers")
-        XCTAssertTrue(read.contains("Looking at it now") && read.contains("Build 319 is green"))
+        let first = summarizer.threads.joined().joined(separator: " ")
+        XCTAssertFalse(first.contains("Something unkind"), "a blocked person's reply is left out")
+        XCTAssertTrue(first.contains("Opening words") && first.contains("Looking at it now"))
 
-        // A block made after a summary: it is written again, without them.
-        blocks.unblock("human-sam")
+        // Pat blocked after the summary was written: it is written again without the words that started it, though
+        // the thread's replies are the same.
+        blocks.block(RoomBlockTarget(actorId: "human-pat", name: "pat"))
         await waitUntil("written again") { summarizer.threads.count >= 2 }
-        let after = summarizer.threads.count
-        blocks.block(RoomBlockTarget(actorId: "human-sam", name: "sam"))
-        await waitUntil("written once more") { summarizer.threads.count > after }
-        XCTAssertFalse(summarizer.threads.last!.joined(separator: " ").contains("Something unkind"))
+        let again = summarizer.threads.last?.joined(separator: " ") ?? ""
+        XCTAssertFalse(again.contains("Opening words"), "nor the message of theirs the thread answers")
+        XCTAssertFalse(again.contains("Something unkind"))
+        XCTAssertTrue(again.contains("Build 319 is green"))
         room.pause()
     }
 
