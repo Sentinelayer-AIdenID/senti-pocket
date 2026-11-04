@@ -231,8 +231,9 @@ struct RoomProfileSheet: View {
     let roomId: String
     /// Direct messages, where they are on; nil offers no Message.
     let context: RoomDirectContext?
-    /// Block, where the app has a block flow (#312); none yet, so the card shows no Block.
-    let onBlock: (() -> Void)?
+    /// Block, where the app has a block flow (#312) and `RoomMemberBlock.offers` allows it, with the message it names
+    /// (the newest of theirs in the list, never their id alone); nil shows no Block.
+    let onBlock: ((Int64) -> Void)?
     /// A box's flight record entry, while it runs: its live steps.
     let box: FlightRecordState.Box?
     /// A message tapped in the list: the sheet closes and the room brings it into view.
@@ -245,7 +246,7 @@ struct RoomProfileSheet: View {
 
     init(target: RoomProfileTarget, roomId: String, sharedRoom: String?, canMessage: Bool, context: RoomDirectContext?,
          messages reader: (any RoomAuthorMessagesReading)? = nil, box: FlightRecordState.Box? = nil,
-         onBlock: (() -> Void)? = nil, onOpenMessage: @escaping (Int64) -> Void = { _ in },
+         isBlocked: Bool = false, onBlock: ((Int64) -> Void)? = nil, onOpenMessage: @escaping (Int64) -> Void = { _ in },
          onOpenFlight: (() -> Void)? = nil, onReauthenticationRequired: @escaping @MainActor () -> Void = {},
          onClose: @escaping () -> Void) {
         self.roomId = roomId
@@ -258,8 +259,9 @@ struct RoomProfileSheet: View {
         _model = StateObject(wrappedValue: RoomProfileModel(target: target, sharedRoom: sharedRoom,
                                                             canMessage: canMessage && context != nil,
                                                             canBlock: onBlock != nil))
+        // Someone you blocked: their messages are not listed (or read).
         _messages = StateObject(wrappedValue: RoomMemberMessagesModel(
-            sessionId: roomId, authorId: target.senderId, reader: reader,
+            sessionId: roomId, authorId: target.senderId, reader: reader, isBlocked: isBlocked,
             onReauthenticationRequired: onReauthenticationRequired
         ))
     }

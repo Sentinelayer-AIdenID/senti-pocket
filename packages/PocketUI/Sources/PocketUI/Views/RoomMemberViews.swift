@@ -10,7 +10,8 @@ public struct RoomMemberSheetView: View {
     private let messages: RoomMemberMessagesState
     private let box: FlightRecordState.Box?
     private let onMessage: () -> Void
-    private let onBlock: (() -> Void)?
+    /// Block, with the message it names (the newest in the list): the card offers it only once there is one.
+    private let onBlock: ((Int64) -> Void)?
     private let onClose: () -> Void
     private let onOpenMessage: (Int64) -> Void
     private let onLoadMore: () -> Void
@@ -21,7 +22,7 @@ public struct RoomMemberSheetView: View {
     static let stepsShown = 5
 
     public init(card: RoomProfileCardState, messages: RoomMemberMessagesState, box: FlightRecordState.Box? = nil,
-                onMessage: @escaping () -> Void, onBlock: (() -> Void)? = nil, onClose: @escaping () -> Void,
+                onMessage: @escaping () -> Void, onBlock: ((Int64) -> Void)? = nil, onClose: @escaping () -> Void,
                 onOpenMessage: @escaping (Int64) -> Void, onLoadMore: @escaping () -> Void,
                 onRetry: @escaping () -> Void, onOpenFlight: (() -> Void)? = nil) {
         self.card = card
@@ -39,7 +40,8 @@ public struct RoomMemberSheetView: View {
     public var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                RoomProfileCardView(state: card, onMessage: onMessage, onBlock: onBlock, onClose: onClose)
+                RoomProfileCardView(state: card, onMessage: onMessage, onBlock: messages.blockAction(onBlock),
+                                    onClose: onClose)
                 if let line = messages.connectionLine {
                     Label(line, systemImage: connectionSymbol)
                         .font(.subheadline)
@@ -153,9 +155,9 @@ public struct RoomMemberSheetView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 20)
                     .padding(.vertical, 8)
-                    .accessibilityIdentifier(messages.isPrivate ? "pocket.member.private" : "pocket.member.empty")
+                    .accessibilityIdentifier(emptyLineIdentifier)
             }
-            ForEach(messages.rows) { row in
+            ForEach(messages.listedRows) { row in
                 Button {
                     onOpenMessage(row.sequenceId)
                 } label: {
@@ -164,9 +166,11 @@ public struct RoomMemberSheetView: View {
                 .buttonStyle(.plain)
                 .accessibilityHint("Shows it in the room")
                 .accessibilityIdentifier("pocket.member.message.\(row.sequenceId)")
-                // The list reads its next page as its last row comes into view.
+                // The list reads its next page as its last row comes into view, unless pages stopped bringing their
+                // messages: then "Load older" reads on.
                 .onAppear {
-                    if row.id == messages.rows.last?.id, messages.canLoadMore, messages.phase == .idle { onLoadMore() }
+                    if row.id == messages.rows.last?.id, messages.canLoadMore, messages.phase == .idle,
+                       !messages.olderNeedsTap { onLoadMore() }
                 }
                 Divider().padding(.leading, 20)
             }
@@ -190,10 +194,27 @@ public struct RoomMemberSheetView: View {
                 .padding(.horizontal, 20)
                 .padding(.vertical, 12)
             case .idle:
-                EmptyView()
+                if messages.showsLoadOlder {
+                    Button(action: onLoadMore) {
+                        Label("Load older", systemImage: "arrow.down.circle")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.borderless)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 8)
+                    .accessibilityHint("Reads their older messages")
+                    .accessibilityIdentifier("pocket.member.loadOlder")
+                }
             }
         }
         .padding(.bottom, 24)
+    }
+
+    private var emptyLineIdentifier: String {
+        if messages.isBlocked { return "pocket.member.blocked" }
+        return messages.isPrivate ? "pocket.member.private" : "pocket.member.empty"
     }
 
     private func rowLabel(_ row: RoomMemberMessageRow) -> some View {

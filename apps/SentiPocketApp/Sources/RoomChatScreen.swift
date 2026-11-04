@@ -694,7 +694,10 @@ struct RoomChatScreen: View {
                 context: directContext,
                 messages: authorMessages,
                 box: box,
-                // Block comes with the room's block flow (#312) once it lands; until then the card has none.
+                // Block comes with the room's block flow (#312); until then the card has none. Whichever of the two
+                // lands second wires it here: `isBlocked:` from the room's blocks, and `onBlock:` only where
+                // `RoomMemberBlock.offers` allows it (with `profileOpener`'s own ids), blocking with the message it is
+                // handed (`RoomBlockTarget(actorId:name:sequenceId:)`), never by their id alone.
                 onBlock: nil,
                 onOpenMessage: { sequence in
                     profileTarget = nil

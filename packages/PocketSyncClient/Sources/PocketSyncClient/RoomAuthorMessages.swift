@@ -46,15 +46,18 @@ public struct RoomAuthorPage: Decodable, Equatable, Sendable {
 }
 
 public enum RoomAuthor {
-    /// How a public room shows a person to a reader outside it (`human-public.<digest>`). The API answers an empty page
-    /// for that id, by design: people's messages are private there.
+    /// A stand-in name (`human-public.<digest>`). When you read a public room you are not a member of, the API shows a
+    /// person who signed in with an account id (`human-<uuid>`, `human-g.<hex>`) under a stand-in name made for that
+    /// room; people known by their login (`human-<login>`) and agents keep their own ids. Rows are stored under the real
+    /// id, so asking for a stand-in name finds nothing.
     public static func isPublicAlias(_ authorId: String) -> Bool {
         authorId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasPrefix("human-public.")
     }
 
-    /// An id the API matches an author by: the row-carried form (`human-<login>`, `human-g.<hex>`, an agent id).
+    /// An id the API accepts for `author`, exactly its own agent-id rule: a letter or digit first, then up to 63 more
+    /// of letters, digits, `.`, `_`, `:` and `-` (64 at most, no `@`).
     static func isValidId(_ authorId: String) -> Bool {
-        authorId.range(of: #"^[A-Za-z0-9._:@-]{1,128}$"#, options: .regularExpression) != nil
+        authorId.range(of: #"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"#, options: .regularExpression) != nil
     }
 }
 

@@ -91,6 +91,56 @@ final class RoomMemberViewTests: XCTestCase {
         XCTAssertFalse(model.state.canLoadMore)
     }
 
+    /// The API can answer a page with none of their messages and a cursor (its scan stops at a row budget, and breakout
+    /// rows are filtered out). No new row shows to read on, so the read goes on by itself to where their messages are.
+    func test_a_page_with_no_rows_but_a_cursor_reads_on() async {
+        let reader = ScriptedAuthorPages([page([], next: 900), page([], next: 700), page([650, 600], next: 500),
+                                          page([450], next: nil)])
+        let model = RoomMemberMessagesModel(sessionId: "room_1", authorId: "agent-a1", reader: reader)
+        await model.loadMore()
+        XCTAssertEqual(reader.calls.map(\.before), [nil, 900, 700], "on past both empty pages, and no further")
+        XCTAssertEqual(model.state.rows.map(\.sequenceId), [650, 600])
+        XCTAssertTrue(model.state.canLoadMore)
+        XCTAssertFalse(model.state.showsLoadOlder, "rows came: the list's last row reads on as it shows")
+        XCTAssertEqual(model.state.phase, .idle)
+    }
+
+    /// Reading on is bounded: three more pages at most, then "Load older" shows, and each tap reads as far again.
+    func test_reading_on_stops_after_three_more_pages_then_load_older_reads_on() async {
+        let reader = ScriptedAuthorPages([page([], next: 9000), page([], next: 8000), page([], next: 7000),
+                                          page([], next: 6000), page([], next: 5000), page([], next: 4000),
+                                          page([], next: 3000), page([], next: 2000), page([1500], next: nil)])
+        let model = RoomMemberMessagesModel(sessionId: "room_1", authorId: "agent-a1", reader: reader)
+        await model.loadMore()
+        XCTAssertEqual(reader.calls.map(\.before), [nil, 9000, 8000, 7000], "the first page and three more, no more")
+        XCTAssertTrue(model.state.showsLoadOlder)
+        XCTAssertEqual(model.state.emptyLine(name: "agent-a1"), "No messages from agent-a1 found so far.")
+
+        // "Load older".
+        await model.loadMore()
+        XCTAssertEqual(reader.calls.map(\.before), [nil, 9000, 8000, 7000, 6000, 5000, 4000, 3000])
+        XCTAssertTrue(model.state.showsLoadOlder, "still none of theirs: the button stays")
+
+        await model.loadMore()
+        XCTAssertEqual(reader.calls.last?.before, 2000)
+        XCTAssertEqual(model.state.rows.map(\.sequenceId), [1500])
+        XCTAssertFalse(model.state.showsLoadOlder, "the room's start")
+        XCTAssertFalse(model.state.canLoadMore)
+        XCTAssertNil(model.state.emptyLine(name: "agent-a1"))
+    }
+
+    /// Someone you blocked: their messages are neither read nor listed, and the list says why.
+    func test_a_blocked_author_is_not_read_and_the_list_says_so() async {
+        let reader = ScriptedAuthorPages([page([50], next: nil)])
+        let model = RoomMemberMessagesModel(sessionId: "room_1", authorId: "human-pat", reader: reader, isBlocked: true)
+        await model.loadMore()
+        XCTAssertTrue(reader.calls.isEmpty)
+        XCTAssertTrue(model.state.isBlocked)
+        XCTAssertTrue(model.state.listedRows.isEmpty)
+        XCTAssertEqual(model.state.emptyLine(name: "pat"), "You blocked them.")
+        XCTAssertNil(model.state.blockReference, "and Block is not offered again")
+    }
+
     /// For people the API usually knows no connection: nothing is shown then, never a guess.
     func test_a_null_connection_shows_nothing() async {
         let unknown = RoomMemberMessagesModel(sessionId: "room_1", authorId: "human-pat",
@@ -108,8 +158,8 @@ final class RoomMemberViewTests: XCTestCase {
         XCTAssertEqual(box.state.connectionLine, "Runs in a box", "a later page that says nothing takes nothing back")
     }
 
-    /// A public room shows a person to a reader outside it as `human-public.<digest>`, and asking by that answers
-    /// nothing: the profile says their messages are private there instead of showing an empty list.
+    /// A public room shows a visitor a person who signed in with an account id under a stand-in name
+    /// (`human-public.<digest>`), and no rows carry it: nothing is asked for, and the profile says why there is no list.
     func test_a_public_alias_shows_the_private_line() async {
         let reader = ScriptedAuthorPages([page([50], next: nil)])
         let model = RoomMemberMessagesModel(sessionId: "room_1", authorId: "human-public.9f2c4e", reader: reader)
@@ -117,7 +167,7 @@ final class RoomMemberViewTests: XCTestCase {
         XCTAssertTrue(reader.calls.isEmpty, "nothing is asked for")
         XCTAssertTrue(model.state.isPrivate)
         XCTAssertFalse(model.state.canLoadMore)
-        XCTAssertEqual(model.state.emptyLine(name: "someone"), "Messages from people are private in public rooms")
+        XCTAssertEqual(model.state.emptyLine(name: "someone"), RoomMemberMessagesState.privateLine)
         XCTAssertTrue(model.state.rows.isEmpty)
 
         let person = RoomMemberMessagesModel(sessionId: "room_1", authorId: "human-pat",

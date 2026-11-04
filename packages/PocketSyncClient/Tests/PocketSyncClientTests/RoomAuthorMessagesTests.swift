@@ -104,6 +104,18 @@ final class RoomAuthorMessagesTests: XCTestCase {
         XCTAssertEqual(AuthorPageURLProtocol.captured().count, 2)
     }
 
+    /// Exactly the API's rule for `author` (`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`): what it would refuse is never sent.
+    func test_the_author_id_check_is_the_apis_own() {
+        for good in ["agent-a1", "human-pat", "human-g.0123abcd", "human-public.9f2c", "a", "Ab:c.d_e-f",
+                     "7-agent", String(repeating: "a", count: 64)] {
+            XCTAssertTrue(RoomAuthor.isValidId(good), good)
+        }
+        for bad in ["", "-agent", ".agent", "_agent", ":agent", "pat@example.com", "human-pat@box",
+                    String(repeating: "a", count: 65), "human pat", "agent/a1", "agent\u{e9}"] {
+            XCTAssertFalse(RoomAuthor.isValidId(bad), bad)
+        }
+    }
+
     func test_a_public_rooms_alias_for_a_person_is_known() {
         XCTAssertTrue(RoomAuthor.isPublicAlias("human-public.9f2c"))
         XCTAssertTrue(RoomAuthor.isPublicAlias("Human-Public.9F2C"))
