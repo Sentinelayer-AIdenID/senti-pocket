@@ -513,6 +513,8 @@ extension RoomPreviewSender: AgentChatCreating {
     func createAgentChat(sessionId: String, title: String, idempotencyKey: String) async throws {
         try? await Task.sleep(nanoseconds: 600_000_000)
     }
+
+    func nameAgentChat(sessionId: String, title: String) async throws {}
 }
 
 /// The mint in the preview: two models, so the room's owner sees New agent; a start "boots" for a few seconds and

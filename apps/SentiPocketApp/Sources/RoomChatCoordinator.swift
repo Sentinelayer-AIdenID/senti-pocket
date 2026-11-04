@@ -180,6 +180,9 @@ final class RoomChatCoordinator: ObservableObject {
     private var nextBeforeSequence: Int64?
     private var connection: RoomConnectionState = .connecting
     private var composing: [String: Date] = [:]
+    /// The room's boxes as the mint lists them, by name: running, and ended (`setBoxes`).
+    private var runningBoxNames: Set<String> = []
+    private var endedBoxNames: Set<String> = []
     private var failure: SessionLoadFailure?
     private var isLoadingInitial = false
     private var isLoadingOlder = false
@@ -943,6 +946,15 @@ final class RoomChatCoordinator: ObservableObject {
     func pullLatest() {
         let current = generation
         Task { [weak self] in await self?.catchUp(current) }
+    }
+
+    /// The room's boxes as the mint lists them (the Flight record's reads, from the room screen): they tell a chat made
+    /// for one agent, whose posts then show in full, and a room with a running box, whose composer says how to reach it.
+    func setBoxes(running: Set<String>, ended: Set<String>) {
+        guard running != runningBoxNames || ended != endedBoxNames else { return }
+        runningBoxNames = running
+        endedBoxNames = ended
+        publish()
     }
 
     /// Re-reads the room's people (owners and admins only). A failed read keeps the list already loaded.
@@ -2318,7 +2330,9 @@ final class RoomChatCoordinator: ObservableObject {
             expandedRepeats: expandedRepeats,
             files: placedFiles?.cards ?? [:],
             fileParts: placedFiles?.parts ?? [:],
-            draftKey: draftKey
+            draftKey: draftKey,
+            runningBoxes: runningBoxNames,
+            endedBoxNames: endedBoxNames
         )
         summarizeNextThread(replyInputs, messages: inputs)
     }

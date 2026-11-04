@@ -1027,6 +1027,10 @@ struct RoomChatScreen: View {
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             offerCrashReports()
         }
+        // The mint's boxes for this room, as the Flight record reads them: the chat's own agent and the composer's hint.
+        .onChange(of: [Set(flight.state.boxes.map(\.name)), flight.state.endedBoxNames]) { boxes in
+            coordinator.setBoxes(running: boxes[0], ended: boxes[1])
+        }
         .task(id: isCovered) {
             // The room's running boxes, for the ring and its count, kept fresh while the room is open (the count once
             // caught up only when the people list was opened): their names only, and only while the room
