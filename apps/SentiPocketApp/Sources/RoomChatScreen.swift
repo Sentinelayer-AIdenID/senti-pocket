@@ -4,6 +4,43 @@ import PocketSyncClient
 import PocketUI
 import PocketVoice
 
+/// When the room's running boxes are read again: with the room in sight and the app in front.
+struct RoomBoxPoll: Equatable {
+    let covered: Bool
+    let active: Bool
+    var runs: Bool { !covered && active }
+
+    /// How often, in nanoseconds.
+    static let interval: UInt64 = 60_000_000_000
+}
+
+/// Whether the app covers the room (the side panel, or a sheet over it), read here and only here: the room's coordinator
+/// keeps what arrives unshown while it is covered, and the room's boxes are read again only while it can be seen and the
+/// app is in front. The room's screen never reads it, so it and its rows draw nothing when the side panel opens.
+struct RoomCoverWatch: ViewModifier {
+    let coversItself: Bool
+    let coordinator: RoomChatCoordinator
+    let flight: FlightRecordCoordinator
+    @Environment(\.roomIsCovered) private var coveredFromOutside
+    @Environment(\.scenePhase) private var scenePhase
+
+    func body(content: Content) -> some View {
+        let poll = RoomBoxPoll(covered: coveredFromOutside || coversItself, active: scenePhase == .active)
+        return content
+            .onAppear { coordinator.isCovered = coveredFromOutside }
+            .onChange(of: coveredFromOutside) { covered in coordinator.isCovered = covered }
+            // The room's running boxes, for the ring and its count (their names only), kept fresh while the room can be
+            // seen (#269) and the app is in front.
+            .task(id: poll) {
+                guard poll.runs else { return }
+                while !Task.isCancelled {
+                    await flight.refreshBoxes()
+                    try? await Task.sleep(nanoseconds: RoomBoxPoll.interval)
+                }
+            }
+    }
+}
+
 /// Navigation value for an open room.
 struct RoomRoute: Hashable {
     let sessionId: String
@@ -81,8 +118,6 @@ struct RoomChatScreen: View {
     @State private var showsArtifacts = false
     /// A voice conversation in this room, while one is open.
     @State private var voiceRoom: VoiceRoomCoordinator?
-    /// The app covers the room (a sheet or the side panel).
-    @Environment(\.roomIsCovered) private var coveredFromOutside
     /// The call's waveform: your microphone and the agent's words.
     @State private var voiceMeter = VoiceLevelMeter()
     @State private var choosesVoicePartner = false
@@ -182,6 +217,9 @@ struct RoomChatScreen: View {
         direct: RoomDirectContext? = nil,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
+        #if DEBUG
+        RootPreview.meter.roomScreenMade()
+        #endif
         self.route = route
         self.directContext = direct
         self.reader = reader
@@ -466,8 +504,9 @@ struct RoomChatScreen: View {
         room.begin(rings: call == nil)
     }
 
-    /// Something covers the room: a sheet or the side panel (from the app), or this room's call.
-    private var isCovered: Bool { coveredFromOutside || voiceRoom != nil || profileTarget != nil }
+    /// This room's own covers: its call, or a profile card. Whether the app covers it (a sheet or the side panel) is read
+    /// only by `RoomCoverWatch`, so this screen and its rows never draw again when the side panel opens or closes.
+    private var coversItself: Bool { voiceRoom != nil || profileTarget != nil }
 
     /// The called agent's lab as the room's presence reports it, for the call screen's logo; nil in a meeting.
     private func partnerLab(of room: VoiceRoomCoordinator) -> AgentLab? {
@@ -564,6 +603,9 @@ struct RoomChatScreen: View {
     }
 
     var body: some View {
+        #if DEBUG
+        let _ = RootPreview.meter.roomScreenBodyRan()
+        #endif
         RoomChatView(
             state: coordinator.state,
             readingAloudId: reader.readingId,
@@ -610,8 +652,8 @@ struct RoomChatScreen: View {
             }
         }
         // A sheet, the side panel or a call's window covers the room: its moving parts (the presence ring) rest
-        // underneath (warden, #265, #269).
-        .environment(\.roomIsCovered, isCovered)
+        // underneath (#265, #269). The app's cover passes through as it is, read only by what rests.
+        .transformEnvironment(\.roomIsCovered) { [coversItself] covered in covered = covered || coversItself }
         .environment(\.roomProfileOpener, profileOpener)
         // A direct message: whom it is with, the room you share, and for an agent whether it may use this chat there.
         .safeAreaInset(edge: .top, spacing: 0) {
@@ -1031,16 +1073,7 @@ struct RoomChatScreen: View {
         .onChange(of: [Set(flight.state.boxes.map(\.name)), flight.state.endedBoxNames]) { boxes in
             coordinator.setBoxes(running: boxes[0], ended: boxes[1])
         }
-        .task(id: isCovered) {
-            // The room's running boxes, for the ring and its count, kept fresh while the room is open (the count once
-            // caught up only when the people list was opened): their names only, and only while the room
-            // can be seen (warden, #269).
-            guard !isCovered else { return }
-            while !Task.isCancelled {
-                await flight.refreshBoxes()
-                try? await Task.sleep(nanoseconds: 60_000_000_000)
-            }
-        }
+        .modifier(RoomCoverWatch(coversItself: coversItself, coordinator: coordinator, flight: flight))
         .onChange(of: crashes.unhandled.count) { _ in offerCrashReports() }
         .onChange(of: coordinator.state.composer.canPost) { _ in offerCrashReports() }
         .sheet(item: $linkedTicket) { linked in
@@ -1069,6 +1102,10 @@ struct RoomChatScreen: View {
             applyRouteLinksOnce()
             #if DEBUG
             if RoomPreview.isLeaderboardSheetRequested { coordinator.send(.openLeaderboard) }
+            if RootPreview.isRequested {
+                RootPreview.meter.watch("room", coordinator)
+                RootPreview.meter.watch("roomFlight", flight)
+            }
             #endif
             takeAnsweredCall()
             connectMedia()

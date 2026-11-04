@@ -342,6 +342,23 @@ final class RoomChatCoordinator: ObservableObject {
 
     // MARK: - Lifecycle
 
+    /// Something covers the room from outside it (the side panel or a sheet the app shows over it): what arrives is kept
+    /// but not shown, so nothing in the room is built or drawn for it, and it shows at once, in one update, when the
+    /// room is uncovered. A call keeps the room shown: its voice room follows what arrives.
+    var isCovered = false {
+        didSet {
+            guard isCovered != oldValue, !isCovered, publishesWhenShown else { return }
+            publishesWhenShown = false
+            publish()
+        }
+    }
+
+    /// Something arrived or changed while the room was covered.
+    private var publishesWhenShown = false
+
+    /// The room shows nothing new while covered, unless a call needs it.
+    private var restsUnderCover: Bool { isCovered && !readsRepliesOften }
+
     /// Opens the room (first time) or resumes it after `pause()`: catch up, then go live.
     func resume() {
         guard liveTasks.isEmpty, !failureIsTerminal else { return }
@@ -2175,6 +2192,10 @@ final class RoomChatCoordinator: ObservableObject {
     }
 
     private func publish() {
+        if restsUnderCover {
+            publishesWhenShown = true
+            return
+        }
         forgetRemovedAttachments()
         // What is shown of a pinned message comes from here, so the newest revision the loaded rows hold is kept
         // first: a board shown at a newer revision (in a window loaded around it, say) never goes back to an older
@@ -2287,7 +2308,7 @@ final class RoomChatCoordinator: ObservableObject {
             )
         }
         let replyInputs = inlineReplyInputs()
-        state = RoomChatPresentationState(
+        let next = RoomChatPresentationState(
             sessionId: sessionId,
             title: title,
             messages: inputs,
@@ -2334,6 +2355,9 @@ final class RoomChatCoordinator: ObservableObject {
             runningBoxes: runningBoxNames,
             endedBoxNames: endedBoxNames
         )
+        // A poll, a presence beat or a read of who viewed what that changed nothing writes nothing: every write draws
+        // the room's whole list again.
+        if next != state { state = next }
         summarizeNextThread(replyInputs, messages: inputs)
     }
 

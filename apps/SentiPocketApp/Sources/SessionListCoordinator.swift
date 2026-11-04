@@ -143,12 +143,15 @@ final class SessionListCoordinator: ObservableObject {
         operation?.cancel()
         revision &+= 1
         let operationRevision = revision
-        state = render(
-            snapshot: snapshot,
-            provenance: provenance,
-            isRefreshing: true,
-            failure: nil
-        )
+        // The side panel's quiet re-read shows nothing while it reads: no spinner, so nothing is drawn as it starts.
+        if !quietly {
+            state = render(
+                snapshot: snapshot,
+                provenance: provenance,
+                isRefreshing: true,
+                failure: nil
+            )
+        }
 
         let repository = repository
         let task = Task { @MainActor [weak self] in
@@ -157,21 +160,28 @@ final class SessionListCoordinator: ObservableObject {
                 guard let self,
                       !Task.isCancelled,
                       self.revision == operationRevision else { return }
+                // The rows are made off the main thread, from what this read found and how far this phone has read.
+                let counted = recounts ? operationRevision : self.snapshotRevision
+                let marks = self.readMarks(countedAt: counted)
+                let provenance = SessionPresentationProvenance.network(lastUpdated: next.loadedAt)
+                let rendered = await Task.detached(priority: .userInitiated) {
+                    Self.render(snapshot: next, provenance: provenance, isRefreshing: false, failure: nil, marks: marks)
+                }.value
+                guard !Task.isCancelled, self.revision == operationRevision else { return }
                 self.snapshot = next
-                if recounts { self.snapshotRevision = operationRevision }
-                self.provenance = .network(lastUpdated: next.loadedAt)
+                self.snapshotRevision = counted
+                self.provenance = provenance
                 if let selectedSessionId = self.selectedSessionId,
                    !next.sessions.contains(where: {
                        UTF8ExactIdentity.matches($0.sessionId, selectedSessionId)
                    }) {
                     self.setSelectedSession(nil)
                 }
-                self.state = self.render(
-                    snapshot: next,
-                    provenance: self.provenance,
-                    isRefreshing: false,
-                    failure: nil
-                )
+                // A read made while this phone read a room counts that read too: made again here, as the rows show it.
+                let shown = marks == self.readMarks(countedAt: counted)
+                    ? rendered
+                    : self.render(snapshot: next, provenance: provenance, isRefreshing: false, failure: nil)
+                self.show(shown, quietly: quietly)
                 if self.revision == operationRevision {
                     self.operation = nil
                 }
@@ -231,7 +241,8 @@ final class SessionListCoordinator: ObservableObject {
                 // The panel's own re-read: its malformed answer is never shown; the last good rows stay, as cached,
                 // and so does the room you are in. A refresh you asked for still fails closed, below.
                 if let snapshot { provenance = .cache(cachedAt: snapshot.loadedAt, authenticationExpired: false) }
-                state = render(snapshot: snapshot, provenance: provenance, isRefreshing: false, failure: .service)
+                let next = render(snapshot: snapshot, provenance: provenance, isRefreshing: false, failure: .service)
+                if next != state { state = next }
                 return
             }
             setSelectedSession(nil)
@@ -282,11 +293,47 @@ final class SessionListCoordinator: ObservableObject {
         onSelectionChanged(sessionId)
     }
 
+    /// How far this phone has read each room, and the rooms it caught up on since the list was counted at `revision`.
+    struct ReadMarks: Equatable, Sendable {
+        let readThrough: [String: Int64]
+        let caughtUp: Set<String>
+    }
+
+    private func readMarks(countedAt revision: UInt64) -> ReadMarks {
+        ReadMarks(readThrough: readThrough, caughtUp: Set(caughtUpAt.filter { $0.value >= revision }.keys))
+    }
+
+    /// Shows `next`. A quiet read that found what the list already shows (only the time of the read differs) writes
+    /// nothing, so the side panel, the root and the room under it draw nothing for it.
+    private func show(_ next: SessionListPresentationState, quietly: Bool) {
+        guard !(quietly && Self.sameButTheTime(next, state)) else { return }
+        state = next
+    }
+
+    /// The same rows, counts and failure, from a live read either way: only when the read was made differs.
+    static func sameButTheTime(_ next: SessionListPresentationState, _ shown: SessionListPresentationState) -> Bool {
+        guard case .network = next.provenance, case .network = shown.provenance else { return next == shown }
+        return next.rows == shown.rows && next.resultCount == shown.resultCount
+            && next.includesArchived == shown.includesArchived && next.hasMore == shown.hasMore
+            && next.isRefreshing == shown.isRefreshing && next.failure == shown.failure
+    }
+
     private func render(
         snapshot: SessionListSnapshot?,
         provenance: SessionPresentationProvenance,
         isRefreshing: Bool,
         failure: SessionLoadFailure?
+    ) -> SessionListPresentationState {
+        Self.render(snapshot: snapshot, provenance: provenance, isRefreshing: isRefreshing, failure: failure,
+                    marks: readMarks(countedAt: snapshotRevision))
+    }
+
+    nonisolated static func render(
+        snapshot: SessionListSnapshot?,
+        provenance: SessionPresentationProvenance,
+        isRefreshing: Bool,
+        failure: SessionLoadFailure?,
+        marks: ReadMarks
     ) -> SessionListPresentationState {
         SessionListPresentationState(
             sessions: snapshot?.sessions ?? [],
@@ -296,8 +343,8 @@ final class SessionListCoordinator: ObservableObject {
             provenance: provenance,
             isRefreshing: isRefreshing,
             failure: failure,
-            readThrough: readThrough,
-            caughtUp: Set(caughtUpAt.filter { $0.value >= snapshotRevision }.keys)
+            readThrough: marks.readThrough,
+            caughtUp: marks.caughtUp
         )
     }
 }

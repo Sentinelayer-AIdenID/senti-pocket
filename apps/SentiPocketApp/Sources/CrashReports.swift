@@ -421,15 +421,33 @@ final class CrashReporter: NSObject, ObservableObject, MXMetricManagerSubscriber
                 Task { @MainActor in self?.memoryWarning() }
             }
         ]
-        sampler = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.sample() }
+        samples(while: UIApplication.shared.applicationState == .active)
+    }
+
+    /// The memory sampler runs only while the app is active: a run that ends while it is not makes no report, so a
+    /// sample then was never read, and each one encoded and wrote the run's file on the main thread.
+    private func samples(while isActive: Bool) {
+        if isActive {
+            guard sampler == nil else { return }
+            sampler = Timer.scheduledTimer(withTimeInterval: Self.sampleInterval, repeats: true) { [weak self] _ in
+                Task { @MainActor in self?.sample() }
+            }
+        } else {
+            sampler?.invalidate()
+            sampler = nil
         }
     }
+
+    static let sampleInterval: TimeInterval = 5
+
+    /// The sampler is running.
+    var isSampling: Bool { sampler != nil }
 
     /// Active or not. Leaving the app, the app switcher and system screens all make it inactive first, and the app
     /// delegate reports a quit (`applicationWillTerminate`) here before the app ends.
     func activeChanged(_ isActive: Bool) {
         MainThreadWatch.shared.activeChanged(isActive)
+        if run != nil { samples(while: isActive) }
         guard var run, run.isActive != isActive else { return }
         run.isActive = isActive
         run.note(isActive ? "active" : "inactive", at: Date())
@@ -606,6 +624,14 @@ final class MainThreadWatch: @unchecked Sendable {
     private var drawsAtStart = 0
     /// Only an app on screen is watched: a suspended app's threads all stop, and its first moments back are no stall.
     private var isActive = true
+    /// The timer is stopped while the app is not active: it neither wakes nor asks the main thread to answer.
+    private var timerSuspended = false
+
+    deinit {
+        // A dispatch source must not be released while suspended.
+        if timerSuspended { timer?.resume() }
+        timer?.cancel()
+    }
 
     init(url: URL) {
         self.url = url
@@ -632,8 +658,21 @@ final class MainThreadWatch: @unchecked Sendable {
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 0.5, repeating: 0.5)
         timer.setEventHandler { [weak self] in self?.tick() }
+        lock.lock()
         self.timer = timer
         timer.resume()
+        if !isActive {
+            timer.suspend()
+            timerSuspended = true
+        }
+        lock.unlock()
+    }
+
+    /// The watch's timer runs (it is stopped while the app is not active).
+    var isTicking: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return timer != nil && !timerSuspended
     }
 
     func note(_ step: String) {
@@ -646,6 +685,10 @@ final class MainThreadWatch: @unchecked Sendable {
         lock.lock()
         isActive = active
         lastBeat = Date()
+        if let timer, active == timerSuspended {
+            if active { timer.resume() } else { timer.suspend() }
+            timerSuspended = !active
+        }
         lock.unlock()
     }
 
