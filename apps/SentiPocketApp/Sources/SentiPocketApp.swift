@@ -328,8 +328,9 @@ struct AuthenticatedRootView: View {
     @StateObject private var directMessages: DirectMessagesCenter
     /// Your room folders: on when the server lists them (ROOM_FOLDERS_ENABLED), else nothing shows.
     @StateObject private var roomFolders: RoomFoldersCenter
-    /// The side panel's rooms in your folders, placed off the main thread when the rooms or the folders change.
-    @StateObject private var sidePanelPlacement = SidePanelPlacement()
+    /// The side panel's rooms in your folders, placed off the main thread when the rooms or the folders change. Kept,
+    /// not watched: the panel watches it, so a new placing draws the panel and not the root (and the room under it).
+    @State private var sidePanelPlacement = SidePanelPlacement()
     @Environment(\.scenePhase) private var rootScenePhase
     @ObservedObject private var whisperModelCoordinator: WhisperModelProvisioningCoordinator
     @ObservedObject private var incomingLinks: IncomingLinkInbox
