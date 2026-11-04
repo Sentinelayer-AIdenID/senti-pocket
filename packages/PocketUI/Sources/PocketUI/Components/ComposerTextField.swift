@@ -18,14 +18,20 @@ struct ComposerTextField: View {
     let identifier: String
     var maxLines: Int = 6
 
-    #if canImport(UIKit)
-    @State private var height: CGFloat = ComposerTextField.lineHeight
+    /// The box's height for text of `contentHeight`: one line at least, `maxLines` at most (it scrolls beyond),
+    /// rounded once.
+    static func boxHeight(contentHeight: CGFloat, lineHeight: CGFloat, maxLines: Int) -> CGFloat {
+        min(max(ceil(contentHeight), ceil(lineHeight)), ceil(lineHeight * CGFloat(maxLines)))
+    }
 
-    static var lineHeight: CGFloat { ceil(UIFont.preferredFont(forTextStyle: .body).lineHeight) }
+    #if canImport(UIKit)
+    @State private var height: CGFloat = ceil(ComposerTextField.lineHeight)
+
+    static var lineHeight: CGFloat { UIFont.preferredFont(forTextStyle: .body).lineHeight }
 
     var body: some View {
         ComposerTextView(text: $text, isFocused: $isFocused, height: $height, identifier: identifier,
-                         placeholder: placeholder, maxHeight: Self.lineHeight * CGFloat(maxLines))
+                         placeholder: placeholder, maxLines: maxLines)
             .frame(height: height)
             .overlay(alignment: .topLeading) {
                 if text.isEmpty {
@@ -37,10 +43,15 @@ struct ComposerTextField: View {
             }
     }
     #else
+    @FocusState private var focused: Bool
+
     var body: some View {
         TextField(placeholder, text: $text, axis: .vertical)
             .lineLimit(1...maxLines)
             .textFieldStyle(.plain)
+            .focused($focused)
+            .onChange(of: isFocused) { focused = $0 }
+            .onChange(of: focused) { if isFocused != $0 { isFocused = $0 } }
             .accessibilityIdentifier(identifier)
     }
     #endif
@@ -55,7 +66,7 @@ private struct ComposerTextView: UIViewRepresentable {
     @Binding var height: CGFloat
     let identifier: String
     let placeholder: String
-    let maxHeight: CGFloat
+    let maxLines: Int
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -79,6 +90,7 @@ private struct ComposerTextView: UIViewRepresentable {
     func updateUIView(_ view: HeightReportingTextView, context: Context) {
         let coordinator = context.coordinator
         coordinator.parent = self
+        view.accessibilityLabel = placeholder   // "Message", "Reply" or "Describe the ticket", as the box is now
         // A change made here (a send empties the box, an @ or a restored draft is put in) reaches the text view; a
         // change typed in the view already matches.
         if view.text != text { view.text = text }
@@ -87,9 +99,14 @@ private struct ComposerTextView: UIViewRepresentable {
         if isFocused != coordinator.lastFocus {
             coordinator.lastFocus = isFocused
             let wanted = isFocused
+            let focus = $isFocused
             DispatchQueue.main.async {
-                if wanted, !view.isFirstResponder, view.window != nil {
-                    view.becomeFirstResponder()
+                if wanted, !view.isFirstResponder {
+                    // Not in a window yet, or refused: say so, so the next ask moves it again.
+                    if view.window == nil || !view.becomeFirstResponder() {
+                        coordinator.lastFocus = false
+                        focus.wrappedValue = false
+                    }
                 } else if !wanted, view.isFirstResponder {
                     view.resignFirstResponder()
                 }
@@ -121,10 +138,11 @@ private struct ComposerTextView: UIViewRepresentable {
             if parent.isFocused { parent.isFocused = false }
         }
 
-        /// The text's height changed: the box grows to it, up to `maxHeight`, and scrolls beyond. Set on the next
+        /// The text's height changed: the box grows to it, up to `maxLines` lines, and scrolls beyond. Set on the next
         /// turn of the run loop, never inside the layout that reported it.
         func contentHeightChanged(_ contentHeight: CGFloat) {
-            let target = min(max(ceil(contentHeight), ComposerTextField.lineHeight), parent.maxHeight)
+            let target = ComposerTextField.boxHeight(contentHeight: contentHeight, lineHeight: ComposerTextField.lineHeight,
+                                                     maxLines: parent.maxLines)
             guard abs(target - parent.height) > 0.5 else { return }
             let binding = parent.$height
             DispatchQueue.main.async { binding.wrappedValue = target }
