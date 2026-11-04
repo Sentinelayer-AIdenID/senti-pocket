@@ -734,36 +734,46 @@ private struct AuthenticatedRootView: View {
             waitingOnYou: waiting.state.isAvailable ? waiting.state.total : nil,
             accountName: accountName,
             theme: theme,
-            onSelectRoom: { sessionId in show(roomRoute(for: sessionId)) },
+            onSelectRoom: { sessionId in
+                CrashReporter.shared.note("drawer: room \(RoomChatScreen.tag(sessionId))")
+                show(roomRoute(for: sessionId))
+            },
             onAllRooms: {
+                CrashReporter.shared.note("drawer: all rooms")
                 roomPath = []
                 currentRoom = nil
                 closeDrawer()
             },
             onNotifications: {
+                CrashReporter.shared.note("drawer: notifications")
                 closeDrawer()
                 presentsNotifications = true
                 Task { await notifications.refresh(force: true) }
             },
             onWaitingOnYou: {
+                CrashReporter.shared.note("drawer: waiting on you")
                 closeDrawer()
                 presentsWaiting = true
                 Task { await waiting.refresh() }
             },
             onCalls: {
+                CrashReporter.shared.note("drawer: calls")
                 closeDrawer()
                 presentsCallLog = true
                 Task { await callLog.refresh() }
             },
             onActivity: {
+                CrashReporter.shared.note("drawer: activity")
                 closeDrawer()
                 presentsActivity = true
             },
             onSettings: {
+                CrashReporter.shared.note("drawer: settings")
                 closeDrawer()
                 presentsSettings = true
             },
             onNewRoom: roomSender is any RoomCreating ? {
+                CrashReporter.shared.note("drawer: new room")
                 closeDrawer()
                 presentsNewRoom = true
             } : nil

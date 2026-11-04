@@ -500,6 +500,9 @@ struct RoomChatScreen: View {
         OpenURLAction { url in handle(url) }
     }
 
+    /// Which room, for the freeze recorder: the first four characters of its id, never its title.
+    static func tag(_ sessionId: String) -> String { String(sessionId.prefix(4)) }
+
     var body: some View {
         RoomChatView(
             state: coordinator.state,
@@ -945,7 +948,7 @@ struct RoomChatScreen: View {
         }
         .environment(\.openURL, linkAction)
         .onAppear {
-            CrashReporter.shared.note("room opened")
+            CrashReporter.shared.note("room opened \(Self.tag(route.sessionId))")
             coordinator.resume()
             applyRouteLinksOnce()
             #if DEBUG
@@ -955,7 +958,7 @@ struct RoomChatScreen: View {
             connectMedia()
         }
         .onDisappear {
-            CrashReporter.shared.note("room closed")
+            CrashReporter.shared.note("room closed \(Self.tag(route.sessionId))")
             coordinator.pause()
             // Reading aloud goes on after you leave (Carter, 10-30); the app's player follows you to the next screen.
         }

@@ -130,9 +130,18 @@ final class CrashReportsTests: XCTestCase {
         XCTAssertEqual(kept.first?.id, "n11", "the newest are kept")
     }
 
+    /// A freeze on build 2026110306 ended a trail at "room closed" with nothing after it: the screens a room is left
+    /// for, the room itself and a long message's page now leave a step, never what anything says.
+    func test_the_trail_names_the_room_and_the_long_message_page() {
+        XCTAssertEqual(RoomChatScreen.tag("38b29035-6724-4efc-bd48-cc64834cdf37"), "38b2")
+        XCTAssertEqual(CrashReporter.step(for: .longMessageOpened(characters: 27_090)), "longMessageOpened")
+        XCTAssertNil(CrashReporter.sentLength(.longMessageOpened(characters: 27_090)), "a length, not a send")
+    }
+
     func test_a_run_that_ended_while_active_is_reported_with_its_last_steps_and_memory() {
         var run = LastRun(build: "2026102915", launchedAt: start, updatedAt: start, isActive: true)
-        for step in 0..<14 { run.note("step \(step)", at: start.addingTimeInterval(Double(step))) }
+        let steps = LastRun.keptSteps + 2
+        for step in 0..<steps { run.note("step \(step)", at: start.addingTimeInterval(Double(step))) }
         run.footprintMB = 812
         run.peakFootprintMB = 1_240
         run.availableMB = 95
@@ -141,11 +150,12 @@ final class CrashReportsTests: XCTestCase {
         let report = run.closedReport(system: "iOS 26.0", device: "iPhone17,2")
         XCTAssertEqual(report?.kind, .closed)
         XCTAssertEqual(report?.id, "closed-1800000000")
-        XCTAssertEqual(report?.at, start.addingTimeInterval(13), "when it was last seen alive")
+        XCTAssertEqual(report?.at, start.addingTimeInterval(Double(steps - 1)), "when it was last seen alive")
         XCTAssertEqual(report?.trail.count, LastRun.keptSteps)
-        XCTAssertEqual(report?.trail.last, "08:00:13 step 13")
-        XCTAssertEqual(report?.trail.first, "08:00:02 step 2")
-        XCTAssertTrue(report?.reason.contains("Memory at 08:00:13: 812 MB in use (peak 1240 MB), 95 MB left before the limit.") == true)
+        XCTAssertEqual(LastRun.keptSteps, 24, "enough steps to name the screens before a freeze")
+        XCTAssertEqual(report?.trail.last, "08:00:25 step 25")
+        XCTAssertEqual(report?.trail.first, "08:00:02 step 2", "the oldest two are dropped")
+        XCTAssertTrue(report?.reason.contains("Memory at 08:00:25: 812 MB in use (peak 1240 MB), 95 MB left before the limit.") == true)
         XCTAssertTrue(report?.reason.contains("iOS warned about memory 2 times before it ended.") == true)
 
         XCTAssertTrue(report?.reason.hasPrefix("On screen, then gone, with no crash of its own: the system ended it, most often for memory.") == true,
