@@ -231,6 +231,8 @@ private struct AuthenticatedRootView: View {
     @State private var currentRoom: RoomRoute?
     @State private var roomPath: [RoomRoute] = []
     @State private var drawerOpen = false
+    /// How often the open side panel reads the rooms again, in nanoseconds.
+    static let openDrawerRefresh: UInt64 = 15_000_000_000
     /// How far the room card moves right when the side panel opens; the panel fits in that space.
     private static let drawerWidth: CGFloat = 300
     @State private var presentsPocket = false
@@ -467,6 +469,16 @@ private struct AuthenticatedRootView: View {
             if open { Task { await notifications.refresh(force: true) } }
             if open { Task { await waiting.refresh() } }
             if open { sessions.send(.refreshSessions) }
+        }
+        // While the side panel stays open its rooms keep up: a message that arrives in another room shows its unread
+        // badge without closing and opening the panel again (Carter, #61188).
+        .task(id: drawerOpen) {
+            guard drawerOpen else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: Self.openDrawerRefresh)
+                guard !Task.isCancelled, drawerOpen else { return }
+                sessions.send(.refreshSessions)
+            }
         }
         .preferredColorScheme(theme.wrappedValue.colorScheme)
         .sheet(isPresented: $presentsPocket) {
