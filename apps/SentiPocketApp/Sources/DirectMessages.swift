@@ -51,9 +51,8 @@ final class DirectMessagesCenter: ObservableObject {
         self.onReauthenticationRequired = onReauthenticationRequired
     }
 
-    /// Asks the server whether direct messages are on (one read at a time). A 404 hides them; a failure that says
-    /// nothing either way keeps what is shown.
-    /// When the settings were last read, answered or not, for the side panel's open.
+    /// When the server last answered a read of the settings, for the side panel's open. A failed read leaves it, so the
+    /// next open asks again.
     private var readAt: Date?
 
     /// Reads again unless the settings were read less than `age` seconds ago.
@@ -62,6 +61,8 @@ final class DirectMessagesCenter: ObservableObject {
         await refresh()
     }
 
+    /// Asks the server whether direct messages are on (one read at a time). A 404 hides them; a failure that says
+    /// nothing either way keeps what is shown.
     func refresh() async {
         if let reading { return await reading.value }
         let task = Task { await read() }
@@ -72,12 +73,13 @@ final class DirectMessagesCenter: ObservableObject {
 
     /// A read that finds what is shown writes nothing, so the root and the side panel draw only for a change.
     private func read() async {
-        defer { readAt = Date() }
         do {
             let value = try await client.directMessageSettings()
+            readAt = Date()
             if !isAvailable { isAvailable = true }
             if allowance != value { allowance = value }
         } catch DirectMessageError.unavailable {
+            readAt = Date()
             if isAvailable { isAvailable = false }
             if allowance != nil { allowance = nil }
         } catch DirectMessageError.reauthenticationRequired {

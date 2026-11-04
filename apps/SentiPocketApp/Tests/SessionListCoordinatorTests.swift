@@ -241,6 +241,24 @@ final class SessionListCoordinatorTests: XCTestCase {
         XCTAssertNil(coordinator.selectedSessionId, "an asked-for refresh still clears it, as before")
     }
 
+    /// Review of #325: the panel's quiet re-read writes nothing when nothing changed, but every change still shows: a new
+    /// room, a renamed one, one that left.
+    func test_a_quiet_refresh_that_finds_a_change_shows_it() async throws {
+        let coordinator = makeCoordinator([
+            .page(try page(ids: ["room-1"], nextCursor: nil, hasMore: false)),
+            .page(try page(ids: ["room-2", "room-1"], nextCursor: nil, hasMore: false)),
+            .page(try page(ids: ["room-2", "room-1"], titles: ["room-1": "Renamed"], nextCursor: nil, hasMore: false)),
+            .page(try page(ids: ["room-1"], titles: ["room-1": "Renamed"], nextCursor: nil, hasMore: false))
+        ])
+        await coordinator.refreshSessions().value
+        await coordinator.refreshSessions(quietly: true).value
+        XCTAssertEqual(coordinator.state.rows.map(\.sessionId), ["room-2", "room-1"], "a new room shows")
+        await coordinator.refreshSessions(quietly: true).value
+        XCTAssertEqual(coordinator.state.rows.last?.title, "Renamed", "a new title shows")
+        await coordinator.refreshSessions(quietly: true).value
+        XCTAssertEqual(coordinator.state.rows.map(\.sessionId), ["room-1"], "a room that left goes")
+    }
+
     /// Review of #311: the panel re-reads only while it is open and the app is in front.
     func test_the_open_panel_reads_its_rooms_only_with_the_app_in_front() {
         XCTAssertTrue(DrawerPoll(open: true, active: true).runs)
@@ -266,11 +284,11 @@ final class SessionListCoordinatorTests: XCTestCase {
         )
     }
 
-    private func page(ids: [String], nextCursor: String?, hasMore: Bool) throws -> SessionListPage {
+    private func page(ids: [String], titles: [String: String] = [:], nextCursor: String?, hasMore: Bool) throws -> SessionListPage {
         let sessions = ids.map { id in
             """
             {"sessionId":"\(id)","status":"active","archiveStatus":"active","visibility":"private",
-            "membershipRole":"owner","title":"\(id)","summaryText":null,"summaryGeneratedAt":null,
+            "membershipRole":"owner","title":"\(titles[id] ?? id)","summaryText":null,"summaryGeneratedAt":null,
             "summaryModel":null,"agentCount":1,"eventCount":1,"totalCostUsd":0,"createdAt":null,
             "lastActivityAt":null,"expiresAt":null,"killedAt":null,"templateName":null,
             "codebasePath":null,"s3ArchivePath":null}

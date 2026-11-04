@@ -58,7 +58,8 @@ final class WaitingOnYouCoordinator: ObservableObject {
         pollTask = nil
     }
 
-    /// When the list was last read (answered or not), for the side panel's open.
+    /// When the server last answered a read of the list, for the side panel's open. A failed read leaves it, so the
+    /// next open asks again.
     private var readAt: Date?
 
     /// Reads again unless the list was read less than `age` seconds ago (the side panel opening: the list polls on its
@@ -68,10 +69,14 @@ final class WaitingOnYouCoordinator: ObservableObject {
         await refresh()
     }
 
+    /// What a failed read says; a later good read takes back only this line, never an answer's own notice.
+    static let readFailedNotice = "Could not update. Pull to try again."
+
+    private enum ReadOutcome { case read, unavailable, failed, untouched }
+
     func refresh() async {
         if items.isEmpty, !state.isLoading { state.isLoading = true }
-        var next = state
-        defer { readAt = now() }
+        let outcome: ReadOutcome
         do {
             let page = try await transport.waiting(limit: 50)
             // The signal model's name never shows, here or in the answer posted (warden, #270).
@@ -79,17 +84,33 @@ final class WaitingOnYouCoordinator: ObservableObject {
             total = page.total
             // The server's word wins once it no longer lists an answered ask.
             answered = answered.filter { key in items.contains { $0.askKey == key } }
-            next.isAvailable = true
-            next.notice = nil
+            outcome = .read
         } catch SessionTransportError.accessDenied {
             // An older server without the list answers 404, which the shared fetch reads as access denied; so does a
             // server that will not show it to this sign-in. Either way the side panel leaves it out.
-            next.isAvailable = false
+            outcome = .unavailable
         } catch SessionTransportError.reauthenticationRequired {
             onReauthenticationRequired()
+            outcome = .untouched
         } catch SessionTransportError.cancelled {
+            outcome = .untouched
         } catch {
-            if next.isAvailable { next.notice = "Could not update. Pull to try again." }
+            outcome = .failed
+        }
+        // Only an answer counts as a read for the side panel's 15 s: a failed one is tried again at the next open.
+        if outcome == .read || outcome == .unavailable { readAt = now() }
+        // The state as it is now, after the wait: an answer sent or failed meanwhile keeps its `sending` and notice.
+        var next = state
+        switch outcome {
+        case .read:
+            next.isAvailable = true
+            if next.notice == Self.readFailedNotice { next.notice = nil }
+        case .unavailable:
+            next.isAvailable = false
+        case .failed:
+            if next.isAvailable { next.notice = Self.readFailedNotice }
+        case .untouched:
+            break
         }
         next.isLoading = false
         publish(into: &next)

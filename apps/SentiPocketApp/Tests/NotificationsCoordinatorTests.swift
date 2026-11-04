@@ -306,6 +306,33 @@ final class NotificationsCoordinatorTests: XCTestCase {
         XCTAssertFalse(coordinator.state.couldNotUpdate)
     }
 
+    /// Review of #325: polls that find the same bell write nothing, but the time shown ("Updated N min ago") is never a
+    /// minute or more behind the last read.
+    func test_quiet_polls_keep_the_shown_time_within_a_minute_of_the_last_read() async {
+        final class Clock: @unchecked Sendable {
+            private let lock = NSLock()
+            private var date = Date(timeIntervalSince1970: 1_793_300_000)
+            var now: Date { lock.withLock { date } }
+            func advance(_ seconds: TimeInterval) { lock.withLock { date = date.addingTimeInterval(seconds) } }
+        }
+        let clock = Clock()
+        let start = clock.now
+        let coordinator = NotificationsCoordinator(
+            transport: ScriptedNotifications([.success(SentiNotificationsPage(notifications: [note("n1")]))]),
+            marker: nil,
+            now: { clock.now },
+            onReauthenticationRequired: {}
+        )
+        await coordinator.refresh()
+        XCTAssertEqual(coordinator.state.updatedAt, start)
+        clock.advance(30)
+        await coordinator.refresh()
+        XCTAssertEqual(coordinator.state.updatedAt, start, "30 s on, the same bell writes nothing")
+        clock.advance(30)
+        await coordinator.refresh()
+        XCTAssertEqual(coordinator.state.updatedAt, start.addingTimeInterval(60), "a minute on, the time shown moves")
+    }
+
     func test_after_an_expired_sign_in_opening_the_bell_reads_again_and_a_success_brings_it_back() async {
         var asked = 0
         let coordinator = NotificationsCoordinator(

@@ -51,9 +51,8 @@ final class RoomFoldersCenter: ObservableObject {
         folders?.map { RoomFolderItem(id: $0.id, name: $0.name, position: $0.position, roomCount: $0.roomCount) }
     }
 
-    /// Reads your folders. A 404 (or 403) means folders are off: everything about them hides. A failure that says
-    /// nothing either way keeps what is shown.
-    /// When the folders were last read, answered or not, for the side panel's open.
+    /// When the server last answered a read of the folders, for the side panel's open. A failed read leaves it, so the
+    /// next open asks again.
     private var readAt: Date?
 
     /// Reads again unless the folders were read less than `age` seconds ago.
@@ -62,13 +61,16 @@ final class RoomFoldersCenter: ObservableObject {
         await refresh()
     }
 
-    /// A read that finds what is shown writes nothing, so the root and the side panel draw only for a change.
+    /// Reads your folders. A 404 (or 403) means folders are off: everything about them hides. A failure that says
+    /// nothing either way keeps what is shown. A read that finds what is shown writes nothing, so the root and the side
+    /// panel draw only for a change.
     func refresh() async {
-        defer { readAt = Date() }
         do {
             let read = try await client.folders()
+            readAt = Date()
             if read != folders { folders = read }
         } catch RoomFolderError.unavailable {
+            readAt = Date()
             if folders != nil { folders = nil }
             if sheet != nil { sheet = nil }
             if deleting != nil { deleting = nil }

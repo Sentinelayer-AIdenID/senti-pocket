@@ -41,6 +41,65 @@ private final class RecordingSender: RoomMessageSending, @unchecked Sendable {
     }
 }
 
+/// Holds one call until the test lets it go.
+private final class Gate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var armed = false
+    private var held: CheckedContinuation<Void, Never>?
+
+    /// The next call waits for `release()`.
+    func arm() { lock.withLock { armed = true } }
+    var isHolding: Bool { lock.withLock { held != nil } }
+
+    func release() {
+        let held: CheckedContinuation<Void, Never>? = lock.withLock {
+            let held = self.held
+            self.held = nil
+            return held
+        }
+        held?.resume()
+    }
+
+    func pass() async {
+        let wait: Bool = lock.withLock {
+            defer { armed = false }
+            return armed
+        }
+        guard wait else { return }
+        await withCheckedContinuation { continuation in lock.withLock { held = continuation } }
+    }
+}
+
+private final class GatedWaiting: WaitingTransport, @unchecked Sendable {
+    let gate = Gate()
+    private let page: SentiWaitingPage
+
+    init(_ page: SentiWaitingPage) { self.page = page }
+
+    func waiting(limit: Int) async throws -> SentiWaitingPage {
+        await gate.pass()
+        return page
+    }
+}
+
+private final class GatedSender: RoomMessageSending, @unchecked Sendable {
+    let gate = Gate()
+    private let lock = NSLock()
+    private var calls = 0
+
+    var count: Int { lock.withLock { calls } }
+
+    /// The first send fails, after the gate; later ones go.
+    func sendHumanMessage(sessionId: String, text: String, clientId: String) async throws {
+        let first: Bool = lock.withLock {
+            calls += 1
+            return calls == 1
+        }
+        await gate.pass()
+        if first { throw RoomSendError.retryable(retryAfterSeconds: nil) }
+    }
+}
+
 @MainActor
 final class WaitingOnYouCoordinatorTests: XCTestCase {
     private func ask(_ id: String, room: String = "room-1", options: [String] = ["Yes", "No"], title: String? = nil,
@@ -107,6 +166,53 @@ final class WaitingOnYouCoordinatorTests: XCTestCase {
         XCTAssertEqual(sender.sent[0].clientId, sender.sent[1].clientId)
         XCTAssertTrue(sender.sent[1].text.hasSuffix(": Custom — ship Monday @pocket-forge"))
         XCTAssertTrue(waiting.state.rows.isEmpty)
+    }
+
+    /// An answer goes out, a read starts while it is on its way, the answer fails, then the read lands: the read must
+    /// not bring the answer's "sending" back or take its failure away, and the answer can be tried again (warden, #325).
+    func test_a_read_landing_after_a_failed_answer_keeps_the_failure_and_allows_a_retry() async {
+        let transport = GatedWaiting(SentiWaitingPage(total: 1, items: [ask("t1")]))
+        let sender = GatedSender()
+        let waiting = WaitingOnYouCoordinator(transport: transport, sender: sender)
+        await waiting.refresh()
+
+        sender.gate.arm()
+        _ = waiting.send(.answer(id: "t1", choice: "Yes", detail: ""))
+        await waitUntil("the answer is on its way") { sender.gate.isHolding }
+        XCTAssertEqual(waiting.state.sending, ["t1"])
+
+        transport.gate.arm()
+        let read = Task { await waiting.refresh() }
+        await waitUntil("the read is waiting on the server") { transport.gate.isHolding }
+
+        sender.gate.release()
+        await waitUntil("the answer failed") { waiting.state.sending.isEmpty && waiting.state.notice != nil }
+        let failure = waiting.state.notice
+
+        transport.gate.release()
+        await read.value
+        XCTAssertTrue(waiting.state.sending.isEmpty, "the read brought the failed answer's sending back")
+        XCTAssertEqual(waiting.state.notice, failure, "the read took the answer's failure away")
+
+        _ = waiting.send(.answer(id: "t1", choice: "Yes", detail: ""))
+        await waitUntil("the retry was sent") { sender.count == 2 && waiting.state.sending.isEmpty }
+        XCTAssertTrue(waiting.state.rows.isEmpty, "the retry went through")
+    }
+
+    /// A failed read is not a read: the side panel's next open asks again instead of waiting out 15 s (warden, #325).
+    func test_a_failed_read_does_not_hold_off_the_next_one() async {
+        let transport = ScriptedWaiting([
+            .success(SentiWaitingPage(total: 1, items: [ask("t1")])),
+            .failure(SessionTransportError.network),
+            .success(SentiWaitingPage(total: 2, items: [ask("t1"), ask("t2")]))
+        ])
+        let waiting = WaitingOnYouCoordinator(transport: transport, sender: RecordingSender())
+        await waiting.refresh()
+        await waiting.refresh()
+        XCTAssertEqual(waiting.state.notice, WaitingOnYouCoordinator.readFailedNotice)
+        await waiting.refresh(ifOlderThan: 15)
+        XCTAssertEqual(waiting.state.rows.map(\.id), ["t1", "t2"], "read again at once after the failure")
+        XCTAssertNil(waiting.state.notice, "the good read took the failed read's line away")
     }
 
     /// Warden (#270): the shared fetch reads an older server's 404 as access denied, so that is what hides the row.
