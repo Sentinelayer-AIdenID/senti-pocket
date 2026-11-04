@@ -21,7 +21,7 @@ private final class FakeCalendar: RoomCalendarServing, CalendarFeedServing, @unc
     private var _reads = 0
     let token: String
 
-    init(token: String = "tok-7Hq2+secret/feed") {
+    init(token: String = "made-up+feed/value") {
         self.token = token
     }
 
@@ -437,7 +437,7 @@ final class RoomCalendarTests: XCTestCase {
     // MARK: - The feed token
 
     func test_the_feed_token_shows_nowhere_but_the_opened_link() async throws {
-        let fake = FakeCalendar(token: "tok-7Hq2+secret/feed")
+        let fake = FakeCalendar(token: "made-up+feed/value")
         var opened: [URL] = []
         let center = CalendarCenter(client: fake, feed: fake, openURL: { opened.append($0) })
         await center.refresh(probeRoom: "room-1")
@@ -456,8 +456,8 @@ final class RoomCalendarTests: XCTestCase {
         let shown = [afterSubscribe, afterReset, CalendarCenter.resetWarning,
                      String(describing: center), String(reflecting: center)].compactMap { $0 }
         for text in shown {
-            XCTAssertFalse(text.contains("secret"), "the token showed in: \(text)")
-            XCTAssertFalse(text.contains("tok-"), "the token showed in: \(text)")
+            XCTAssertFalse(text.contains(fake.token), "the token showed in: \(text)")
+            XCTAssertFalse(text.contains("made-up"), "the token showed in: \(text)")
         }
         XCTAssertEqual(afterSubscribe, CalendarCenter.opened)
         XCTAssertEqual(afterReset, CalendarCenter.reset)

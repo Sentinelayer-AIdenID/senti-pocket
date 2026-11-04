@@ -312,17 +312,17 @@ final class RoomCalendarClientTests: XCTestCase {
     // MARK: - Subscribe
 
     func test_the_subscribe_link_is_webcal_on_the_api_host_with_the_token_encoded() async throws {
-        let secret = "s3cr+t/to=ken"
+        let feedValue = "made+up/feed=value"
         let calendar = client { request in
             XCTAssertEqual(request.method, "POST")
             XCTAssertEqual(request.path, "/api/v1/me/calendar-feed-token")
             XCTAssertNil(request.body, "a new link is a POST with no body")
-            return (200, #"{"token": "\#(secret)", "url": "https://elsewhere.example.test/feed"}"#)
+            return (200, #"{"token": "\#(feedValue)", "url": "https://elsewhere.example.test/feed"}"#)
         }
         let link = try await calendar.newSubscriptionLink()
-        XCTAssertEqual(link.url.absoluteString, "webcal://api.example.test/api/v1/me/calendar.ics?token=s3cr%2Bt%2Fto%3Dken")
+        XCTAssertEqual(link.url.absoluteString, "webcal://api.example.test/api/v1/me/calendar.ics?token=made%2Bup%2Ffeed%3Dvalue")
         let parsed = URLComponents(url: link.url, resolvingAgainstBaseURL: false)
-        XCTAssertEqual(parsed?.queryItems?.first { $0.name == "token" }?.value, secret, "the token reads back exactly")
+        XCTAssertEqual(parsed?.queryItems?.first { $0.name == "token" }?.value, feedValue, "the token reads back exactly")
         XCTAssertEqual(link.url.host, "api.example.test", "the link stays on the API host, whatever url the answer has")
     }
 
@@ -337,13 +337,13 @@ final class RoomCalendarClientTests: XCTestCase {
     }
 
     func test_the_link_never_describes_its_token() throws {
-        let secret = "feed-secret-value"
+        let feedValue = "made-up-feed-value"
         let link = try XCTUnwrap(CalendarSubscriptionLink.make(apiBaseURL: URL(string: "https://api.example.test"),
-                                                                token: secret))
+                                                                token: feedValue))
         var dumped = ""
         dump(link, to: &dumped)
         for text in [String(describing: link), String(reflecting: link), "\(link)", dumped] {
-            XCTAssertFalse(text.contains(secret), text)
+            XCTAssertFalse(text.contains(feedValue), text)
         }
     }
 

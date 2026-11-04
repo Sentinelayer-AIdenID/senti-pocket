@@ -259,10 +259,9 @@ public struct CalendarSubscriptionLink: Sendable, CustomStringConvertible, Custo
         return components.url.map(CalendarSubscriptionLink.init(url:))
     }
 
-    /// RFC 3986 unreserved: everything else in the token is percent-encoded (`+` included, which a query would read as
-    /// a space).
-    private static let unreserved = CharacterSet(charactersIn:
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+    /// RFC 3986 unreserved (the token is printable ASCII, so letters and digits are ASCII ones): everything else in
+    /// the token is percent-encoded (`+` included, which a query would read as a space).
+    private static let unreserved = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
 
     public var description: String { "CalendarSubscriptionLink(redacted)" }
     public var debugDescription: String { description }
