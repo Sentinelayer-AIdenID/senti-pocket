@@ -12,7 +12,17 @@ import MachO
 enum MainThreadStack {
     static let maximumFrames = 64
 
-    /// The main thread's stack, innermost first; empty when it can't be read (not arm64, or called on the main thread).
+    /// The main thread's Mach port, taken on the main thread before any stack is read (the freeze watch's start).
+    private static var mainThread: thread_t = 0
+
+    /// Remembers the main thread; on the main thread only, once.
+    static func rememberMainThread() {
+        guard pthread_main_np() != 0, mainThread == 0 else { return }
+        mainThread = mach_thread_self()
+    }
+
+    /// The main thread's stack, innermost first; empty when it can't be read (not arm64, called on the main thread, or
+    /// before `rememberMainThread`).
     static func capture() -> (frames: [String], binaries: [String]) {
         #if arch(arm64)
         guard pthread_main_np() == 0 else { return ([], []) }
@@ -28,8 +38,8 @@ enum MainThreadStack {
     #if arch(arm64)
     /// Writes the main thread's return addresses, innermost first, into `buffer`, and says how many.
     private static func read(into buffer: UnsafeMutablePointer<UInt>) -> Int {
-        let thread = pthread_mach_thread_np(pthread_main_thread_np())
-        guard thread_suspend(thread) == KERN_SUCCESS else { return 0 }
+        let thread = mainThread
+        guard thread != 0, thread_suspend(thread) == KERN_SUCCESS else { return 0 }
         defer { thread_resume(thread) }
         var state = arm_thread_state64_t()
         var stateCount = mach_msg_type_number_t(MemoryLayout<arm_thread_state64_t>.size / MemoryLayout<natural_t>.size)

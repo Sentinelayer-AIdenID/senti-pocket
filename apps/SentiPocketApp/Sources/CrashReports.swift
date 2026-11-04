@@ -627,6 +627,7 @@ final class MainThreadWatch: @unchecked Sendable {
 
     func start() {
         guard timer == nil else { return }
+        MainThreadStack.rememberMainThread()
         try? FileManager.default.removeItem(at: url)
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 0.5, repeating: 0.5)

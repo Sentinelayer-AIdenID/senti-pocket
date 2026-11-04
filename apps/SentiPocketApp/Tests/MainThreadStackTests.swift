@@ -14,6 +14,7 @@ final class MainThreadStackTests: XCTestCase {
         #if !arch(arm64)
         throw XCTSkip("The stack is read on arm64 only.")
         #else
+        MainThreadStack.rememberMainThread()
         let box = Box()
         let read = DispatchSemaphore(value: 0)
         DispatchQueue.global(qos: .userInitiated).async {
