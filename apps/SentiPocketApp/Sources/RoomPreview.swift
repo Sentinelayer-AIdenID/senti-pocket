@@ -304,6 +304,8 @@ private struct SidePanelFoldersPreview: View {
 /// default) after the room's stream opened, for a run by hand.
 enum RoomPreviewBurst {
     static let signal = "com.plexaura.sentipocket.preview.burst"
+    /// Said once the burst's last row has been sent: the UI tests measure until then, however slow the machine.
+    static let doneSignal = "com.plexaura.sentipocket.preview.burst.done"
     static let historyCount = 80
     static let firstSequence: Int64 = 1001
     static let firstArrival: Int64 = 1081
@@ -926,6 +928,9 @@ private struct RoomPreviewTransport: RoomTransport {
                     }
                     try? await Task.sleep(nanoseconds: RoomPreviewBurst.interval)
                 }
+                CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                                     CFNotificationName(RoomPreviewBurst.doneSignal as CFString),
+                                                     nil, nil, true)
                 // Stay connected like a quiet live room.
             }
             continuation.onTermination = { _ in task.cancel() }

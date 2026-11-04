@@ -913,6 +913,10 @@ public struct RoomChatView: View {
             bottomWatch.followQueued = false
             // The reader may have left the bottom since this was asked for.
             guard followsBottom else { return }
+            // Where the follow lands is taken as a new reading, even if it looks like the last one taken: in a lazy
+            // list the scroll to the end goes by the rows' estimated heights, and can stop short of an end that is
+            // still below (seen in a burst of 40 at 60 a second), which would otherwise never be followed again.
+            bottomWatch.takenSight = nil
             guard eased else {
                 proxy.scrollTo(Self.bottomId, anchor: .bottom)
                 return

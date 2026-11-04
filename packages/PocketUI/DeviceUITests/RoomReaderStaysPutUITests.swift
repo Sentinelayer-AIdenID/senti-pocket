@@ -17,8 +17,13 @@ final class RoomReaderStaysPutUITests: XCTestCase {
     private static let firstArrival = "pocket.room.message.1081"
     /// The mixed burst's thirty rows hold 26 messages (the other four are checkpoints and joins): what the arrow counts.
     private static let mixedMessages = 26
-    /// Thirty rows 0.3 s apart, and time after the last for its row to settle.
+    /// Thirty rows 0.3 s apart, and time after the last for its row to settle: the least a burst is watched. A loaded
+    /// machine delivers it slower, so each is watched until the app says its last row was sent (`doneSignal`), then
+    /// `settleTime`, for at most `longestBurst`.
     private static let burstTime: TimeInterval = 9 + 4
+    private static let doneSignal = "com.plexaura.sentipocket.preview.burst.done"
+    private static let settleTime: TimeInterval = 3
+    private static let longestBurst: TimeInterval = 150
     private static let tolerance: CGFloat = 2
 
     override func setUp() {
@@ -151,15 +156,16 @@ final class RoomReaderStaysPutUITests: XCTestCase {
         let app = launch(kind: "arrivals")
         scrollUp(app, screens: 3)
         Self.beginBurst()
-        pause(Self.burstTime)
+        waitForBurst()
         let arrow = app.descendants(matching: .any)["pocket.room.jumpToLatest"]
         XCTAssertTrue(arrow.waitForExistence(timeout: 10))
         keep(XCUIScreen.main.screenshot(), as: "arrow-0-before-tap")
         arrow.tap()
+        let line = app.descendants(matching: .any)["pocket.room.unreadDivider"]
+        _ = line.waitForExistence(timeout: 10)
         pause(1.5)
         keep(XCUIScreen.main.screenshot(), as: "arrow-1-after-tap")
         let screen = try XCTUnwrap(readScreen(app), "the app could be read")
-        let line = app.descendants(matching: .any)["pocket.room.unreadDivider"]
         let first = screen.messages[Self.firstArrival]
         print("READER-STAYS-PUT arrow first-tap line=\(line.exists ? "\(line.frame.minY)" : "absent") "
             + "first=\(first.map { "\($0.minY)" } ?? "absent") last=\(screen.messages[Self.lastArrival] != nil) "
@@ -211,14 +217,15 @@ final class RoomReaderStaysPutUITests: XCTestCase {
     func test_a_reader_at_the_bottom_follows_the_burst() {
         let app = launch()
         Self.beginBurst()
-        let end = Date().addingTimeInterval(Self.burstTime)
-        while Date() < end {
+        let started = Date()
+        while !Self.burstWatched(since: started, least: Self.burstTime) {
             if let screen = readScreen(app) {
-                print("READER-STAYS-PUT at-bottom t=\(String(format: "%.1f", Self.burstTime - end.timeIntervalSinceNow)) "
+                print("READER-STAYS-PUT at-bottom t=\(String(format: "%.1f", Date().timeIntervalSince(started))) "
                     + "newest-visible=\(screen.newestVisible() ?? "none") arrow=\(screen.jumpLabel ?? "none")")
             }
             pause(0.3)
         }
+        XCTAssertNotNil(Self.doneAt, "the burst arrived in full while it was watched")
         guard let screen = readScreen(app) else { return XCTFail("the app could not be read") }
         let last = screen.messages[Self.lastArrival]
         let lowest = screen.rows.values.map(\.maxY).max() ?? 0
@@ -270,8 +277,8 @@ final class RoomReaderStaysPutUITests: XCTestCase {
         var longestUnmatched = 0
         var samples = 0
         var keptMoved = false
-        let end = Date().addingTimeInterval(watch)
-        while Date() < end {
+        let started = Date()
+        while !Self.burstWatched(since: started, least: watch) {
             defer { pause(0.1) }
             guard let drawn = Drawn(XCUIScreen.main.screenshot()) else { continue }
             samples += 1
@@ -294,7 +301,10 @@ final class RoomReaderStaysPutUITests: XCTestCase {
         }
         keep(XCUIScreen.main.screenshot(), as: "\(name)-9-after")
         print("READER-STAYS-PUT \(name) RESULT max-moved=\(String(format: "%.1f", moved)) "
-            + "unmatched=\(unmatched)/\(samples) longest-unmatched-run=\(longestUnmatched)")
+            + "unmatched=\(unmatched)/\(samples) longest-unmatched-run=\(longestUnmatched) "
+            + "burst-done=\(Self.doneAt.map { String(format: "%.1fs", $0.timeIntervalSince(started)) } ?? "never") "
+            + "watched=\(String(format: "%.1fs", Date().timeIntervalSince(started)))")
+        XCTAssertNotNil(Self.doneAt, "\(name): the burst arrived in full while it was measured")
         XCTAssertGreaterThan(samples, 5, "\(name): measured through it")
         // A sample can catch the navigation bar's edge effect or a row's own content changing over the strips (a
         // screenshot is kept for each); a room that moved shows as a measured movement, or as what was read being gone
@@ -530,8 +540,40 @@ final class RoomReaderStaysPutUITests: XCTestCase {
     }
 
     private static func beginBurst() {
+        listenForDone()
+        doneAt = nil
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                              CFNotificationName(signal as CFString), nil, nil, true)
+    }
+
+    /// When the app said the burst's last row was sent (nil until it does).
+    private static var doneAt: Date?
+    private static var listening = false
+
+    private static func listenForDone() {
+        guard !listening else { return }
+        listening = true
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(), nil,
+            { _, _, _, _, _ in RoomReaderStaysPutUITests.doneAt = Date() },
+            doneSignal as CFString, nil, .deliverImmediately
+        )
+    }
+
+    /// The burst has been watched long enough: at least `least`, and until `settleTime` after its last row, or
+    /// `longestBurst` if the app never says so.
+    private static func burstWatched(since started: Date, least: TimeInterval) -> Bool {
+        let now = Date()
+        if now.timeIntervalSince(started) >= longestBurst { return true }
+        guard now.timeIntervalSince(started) >= least, let doneAt else { return false }
+        return now.timeIntervalSince(doneAt) >= settleTime
+    }
+
+    /// Waits until the burst has all arrived and settled; fails if it never does.
+    private func waitForBurst() {
+        let started = Date()
+        while !Self.burstWatched(since: started, least: Self.burstTime) { pause(0.2) }
+        XCTAssertNotNil(Self.doneAt, "the burst arrived in full")
     }
 
     private func pause(_ seconds: TimeInterval) {
