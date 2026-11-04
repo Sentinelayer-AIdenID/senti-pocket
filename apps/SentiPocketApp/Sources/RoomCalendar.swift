@@ -36,6 +36,13 @@ final class CalendarCenter: ObservableObject {
     var showsCalendar: Bool { draftsOn == true }
     var showsSubscribe: Bool { feedOn == true }
 
+    /// The room Settings asks the drafts route with: any room you are in, whatever your role (the flag answers before
+    /// any role check, so a viewer's room tells as much as an owner's), a room before a direct message. Nil only with
+    /// no rooms at all.
+    static func probeRoom(in rooms: [(id: String, role: String, isDirect: Bool)]) -> String? {
+        rooms.first { !$0.isDirect }?.id ?? rooms.first?.id
+    }
+
     /// Whether a member with this role may add events (the server decides in the end: a 403 says so).
     static func canAdd(role: String) -> Bool {
         let role = role.lowercased()
@@ -360,8 +367,10 @@ final class CalendarBoard: ObservableObject {
         }
     }
 
-    /// Drops the draft. Nothing was saved; what was typed stays, to draft again.
+    /// Drops the draft. Nothing was saved; what was typed stays, to draft again. While a save is out it does nothing:
+    /// the event may already exist, so the form stays until the server answers.
     func cancelDraft() {
+        guard !isSaving else { return }
         form = nil
         saveProblem = nil
     }

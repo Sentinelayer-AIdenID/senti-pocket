@@ -444,7 +444,9 @@ struct CalendarDraftFormView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
+                // Not while a save is out: the event may already be made.
                 Button("Cancel", action: onCancel)
+                    .disabled(isSaving)
                     .accessibilityIdentifier("pocket.calendar.form.cancel")
             }
             ToolbarItem(placement: .confirmationAction) {

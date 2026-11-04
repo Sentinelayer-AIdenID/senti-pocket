@@ -877,7 +877,7 @@ private struct AuthenticatedRootView: View {
                 closeDrawer()
                 presentsSettings = true
                 Task { await directMessages.refresh() }
-                Task { await calendar.refresh(probeRoom: calendarRooms.first?.id) }
+                Task { await calendar.refresh(probeRoom: calendarProbeRoom) }
             },
             onNewRoom: roomSender is any RoomCreating ? {
                 closeDrawer()
@@ -927,6 +927,13 @@ private struct AuthenticatedRootView: View {
                                     canAdd: CalendarCenter.canAdd(role: route.membershipRole),
                                     isOffered: route.direct == nil,
                                     onReauthenticationRequired: invalidateProtectedAuthentication))
+    }
+
+    /// Any room you are in, to ask whether drafting is on: a viewer's room answers the flag as well as any.
+    private var calendarProbeRoom: String? {
+        CalendarCenter.probeRoom(in: sessions.state.rows.map {
+            (id: $0.sessionId, role: $0.membershipRole, isDirect: $0.isDirect)
+        })
     }
 
     /// The rooms an event can be added to from Settings' calendar: rooms (not direct messages) you can write in.

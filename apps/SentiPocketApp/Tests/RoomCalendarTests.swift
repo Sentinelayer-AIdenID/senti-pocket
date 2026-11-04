@@ -14,6 +14,8 @@ private final class FakeCalendar: RoomCalendarServing, CalendarFeedServing, @unc
     private var _draft: Result<CalendarDraft, CalendarError> = .failure(.retryable)
     private var _saveFailure: CalendarError?
     private var _readFailure: CalendarError?
+    private var _holdsSave = false
+    private var _saveWaiter: CheckedContinuation<Void, Never>?
     private var _draftRequests: [(room: String, request: CalendarDraftRequest)] = []
     private var _saved: [(room: String, event: CalendarEventCreate)] = []
     private var _reads = 0
@@ -34,6 +36,16 @@ private final class FakeCalendar: RoomCalendarServing, CalendarFeedServing, @unc
     }
     var readFailure: CalendarError? {
         get { lock.withLock { _readFailure } } set { lock.withLock { _readFailure = newValue } }
+    }
+    /// Saves wait until `releaseSave()`, to act while one is out.
+    var holdsSave: Bool { get { lock.withLock { _holdsSave } } set { lock.withLock { _holdsSave = newValue } } }
+    var saveIsOut: Bool { lock.withLock { _saveWaiter != nil } }
+    func releaseSave() {
+        let waiter: CheckedContinuation<Void, Never>? = lock.withLock {
+            defer { _saveWaiter = nil }
+            return _saveWaiter
+        }
+        waiter?.resume()
     }
     var draftRequests: [(room: String, request: CalendarDraftRequest)] { lock.withLock { _draftRequests } }
     var saved: [(room: String, event: CalendarEventCreate)] { lock.withLock { _saved } }
@@ -59,6 +71,11 @@ private final class FakeCalendar: RoomCalendarServing, CalendarFeedServing, @unc
     }
 
     func save(_ event: CalendarEventCreate, inRoom sessionId: String) async throws -> CalendarEvent {
+        if holdsSave {
+            await withCheckedContinuation { (waiter: CheckedContinuation<Void, Never>) in
+                lock.withLock { _saveWaiter = waiter }
+            }
+        }
         if let failure = saveFailure { throw failure }
         lock.withLock { _saved.append((sessionId, event)) }
         return CalendarEvent(id: "saved-\(saved.count)", sessionId: sessionId, title: event.title,
@@ -200,6 +217,51 @@ final class RoomCalendarTests: XCTestCase {
         await board.save()
         XCTAssertTrue(fake.saved.isEmpty, "a cancelled draft cannot be saved")
         XCTAssertEqual(board.addText, "Lunch with Sam at 1", "what was typed stays, to draft again")
+    }
+
+    /// Review finding (PR #330): Cancel during a save dropped the form while the event was still being made, so the
+    /// event appeared after the person had cancelled, and a new draft could save it twice. Cancel now waits.
+    func test_cancel_while_the_save_is_out_keeps_the_form_and_makes_one_event() async throws {
+        let fake = FakeCalendar()
+        fake.draftAnswer = .success(lunchDraft("2026-11-06T13:00:00-05:00", nil))
+        fake.holdsSave = true
+        let board = makeBoard(fake)
+        let friday = CalendarDay(year: 2026, month: 11, day: 6)
+        board.select(friday)
+        board.addText = "Lunch with Sam on Friday at 1"
+        await board.draft()
+        let saving = Task { await board.save() }
+        for _ in 0..<2_000 where !fake.saveIsOut { try await Task.sleep(nanoseconds: 1_000_000) }
+        XCTAssertTrue(fake.saveIsOut, "the save is out")
+        XCTAssertTrue(board.isSaving)
+
+        board.cancelDraft()
+        XCTAssertNotNil(board.form, "Cancel does nothing while the save is out: the event may already exist")
+        await board.save()
+        await board.draft()
+
+        fake.releaseSave()
+        await saving.value
+        XCTAssertNil(board.form, "the form closes when the save lands")
+        XCTAssertEqual(fake.saved.count, 1, "one event, not two")
+        XCTAssertEqual(fake.draftRequests.count, 1, "no new draft while the first was being saved")
+        XCTAssertEqual(board.events(on: friday).count, 1)
+    }
+
+    /// Review finding (PR #330): Settings asked the drafts route only with a room the person could write in, so an
+    /// account that only reads rooms never had the calendar asked about from Settings. Any room answers the flag.
+    func test_settings_asks_about_the_calendar_with_a_room_a_viewer_reads() async {
+        let viewerOnly = [(id: "dm-1", role: "owner", isDirect: true), (id: "room-a", role: "viewer", isDirect: false),
+                          (id: "room-b", role: "viewer", isDirect: false)]
+        XCTAssertEqual(CalendarCenter.probeRoom(in: viewerOnly), "room-a", "a room before a direct message, any role")
+        XCTAssertEqual(CalendarCenter.probeRoom(in: [(id: "dm-1", role: "viewer", isDirect: true)]), "dm-1")
+        XCTAssertNil(CalendarCenter.probeRoom(in: []))
+
+        let fake = FakeCalendar()
+        let center = CalendarCenter(client: fake, feed: fake, openURL: { _ in })
+        await center.refresh(probeRoom: CalendarCenter.probeRoom(in: viewerOnly))
+        XCTAssertTrue(center.showsCalendar, "a viewer-only account sees the calendar once drafting is on")
+        XCTAssertTrue(center.showsSubscribe)
     }
 
     func test_a_failed_draft_says_so_and_keeps_the_text() async {
