@@ -5,19 +5,22 @@ import PocketUI
 import XCTest
 @testable import SentiPocketApp
 
-/// Your folders as a fake of the pinned contract (2026-11-04): 404 for everything when the flag is off, 404 for a folder
-/// that is gone, 409 for a name already used.
+/// Your folders as a fake of the API's contract (sentinelayer-api #1125): 404 for everything when the flag is off, 404
+/// for a folder that is gone, and whatever refusal a test sets for the next call.
 private final class FakeRoomFolders: RoomFoldersServing, @unchecked Sendable {
     private let lock = NSLock()
     private var _on = true
     private var _folders: [RoomFolder] = []
     private var _calls: [String] = []
+    private var _keys: [String?] = []
     private var _failNext: RoomFolderError?
     private var next = 1
 
     var on: Bool { get { lock.withLock { _on } } set { lock.withLock { _on = newValue } } }
     var failNext: RoomFolderError? { get { lock.withLock { _failNext } } set { lock.withLock { _failNext = newValue } } }
     var calls: [String] { lock.withLock { _calls } }
+    /// The Idempotency-Key of each create.
+    var keys: [String?] { lock.withLock { _keys } }
 
     init(_ folders: [RoomFolder] = []) { _folders = folders }
 
@@ -37,10 +40,11 @@ private final class FakeRoomFolders: RoomFoldersServing, @unchecked Sendable {
         return lock.withLock { _folders }
     }
 
-    func createFolder(named name: String) async throws -> RoomFolder {
-        try note("create \(name)")
+    func createFolder(named name: String, in parentFolderId: String?, idempotencyKey: String?) async throws -> RoomFolder {
+        lock.withLock { _keys.append(idempotencyKey) }
+        try note("create \(name)" + (parentFolderId.map { " in \($0)" } ?? ""))
         return lock.withLock {
-            let folder = RoomFolder(id: "f-new\(next)", name: name, position: _folders.count)
+            let folder = RoomFolder(id: "f-new\(next)", name: name, parentFolderId: parentFolderId, position: _folders.count)
             next += 1
             _folders.append(folder)
             return folder
@@ -57,8 +61,14 @@ private final class FakeRoomFolders: RoomFoldersServing, @unchecked Sendable {
         return RoomFolder(id: folderId, name: "moved", position: position)
     }
 
+    func moveFolder(_ folderId: String, into parentFolderId: String?) async throws -> RoomFolder {
+        try note("move \(folderId) into \(parentFolderId ?? "top")")
+        return RoomFolder(id: folderId, name: "moved", parentFolderId: parentFolderId, position: 0)
+    }
+
     func deleteFolder(_ folderId: String) async throws {
         try note("delete \(folderId)")
+        lock.withLock { _folders.removeAll { $0.id == folderId } }
     }
 
     func file(room sessionId: String, in folderId: String) async throws {
@@ -72,9 +82,17 @@ private final class FakeRoomFolders: RoomFoldersServing, @unchecked Sendable {
 
 @MainActor
 final class RoomFoldersCenterTests: XCTestCase {
-    private let three = [RoomFolder(id: "f-a", name: "Launch", position: 0, roomCount: 2),
-                         RoomFolder(id: "f-b", name: "Clients", position: 1, roomCount: 1),
-                         RoomFolder(id: "f-c", name: "Later", position: 2)]
+    private let three = [RoomFolder(id: "f-a", name: "Studio", position: 0, roomCount: 2),
+                         RoomFolder(id: "f-b", name: "Ops", position: 1, roomCount: 1),
+                         RoomFolder(id: "f-c", name: "Notes", position: 2)]
+    /// Studio > Sketches > Ideas; Ops > Night shift; Notes.
+    private let nested = [RoomFolder(id: "f-a", name: "Studio", position: 0, roomCount: 1, totalRoomCount: 3),
+                          RoomFolder(id: "f-s", name: "Sketches", parentFolderId: "f-a", position: 0, roomCount: 1,
+                                     totalRoomCount: 2),
+                          RoomFolder(id: "f-i", name: "Ideas", parentFolderId: "f-s", position: 0, roomCount: 1),
+                          RoomFolder(id: "f-b", name: "Ops", position: 1),
+                          RoomFolder(id: "f-n", name: "Night shift", parentFolderId: "f-b", position: 0),
+                          RoomFolder(id: "f-c", name: "Notes", position: 2)]
     private var roomReads = 0
 
     private func center(_ fake: FakeRoomFolders) -> RoomFoldersCenter {
@@ -97,6 +115,18 @@ final class RoomFoldersCenterTests: XCTestCase {
         XCTAssertNil(folders.items, "the flag off: the routes 404 and every folder affordance hides")
     }
 
+    func test_the_side_panels_folders_carry_their_parent_counts_and_time() async {
+        let fake = FakeRoomFolders([RoomFolder(id: "f-s", name: "Sketches", parentFolderId: "f-a", position: 3,
+                                               roomCount: 1, totalRoomCount: 4, createdAt: "2026-11-04T10:17:00+00:00")])
+        let folders = center(fake)
+        await folders.refresh()
+        let item = folders.items?.first
+        XCTAssertEqual(item?.parentId, "f-a")
+        XCTAssertEqual(item?.position, 3)
+        XCTAssertEqual(item?.totalRoomCount, 4)
+        XCTAssertEqual(item?.createdAt, ParsedSessionTimestamp("2026-11-04T10:17:00+00:00").date)
+    }
+
     func test_a_new_folder_from_a_rooms_menu_is_made_then_the_room_filed_then_both_lists_read_again() async {
         let fake = FakeRoomFolders(three)
         let folders = center(fake)
@@ -110,30 +140,77 @@ final class RoomFoldersCenterTests: XCTestCase {
         XCTAssertEqual(folders.items?.count, 4)
     }
 
-    func test_a_taken_name_keeps_the_sheet_open_and_says_so() async {
-        let fake = FakeRoomFolders(three)
+    func test_new_folder_inside_makes_it_in_that_folder() async {
+        let fake = FakeRoomFolders(nested)
         let folders = center(fake)
         await folders.refresh()
-        folders.send(.create(fileRoomId: nil))
-        fake.failNext = .duplicateName
-        await folders.save(name: "Launch")
-        XCTAssertEqual(folders.sheet, .create(fileRoomId: nil))
-        XCTAssertEqual(folders.sheetProblem, "You already have a folder named “Launch”.")
-        XCTAssertEqual(roomReads, 0)
+        folders.send(.createInside(folderId: "f-n"))
+        XCTAssertEqual(folders.sheet, .createInside(nested[4]))
+        XCTAssertEqual(RoomFolderSheets.place(folders.sheet!), "Inside “Night shift”")
+        await folders.save(name: "Rota")
+        XCTAssertEqual(fake.calls, ["list", "create Rota in f-n", "list"])
+        XCTAssertNil(folders.sheet)
+        XCTAssertEqual(roomReads, 1)
     }
 
-    /// The server counted 100 folders where the phone counted fewer (another device made some): the sheet says it is
-    /// the cap, not a taken name, and the folders are read again so the phone counts what the server has.
-    func test_the_servers_cap_says_so_and_reads_the_folders_again() async {
+    func test_a_level_3_folder_offers_no_folder_inside() async {
+        let folders = center(FakeRoomFolders(nested))
+        await folders.refresh()
+        folders.send(.createInside(folderId: "f-i"))
+        XCTAssertNil(folders.sheet, "Ideas is at level 3")
+    }
+
+    /// A retry after a lost answer sends the same key, so the server answers with the folder it made; another name is
+    /// another create, with another key.
+    func test_a_retried_create_sends_the_same_key_and_another_name_a_new_one() async {
         let fake = FakeRoomFolders(three)
         let folders = center(fake)
         await folders.refresh()
+        folders.send(.createInside(folderId: "f-a"))
+        fake.failNext = .retryable
+        await folders.save(name: "Sketches")
+        XCTAssertNotNil(folders.sheet, "not saved: the sheet stays")
+        await folders.save(name: "Sketches")
+        await folders.refresh()
         folders.send(.create(fileRoomId: nil))
-        fake.failNext = .limitReached
-        await folders.save(name: "One more")
-        XCTAssertEqual(folders.sheetProblem, RoomFolderName.limitMessage)
-        XCTAssertEqual(fake.calls, ["list", "create One more", "list"], "the folders are read again")
-        XCTAssertEqual(folders.sheet, .create(fileRoomId: nil), "the sheet stays, with the reason")
+        await folders.save(name: "Sketches")
+        let keys = fake.keys
+        XCTAssertEqual(keys.count, 3)
+        XCTAssertNotNil(keys[0])
+        XCTAssertEqual(keys[0], keys[1], "the same create tried again")
+        XCTAssertNotEqual(keys[1], keys[2], "another place is another create")
+    }
+
+    /// Each refusal the API sends as a 409 reads as its own plain line, and the sheet stays open with it.
+    func test_each_409_on_a_create_keeps_the_sheet_and_says_its_line() async {
+        let cases: [(RoomFolderError, String)] = [
+            (.duplicateName, "There's already a folder with that name here."),
+            (.limitReached, "You've reached 100 folders."),
+            (.tooDeep, "Folders go 3 levels deep at most.")
+        ]
+        for (error, line) in cases {
+            let fake = FakeRoomFolders(nested)
+            let folders = center(fake)
+            await folders.refresh()
+            folders.send(.createInside(folderId: "f-s"))
+            fake.failNext = error
+            await folders.save(name: "Late")
+            XCTAssertEqual(folders.sheet, .createInside(nested[1]), "\(error)")
+            XCTAssertEqual(folders.sheetProblem, line)
+            XCTAssertEqual(fake.calls, ["list", "create Late in f-s", "list"], "the folders are read again")
+            XCTAssertEqual(roomReads, 0)
+        }
+    }
+
+    func test_the_409_lines() {
+        XCTAssertEqual(RoomFoldersCenter.line(for: .tooDeep), "Folders go 3 levels deep at most.")
+        XCTAssertEqual(RoomFoldersCenter.line(for: .cycle), "A folder can't go inside itself.")
+        XCTAssertEqual(RoomFoldersCenter.line(for: .duplicateName), "There's already a folder with that name here.")
+        XCTAssertEqual(RoomFoldersCenter.line(for: .limitReached), "You've reached 100 folders.")
+        XCTAssertEqual(RoomFoldersCenter.line(for: .duplicateName, deleting: true),
+                       "A folder inside has the same name as one at that level. Rename one of them first.")
+        XCTAssertNil(RoomFoldersCenter.line(for: .retryable))
+        XCTAssertNil(RoomFoldersCenter.line(for: .gone))
     }
 
     func test_a_name_the_api_would_refuse_is_never_sent() async {
@@ -160,17 +237,113 @@ final class RoomFoldersCenterTests: XCTestCase {
         XCTAssertEqual(roomReads, 1)
     }
 
-    func test_move_up_and_down_send_the_new_place_and_the_ends_do_not_move() async throws {
-        let fake = FakeRoomFolders(three)
+    // MARK: Move to…
+
+    /// The picker for Sketches (it holds Ideas): the top level and the level-1 folders, Studio ticked; never itself,
+    /// Ideas or Night shift.
+    func test_move_to_offers_only_valid_places_and_moves_there() async {
+        let fake = FakeRoomFolders(nested)
+        let folders = center(fake)
+        await folders.refresh()
+        folders.send(.pickParent(folderId: "f-s"))
+        XCTAssertEqual(folders.sheet, .moveFolder(nested[1]))
+        XCTAssertEqual(folders.destinations.map(\.id), ["top", "f-a", "f-b", "f-c"])
+        XCTAssertEqual(folders.destinations.filter(\.isCurrent).map(\.id), ["f-a"])
+        await folders.pick("f-b")
+        XCTAssertEqual(fake.calls, ["list", "move f-s into f-b", "list"])
+        XCTAssertNil(folders.sheet)
+        XCTAssertEqual(roomReads, 1)
+    }
+
+    func test_moving_to_the_top_level_sends_no_parent_and_picking_where_it_is_sends_nothing() async {
+        let fake = FakeRoomFolders(nested)
+        let folders = center(fake)
+        await folders.refresh()
+        folders.send(.pickParent(folderId: "f-n"))
+        await folders.pick(nil)
+        XCTAssertEqual(fake.calls, ["list", "move f-n into top", "list"])
+        folders.send(.pickParent(folderId: "f-n"))
+        await folders.pick("f-b")
+        XCTAssertEqual(fake.calls.count, 3, "it is in Ops already")
+        XCTAssertNil(folders.sheet)
+    }
+
+    /// The server is the judge: a move it refuses keeps the picker open with the reason, and the folders are read
+    /// again (another device may have changed them).
+    func test_each_409_on_a_move_keeps_the_picker_and_says_its_line() async {
+        let cases: [(RoomFolderError, String)] = [
+            (.tooDeep, "Folders go 3 levels deep at most."),
+            (.cycle, "A folder can't go inside itself."),
+            (.duplicateName, "There's already a folder with that name here.")
+        ]
+        for (error, line) in cases {
+            let fake = FakeRoomFolders(nested)
+            let folders = center(fake)
+            await folders.refresh()
+            folders.send(.pickParent(folderId: "f-i"))
+            fake.failNext = error
+            await folders.pick("f-n")
+            XCTAssertEqual(folders.sheet, .moveFolder(nested[2]), "\(error)")
+            XCTAssertEqual(folders.sheetProblem, line)
+            XCTAssertEqual(fake.calls, ["list", "move f-i into f-n", "list"])
+            XCTAssertNil(folders.notice)
+        }
+    }
+
+    func test_folders_turned_off_while_the_picker_is_open_close_it() async {
+        let fake = FakeRoomFolders(nested)
+        let folders = center(fake)
+        await folders.refresh()
+        folders.send(.pickParent(folderId: "f-s"))
+        fake.on = false
+        await folders.pick("f-c")
+        XCTAssertNil(folders.sheet)
+        XCTAssertNil(folders.items)
+    }
+
+    // MARK: Move to folder… (a room)
+
+    func test_a_rooms_picker_lists_the_tree_ticks_its_folder_and_files_it() async {
+        let fake = FakeRoomFolders(nested)
+        let folders = center(fake)
+        await folders.refresh()
+        folders.send(.pickFolder(roomId: "room-1", folderId: "f-n"))
+        XCTAssertEqual(folders.destinations.map(\.id), ["f-a", "f-s", "f-i", "f-b", "f-n", "f-c"])
+        XCTAssertEqual(folders.destinations.map(\.depth), [1, 2, 3, 1, 2, 1])
+        XCTAssertEqual(folders.destinations.filter(\.isCurrent).map(\.id), ["f-n"])
+        await folders.pick("f-n")
+        XCTAssertEqual(fake.calls, ["list"], "where it is already: nothing sent")
+        folders.send(.pickFolder(roomId: "room-1", folderId: "f-n"))
+        await folders.pick("f-i")
+        XCTAssertEqual(fake.calls, ["list", "file room-1 f-i", "list"])
+        XCTAssertEqual(roomReads, 1)
+    }
+
+    func test_new_folder_from_a_rooms_picker_files_the_room_in_it() async {
+        let fake = FakeRoomFolders(nested)
+        let folders = center(fake)
+        await folders.refresh()
+        folders.send(.pickFolder(roomId: "room-1", folderId: nil))
+        folders.newFolderForPickedRoom()
+        XCTAssertEqual(folders.sheet, .create(fileRoomId: "room-1"))
+        await folders.save(name: "Garden")
+        XCTAssertEqual(Array(fake.calls.suffix(3)), ["create Garden", "file room-1 f-new1", "list"])
+    }
+
+    // MARK: Move up and down, file and unfile
+
+    func test_move_up_and_down_go_among_the_folders_beside_it_and_the_ends_do_not_move() async throws {
+        let fake = FakeRoomFolders(nested)
         let folders = center(fake)
         await folders.refresh()
         folders.send(.move(folderId: "f-a", up: true))
-        folders.send(.move(folderId: "f-c", up: false))
+        folders.send(.move(folderId: "f-n", up: false))
+        folders.send(.move(folderId: "f-s", up: true))
         try await Task.sleep(nanoseconds: 100_000_000)
-        XCTAssertEqual(fake.calls, ["list"], "the first cannot go up, the last cannot go down")
+        XCTAssertEqual(fake.calls, ["list"], "the first cannot go up, the last cannot go down, an only folder neither")
         folders.send(.move(folderId: "f-c", up: true))
         try await settle(fake, calls: 3)
-        XCTAssertEqual(fake.calls, ["list", "move f-c 1", "list"])
+        XCTAssertEqual(fake.calls, ["list", "move f-c 1", "list"], "Notes is third at the top level: up is place 1")
         XCTAssertEqual(roomReads, 1)
     }
 
@@ -188,19 +361,35 @@ final class RoomFoldersCenterTests: XCTestCase {
         XCTAssertEqual(roomReads, 2)
     }
 
-    func test_delete_waits_for_your_confirmation_and_says_where_the_rooms_go() async {
-        let fake = FakeRoomFolders(three)
+    // MARK: Delete
+
+    func test_delete_waits_for_your_confirmation_and_says_what_moves_up() async {
+        let fake = FakeRoomFolders(nested)
         let folders = center(fake)
         await folders.refresh()
         folders.send(.delete(folderId: "f-a"))
         XCTAssertEqual(folders.deleting?.id, "f-a")
         XCTAssertEqual(fake.calls, ["list"], "nothing is deleted before you confirm")
-        XCTAssertEqual(RoomFolderSheets.deleteMessage(roomCount: 2),
-                       "Its 2 rooms move back to Rooms. The rooms themselves are not deleted.")
+        XCTAssertEqual(RoomFolderName.deleteMessage, "Its folders and rooms move up one level. No rooms are deleted.")
         await folders.confirmDelete()
         XCTAssertNil(folders.deleting)
         XCTAssertEqual(fake.calls, ["list", "delete f-a", "list"])
         XCTAssertEqual(roomReads, 1)
+    }
+
+    /// The server refuses a delete that would put a folder inside it beside one of the same name: the folder stays,
+    /// and the side panel says what to do.
+    func test_a_delete_refused_for_a_promoted_childs_name_keeps_the_folder_and_says_so() async {
+        let fake = FakeRoomFolders(nested)
+        let folders = center(fake)
+        await folders.refresh()
+        folders.send(.delete(folderId: "f-s"))
+        fake.failNext = .duplicateName
+        await folders.confirmDelete()
+        XCTAssertEqual(folders.notice,
+                       "A folder inside has the same name as one at that level. Rename one of them first.")
+        XCTAssertEqual(folders.items?.map(\.id).contains("f-s"), true, "the folder is kept")
+        XCTAssertEqual(fake.calls, ["list", "delete f-s", "list"])
     }
 
     func test_folders_turned_off_mid_change_hide_everything() async {
@@ -219,6 +408,8 @@ final class RoomFoldersCenterTests: XCTestCase {
         await folders.refresh()
         folders.send(.rename(folderId: "f-zz"))
         folders.send(.delete(folderId: "f-zz"))
+        folders.send(.pickParent(folderId: "f-zz"))
+        folders.send(.createInside(folderId: "f-zz"))
         XCTAssertNil(folders.sheet)
         XCTAssertNil(folders.deleting)
     }

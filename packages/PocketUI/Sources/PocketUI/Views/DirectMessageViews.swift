@@ -388,43 +388,29 @@ public struct DirectRoomHeaderView: View {
     }
 }
 
-/// A room's folder choices, in its long-press menu (the side panel and All rooms): move it to a folder (or a new one),
-/// or take it out of the one it is in.
+/// A room's folder choices, in its long-press menu (the side panel and All rooms): move it to a folder (a picker of your
+/// folders as a tree, where a new one can be made too), or take it out of the one it is in.
 public struct RoomFolderMenuItems: View {
     let roomId: String
-    let folderId: String?
-    let folders: [RoomFolderItem]
+    /// The folder it is in, when that is one of yours.
+    let filedIn: String?
     let send: (RoomFolderIntent) -> Void
 
-    public init(roomId: String, folderId: String?, folders: [RoomFolderItem], send: @escaping (RoomFolderIntent) -> Void) {
+    public init(roomId: String, filedIn: String?, send: @escaping (RoomFolderIntent) -> Void) {
         self.roomId = roomId
-        self.folderId = folderId
-        self.folders = folders
+        self.filedIn = filedIn
         self.send = send
     }
 
     public var body: some View {
-        let others = RoomFolderItem.ordered(folders).filter { $0.id != folderId }
-        Menu {
-            ForEach(others) { folder in
-                Button {
-                    send(.file(roomId: roomId, folderId: folder.id))
-                } label: {
-                    Label(folder.name, systemImage: "folder")
-                }
-            }
-            if !others.isEmpty { Divider() }
-            Button {
-                send(.create(fileRoomId: roomId))
-            } label: {
-                Label("New folder…", systemImage: "folder.badge.plus")
-            }
+        Button {
+            send(.pickFolder(roomId: roomId, folderId: filedIn))
         } label: {
-            Label("Move to folder", systemImage: "folder")
+            Label("Move to folder…", systemImage: "folder")
         }
-        if let folderId, folders.contains(where: { $0.id == folderId }) {
+        if let filedIn {
             Button {
-                send(.unfile(roomId: roomId, folderId: folderId))
+                send(.unfile(roomId: roomId, folderId: filedIn))
             } label: {
                 Label("Remove from folder", systemImage: "folder.badge.minus")
             }
@@ -432,19 +418,18 @@ public struct RoomFolderMenuItems: View {
     }
 }
 
-/// A room's long press with its folder choices, only where folders are on: with them off the room has no long-press
-/// menu at all, as before.
+/// A room's long press with its folder choices, only where folders are on (`send` not nil): with them off the room has
+/// no long-press menu at all, as before.
 struct RoomFolderContextMenu: ViewModifier {
     let roomId: String
-    let folderId: String?
-    let folders: [RoomFolderItem]?
+    let filedIn: String?
     let send: ((RoomFolderIntent) -> Void)?
 
     @ViewBuilder
     func body(content: Content) -> some View {
-        if let folders, let send {
+        if let send {
             content.contextMenu {
-                RoomFolderMenuItems(roomId: roomId, folderId: folderId, folders: folders, send: send)
+                RoomFolderMenuItems(roomId: roomId, filedIn: filedIn, send: send)
             }
         } else {
             content
@@ -456,6 +441,8 @@ struct RoomFolderContextMenu: ViewModifier {
 /// what the server said about it (a name already used) shows under it.
 public struct RoomFolderNameSheet: View {
     private let title: String
+    /// Where the new folder goes ("Inside Studio."), when not at the top level.
+    private let place: String?
     private let isNew: Bool
     private let folderCount: Int
     private let serverProblem: String?
@@ -465,9 +452,11 @@ public struct RoomFolderNameSheet: View {
     @State private var name: String
     @State private var edited = false
 
-    public init(title: String, initialName: String = "", isNew: Bool, folderCount: Int, serverProblem: String?,
-                isSaving: Bool, onSave: @escaping (String) -> Void, onCancel: @escaping () -> Void) {
+    public init(title: String, place: String? = nil, initialName: String = "", isNew: Bool, folderCount: Int,
+                serverProblem: String?, isSaving: Bool, onSave: @escaping (String) -> Void,
+                onCancel: @escaping () -> Void) {
         self.title = title
+        self.place = place
         self.isNew = isNew
         self.folderCount = folderCount
         self.serverProblem = serverProblem
@@ -490,6 +479,12 @@ public struct RoomFolderNameSheet: View {
                         .onSubmit { save() }
                         .onChange(of: name) { _ in edited = true }
                         .accessibilityIdentifier("pocket.folder.name")
+                } header: {
+                    if let place {
+                        Text(place)
+                            .textCase(nil)
+                            .accessibilityIdentifier("pocket.folder.place")
+                    }
                 } footer: {
                     VStack(alignment: .leading, spacing: 4) {
                         if case .problem(let text) = check, edited || isNew && folderCount >= RoomFolderName.maximumFolders {

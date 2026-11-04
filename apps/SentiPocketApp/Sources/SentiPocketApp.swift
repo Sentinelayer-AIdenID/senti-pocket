@@ -233,6 +233,8 @@ private struct AuthenticatedRootView: View {
     @StateObject private var directMessages: DirectMessagesCenter
     /// Your room folders: on when the server lists them (ROOM_FOLDERS_ENABLED), else nothing shows.
     @StateObject private var roomFolders: RoomFoldersCenter
+    /// The side panel's rooms in your folders, placed off the main thread when the rooms or the folders change.
+    @StateObject private var sidePanelPlacement = SidePanelPlacement()
     @Environment(\.scenePhase) private var rootScenePhase
     @ObservedObject private var whisperModelCoordinator: WhisperModelProvisioningCoordinator
     @ObservedObject private var incomingLinks: IncomingLinkInbox
@@ -812,22 +814,11 @@ private struct AuthenticatedRootView: View {
         .accessibilityIdentifier("pocket.drawer.open")
     }
 
+    /// The side panel. Its rooms and folders are placed off the main thread, and only when the room list or your
+    /// folders change: opening it, and a read that finds nothing new, place nothing.
     private var sidePanel: some View {
         PocketSidePanel(
-            rooms: sessions.state.rows.map { row in
-                PocketSidePanel.Room(
-                    id: row.sessionId,
-                    title: row.title,
-                    subtitle: row.summary,
-                    lastActivity: row.lastActivity?.date,
-                    kind: row.roomTypeLabel,
-                    activity: row.activity,
-                    direct: row.counterpart.map {
-                        PocketSidePanel.Direct(name: $0.displayName, isAgent: $0.isAgent, originRoomId: row.originRoomId)
-                    },
-                    folderId: row.folderId
-                )
-            },
+            placement: sidePanelPlacement,
             currentRoomId: currentRoom?.sessionId,
             unreadNotifications: notifications.unreadCount,
             waitingOnYou: waiting.state.isAvailable ? waiting.state.total : nil,
@@ -867,10 +858,17 @@ private struct AuthenticatedRootView: View {
                 closeDrawer()
                 presentsNewRoom = true
             } : nil,
-            folders: roomFolders.items,
             folderNotice: roomFolders.notice,
-            onFolder: { roomFolders.send($0) }
+            // Folders show only where they are on.
+            onFolder: roomFolders.items == nil ? nil : { roomFolders.send($0) }
         )
+        .onAppear(perform: placeSidePanelRooms)
+        .onChange(of: sessions.state.rows) { _ in placeSidePanelRooms() }
+        .onChange(of: roomFolders.folders) { _ in placeSidePanelRooms() }
+    }
+
+    private func placeSidePanelRooms() {
+        sidePanelPlacement.update(rows: sessions.state.rows, folders: roomFolders.items)
     }
 
     @ViewBuilder
