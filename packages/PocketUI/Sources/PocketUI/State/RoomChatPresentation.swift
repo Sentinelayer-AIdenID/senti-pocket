@@ -40,6 +40,8 @@ public struct RoomChatMessageInput: Equatable, Sendable {
     public let isVoiceTurn: Bool
     /// A checkpoint's summary.
     public let checkpointSummary: String?
+    /// The server takes a report on it (a posted message or a reply, not a file's upload notice or a relayed line).
+    public var isReportable = true
 
     public init(
         id: String,
@@ -296,6 +298,8 @@ public struct RoomChatMessageRow: Equatable, Identifiable, Sendable {
     public var isAuthorBlocked = false
     /// You blocked its author and have not asked to see this one: it shows as one line with Show.
     public var hidesAsBlocked = false
+    /// The server takes a report on it (`RoomChatMessageInput.isReportable`).
+    public var isReportable = true
 }
 
 public enum RoomChatRow: Equatable, Identifiable, Sendable {
@@ -607,9 +611,11 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     public let canBlock: Bool
     /// The report sheet, while one is open.
     public let report: RoomReportState?
-    /// Sending here first asks your OK for the room's AI agents to read it: the room has agents, and this account has
-    /// not said OK (or took it back). Asked before the box empties, so Not now keeps what you wrote.
+    /// Writing here first asks your OK to share with AI: this account has not said OK (or took it back). The box asks
+    /// before it empties, so Not now keeps what you wrote.
     public let asksAIConsent: Bool
+    /// Writes are waiting for that answer (a reaction, a pin, an edit): the room asks now.
+    public let consentRequested: Bool
 
     /// Same-author rows closer together than this share one header.
     public static let groupingWindow: TimeInterval = 5 * 60
@@ -670,6 +676,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         canBlock: Bool = false,
         report: RoomReportState? = nil,
         asksAIConsent: Bool = false,
+        consentRequested: Bool = false,
         calendar: Calendar = .current
     ) {
         // Emoji reactions show only in a build that turns them on (`RoomEmojiReactions`), and never on a reply shown
@@ -713,6 +720,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         self.canBlock = protectedFailure ? false : canBlock
         self.report = protectedFailure ? nil : report
         self.asksAIConsent = asksAIConsent
+        self.consentRequested = consentRequested
 
         // Protected content never renders beside an auth or access failure.
         guard failure?.suppressesProtectedContent != true else {
@@ -837,7 +845,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 isAuthorBlocked: input.kind == .message && isBlocked(input.authorId),
                 hidesAsBlocked: input.kind == .message && isBlocked(input.authorId)
                     && !revealedBlocked.contains(input.inlineReplyId.map(RoomBlocking.revealKey(reply:))
-                        ?? RoomBlocking.revealKey(message: input.id))
+                        ?? RoomBlocking.revealKey(message: input.id)),
+                isReportable: input.isReportable
             )))
             if input.kind == .message, let date = input.date {
                 run = (input.authorId, date)
@@ -1493,24 +1502,29 @@ extension RoomChatMessageRow {
             options.append(RoomRowOption(kind: .edit, title: "Edit", symbol: "pencil", intent: nil))
         }
         options.append(RoomRowOption(kind: .copy, title: "Copy text", symbol: "doc.on.doc", intent: nil))
-        if let target = reportTarget {
-            if canReport {
-                options.append(RoomRowOption(kind: .report, title: "Report…", symbol: "exclamationmark.bubble",
-                                             intent: .openReport(target)))
-            }
-            // The view asks first; once blocked, the author is not offered again.
-            if canBlock, !isAuthorBlocked {
-                options.append(RoomRowOption(kind: .block, title: "Block \(authorName)", symbol: "hand.raised",
-                                             intent: nil, isDestructive: true))
-            }
+        if canReport, let target = reportTarget {
+            options.append(RoomRowOption(kind: .report, title: "Report…", symbol: "exclamationmark.bubble",
+                                         intent: .openReport(target)))
+        }
+        // The view asks first; once blocked, the author is not offered again.
+        if canBlock, isBlockable {
+            options.append(RoomRowOption(kind: .block, title: "Block \(authorName)", symbol: "hand.raised",
+                                         intent: nil, isDestructive: true))
         }
         return options
     }
 
-    /// What Report and Block act on: someone else's message or reply, with an author to name. None for your own, or
-    /// for what the room itself posts (a checkpoint, a join, a breakout).
+    /// Someone else's message or reply whose author can be blocked: not yours, not already blocked, and never the
+    /// server's own posts.
+    public var isBlockable: Bool {
+        !isOwn && kind == .message && !authorId.isEmpty && !isAuthorBlocked
+            && authorId.lowercased() != RoomBlocking.serverAuthor
+    }
+
+    /// What Report and Block act on: someone else's message or reply, with an author to name. None for your own, for
+    /// what the room itself posts (a checkpoint, a join, a breakout), or for a row the server takes no report on.
     public var reportTarget: RoomReportTarget? {
-        guard !isOwn, kind == .message, !authorId.isEmpty else { return nil }
+        guard !isOwn, kind == .message, isReportable, !authorId.isEmpty else { return nil }
         return RoomReportTarget(sequenceId: sequenceId, replyId: inlineReplyId, authorId: authorId, authorName: authorName)
     }
 }
@@ -1603,8 +1617,10 @@ public enum RoomChatIntent: Equatable, Sendable {
     case block(RoomBlockTarget)
     /// Show one message or reply from someone you blocked (`RoomBlocking.revealKey`), this once.
     case revealBlocked(key: String)
-    /// You said OK to what you send in rooms reaching their AI agents (`AIConsentText.notice`).
+    /// You said OK to what you share in rooms being shared with AI (`AIConsentText.notice`): the writes held for it go.
     case allowAIAgents
+    /// Not now: the writes held for that answer don't go (what you wrote stays, to edit and send again).
+    case declineAIAgents
 }
 
 /// A room's name as the API takes it (`SessionTitlePayload`, `_normalize_session_title`): control characters out,

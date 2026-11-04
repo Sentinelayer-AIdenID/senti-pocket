@@ -60,8 +60,9 @@ struct BlockedPeopleView: View {
                         }
                     }
                 } footer: {
-                    Text("Their messages and replies show as one line in every room, with Show to see one. They "
-                         + "aren't told when you block or unblock them.")
+                    Text("Their messages and replies show as one line in every room, with Show to see one, and room "
+                         + "search hides their words. " + RoomBlocking.calls + " Blocking an agent blocks its name, so "
+                         + "every agent with that name is blocked. They aren't told when you block or unblock them.")
                 }
             }
         }
@@ -87,15 +88,15 @@ struct AIConsentSettingsView: View {
                     Button("Withdraw", role: .destructive) { consent.withdraw() }
                         .accessibilityIdentifier("settings.aiConsent.withdraw")
                 } else {
-                    Text("Not given. Pocket asks the next time you send a message, answer a ticket or call in a room "
-                         + "with AI agents.")
+                    Text("Not given. Pocket asks the next time you write in a room: a message, a reply, a file, a "
+                         + "ticket or a call.")
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("settings.aiConsent.notGiven")
                 }
             } footer: {
                 if consent.isGiven {
-                    Text("Withdrawing doesn't remove what you already sent. Until you say OK again, Pocket asks before "
-                         + "you send in a room with AI agents.")
+                    Text("Withdrawing doesn't remove what you already shared. Until you say OK again, Pocket asks "
+                         + "before you write in any room.")
                 }
             }
         }

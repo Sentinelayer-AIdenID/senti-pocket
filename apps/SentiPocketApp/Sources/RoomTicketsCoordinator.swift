@@ -646,9 +646,8 @@ struct RoomTicketsScreen: View {
     @StateObject private var coordinator: RoomTicketsCoordinator
     private let onOpenMessage: (@MainActor (Int64) -> Void)?
     private let startsFiling: Bool
-    /// The first answer posted to a room with AI agents asks this account's OK first.
+    /// The first write to the room's tickets asks this account's OK to share with AI.
     private let aiConsent: AIConsent?
-    private let roomHasAgents: @MainActor () -> Bool
     @State private var consentHeld: AIConsentHeld?
 
     init(
@@ -663,14 +662,12 @@ struct RoomTicketsScreen: View {
         mint: (any MintStarting)? = nil,
         startsFiling: Bool = false,
         aiConsent: AIConsent? = nil,
-        roomHasAgents: @escaping @MainActor () -> Bool = { true },
         onOpenMessage: (@MainActor (Int64) -> Void)? = nil,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.onOpenMessage = onOpenMessage
         self.startsFiling = startsFiling && writer != nil
         self.aiConsent = aiConsent
-        self.roomHasAgents = roomHasAgents
         self.sessionId = sessionId
         self.mint = mint
         _coordinator = StateObject(wrappedValue: RoomTicketsCoordinator(
@@ -695,7 +692,7 @@ struct RoomTicketsScreen: View {
         RoomTicketsView(state: coordinator.state, startsFiling: startsFiling) { intent in
             if case .openSourceMessage(let sequence) = intent, let onOpenMessage {
                 onOpenMessage(sequence)
-            } else if intent.postsToTheRoom, let aiConsent, aiConsent.asks(roomHasAgents: roomHasAgents()) {
+            } else if intent.writesToTheRoom, aiConsent?.asks == true {
                 consentHeld = AIConsentHeld { coordinator.send(intent) }
             } else {
                 coordinator.send(intent)
@@ -720,9 +717,8 @@ struct RoomTicketLinkScreen: View {
     @StateObject private var coordinator: RoomTicketsCoordinator
     @Environment(\.dismiss) private var dismiss
     private let onOpenMessage: @MainActor (Int64) -> Void
-    /// The first answer posted to a room with AI agents asks this account's OK first.
+    /// The first write to the room's tickets asks this account's OK to share with AI.
     private let aiConsent: AIConsent?
-    private let roomHasAgents: @MainActor () -> Bool
     @State private var consentHeld: AIConsentHeld?
 
     init(
@@ -737,13 +733,11 @@ struct RoomTicketLinkScreen: View {
         extras: (any RoomTicketExtrasReading)? = nil,
         mint: (any MintStarting)? = nil,
         aiConsent: AIConsent? = nil,
-        roomHasAgents: @escaping @MainActor () -> Bool = { true },
         onOpenMessage: @escaping @MainActor (Int64) -> Void,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.onOpenMessage = onOpenMessage
         self.aiConsent = aiConsent
-        self.roomHasAgents = roomHasAgents
         self.sessionId = sessionId
         self.mint = mint
         _coordinator = StateObject(wrappedValue: RoomTicketsCoordinator(
@@ -810,7 +804,7 @@ struct RoomTicketLinkScreen: View {
             ) { intent in
                 if case .openSourceMessage(let sequence) = intent {
                     onOpenMessage(sequence)
-                } else if intent.postsToTheRoom, let aiConsent, aiConsent.asks(roomHasAgents: roomHasAgents()) {
+                } else if intent.writesToTheRoom, aiConsent?.asks == true {
                     consentHeld = AIConsentHeld { coordinator.send(intent) }
                 } else {
                     coordinator.send(intent)
@@ -840,12 +834,15 @@ struct RoomTicketLinkScreen: View {
 }
 
 extension RoomTicketsIntent {
-    /// Posts your words to the room, where its AI agents read them: a decision's answer (or the same answer again) and
-    /// Chat about it.
-    var postsToTheRoom: Bool {
+    /// Writes to the room's tickets or chat (an answer, a ticket, a comment, an edit, a claim, an agent started): it waits
+    /// for this account's OK to share with AI, asked once. Reading never does.
+    var writesToTheRoom: Bool {
         switch self {
-        case .answerDecision, .retryDecision, .chatAboutIt: return true
-        default: return false
+        case .answerDecision, .retryDecision, .fileTicket, .claim, .release, .assign, .edit, .comment, .retryComment,
+             .chatAboutIt, .startAgent:
+            return true
+        case .setShowsArchived, .search, .refresh, .openSourceMessage, .loadComments:
+            return false
         }
     }
 }

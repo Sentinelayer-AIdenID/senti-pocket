@@ -23,6 +23,8 @@ final class RoomSearchModel: ObservableObject {
     private let people: @MainActor () -> [RoomSearchPerson]
     private let artifacts: @MainActor () -> (items: [RoomArtifact], isReading: Bool)
     private let onReauthenticationRequired: @MainActor () -> Void
+    /// Someone you blocked: their matches show the room's one line, not their words.
+    private let isBlocked: @MainActor (String) -> Bool
     /// The words in the field now (people and shared things match these at once).
     private var words = ""
     /// The words the message results are for.
@@ -46,8 +48,10 @@ final class RoomSearchModel: ObservableObject {
         sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
             try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
         },
+        isBlocked: @escaping @MainActor (String) -> Bool = { _ in false },
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
+        self.isBlocked = isBlocked
         self.sessionId = sessionId
         self.searcher = searcher
         self.people = people
@@ -165,7 +169,9 @@ final class RoomSearchModel: ObservableObject {
                     guard let author else { return true }
                     return result.message?.authorId.lowercased() == author
                 }
-                self.rows += kept.filter { seen.insert($0.sequenceId).inserted }.map(Self.row)
+                self.rows += kept.filter { seen.insert($0.sequenceId).inserted }.map { result in
+                    Self.row(result, hidesText: result.message.map { self.isBlocked($0.authorId) } ?? false)
+                }
                 self.nextBeforeSequence = page.nextBeforeSequence
                 self.isSearching = false
                 self.isLoadingMore = false
@@ -205,12 +211,17 @@ final class RoomSearchModel: ObservableObject {
     }
 
     nonisolated static func row(_ result: RoomSearchResult) -> RoomSearchRow {
+        row(result, hidesText: false)
+    }
+
+    /// A match; one from someone you blocked shows the room's one line instead of their words.
+    nonisolated static func row(_ result: RoomSearchResult, hidesText: Bool) -> RoomSearchRow {
         RoomSearchRow(
             sequenceId: result.sequenceId,
             author: result.message?.authorName,
             isHuman: result.message?.isHuman ?? false,
             date: result.message.flatMap { ParsedSessionTimestamp($0.timestamp).date },
-            snippet: result.snippet
+            snippet: hidesText ? RoomBlocking.hiddenLine : result.snippet
         )
     }
 }

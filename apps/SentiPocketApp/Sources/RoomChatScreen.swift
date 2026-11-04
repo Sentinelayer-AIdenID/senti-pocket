@@ -137,6 +137,10 @@ struct RoomChatScreen: View {
     private let aiConsent: AIConsent?
     /// What waits on that answer.
     @State private var consentHeld: AIConsentHeld?
+    /// A problem report from the summary sheet, waiting on that answer there.
+    @State private var summaryConsentHeld: AIConsentHeld?
+    /// Who this account blocked, for room search.
+    private let blocks: BlockList?
 
     init(
         route: RoomRoute,
@@ -166,6 +170,7 @@ struct RoomChatScreen: View {
     ) {
         self.route = route
         self.aiConsent = aiConsent
+        self.blocks = blocks
         self.reader = reader
         self.search = search
         self.ticketsTransport = ticketsTransport
@@ -477,7 +482,7 @@ struct RoomChatScreen: View {
         CrashReporter.shared.note("call answered")
         // An agent's call answered before this account said OK: nothing is said to it until you do, and Not now ends
         // the call.
-        afterAIConsent(roomHasAgents: true, {
+        afterAIConsent({
             guard RoomCallDesk.shared.isLive(call.uuid) else {
                 answeredCall = nil
                 return
@@ -489,12 +494,11 @@ struct RoomChatScreen: View {
         })
     }
 
-    /// Runs `action` once this account has said OK to what it shares reaching the room's AI agents (App Store guideline
-    /// 5.1.2(i)), asking first where the room has agents and it has not. Asked `after` a moment when something else
-    /// is leaving the screen (an alert), so the question is never dropped.
-    private func afterAIConsent(roomHasAgents: Bool, after: TimeInterval = 0, _ action: @escaping () -> Void,
+    /// Runs `action` once this account has said OK to sharing with AI (App Store guideline 5.1.2(i)), asking first if it
+    /// has not, whatever the room. Asked `after` a moment when something else is leaving the screen (an alert).
+    private func afterAIConsent(after: TimeInterval = 0, _ action: @escaping () -> Void,
                                 onDecline: @escaping () -> Void = {}) {
-        guard let aiConsent, aiConsent.asks(roomHasAgents: roomHasAgents) else {
+        guard let aiConsent, aiConsent.asks else {
             action()
             return
         }
@@ -580,7 +584,8 @@ struct RoomChatScreen: View {
             } else if intent == .stopReadingAloud {
                 reader.stop()
             } else if intent == .openInvite {
-                showsInvite = true
+                // An invite writes to the room too: the first write asks.
+                afterAIConsent { showsInvite = true }
             } else if intent == .peopleOpened {
                 // Which boxes still run, so the people list shows them as here or ended.
                 Task { await flight.refresh() }
@@ -596,7 +601,7 @@ struct RoomChatScreen: View {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
                         // A call shares what you say with the agents: the first one asks first.
-                        afterAIConsent(roomHasAgents: true) {
+                        afterAIConsent {
                             choosesVoicePartner = true
                             // Which boxes still run, so the picker offers no box that ended.
                             Task { await flight.refresh() }
@@ -803,7 +808,15 @@ struct RoomChatScreen: View {
                 RoomSummarySheet(sessionId: route.sessionId, roomTitle: coordinator.state.title,
                                  generator: makesSummary ? summaryGenerator : nil, saved: savedSummary,
                                  reader: reader, onClose: { showsSummary = false },
-                                 onReport: coordinator.state.composer.canPost ? { coordinator.send(.sendMessage(text: $0)) } : nil)
+                                 onReport: coordinator.state.composer.canPost ? { text in
+                                     // Asked here, over the summary, before the report goes to the room.
+                                     if aiConsent?.asks == true {
+                                         summaryConsentHeld = AIConsentHeld { coordinator.send(.sendMessage(text: text)) }
+                                     } else {
+                                         coordinator.send(.sendMessage(text: text))
+                                     }
+                                 } : nil)
+                .aiConsentPrompt($summaryConsentHeld) { coordinator.send(.allowAIAgents) }
             }
         }
         .onChange(of: showsSummary) { open in
@@ -831,7 +844,6 @@ struct RoomChatScreen: View {
                         mint: writesTickets ? ticketMint : nil,
                         startsFiling: ticketsStartFiling,
                         aiConsent: aiConsent,
-                        roomHasAgents: { [coordinator] in coordinator.roomHasAgents },
                         onOpenMessage: { sequence in
                             // The sheet closes first, then the room goes to the message.
                             showsTickets = false
@@ -877,6 +889,7 @@ struct RoomChatScreen: View {
                     searcher: search,
                     artifacts: artifacts,
                     people: { searchPeople },
+                    isBlocked: { [blocks] in blocks?.isBlocked($0) ?? false },
                     onReauthenticationRequired: onReauthenticationRequired,
                     onOpen: { sequenceId in coordinator.focus(on: sequenceId) },
                     // A ticket opens over the room once the search has closed; other links follow the room's rules.
@@ -950,7 +963,7 @@ struct RoomChatScreen: View {
                 DispatchQueue.main.async {
                     // Posted to the room, so its agents read it too: the first send there asks first. Not now leaves
                     // the reports to be offered again.
-                    afterAIConsent(roomHasAgents: coordinator.roomHasAgents, after: 0.4) {
+                    afterAIConsent(after: 0.4) {
                         coordinator.sendCrashReport(CrashReportText.message(reports)) { crashes.markHandled(reports) }
                     }
                 }
@@ -990,7 +1003,6 @@ struct RoomChatScreen: View {
                     extras: ticketExtras,
                     mint: writesTickets ? ticketMint : nil,
                     aiConsent: aiConsent,
-                    roomHasAgents: { [coordinator] in coordinator.roomHasAgents },
                     onOpenMessage: { sequence in focus(on: sequence) },
                     onReauthenticationRequired: onReauthenticationRequired
                 )
@@ -1193,6 +1205,7 @@ private struct RoomSearchSheet: View {
         searcher: any RoomSearching,
         artifacts: RoomArtifactsCoordinator,
         people: @escaping @MainActor () -> [RoomSearchPerson],
+        isBlocked: @escaping @MainActor (String) -> Bool,
         onReauthenticationRequired: @escaping @MainActor () -> Void,
         onOpen: @escaping (Int64) -> Void,
         onOpenURL: @escaping (URL) -> Void
@@ -1202,6 +1215,7 @@ private struct RoomSearchSheet: View {
             searcher: searcher,
             people: people,
             artifacts: { [weak artifacts] in (artifacts?.artifacts ?? [], artifacts?.isLoading ?? false) },
+            isBlocked: isBlocked,
             onReauthenticationRequired: onReauthenticationRequired
         ))
         _artifacts = ObservedObject(wrappedValue: artifacts)

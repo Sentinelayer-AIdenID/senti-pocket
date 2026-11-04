@@ -228,6 +228,8 @@ private struct AuthenticatedRootView: View {
     @StateObject private var aiConsent: AIConsent
     /// An answer from Waiting on you, held for that OK.
     @State private var waitingConsentHeld: AIConsentHeld?
+    /// A new room, held for that OK.
+    @State private var newRoomConsentHeld: AIConsentHeld?
     @Environment(\.scenePhase) private var rootScenePhase
     @ObservedObject private var whisperModelCoordinator: WhisperModelProvisioningCoordinator
     @ObservedObject private var incomingLinks: IncomingLinkInbox
@@ -559,7 +561,7 @@ private struct AuthenticatedRootView: View {
         .sheet(isPresented: $presentsWaiting) {
             WaitingOnYouView(state: waiting.state, send: { intent in
                 // An answer goes to the room that asked, where its agents read it: the first asks this account's OK.
-                if case .answer = intent, aiConsent.asks(roomHasAgents: true) {
+                if case .answer = intent, aiConsent.asks {
                     waitingConsentHeld = AIConsentHeld { _ = waiting.send(intent) }
                     return
                 }
@@ -590,6 +592,7 @@ private struct AuthenticatedRootView: View {
                 }
             )
         }
+        .aiConsentPrompt($newRoomConsentHeld) { aiConsent.grant() }
         .sheet(isPresented: $presentsNewRoom) {
             if let creator = roomSender as? any RoomCreating {
                 NewRoomSheet(
@@ -787,7 +790,12 @@ private struct AuthenticatedRootView: View {
             },
             onNewRoom: roomSender is any RoomCreating ? {
                 closeDrawer()
-                presentsNewRoom = true
+                // A new room is written to as it is made: the first write asks.
+                if aiConsent.asks {
+                    newRoomConsentHeld = AIConsentHeld { presentsNewRoom = true }
+                } else {
+                    presentsNewRoom = true
+                }
             } : nil
         )
     }

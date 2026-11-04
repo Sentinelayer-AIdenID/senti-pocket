@@ -56,9 +56,8 @@ public struct RoomChatView: View {
     @State private var renameDraft = ""
     /// A failed message the reader chose to edit: its text goes back into the composer.
     @State private var restoredDraft: RoomComposerRestore?
-    /// Someone the reader chose to block from a message's menu, while the room asks to be sure.
-    @State private var blockingTarget: RoomBlockTarget?
-    /// A send from the room's box, held for the AI consent question.
+    /// Something held for the AI consent question: a send from the room's box, an edit about to open, or the room's own
+    /// writes (`RoomChatPresentationState.consentRequested`).
     @State private var consentHeld: AIConsentHeld?
 
     /// What the composer's "+" offers besides mentioning: filing a ticket and searching, where the room has them.
@@ -140,6 +139,7 @@ public struct RoomChatView: View {
                     canBlock: state.canBlock,
                     report: state.report,
                     asksAIConsent: state.asksAIConsent,
+                    consentRequested: state.consentRequested,
                     send: send,
                     draft: threadDraft(thread.parent.sequenceId)
                 )
@@ -201,8 +201,13 @@ public struct RoomChatView: View {
                 RoomReportSheet(report: report, send: send)
             }
         }
-        .roomBlockConfirmation($blockingTarget, send: send)
         .aiConsentPrompt($consentHeld) { send(.allowAIAgents) }
+        // A reaction, a pin or an edit held for the answer: the room asks, and Not now lets them go. In a thread, the
+        // thread asks.
+        .onChange(of: state.consentRequested) { requested in
+            guard requested, state.thread == nil, consentHeld == nil else { return }
+            consentHeld = AIConsentHeld({}, onDecline: { send(.declineAIAgents) })
+        }
         .safeAreaInset(edge: .top, spacing: 0) {
             if let notice = state.notice {
                 HStack(spacing: 8) {
@@ -567,7 +572,14 @@ public struct RoomChatView: View {
             onOpenSummary: { summary, id in openSummary = OpenThreadSummary(id: id, summary: summary) },
             onOpenReplyTarget: { jump(to: $0, proxy: proxy) },
             onOpenCheckpoint: { openCheckpoint = $0 },
-            onEdit: { editingRow = $0 },
+            onEdit: { row in
+                // Asked before the editor opens, so an edit is never written to be dropped.
+                if state.asksAIConsent {
+                    consentHeld = AIConsentHeld({ editingRow = row }, onDecline: { send(.declineAIAgents) })
+                } else {
+                    editingRow = row
+                }
+            },
             onToggleQuiet: {
                 if expandedQuiet.contains(message.id) {
                     expandedQuiet.remove(message.id)
@@ -578,12 +590,6 @@ public struct RoomChatView: View {
             onOpenLong: { longRow = $0 },
             onReply: { replyTarget = $0 },
             onAddReaction: { reactingRow = $0 },
-            onBlock: { row in
-                // Once the menu that offered it has gone, so the question is never dropped.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    blockingTarget = RoomBlockTarget(actorId: row.authorId, name: row.authorName)
-                }
-            },
             isMinimized: message.isInlineReply && message.replyToSequenceId.map { minimizedThreads.contains($0) } == true,
             onToggleMinimized: {
                 guard let thread = message.replyToSequenceId else { return }
@@ -904,8 +910,6 @@ private struct RoomMessageRowView: View {
     var onReply: (RoomChatMessageRow) -> Void = { _ in }
     /// Open the emoji picker for this row.
     var onAddReaction: (RoomChatMessageRow) -> Void = { _ in }
-    /// Block this row's author (the room asks first).
-    var onBlock: (RoomChatMessageRow) -> Void = { _ in }
     /// A thread's answer shown in the room, minimized to the line over it: what it answers and who replied.
     var isMinimized = false
     var onToggleMinimized: () -> Void = {}
@@ -914,6 +918,8 @@ private struct RoomMessageRowView: View {
     @State private var swipe: CGFloat = 0
     /// A double tap opens the same options as a long press.
     @State private var showsOptions = false
+    /// Blocking this row's author, while the row asks to be sure (the question points at this message).
+    @State private var blocking: RoomBlockTarget?
 
     var body: some View {
         RenderTrace.row(row.sequenceId)
@@ -1110,6 +1116,7 @@ private struct RoomMessageRowView: View {
                     .disabled(!option.isEnabled)
             }
         }
+        .roomBlockConfirmation($blocking, send: send)
     }
 
     private static let swipeToReply: CGFloat = 64
@@ -1497,7 +1504,10 @@ private struct RoomMessageRowView: View {
         } else if option.kind == .edit {
             onEdit(row)
         } else if option.kind == .block {
-            onBlock(row)
+            // Once the menu that offered it has gone, so the question is never dropped.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                blocking = RoomBlockTarget(actorId: row.authorId, name: row.authorName)
+            }
         } else if option.kind == .copy {
             copyToPasteboard(row.text)
         } else if let intent = option.intent {
@@ -1871,15 +1881,17 @@ private struct RoomThreadSheet: View {
     var canBlock = false
     /// The room's report sheet: one opened here shows over the thread.
     var report: RoomReportState?
-    /// The first reply in a room with AI agents asks your OK first (`RoomChatPresentationState.asksAIConsent`).
+    /// The first reply asks your OK to share with AI first (`RoomChatPresentationState.asksAIConsent`).
     var asksAIConsent = false
+    /// The room's writes from this thread (a reaction, an edit) wait for that answer: the thread asks.
+    var consentRequested = false
     let send: (RoomChatIntent) -> Void
     @Binding var draft: String
     /// The reply being answered (a reply to a reply nests under it); nil answers the message.
     @State private var answering: RoomChatReplyRow?
-    /// Someone the reader chose to block from a reply's menu, while the thread asks to be sure.
-    @State private var blocking: RoomBlockTarget?
-    /// A reply held for the AI consent question.
+    /// The reply whose author the reader chose to block, while its row asks to be sure.
+    @State private var blockingReply: RoomChatReplyRow?
+    /// A reply, an edit about to open, or the thread's writes, held for the AI consent question.
     @State private var consentHeld: AIConsentHeld?
     /// "File as a ticket": the reply goes to the room's ticket keeper as a ticket request.
     @State private var ticketMode = false
@@ -2002,8 +2014,11 @@ private struct RoomThreadSheet: View {
                     RoomReportSheet(report: report, send: send)
                 }
             }
-            .roomBlockConfirmation($blocking, send: send)
             .aiConsentPrompt($consentHeld) { send(.allowAIAgents) }
+            .onChange(of: consentRequested) { requested in
+                guard requested, consentHeld == nil else { return }
+                consentHeld = AIConsentHeld({}, onDecline: { send(.declineAIAgents) })
+            }
             .navigationTitle(thread.replies.count == 1 ? "1 reply" : "\(thread.replies.count) replies")
             .navigationBarTitleDisplayModeInlineIfAvailable()
             .toolbar {
@@ -2174,6 +2189,11 @@ private struct RoomThreadSheet: View {
         }
         .padding(.leading, CGFloat(reply.depth) * 16)
         .accessibilityAction(named: "Reply") { answer(reply) }
+        // Asked at the reply, so the question points at it.
+        .roomBlockConfirmation(Binding(
+            get: { blockingReply?.id == reply.id ? RoomBlockTarget(actorId: reply.authorId, name: reply.authorName) : nil },
+            set: { if $0 == nil { blockingReply = nil } }
+        ), send: send)
     }
 
     private var canSendReply: Bool {
@@ -2186,7 +2206,7 @@ private struct RoomThreadSheet: View {
         let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard canSendReply else { return }
         if asksAIConsent, !allowed {
-            consentHeld = AIConsentHeld { sendReply(allowed: true) }
+            consentHeld = AIConsentHeld({ sendReply(allowed: true) }, onDecline: { send(.declineAIAgents) })
             return
         }
         let text = ticketMode ? RoomComposerDraft.ticketRequest(typed) : typed
@@ -2239,7 +2259,12 @@ private struct RoomThreadSheet: View {
         }
         if reply.isOwn, thread.canReply {
             Button {
-                editingReply = reply
+                // Asked before the editor opens, so an edit is never written to be dropped.
+                if asksAIConsent {
+                    consentHeld = AIConsentHeld({ editingReply = reply }, onDecline: { send(.declineAIAgents) })
+                } else {
+                    editingReply = reply
+                }
             } label: {
                 Label("Edit", systemImage: "pencil")
             }
@@ -2257,12 +2282,10 @@ private struct RoomThreadSheet: View {
                     Label("Report…", systemImage: "exclamationmark.bubble")
                 }
             }
-            if canBlock, !reply.isAuthorBlocked {
+            if canBlock, !reply.isAuthorBlocked, reply.authorId.lowercased() != RoomBlocking.serverAuthor {
                 Button(role: .destructive) {
                     // Once the menu has gone, so the question is never dropped.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                        blocking = RoomBlockTarget(actorId: reply.authorId, name: reply.authorName)
-                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { blockingReply = reply }
                 } label: {
                     Label("Block \(reply.authorName)", systemImage: "hand.raised")
                 }
@@ -2422,7 +2445,7 @@ private struct RoomComposerBar: View {
         // In a room with AI agents the first send asks your OK, before the box empties: Not now keeps what you wrote,
         // your files and who you were answering, as they were.
         if asksAIConsent, !allowed, !text.isEmpty || media?.tray.isEmpty == false {
-            askAIConsent(AIConsentHeld { sendDraft(allowed: true) })
+            askAIConsent(AIConsentHeld({ sendDraft(allowed: true) }, onDecline: { onIntent(.declineAIAgents) }))
             return
         }
         if !text.isEmpty || media?.tray.isEmpty == false { onIntent(.sendTapped(characters: text.count)) }

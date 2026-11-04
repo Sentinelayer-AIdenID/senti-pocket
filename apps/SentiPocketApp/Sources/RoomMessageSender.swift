@@ -126,8 +126,11 @@ struct SignedInAccount: Equatable, Sendable {
     let accountId: String?
     /// The GitHub username as written, when the account has one.
     let login: String?
+    /// The author id the server writes your posts under (`/auth/me` `sender_id`, sentinelayer-api #1115); nil from an
+    /// API without it.
+    let senderId: String?
 
-    init?(githubUsername: String?, accountId: String?) {
+    init?(githubUsername: String?, accountId: String?, senderId: String? = nil) {
         let username = (githubUsername ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let id = (accountId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let source = username.isEmpty ? id : username
@@ -143,6 +146,8 @@ struct SignedInAccount: Equatable, Sendable {
         actorRef = ref
         self.accountId = id.isEmpty ? nil : id.lowercased()
         login = username.isEmpty ? nil : username
+        let serverSender = (senderId ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        self.senderId = serverSender.isEmpty ? nil : serverSender
     }
 
     /// The author id the API writes your messages under when the account has no verified GitHub login: bound to the
@@ -188,7 +193,8 @@ final class HTTPAccountIdentity: AccountIdentityProviding, @unchecked Sendable {
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }
-        return SignedInAccount(githubUsername: object["github_username"] as? String, accountId: object["id"] as? String)
+        return SignedInAccount(githubUsername: object["github_username"] as? String, accountId: object["id"] as? String,
+                               senderId: object["sender_id"] as? String)
     }
 }
 

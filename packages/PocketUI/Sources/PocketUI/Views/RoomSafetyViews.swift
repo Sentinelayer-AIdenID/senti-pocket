@@ -37,6 +37,7 @@ struct RoomReportSheet: View {
     @State private var reason: RoomReportReason?
     @State private var note = ""
     @State private var blocking: RoomBlockTarget?
+    @FocusState private var writingNote: Bool
 
     private var name: String { report.target.authorName }
     private var limit: Int { report.target.noteLimit }
@@ -70,7 +71,7 @@ struct RoomReportSheet: View {
                                 guard let reason else { return }
                                 send(.sendReport(reason: reason, note: note))
                             }
-                            .disabled(reason == nil)
+                            .disabled(reason == nil || report.phase == .refused)
                             .accessibilityIdentifier("pocket.report.send")
                         }
                     }
@@ -81,57 +82,74 @@ struct RoomReportSheet: View {
     }
 
     private var choosing: some View {
-        Form {
-            Section {
-                ForEach(RoomReportReason.allCases) { item in
-                    Button {
-                        reason = item
-                    } label: {
-                        HStack {
-                            Text(item.title)
-                                .foregroundStyle(PocketPalette.textPrimary)
-                            Spacer(minLength: 8)
-                            if reason == item {
-                                Image(systemName: "checkmark")
-                                    .font(.body.weight(.semibold))
-                                    .foregroundStyle(PocketPalette.accent)
-                            }
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityAddTraits(reason == item ? .isSelected : [])
-                    .accessibilityIdentifier("pocket.report.reason.\(item.rawValue)")
-                }
-            } header: {
-                Text("Why are you reporting this \(report.target.replyId == nil ? "message" : "reply") from \(name)?")
-            }
-            Section {
-                TextField("Add a note (optional)", text: $note, axis: .vertical)
-                    .lineLimit(3...6)
-                    .onChange(of: note) { typed in
-                        let kept = RoomReport.clamped(typed, to: limit)
-                        if kept != typed { note = kept }
-                    }
-                    .accessibilityIdentifier("pocket.report.note")
-            } footer: {
-                Text("\(note.unicodeScalars.count) of \(limit) characters")
-                    .monospacedDigit()
-            }
-            if report.phase == .failed {
+        ScrollViewReader { proxy in
+            Form {
                 Section {
-                    Label(RoomReport.notSent, systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(PocketPalette.warning)
-                        .accessibilityIdentifier("pocket.report.notSent")
+                    ForEach(RoomReportReason.allCases) { item in
+                        Button {
+                            reason = item
+                        } label: {
+                            HStack {
+                                Text(item.title)
+                                    .foregroundStyle(PocketPalette.textPrimary)
+                                Spacer(minLength: 8)
+                                if reason == item {
+                                    Image(systemName: "checkmark")
+                                        .font(.body.weight(.semibold))
+                                        .foregroundStyle(PocketPalette.accent)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(reason == item ? .isSelected : [])
+                        .accessibilityIdentifier("pocket.report.reason.\(item.rawValue)")
+                    }
+                } header: {
+                    Text("Why are you reporting this \(report.target.replyId == nil ? "message" : "reply") from \(name)?")
+                }
+                Section {
+                    TextField("Add a note (optional)", text: $note, axis: .vertical)
+                        .lineLimit(3...6)
+                        .focused($writingNote)
+                        .onChange(of: note) { typed in
+                            let kept = RoomReport.clamped(typed, to: limit)
+                            if kept != typed { note = kept }
+                        }
+                        .accessibilityIdentifier("pocket.report.note")
+                        .id("pocket.report.noteRow")
+                } footer: {
+                    Text("\(note.unicodeScalars.count) of \(limit) characters")
+                        .monospacedDigit()
+                }
+                if report.phase == .failed {
+                    Section {
+                        Label(RoomReport.notSent, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(PocketPalette.warning)
+                            .accessibilityIdentifier("pocket.report.notSent")
+                    }
+                } else if report.phase == .refused {
+                    Section {
+                        Label(RoomReport.refused, systemImage: "nosign")
+                            .foregroundStyle(PocketPalette.warning)
+                            .accessibilityIdentifier("pocket.report.refused")
+                    }
+                }
+                Section {
+                    Text("Reports go to the Senti team. \(name) isn't told who reported it.")
+                        .font(.footnote)
+                        .foregroundStyle(PocketPalette.textSecondary)
                 }
             }
-            Section {
-                Text("Reports go to the Senti team. \(name) isn't told who reported it.")
-                    .font(.footnote)
-                    .foregroundStyle(PocketPalette.textSecondary)
+            .disabled(report.phase == .sending)
+            // The note stays in sight above the keyboard while it is written.
+            .onChange(of: writingNote) { writing in
+                guard writing else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    withAnimation { proxy.scrollTo("pocket.report.noteRow", anchor: .center) }
+                }
             }
         }
-        .disabled(report.phase == .sending)
     }
 
     private var sent: some View {
@@ -175,14 +193,14 @@ extension View {
             Button("Block \(blocked.name)", role: .destructive) { send(.block(blocked)) }
                 .accessibilityIdentifier("pocket.block.confirm")
             Button("Cancel", role: .cancel) {}
-        } message: { _ in
-            Text(RoomBlocking.confirmation)
+        } message: { blocked in
+            Text(RoomBlocking.confirmation(for: blocked))
         }
     }
 }
 
-/// The one-time notice before what you send in a room reaches its AI agents (App Store guideline 5.1.2(i)). OK records
-/// your consent for this account and the send goes ahead; Not now cancels it.
+/// The one-time notice before anything you write in a room is shared with AI (App Store guideline 5.1.2(i)): what is
+/// shared, and with whom. OK records your consent for this account and the write goes ahead; Not now cancels it.
 public struct RoomAIConsentSheet: View {
     private let onAllow: () -> Void
     private let onNotNow: () -> Void
@@ -194,23 +212,28 @@ public struct RoomAIConsentSheet: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Image(systemName: "cpu")
-                .font(.system(size: 30))
-                .foregroundStyle(PocketPalette.listening)
-                .accessibilityHidden(true)
-            Text("AI agents in this room")
-                .font(.title3.bold())
-                .foregroundStyle(PocketPalette.textPrimary)
-            Text(AIConsentText.notice)
-                .font(.body)
-                .foregroundStyle(PocketPalette.textPrimary)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityIdentifier("pocket.aiConsent.notice")
-            Text(AIConsentText.settingsHint)
-                .font(.footnote)
-                .foregroundStyle(PocketPalette.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
+            // Scrolls, so the words are never cut off at a large text size; the buttons stay in reach below.
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    Image(systemName: "cpu")
+                        .font(.system(size: 30))
+                        .foregroundStyle(PocketPalette.listening)
+                        .accessibilityHidden(true)
+                    Text(AIConsentText.title)
+                        .font(.title3.bold())
+                        .foregroundStyle(PocketPalette.textPrimary)
+                    Text(AIConsentText.notice)
+                        .font(.body)
+                        .foregroundStyle(PocketPalette.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("pocket.aiConsent.notice")
+                    Text(AIConsentText.settingsHint)
+                        .font(.footnote)
+                        .foregroundStyle(PocketPalette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
             Button(action: onAllow) {
                 Text("OK").frame(maxWidth: .infinity)
             }
@@ -226,7 +249,7 @@ public struct RoomAIConsentSheet: View {
             .accessibilityIdentifier("pocket.aiConsent.notNow")
         }
         .padding(24)
-        .presentationDetents([.medium])
+        .presentationDetents([.medium, .large])
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("pocket.aiConsent")
     }
@@ -248,33 +271,45 @@ public struct AIConsentHeld: Identifiable {
 private struct AIConsentPrompt: ViewModifier {
     @Binding var held: AIConsentHeld?
     let onAllow: () -> Void
+    /// The question on screen: shown a moment after it is asked for, so a menu, alert or sheet still leaving never
+    /// swallows it.
+    @State private var asking: AIConsentHeld?
     /// The answer, acted on once the sheet has gone, so a sheet the send opens (a call's picker) is never dropped.
     @State private var answer: (request: AIConsentHeld, allowed: Bool)?
 
     func body(content: Content) -> some View {
-        content.sheet(item: $held, onDismiss: {
-            guard let answer else { return }
-            self.answer = nil
-            if answer.allowed {
-                answer.request.proceed()
-            } else {
-                answer.request.decline()
-            }
-        }) { request in
-            RoomAIConsentSheet(
-                onAllow: {
-                    onAllow()
-                    answer = (request, true)
-                    held = nil
-                },
-                onNotNow: {
-                    answer = (request, false)
-                    held = nil
+        content
+            .onChange(of: held?.id) { id in
+                guard id != nil else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    if asking == nil, let held { asking = held }
                 }
-            )
-            // OK or Not now: the answer is never left to a swipe.
-            .interactiveDismissDisabled()
-        }
+            }
+            .sheet(item: $asking, onDismiss: {
+                guard let answer else { return }
+                self.answer = nil
+                if answer.allowed {
+                    answer.request.proceed()
+                } else {
+                    answer.request.decline()
+                }
+            }) { request in
+                RoomAIConsentSheet(
+                    onAllow: {
+                        onAllow()
+                        answer = (request, true)
+                        held = nil
+                        asking = nil
+                    },
+                    onNotNow: {
+                        answer = (request, false)
+                        held = nil
+                        asking = nil
+                    }
+                )
+                // OK or Not now: the answer is never left to a swipe.
+                .interactiveDismissDisabled()
+            }
     }
 }
 

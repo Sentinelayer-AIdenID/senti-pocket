@@ -65,7 +65,7 @@ final class RoomSafetyFlowTests: XCTestCase {
 
         let notNow = el(app, "pocket.aiConsent.notNow")
         XCTAssertTrue(notNow.waitForExistence(timeout: 5), "a room with agents asks before the first send")
-        XCTAssertTrue(el(app, "pocket.aiConsent.notice").label.hasPrefix("Messages you send in a room are shared"))
+        XCTAssertTrue(el(app, "pocket.aiConsent.notice").label.hasPrefix("What you share in a room"))
         notNow.tap()
         XCTAssertTrue(notNow.waitForNonExistence(timeout: 5))
         XCTAssertEqual(composer.value as? String, "Ship it tonight", "Not now keeps the draft")

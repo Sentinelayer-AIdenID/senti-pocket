@@ -26,11 +26,11 @@ public enum RoomReportReason: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-/// What a report is about: someone else's message, or a reply. The API reads messages by their sequence, so a reply is
-/// reported on its thread's message and named at the start of the note, for whoever reviews it.
+/// What a report is about: someone else's message, or a reply on it (reported under its own id and author).
 public struct RoomReportTarget: Equatable, Identifiable, Sendable {
+    /// The message, or the message a reply is on.
     public let sequenceId: Int64
-    /// The reply's own action id, for a reply.
+    /// The reply's own action id, for a reply (the API's `replyId`).
     public let replyId: String?
     /// Who wrote it, as messages carry it (`human-<login>` or an agent id).
     public let authorId: String
@@ -45,21 +45,14 @@ public struct RoomReportTarget: Equatable, Identifiable, Sendable {
 
     public var id: String { replyId.map { "reply:\($0)" } ?? "msg:\(sequenceId)" }
 
-    /// What the stored note starts with for a reply.
-    public var notePrefix: String? { replyId.map { "Reply \($0)" } }
+    /// The longest note you can write: the API's limit.
+    public var noteLimit: Int { RoomReport.noteLimit }
 
-    /// The longest note you can write: the API's limit, less the reply's name and its line break.
-    public var noteLimit: Int {
-        RoomReport.noteLimit - (notePrefix.map { $0.unicodeScalars.count + 1 } ?? 0)
-    }
-
-    /// The note as the API takes it: the reply's name, then what you wrote (cut to fit, and without NUL, which the API
-    /// refuses), or nil when there is neither.
+    /// The note as the API takes it: what you wrote, cut to fit and without NUL (which the API refuses), or nil.
     public func apiNote(_ written: String) -> String? {
         let clean = written.replacingOccurrences(of: "\u{0}", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmed = RoomReport.clamped(clean, to: noteLimit)
-        let parts = [notePrefix, trimmed.isEmpty ? nil : trimmed].compactMap { $0 }
-        return parts.isEmpty ? nil : parts.joined(separator: "\n")
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 
@@ -71,6 +64,9 @@ public struct RoomReportState: Equatable, Sendable {
         case sent
         /// It did not go; the sheet keeps the reason and note so it can be sent again.
         case failed
+        /// The server won't take it (the message is gone, it is yours, or you are no longer in the room): trying again
+        /// would not help.
+        case refused
     }
 
     public let target: RoomReportTarget
@@ -93,6 +89,7 @@ public enum RoomReport {
     public static let noteLimit = 500
     public static let thanks = "Thanks. We'll review it within 24 hours."
     public static let notSent = "Your report couldn't be sent right now. Try again in a little while."
+    public static let refused = "This can't be reported. It may have been deleted, or you're no longer in this room."
 
     /// `text` cut to at most `limit` code points, never inside a character.
     public static func clamped(_ text: String, to limit: Int) -> String {
@@ -121,12 +118,28 @@ public struct RoomBlockTarget: Equatable, Identifiable, Sendable {
     }
 
     public var id: String { actorId.lowercased() }
+
+    /// An agent, not a person: blocked by its name, so every agent with that name is blocked.
+    public var isAgent: Bool { !actorId.lowercased().hasPrefix("human-") }
 }
 
 public enum RoomBlocking {
     public static let hiddenLine = "Message from someone you blocked"
-    public static let confirmation = "Their messages and replies show as one line in every room. They aren't told, "
-        + "and you can unblock them in Settings."
+
+    /// What blocking does and doesn't do, said before you block.
+    public static func confirmation(for target: RoomBlockTarget) -> String {
+        let who = target.isAgent
+            ? "Blocking an agent blocks its name: every agent called \(target.name), in every room. Their"
+            : "Their"
+        return who + " messages and replies show as one line in every room, and room search hides their words. "
+            + calls + " They aren't told, and you can unblock them in Settings."
+    }
+
+    /// What blocking leaves as it is.
+    public static let calls = "Calls from them still ring, and Waiting on you still shows their questions."
+
+    /// The server's own posts (checkpoints, joins) can't be blocked.
+    public static let serverAuthor = "senti"
 
     /// What Show opens: a message, or a reply wherever it shows (in the room or in its thread).
     public static func revealKey(message id: String) -> String { "msg:\(id)" }
@@ -137,10 +150,32 @@ public enum RoomBlocking {
     }
 }
 
-/// What a person is told, once per account, before what they send in a room reaches its AI agents (App Store
-/// guideline 5.1.2(i)). Never names the providers.
+/// What a person is told, once per account, before anything they write in a room is shared with AI (App Store guideline
+/// 5.1.2(i)). Says what is shared and with whom; never names the providers.
 public enum AIConsentText {
-    public static let notice = "Messages you send in a room are shared with the AI agents in that room, which run on AI "
-        + "models from third-party providers, to read and answer them."
+    public static let title = "AI and what you share"
+    public static let notice = "What you share in a room (messages, replies, files, tickets, and what you say on calls) "
+        + "is shared with the AI agents in that room and with Senti's own AI features, such as room titles, progress "
+        + "scoring and noticing when you've finished speaking on a call. These run on AI models from third-party "
+        + "providers."
     public static let settingsHint = "You can change this in Settings, under AI and your messages."
+}
+
+extension RoomChatIntent {
+    /// Writes something into the room (a message, a reply, a file, an edit, a reaction, a pin, a new name): it waits for
+    /// this account's OK to share with AI (`AIConsentText`), asked once.
+    public var isRoomWrite: Bool {
+        switch self {
+        case .sendMessage, .retrySend, .react, .sendReply, .sendReplyToReply, .reactToReply, .setEmojiReaction,
+             .setPinned, .renameRoom, .editMessage, .editReply:
+            return true
+        case .dismissNotice, .loadOlder, .loadNewer, .jumpToLatest, .openTickets, .openSearch, .readerAtBottom,
+             .bottomFlapHeld, .sendTapped, .retry, .jumpToMessage, .discardSend, .openThread, .closeThread,
+             .openLeaderboard, .closeLeaderboard, .focusHandled, .openBreakout, .openAttachment, .shareAttachment,
+             .readAloud, .stopReadingAloud, .attachmentAppeared, .messageOnScreen, .replyOnScreen, .toggleRepeats,
+             .peopleOpened, .openInvite, .keepLatestForJumpDown, .openReport, .sendReport, .closeReport, .block,
+             .revealBlocked, .allowAIAgents, .declineAIAgents:
+            return false
+        }
+    }
 }

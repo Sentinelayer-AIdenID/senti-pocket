@@ -161,15 +161,21 @@ private final class RecordingSender: RoomMessageSending, RoomActionSending, @unc
     private let lock = NSLock()
     private var _messages: [String] = []
     private var _replies: [String] = []
+    private var _actions: [String] = []
     var messages: [String] { lock.withLock { _messages } }
     var replies: [String] { lock.withLock { _replies } }
+    /// Every action's type, replies and reactions alike.
+    var actions: [String] { lock.withLock { _actions } }
 
     func sendHumanMessage(sessionId: String, text: String, clientId: String) async throws {
         lock.withLock { _messages.append(text) }
     }
 
     func sendAction(_ action: RoomActionRequest) async throws {
-        lock.withLock { if action.actionType == "reply" { _replies.append(action.note ?? "") } }
+        lock.withLock {
+            _actions.append(action.actionType)
+            if action.actionType == "reply" { _replies.append(action.note ?? "") }
+        }
     }
 }
 
@@ -198,6 +204,39 @@ private struct QuietRoom: RoomTransport {
 private struct UnlinkedAccount: AccountIdentityProviding {
     func currentAccount() async -> SignedInAccount? {
         SignedInAccount(githubUsername: nil, accountId: "6F1C2B9E-0000-4000-8000-00000000000A")
+    }
+}
+
+/// Who is signed in, as an API with `sender_id` says it, after `/auth/me` failed `failures` times.
+private final class SenderAccount: AccountIdentityProviding, @unchecked Sendable {
+    private let lock = NSLock()
+    private var failures: Int
+    private var _asked = 0
+    var asked: Int { lock.withLock { _asked } }
+
+    init(failures: Int = 0) {
+        self.failures = failures
+    }
+
+    func currentAccount() async -> SignedInAccount? {
+        lock.withLock { () -> SignedInAccount? in
+            _asked += 1
+            if failures > 0 {
+                failures -= 1
+                return nil
+            }
+            return SignedInAccount(githubUsername: "sam", accountId: "6F1C2B9E-0000-4000-8000-00000000000A",
+                                   senderId: "HUMAN-G.6f1c2b9e00004000800000000000000a")
+        }
+    }
+}
+
+/// Room search that finds `results` for any words.
+private struct FoundSearch: RoomSearching {
+    let results: [RoomSearchResult]
+
+    func searchRoom(sessionId: String, query: String, beforeSequence: Int64?, limit: Int) async throws -> RoomSearchPage {
+        RoomSearchPage(query: query, results: results)
     }
 }
 
@@ -293,7 +332,18 @@ final class RoomSafetyTests: XCTestCase {
         let second = try XCTUnwrap(JSONSerialization.jsonObject(with: sent[1].body) as? [String: Any])
         XCTAssertTrue(second["note"] is NSNull, "no note is sent as null")
 
-        // The API without the route yet (404), or offline: not sent.
+        // A reply goes under its own id, on the message it answers.
+        SafetyURLProtocol.reset(["POST /api/v1/sessions/room_1/reports": (201, #"{"report":{"id":"r-2","status":"open"}}"#)])
+        let reply = RoomReportTarget(sequenceId: 9, replyId: "3f0c2a8e-2c4d-4c38-9e0f-2b1f5f1d7a10", authorId: "review-agent",
+                                     authorName: "review-agent")
+        try await sender.report(sessionId: "room_1", RoomReportRequest(target: reply, reason: .harassment, note: "again"))
+        let replyBody = try XCTUnwrap(JSONSerialization.jsonObject(with: SafetyURLProtocol.requests[0].body) as? [String: Any])
+        XCTAssertEqual(Set(replyBody.keys), ["sequenceId", "replyId", "reason", "note"])
+        XCTAssertEqual(replyBody["sequenceId"] as? Int, 9)
+        XCTAssertEqual(replyBody["replyId"] as? String, "3f0c2a8e-2c4d-4c38-9e0f-2b1f5f1d7a10")
+        XCTAssertEqual(replyBody["note"] as? String, "again", "the note is only what was written")
+
+        // The API without the route yet (a bare 404), or offline: not sent, and worth trying again.
         SafetyURLProtocol.reset([:])
         do {
             try await sender.report(sessionId: "room_1", RoomReportRequest(target: target, reason: .spam, note: ""))
@@ -301,13 +351,60 @@ final class RoomSafetyTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? RoomSendError, .retryable(retryAfterSeconds: nil))
         }
+        // The server's own 404: that message can't be reported.
+        SafetyURLProtocol.reset(["POST /api/v1/sessions/room_1/reports":
+            (404, #"{"detail":{"error":{"code":"MESSAGE_NOT_FOUND","message":"No message"}}}"#)])
+        do {
+            try await sender.report(sessionId: "room_1", RoomReportRequest(target: target, reason: .spam, note: ""))
+            XCTFail("a refusal is not a report sent")
+        } catch {
+            XCTAssertEqual(error as? RoomSendError, .rejected)
+        }
     }
 
-    func test_a_reply_is_reported_on_its_thread_and_named_in_the_note() {
-        let target = RoomReportTarget(sequenceId: 9, replyId: "act-77", authorId: "review-agent", authorName: "review-agent")
-        let request = RoomReportRequest(target: target, reason: .harassment, note: "again")
-        XCTAssertEqual(request.sequenceId, 9)
-        XCTAssertEqual(request.note, "Reply act-77\nagain")
+    func test_what_a_reports_answer_means() {
+        func outcome(_ status: Int, _ code: String? = nil) -> RoomSendError? {
+            let body = code.map { Data(#"{"detail":{"error":{"code":"\#($0)"}}}"#.utf8) } ?? Data("{}".utf8)
+            do {
+                try HTTPRoomMessageSender.reportOutcome(status: status, body: body)
+                return nil
+            } catch {
+                return error as? RoomSendError
+            }
+        }
+        XCTAssertNil(outcome(201))
+        XCTAssertEqual(outcome(404, "SESSION_NOT_FOUND"), .rejected, "not in that room: can't be reported")
+        XCTAssertEqual(outcome(404, "MESSAGE_NOT_FOUND"), .rejected)
+        XCTAssertEqual(outcome(422, "CANNOT_REPORT_OWN_MESSAGE"), .rejected)
+        XCTAssertEqual(outcome(403), .notAllowed)
+        XCTAssertEqual(outcome(404), .retryable(retryAfterSeconds: nil), "a bare 404 is an API without the route yet")
+        XCTAssertEqual(outcome(429), .retryable(retryAfterSeconds: nil))
+        XCTAssertEqual(outcome(401), .reauthenticationRequired)
+    }
+
+    func test_a_report_the_server_refuses_says_so_and_is_not_sent_again() async {
+        let reporter = FakeReporter(results: [RoomSendError.rejected])
+        let room = room(reporter: reporter)
+        room.handle(.message(message(2, author: "human-sam", text: "Something unkind")))
+        room.send(.openReport(RoomReportTarget(sequenceId: 2, authorId: "human-sam", authorName: "sam")))
+        room.send(.sendReport(reason: .spam, note: ""))
+        await waitUntil("refused") { room.state.report?.phase == .refused }
+        room.send(.sendReport(reason: .spam, note: ""))
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(reporter.requests.count, 1, "a refusal is final")
+    }
+
+    func test_only_a_posted_message_or_a_reply_is_offered_for_report() {
+        let room = room(reporter: FakeReporter(), blocks: BlockList(account: "sub:a", store: temporaryStore(), client: nil))
+        var notice = message(3, author: "human-sam", text: "Attachment uploaded: photo.png")
+        notice = RoomMessage(id: notice.id, sequenceId: notice.sequenceId, kind: .message, authorId: notice.authorId,
+                             authorName: notice.authorName, isHuman: true, text: notice.text, timestamp: notice.timestamp,
+                             eventType: "human_relay")
+        room.handle(.message(message(2, author: "human-sam", text: "Hello")))
+        room.handle(.message(notice))
+        XCTAssertNotNil(rows(room)["evt-2"]?.reportTarget)
+        XCTAssertNil(rows(room)["evt-3"]?.reportTarget, "a relayed line takes no report")
+        XCTAssertEqual(rows(room)["evt-3"]?.isBlockable, true, "its author can still be blocked")
     }
 
     func test_the_report_sheet_goes_choosing_sending_then_not_sent_then_sent() async {
@@ -357,7 +454,51 @@ final class RoomSafetyTests: XCTestCase {
         room.pause()
     }
 
+    func test_your_own_posts_are_the_servers_sender_id_when_it_says() async {
+        let identity = SenderAccount()
+        let room = RoomChatCoordinator(
+            sessionId: "room_1", title: "Room", transport: QuietRoom(), identity: identity,
+            sleep: { seconds in if seconds > 5 { try? await Task.sleep(nanoseconds: 3_600_000_000_000) } },
+            reporter: FakeReporter(), onReauthenticationRequired: {}
+        )
+        room.resume()
+        room.handle(.message(message(2, author: "human-g.6f1c2b9e00004000800000000000000a", text: "Mine")))
+        room.handle(.message(message(3, author: "human-sam", text: "Someone else called sam")))
+        await waitUntil("yours") { self.rows(room)["evt-2"]?.isOwn == true }
+        XCTAssertEqual(rows(room)["evt-3"]?.isOwn, false, "the GitHub-shaped id is not yours when the server says otherwise")
+        XCTAssertNotNil(rows(room)["evt-3"]?.reportTarget)
+        room.pause()
+    }
+
+    func test_auth_me_is_asked_again_when_it_fails_as_the_room_opens() async {
+        let identity = SenderAccount(failures: 2)
+        let room = RoomChatCoordinator(
+            sessionId: "room_1", title: "Room", transport: QuietRoom(), identity: identity,
+            sleep: { seconds in if seconds > 20 { try? await Task.sleep(nanoseconds: 3_600_000_000_000) } },
+            onReauthenticationRequired: {}
+        )
+        room.resume()
+        room.handle(.message(message(2, author: "human-g.6f1c2b9e00004000800000000000000a", text: "Mine")))
+        await waitUntil("learned on the third look") { self.rows(room)["evt-2"]?.isOwn == true }
+        XCTAssertEqual(identity.asked, 3)
+        room.pause()
+    }
+
     // MARK: Block
+
+    func test_room_search_shows_the_one_line_for_someone_you_blocked() async {
+        let found = FoundSearch(results: [
+            RoomSearchResult(sequenceId: 2, snippet: "Something unkind about paste", message: message(2, author: "human-sam")),
+            RoomSearchResult(sequenceId: 3, snippet: "Paste is fixed", message: message(3, author: "review-agent"))
+        ])
+        let model = RoomSearchModel(sessionId: "room_1", searcher: found,
+                                    sleep: { _ in }, isBlocked: { $0.lowercased() == "human-sam" },
+                                    onReauthenticationRequired: {})
+        model.send(.submit("paste"))
+        await waitUntil("found") { model.state.rows.count == 2 }
+        XCTAssertEqual(model.state.rows.first { $0.sequenceId == 2 }?.snippet, RoomBlocking.hiddenLine)
+        XCTAssertEqual(model.state.rows.first { $0.sequenceId == 3 }?.snippet, "Paste is fixed")
+    }
 
     func test_blocking_hides_the_authors_messages_and_replies_in_every_room_and_show_reveals_one() async {
         let blocks = BlockList(account: "sub:a", store: temporaryStore(), client: nil)
@@ -533,65 +674,87 @@ final class RoomSafetyTests: XCTestCase {
     func test_ai_consent_is_asked_once_per_account_and_again_after_withdrawing() {
         let defaults = temporaryDefaults()
         let consent = AIConsent(account: "sub:a", defaults: defaults)
-        XCTAssertTrue(consent.asks(roomHasAgents: true))
-        XCTAssertFalse(consent.asks(roomHasAgents: false), "a room without agents never asks")
+        XCTAssertTrue(consent.asks)
 
         consent.grant()
-        XCTAssertFalse(consent.asks(roomHasAgents: true), "asked once")
-        XCTAssertFalse(AIConsent(account: "sub:a", defaults: defaults).asks(roomHasAgents: true), "kept across launches")
-        XCTAssertTrue(AIConsent(account: "sub:b", defaults: defaults).asks(roomHasAgents: true),
-                      "another account on this phone is asked for itself")
+        XCTAssertFalse(consent.asks, "asked once")
+        XCTAssertFalse(AIConsent(account: "sub:a", defaults: defaults).asks, "kept across launches")
+        XCTAssertTrue(AIConsent(account: "sub:b", defaults: defaults).asks, "another account on this phone is asked for itself")
 
         consent.withdraw()
-        XCTAssertTrue(consent.asks(roomHasAgents: true), "withdrawn: asked again")
-        XCTAssertTrue(AIConsent(account: "sub:a", defaults: defaults).asks(roomHasAgents: true))
+        XCTAssertTrue(consent.asks, "withdrawn: asked again")
+        XCTAssertTrue(AIConsent(account: "sub:a", defaults: defaults).asks)
     }
 
-    func test_a_room_with_agents_asks_first_and_sends_nothing_without_the_ok() async {
+    func test_every_room_write_waits_for_the_ok_whatever_the_room() async {
         let consent = AIConsent(account: "sub:a", defaults: temporaryDefaults())
         let sender = RecordingSender()
         let room = room(sender: sender, aiConsent: consent)
+        // People only: no agent here, and still it asks.
         room.handle(.message(message(1, author: "human-alex", text: "Hello")))
-        XCTAssertFalse(room.state.asksAIConsent, "no agents here yet")
-        room.handle(.message(message(2, author: "review-agent", text: "Build 319 is green")))
-        XCTAssertTrue(room.roomHasAgents)
-        XCTAssertTrue(room.state.asksAIConsent, "an agent wrote here: the first send asks")
+        room.handle(.message(message(2, author: "human-sam", text: "Hi")))
+        XCTAssertTrue(room.state.asksAIConsent)
 
-        // A send that came without the OK goes nowhere, and keeps its words to edit and send again.
         room.send(.sendMessage(text: "Ship it"))
         room.send(.sendReply(sequenceId: 2, text: "Thanks"))
+        room.send(.react(sequenceId: 2, type: "like"))
+        room.send(.editMessage(sequenceId: 1, text: "Hello all"))
+        room.send(.setPinned(sequenceId: 2, isPinned: true))
+        XCTAssertTrue(room.state.consentRequested, "the room asks")
         try? await Task.sleep(nanoseconds: 50_000_000)
-        XCTAssertTrue(sender.messages.isEmpty)
-        XCTAssertTrue(sender.replies.isEmpty)
+        XCTAssertTrue(sender.messages.isEmpty && sender.actions.isEmpty, "nothing went before the answer")
+
+        // Not now: nothing goes; what was written stays, to edit and send again.
+        room.send(.declineAIAgents)
+        XCTAssertFalse(room.state.consentRequested)
         XCTAssertEqual(room.state.pending.map(\.text), ["Ship it"])
         XCTAssertEqual(room.state.pending.first?.status, .failed(reason: RoomChatCoordinator.consentReason, canRetry: false))
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertTrue(sender.messages.isEmpty && sender.actions.isEmpty)
+        XCTAssertFalse(consent.isGiven)
 
+        // OK: the held writes go, in order, and the next ones go at once.
+        room.send(.sendMessage(text: "Ship it now"))
+        room.send(.react(sequenceId: 2, type: "like"))
+        XCTAssertTrue(room.state.consentRequested)
         room.send(.allowAIAgents)
         XCTAssertTrue(consent.isGiven)
         XCTAssertFalse(room.state.asksAIConsent)
-        room.send(.sendMessage(text: "Ship it"))
+        await waitUntil("held writes sent") { sender.messages == ["Ship it now"] && sender.actions == ["like"] }
         room.send(.sendReply(sequenceId: 2, text: "Thanks"))
-        await waitUntil("sent") { sender.messages == ["Ship it"] && sender.replies == ["Thanks"] }
+        await waitUntil("next write sent at once") { sender.replies == ["Thanks"] }
+        XCTAssertFalse(room.state.consentRequested)
 
         consent.withdraw()
         await waitUntil("asks again") { room.state.asksAIConsent }
+        room.send(.react(sequenceId: 2, type: "dislike"))
+        XCTAssertTrue(room.state.consentRequested, "withdrawn: the next write waits again")
     }
 
-    func test_a_room_without_agents_never_asks() async {
+    func test_a_crash_report_without_the_ok_is_kept_not_sent() async {
         let consent = AIConsent(account: "sub:a", defaults: temporaryDefaults())
         let sender = RecordingSender()
         let room = room(sender: sender, aiConsent: consent)
-        room.handle(.message(message(1, author: "human-alex", text: "Hello")))
-        room.send(.sendMessage(text: "Hi Alex"))
-        await waitUntil("sent") { sender.messages == ["Hi Alex"] }
-        XCTAssertFalse(consent.isGiven, "nothing was asked")
+        var handled = false
+        room.sendCrashReport("Pocket closed unexpectedly") { handled = true }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertTrue(sender.messages.isEmpty)
+        XCTAssertFalse(handled, "offered again next time")
+        XCTAssertEqual(room.state.pending.map(\.text), ["Pocket closed unexpectedly"])
     }
 
-    func test_ticket_answers_and_chat_about_it_are_what_ask() {
-        XCTAssertTrue(RoomTicketsIntent.answerDecision(ticketId: "t1", answer: "Yes", detail: "").postsToTheRoom)
-        XCTAssertTrue(RoomTicketsIntent.chatAboutIt(ticketId: "t1", note: "").postsToTheRoom)
-        XCTAssertTrue(RoomTicketsIntent.retryDecision(ticketId: "t1").postsToTheRoom)
-        XCTAssertFalse(RoomTicketsIntent.refresh.postsToTheRoom)
+    func test_every_ticket_write_asks_and_reading_never_does() {
+        let writes: [RoomTicketsIntent] = [
+            .answerDecision(ticketId: "t1", answer: "Yes", detail: ""), .retryDecision(ticketId: "t1"),
+            .fileTicket(title: "T", body: "B", assignee: nil), .claim(ticketId: "t1"), .release(ticketId: "t1"),
+            .assign(ticketId: "t1", assignee: "review-agent"), .edit(ticketId: "t1", title: "T", body: "B"),
+            .comment(ticketId: "t1", body: "C"), .retryComment(ticketId: "t1"), .chatAboutIt(ticketId: "t1", note: ""),
+            .startAgent(ticketId: "t1")
+        ]
+        XCTAssertTrue(writes.allSatisfy(\.writesToTheRoom))
+        let reads: [RoomTicketsIntent] = [.setShowsArchived(true), .search("x"), .refresh,
+                                          .openSourceMessage(sequenceId: 1), .loadComments(ticketId: "t1")]
+        XCTAssertFalse(reads.contains(where: \.writesToTheRoom))
     }
 
     // MARK: Support

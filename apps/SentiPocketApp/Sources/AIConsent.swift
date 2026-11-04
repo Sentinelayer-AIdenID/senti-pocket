@@ -1,9 +1,10 @@
 import Foundation
 
-/// Whether this account said OK to what it sends in a room reaching the room's AI agents (App Store guideline
-/// 5.1.2(i)): asked once, the first time it sends a message, answers a ticket or calls in a room with agents
-/// (`AIConsentText.notice`). Kept on the phone under the account (`RoomSendOutbox.account(token:)`), so another account
-/// signing in here is asked for itself. Withdrawn in Settings, it is asked again.
+/// Whether this account said OK to what it shares in rooms being shared with AI (App Store guideline 5.1.2(i)): the
+/// rooms' agents and Senti's own AI features (`AIConsentText.notice`). Asked once, before its first write to any room
+/// (a message, a reply, a file, an edit, a reaction, a ticket, a call), whatever the room. Kept on the phone under the
+/// account (`RoomSendOutbox.account(token:)`), so another account signing in here is asked for itself. Withdrawn in
+/// Settings, it is asked again.
 @MainActor
 final class AIConsent: ObservableObject {
     /// When this account said OK; nil until it does, and again after it withdraws.
@@ -23,10 +24,8 @@ final class AIConsent: ObservableObject {
 
     var isGiven: Bool { givenAt != nil }
 
-    /// A send in a room with AI agents asks first, until this account says OK.
-    func asks(roomHasAgents: Bool) -> Bool {
-        roomHasAgents && !isGiven
-    }
+    /// A write to a room asks first, until this account says OK.
+    var asks: Bool { !isGiven }
 
     func grant() {
         let date = now()

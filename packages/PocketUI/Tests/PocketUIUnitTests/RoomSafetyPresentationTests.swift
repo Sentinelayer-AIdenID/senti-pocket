@@ -160,6 +160,23 @@ final class RoomSafetyPresentationTests: XCTestCase {
                                                    messages: [input("c1", seq: 9, at: 0, author: "senti", kind: .checkpoint)])
         XCTAssertNil(self.rows(checkpoint)["c1"]?.reportTarget, "what the room itself posts is not reported")
 
+        // The server's own posts are never offered to block.
+        let server = RoomChatPresentationState(sessionId: "room", title: "Room",
+                                               messages: [input("s1", seq: 10, at: 0, author: "senti", text: "Room renamed")])
+        let serverOptions = self.rows(server)["s1"]!.options(canReply: true, canReact: true, canPin: true, isPinned: false,
+                                                              pinsFull: false, canReport: true, canBlock: true)
+        XCTAssertFalse(serverOptions.contains { $0.kind == .block }, "no Block senti")
+
+        // A row the server takes no report on (an upload notice, a relayed line) offers Block but not Report.
+        var relayed = input("r1", seq: 11, at: 0, author: "human-sam", text: "Attachment uploaded")
+        relayed.isReportable = false
+        let relayedRow = self.rows(RoomChatPresentationState(sessionId: "room", title: "Room", messages: [relayed]))["r1"]!
+        let relayedOptions = relayedRow.options(canReply: true, canReact: true, canPin: true, isPinned: false,
+                                                pinsFull: false, canReport: true, canBlock: true)
+        XCTAssertNil(relayedRow.reportTarget)
+        XCTAssertFalse(relayedOptions.contains { $0.kind == .report })
+        XCTAssertTrue(relayedOptions.contains { $0.kind == .block })
+
         let reply = RoomChatReplyRow(id: "r9", authorName: "sam", isHuman: true, isOwn: false, text: "x", date: nil,
                                      isEdited: false, authorId: "human-sam")
         XCTAssertEqual(reply.reportTarget(inThread: 4),
@@ -178,11 +195,12 @@ final class RoomSafetyPresentationTests: XCTestCase {
         let long = String(repeating: "é", count: 600)
         XCTAssertEqual(message.apiNote(long)?.unicodeScalars.count, 500)
 
+        // A reply is reported under its own id; its note is only what was written.
         let reply = RoomReportTarget(sequenceId: 7, replyId: "3f0c2a8e-2c4d-4c38-9e0f-2b1f5f1d7a10", authorId: "a", authorName: "a")
-        XCTAssertEqual(reply.apiNote(""), "Reply 3f0c2a8e-2c4d-4c38-9e0f-2b1f5f1d7a10")
-        XCTAssertEqual(reply.apiNote("rude")?.components(separatedBy: "\n"),
-                       ["Reply 3f0c2a8e-2c4d-4c38-9e0f-2b1f5f1d7a10", "rude"])
-        XCTAssertEqual(reply.apiNote(long)?.unicodeScalars.count, 500, "the whole note stays within the API's limit")
+        XCTAssertNil(reply.apiNote(""))
+        XCTAssertEqual(reply.apiNote("rude"), "rude")
+        XCTAssertEqual(reply.noteLimit, 500)
+        XCTAssertEqual(reply.apiNote(long)?.unicodeScalars.count, 500)
 
         // Cut by code points, never inside a character: a family emoji is 7 of them.
         XCTAssertEqual(RoomReport.clamped("ab👨‍👩‍👧‍👦", to: 8), "ab")
@@ -194,12 +212,48 @@ final class RoomSafetyPresentationTests: XCTestCase {
                        ["spam", "harassment", "hate", "sexual", "violence", "self_harm", "other"])
     }
 
-    func test_the_ai_consent_notice_says_what_was_agreed() {
-        XCTAssertEqual(AIConsentText.notice,
-                       "Messages you send in a room are shared with the AI agents in that room, which run on AI models "
-                       + "from third-party providers, to read and answer them.")
-        let state = RoomChatPresentationState(sessionId: "room", title: "Room", messages: messages, asksAIConsent: true)
+    func test_the_ai_consent_notice_says_what_is_shared_and_with_whom() {
+        let notice = AIConsentText.notice
+        for shared in ["messages", "replies", "files", "tickets", "what you say on calls"] {
+            XCTAssertTrue(notice.contains(shared), "says it shares \(shared)")
+        }
+        for whom in ["AI agents in that room", "Senti's own AI features", "room titles", "progress scoring",
+                     "finished speaking on a call", "third-party providers"] {
+            XCTAssertTrue(notice.contains(whom), "says \(whom)")
+        }
+        let state = RoomChatPresentationState(sessionId: "room", title: "Room", messages: messages, asksAIConsent: true,
+                                              consentRequested: true)
         XCTAssertTrue(state.asksAIConsent)
+        XCTAssertTrue(state.consentRequested)
+    }
+
+    func test_every_write_to_the_room_waits_for_the_ok_and_reading_never_does() {
+        let writes: [RoomChatIntent] = [
+            .sendMessage(text: "x"), .retrySend(clientId: "c"), .react(sequenceId: 1, type: "like"),
+            .sendReply(sequenceId: 1, text: "x"), .sendReplyToReply(sequenceId: 1, replyId: "r", text: "x"),
+            .reactToReply(sequenceId: 1, replyId: "r", type: "ack"),
+            .setEmojiReaction(sequenceId: 1, replyId: nil, emoji: "🎉", isOn: true),
+            .setPinned(sequenceId: 1, isPinned: true), .renameRoom(title: "x"),
+            .editMessage(sequenceId: 1, text: "x"), .editReply(sequenceId: 1, replyId: "r", text: "x")
+        ]
+        XCTAssertTrue(writes.allSatisfy(\.isRoomWrite))
+        let others: [RoomChatIntent] = [
+            .loadOlder, .openThread(sequenceId: 1), .readAloud(id: "a", text: "b"), .messageOnScreen(id: "a", isOnScreen: true),
+            .openReport(RoomReportTarget(sequenceId: 1, authorId: "human-sam", authorName: "sam")),
+            .sendReport(reason: .spam, note: ""), .block(RoomBlockTarget(actorId: "human-sam", name: "sam")),
+            .revealBlocked(key: "msg:1"), .allowAIAgents, .declineAIAgents, .discardSend(clientId: "c")
+        ]
+        XCTAssertFalse(others.contains(where: \.isRoomWrite))
+    }
+
+    func test_blocking_says_plainly_what_it_does_and_does_not() {
+        let agent = RoomBlocking.confirmation(for: RoomBlockTarget(actorId: "build-agent", name: "build-agent"))
+        XCTAssertTrue(agent.contains("every agent called build-agent"), "an agent is blocked by its name")
+        XCTAssertTrue(agent.contains("Calls from them still ring"))
+        XCTAssertTrue(agent.contains("Waiting on you still shows"))
+        let person = RoomBlocking.confirmation(for: RoomBlockTarget(actorId: "human-sam", name: "Sam"))
+        XCTAssertFalse(person.contains("every agent"))
+        XCTAssertTrue(person.contains("Calls from them still ring"))
     }
 
     func test_nothing_to_report_or_block_beside_an_access_failure() {
