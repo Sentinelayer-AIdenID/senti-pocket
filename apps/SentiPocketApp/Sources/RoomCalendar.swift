@@ -1,0 +1,549 @@
+import Foundation
+import PocketSyncClient
+import SwiftUI
+
+// The calendar (Carter, 11-04; ticket 49119fff): tap a day, say what is happening, a cheap model drafts the event, you
+// edit it and save it; and subscribe to it from Apple Calendar. The server half is behind CALENDAR_DRAFTS_ENABLED and
+// CALENDAR_FEED_ENABLED: until a flag answers something other than 404 nothing of what it does shows, and a 404 later
+// hides it again. The calendar reads when it opens and never on a timer; nothing saves without the person tapping Save.
+
+/// Whether the calendar is on, and the Apple Calendar link. One per signed-in app.
+@MainActor
+final class CalendarCenter: ObservableObject {
+    /// Drafting (and so the calendar itself): nil until the server has answered, false where the flag is off.
+    @Published private(set) var draftsOn: Bool?
+    /// The subscribe link: nil until the server has answered, false where the flag is off.
+    @Published private(set) var feedOn: Bool?
+    /// What the subscribe rows last did, in words. Never the link: the link only ever goes to the system to open.
+    @Published private(set) var feedNotice: String?
+    @Published private(set) var isWorkingOnFeed = false
+
+    let client: any RoomCalendarServing
+    private let feed: any CalendarFeedServing
+    private let openURL: @MainActor (URL) -> Void
+    private let onReauthenticationRequired: @MainActor () -> Void
+    private var checkingDrafts = false
+    private var checkingFeed = false
+
+    init(client: any RoomCalendarServing, feed: any CalendarFeedServing, openURL: @escaping @MainActor (URL) -> Void,
+         onReauthenticationRequired: @escaping @MainActor () -> Void = {}) {
+        self.client = client
+        self.feed = feed
+        self.openURL = openURL
+        self.onReauthenticationRequired = onReauthenticationRequired
+    }
+
+    var showsCalendar: Bool { draftsOn == true }
+    var showsSubscribe: Bool { feedOn == true }
+
+    /// Whether a member with this role may add events (the server decides in the end: a 403 says so).
+    static func canAdd(role: String) -> Bool {
+        let role = role.lowercased()
+        return role.isEmpty || ["owner", "admin", "contributor"].contains(role)
+    }
+
+    /// Asks once whether drafting is on, with a room the person is in (the route is per room). An answer that says
+    /// neither keeps the calendar hidden; the next open asks again.
+    func checkDrafts(probeRoom: String?) async {
+        guard draftsOn == nil, !checkingDrafts, let probeRoom else { return }
+        await probeDrafts(probeRoom)
+    }
+
+    /// Settings asks again each time it opens, so a flag turned on shows without a new sign-in.
+    func refresh(probeRoom: String?) async {
+        if draftsOn != true, !checkingDrafts, let probeRoom { await probeDrafts(probeRoom) }
+        guard feedOn != true, !checkingFeed else { return }
+        checkingFeed = true
+        defer { checkingFeed = false }
+        do {
+            feedOn = try await feed.feedAvailable()
+        } catch CalendarError.reauthenticationRequired {
+            onReauthenticationRequired()
+        } catch {
+        }
+    }
+
+    private func probeDrafts(_ room: String) async {
+        checkingDrafts = true
+        defer { checkingDrafts = false }
+        do {
+            draftsOn = try await client.draftsAvailable(inRoom: room)
+        } catch CalendarError.reauthenticationRequired {
+            onReauthenticationRequired()
+        } catch {
+        }
+    }
+
+    /// A calendar route answered 404: the flag went off. Every calendar entry hides.
+    func calendarWentAway() {
+        draftsOn = false
+    }
+
+    /// Opens Apple Calendar's subscribe sheet on your feed. The link is handed to the system and kept nowhere.
+    func subscribe() async {
+        guard showsSubscribe, !isWorkingOnFeed else { return }
+        isWorkingOnFeed = true
+        feedNotice = nil
+        defer { isWorkingOnFeed = false }
+        do {
+            let link = try await feed.subscriptionLink(resetting: false)
+            openURL(link.url)
+            feedNotice = Self.opened
+        } catch {
+            handleFeed(error)
+        }
+    }
+
+    /// Makes a new link. The old one stops working, so a calendar subscribed to it stops updating.
+    func resetLink() async {
+        guard showsSubscribe, !isWorkingOnFeed else { return }
+        isWorkingOnFeed = true
+        feedNotice = nil
+        defer { isWorkingOnFeed = false }
+        do {
+            _ = try await feed.subscriptionLink(resetting: true)
+            feedNotice = Self.reset
+        } catch {
+            handleFeed(error)
+        }
+    }
+
+    private func handleFeed(_ error: Error) {
+        switch error as? CalendarError {
+        case .unavailable?:
+            feedOn = false
+        case .reauthenticationRequired?:
+            onReauthenticationRequired()
+        case .limited?:
+            feedNotice = "Too many tries just now. Try again in a minute."
+        default:
+            feedNotice = "Couldn't get your calendar link. Check your connection and try again."
+        }
+    }
+
+    static let opened = "Apple Calendar opened. Choose Subscribe there to add your Senti events."
+    static let reset = "Link reset. The old link no longer updates. Tap Subscribe to add the new one."
+    static let resetWarning = "Apple Calendar stops updating from the old link, on every device that subscribed to it. "
+        + "You can subscribe again with the new one."
+}
+
+/// A room the person can add events to, for the calendar opened from Settings.
+struct CalendarRoomChoice: Equatable, Hashable, Identifiable {
+    let id: String
+    let title: String
+}
+
+/// Where a calendar reads and where it adds.
+enum CalendarScope: Equatable {
+    /// One room: its events, and events added to it.
+    case room(sessionId: String, title: String, canAdd: Bool)
+    /// Your events across your rooms; an event is added to the room picked.
+    case agenda(rooms: [CalendarRoomChoice])
+}
+
+/// One open calendar: the month on screen, the day picked, its events, and the event being drafted.
+@MainActor
+final class CalendarBoard: ObservableObject {
+    enum Load: Equatable {
+        case loading
+        case loaded
+        case failed
+    }
+
+    /// The first day of the month on screen.
+    @Published private(set) var month: CalendarDay
+    /// The month as drawn; built again only when the month or the events change.
+    @Published private(set) var grid: CalendarMonthGrid
+    @Published private(set) var selected: CalendarDay?
+    @Published private(set) var load: Load = .loading
+    /// What the person typed to draft from. A failed draft leaves it as it was.
+    @Published var addText = ""
+    /// For the calendar opened from Settings: the room an event is added to.
+    @Published var addRoomId: String?
+    @Published private(set) var isDrafting = false
+    @Published private(set) var draftProblem: String?
+    /// The draft being edited. Saved only by `save()`; cancelling drops it.
+    @Published var form: CalendarDraftForm?
+    @Published private(set) var isSaving = false
+    @Published private(set) var saveProblem: String?
+
+    let scope: CalendarScope
+    let calendar: Calendar
+    /// How many times the calendar has been read from the server (once per open, unless the read failed).
+    private(set) var reads = 0
+    /// How many times the month has been laid out (once per month change or new events).
+    private(set) var gridBuilds = 0
+
+    private let client: any RoomCalendarServing
+    private let now: () -> Date
+    private let onUnavailable: @MainActor () -> Void
+    private let onReauthenticationRequired: @MainActor () -> Void
+    private var allEvents: [CalendarEvent] = []
+    private var eventsByDay: [CalendarDay: [CalendarEvent]] = [:]
+
+    init(scope: CalendarScope, client: any RoomCalendarServing, calendar: Calendar = CalendarBoard.personsCalendar(),
+         now: @escaping () -> Date = { Date() }, onUnavailable: @escaping @MainActor () -> Void = {},
+         onReauthenticationRequired: @escaping @MainActor () -> Void = {}) {
+        self.scope = scope
+        self.client = client
+        self.calendar = calendar
+        self.now = now
+        self.onUnavailable = onUnavailable
+        self.onReauthenticationRequired = onReauthenticationRequired
+        let today = CalendarDay(now(), in: calendar)
+        let first = CalendarDay(year: today.year, month: today.month, day: 1)
+        month = first
+        selected = today
+        grid = CalendarMonthGrid(month: first, eventsByDay: [:], today: today, calendar: calendar)
+        gridBuilds = 1
+        if case .agenda(let rooms) = scope { addRoomId = rooms.first?.id }
+    }
+
+    /// The Gregorian calendar in the person's zone and language, whatever calendar the phone shows: the API's days
+    /// are Gregorian.
+    nonisolated static func personsCalendar(timeZone: TimeZone = .current, locale: Locale = .current) -> Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        calendar.locale = locale
+        calendar.firstWeekday = Calendar.current.firstWeekday
+        return calendar
+    }
+
+    var timeZone: TimeZone { calendar.timeZone }
+
+    var canAdd: Bool {
+        switch scope {
+        case .room(_, _, let canAdd): return canAdd
+        case .agenda(let rooms): return !rooms.isEmpty
+        }
+    }
+
+    var rooms: [CalendarRoomChoice] {
+        if case .agenda(let rooms) = scope { return rooms }
+        return []
+    }
+
+    func events(on day: CalendarDay) -> [CalendarEvent] {
+        eventsByDay[day] ?? []
+    }
+
+    func roomTitle(_ sessionId: String) -> String? {
+        rooms.first { $0.id == sessionId }?.title
+    }
+
+    /// Reads the calendar when it opens: once, and again only after a read that failed. The event list is not behind
+    /// a flag, so a 404 there is a room that is not there, not the calendar turned off.
+    func loadIfNeeded() async {
+        guard reads == 0 || load == .failed else { return }
+        reads += 1
+        load = .loading
+        do {
+            let read: [CalendarEvent]
+            switch scope {
+            case .room(let sessionId, _, _): read = try await client.events(inRoom: sessionId)
+            case .agenda: read = try await client.agenda()
+            }
+            setEvents(read)
+            load = .loaded
+        } catch CalendarError.reauthenticationRequired {
+            load = .failed
+            onReauthenticationRequired()
+        } catch {
+            load = .failed
+        }
+    }
+
+    /// The month before (-1) or after (+1). The new month is laid out once.
+    func showMonth(_ delta: Int) {
+        guard delta != 0, let start = month.start(in: calendar),
+              let moved = calendar.date(byAdding: .month, value: delta, to: start) else { return }
+        let next = CalendarDay(moved, in: calendar)
+        month = CalendarDay(year: next.year, month: next.month, day: 1)
+        let today = CalendarDay(now(), in: calendar)
+        selected = (today.year, today.month) == (month.year, month.month) ? today : nil
+        buildGrid()
+    }
+
+    func select(_ day: CalendarDay) {
+        selected = day
+        draftProblem = nil
+    }
+
+    /// Asks for a draft of what was typed, for the day picked, in the person's zone. Nothing is saved: the draft
+    /// opens as a form. A 404 here is the drafts flag off: the calendar hides everywhere.
+    func draft() async {
+        let text = addText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard canAdd, !isDrafting, form == nil, let day = selected, !text.isEmpty, let room = targetRoom else { return }
+        guard text.count <= CalendarDraftRequest.maxTextLength else {
+            draftProblem = "That's too long to draft. Keep it under \(CalendarDraftRequest.maxTextLength) characters."
+            return
+        }
+        isDrafting = true
+        draftProblem = nil
+        defer { isDrafting = false }
+        do {
+            let draft = try await client.draft(inRoom: room.id, .text(day: day, text: text, timeZone: timeZone.identifier))
+            saveProblem = nil
+            form = CalendarDraftForm(draft: draft, day: day, roomId: room.id, roomTitle: room.title, calendar: calendar)
+        } catch CalendarError.unavailable {
+            onUnavailable()
+        } catch CalendarError.reauthenticationRequired {
+            onReauthenticationRequired()
+        } catch CalendarError.forbidden {
+            draftProblem = "You can't add events in this room."
+        } catch CalendarError.limited {
+            draftProblem = "Too many drafts just now. Try again in a minute."
+        } catch {
+            draftProblem = "Couldn't draft that. Check your connection and try again."
+        }
+    }
+
+    /// Saves the form as it stands, to the room it was drafted for. The only way an event is saved.
+    func save() async {
+        guard let form, !isSaving else { return }
+        let event: CalendarEventCreate
+        switch form.validated(now: now()) {
+        case .failure(let problem):
+            saveProblem = problem.message
+            return
+        case .success(let valid):
+            event = valid
+        }
+        isSaving = true
+        saveProblem = nil
+        defer { isSaving = false }
+        do {
+            let saved = try await client.save(event, inRoom: form.roomId)
+            self.form = nil
+            addText = ""
+            setEvents(allEvents.filter { $0.id != saved.id } + [saved])
+            let day = CalendarDay(saved.startsAt, in: calendar)
+            if (day.year, day.month) != (month.year, month.month) {
+                month = CalendarDay(year: day.year, month: day.month, day: 1)
+                buildGrid()
+            }
+            selected = day
+        } catch CalendarError.unavailable {
+            saveProblem = "Not saved: that room isn't there anymore."
+        } catch CalendarError.reauthenticationRequired {
+            onReauthenticationRequired()
+        } catch CalendarError.forbidden {
+            saveProblem = "You can't add events in this room."
+        } catch CalendarError.rejected {
+            saveProblem = "Senti didn't take that. Check the times and the link."
+        } catch CalendarError.limited {
+            saveProblem = "This room or your account has reached today's limit of new events."
+        } catch {
+            saveProblem = "Not saved. Check your connection and try again."
+        }
+    }
+
+    /// Drops the draft. Nothing was saved; what was typed stays, to draft again.
+    func cancelDraft() {
+        form = nil
+        saveProblem = nil
+    }
+
+    private var targetRoom: CalendarRoomChoice? {
+        switch scope {
+        case .room(let sessionId, let title, _):
+            return CalendarRoomChoice(id: sessionId, title: title)
+        case .agenda(let rooms):
+            return rooms.first { $0.id == addRoomId } ?? rooms.first
+        }
+    }
+
+    private func setEvents(_ list: [CalendarEvent]) {
+        allEvents = list.sorted { ($0.startsAt, $0.id) < ($1.startsAt, $1.id) }
+        eventsByDay = Dictionary(grouping: allEvents) { CalendarDay($0.startsAt, in: calendar) }
+        buildGrid()
+    }
+
+    private func buildGrid() {
+        grid = CalendarMonthGrid(month: month, eventsByDay: eventsByDay, today: CalendarDay(now(), in: calendar),
+                                 calendar: calendar)
+        gridBuilds += 1
+    }
+}
+
+/// A month laid out for the grid: blank cells before the 1st, then each day with its count of events and what
+/// VoiceOver reads for it.
+struct CalendarMonthGrid: Equatable {
+    struct Cell: Equatable, Identifiable {
+        let id: Int
+        /// Nil for the blanks before the month's first day.
+        let day: CalendarDay?
+        let eventCount: Int
+        let isToday: Bool
+        /// "Wednesday, November 4, 2 events".
+        let accessibilityLabel: String
+    }
+
+    let month: CalendarDay
+    /// "November 2026".
+    let title: String
+    /// The weekday initials, from the person's first day of the week.
+    let weekdays: [String]
+    let cells: [Cell]
+
+    init(month: CalendarDay, eventsByDay: [CalendarDay: [CalendarEvent]], today: CalendarDay, calendar: Calendar) {
+        self.month = month
+        let titleFormatter = DateFormatter()
+        titleFormatter.calendar = calendar
+        titleFormatter.timeZone = calendar.timeZone
+        titleFormatter.locale = calendar.locale
+        titleFormatter.setLocalizedDateFormatFromTemplate("MMMMy")
+        let first = month.start(in: calendar) ?? Date()
+        title = titleFormatter.string(from: first)
+        let symbols = titleFormatter.veryShortStandaloneWeekdaySymbols ?? ["S", "M", "T", "W", "T", "F", "S"]
+        let shift = max(0, calendar.firstWeekday - 1) % 7
+        weekdays = Array(symbols[shift...] + symbols[..<shift])
+        let leading = (calendar.component(.weekday, from: first) - calendar.firstWeekday + 7) % 7
+        let length = calendar.range(of: .day, in: .month, for: first)?.count ?? 30
+        let labels = CalendarDayLabel(calendar: calendar)
+        var cells = (0..<leading).map { Cell(id: $0, day: nil, eventCount: 0, isToday: false, accessibilityLabel: "") }
+        for number in 1...length {
+            let day = CalendarDay(year: month.year, month: month.month, day: number)
+            let count = eventsByDay[day]?.count ?? 0
+            cells.append(Cell(id: leading + number - 1, day: day, eventCount: count, isToday: day == today,
+                              accessibilityLabel: labels.text(for: day, eventCount: count)))
+        }
+        self.cells = cells
+    }
+}
+
+/// What VoiceOver reads for a day: "Wednesday, November 4, 2 events".
+struct CalendarDayLabel {
+    private let calendar: Calendar
+    private let formatter: DateFormatter
+
+    init(calendar: Calendar) {
+        self.calendar = calendar
+        formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.locale = calendar.locale
+        formatter.setLocalizedDateFormatFromTemplate("EEEEMMMMd")
+    }
+
+    func day(_ day: CalendarDay) -> String {
+        day.start(in: calendar).map(formatter.string(from:)) ?? day.key
+    }
+
+    func text(for day: CalendarDay, eventCount: Int) -> String {
+        "\(self.day(day)), \(Self.count(eventCount))"
+    }
+
+    static func count(_ events: Int) -> String {
+        switch events {
+        case 0: return "no events"
+        case 1: return "1 event"
+        default: return "\(events) events"
+        }
+    }
+}
+
+/// An event's time as the person reads it, in their zone: "1:00 – 2:00 PM".
+enum CalendarEventTime {
+    static func text(_ event: CalendarEvent, calendar: Calendar) -> String {
+        guard let end = event.endsAt else { return time(event.startsAt, calendar: calendar) }
+        let formatter = DateIntervalFormatter()
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.locale = calendar.locale
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter.string(from: event.startsAt, to: end)
+    }
+
+    static func time(_ date: Date, calendar: Calendar) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.locale = calendar.locale
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+}
+
+/// The form a draft opens as: every field the person can change before saving, what the model assumed, and whether
+/// it was unsure.
+struct CalendarDraftForm: Identifiable, Equatable {
+    enum Problem: Error, Equatable {
+        case noTitle
+        case titleTooLong
+        case startPassed
+        case endBeforeStart
+        case badLink
+        case notesTooLong
+
+        var message: String {
+            switch self {
+            case .noTitle: return "Give it a title."
+            case .titleTooLong: return "Keep the title under 200 characters."
+            case .startPassed: return "That start time has passed. Pick a later one."
+            case .endBeforeStart: return "The end is before the start."
+            case .badLink: return "Links need to start with https://"
+            case .notesTooLong: return "Keep the notes under 2,000 characters."
+            }
+        }
+    }
+
+    /// Below this, the form says the model was unsure.
+    static let confidentFrom = 0.6
+
+    let id = UUID()
+    let roomId: String
+    let roomTitle: String?
+    let timeZone: TimeZone
+    var title: String
+    var startsAt: Date
+    var hasEnd: Bool
+    var endsAt: Date
+    var link: String
+    var notes: String
+    /// What the model assumed, as it said it.
+    let assumptions: [String]
+    /// The model was unsure (confidence under 0.6, none given, or no start time).
+    let isLowConfidence: Bool
+
+    init(draft: CalendarDraft, day: CalendarDay, roomId: String, roomTitle: String?, calendar: Calendar) {
+        let midnight = day.start(in: calendar) ?? Date()
+        let fallback = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: midnight) ?? midnight
+        let start = draft.startsAt ?? fallback
+        self.roomId = roomId
+        self.roomTitle = roomTitle
+        timeZone = calendar.timeZone
+        title = draft.title
+        startsAt = start
+        hasEnd = draft.endsAt != nil
+        endsAt = draft.endsAt ?? start.addingTimeInterval(3_600)
+        link = draft.link ?? ""
+        notes = draft.notes ?? ""
+        assumptions = draft.assumptions
+        isLowConfidence = draft.startsAt == nil || (draft.confidence ?? 0) < Self.confidentFrom
+    }
+
+    /// The event to save, or what to fix first.
+    func validated(now: Date) -> Result<CalendarEventCreate, Problem> {
+        let title = self.title.split(whereSeparator: \.isNewline).joined(separator: " ")
+            .trimmingCharacters(in: .whitespaces)
+        guard !title.isEmpty else { return .failure(.noTitle) }
+        guard title.count <= 200 else { return .failure(.titleTooLong) }
+        guard startsAt > now else { return .failure(.startPassed) }
+        if hasEnd, endsAt <= startsAt { return .failure(.endBeforeStart) }
+        let linkText = link.trimmingCharacters(in: .whitespacesAndNewlines)
+        let url = CalendarLink.https(linkText)
+        if !linkText.isEmpty, url == nil { return .failure(.badLink) }
+        let notes = self.notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard notes.count <= 2_000 else { return .failure(.notesTooLong) }
+        return .success(CalendarEventCreate(title: title, startsAt: startsAt, endsAt: hasEnd ? endsAt : nil, link: url,
+                                            notes: notes.isEmpty ? nil : notes, timeZone: timeZone))
+    }
+
+    static func == (lhs: CalendarDraftForm, rhs: CalendarDraftForm) -> Bool {
+        lhs.id == rhs.id && lhs.title == rhs.title && lhs.startsAt == rhs.startsAt && lhs.hasEnd == rhs.hasEnd
+            && lhs.endsAt == rhs.endsAt && lhs.link == rhs.link && lhs.notes == rhs.notes
+    }
+}

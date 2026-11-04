@@ -118,7 +118,9 @@ struct SentiPocketApp: App {
 
     @ViewBuilder private var rootView: some View {
         #if DEBUG
-        if RoomPreview.isRequested {
+        if RoomCalendarPreview.isRequested {
+            RoomCalendarPreview.rootView
+        } else if RoomPreview.isRequested {
             RoomPreview.rootView
         } else {
             RootAppView(model: model, whisperModelCoordinator: whisperModel)
@@ -233,6 +235,8 @@ private struct AuthenticatedRootView: View {
     @StateObject private var directMessages: DirectMessagesCenter
     /// Your room folders: on when the server lists them (ROOM_FOLDERS_ENABLED), else nothing shows.
     @StateObject private var roomFolders: RoomFoldersCenter
+    /// The calendar: on when the server answers its routes (CALENDAR_DRAFTS_ENABLED, CALENDAR_FEED_ENABLED).
+    @StateObject private var calendar: CalendarCenter
     @Environment(\.scenePhase) private var rootScenePhase
     @ObservedObject private var whisperModelCoordinator: WhisperModelProvisioningCoordinator
     @ObservedObject private var incomingLinks: IncomingLinkInbox
@@ -383,6 +387,16 @@ private struct AuthenticatedRootView: View {
                                           tokenProvider: { SessionTokenStore.load() }),
             // Where each room is filed is the room list's: it is read again after every change.
             onRoomsChanged: { sessions.send(.refreshSessions) },
+            onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
+        ))
+        let calendarClient = HTTPRoomCalendarClient(apiBaseURL: apiURL,
+                                                    urlSession: SentiHTTPTransportPolicy.protectedReadSession,
+                                                    tokenProvider: { SessionTokenStore.load() })
+        _calendar = StateObject(wrappedValue: CalendarCenter(
+            client: calendarClient,
+            feed: calendarClient,
+            // The webcal link goes to the system (Apple Calendar's subscribe sheet) and nowhere else.
+            openURL: { UIApplication.shared.open($0) },
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
         ))
         _whisperModelCoordinator = ObservedObject(wrappedValue: whisperModelCoordinator)
@@ -610,6 +624,8 @@ private struct AuthenticatedRootView: View {
             WhisperModelSettingsView(
                 coordinator: whisperModelCoordinator,
                 directMessages: directMessages,
+                calendar: CalendarSettingsContext(center: calendar, rooms: calendarRooms,
+                                                  onReauthenticationRequired: invalidateProtectedAuthentication),
                 onSignOut: {
                     presentsSettings = false
                     onSignOut()
@@ -862,6 +878,7 @@ private struct AuthenticatedRootView: View {
                 closeDrawer()
                 presentsSettings = true
                 Task { await directMessages.refresh() }
+                Task { await calendar.refresh(probeRoom: calendarRooms.first?.id) }
             },
             onNewRoom: roomSender is any RoomCreating ? {
                 closeDrawer()
@@ -907,6 +924,17 @@ private struct AuthenticatedRootView: View {
             direct: directContext,
             onReauthenticationRequired: invalidateProtectedAuthentication
         )
+        .modifier(RoomCalendarEntry(center: calendar, sessionId: route.sessionId, roomTitle: route.title,
+                                    canAdd: CalendarCenter.canAdd(role: route.membershipRole),
+                                    isOffered: route.direct == nil,
+                                    onReauthenticationRequired: invalidateProtectedAuthentication))
+    }
+
+    /// The rooms an event can be added to from Settings' calendar: rooms (not direct messages) you can write in.
+    private var calendarRooms: [CalendarRoomChoice] {
+        sessions.state.rows
+            .filter { !$0.isDirect && CalendarCenter.canAdd(role: $0.membershipRole) }
+            .map { CalendarRoomChoice(id: $0.sessionId, title: $0.title) }
     }
 
     /// The call whose summary is being read aloud, if any.

@@ -179,6 +179,7 @@ enum RoomPreview {
                 direct: (isProfileCardRequested || isDirectRequested) ? directContext : nil,
                 onReauthenticationRequired: {}
             )
+            .modifier(RoomCalendarPreview.roomEntry)
         }
     }
 }
