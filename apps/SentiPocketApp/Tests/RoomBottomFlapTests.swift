@@ -25,6 +25,8 @@ final class RoomBottomFlapTests: XCTestCase {
         @Published var key = 0
         @Published var covered = false
         @Published var drawerOpen = false
+        /// Your messages on their way, as the coordinator shows them before their echo.
+        private var pendingRows: [RoomChatPendingRow] = []
         private(set) var inputs: [RoomChatMessageInput]
         private var loading = false
         /// The coordinator's side of the reader's place: arrivals while away are unread, and coming back clears them.
@@ -90,11 +92,23 @@ final class RoomBottomFlapTests: XCTestCase {
             publish()
         }
 
-        /// The coordinator's send from up the history (`keepLatestForTheJumpDown`): only the newest rows are kept, then
-        /// the reader's own message arrives and the room goes to the bottom.
-        func sendFromUpTheHistory(_ message: RoomChatMessageInput, keeping: Int) {
+        /// The coordinator's send from up the history (`keepLatestForTheJumpDown`): only the newest rows are kept and the
+        /// message shows as on its way (the room view reopens at its newest rows for it).
+        func sendFromUpTheHistory(_ text: String, keeping: Int) {
             inputs = Array(inputs.suffix(keeping))
+            pendingRows = [RoomChatPendingRow(clientId: "hm_long", text: text, status: .sending)]
+            publish()
+        }
+
+        /// Its echo comes back as a message, the pending row marked sent, then the pending row goes.
+        func echo(_ message: RoomChatMessageInput) {
+            pendingRows = pendingRows.map { RoomChatPendingRow(clientId: $0.clientId, text: $0.text, status: .sent) }
             inputs.append(message)
+            publish()
+        }
+
+        func clearPending() {
+            pendingRows = []
             publish()
         }
 
@@ -108,7 +122,9 @@ final class RoomBottomFlapTests: XCTestCase {
                 unreadCount: unread,
                 isLoadingInitial: loading,
                 canLoadOlder: true,
+                jumpDownKeepsLatest: inputs.count > 60,
                 connection: .live,
+                pending: pendingRows,
                 composer: RoomComposerState(canPost: true, disabledReason: nil),
                 canReact: true,
                 canPin: true
@@ -329,9 +345,10 @@ final class RoomBottomFlapTests: XCTestCase {
                 scroll.setContentOffset(CGPoint(x: 0, y: max(0, scroll.contentOffset.y - 3_000)), animated: false)
             }
             let last = rows.last?.sequenceId ?? 0
-            settles(label, seconds: 3) {
-                room.sendFromUpTheHistory(Self.input(last + 1, "human-mrrcarter", Self.dictated(length)), keeping: 60)
-            }
+            let text = Self.dictated(length)
+            settles("\(label): sent", seconds: 3) { room.sendFromUpTheHistory(text, keeping: 60) }
+            settles("\(label): its echo", seconds: 2) { room.echo(Self.input(last + 1, "human-mrrcarter", text)) }
+            settles("\(label): pending gone", seconds: 1) { room.clearPending() }
             close()
         }
     }
