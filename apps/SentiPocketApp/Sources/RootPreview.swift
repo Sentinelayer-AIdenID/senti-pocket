@@ -310,7 +310,8 @@ final class RootPreviewAPI: @unchecked Sendable {
         var rooms = [
             Room(id: longRoom, title: "Long room", folderId: "folder-0", summary: words.sentence(), unread: 0, humans: 2,
                  agents: 5, minutesAgo: 1, direct: nil, messages: 1_000),
-            Room(id: midRoom, title: "Review room", folderId: nil, summary: words.sentence(), unread: 0, humans: 1,
+            // In the first folder with the long room, so the side panel shows both without scrolling.
+            Room(id: midRoom, title: "Review room", folderId: "folder-0", summary: words.sentence(), unread: 0, humans: 1,
                  agents: 4, minutesAgo: 2, direct: nil, messages: 165)
         ]
         for index in 0..<138 {

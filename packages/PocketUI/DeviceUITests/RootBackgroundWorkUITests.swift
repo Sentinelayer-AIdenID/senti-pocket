@@ -78,9 +78,10 @@ final class RootBackgroundWorkUITests: XCTestCase {
         var reads: [TimeInterval] = []
         for round in 1...5 {
             Self.post(Self.openDrawer)
-            reads.append(read("panel open \(round)") {
+            // Waiting for the panel includes its opening spring: timed, but not a read of the screen.
+            XCTAssertTrue(read("panel open \(round)") {
                 _ = app.descendants(matching: .any)["pocket.drawer"].waitForExistence(timeout: 60)
-            })
+            } < 60, "the side panel opened")
             reads.append(read("whole tree, panel open \(round)") { _ = app.debugDescription.count })
             Self.post(Self.closeDrawer)
             pause(1.5)
