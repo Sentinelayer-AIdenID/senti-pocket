@@ -370,6 +370,26 @@ final class NewAgentTests: XCTestCase {
     }
 
     /// A start the phone cannot keep is never sent, and no chat is made for it.
+    /// Review (R13): a check again whose new chat's record is gone sends nothing. Whether that chat was made is not
+    /// known, so the start is never sent again.
+    func test_a_check_again_whose_new_chat_record_is_gone_sends_nothing() async throws {
+        let ledger = temporaryLedger()
+        defer { remove(ledger) }
+        let mint = ScriptedMint(models: models, script: [.notConfirmed])
+        let model = newAgent(mint, chats: FakeChats(), ledger: ledger)
+        await model.load()
+        model.job = "Review it."
+        model.place = .newChat
+        await model.start()
+        XCTAssertEqual(model.phase, .unconfirmed)
+        XCTAssertEqual(mint.sent.count, 1)
+
+        try FileManager.default.removeItem(at: ledger.chatsURL)
+        await model.checkAgain()
+        XCTAssertEqual(model.phase, .unconfirmedTooOld)
+        XCTAssertEqual(mint.sent.count, 1, "the start is not sent again")
+    }
+
     func test_a_new_chat_start_the_phone_cannot_keep_makes_no_chat_and_sends_nothing() async {
         for (name, ledger, account) in [("no record on this phone", nil, "sub:carter"), ("no signed-in account", temporaryLedger(), nil)]
             as [(String, MintStartLedger?, String?)] {
