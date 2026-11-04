@@ -270,8 +270,8 @@ final class CalendarBoard: ObservableObject {
         rooms.first { $0.id == sessionId }?.title
     }
 
-    /// Reads the calendar when it opens: once, and again only after a read that failed. The event list is not behind
-    /// a flag, so a 404 there is a room that is not there, not the calendar turned off.
+    /// Reads the calendar when it opens: once, and again only after a read that failed. A 404 without a calendar code
+    /// is the calendar turned off (it hides); with one it is a read that failed.
     func loadIfNeeded() async {
         guard reads == 0 || load == .failed else { return }
         reads += 1
@@ -284,6 +284,9 @@ final class CalendarBoard: ObservableObject {
             }
             setEvents(read)
             load = .loaded
+        } catch CalendarError.unavailable {
+            load = .failed
+            onUnavailable()
         } catch CalendarError.reauthenticationRequired {
             load = .failed
             onReauthenticationRequired()
@@ -327,6 +330,8 @@ final class CalendarBoard: ObservableObject {
             form = CalendarDraftForm(draft: draft, day: day, roomId: room.id, roomTitle: room.title, calendar: calendar)
         } catch CalendarError.unavailable {
             onUnavailable()
+        } catch CalendarError.notFound {
+            draftProblem = "That room isn't there anymore."
         } catch CalendarError.reauthenticationRequired {
             onReauthenticationRequired()
         } catch CalendarError.forbidden {
@@ -369,6 +374,9 @@ final class CalendarBoard: ObservableObject {
             }
             selected = day
         } catch CalendarError.unavailable {
+            self.form = nil
+            onUnavailable()
+        } catch CalendarError.notFound {
             saveProblem = "Not saved: that room isn't there anymore."
         } catch CalendarError.reauthenticationRequired {
             onReauthenticationRequired()

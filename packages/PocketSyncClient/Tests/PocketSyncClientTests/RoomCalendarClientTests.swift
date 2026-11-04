@@ -244,7 +244,8 @@ final class RoomCalendarClientTests: XCTestCase {
 
     func test_statuses_map_to_what_the_app_does() async {
         let cases: [(Int, String, CalendarError)] = [
-            (404, "CALENDAR_ERROR", .unavailable), (403, "CALENDAR_ERROR", .forbidden), (400, "CALENDAR_ERROR", .rejected),
+            (404, "HTTP_ERROR", .unavailable), (404, "CALENDAR_ERROR", .notFound),
+            (403, "CALENDAR_ERROR", .forbidden), (400, "CALENDAR_ERROR", .rejected),
             (422, "CALENDAR_ERROR", .rejected), (429, "RATE_LIMITED", .rateLimited), (429, "CALENDAR_ERROR", .dailyLimit),
             (401, "CALENDAR_ERROR", .reauthenticationRequired), (503, "CALENDAR_ERROR", .retryable)
         ]
@@ -270,6 +271,53 @@ final class RoomCalendarClientTests: XCTestCase {
     }
 
     // MARK: - Flags
+
+    /// Web review of the same API (#746), checked against the API's handler (#1150 at 7484c8c,
+    /// `http_exception_handler`): a flag off raises `HTTPException(404, "Not found")`, which the handler writes as
+    /// `{"error": {"code": "HTTP_ERROR"}}`; an unknown path is Starlette's `{"detail": "Not Found"}`; a real calendar
+    /// not-found is `{"error": {"code": "CALENDAR_ERROR"}}`. Only the first two are "off". The exact bodies:
+    func test_a_404_is_off_only_without_a_calendar_code() async throws {
+        let off = [
+            #"{"error": {"code": "HTTP_ERROR", "message": "Not found", "request_id": "req-1"}}"#,
+            #"{"detail": "Not Found"}"#,
+            "",
+            #"{"detail": {"error": {"code": "HTTP_ERROR", "message": "Not found"}}}"#,
+        ]
+        let found = [
+            #"{"error": {"code": "CALENDAR_ERROR", "message": "Calendar feed not found", "request_id": "req-2"}}"#,
+            #"{"detail": {"error": {"code": "CALENDAR_ERROR", "message": "Calendar event not found"}}}"#,
+        ]
+        for body in off {
+            var calendar = client { _ in (404, body) }
+            let drafts = try await calendar.draftsAvailable(inRoom: room)
+            XCTAssertFalse(drafts, "drafting reads as off for \(body)")
+            calendar = client { _ in (404, body) }
+            let feed = try await calendar.feedAvailable()
+            XCTAssertFalse(feed, "the feed reads as off for \(body)")
+            calendar = client { _ in (404, body) }
+            do {
+                _ = try await calendar.events(inRoom: room)
+                XCTFail("events read from a 404")
+            } catch {
+                XCTAssertEqual(error as? CalendarError, .unavailable, body)
+            }
+        }
+        for body in found {
+            var calendar = client { _ in (404, body) }
+            let drafts = try await calendar.draftsAvailable(inRoom: room)
+            XCTAssertTrue(drafts, "a calendar not-found means the route is there: \(body)")
+            calendar = client { _ in (404, body) }
+            let feed = try await calendar.feedAvailable()
+            XCTAssertTrue(feed, "a calendar not-found means the route is there: \(body)")
+            calendar = client { _ in (404, body) }
+            do {
+                _ = try await calendar.newSubscriptionLink()
+                XCTFail("a link from a 404")
+            } catch {
+                XCTAssertEqual(error as? CalendarError, .notFound, body)
+            }
+        }
+    }
 
     func test_drafting_is_off_only_on_a_404_and_the_probe_sends_an_empty_body() async throws {
         for (status, on) in [(404, false), (422, true), (400, true), (403, true), (429, true), (200, true)] {

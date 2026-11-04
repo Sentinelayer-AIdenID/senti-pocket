@@ -10,8 +10,9 @@ import PocketContracts
 // - a draft is `POST /sessions/{id}/calendar/drafts` (flag CALENDAR_DRAFTS_ENABLED) and is never saved by the server;
 // - the subscribe link is `POST /me/calendar-feed-token` (every call makes a new token; the old link stops working)
 //   and `GET /me/calendar.ics?token=` (flag CALENDAR_FEED_ENABLED).
-// With a flag off its routes answer 404 and the app shows nothing of what they do. Every path is in `CalendarRoutes`,
-// so a route that lands differently changes there.
+// With a flag off its routes answer 404 with no code or the API's generic `HTTP_ERROR`, and the app shows nothing of
+// what they do; a 404 with a calendar code (`CALENDAR_ERROR`: no such event or feed token) is a real not-found.
+// Every path is in `CalendarRoutes`, so a route that lands differently changes there.
 
 /// The calendar's routes under the API origin.
 public enum CalendarRoutes {
@@ -269,8 +270,10 @@ public struct CalendarSubscriptionLink: Sendable, CustomStringConvertible, Custo
 }
 
 public enum CalendarError: Error, Equatable, Sendable {
-    /// 404: the flag is off (or the route is not there yet). Everything about it hides.
+    /// 404 with no code or `HTTP_ERROR`: the flag is off (or the route is not there yet). Everything about it hides.
     case unavailable
+    /// 404 with any other code (`CALENDAR_ERROR`): the route is there, the thing asked for is not.
+    case notFound
     /// 403: not something this person may do in this room.
     case forbidden
     /// 400 or 422: the server refused what was sent.
@@ -370,6 +373,14 @@ public final class HTTPRoomCalendarClient: RoomCalendarServing, CalendarFeedServ
         return link
     }
 
+    /// A 404 is the flag off (or no such route) when it carries no code or the API's generic `HTTP_ERROR` (what its
+    /// handler writes for `HTTPException(404, "Not found")` and for an unknown path); any other code means the route
+    /// answered.
+    static func isFlagOff(_ json: JSONValue?) -> Bool {
+        let code = errorCode(json)
+        return code == nil || code == "HTTP_ERROR"
+    }
+
     /// The error's code, at the top (`{"error": {"code": ...}}`) or under FastAPI's `detail`.
     static func errorCode(_ json: JSONValue?) -> String? {
         json?["error"]?["code"]?.stringValue
@@ -405,7 +416,8 @@ public final class HTTPRoomCalendarClient: RoomCalendarServing, CalendarFeedServ
             return true
         } catch CalendarError.unavailable {
             return false
-        } catch CalendarError.forbidden, CalendarError.rejected, CalendarError.rateLimited, CalendarError.dailyLimit {
+        } catch CalendarError.notFound, CalendarError.forbidden, CalendarError.rejected, CalendarError.rateLimited,
+                CalendarError.dailyLimit {
             return true
         }
     }
@@ -430,7 +442,7 @@ public final class HTTPRoomCalendarClient: RoomCalendarServing, CalendarFeedServ
         case 200..<300: return answer.json
         case 401: throw unauthorized
         case 403: throw CalendarError.forbidden
-        case 404: throw CalendarError.unavailable
+        case 404: throw Self.isFlagOff(answer.json) ? CalendarError.unavailable : CalendarError.notFound
         case 429: throw Self.errorCode(answer.json) == "RATE_LIMITED" ? CalendarError.rateLimited : CalendarError.dailyLimit
         case 408, 425, 500..<600: throw CalendarError.retryable
         default: throw CalendarError.rejected

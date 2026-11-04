@@ -392,20 +392,25 @@ final class RoomCalendarTests: XCTestCase {
         XCTAssertFalse(center.showsSubscribe)
     }
 
-    /// The event list is not behind a flag: its 404 is a room that is not there, said in the calendar, not the
-    /// calendar turned off everywhere. Opening it again reads again.
-    func test_a_404_on_the_event_list_is_a_failed_read_not_the_flag() async {
+    /// A 404 with a calendar code (a real not-found) is a read that failed, said in the calendar; a 404 without one
+    /// is the calendar turned off, which hides it everywhere. Opening it again reads again.
+    func test_a_404_with_a_calendar_code_is_a_failed_read_and_without_one_hides_the_calendar() async {
         let fake = FakeCalendar()
-        fake.readFailure = .unavailable
+        fake.readFailure = .notFound
         var hidden = false
         let board = makeBoard(fake, onUnavailable: { hidden = true })
         await board.loadIfNeeded()
         XCTAssertEqual(board.load, .failed)
-        XCTAssertFalse(hidden)
+        XCTAssertFalse(hidden, "a real not-found does not hide the calendar")
         fake.readFailure = nil
         await board.loadIfNeeded()
         XCTAssertEqual(board.load, .loaded)
         XCTAssertEqual(fake.reads, 2, "a failed read is read again on Try again")
+
+        fake.readFailure = .unavailable
+        let off = makeBoard(fake, onUnavailable: { hidden = true })
+        await off.loadIfNeeded()
+        XCTAssertTrue(hidden, "a 404 without a calendar code is the calendar off")
     }
 
     func test_an_answer_that_says_neither_keeps_the_calendar_hidden_and_asks_again() async {
