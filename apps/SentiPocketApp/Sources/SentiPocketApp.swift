@@ -120,6 +120,8 @@ struct SentiPocketApp: App {
         #if DEBUG
         if RoomPreview.isRequested {
             RoomPreview.rootView
+        } else if PlansPreview.isRequested {
+            PlansPreview.rootView(whisperModel: whisperModel)
         } else {
             RootAppView(model: model, whisperModelCoordinator: whisperModel)
         }
@@ -238,6 +240,8 @@ private struct AuthenticatedRootView: View {
     @State private var presentsPocket = false
     @State private var presentsActivity = false
     @State private var accountName: String?
+    /// In-app plans for this account: Settings shows them only while the server sells them.
+    @StateObject private var subscriptions: AppleSubscriptionsCoordinator
     /// The room opened last, reopened when the app starts (as the big assistant apps reopen your last chat).
     @AppStorage("pocket.lastRoomId") private var lastRoomId = ""
     @State private var restoredLastRoom = false
@@ -357,6 +361,11 @@ private struct AuthenticatedRootView: View {
         _waiting = StateObject(wrappedValue: WaitingOnYouCoordinator(
             transport: transport,
             sender: HTTPRoomMessageSender(apiBaseURL: apiURL),
+            onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
+        ))
+        _subscriptions = StateObject(wrappedValue: AppleSubscriptionsCoordinator(
+            server: HTTPAppleSubscriptionsServer(apiBaseURL: apiURL),
+            store: StoreKitAppleStore(),
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
         ))
         _whisperModelCoordinator = ObservedObject(wrappedValue: whisperModelCoordinator)
@@ -595,6 +604,11 @@ private struct AuthenticatedRootView: View {
                 )
             }
         }
+        // Settings (a sheet presented inside this) reaches the plans through the environment.
+        .environment(\.appleSubscriptions, subscriptions)
+        .onChange(of: presentsSettings) { isOpen in
+            if isOpen { Task { await subscriptions.refresh() } }
+        }
         .onAppear {
             checkpointPocket.setSelectedSession(
                 sessions.selectedSessionId,
@@ -608,6 +622,8 @@ private struct AuthenticatedRootView: View {
             notifications.startPolling()
             // Waiting on you is read from sign-in on, not only once the app comes back to the front (warden, #270).
             waiting.startPolling()
+            // App Store transactions go to the server from sign-in on, and the plans load.
+            subscriptions.start()
             // Apple push: a tap opens its room at the message; the room on screen gets no banner.
             PushRegistrar.shared.inbox = incomingLinks
             PushRegistrar.shared.currentRoomId = { (roomPath.last ?? currentRoom)?.sessionId }
@@ -637,6 +653,7 @@ private struct AuthenticatedRootView: View {
             InAppBanner.shared.dismiss()
             notifications.stopPolling()
             waiting.stopPolling()
+            subscriptions.stop()
             sessions.clearSelection()
             details.clearSelection()
             checkpointPocket.clearSelection()
