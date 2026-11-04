@@ -4,6 +4,8 @@ import SwiftUI
 @MainActor
 struct WhisperModelSettingsView: View {
     @ObservedObject var coordinator: WhisperModelProvisioningCoordinator
+    /// Direct messages' "Who can message me", where they are on.
+    let directMessages: DirectMessagesCenter?
     let onSignOut: (@MainActor () -> Void)?
 
     @Environment(\.dismiss) private var dismiss
@@ -14,9 +16,11 @@ struct WhisperModelSettingsView: View {
 
     init(
         coordinator: WhisperModelProvisioningCoordinator,
+        directMessages: DirectMessagesCenter? = nil,
         onSignOut: (@MainActor () -> Void)? = nil
     ) {
         _coordinator = ObservedObject(wrappedValue: coordinator)
+        self.directMessages = directMessages
         self.onSignOut = onSignOut
     }
 
@@ -26,6 +30,9 @@ struct WhisperModelSettingsView: View {
                 PlanSettingsSection()
                 inAppSection
                 notificationsSection
+                if let directMessages {
+                    DirectMessagesSettingsSection(center: directMessages)
+                }
                 crashSection
                 modelStatusSection
                 modelActionsSection

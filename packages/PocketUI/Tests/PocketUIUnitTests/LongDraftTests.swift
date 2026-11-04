@@ -51,6 +51,38 @@ final class LongDraftTests: XCTestCase {
         }
     }
 
+    /// Carter, 11-04: still slow at 2,000 characters. A keystroke at the end is answered without walking the draft: nil
+    /// exactly where the full answer is the end of the new text, and the full answer everywhere else.
+    func test_an_edit_at_the_end_is_nil_and_any_other_edit_is_the_full_offset() {
+        let long = String(repeating: "word ", count: 2_000)
+        let pairs: [(String, String)] = [
+            ("", "a"), ("ask @wa", "ask @war"), ("ask @war to go", "ask @wa to go"), ("hello", "hello"),
+            ("one two", "one three two"), ("👨‍👩‍👧 hi", "👨‍👩‍👧 hi!"), ("café", "cafés"), ("aaaa", "aaa"),
+            ("abc", ""), ("x@y", "x@yz"), ("e", "e\u{301}"), ("👍", "👍🏽"), ("ab", "acb"), ("abc", "xbc"),
+            (long, long + "@w"), (long + "x", long), (long, "@w " + long)
+        ]
+        for (old, new) in pairs {
+            let full = referenceEditOffset(old, new)
+            let ours = MentionSuggester.editOffsetUnlessAtEnd(from: old, to: new)
+            if full == new.count {
+                XCTAssertNil(ours, "\(old.prefix(12)) → \(new.prefix(12)): the edit ended at the end")
+            } else {
+                XCTAssertEqual(ours, full, "\(old.prefix(12)) → \(new.prefix(12))")
+            }
+        }
+    }
+
+    /// The `@word` at the end, found from the end only: the same answer as the offset-based query at the end.
+    func test_the_query_at_the_end_matches_the_query_at_the_last_offset() {
+        let drafts = ["ask @war to check", "ask @war", "@all", "mail a@b.com", "👋 @build-agent", "@", "no mention",
+                      "x @a-b_c9", "x@y", " @", "line\n@agent", String(repeating: "word ", count: 2_000) + "@wa"]
+        for draft in drafts {
+            XCTAssertEqual(MentionSuggester.queryAtEnd(of: draft), referenceQuery(draft, draft.count)?.query, draft)
+        }
+        // A run of letters longer than any handle is not looked through to its start.
+        XCTAssertNil(MentionSuggester.queryAtEnd(of: "@" + String(repeating: "a", count: 10_000)))
+    }
+
     func test_a_keystroke_is_never_a_paste_and_a_paste_still_is() {
         let long = String(repeating: "x", count: 5_000)
         XCTAssertNil(RoomComposerDraft.pastedBlock(from: long, to: long + "y"))

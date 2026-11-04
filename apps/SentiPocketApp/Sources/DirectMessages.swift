@@ -1,0 +1,382 @@
+import Foundation
+import PocketContracts
+import PocketSyncClient
+import PocketUI
+import SwiftUI
+
+// Direct messages (Carter's ask): a tap on someone's avatar messages them privately, and the direct message sits under
+// the room it started from. The server half is behind DIRECT_MESSAGES_ENABLED: with it off every route answers 404, and
+// the app shows nothing of direct messages. Whether they are on is read from `GET /me/dm-settings`.
+
+/// What the room list knows of a direct message when it is opened: whom it is with, and the room it started from.
+struct DirectRoomInfo: Hashable {
+    let counterpart: SessionCounterpart
+    let originRoomId: String?
+    let originTitle: String?
+
+    /// A direct message's row, with its room's title from the same list; nil for a room.
+    init?(row: SessionRowPresentation?, rows: [SessionRowPresentation]) {
+        guard let row, let counterpart = row.counterpart else { return nil }
+        self.counterpart = counterpart
+        self.originRoomId = row.originRoomId
+        self.originTitle = row.originRoomId.flatMap { id in
+            rows.first { UTF8ExactIdentity.matches($0.sessionId, id) && !$0.isDirect }?.title
+        }
+    }
+
+    /// A direct message the server just opened.
+    init(_ dm: DirectMessage) {
+        counterpart = dm.counterpart
+        originRoomId = dm.originRoom?.sessionId
+        originTitle = dm.originRoom?.title
+    }
+}
+
+/// Whether direct messages are on for this account, and who can message you. One per signed-in app.
+@MainActor
+final class DirectMessagesCenter: ObservableObject {
+    /// On once the server answered its settings; off until then, and after a 404 (the feature is off).
+    @Published private(set) var isAvailable = false
+    /// Who can message you, as the server holds it; nil before it has said, or for a value this build does not know.
+    @Published private(set) var allowance: DirectMessagesAllowance?
+    @Published private(set) var isSavingAllowance = false
+    @Published private(set) var allowanceNotice: String?
+
+    let client: any DirectMessaging
+    private let onReauthenticationRequired: @MainActor () -> Void
+    private var reading: Task<Void, Never>?
+
+    init(client: any DirectMessaging, onReauthenticationRequired: @escaping @MainActor () -> Void = {}) {
+        self.client = client
+        self.onReauthenticationRequired = onReauthenticationRequired
+    }
+
+    /// Asks the server whether direct messages are on (one read at a time). A 404 hides them; a failure that says
+    /// nothing either way keeps what is shown.
+    func refresh() async {
+        if let reading { return await reading.value }
+        let task = Task { await read() }
+        reading = task
+        await task.value
+        reading = nil
+    }
+
+    private func read() async {
+        do {
+            let value = try await client.directMessageSettings()
+            isAvailable = true
+            allowance = value
+        } catch DirectMessageError.unavailable {
+            isAvailable = false
+            allowance = nil
+        } catch DirectMessageError.reauthenticationRequired {
+            onReauthenticationRequired()
+        } catch {
+        }
+    }
+
+    /// "Who can message me". Shown at once; put back with a line if the server did not take it.
+    func setAllowance(_ value: DirectMessagesAllowance) async {
+        guard isAvailable, value != allowance, !isSavingAllowance else { return }
+        let before = allowance
+        allowance = value
+        allowanceNotice = nil
+        isSavingAllowance = true
+        defer { isSavingAllowance = false }
+        do {
+            allowance = try await client.setDirectMessageSettings(value) ?? value
+        } catch DirectMessageError.unavailable {
+            isAvailable = false
+            allowance = nil
+        } catch DirectMessageError.reauthenticationRequired {
+            allowance = before
+            onReauthenticationRequired()
+        } catch {
+            allowance = before
+            allowanceNotice = "Not saved. Check your connection and try again."
+        }
+    }
+
+    /// What a room opened by its id is (from a push, a banner or a link): what the room list says, and when the list has
+    /// not loaded it (a direct message that just arrived), what the server says, so a direct message opens as one,
+    /// with its header, and never as a plain room whose avatars would offer Message from inside it. Nil is a room.
+    func directInfo(for sessionId: String, row: SessionRowPresentation?,
+                    rows: [SessionRowPresentation]) async -> DirectRoomInfo? {
+        if let row { return DirectRoomInfo(row: row, rows: rows) }
+        if !isAvailable { await refresh() }
+        guard isAvailable, let dm = try? await client.directMessage(sessionId) else { return nil }
+        return DirectRoomInfo(dm)
+    }
+
+    enum OpenOutcome: Equatable {
+        case opened(DirectMessage)
+        /// The server's one answer for blocked, off, not sharing a room and unknown.
+        case refused
+        case failed(String)
+    }
+
+    /// Opens (or finds) the direct message with `target`, from the room you are in.
+    func open(_ target: RoomProfileTarget, from contextRoomId: String) async -> OpenOutcome {
+        do {
+            return .opened(try await client.openDirectMessage(with: target.senderId, from: contextRoomId))
+        } catch DirectMessageError.unavailable {
+            // Every refusal reads the same. If direct messages went off, reading the settings hides the rest of them.
+            Task { await refresh() }
+            return .refused
+        } catch DirectMessageError.reauthenticationRequired {
+            onReauthenticationRequired()
+            return .failed("Sign in again to send messages.")
+        } catch {
+            return .failed("Couldn't open the conversation. Check your connection and try again.")
+        }
+    }
+}
+
+/// Which header a direct message shows: Carter's pick, one line to change. `.compact` is one line ("From <room> ›" and a
+/// "Memory: Off" pill that opens the switch); `.expanded` is the full header with the switch always shown.
+enum DirectRoomHeaderChoice {
+    static let pick: DirectRoomHeaderStyle = .compact
+
+    /// The pick, or in a DEBUG build the one a launch argument asks for (`-PocketDMHeaderExpanded`,
+    /// `-PocketDMHeaderCompact`), so both can be shown from one build.
+    static var current: DirectRoomHeaderStyle {
+        #if DEBUG
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("-PocketDMHeaderExpanded") { return .expanded }
+        if arguments.contains("-PocketDMHeaderCompact") { return .compact }
+        #endif
+        return pick
+    }
+}
+
+/// What a room screen needs for direct messages; nil where they are off.
+struct RoomDirectContext {
+    let center: DirectMessagesCenter
+    /// The direct message you already have with a sender id, from the room list.
+    let existing: @MainActor (String) -> String?
+    /// Opens a direct message the server answered with, as the room on screen.
+    let open: @MainActor (DirectMessage) -> Void
+
+    /// The context for a room screen, or nil while direct messages are off (or not known to be on): then no avatar is a
+    /// button, no card opens and no direct message shows its switch.
+    @MainActor
+    static func ifAvailable(_ center: DirectMessagesCenter, existing: @escaping @MainActor (String) -> String?,
+                            open: @escaping @MainActor (DirectMessage) -> Void) -> RoomDirectContext? {
+        center.isAvailable ? RoomDirectContext(center: center, existing: existing, open: open) : nil
+    }
+}
+
+// MARK: - The profile card
+
+@MainActor
+final class RoomProfileModel: ObservableObject {
+    @Published private(set) var state: RoomProfileCardState
+    private let canMessage: Bool
+    private let canBlock: Bool
+
+    init(target: RoomProfileTarget, sharedRoom: String?, canMessage: Bool, canBlock: Bool) {
+        self.canMessage = canMessage
+        self.canBlock = canBlock
+        state = RoomProfileCardState(target: target, sharedRooms: sharedRoom.map { [$0] } ?? [], canMessage: canMessage,
+                                     canBlock: canBlock)
+    }
+
+    /// With a direct message already open with them, the rooms you share are the server's list.
+    func loadSharedRooms(_ context: RoomDirectContext) async {
+        guard let existing = context.existing(state.target.senderId),
+              let dm = try? await context.center.client.directMessage(existing), !dm.mutualRooms.isEmpty else { return }
+        state = RoomProfileCardState(target: state.target, sharedRooms: dm.mutualRooms.map(\.title),
+                                     canMessage: canMessage, canBlock: canBlock, phase: state.phase)
+    }
+
+    /// Message: opens the direct message from `roomId`; returns it, or says why not on the card.
+    func message(_ context: RoomDirectContext, from roomId: String) async -> DirectMessage? {
+        guard state.phase != .opening else { return nil }
+        set(.opening)
+        switch await context.center.open(state.target, from: roomId) {
+        case .opened(let dm):
+            set(.idle)
+            return dm
+        case .refused:
+            set(.notice(RoomProfileCardState.refusal(name: state.target.name)))
+        case .failed(let text):
+            set(.notice(text))
+        }
+        return nil
+    }
+
+    private func set(_ phase: RoomProfileCardState.Phase) {
+        state = RoomProfileCardState(target: state.target, sharedRooms: state.sharedRooms, canMessage: canMessage,
+                                     canBlock: canBlock, phase: phase)
+    }
+}
+
+/// The card a tapped avatar opens, over the room.
+struct RoomProfileSheet: View {
+    let roomId: String
+    let context: RoomDirectContext
+    /// Block, where the app has a block flow (#312); none yet, so the card shows no Block.
+    let onBlock: (() -> Void)?
+    let onClose: () -> Void
+    @StateObject private var model: RoomProfileModel
+
+    init(target: RoomProfileTarget, roomId: String, sharedRoom: String?, canMessage: Bool, context: RoomDirectContext,
+         onBlock: (() -> Void)? = nil, onClose: @escaping () -> Void) {
+        self.roomId = roomId
+        self.context = context
+        self.onBlock = onBlock
+        self.onClose = onClose
+        _model = StateObject(wrappedValue: RoomProfileModel(target: target, sharedRoom: sharedRoom,
+                                                            canMessage: canMessage, canBlock: onBlock != nil))
+    }
+
+    var body: some View {
+        RoomProfileCardView(
+            state: model.state,
+            onMessage: {
+                Task {
+                    guard let dm = await model.message(context, from: roomId) else { return }
+                    CrashReporter.shared.note("direct message opened")
+                    onClose()
+                    // After the card has gone, so the room it sat on can be replaced.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { context.open(dm) }
+                }
+            },
+            onBlock: onBlock,
+            onClose: onClose
+        )
+        .presentationDetents([.medium, .large])
+        .task { await model.loadSharedRooms(context) }
+    }
+}
+
+// MARK: - The direct message's header
+
+@MainActor
+final class DirectRoomModel: ObservableObject {
+    @Published private(set) var dm: DirectMessage?
+    @Published private(set) var isSaving = false
+    @Published var notice: String?
+    let sessionId: String
+
+    init(sessionId: String) {
+        self.sessionId = sessionId
+    }
+
+    func load(_ client: any DirectMessaging) async {
+        do {
+            dm = try await client.directMessage(sessionId)
+        } catch DirectMessageError.unavailable {
+            // Off, or no longer yours: no switch (and nothing assumed about it).
+            dm = nil
+        } catch {
+        }
+    }
+
+    /// Turns the agent's use of this chat in `roomId` on or off. The switch keeps the server's value until the server
+    /// answers with its new one.
+    func setMemory(_ enabled: Bool, roomId: String, client: any DirectMessaging) async {
+        guard let dm, !isSaving else { return }
+        isSaving = true
+        notice = nil
+        defer { isSaving = false }
+        do {
+            let shares = try await client.setMemoryShare(sessionId, roomId: roomId, enabled: enabled)
+            self.dm = dm.with(memoryShare: shares)
+        } catch DirectMessageError.unavailable {
+            notice = "This can't be changed right now."
+            await load(client)
+        } catch {
+            notice = "Not saved. Check your connection and try again."
+        }
+    }
+}
+
+/// Whom a direct message is with, the room you share, and for an agent the memory switch and "notified".
+struct DirectRoomHeaderHost: View {
+    let info: DirectRoomInfo
+    let sessionId: String
+    let center: DirectMessagesCenter?
+    let openRoom: @MainActor (String) -> Void
+    let style: DirectRoomHeaderStyle
+    /// The compact header's switch starts open (DEBUG previews only).
+    let memoryOpen: Bool
+    @StateObject private var model: DirectRoomModel
+
+    init(info: DirectRoomInfo, sessionId: String, center: DirectMessagesCenter?,
+         style: DirectRoomHeaderStyle = DirectRoomHeaderChoice.current, memoryOpen: Bool = false,
+         openRoom: @escaping @MainActor (String) -> Void) {
+        self.info = info
+        self.sessionId = sessionId
+        self.center = center
+        self.style = style
+        self.memoryOpen = memoryOpen
+        self.openRoom = openRoom
+        _model = StateObject(wrappedValue: DirectRoomModel(sessionId: sessionId))
+    }
+
+    var state: DirectRoomHeaderState {
+        let dm = model.dm
+        // The server's word on where it started wins, a null included; before it answers, the room list's.
+        let origin: (id: String, title: String)?
+        if let dm {
+            origin = dm.originRoom.map { (id: $0.sessionId, title: $0.title) }
+        } else {
+            origin = info.originRoomId.flatMap { id in info.originTitle.map { (id: id, title: $0) } }
+        }
+        return DirectRoomHeaderState.make(
+            name: info.counterpart.displayName,
+            isAgent: info.counterpart.isAgent,
+            origin: origin,
+            mutual: (dm?.mutualRooms ?? []).map { (id: $0.sessionId, title: $0.title) },
+            memoryShare: dm.map { Dictionary($0.memoryShare.map { ($0.roomId, $0.enabled) }, uniquingKeysWith: { $1 }) },
+            isSaving: model.isSaving,
+            notice: model.notice
+        )
+    }
+
+    var body: some View {
+        DirectRoomHeaderView(
+            state: state,
+            style: style,
+            memoryOpen: memoryOpen,
+            onOpenSharedRoom: { openRoom($0) },
+            onSetMemory: { enabled in
+                guard let center, let roomId = state.memory?.roomId else { return }
+                Task { await model.setMemory(enabled, roomId: roomId, client: center.client) }
+            },
+            onDismissNotice: { model.notice = nil }
+        )
+        .task(id: center == nil) {
+            if let center { await model.load(center.client) }
+        }
+    }
+}
+
+// MARK: - Settings
+
+/// "Who can message me", where direct messages are on.
+struct DirectMessagesSettingsSection: View {
+    @ObservedObject var center: DirectMessagesCenter
+
+    var body: some View {
+        if center.isAvailable {
+            Section {
+                Picker("Who can message me", selection: Binding(
+                    get: { center.allowance },
+                    set: { value in if let value { Task { await center.setAllowance(value) } } }
+                )) {
+                    Text("People in rooms you share").tag(Optional(DirectMessagesAllowance.sharedRooms))
+                    Text("Nobody").tag(Optional(DirectMessagesAllowance.nobody))
+                }
+                .disabled(center.isSavingAllowance)
+                .accessibilityIdentifier("settings.dms.allow")
+            } header: {
+                Text("Direct messages")
+            } footer: {
+                Text(center.allowanceNotice
+                     ?? "People and agents in a room you share can message you directly, from their card. Choose Nobody to turn that off.")
+            }
+        }
+    }
+}

@@ -68,6 +68,8 @@ final class ComposerDraftTests: XCTestCase {
     func test_a_long_message_shows_its_start_and_closes_a_code_block_it_cuts() {
         XCTAssertFalse(LongMessage.isLong("short"))
         XCTAssertTrue(LongMessage.isLong(String(repeating: "x", count: 1_501)))
+        XCTAssertFalse(LongMessage.isLong(String(repeating: "x", count: 1_000)), "up to 1,000 characters shows whole")
+        XCTAssertTrue(LongMessage.isLong(String(repeating: "x", count: 1_001)), "past 1,000 it folds (the 11-04 sends)")
         XCTAssertTrue(LongMessage.isLong(Array(repeating: "line", count: 31).joined(separator: "\n")), "many short lines")
         let text = (["Intro line"] + ["```swift"] + (1...40).map { "let x\($0) = \($0)" } + ["```"]).joined(separator: "\n")
         let preview = LongMessage.preview(text)

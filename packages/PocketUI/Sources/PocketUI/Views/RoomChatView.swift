@@ -17,6 +17,8 @@ public struct RoomChatView: View {
 
     /// The reply being typed in each thread, kept while the room is open: closing the sheet does not lose it.
     @State private var threadDrafts: [Int64: String] = [:]
+    /// Opens a profile card from an avatar, where direct messages are on.
+    @Environment(\.roomProfileOpener) private var profileOpener
     @State private var readerAtBottom = true
     /// The reader's place as the bottom marker reports it, settled outside layout, and whether the room is on screen
     /// to take it (see `RoomBottomSettle`). A reference, so keeping it never redraws the room.
@@ -267,7 +269,15 @@ public struct RoomChatView: View {
                     showsPresence = false
                     // After this sheet has gone, so the invite sheet can come up.
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { send(.openInvite) }
-                } : nil
+                } : nil,
+                onProfile: profileOpener.map { opener -> (RoomProfileTarget) -> Void in
+                    return { target in
+                        showsPresence = false
+                        // After this sheet has gone, so the profile card can come up.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { opener(target) }
+                    }
+                },
+                ownAuthorIds: profileOpener?.ownAuthorIds ?? []
             )
             .onAppear { send(.peopleOpened) }
         }
@@ -1323,8 +1333,10 @@ private struct RoomMessageRowView: View {
     /// Another person: a warm bubble on the left with their name.
     private var personMessage: some View {
         HStack(alignment: .top, spacing: 8) {
-            RoomAvatar(name: row.authorName, isHuman: true)
+            RoomProfileAvatar(senderId: row.authorId, name: row.authorName, isHuman: true)
                 .opacity(row.showsHeader ? 1 : 0)
+                .allowsHitTesting(row.showsHeader)
+                .accessibilityHidden(!row.showsHeader)
             VStack(alignment: .leading, spacing: 4) {
                 if row.showsHeader { authorLine }
                 replyQuote
@@ -1357,7 +1369,7 @@ private struct RoomMessageRowView: View {
         VStack(alignment: .leading, spacing: 5) {
             if row.showsHeader {
                 HStack(spacing: 8) {
-                    RoomAvatar(name: row.authorName, isHuman: false)
+                    RoomProfileAvatar(senderId: row.authorId, name: row.authorName, isHuman: false)
                     authorLine
                 }
             }
@@ -1542,6 +1554,7 @@ struct RoomWorkLines: View {
 struct RoomAvatar: View {
     let name: String
     let isHuman: Bool
+    var size: CGFloat = 26
 
     private static let tints: [(Double, Double, Double)] = [
         (18, 85, 55), (189, 65, 40), (262, 45, 55), (215, 60, 50), (330, 55, 52), (38, 85, 48), (200, 30, 45)
@@ -1555,11 +1568,12 @@ struct RoomAvatar: View {
 
     var body: some View {
         Text(initials)
-            .font(.system(size: 11, weight: .bold))
+            .font(.system(size: (size * 0.42).rounded(), weight: .bold))
             .foregroundStyle(.white)
-            .frame(width: 26, height: 26)
+            .frame(width: size, height: size)
             // People are round, agents are rounded squares.
-            .background(Self.tint(for: name), in: RoundedRectangle(cornerRadius: isHuman ? 13 : 7, style: .continuous))
+            .background(Self.tint(for: name),
+                        in: RoundedRectangle(cornerRadius: isHuman ? size / 2 : (size * 0.27).rounded(), style: .continuous))
             .accessibilityHidden(true)
     }
 
@@ -1831,7 +1845,7 @@ private struct RoomThreadSheet: View {
     @State private var answering: RoomChatReplyRow?
     /// "File as a ticket": the reply goes to the room's ticket keeper as a ticket request.
     @State private var ticketMode = false
-    @FocusState private var isReplying: Bool
+    @State private var isReplying = false
     /// Your own reply being edited.
     @State private var editingReply: RoomChatReplyRow?
     /// Where the reply text last changed (the field does not say where the caret is), for an @ anywhere in it.
@@ -1870,8 +1884,10 @@ private struct RoomThreadSheet: View {
     }
 
     private var suggestions: [MentionCandidate] {
-        guard let active = MentionSuggester.activeQuery(in: draft, at: editOffset ?? draft.count) else { return [] }
-        return MentionSuggester.suggestions(for: active.query, among: mentionCandidates)
+        // No offset means the edit ended at the end: look back over the last word only, never counting the draft.
+        let query = editOffset.map { MentionSuggester.activeQuery(in: draft, at: $0)?.query } ?? MentionSuggester.queryAtEnd(of: draft)
+        guard let query else { return [] }
+        return MentionSuggester.suggestions(for: query, among: mentionCandidates)
     }
 
     private func answer(_ reply: RoomChatReplyRow) {
@@ -2062,19 +2078,16 @@ private struct RoomThreadSheet: View {
                     HStack(alignment: .bottom, spacing: 8) {
                         RoomComposerPlusButton(board: nil, more: plusActions, identifier: "pocket.thread.composer.plus")
                             .padding(.bottom, 1)
-                        TextField(ticketMode ? "Describe the ticket" : "Reply", text: $draft, axis: .vertical)
-                            .lineLimit(1...6)
-                            .textFieldStyle(.plain)
-                            .focused($isReplying)
+                        ComposerTextField(placeholder: ticketMode ? "Describe the ticket" : "Reply", text: $draft,
+                                          isFocused: $isReplying, identifier: "pocket.thread.composer")
                             .onChange(of: draft) { new in
                                 replyWrittenBack.changed(from: lastDraft, to: new, sent: replySent)
-                                editOffset = MentionSuggester.editOffset(from: lastDraft, to: new)
+                                editOffset = MentionSuggester.editOffsetUnlessAtEnd(from: lastDraft, to: new)
                                 lastDraft = new
                             }
                             .padding(.horizontal, 12)
                             .padding(.vertical, 9)
                             .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                            .accessibilityIdentifier("pocket.thread.composer")
                         Button {
                             let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
                             guard canSendReply else { return }
@@ -2268,7 +2281,7 @@ private struct RoomComposerBar: View {
     /// While a send settles, the sent text stays saved (see `sendDraft()`); which send that is.
     @State private var keepsSavedDraft = false
     @State private var sends = 0
-    @FocusState private var isEditing: Bool
+    @State private var isEditing = false
     /// "File as a ticket": what you type goes to the room as a ticket request, and the ticket keeper files it.
     @State private var ticketMode = false
     /// Where the text last changed (the field does not say where the caret is), for an @ anywhere in it.
@@ -2369,8 +2382,10 @@ private struct RoomComposerBar: View {
     }
 
     private var suggestions: [MentionCandidate] {
-        guard let active = MentionSuggester.activeQuery(in: draft, at: editOffset ?? draft.count) else { return [] }
-        return MentionSuggester.suggestions(for: active.query, among: mentionCandidates)
+        // No offset means the edit ended at the end: look back over the last word only, never counting the draft.
+        let query = editOffset.map { MentionSuggester.activeQuery(in: draft, at: $0)?.query } ?? MentionSuggester.queryAtEnd(of: draft)
+        guard let query else { return [] }
+        return MentionSuggester.suggestions(for: query, among: mentionCandidates)
     }
 
     private var outgoing: String { RoomComposerDraft.outgoing(draft, blocks: pasted) }
@@ -2514,10 +2529,8 @@ private struct RoomComposerBar: View {
                 RoomComposerPlusButton(board: replying == nil && !ticketMode ? media : nil, more: plusActions,
                                        identifier: "pocket.room.composer.plus")
                     .padding(.bottom, 1)
-                TextField(ticketMode ? "Describe the ticket" : (replying == nil ? "Message" : "Reply"), text: $draft, axis: .vertical)
-                    .lineLimit(1...6)
-                    .textFieldStyle(.plain)
-                    .focused($isEditing)
+                ComposerTextField(placeholder: ticketMode ? "Describe the ticket" : (replying == nil ? "Message" : "Reply"),
+                                  text: $draft, isFocused: $isEditing, identifier: "pocket.room.composer")
                     .onChange(of: draft) { new in
                         writtenBack.changed(from: lastDraft, to: new, sent: justSent)
                         if writtenBack.text != nil {
@@ -2533,7 +2546,7 @@ private struct RoomComposerBar: View {
                             saveDraft()
                             return
                         }
-                        editOffset = MentionSuggester.editOffset(from: lastDraft, to: new)
+                        editOffset = MentionSuggester.editOffsetUnlessAtEnd(from: lastDraft, to: new)
                         lastDraft = new
                         saveDraft()
                     }
@@ -2544,7 +2557,6 @@ private struct RoomComposerBar: View {
                         RoundedRectangle(cornerRadius: 18, style: .continuous)
                             .stroke(PocketPalette.separator.opacity(0.6), lineWidth: 0.5)
                     )
-                    .accessibilityIdentifier("pocket.room.composer")
                 if let media {
                     RoomMediaSendButton(board: media, canSendText: canSend, hasProblem: problem != nil) {
                         sendDraft()
@@ -2986,7 +2998,31 @@ private struct RoomPresenceSheet: View {
     var roster: RoomRoster = .empty
     /// Invite people, for the room's owner or an admin.
     var onInvite: (() -> Void)?
+    /// Opens a member's profile card from their avatar, where direct messages are on.
+    var onProfile: ((RoomProfileTarget) -> Void)?
+    var ownAuthorIds: Set<String> = []
     @Environment(\.dismiss) private var dismiss
+
+    /// The member's card, unless it is you, the room's voice or a box that ended.
+    private func profileTarget(_ member: RoomRoster.Member) -> RoomProfileTarget? {
+        guard onProfile != nil, member.status != .ended,
+              RoomProfile.opens(senderId: member.id, ownAuthorIds: ownAuthorIds) else { return nil }
+        return RoomProfileTarget(senderId: member.id, name: member.name, isAgent: member.kind != .person)
+    }
+
+    @ViewBuilder
+    private func memberAvatar(_ member: RoomRoster.Member) -> some View {
+        if let target = profileTarget(member), let onProfile {
+            Button {
+                onProfile(target)
+            } label: {
+                RoomAvatar(name: member.name, isHuman: member.kind == .person)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("\(member.name)'s profile")
+            .accessibilityIdentifier("pocket.room.people.\(member.id).profile")
+        }
+    }
 
     /// The ring's number: who is here and active, counted as the ring counts them.
     private var online: String {
@@ -3039,12 +3075,15 @@ private struct RoomPresenceSheet: View {
                     ForEach(roster.sides, id: \.title) { side in
                         Section {
                             ForEach(side.members) { member in
-                                NavigationLink {
-                                    RoomMemberDetail(member: member)
-                                } label: {
-                                    RoomMemberRow(member: member)
+                                HStack(spacing: 10) {
+                                    memberAvatar(member)
+                                    NavigationLink {
+                                        RoomMemberDetail(member: member)
+                                    } label: {
+                                        RoomMemberRow(member: member)
+                                    }
+                                    .accessibilityIdentifier("pocket.room.people.\(member.id)")
                                 }
-                                .accessibilityIdentifier("pocket.room.people.\(member.id)")
                             }
                         } header: {
                             Text(side.header)

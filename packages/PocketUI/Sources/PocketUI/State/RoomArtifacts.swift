@@ -112,7 +112,7 @@ public enum RoomArtifacts {
                 continue
             }
             // Tickets (the keeper's links), then the rest of the text's links.
-            let split = ChatReferences.ticketLinks(in: message.text)
+            let split = ChatReferences.ticketLinks(in: message.text, cleaningProse: false)
             for ticket in split.tickets {
                 note("ticket:\(ticket.ticketId)", { count in
                     RoomArtifact(id: "ticket:\(ticket.ticketId)", kind: .ticket, title: ticket.title, detail: nil, url: ticket.url,

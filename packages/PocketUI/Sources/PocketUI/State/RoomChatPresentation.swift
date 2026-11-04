@@ -931,9 +931,11 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         return result
     }
 
-    /// "author: first line" of the message a reply answers, kept short.
+    /// "author: first line" of the message a reply answers, kept short. Reads only up to that line's end: the
+    /// message can be a 27,000-character packet, and this runs for every reply on every update.
     static func replyContext(for parent: RoomChatMessageInput) -> String {
-        let line = parent.text.split(whereSeparator: \.isNewline).first.map(String.init) ?? parent.text
+        let body = parent.text.drop { $0.isNewline }
+        let line = String(body.firstIndex(where: \.isNewline).map { body[..<$0] } ?? body)
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         let snippet = trimmed.count > 70 ? String(trimmed.prefix(70)) + "…" : trimmed
         return "\(parent.authorName): \(snippet)"
@@ -1731,7 +1733,9 @@ public struct RoomComposerWriteBack: Equatable {
 
 /// A message too long to read in the room shows its start and a card that opens the whole of it (Carter, #55006).
 public enum LongMessage {
-    public static let characters = 1_500
+    /// Folded from 1,000 characters: the 11-04 freezes came right after sends of 1,342 and 1,486 characters, which drew
+    /// in full under the old 1,500.
+    public static let characters = 1_000
     public static let lines = 30
     static let previewLines = 8
     static let previewCharacters = 600

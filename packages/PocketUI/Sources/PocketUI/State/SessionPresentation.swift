@@ -145,6 +145,16 @@ public struct SessionRowPresentation: Equatable, Identifiable, Sendable {
     public let firstUnreadSequenceId: Int64?
     /// How far you have read the room: the server's mark, or further where this phone has read since.
     public let lastReadSequenceId: Int64?
+    /// A direct message's other side, as you see it; nil for a room.
+    public let counterpart: SessionCounterpart?
+    /// The room a direct message was opened from, where the side panel nests it; nil when that room is gone or no
+    /// longer visible to you.
+    public let originRoomId: String?
+    /// Your folder for the room, as the room list says (the only copy the app keeps).
+    public let folderId: String?
+
+    /// A direct message with one person or agent.
+    public var isDirect: Bool { counterpart != nil }
 
     /// - Parameters:
     ///   - readThrough: how far this phone has read the room since the list was counted, as the server confirmed it.
@@ -156,7 +166,11 @@ public struct SessionRowPresentation: Equatable, Identifiable, Sendable {
     fileprivate init(_ session: SessionSummary, readThrough: Int64?, caughtUp: Bool = false) {
         self.id = OpaqueUTF8Identity(session.sessionId)
         self.sessionId = session.sessionId
-        self.title = session.title.pocketNonblank ?? "Untitled session"
+        // A direct message is named for whom it is with.
+        self.counterpart = session.isDirect ? session.counterpart : nil
+        self.originRoomId = session.isDirect ? session.originRoomId : nil
+        self.folderId = session.isDirect ? nil : session.folderId
+        self.title = self.counterpart?.displayName ?? session.title.pocketNonblank ?? "Untitled session"
         // The room's saved summary: the server's prose as written, or an older server's five labelled parts read
         // into sentences.
         self.summary = session.summaryText.pocketNonblank.map(SummaryProse.saved).pocketNonblank
