@@ -548,6 +548,7 @@ struct AuthenticatedRootView: View {
                 .toolbar {
                     ToolbarItem(placement: .navigationBarLeading) { drawerButton }
                 }
+                .modifier(calendarEntry)
                 .navigationDestination(for: RoomRoute.self) { route in
                     roomScreen(route)
                 }
@@ -1006,12 +1007,15 @@ struct AuthenticatedRootView: View {
             roomChatScreen(route, savedSummary: savedSummary, direct: direct)
         }
         .equatable()
-        // The calendar's ⋯ entry sits outside the host: it follows the calendar's own state, and the room screen
-        // inside is made again only when what it is opened with changes.
-        .modifier(RoomCalendarEntry(center: calendar, sessionId: route.sessionId, roomTitle: route.title,
-                                    canAdd: CalendarCenter.canAdd(role: route.membershipRole),
-                                    isOffered: route.direct == nil,
-                                    onReauthenticationRequired: invalidateProtectedAuthentication))
+    }
+
+    /// The calendar's ⋯ entry for the room on screen (a room, not a direct message). It sits on the navigation root
+    /// beside the side panel's button, outside the room screen and its host.
+    private var calendarEntry: RoomCalendarEntry {
+        RoomCalendarEntry(center: calendar, sessionId: currentRoom?.sessionId ?? "", roomTitle: currentRoom?.title ?? "",
+                          canAdd: CalendarCenter.canAdd(role: currentRoom?.membershipRole ?? ""),
+                          isOffered: currentRoom.map { $0.direct == nil } ?? false,
+                          onReauthenticationRequired: invalidateProtectedAuthentication)
     }
 
     private func roomChatScreen(_ route: RoomRoute, savedSummary: String?, direct: RoomDirectContext?) -> some View {
