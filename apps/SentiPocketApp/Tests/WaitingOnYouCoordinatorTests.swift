@@ -199,17 +199,27 @@ final class WaitingOnYouCoordinatorTests: XCTestCase {
         XCTAssertTrue(waiting.state.rows.isEmpty, "the retry went through")
     }
 
-    /// A failed read is not a read: the side panel's next open asks again instead of waiting out 15 s (warden, #325).
+    /// A failed read is not a read: the side panel's next open asks again instead of waiting out 15 s from the failure
+    /// (warden, #325). The good read is 20 s old when the read fails; the open comes a second later.
     func test_a_failed_read_does_not_hold_off_the_next_one() async {
+        final class Clock: @unchecked Sendable {
+            private let lock = NSLock()
+            private var date = Date(timeIntervalSince1970: 1_793_300_000)
+            var now: Date { lock.withLock { date } }
+            func advance(_ seconds: TimeInterval) { lock.withLock { date = date.addingTimeInterval(seconds) } }
+        }
+        let clock = Clock()
         let transport = ScriptedWaiting([
             .success(SentiWaitingPage(total: 1, items: [ask("t1")])),
             .failure(SessionTransportError.network),
             .success(SentiWaitingPage(total: 2, items: [ask("t1"), ask("t2")]))
         ])
-        let waiting = WaitingOnYouCoordinator(transport: transport, sender: RecordingSender())
+        let waiting = WaitingOnYouCoordinator(transport: transport, sender: RecordingSender(), now: { clock.now })
         await waiting.refresh()
+        clock.advance(20)
         await waiting.refresh()
         XCTAssertEqual(waiting.state.notice, WaitingOnYouCoordinator.readFailedNotice)
+        clock.advance(1)
         await waiting.refresh(ifOlderThan: 15)
         XCTAssertEqual(waiting.state.rows.map(\.id), ["t1", "t2"], "read again at once after the failure")
         XCTAssertNil(waiting.state.notice, "the good read took the failed read's line away")
