@@ -168,6 +168,28 @@ final class RoomReaderStaysPutTests: XCTestCase {
         XCTAssertFalse(room.atBottom)
     }
 
+    /// A gentle coast up from the bottom moves a third of a point a frame near its end: measured frame to frame it never
+    /// looked like leaving, and the next message pulled the reader down. Here the list moves up 36 points in 0.33-point
+    /// steps, one per frame: the reader is away from the bottom, and an arrival moves nothing.
+    func test_a_slow_coast_a_little_way_up_leaves_the_bottom() throws {
+        try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
+        let room = Room(Self.messages())
+        let list = try host(room)
+        var offset = list.contentOffset.y
+        let target = Self.bottomOffset(of: list) - 36
+        while offset > target {
+            offset = max(target, offset - 1.0 / 3.0)
+            list.setContentOffset(CGPoint(x: 0, y: offset), animated: false)
+            pump(1.0 / 60.0)
+        }
+        wait("away from the bottom", seconds: 3) { !room.atBottom }
+        XCTAssertFalse(room.atBottom, "36 points up, reached a third of a point at a time, is away from the bottom")
+
+        room.arrive([Self.arrival(61)])
+        pump(1)
+        XCTAssertEqual(list.contentOffset.y, offset, accuracy: 1, "the arrival moved the reader")
+    }
+
     /// Within the bottom's 24 points the reader is at the bottom, and follows what arrives.
     func test_at_the_very_bottom_the_reader_follows_what_arrives() throws {
         try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")

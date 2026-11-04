@@ -14,6 +14,7 @@ final class RoomReaderStaysPutUITests: XCTestCase {
     private static let signal = "com.plexaura.sentipocket.preview.burst"
     private static let newestHistory = "pocket.room.message.1080"
     private static let lastArrival = "pocket.room.message.1110"
+    private static let firstArrival = "pocket.room.message.1081"
     /// The mixed burst's thirty rows hold 26 messages (the other four are checkpoints and joins): what the arrow counts.
     private static let mixedMessages = 26
     /// Thirty rows 0.3 s apart, and time after the last for its row to settle.
@@ -87,7 +88,7 @@ final class RoomReaderStaysPutUITests: XCTestCase {
         try readerStaysPut(app, case: "three-screens-up") { Self.beginBurst() }
         let label = readScreen(app)?.jumpLabel
         print("READER-STAYS-PUT three-screens-up arrow=\(label ?? "none")")
-        XCTAssertEqual(label, "\(Self.mixedMessages) new messages, jump to latest", "the arrow says how many arrived")
+        XCTAssertEqual(label, "\(Self.mixedMessages) new messages, jump to the first one", "the arrow says how many arrived")
     }
 
     // MARK: - Rows above changing height: not held yet
@@ -134,6 +135,64 @@ final class RoomReaderStaysPutUITests: XCTestCase {
         }
         XCTAssertTrue(app.descendants(matching: .any)["pocket.room.jumpToLatest"].exists,
                       "the reader is still up the room: the arrow shows")
+    }
+
+    // MARK: - The arrow goes to the first new message
+
+    /// Three screens up, the burst arrives; the arrow takes the reader to the first message that arrived, read from its
+    /// top under the New messages line (as the web room's does), not to the latest, so none of what arrived is skipped.
+    /// The count is taken: the arrow is plain, and a second tap goes on to the latest.
+    func test_the_arrow_goes_to_the_first_new_message_then_to_the_latest() throws {
+        let app = launch(kind: "arrivals")
+        scrollUp(app, screens: 3)
+        Self.beginBurst()
+        pause(Self.burstTime)
+        let arrow = app.descendants(matching: .any)["pocket.room.jumpToLatest"]
+        XCTAssertTrue(arrow.waitForExistence(timeout: 10))
+        keep(XCUIScreen.main.screenshot(), as: "arrow-0-before-tap")
+        arrow.tap()
+        pause(1.5)
+        keep(XCUIScreen.main.screenshot(), as: "arrow-1-after-tap")
+        let screen = try XCTUnwrap(readScreen(app), "the app could be read")
+        let line = app.descendants(matching: .any)["pocket.room.unreadDivider"]
+        let first = screen.messages[Self.firstArrival]
+        print("READER-STAYS-PUT arrow first-tap line=\(line.exists ? "\(line.frame.minY)" : "absent") "
+            + "first=\(first.map { "\($0.minY)" } ?? "absent") last=\(screen.messages[Self.lastArrival] != nil) "
+            + "arrow=\(screen.jumpLabel ?? "none") band=\(screen.top)...\(screen.bottom)")
+        XCTAssertTrue(line.exists, "the New messages line is there")
+        if line.exists {
+            XCTAssertGreaterThanOrEqual(line.frame.minY, screen.top, "the line is in view")
+            XCTAssertLessThan(line.frame.minY, screen.top + (screen.bottom - screen.top) / 2, "near the top of the screen")
+        }
+        let firstInView = first.map { $0.minY >= screen.top && $0.minY < screen.bottom } ?? false
+        XCTAssertTrue(firstInView, "the first message that arrived is in view, from its top")
+        XCTAssertEqual(screen.jumpLabel, "Jump to latest", "the count is taken; the arrow goes on to the latest")
+
+        arrow.tap()
+        pause(1.5)
+        keep(XCUIScreen.main.screenshot(), as: "arrow-2-second-tap")
+        let after = try XCTUnwrap(readScreen(app), "the app could be read")
+        print("READER-STAYS-PUT arrow second-tap newest-visible=\(after.newestVisible() ?? "none") "
+            + "arrow=\(after.jumpLabel ?? "none")")
+        XCTAssertEqual(after.newestVisible(), Self.lastArrival, "the second tap goes to the latest")
+    }
+
+    // MARK: - A slow coast a little way up
+
+    /// At the bottom, the reader drags the list up slowly, about 50 points at 10 points a second (a sixth of a point a
+    /// frame at 60 Hz, a third of a point now and then once rounded to the screen's pixels, like the end of a gentle
+    /// coast), and lets go; then messages arrive. The reader is away from the bottom and stays where they are.
+    func test_a_slow_drag_a_little_way_up_then_arrivals_move_nothing() throws {
+        let app = launch(kind: "messages")
+        let screen = try XCTUnwrap(readScreen(app), "the app could be read")
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        let from = origin.withOffset(CGVector(dx: app.frame.midX, dy: screen.top + (screen.bottom - screen.top) * 0.3))
+        from.press(forDuration: 0.05, thenDragTo: from.withOffset(CGVector(dx: 0, dy: 60)),
+                   withVelocity: XCUIGestureVelocity(rawValue: 10), thenHoldForDuration: 0)
+        pause(1.5)
+        let after = try XCTUnwrap(readScreen(app), "the app could be read")
+        print("READER-STAYS-PUT slow-drag end-below=\(after.endBelow) arrow=\(after.jumpLabel ?? "none")")
+        try readerStaysPut(app, case: "slow-drag-up") { Self.beginBurst() }
     }
 
     func test_a_reader_at_the_bottom_follows_the_burst() {
