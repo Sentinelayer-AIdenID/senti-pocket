@@ -114,7 +114,7 @@ enum RoomPreview {
 private struct RoomPreviewSearch: RoomSearching {
     static let sampleState = RoomSearchPresentationState(
         query: "paste",
-        rows: matches(for: "paste", before: nil, limit: 10).map(RoomSearchModel.row),
+        rows: matches(for: "paste", before: nil, limit: 10).map { RoomSearchModel.row($0, query: "paste") },
         hasMore: true
     )
 
