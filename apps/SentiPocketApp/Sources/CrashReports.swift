@@ -703,3 +703,16 @@ extension UIResponder {
         KeyboardInput.captured(self)
     }
 }
+
+/// A random value made once per install for the freeze trail's room tags, so a shared report's tags match only on
+/// this phone. Never sent anywhere on its own.
+enum CrashTrailSalt {
+    private static let key = "pocket.crashTrailSalt"
+
+    static var current: String {
+        if let kept = UserDefaults.standard.string(forKey: key), !kept.isEmpty { return kept }
+        let made = UUID().uuidString
+        UserDefaults.standard.set(made, forKey: key)
+        return made
+    }
+}

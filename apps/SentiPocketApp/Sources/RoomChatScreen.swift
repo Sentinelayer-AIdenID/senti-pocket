@@ -1,3 +1,4 @@
+import CryptoKit
 import SwiftUI
 import UIKit
 import PocketSyncClient
@@ -500,8 +501,12 @@ struct RoomChatScreen: View {
         OpenURLAction { url in handle(url) }
     }
 
-    /// Which room, for the freeze recorder: the first four characters of its id, never its title.
-    static func tag(_ sessionId: String) -> String { String(sessionId.prefix(4)) }
+    /// Which room, for the freeze recorder: four hex characters of a hash of its id salted per install, never its
+    /// title. Unsalted, the id's own start would let anyone in that room match a shared report to rooms they share.
+    static func tag(_ sessionId: String, salt: String = CrashTrailSalt.current) -> String {
+        let digest = SHA256.hash(data: Data((salt + ":" + sessionId).utf8))
+        return String(digest.map { String(format: "%02x", $0) }.joined().prefix(4))
+    }
 
     var body: some View {
         RoomChatView(

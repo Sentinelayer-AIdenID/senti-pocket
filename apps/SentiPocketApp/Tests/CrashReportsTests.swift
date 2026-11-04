@@ -133,7 +133,13 @@ final class CrashReportsTests: XCTestCase {
     /// A freeze on build 2026110306 ended a trail at "room closed" with nothing after it: the screens a room is left
     /// for, the room itself and a long message's page now leave a step, never what anything says.
     func test_the_trail_names_the_room_and_the_long_message_page() {
-        XCTAssertEqual(RoomChatScreen.tag("38b29035-6724-4efc-bd48-cc64834cdf37"), "38b2")
+        let room = "38b29035-6724-4efc-bd48-cc64834cdf37"
+        let tag = RoomChatScreen.tag(room, salt: "install-a")
+        XCTAssertEqual(tag.count, 4)
+        XCTAssertEqual(tag, RoomChatScreen.tag(room, salt: "install-a"), "the same room reads the same on one phone")
+        XCTAssertNotEqual(tag, "38b2", "never the id's own start")
+        XCTAssertNotEqual(tag, RoomChatScreen.tag(room, salt: "install-b"), "another phone's tag for it differs")
+        XCTAssertEqual(CrashTrailSalt.current, CrashTrailSalt.current, "made once, then kept")
         XCTAssertEqual(CrashReporter.step(for: .longMessageOpened(characters: 27_090)), "longMessageOpened")
         XCTAssertNil(CrashReporter.sentLength(.longMessageOpened(characters: 27_090)), "a length, not a send")
     }
