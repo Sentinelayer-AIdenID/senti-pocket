@@ -505,6 +505,7 @@ struct CalendarSettingsSection: View {
     let context: CalendarSettingsContext
     @ObservedObject private var center: CalendarCenter
     @State private var confirmsReset = false
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     init(context: CalendarSettingsContext) {
         self.context = context
@@ -546,6 +547,8 @@ struct CalendarSettingsSection: View {
                     Text(center.feedNotice ?? footer)
                         .accessibilityIdentifier("settings.calendar.footer")
                 }
+                // At the accessibility sizes the rows drop their icons, so "Calendar" is not broken across lines.
+                .labelStyle(CalendarRowLabelStyle(showsIcon: !typeSize.isAccessibilitySize))
                 .confirmationDialog("Reset your calendar link?", isPresented: $confirmsReset, titleVisibility: .visible) {
                     Button("Reset link", role: .destructive) { Task { await center.resetLink() } }
                     Button("Cancel", role: .cancel) {}
@@ -560,6 +563,20 @@ struct CalendarSettingsSection: View {
         center.showsSubscribe
             ? "Apple Calendar shows the events from your rooms and keeps them up to date."
             : "Events from your rooms, by day."
+    }
+}
+
+/// A row's icon and title, or the title alone.
+private struct CalendarRowLabelStyle: LabelStyle {
+    let showsIcon: Bool
+
+    @ViewBuilder
+    func makeBody(configuration: Configuration) -> some View {
+        if showsIcon {
+            Label(configuration)
+        } else {
+            configuration.title
+        }
     }
 }
 
