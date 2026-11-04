@@ -74,7 +74,7 @@ final class LongDraftTests: XCTestCase {
 
     /// The `@word` at the end, found from the end only: the same answer as the offset-based query at the end.
     func test_the_query_at_the_end_matches_the_query_at_the_last_offset() {
-        let drafts = ["ask @war to check", "ask @war", "@all", "mail a@b.com", "👋 @pocket-forge", "@", "no mention",
+        let drafts = ["ask @war to check", "ask @war", "@all", "mail a@b.com", "👋 @build-agent", "@", "no mention",
                       "x @a-b_c9", "x@y", " @", "line\n@agent", String(repeating: "word ", count: 2_000) + "@wa"]
         for draft in drafts {
             XCTAssertEqual(MentionSuggester.queryAtEnd(of: draft), referenceQuery(draft, draft.count)?.query, draft)
