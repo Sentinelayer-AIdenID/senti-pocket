@@ -734,7 +734,7 @@ final class RoomSafetyTests: XCTestCase {
         let bodies = try SafetyURLProtocol.requests.map {
             try XCTUnwrap(JSONSerialization.jsonObject(with: $0.body) as? [String: Any])
         }
-        XCTAssertEqual(bodies.count, 2)
+        guard bodies.count == 2 else { return XCTFail("expected two blocks sent, got \(bodies.count)") }
         XCTAssertEqual(Set(bodies[0].keys), ["actorId", "sessionId", "sequenceId", "replyId"], "the report route's names")
         XCTAssertEqual(bodies[0]["actorId"] as? String, "human-sam")
         XCTAssertEqual(bodies[0]["sessionId"] as? String, "room_1")
@@ -768,7 +768,7 @@ final class RoomSafetyTests: XCTestCase {
         let bodies = try SafetyURLProtocol.requests.map {
             try XCTUnwrap(JSONSerialization.jsonObject(with: $0.body) as? [String: Any])
         }
-        XCTAssertEqual(bodies.count, 2, "sent again, by id alone")
+        guard bodies.count == 2 else { return XCTFail("sent again, by id alone: expected two requests, got \(bodies.count)") }
         XCTAssertEqual(Set(bodies[0].keys), ["actorId", "sessionId", "sequenceId"])
         XCTAssertEqual(bodies[1] as? [String: String], ["actorId": "human-sam"])
     }
@@ -965,6 +965,11 @@ final class RoomSafetyTests: XCTestCase {
     }
 
     // MARK: Support
+
+    func test_blocked_people_says_what_the_question_says() {
+        XCTAssertTrue(BlockedPeopleView.covers.contains(RoomBlocking.calls))
+        XCTAssertTrue(BlockedPeopleView.covers.contains(RoomBlocking.byId))
+    }
 
     func test_the_support_contact_is_one_address() {
         XCTAssertEqual(PocketSupport.email, "help@plexaura.io")

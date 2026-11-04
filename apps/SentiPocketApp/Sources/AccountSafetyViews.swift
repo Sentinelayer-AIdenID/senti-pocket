@@ -60,15 +60,18 @@ struct BlockedPeopleView: View {
                         }
                     }
                 } footer: {
-                    Text("Their messages and replies show as one line in every room, with Show to see one, and room "
-                         + "search hides their words. " + RoomBlocking.calls + " " + RoomBlocking.byId
-                         + " They aren't told when you block or unblock them.")
+                    Text(Self.covers)
                 }
             }
         }
         .navigationTitle("Blocked people")
         .task { await blocks.sync() }
     }
+
+    /// What blocking covers, as the question before it says it.
+    static let covers: String = "Their messages and replies show as one line in every room, with Show to see one, "
+        + "and room search hides their words. \(RoomBlocking.calls) \(RoomBlocking.byId) They aren't told when you "
+        + "block or unblock them."
 }
 
 /// Settings, Account, AI and your messages: what the room's AI agents read, and the OK this account gave, which it can
