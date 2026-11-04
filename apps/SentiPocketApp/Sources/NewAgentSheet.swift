@@ -48,17 +48,18 @@ final class NewAgentOffer: ObservableObject {
     private var answered = false
     private var asking = false
 
-    init(role: String, isBreakout: Bool, mint: (any MintStarting)?,
+    init(role: String, isBreakout: Bool, isDirect: Bool = false, mint: (any MintStarting)?,
          sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
              try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
          }) {
-        self.mint = Self.admits(role: role, isBreakout: isBreakout) ? mint : nil
+        self.mint = Self.admits(role: role, isBreakout: isBreakout, isDirect: isDirect) ? mint : nil
         self.sleep = sleep
     }
 
-    /// Owners and admins (the API's roles), in a room that is not a breakout. An unknown role offers nothing.
-    static func admits(role: String, isBreakout: Bool) -> Bool {
-        !isBreakout && ["owner", "admin"].contains(role.lowercased())
+    /// Owners and admins (the API's roles), in a room that is neither a breakout nor a direct message (the API refuses a
+    /// new agent in a direct room). An unknown role offers nothing.
+    static func admits(role: String, isBreakout: Bool, isDirect: Bool = false) -> Bool {
+        !isBreakout && !isDirect && ["owner", "admin"].contains(role.lowercased())
     }
 
     /// Asks the mint until it answers for this account. No answer is asked again after a short wait, twice, and again

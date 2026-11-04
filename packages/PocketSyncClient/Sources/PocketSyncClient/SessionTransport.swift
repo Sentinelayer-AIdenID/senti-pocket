@@ -346,7 +346,7 @@ public final class HTTPSessionTransport: SessionTransport, @unchecked Sendable {
         }
     }
 
-    private static func makeURL(
+    static func makeURL(
         baseURL: URL,
         path: [String],
         query: [URLQueryItem]
@@ -370,7 +370,7 @@ public final class HTTPSessionTransport: SessionTransport, @unchecked Sendable {
         return url
     }
 
-    private static func validOrigin(_ url: URL?) -> URL? {
+    static func validOrigin(_ url: URL?) -> URL? {
         guard let url,
               let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               components.scheme?.lowercased() == "https",

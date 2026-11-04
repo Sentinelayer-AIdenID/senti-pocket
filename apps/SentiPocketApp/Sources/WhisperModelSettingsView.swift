@@ -7,6 +7,8 @@ struct WhisperModelSettingsView: View {
     /// The signed-in account's blocks and AI consent, under Account.
     let blocks: BlockList?
     let aiConsent: AIConsent?
+    /// Direct messages' "Who can message me", where they are on.
+    let directMessages: DirectMessagesCenter?
     let onSignOut: (@MainActor () -> Void)?
 
     @Environment(\.dismiss) private var dismiss
@@ -19,11 +21,13 @@ struct WhisperModelSettingsView: View {
         coordinator: WhisperModelProvisioningCoordinator,
         blocks: BlockList? = nil,
         aiConsent: AIConsent? = nil,
+        directMessages: DirectMessagesCenter? = nil,
         onSignOut: (@MainActor () -> Void)? = nil
     ) {
         _coordinator = ObservedObject(wrappedValue: coordinator)
         self.blocks = blocks
         self.aiConsent = aiConsent
+        self.directMessages = directMessages
         self.onSignOut = onSignOut
     }
 
@@ -32,6 +36,9 @@ struct WhisperModelSettingsView: View {
             Form {
                 inAppSection
                 notificationsSection
+                if let directMessages {
+                    DirectMessagesSettingsSection(center: directMessages)
+                }
                 crashSection
                 modelStatusSection
                 modelActionsSection
