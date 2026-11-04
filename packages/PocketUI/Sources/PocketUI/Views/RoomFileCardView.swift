@@ -86,6 +86,7 @@ struct RoomFileCardView: View {
                             .textSelection(.enabled)
                             .padding(8)
                     }
+                    .modifier(ScrollStartsAtLeading())
                     .background(PocketPalette.inset, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 }
             }
