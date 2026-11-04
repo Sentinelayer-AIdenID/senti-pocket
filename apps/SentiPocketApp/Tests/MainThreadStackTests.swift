@@ -44,8 +44,9 @@ final class MainThreadStackTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: url) }
         let watch = MainThreadWatch(url: url)
         watch.start()
-        let never = DispatchSemaphore(value: 0)
-        holdTheMainThread(until: never, seconds: MainThreadWatch.threshold + 1.5)
+        // Held until the stall on disk has its frames (the watch writes the stall first, then reads the stack), not
+        // for a fixed time: a slow machine only takes longer (CI once let go at 3 s, before the frames were written).
+        holdTheMainThread(untilFramesIn: url, seconds: 30)
         let data = try Data(contentsOf: url)
         let stall = try JSONDecoder().decode(MainThreadWatch.Stall.self, from: data)
         let ownImage = Bundle(for: Self.self).executablePath.map { ($0 as NSString).lastPathComponent } ?? "SentiPocketAppTests"
@@ -63,5 +64,21 @@ final class MainThreadStackTests: XCTestCase {
     private func holdTheMainThread(until read: DispatchSemaphore, seconds: TimeInterval = 5) {
         let end = Date().addingTimeInterval(seconds)
         while read.wait(timeout: .now()) == .timedOut, Date() < end {}
+    }
+
+    /// Busy on the main thread until the stall written at `url` names frames (`seconds` at most).
+    @inline(never)
+    private func holdTheMainThread(untilFramesIn url: URL, seconds: TimeInterval) {
+        let end = Date().addingTimeInterval(seconds)
+        var nextLook = Date()
+        while Date() < end {
+            guard Date() >= nextLook else { continue }
+            nextLook = Date().addingTimeInterval(0.1)
+            if let data = try? Data(contentsOf: url),
+               let stall = try? JSONDecoder().decode(MainThreadWatch.Stall.self, from: data),
+               stall.frames?.isEmpty == false {
+                return
+            }
+        }
     }
 }
