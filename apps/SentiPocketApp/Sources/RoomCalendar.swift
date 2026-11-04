@@ -79,14 +79,15 @@ final class CalendarCenter: ObservableObject {
         draftsOn = false
     }
 
-    /// Opens Apple Calendar's subscribe sheet on your feed. The link is handed to the system and kept nowhere.
+    /// Opens Apple Calendar's subscribe sheet on a new link to your feed. The link is handed to the system and kept
+    /// nowhere.
     func subscribe() async {
         guard showsSubscribe, !isWorkingOnFeed else { return }
         isWorkingOnFeed = true
         feedNotice = nil
         defer { isWorkingOnFeed = false }
         do {
-            let link = try await feed.subscriptionLink(resetting: false)
+            let link = try await feed.newSubscriptionLink()
             openURL(link.url)
             feedNotice = Self.opened
         } catch {
@@ -101,7 +102,7 @@ final class CalendarCenter: ObservableObject {
         feedNotice = nil
         defer { isWorkingOnFeed = false }
         do {
-            _ = try await feed.subscriptionLink(resetting: true)
+            _ = try await feed.newSubscriptionLink()
             feedNotice = Self.reset
         } catch {
             handleFeed(error)
@@ -114,17 +115,28 @@ final class CalendarCenter: ObservableObject {
             feedOn = false
         case .reauthenticationRequired?:
             onReauthenticationRequired()
-        case .limited?:
-            feedNotice = "Too many tries just now. Try again in a minute."
+        case .rateLimited?, .dailyLimit?:
+            feedNotice = "Too many tries just now. Try again later."
         default:
             feedNotice = "Couldn't get your calendar link. Check your connection and try again."
         }
     }
 
-    static let opened = "Apple Calendar opened. Choose Subscribe there to add your Senti events."
+    static let opened = "Apple Calendar opened. Choose Subscribe there to add your Senti events. "
+        + "A calendar that used an older link stops updating."
     static let reset = "Link reset. The old link no longer updates. Tap Subscribe to add the new one."
     static let resetWarning = "Apple Calendar stops updating from the old link, on every device that subscribed to it. "
         + "You can subscribe again with the new one."
+}
+
+/// The calendar's network session: the app's personal-call settings (no cache, no cookies, the bearer per request),
+/// but a draft waits on a model, which the server allows about 35 s, so a request may wait 45 s.
+enum CalendarHTTP {
+    static let session: URLSession = {
+        let configuration = SentiHTTPTransportPolicy.makeProtectedReadConfiguration()
+        configuration.timeoutIntervalForRequest = 45
+        return URLSession(configuration: configuration)
+    }()
 }
 
 /// A room the person can add events to, for the calendar opened from Settings.
@@ -227,6 +239,11 @@ final class CalendarBoard: ObservableObject {
         eventsByDay[day] ?? []
     }
 
+    /// A day before today takes no new event.
+    func isPast(_ day: CalendarDay) -> Bool {
+        day < CalendarDay(now(), in: calendar)
+    }
+
     func roomTitle(_ sessionId: String) -> String? {
         rooms.first { $0.id == sessionId }?.title
     }
@@ -273,7 +290,8 @@ final class CalendarBoard: ObservableObject {
     /// opens as a form. A 404 here is the drafts flag off: the calendar hides everywhere.
     func draft() async {
         let text = addText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard canAdd, !isDrafting, form == nil, let day = selected, !text.isEmpty, let room = targetRoom else { return }
+        guard canAdd, !isDrafting, form == nil, let day = selected, !isPast(day), !text.isEmpty,
+              let room = targetRoom else { return }
         guard text.count <= CalendarDraftRequest.maxTextLength else {
             draftProblem = "That's too long to draft. Keep it under \(CalendarDraftRequest.maxTextLength) characters."
             return
@@ -291,8 +309,10 @@ final class CalendarBoard: ObservableObject {
             onReauthenticationRequired()
         } catch CalendarError.forbidden {
             draftProblem = "You can't add events in this room."
-        } catch CalendarError.limited {
-            draftProblem = "Too many drafts just now. Try again in a minute."
+        } catch CalendarError.rateLimited {
+            draftProblem = "Too many tries just now. Wait a moment and try again."
+        } catch CalendarError.dailyLimit {
+            draftProblem = "You've used today's drafts. Try again tomorrow."
         } catch {
             draftProblem = "Couldn't draft that. Check your connection and try again."
         }
@@ -331,7 +351,9 @@ final class CalendarBoard: ObservableObject {
             saveProblem = "You can't add events in this room."
         } catch CalendarError.rejected {
             saveProblem = "Senti didn't take that. Check the times and the link."
-        } catch CalendarError.limited {
+        } catch CalendarError.rateLimited {
+            saveProblem = "Too many tries just now. Wait a moment and try again."
+        } catch CalendarError.dailyLimit {
             saveProblem = "This room or your account has reached today's limit of new events."
         } catch {
             saveProblem = "Not saved. Check your connection and try again."

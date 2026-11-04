@@ -135,7 +135,7 @@ private struct PreviewCalendar: RoomCalendarServing, CalendarFeedServing {
 
     func feedAvailable() async throws -> Bool { true }
 
-    func subscriptionLink(resetting: Bool) async throws -> CalendarSubscriptionLink {
+    func newSubscriptionLink() async throws -> CalendarSubscriptionLink {
         guard let link = CalendarSubscriptionLink.make(apiBaseURL: URL(string: "https://api.example.com"),
                                                        token: "preview") else { throw CalendarError.invalidData }
         return link

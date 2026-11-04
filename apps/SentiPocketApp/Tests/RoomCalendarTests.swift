@@ -67,7 +67,7 @@ private final class FakeCalendar: RoomCalendarServing, CalendarFeedServing, @unc
 
     func feedAvailable() async throws -> Bool { feedOn }
 
-    func subscriptionLink(resetting: Bool) async throws -> CalendarSubscriptionLink {
+    func newSubscriptionLink() async throws -> CalendarSubscriptionLink {
         guard feedOn else { throw CalendarError.unavailable }
         return CalendarSubscriptionLink.make(apiBaseURL: URL(string: "https://api.example.test"), token: token)!
     }
@@ -236,6 +236,33 @@ final class RoomCalendarTests: XCTestCase {
         await board.save()
         XCTAssertNotNil(board.form, "the form stays to fix")
         XCTAssertEqual(board.saveProblem, "Senti didn't take that. Check the times and the link.")
+    }
+
+    func test_a_past_day_takes_no_new_event() async {
+        let fake = FakeCalendar()
+        fake.draftAnswer = .success(lunchDraft("2026-11-06T13:00:00-05:00", nil))
+        let board = makeBoard(fake)
+        let yesterday = CalendarDay(year: 2026, month: 11, day: 3)
+        XCTAssertTrue(board.isPast(yesterday))
+        XCTAssertFalse(board.isPast(CalendarDay(year: 2026, month: 11, day: 4)), "today still takes events")
+        board.select(yesterday)
+        board.addText = "Lunch"
+        await board.draft()
+        XCTAssertTrue(fake.draftRequests.isEmpty)
+        XCTAssertNil(board.form)
+    }
+
+    func test_limits_say_which_one() async {
+        let fake = FakeCalendar()
+        let board = makeBoard(fake)
+        board.addText = "Lunch"
+        fake.draftAnswer = .failure(.dailyLimit)
+        await board.draft()
+        XCTAssertEqual(board.draftProblem, "You've used today's drafts. Try again tomorrow.")
+        fake.draftAnswer = .failure(.rateLimited)
+        await board.draft()
+        XCTAssertEqual(board.draftProblem, "Too many tries just now. Wait a moment and try again.")
+        XCTAssertEqual(board.addText, "Lunch")
     }
 
     func test_a_viewer_gets_no_add_field() async {

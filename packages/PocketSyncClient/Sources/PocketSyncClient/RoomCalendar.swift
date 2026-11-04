@@ -8,8 +8,8 @@ import PocketContracts
 // - a room's events are the live `/sessions/{id}/calendar/events` (list: upcoming only, at most 90 days ahead; create:
 //   `{title, startsAt, endsAt?, link?}` with explicit offsets);
 // - a draft is `POST /sessions/{id}/calendar/drafts` (flag CALENDAR_DRAFTS_ENABLED) and is never saved by the server;
-// - the subscribe link is `POST /me/calendar-feed-token` and `GET /me/calendar.ics?token=`
-//   (flag CALENDAR_FEED_ENABLED).
+// - the subscribe link is `POST /me/calendar-feed-token` (every call makes a new token; the old link stops working)
+//   and `GET /me/calendar.ics?token=` (flag CALENDAR_FEED_ENABLED).
 // With a flag off its routes answer 404 and the app shows nothing of what they do. Every path is in `CalendarRoutes`,
 // so a route that lands differently changes there.
 
@@ -220,12 +220,16 @@ public struct CalendarEventCreate: Equatable, Sendable {
         self.timeZone = timeZone
     }
 
+    /// Whether a saved event keeps its notes. The create route takes no `notes` yet (its body refuses unknown fields),
+    /// so sending them would refuse every save; the form says notes stay in the draft. On when the API stores them.
+    public static let savesNotes = false
+
     /// The create body. Empty fields are left out, so an event without an end or a link saves as the API expects.
     public var body: [String: Any] {
         var body: [String: Any] = ["title": title, "startsAt": CalendarInstant.format(startsAt, in: timeZone)]
         if let endsAt { body["endsAt"] = CalendarInstant.format(endsAt, in: timeZone) }
         if let link { body["link"] = link.absoluteString }
-        if let notes, !notes.isEmpty { body["notes"] = notes }
+        if Self.savesNotes, let notes, !notes.isEmpty { body["notes"] = notes }
         return body
     }
 }
@@ -272,8 +276,10 @@ public enum CalendarError: Error, Equatable, Sendable {
     case forbidden
     /// 400 or 422: the server refused what was sent.
     case rejected
-    /// 429: too many events today, or too many requests just now.
-    case limited
+    /// 429 `RATE_LIMITED`: too many requests just now.
+    case rateLimited
+    /// Any other 429: a daily cap (drafts, or new events per room or per person).
+    case dailyLimit
     case reauthenticationRequired
     case notConfigured
     case retryable
@@ -300,8 +306,9 @@ public protocol RoomCalendarServing: Sendable {
 public protocol CalendarFeedServing: Sendable {
     /// Whether the feed is on: its route answers something other than 404.
     func feedAvailable() async throws -> Bool
-    /// The link with your feed token; `resetting` makes a new token, and the old link stops working.
-    func subscriptionLink(resetting: Bool) async throws -> CalendarSubscriptionLink
+    /// A link with a new feed token. Every call makes a new one, and a calendar subscribed to an older link stops
+    /// updating.
+    func newSubscriptionLink() async throws -> CalendarSubscriptionLink
 }
 
 public final class HTTPRoomCalendarClient: RoomCalendarServing, CalendarFeedServing, @unchecked Sendable {
@@ -350,13 +357,14 @@ public final class HTTPRoomCalendarClient: RoomCalendarServing, CalendarFeedServ
         return saved
     }
 
-    /// Asks the feed with no token: off answers 404, on refuses the missing token.
+    /// Asks the feed with no token: off answers 404, on refuses the missing token. Its 401 is that refusal, not a
+    /// signed-out person: the feed takes its token, not the bearer.
     public func feedAvailable() async throws -> Bool {
-        try await probe("GET", CalendarRoutes.feed, body: nil)
+        try await probe("GET", CalendarRoutes.feed, body: nil, unauthorized: .forbidden)
     }
 
-    public func subscriptionLink(resetting: Bool) async throws -> CalendarSubscriptionLink {
-        let answer = try await send("POST", CalendarRoutes.feedToken, body: resetting ? ["rotate": true] : nil)
+    public func newSubscriptionLink() async throws -> CalendarSubscriptionLink {
+        let answer = try await send("POST", CalendarRoutes.feedToken)
         guard let token = answer?["token"]?.stringValue,
               let link = CalendarSubscriptionLink.make(apiBaseURL: apiBaseURL, token: token)
         else { throw CalendarError.invalidData }
@@ -391,19 +399,20 @@ public final class HTTPRoomCalendarClient: RoomCalendarServing, CalendarFeedServ
         return events.sorted { ($0.startsAt, $0.id) < ($1.startsAt, $1.id) }
     }
 
-    private func probe(_ method: String, _ path: [String], body: [String: Any]?) async throws -> Bool {
+    private func probe(_ method: String, _ path: [String], body: [String: Any]?,
+                       unauthorized: CalendarError = .reauthenticationRequired) async throws -> Bool {
         do {
-            _ = try await send(method, path, body: body)
+            _ = try await send(method, path, body: body, unauthorized: unauthorized)
             return true
         } catch CalendarError.unavailable {
             return false
-        } catch CalendarError.forbidden, CalendarError.rejected, CalendarError.limited {
+        } catch CalendarError.forbidden, CalendarError.rejected, CalendarError.rateLimited, CalendarError.dailyLimit {
             return true
         }
     }
 
-    private func send(_ method: String, _ path: [String], query: [URLQueryItem] = [],
-                      body: [String: Any]? = nil) async throws -> JSONValue? {
+    private func send(_ method: String, _ path: [String], query: [URLQueryItem] = [], body: [String: Any]? = nil,
+                      unauthorized: CalendarError = .reauthenticationRequired) async throws -> JSONValue? {
         let answer: PersonalRequest.Answer
         do {
             answer = try await request.send(method, path, query: query, body: body)
@@ -420,10 +429,10 @@ public final class HTTPRoomCalendarClient: RoomCalendarServing, CalendarFeedServ
         }
         switch answer.status {
         case 200..<300: return answer.json
-        case 401: throw CalendarError.reauthenticationRequired
+        case 401: throw unauthorized
         case 403: throw CalendarError.forbidden
         case 404: throw CalendarError.unavailable
-        case 429: throw CalendarError.limited
+        case 429: throw Self.errorCode(answer.json) == "RATE_LIMITED" ? CalendarError.rateLimited : CalendarError.dailyLimit
         case 408, 425, 500..<600: throw CalendarError.retryable
         default: throw CalendarError.rejected
         }

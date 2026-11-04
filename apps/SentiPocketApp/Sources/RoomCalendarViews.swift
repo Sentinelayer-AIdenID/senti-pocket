@@ -192,7 +192,13 @@ struct CalendarScreen: View {
                 eventRow(event)
             }
             if board.canAdd {
-                addField(day)
+                if board.isPast(day) {
+                    Text("Past days take no new events.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    addField(day)
+                }
             }
         }
     }
@@ -452,10 +458,11 @@ struct CalendarDraftFormView: View {
         }
     }
 
-    /// "Times are in Eastern Time."
+    /// "Times are in Eastern Time." And, until the API keeps them, that notes are not saved.
     private var zoneLine: String {
         let name = form.timeZone.localizedName(for: .generic, locale: .current) ?? form.timeZone.identifier
-        return "Times are in \(name)."
+        let notes = CalendarEventCreate.savesNotes ? "" : " Notes stay in this draft: saved events don't keep notes yet."
+        return "Times are in \(name)." + notes
     }
 
     /// A date and time. At the accessibility sizes the label sits above, and the date and the time each get a line,
@@ -561,7 +568,8 @@ struct CalendarSettingsSection: View {
 
     private var footer: String {
         center.showsSubscribe
-            ? "Apple Calendar shows the events from your rooms and keeps them up to date."
+            ? "Apple Calendar shows the events from your rooms and keeps them up to date. Each Subscribe makes a new "
+                + "link, and a calendar on an older one stops updating."
             : "Events from your rooms, by day."
     }
 }

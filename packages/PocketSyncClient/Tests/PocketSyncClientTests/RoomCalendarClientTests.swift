@@ -204,6 +204,7 @@ final class RoomCalendarClientTests: XCTestCase {
 
     // MARK: - Saving
 
+    /// The existing create route refuses unknown fields and has no `notes` yet: notes are not sent.
     func test_save_posts_the_existing_create_body_with_offsets_in_the_persons_zone() async throws {
         let calendar = client { request in
             XCTAssertEqual(request.method, "POST")
@@ -212,8 +213,7 @@ final class RoomCalendarClientTests: XCTestCase {
                 "title": .string("Lunch with Sam"),
                 "startsAt": .string("2026-11-04T13:00:00-05:00"),
                 "endsAt": .string("2026-11-04T14:00:00-05:00"),
-                "link": .string("https://docs.example.test/plan"),
-                "notes": .string("Bring the plan")
+                "link": .string("https://docs.example.test/plan")
             ]))
             return (201, """
             {"id": "e9", "sessionId": "room-1", "title": "Lunch with Sam", "startsAt": "2026-11-04T18:00:00+00:00",
@@ -235,7 +235,7 @@ final class RoomCalendarClientTests: XCTestCase {
 
     func test_save_leaves_out_what_is_empty() {
         let body = CalendarEventCreate(title: "Dentist", startsAt: Date(timeIntervalSince1970: 1_800_000_000), endsAt: nil,
-                                       link: nil, notes: "", timeZone: zone("Asia/Kolkata")).body
+                                       link: nil, notes: "Bring the card", timeZone: zone("Asia/Kolkata")).body
         XCTAssertEqual(Set(body.keys), ["title", "startsAt"])
         XCTAssertEqual(body["startsAt"] as? String, "2027-01-15T13:30:00+05:30")
     }
@@ -243,10 +243,13 @@ final class RoomCalendarClientTests: XCTestCase {
     // MARK: - Status codes
 
     func test_statuses_map_to_what_the_app_does() async {
-        let cases: [(Int, CalendarError)] = [(404, .unavailable), (403, .forbidden), (400, .rejected), (422, .rejected),
-                                             (429, .limited), (401, .reauthenticationRequired), (503, .retryable)]
-        for (status, expected) in cases {
-            let calendar = client { _ in (status, #"{"detail": {"error": {"code": "CALENDAR_ERROR"}}}"#) }
+        let cases: [(Int, String, CalendarError)] = [
+            (404, "CALENDAR_ERROR", .unavailable), (403, "CALENDAR_ERROR", .forbidden), (400, "CALENDAR_ERROR", .rejected),
+            (422, "CALENDAR_ERROR", .rejected), (429, "RATE_LIMITED", .rateLimited), (429, "CALENDAR_ERROR", .dailyLimit),
+            (401, "CALENDAR_ERROR", .reauthenticationRequired), (503, "CALENDAR_ERROR", .retryable)
+        ]
+        for (status, code, expected) in cases {
+            let calendar = client { _ in (status, #"{"detail": {"error": {"code": "\#(code)"}}}"#) }
             do {
                 _ = try await calendar.events(inRoom: room)
                 XCTFail("\(status) answered events")
@@ -281,8 +284,10 @@ final class RoomCalendarClientTests: XCTestCase {
         }
     }
 
+    /// A 401 on the feed is the missing token refused, not a signed-out person: it reads as on, and nobody is signed
+    /// out by it.
     func test_the_feed_is_off_only_on_a_404_and_the_probe_carries_no_token() async throws {
-        for (status, on) in [(404, false), (422, true), (403, true)] {
+        for (status, on) in [(404, false), (422, true), (403, true), (401, true)] {
             let calendar = client { request in
                 XCTAssertEqual(request.method, "GET")
                 XCTAssertEqual(request.path, "/api/v1/me/calendar.ics")
@@ -311,22 +316,24 @@ final class RoomCalendarClientTests: XCTestCase {
         let calendar = client { request in
             XCTAssertEqual(request.method, "POST")
             XCTAssertEqual(request.path, "/api/v1/me/calendar-feed-token")
-            XCTAssertNil(request.body, "getting the link sends no body: it does not rotate")
-            return (200, #"{"token": "\#(secret)"}"#)
+            XCTAssertNil(request.body, "a new link is a POST with no body")
+            return (200, #"{"token": "\#(secret)", "url": "https://elsewhere.example.test/feed"}"#)
         }
-        let link = try await calendar.subscriptionLink(resetting: false)
+        let link = try await calendar.newSubscriptionLink()
         XCTAssertEqual(link.url.absoluteString, "webcal://api.example.test/api/v1/me/calendar.ics?token=s3cr%2Bt%2Fto%3Dken")
         let parsed = URLComponents(url: link.url, resolvingAgainstBaseURL: false)
         XCTAssertEqual(parsed?.queryItems?.first { $0.name == "token" }?.value, secret, "the token reads back exactly")
+        XCTAssertEqual(link.url.host, "api.example.test", "the link stays on the API host, whatever url the answer has")
     }
 
-    func test_reset_asks_for_a_new_token() async throws {
-        let calendar = client { request in
-            XCTAssertEqual(request.body, .object(["rotate": .bool(true)]))
-            return (200, #"{"token": "new-one"}"#)
+    func test_an_answer_without_a_token_is_no_link() async {
+        let calendar = client { _ in (200, #"{"url": "https://api.example.test/api/v1/me/calendar.ics"}"#) }
+        do {
+            _ = try await calendar.newSubscriptionLink()
+            XCTFail("a link without a token")
+        } catch {
+            XCTAssertEqual(error as? CalendarError, .invalidData)
         }
-        let link = try await calendar.subscriptionLink(resetting: true)
-        XCTAssertTrue(link.url.absoluteString.hasSuffix("token=new-one"))
     }
 
     func test_the_link_never_describes_its_token() throws {

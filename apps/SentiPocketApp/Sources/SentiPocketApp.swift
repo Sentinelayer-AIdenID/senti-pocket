@@ -389,8 +389,7 @@ private struct AuthenticatedRootView: View {
             onRoomsChanged: { sessions.send(.refreshSessions) },
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
         ))
-        let calendarClient = HTTPRoomCalendarClient(apiBaseURL: apiURL,
-                                                    urlSession: SentiHTTPTransportPolicy.protectedReadSession,
+        let calendarClient = HTTPRoomCalendarClient(apiBaseURL: apiURL, urlSession: CalendarHTTP.session,
                                                     tokenProvider: { SessionTokenStore.load() })
         _calendar = StateObject(wrappedValue: CalendarCenter(
             client: calendarClient,
