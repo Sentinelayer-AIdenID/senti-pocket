@@ -316,6 +316,9 @@ final class CalendarBoard: ObservableObject {
             onReauthenticationRequired()
         } catch CalendarError.forbidden {
             draftProblem = "You can't add events in this room."
+        } catch CalendarError.rejected {
+            // The server refused the words or the day (a day with no future time left in it, say): not the network.
+            draftProblem = "Senti couldn't draft that for this day. Try saying it another way."
         } catch CalendarError.rateLimited {
             draftProblem = "Too many tries just now. Wait a moment and try again."
         } catch CalendarError.dailyLimit {

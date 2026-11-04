@@ -324,6 +324,10 @@ final class RoomCalendarTests: XCTestCase {
         fake.draftAnswer = .failure(.rateLimited)
         await board.draft()
         XCTAssertEqual(board.draftProblem, "Too many tries just now. Wait a moment and try again.")
+        fake.draftAnswer = .failure(.rejected)
+        await board.draft()
+        XCTAssertEqual(board.draftProblem, "Senti couldn't draft that for this day. Try saying it another way.",
+                       "a 400 is the words or the day, not the connection")
         XCTAssertEqual(board.addText, "Lunch")
     }
 
