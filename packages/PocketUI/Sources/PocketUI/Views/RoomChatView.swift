@@ -1884,8 +1884,10 @@ private struct RoomThreadSheet: View {
     }
 
     private var suggestions: [MentionCandidate] {
-        guard let active = MentionSuggester.activeQuery(in: draft, at: editOffset ?? draft.count) else { return [] }
-        return MentionSuggester.suggestions(for: active.query, among: mentionCandidates)
+        // No offset means the edit ended at the end: look back over the last word only, never counting the draft.
+        let query = editOffset.map { MentionSuggester.activeQuery(in: draft, at: $0)?.query } ?? MentionSuggester.queryAtEnd(of: draft)
+        guard let query else { return [] }
+        return MentionSuggester.suggestions(for: query, among: mentionCandidates)
     }
 
     private func answer(_ reply: RoomChatReplyRow) {
@@ -2080,7 +2082,7 @@ private struct RoomThreadSheet: View {
                                           isFocused: $isReplying, identifier: "pocket.thread.composer")
                             .onChange(of: draft) { new in
                                 replyWrittenBack.changed(from: lastDraft, to: new, sent: replySent)
-                                editOffset = MentionSuggester.editOffset(from: lastDraft, to: new)
+                                editOffset = MentionSuggester.editOffsetUnlessAtEnd(from: lastDraft, to: new)
                                 lastDraft = new
                             }
                             .padding(.horizontal, 12)
@@ -2380,8 +2382,10 @@ private struct RoomComposerBar: View {
     }
 
     private var suggestions: [MentionCandidate] {
-        guard let active = MentionSuggester.activeQuery(in: draft, at: editOffset ?? draft.count) else { return [] }
-        return MentionSuggester.suggestions(for: active.query, among: mentionCandidates)
+        // No offset means the edit ended at the end: look back over the last word only, never counting the draft.
+        let query = editOffset.map { MentionSuggester.activeQuery(in: draft, at: $0)?.query } ?? MentionSuggester.queryAtEnd(of: draft)
+        guard let query else { return [] }
+        return MentionSuggester.suggestions(for: query, among: mentionCandidates)
     }
 
     private var outgoing: String { RoomComposerDraft.outgoing(draft, blocks: pasted) }
@@ -2542,7 +2546,7 @@ private struct RoomComposerBar: View {
                             saveDraft()
                             return
                         }
-                        editOffset = MentionSuggester.editOffset(from: lastDraft, to: new)
+                        editOffset = MentionSuggester.editOffsetUnlessAtEnd(from: lastDraft, to: new)
                         lastDraft = new
                         saveDraft()
                     }
