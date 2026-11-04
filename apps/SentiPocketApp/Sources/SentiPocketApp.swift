@@ -284,6 +284,24 @@ struct RootServices {
     }
 }
 
+/// The room on screen, made again and drawn again only when what it is opened with changes: the room, its saved summary
+/// and whether direct messages are on. The root draws again for every change of the room list, the bell, Waiting on you,
+/// folders and the side panel opening or closing; each of those made a new room screen (with a Keychain read) and drew
+/// the room's whole list again, under the side panel, while it opened (the freezes of build 2026110308 came right after
+/// the side panel opened, and with the bell's read landing over a room just opened).
+struct RoomScreenHost<Content: View>: View, Equatable {
+    let route: RoomRoute
+    let savedSummary: String?
+    let directMessagesOn: Bool
+    let content: () -> Content
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.route == rhs.route && lhs.savedSummary == rhs.savedSummary && lhs.directMessagesOn == rhs.directMessagesOn
+    }
+
+    var body: some View { content() }
+}
+
 /// Release composition of the authenticated repository-backed Sessions surface and the selected-session Pocket flow.
 /// When the open side panel reads its rooms again: open, with the app in front.
 struct DrawerPoll: Equatable {
@@ -959,8 +977,17 @@ struct AuthenticatedRootView: View {
         )
     }
 
-    @ViewBuilder
+    /// The room on screen, made and drawn again only when what it is opened with changes (`RoomScreenHost`).
     private func roomScreen(_ route: RoomRoute) -> some View {
+        let savedSummary = sessions.state.rows.first { UTF8ExactIdentity.matches($0.sessionId, route.sessionId) }?.summary
+        let direct = directContext
+        return RoomScreenHost(route: route, savedSummary: savedSummary, directMessagesOn: direct != nil) {
+            roomChatScreen(route, savedSummary: savedSummary, direct: direct)
+        }
+        .equatable()
+    }
+
+    private func roomChatScreen(_ route: RoomRoute, savedSummary: String?, direct: RoomDirectContext?) -> some View {
         RoomChatScreen(
             route: route,
             transport: roomTransport,
@@ -986,11 +1013,11 @@ struct AuthenticatedRootView: View {
             reader: messageReader,
             onRenamed: { sessions.send(.refreshSessions) },
             // What the room list has of the room's summary, for a member who reads it without making one.
-            savedSummary: sessions.state.rows.first { UTF8ExactIdentity.matches($0.sessionId, route.sessionId) }?.summary,
+            savedSummary: savedSummary,
             onRead: { sessionId, sequence, caughtUp in
                 sessions.noteRead(sessionId: sessionId, through: sequence, caughtUp: caughtUp)
             },
-            direct: directContext,
+            direct: direct,
             onReauthenticationRequired: invalidateProtectedAuthentication
         )
     }
