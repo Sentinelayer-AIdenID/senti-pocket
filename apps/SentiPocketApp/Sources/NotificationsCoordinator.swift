@@ -128,6 +128,13 @@ final class NotificationsCoordinator: ObservableObject {
 
     /// Reads the bell. The poll skips it after an expired sign-in; opening the side panel or the bell (`force`) tries
     /// again, and a success brings the poll back. A failed read keeps the list and says it could not update.
+    /// Reads the bell again unless it was read less than `age` seconds ago (the side panel opening: the bell polls on
+    /// its own while the app is in front).
+    func refresh(force: Bool = false, ifOlderThan age: TimeInterval) async {
+        if let updatedAt, now().timeIntervalSince(updatedAt) < age, failure == nil { return }
+        await refresh(force: force)
+    }
+
     func refresh(force: Bool = false) async {
         guard force || failure != .reauthenticationRequired else { return }
         if notifications.isEmpty { isLoading = true; publish() }

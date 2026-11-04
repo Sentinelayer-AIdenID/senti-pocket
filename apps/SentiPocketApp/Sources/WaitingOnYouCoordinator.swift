@@ -58,9 +58,20 @@ final class WaitingOnYouCoordinator: ObservableObject {
         pollTask = nil
     }
 
+    /// When the list was last read (answered or not), for the side panel's open.
+    private var readAt: Date?
+
+    /// Reads again unless the list was read less than `age` seconds ago (the side panel opening: the list polls on its
+    /// own while the app is in front).
+    func refresh(ifOlderThan age: TimeInterval) async {
+        if let readAt, now().timeIntervalSince(readAt) < age { return }
+        await refresh()
+    }
+
     func refresh() async {
         if items.isEmpty, !state.isLoading { state.isLoading = true }
         var next = state
+        defer { readAt = now() }
         do {
             let page = try await transport.waiting(limit: 50)
             // The signal model's name never shows, here or in the answer posted (warden, #270).

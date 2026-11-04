@@ -321,6 +321,9 @@ struct AuthenticatedRootView: View {
     @State private var drawerOpen = false
     /// How often the open side panel reads the rooms again, in nanoseconds.
     static let openDrawerRefresh: UInt64 = 15_000_000_000
+    /// What the side panel's open reads again: anything not read for this many seconds (the panel's own poll period;
+    /// the bell and Waiting on you poll on their own while the app is in front).
+    static let panelFreshness: TimeInterval = 15
     /// How far the room card moves right when the side panel opens; the panel fits in that space.
     private static let drawerWidth: CGFloat = 300
     @State private var presentsPocket = false
@@ -557,15 +560,15 @@ struct AuthenticatedRootView: View {
         // The logo at launch, while your rooms load underneath (Carter, #55287).
         .overlay { LaunchSplash(isReady: roomListSettled) }
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: drawerOpen)
-        // Opening the side panel reads the bell, so its count is never older than the panel; and the rooms, so who is
-        // online and their unread badges are not either.
+        // Opening the side panel reads what it shows that was not read lately: the bell, Waiting on you, whether folders
+        // and direct messages are on, and your folders, so no count is older than `panelFreshness`. The rooms are read
+        // once, at once, by the panel's own poll below (a second read here was the same request again).
         .onChange(of: drawerOpen) { open in
-            if open { Task { await notifications.refresh(force: true) } }
-            if open { Task { await waiting.refresh() } }
-            if open { sessions.send(.refreshSessions) }
-            // Whether folders and direct messages are on, and your folders, as the panel opens.
-            if open { Task { await roomFolders.refresh() } }
-            if open { Task { await directMessages.refresh() } }
+            guard open else { return }
+            Task { await notifications.refresh(force: true, ifOlderThan: Self.panelFreshness) }
+            Task { await waiting.refresh(ifOlderThan: Self.panelFreshness) }
+            Task { await roomFolders.refresh(ifOlderThan: Self.panelFreshness) }
+            Task { await directMessages.refresh(ifOlderThan: Self.panelFreshness) }
         }
         // While the side panel stays open its rooms keep up: a message that arrives in another room shows its unread
         // badge without closing and opening the panel again (Carter, #61188). Only with the app in front, as the bell's
