@@ -260,7 +260,15 @@ private struct AppleSignInButton: UIViewRepresentable {
         let button = ASAuthorizationAppleIDButton(authorizationButtonType: .signIn, authorizationButtonStyle: style)
         button.cornerRadius = cornerRadius   // a capsule, like the other sign-in button
         button.addTarget(context.coordinator, action: #selector(Tap.fire), for: .touchUpInside)
+        button.setContentHuggingPriority(.defaultLow, for: .vertical)
         return button
+    }
+
+    /// Fill the frame SwiftUI gives it: left to its own size, Apple's button drew 51 pt inside a 54 pt frame, so it
+    /// looked shorter than the card's button even with the frames equal.
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: ASAuthorizationAppleIDButton, context: Context) -> CGSize? {
+        let natural = uiView.intrinsicContentSize
+        return CGSize(width: proposal.width ?? natural.width, height: proposal.height ?? natural.height)
     }
 
     func updateUIView(_ button: ASAuthorizationAppleIDButton, context: Context) {
