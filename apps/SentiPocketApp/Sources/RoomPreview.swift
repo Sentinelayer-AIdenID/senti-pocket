@@ -14,8 +14,17 @@ enum RoomPreview {
     static var isRequested: Bool {
         ProcessInfo.processInfo.arguments.contains("-PocketRoomPreview") || isTicketsRequested || isTicketLinkRequested
             || isAnchorRequested || isSearchRequested || isBlockedPeopleRequested || isProfileCardRequested
-            || isDirectRequested || isSidePanelFoldersRequested
+            || isDirectRequested || isSidePanelFoldersRequested || isDialConsentRequested
     }
+
+    /// `-PocketDialConsentPreview` opens Blocked people as a sheet, then a dial asks its AI question: it shows over the
+    /// open sheet, as on a call.
+    static var isDialConsentRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-PocketDialConsentPreview")
+    }
+
+    /// The preview dial's asker, kept while it asks; in memory only, so it asks every launch.
+    @MainActor private static let dialAsker = AIConsentAsker(storedConsent: { AIConsent(account: nil) })
 
     /// `-PocketProfileCardPreview` opens the room with an agent's profile card over it, as a tap on its avatar does.
     static var isProfileCardRequested: Bool {
@@ -96,6 +105,17 @@ enum RoomPreview {
             }
         } else if isSearchRequested {
             RoomSearchView(state: RoomPreviewSearch.sampleState) { _ in }
+        } else if isDialConsentRequested {
+            roomRoot
+                .sheet(isPresented: .constant(true)) {
+                    NavigationStack {
+                        BlockedPeopleView(blocks: sampleBlocks)
+                    }
+                    .task {
+                        try? await Task.sleep(nanoseconds: 1_500_000_000)
+                        _ = await dialAsker.allows()
+                    }
+                }
         } else if isBlockedPeopleRequested {
             NavigationStack {
                 BlockedPeopleView(blocks: sampleBlocks)

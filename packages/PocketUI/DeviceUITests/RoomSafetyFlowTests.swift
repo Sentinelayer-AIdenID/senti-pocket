@@ -66,6 +66,11 @@ final class RoomSafetyFlowTests: XCTestCase {
         let notNow = el(app, "pocket.aiConsent.notNow")
         XCTAssertTrue(notNow.waitForExistence(timeout: 5), "a room with agents asks before the first send")
         XCTAssertTrue(el(app, "pocket.aiConsent.notice").label.hasPrefix("What you share in a room"))
+        // Every word is on screen before the answers: the Settings line whole, above OK.
+        let hint = el(app, "pocket.aiConsent.hint")
+        let answer = el(app, "pocket.aiConsent.ok")
+        XCTAssertTrue(app.frame.contains(hint.frame), "the Settings line is on screen, whole: \(hint.frame)")
+        XCTAssertLessThanOrEqual(hint.frame.maxY, answer.frame.minY, "and above OK, never behind it")
         notNow.tap()
         XCTAssertTrue(notNow.waitForNonExistence(timeout: 5))
         XCTAssertEqual(composer.value as? String, "Ship it tonight", "Not now keeps the draft")

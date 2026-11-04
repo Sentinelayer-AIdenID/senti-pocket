@@ -13,15 +13,11 @@ import XCTest
 private final class SafetyURLProtocol: URLProtocol {
     private static let lock = NSLock()
     private static var answers: [String: (status: Int, body: String)] = [:]
-    private static var rule: ((String, Data) -> (status: Int, body: String)?)?
     private static var captured: [(request: URLRequest, body: Data)] = []
 
-    /// `rule`, when it answers, answers by what was sent; else `answers` by method and path.
-    static func reset(_ answers: [String: (status: Int, body: String)],
-                      rule: ((String, Data) -> (status: Int, body: String)?)? = nil) {
+    static func reset(_ answers: [String: (status: Int, body: String)]) {
         lock.withLock {
             self.answers = answers
-            self.rule = rule
             captured = []
         }
     }
@@ -46,7 +42,7 @@ private final class SafetyURLProtocol: URLProtocol {
         let key = "\(request.httpMethod ?? "GET") \(request.url?.path ?? "")"
         let answer = Self.lock.withLock { () -> (status: Int, body: String) in
             Self.captured.append((request, body))
-            return Self.rule?(key, body) ?? Self.answers[key] ?? (404, "{}")
+            return Self.answers[key] ?? (404, "{}")
         }
         let response = HTTPURLResponse(url: request.url!, statusCode: answer.status, httpVersion: nil, headerFields: nil)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
@@ -252,6 +248,18 @@ private struct GoogleAccount: AccountIdentityProviding {
     func currentAccount() async -> SignedInAccount? {
         SignedInAccount(githubUsername: "sam-rivera", accountId: "6F1C2B9E-0000-4000-8000-00000000000A",
                         senderId: "human-g.6f1c2b9e00004000800000000000000a")
+    }
+}
+
+/// A thread summarizer that keeps every thread it was given, and answers with a line.
+private final class RecordingSummarizer: ThreadSummarizing, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _threads: [[String]] = []
+    var threads: [[String]] { lock.withLock { _threads } }
+
+    func summarize(thread lines: [String]) async -> String? {
+        lock.withLock { _threads.append(lines) }
+        return "A summary."
     }
 }
 
@@ -754,23 +762,19 @@ final class RoomSafetyTests: XCTestCase {
         XCTAssertEqual(SafetyURLProtocol.requests.count, 1)
     }
 
-    func test_an_api_from_before_the_post_reference_still_takes_the_block_by_id() async throws {
-        // As the API before the reference: it refuses any field it doesn't know, with a validation error and no code.
-        SafetyURLProtocol.reset([:], rule: { key, body in
-            guard key == "POST /api/v1/me/blocks",
-                  let sent = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else { return nil }
-            if Set(sent.keys) == ["actorId"] { return (201, #"{"block":{"actorId":"human-sam"}}"#) }
-            return (422, #"{"detail":[{"type":"extra_forbidden","loc":["body","sessionId"],"msg":"Extra inputs are not permitted"}]}"#)
-        })
+    func test_a_refused_block_with_its_post_is_final_and_never_sent_again_by_id() async throws {
+        // A validation refusal (no error code of its own) is a refusal like any other.
+        SafetyURLProtocol.reset(["POST /api/v1/me/blocks":
+            (422, #"{"detail":[{"type":"value_error","loc":["body"],"msg":"sessionId and sequenceId go together"}]}"#)])
         let client = HTTPBlockListClient(apiBaseURL: URL(string: "https://api.example.test"), account: "sub:user-a",
                                          urlSession: SafetyURLProtocol.session, tokenProvider: { token(subject: "user-a") })
-        try await client.block("human-sam", from: BlockReference(sessionId: "room_1", sequenceId: 42, replyId: nil))
-        let bodies = try SafetyURLProtocol.requests.map {
-            try XCTUnwrap(JSONSerialization.jsonObject(with: $0.body) as? [String: Any])
+        do {
+            try await client.block("human-sam", from: BlockReference(sessionId: "room_1", sequenceId: 42, replyId: nil))
+            XCTFail("a refusal")
+        } catch {
+            XCTAssertEqual(error as? RoomSendError, .rejected)
         }
-        guard bodies.count == 2 else { return XCTFail("sent again, by id alone: expected two requests, got \(bodies.count)") }
-        XCTAssertEqual(Set(bodies[0].keys), ["actorId", "sessionId", "sequenceId"])
-        XCTAssertEqual(bodies[1] as? [String: String], ["actorId": "human-sam"])
+        XCTAssertEqual(SafetyURLProtocol.requests.count, 1, "sent once, with its post")
     }
 
     func test_block_from_a_message_or_reply_sends_that_post_and_keeps_it_offline() async {
@@ -918,43 +922,58 @@ final class RoomSafetyTests: XCTestCase {
         guard case .confirming = write.state else { return XCTFail("drafted at once, got \(write.state)") }
     }
 
-    func test_a_dial_asks_the_same_question_and_goes_on_only_after_ok() async {
-        let consent = AIConsent(account: "sub:a", defaults: temporaryDefaults())
-        let asker = AIConsentAsker(storedConsent: { consent })
+    /// The dial's question as the asker shows it, scripted: shown or not, answered by the test, taken away.
+    @MainActor
+    private final class ScriptedQuestion {
+        var canShow = true
+        private(set) var shown = 0
+        private(set) var withdrawn = 0
+        private(set) var told: [String] = []
+        private(set) var allow: (() -> Void)?
+        private(set) var notNow: (() -> Void)?
 
-        // Not now: the dial doesn't go on.
+        func asker(_ consent: AIConsent) -> AIConsentAsker {
+            AIConsentAsker(
+                storedConsent: { consent },
+                show: { [unowned self] allow, notNow in
+                    guard self.canShow else { return nil }
+                    self.shown += 1
+                    self.allow = allow
+                    self.notNow = notNow
+                    return AIConsentAsker.Showing { [unowned self] in self.withdrawn += 1 }
+                },
+                tell: { [unowned self] in self.told.append($0) }
+            )
+        }
+    }
+
+    func test_a_dial_asks_over_whatever_is_open_and_goes_on_only_after_ok() async {
+        let consent = AIConsent(account: "sub:a", defaults: temporaryDefaults())
+        let question = ScriptedQuestion()
+        let asker = question.asker(consent)
+
+        // Not now: the dial doesn't go on, and the question goes.
         let declined = Task { await asker.allows() }
-        await waitUntil("asked") { asker.held != nil }
-        let first = asker.held
-        asker.held = nil
-        first?.decline()
+        await waitUntil("asked") { question.shown == 1 }
+        question.notNow?()
         let declinedAnswer = await declined.value
         XCTAssertFalse(declinedAnswer)
         XCTAssertFalse(consent.isGiven)
+        XCTAssertEqual(question.withdrawn, 1)
 
-        // OK: it does.
+        // OK: it does, and this account's OK is kept.
         let allowed = Task { await asker.allows() }
-        await waitUntil("asked again") { asker.held != nil }
-        let second = asker.held
-        asker.held = nil
-        consent.grant()
-        second?.proceed()
+        await waitUntil("asked again") { question.shown == 2 }
+        question.allow?()
         let allowedAnswer = await allowed.value
         XCTAssertTrue(allowedAnswer)
+        XCTAssertTrue(consent.isGiven)
+        XCTAssertEqual(question.withdrawn, 2)
 
-        // Said: at once, with nothing asked.
+        // Said: at once, with nothing shown.
         let atOnce = await asker.allows()
         XCTAssertTrue(atOnce)
-        XCTAssertNil(asker.held)
-
-        // Hung up while it asks: it doesn't go on, and the question goes.
-        consent.withdraw()
-        let hungUp = Task { await asker.allows() }
-        await waitUntil("asked") { asker.held != nil }
-        hungUp.cancel()
-        let hungUpAnswer = await hungUp.value
-        XCTAssertFalse(hungUpAnswer)
-        await waitUntil("question gone") { asker.held == nil }
+        XCTAssertEqual(question.shown, 2)
 
         // The signed-in screens' consent is the one asked.
         let screens = AIConsent(account: "sub:a", defaults: temporaryDefaults())
@@ -962,6 +981,73 @@ final class RoomSafetyTests: XCTestCase {
         asker.consent = screens
         let fromScreens = await asker.allows()
         XCTAssertTrue(fromScreens)
+    }
+
+    func test_a_dial_hung_up_while_asked_takes_the_question_away() async {
+        let consent = AIConsent(account: "sub:a", defaults: temporaryDefaults())
+        let question = ScriptedQuestion()
+        let asker = question.asker(consent)
+        let hungUp = Task { await asker.allows() }
+        await waitUntil("asked") { question.shown == 1 }
+        hungUp.cancel()
+        let answer = await hungUp.value
+        XCTAssertFalse(answer, "the dial doesn't go on")
+        XCTAssertEqual(question.withdrawn, 1, "and the question is taken away with the call")
+        question.allow?()
+        XCTAssertFalse(consent.isGiven, "an answer after the call ended changes nothing")
+    }
+
+    func test_a_dial_with_nothing_on_screen_to_ask_ends_at_once_and_says_why() async {
+        let consent = AIConsent(account: "sub:a", defaults: temporaryDefaults())
+        let question = ScriptedQuestion()
+        question.canShow = false
+        let asker = question.asker(consent)
+        var ended = false
+        Task {
+            _ = await asker.allows()
+            ended = true
+        }
+        await waitUntil("ended at once, never waiting silent") { ended }
+        XCTAssertEqual(question.told, [AIConsentAsker.notOnScreen], "and says why where it is seen")
+        XCTAssertFalse(consent.isGiven)
+    }
+
+    func test_a_thread_summary_never_carries_a_blocked_persons_words() async {
+        let summarizer = RecordingSummarizer()
+        let blocks = BlockList(account: "sub:a", store: temporaryStore(), client: nil)
+        blocks.block(RoomBlockTarget(actorId: "human-sam", name: "sam"))
+        let replies = [
+            RoomReply(id: "a1", targetSequenceId: 2, authorId: "review-agent", text: "Looking at it now",
+                      createdAt: "2026-11-03T18:00:05.000000+00:00"),
+            RoomReply(id: "a2", targetSequenceId: 2, authorId: "human-sam", text: "Something unkind",
+                      createdAt: "2026-11-03T18:00:06.000000+00:00"),
+            RoomReply(id: "a3", targetSequenceId: 2, authorId: "build-agent", text: "Build 319 is green",
+                      createdAt: "2026-11-03T18:00:07.000000+00:00"),
+            RoomReply(id: "a4", targetSequenceId: 2, authorId: "human-alex", text: "Thanks both",
+                      createdAt: "2026-11-03T18:00:08.000000+00:00")
+        ]
+        let room = RoomChatCoordinator(
+            sessionId: "room_1", title: "Room", transport: QuietRoom(replies: replies), summarizer: summarizer,
+            ownAuthorIds: ["human-me"],
+            sleep: { seconds in if seconds > 5 { try? await Task.sleep(nanoseconds: 3_600_000_000_000) } },
+            blocks: blocks, onReauthenticationRequired: {}
+        )
+        room.resume()
+        room.handle(.message(message(2, author: "human-sam", text: "Opening words")))
+        await waitUntil("summarized") { !summarizer.threads.isEmpty }
+        let read = summarizer.threads.joined().joined(separator: " ")
+        XCTAssertFalse(read.contains("Something unkind"), "a blocked person's reply is left out")
+        XCTAssertFalse(read.contains("Opening words"), "and the message of theirs the thread answers")
+        XCTAssertTrue(read.contains("Looking at it now") && read.contains("Build 319 is green"))
+
+        // A block made after a summary: it is written again, without them.
+        blocks.unblock("human-sam")
+        await waitUntil("written again") { summarizer.threads.count >= 2 }
+        let after = summarizer.threads.count
+        blocks.block(RoomBlockTarget(actorId: "human-sam", name: "sam"))
+        await waitUntil("written once more") { summarizer.threads.count > after }
+        XCTAssertFalse(summarizer.threads.last!.joined(separator: " ").contains("Something unkind"))
+        room.pause()
     }
 
     // MARK: Support

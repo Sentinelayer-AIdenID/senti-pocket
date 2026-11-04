@@ -163,6 +163,8 @@ struct RoomChatScreen: View {
     private let directContext: RoomDirectContext?
     /// The profile card open over the room.
     @State private var profileTarget: RoomProfileTarget?
+    /// Block, asked from a profile card once the card has gone.
+    @State private var blockingFromCard: RoomBlockTarget?
 
     init(
         route: RoomRoute,
@@ -269,13 +271,15 @@ struct RoomChatScreen: View {
             ? nil
             : (sender as? HTTPRoomMessageSender).map { HTTPRoomMediaUploader(api: $0.bound(toAccount: account)) }
         _media = StateObject(wrappedValue: RoomMediaUploadCoordinator.forRoom(route.sessionId, account: account,
-                                                                              uploader: mediaUploader) {
+                                                                              uploader: mediaUploader,
+                                                                              aiConsent: aiConsent) {
             RoomMediaUploadCoordinator(
                 sessionId: route.sessionId,
                 account: account,
                 uploader: mediaUploader,
                 canUseCamera: UIImagePickerController.isSourceTypeAvailable(.camera),
-                canPaste: { UIPasteboard.general.hasImages }
+                canPaste: { UIPasteboard.general.hasImages },
+                aiConsent: aiConsent
             )
         })
         _artifacts = StateObject(wrappedValue: RoomArtifactsCoordinator(sessionId: route.sessionId, transport: transport))
@@ -680,12 +684,20 @@ struct RoomChatScreen: View {
                     sharedRoom: profileSharedRoom,
                     canMessage: route.cardsOfferMessage,
                     context: directContext,
-                    // Block comes with the room's block flow (#312) once it lands; until then the card has none.
-                    onBlock: nil,
+                    // Block, asked as from a message once the card has gone: by their id, with no post.
+                    onBlock: blocks == nil ? nil : RoomBlockTarget.fromCard(
+                        target, alreadyBlocked: blocks?.isBlocked(target.senderId) == true
+                    ).map { block -> () -> Void in
+                        {
+                            profileTarget = nil
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { blockingFromCard = block }
+                        }
+                    },
                     onClose: { profileTarget = nil }
                 )
             }
         }
+        .roomBlockConfirmation($blockingFromCard) { coordinator.send($0) }
         .toolbar {
             // New agent (Carter: "I don't think I see a new agent button on mobile, put that"), beside the title as on
             // the web, for owners and admins the mint admits. The first of the room's buttons: iOS keeps the title whole
@@ -869,6 +881,8 @@ struct RoomChatScreen: View {
             coordinator.onFeedback = nil
         }
         .onAppear {
+            // A message with files asks its AI question here, as a text does.
+            media.askAIConsent = { held in consentHeld = held }
             // The room on screen sounds and vibrates, except during a voice room, which speaks instead.
             coordinator.onFeedback = { event in
                 guard voiceRoom == nil else { return }
@@ -1162,7 +1176,13 @@ struct RoomChatScreen: View {
         }
         // Hung up on the phone's own call screen: the voice room ends with it.
         .onReceive(callDesk.$hungUp) { uuid in
-            guard let uuid, answeredCall?.uuid == uuid, let voiceRoom else { return }
+            guard let uuid, answeredCall?.uuid == uuid else { return }
+            guard let voiceRoom else {
+                // Hung up while the AI question was still asked: the question goes with the call.
+                consentHeld = nil
+                answeredCall = nil
+                return
+            }
             Task { await voiceRoom.hangUp() }
         }
     }

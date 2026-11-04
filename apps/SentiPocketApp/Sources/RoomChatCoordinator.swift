@@ -362,7 +362,11 @@ final class RoomChatCoordinator: ObservableObject {
         }
         // Published before the new value is set: the room redraws on the next turn, with it.
         blocks?.$actorIds.dropFirst().sink { [weak self] _ in
-            Task { @MainActor in self?.publish() }
+            Task { @MainActor in
+                // A summary written before a block may carry the blocked person's words: each is written again.
+                self?.threadSummaries = [:]
+                self?.publish()
+            }
         }.store(in: &safetyWatch)
         aiConsent?.$givenAt.dropFirst().sink { [weak self] _ in
             Task { @MainActor in self?.publish() }
@@ -2184,14 +2188,18 @@ final class RoomChatCoordinator: ObservableObject {
     /// replies first, and again only once it has grown. A phone without the on-device model writes none.
     private func summarizeNextThread(_ replies: [RoomChatMessageInput], messages: [RoomChatMessageInput]) {
         guard let summarizer, summarizing == nil, !liveTasks.isEmpty else { return }
+        // Someone you blocked is left out: their words never come back through a thread's summary.
+        let isBlocked = { [blocks] (authorId: String) in blocks?.isBlocked(authorId) == true }
         var byThread: [Int64: [RoomChatMessageInput]] = [:]
-        for reply in replies { byThread[reply.sequenceId, default: []].append(reply) }
+        for reply in replies where !isBlocked(reply.authorId) { byThread[reply.sequenceId, default: []].append(reply) }
         let due = byThread
             .filter { $0.value.count >= ThreadSummaryInput.minimumReplies && threadSummaries[$0.key]?.replies != $0.value.count }
             .max { $0.value.count < $1.value.count }
         guard let (parent, thread) = due else { return }
         summarizing = parent
-        let lines = ThreadSummaryInput.lines(thread, parent: messages.first { $0.sequenceId == parent && !$0.isInlineReply })
+        let lines = ThreadSummaryInput.lines(thread, parent: messages.first {
+            $0.sequenceId == parent && !$0.isInlineReply && !isBlocked($0.authorId)
+        })
         let details = ThreadSummaryInput.details(thread)
         let count = thread.count
         Task.detached(priority: .utility) { [weak self] in

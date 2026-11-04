@@ -1,9 +1,6 @@
 import Foundation
 import XCTest
 @testable import PocketUI
-#if canImport(SwiftUI)
-import SwiftUI
-#endif
 
 /// Report, Block and the AI consent, as the room shows them (App Store guidelines 1.2 and 5.1.2(i)).
 final class RoomSafetyPresentationTests: XCTestCase {
@@ -269,16 +266,25 @@ final class RoomSafetyPresentationTests: XCTestCase {
         XCTAssertTrue(RoomBlocking.byId.contains("blocking one agent id doesn't block the same agent under another id"))
     }
 
-    #if canImport(SwiftUI)
-    func test_at_the_accessibility_text_sizes_the_consent_words_come_before_ok() {
-        for size in [DynamicTypeSize.accessibility1, .accessibility3, .accessibility5] {
-            XCTAssertTrue(RoomAIConsentSheet.wordsFirst(at: size), "\(size): the words are never squeezed out")
-        }
-        for size in [DynamicTypeSize.xSmall, .large, .xxxLarge] {
-            XCTAssertFalse(RoomAIConsentSheet.wordsFirst(at: size), "\(size): OK and Not now stay in reach below")
-        }
+    func test_a_reports_outcome_is_said_aloud_and_only_its_outcome() {
+        XCTAssertEqual(RoomReport.announcement(for: .sent), RoomReport.thanks)
+        XCTAssertEqual(RoomReport.announcement(for: .failed), RoomReport.notSent)
+        XCTAssertEqual(RoomReport.announcement(for: .refused), RoomReport.refused)
+        XCTAssertNil(RoomReport.announcement(for: .choosing))
+        XCTAssertNil(RoomReport.announcement(for: .sending))
+        XCTAssertGreaterThanOrEqual(RoomBlocking.minimumTapSize, 44, "Show takes a 44 pt tap")
     }
-    #endif
+
+    func test_block_from_a_profile_card_is_by_id_and_never_the_server_or_someone_already_blocked() {
+        let card = RoomProfileTarget(senderId: "human-sam", name: "Sam", isAgent: false)
+        XCTAssertEqual(RoomBlockTarget.fromCard(card, alreadyBlocked: false),
+                       RoomBlockTarget(actorId: "human-sam", name: "Sam"), "by id, with no post")
+        XCTAssertNil(RoomBlockTarget.fromCard(card, alreadyBlocked: true), "already blocked: not offered again")
+        XCTAssertNil(RoomBlockTarget.fromCard(RoomProfileTarget(senderId: "Senti", name: "Senti", isAgent: true),
+                                              alreadyBlocked: false), "never the server's own posts")
+        XCTAssertEqual(RoomBlockTarget.fromCard(RoomProfileTarget(senderId: "review-agent", name: "review-agent",
+                                                                  isAgent: true), alreadyBlocked: false)?.isAgent, true)
+    }
 
     func test_block_names_the_post_it_was_chosen_on() {
         let state = RoomChatPresentationState(sessionId: "room", title: "Room", messages: messages,

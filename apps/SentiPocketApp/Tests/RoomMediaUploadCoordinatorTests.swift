@@ -365,7 +365,8 @@ final class RoomMediaUploadCoordinatorTests: XCTestCase {
     }
 
     private func coordinator(_ uploader: FakeUploader?, keepAlive: any RoomMediaKeepingAlive = NoKeepAlive(),
-                             session: String = "room_1", account: String? = nil) -> RoomMediaUploadCoordinator {
+                             session: String = "room_1", account: String? = nil,
+                             consent: AIConsent? = nil) -> RoomMediaUploadCoordinator {
         RoomMediaUploadCoordinator(
             sessionId: session,
             account: account,
@@ -382,8 +383,86 @@ final class RoomMediaUploadCoordinatorTests: XCTestCase {
                 RoomMediaFiles.discard(source, root: self.root)
                 self.discards.send(())
             },
-            outboxRoot: root
+            outboxRoot: root,
+            aiConsent: consent
         )
+    }
+
+    // MARK: The AI consent (App Store guideline 5.1.2(i))
+
+    func test_retry_of_a_message_an_earlier_build_left_asks_first_and_posts_only_after_ok() async throws {
+        // An earlier build, without the question, left a photo cut off mid-upload.
+        let uploader = FakeUploader()
+        uploader.failingPuts = 1
+        let earlier = coordinator(uploader)
+        earlier.add([try source("IMG_0001.jpg")])
+        earlier.perform(.send(text: "Hi"))
+        let clientId = try XCTUnwrap(earlier.board.outgoing.first?.id)
+        await until("failed", boards: [earlier.board]) { earlier.board.outgoing.first?.isFailed == true }
+
+        // This build, in a room this account never said OK for.
+        let consent = AIConsent(account: nil)
+        let again = FakeUploader()
+        let reopened = coordinator(again, consent: consent)
+        var asked: [AIConsentHeld] = []
+        reopened.askAIConsent = { asked.append($0) }
+        reopened.perform(.retry(clientId: clientId))
+        XCTAssertEqual(asked.count, 1, "Retry asks first, as a text does")
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(again.posts.isEmpty, "no photo and no words reach the room's agents before OK")
+        XCTAssertTrue(again.inits.isEmpty && again.completes.isEmpty, "nothing of it goes at all")
+
+        // Not now: it stays as it was.
+        asked.first?.decline()
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertTrue(again.posts.isEmpty)
+        XCTAssertEqual(reopened.board.outgoing.first?.canRetry, true)
+
+        // OK: it goes.
+        reopened.perform(.retry(clientId: clientId))
+        XCTAssertEqual(asked.count, 2)
+        consent.grant()
+        asked.last?.proceed()
+        await until("posted", uploaders: [again]) { again.posts.count == 1 }
+        XCTAssertEqual(again.posts.first?.clientId, clientId)
+    }
+
+    func test_retry_after_the_ok_was_withdrawn_asks_again_and_posts_nothing() async throws {
+        let consent = AIConsent(account: nil)
+        consent.grant()
+        let uploader = FakeUploader()
+        uploader.failingPuts = 1
+        let media = coordinator(uploader, consent: consent)
+        var asked = 0
+        media.askAIConsent = { _ in asked += 1 }
+        media.add([try source("IMG_0001.jpg")])
+        media.perform(.send(text: "Hi"))
+        let clientId = try XCTUnwrap(media.board.outgoing.first?.id)
+        await until("failed", boards: [media.board]) { media.board.outgoing.first?.isFailed == true }
+
+        consent.withdraw()
+        media.perform(.retry(clientId: clientId))
+        XCTAssertEqual(asked, 1, "withdrawn in Settings: Retry asks again")
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(uploader.posts.isEmpty, "and nothing is posted")
+    }
+
+    func test_a_message_with_files_never_reaches_the_room_without_the_ok() async throws {
+        // However it was sent (the room's box asks first; this is the coordinator's own stop).
+        let consent = AIConsent(account: nil)
+        let uploader = FakeUploader()
+        let media = coordinator(uploader, consent: consent)
+        media.add([try source("notes.md"), try source("IMG_0001.jpg")])
+        await until("ready and uploaded", boards: [media.board]) {
+            media.board.tray.map(\.phase) == [.ready, .uploaded]
+        }
+        media.perform(.send(text: "Notes and a photo"))
+        await until("stopped", boards: [media.board]) { media.board.outgoing.first?.isFailed == true }
+        XCTAssertEqual(media.board.outgoing.first?.status,
+                       .failed(reason: RoomMediaUploadCoordinator.consentReason, canRetry: true))
+        XCTAssertTrue(uploader.posts.isEmpty, "the message is not posted")
+        XCTAssertFalse(uploader.events.contains("init:pm_test_000001"),
+                       "the Markdown file, published as it completes, never even starts")
     }
 
     func test_files_over_the_limits_or_of_other_types_never_enter_the_tray() async throws {

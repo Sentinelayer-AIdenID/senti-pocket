@@ -237,8 +237,6 @@ private struct AuthenticatedRootView: View {
     @State private var waitingConsentHeld: AIConsentHeld?
     /// A new room, held for that OK.
     @State private var newRoomConsentHeld: AIConsentHeld?
-    /// A dial (Senti calling you about a decision) waiting for that OK.
-    @ObservedObject private var dialConsent = AIConsentAsker.shared
     /// Direct messages: on when the server answers their settings (DIRECT_MESSAGES_ENABLED), else nothing shows.
     @StateObject private var directMessages: DirectMessagesCenter
     /// Your room folders: on when the server lists them (ROOM_FOLDERS_ENABLED), else nothing shows.
@@ -643,7 +641,6 @@ private struct AuthenticatedRootView: View {
             )
         }
         .aiConsentPrompt($newRoomConsentHeld) { aiConsent.grant() }
-        .aiConsentPrompt($dialConsent.held) { aiConsent.grant() }
         .modifier(RoomFolderSheets(center: roomFolders))
         .sheet(isPresented: $presentsNewRoom) {
             if let creator = roomSender as? any RoomCreating {
@@ -673,7 +670,7 @@ private struct AuthenticatedRootView: View {
             Task { await roomFolders.refresh() }
             notifications.startPolling()
             Task { await blocks.sync() }
-            // A dial asks this account, with this screen.
+            // A dial asks this account's consent (its question shows in a window of its own, over any sheet).
             AIConsentAsker.shared.consent = aiConsent
             // Waiting on you is read from sign-in on, not only once the app comes back to the front (warden, #270).
             waiting.startPolling()

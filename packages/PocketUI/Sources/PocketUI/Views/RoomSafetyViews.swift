@@ -1,5 +1,8 @@
 #if canImport(SwiftUI)
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// A message or reply from someone you blocked, as one line in its place. Show opens this one, once.
 struct RoomBlockedLine: View {
@@ -17,13 +20,16 @@ struct RoomBlockedLine: View {
                 .foregroundStyle(PocketPalette.textSecondary)
                 .lineLimit(1)
             Spacer(minLength: 4)
-            Button("Show", action: onShow)
-                .font(.footnote.weight(.semibold))
+            Button(action: onShow) {
+                Text("Show")
+                    .font(.footnote.weight(.semibold))
+                    .frame(minWidth: RoomBlocking.minimumTapSize, minHeight: RoomBlocking.minimumTapSize)
+                    .contentShape(Rectangle())
+            }
                 .buttonStyle(.borderless)
                 .accessibilityHint("Shows this one message")
                 .accessibilityIdentifier("\(identifier).show")
         }
-        .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(identifier)
@@ -79,6 +85,12 @@ struct RoomReportSheet: View {
             }
         }
         .roomBlockConfirmation($blocking, send: send)
+        .onChange(of: report.phase) { phase in
+            guard let said = RoomReport.announcement(for: phase) else { return }
+            #if canImport(UIKit)
+            UIAccessibility.post(notification: .announcement, argument: said)
+            #endif
+        }
     }
 
     private var choosing: some View {
@@ -183,7 +195,8 @@ struct RoomReportSheet: View {
 
 extension View {
     /// Blocking asks first: what it does, and that it can be undone in Settings.
-    func roomBlockConfirmation(_ target: Binding<RoomBlockTarget?>, send: @escaping (RoomChatIntent) -> Void) -> some View {
+    public func roomBlockConfirmation(_ target: Binding<RoomBlockTarget?>,
+                                      send: @escaping (RoomChatIntent) -> Void) -> some View {
         confirmationDialog(
             "Block \(target.wrappedValue?.name ?? "")?",
             isPresented: Binding(get: { target.wrappedValue != nil }, set: { if !$0 { target.wrappedValue = nil } }),
@@ -204,50 +217,45 @@ extension View {
 public struct RoomAIConsentSheet: View {
     private let onAllow: () -> Void
     private let onNotNow: () -> Void
-    @Environment(\.dynamicTypeSize) private var typeSize
 
     public init(onAllow: @escaping () -> Void, onNotNow: @escaping () -> Void) {
         self.onAllow = onAllow
         self.onNotNow = onNotNow
     }
 
-    /// At the accessibility text sizes the buttons below the words would leave them no room: the sheet opens at full
-    /// height and OK and Not now come after the words, so what is shared is read before it is agreed to.
-    public static func wordsFirst(at size: DynamicTypeSize) -> Bool {
-        size.isAccessibilitySize
-    }
-
     public var body: some View {
-        let wordsFirst = Self.wordsFirst(at: typeSize)
-        VStack(alignment: .leading, spacing: 14) {
-            // Scrolls, so the words are never cut off at a large text size.
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    Image(systemName: "cpu")
-                        .font(.system(size: 30))
-                        .foregroundStyle(PocketPalette.listening)
-                        .accessibilityHidden(true)
-                    Text(AIConsentText.title)
-                        .font(.title3.bold())
-                        .foregroundStyle(PocketPalette.textPrimary)
-                    Text(AIConsentText.notice)
-                        .font(.body)
-                        .foregroundStyle(PocketPalette.textPrimary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityIdentifier("pocket.aiConsent.notice")
-                    Text(AIConsentText.settingsHint)
-                        .font(.footnote)
-                        .foregroundStyle(PocketPalette.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if wordsFirst { answers }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+        // At full height, every word, then OK and Not now after them, at every text size: what is shared is read
+        // before it is agreed to, and at the largest sizes the whole of it scrolls.
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                Image(systemName: "cpu")
+                    .font(.system(size: 30))
+                    .foregroundStyle(PocketPalette.listening)
+                    .accessibilityHidden(true)
+                Text(AIConsentText.title)
+                    .font(.title3.bold())
+                    .foregroundStyle(PocketPalette.textPrimary)
+                    .accessibilityAddTraits(.isHeader)
+                Text(AIConsentText.notice)
+                    .font(.body)
+                    .foregroundStyle(PocketPalette.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("pocket.aiConsent.notice")
+                Text(AIConsentText.settingsHint)
+                    .font(.footnote)
+                    .foregroundStyle(PocketPalette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("pocket.aiConsent.hint")
+                answers
+                    .padding(.top, 6)
             }
-            if !wordsFirst { answers }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(24)
         }
-        .padding(24)
-        .presentationDetents(wordsFirst ? [.large] : [.medium, .large])
+        .presentationDetents([.large])
         .accessibilityElement(children: .contain)
+        // VoiceOver's escape (two-finger scrub) is Not now, as the sheet can't be swiped away.
+        .accessibilityAction(.escape) { onNotNow() }
         .accessibilityIdentifier("pocket.aiConsent")
     }
 
@@ -295,7 +303,11 @@ private struct AIConsentPrompt: ViewModifier {
     func body(content: Content) -> some View {
         content
             .onChange(of: held?.id) { id in
-                guard id != nil else { return }
+                guard id != nil else {
+                    // Cleared by what asked (not answered here): the question goes.
+                    if answer == nil { asking = nil }
+                    return
+                }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                     if asking == nil, let held { asking = held }
                 }

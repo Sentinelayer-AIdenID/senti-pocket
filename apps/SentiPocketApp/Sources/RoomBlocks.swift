@@ -271,13 +271,8 @@ final class HTTPBlockListClient: BlockListClient, @unchecked Sendable {
             body["sequenceId"] = reference.sequenceId
             if let replyId = reference.replyId { body["replyId"] = replyId }
         }
-        let (data, status) = try await send("POST", path: "/api/v1/me/blocks", body: body)
-        // An API from before the reference refuses fields it doesn't know (a 422 with no error code of its own): the
-        // block goes by id alone.
-        if reference != nil, status == 422,
-           HTTPRoomTicketWriter.errorCode(try? JSONDecoder().decode(JSONValue.self, from: data)) == nil {
-            return try await block(actorId, from: nil)
-        }
+        // Every API with this route takes the post (sentinelayer-api #1118): a refusal is final, never sent again by id.
+        let (_, status) = try await send("POST", path: "/api/v1/me/blocks", body: body)
         guard (200..<300).contains(status) else { throw Self.error(status) }
     }
 

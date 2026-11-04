@@ -91,6 +91,16 @@ public enum RoomReport {
     public static let notSent = "Your report couldn't be sent right now. Try again in a little while."
     public static let refused = "This can't be reported. It may have been deleted, or you're no longer in this room."
 
+    /// What VoiceOver says when a report's outcome comes: sent, not sent, or refused; nothing while it is chosen or sent.
+    public static func announcement(for phase: RoomReportState.Phase) -> String? {
+        switch phase {
+        case .sent: return thanks
+        case .failed: return notSent
+        case .refused: return refused
+        case .choosing, .sending: return nil
+        }
+    }
+
     /// `text` cut to at most `limit` code points, never inside a character.
     public static func clamped(_ text: String, to limit: Int) -> String {
         guard text.unicodeScalars.count > limit else { return text }
@@ -132,6 +142,14 @@ public struct RoomBlockTarget: Equatable, Identifiable, Sendable {
 
     public var id: String { actorId.lowercased() }
 
+    /// Block from someone's profile card: by their id, with no post. None for the server's own posts, or someone already
+    /// blocked.
+    public static func fromCard(_ card: RoomProfileTarget, alreadyBlocked: Bool) -> RoomBlockTarget? {
+        guard !alreadyBlocked, !card.senderId.isEmpty,
+              card.senderId.lowercased() != RoomBlocking.serverAuthor else { return nil }
+        return RoomBlockTarget(actorId: card.senderId, name: card.name)
+    }
+
     /// An agent, not a person: blocked by this one id, so the same agent under another id is not.
     public var isAgent: Bool { !actorId.lowercased().hasPrefix("human-") }
 }
@@ -159,6 +177,9 @@ public enum RoomBlocking {
 
     /// The server's own posts (checkpoints, joins) can't be blocked.
     public static let serverAuthor = "senti"
+
+    /// The smallest tap a control takes, in points (Apple's Human Interface Guidelines).
+    public static let minimumTapSize: CGFloat = 44
 
     /// What Show opens: a message, or a reply wherever it shows (in the room or in its thread).
     public static func revealKey(message id: String) -> String { "msg:\(id)" }
