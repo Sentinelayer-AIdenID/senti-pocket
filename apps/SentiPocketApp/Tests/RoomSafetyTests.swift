@@ -775,8 +775,8 @@ final class RoomSafetyTests: XCTestCase {
 
     func test_block_from_a_message_or_reply_sends_that_post_and_keeps_it_offline() async {
         let store = temporaryStore()
-        let api = FakeBlocksAPI(online: false)
-        let blocks = BlockList(account: "sub:a", store: store, client: api)
+        // Blocked with no way to the server yet; a later launch has one.
+        let blocks = BlockList(account: "sub:a", store: store, client: nil)
         let reply = RoomReply(id: "act-1", targetSequenceId: 3, authorId: "review-agent", text: "A reply",
                               createdAt: "2026-11-03T18:00:05.000000+00:00")
         let room = room(QuietRoom(replies: [reply]), blocks: blocks)
@@ -791,9 +791,9 @@ final class RoomSafetyTests: XCTestCase {
         ])
 
         // Kept on the phone with the post, and sent with it once the server can take it.
+        let api = FakeBlocksAPI(online: true)
         let relaunched = BlockList(account: "sub:a", store: store, client: api)
         XCTAssertEqual(relaunched.changes, blocks.changes)
-        api.online = true
         await relaunched.sync()
         XCTAssertEqual(api.references, [
             BlockReference(sessionId: "room_1", sequenceId: 2, replyId: nil),
