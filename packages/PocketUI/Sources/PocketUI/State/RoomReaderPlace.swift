@@ -39,6 +39,10 @@ public enum RoomReaderPlace {
         case endInView
         /// The list moved up from where it was at the bottom, and the end is out of view: the reader left the bottom.
         case leftBottom
+        /// The same, but not by the reader's hand (dragging the list, or its coast): it counts once a later reading
+        /// still shows it, on the next frame. SwiftUI lays a list out several times within one frame, and one pass can
+        /// show it a little up for a moment.
+        case mayHaveLeft
         /// The end is out of view while the list did not move up: a reader at the bottom follows it there.
         case endMovedAway
     }
@@ -72,6 +76,8 @@ public enum RoomReaderPlace {
         /// messages a second, and a reader taken for gone was never followed again. The reader moving the list
         /// (dragging it, or its coast) still leaves.
         public private(set) var endPushedDown = false
+        /// The last reading read showed the list moved up, not by the reader's hand (`Change.mayHaveLeft`).
+        public private(set) var leaveSeen = false
 
         public init(atBottom: Bool = true) {
             self.atBottom = atBottom
@@ -104,13 +110,20 @@ public enum RoomReaderPlace {
         /// What `reading` changes. `mayBeAtBottom` is false while the end in view is not the live room's bottom (a
         /// window further back) or a message the reader was taken to holds them.
         public mutating func read(_ reading: Reading, mayBeAtBottom: Bool = true, readerMoving: Bool = false) -> Change {
-            switch see(reading, readerMoving: readerMoving) {
+            let sight = see(reading, readerMoving: readerMoving)
+            let seenBefore = leaveSeen
+            leaveSeen = false
+            switch sight {
             case .endInView:
                 guard !atBottom, mayBeAtBottom else { return .none }
                 atBottom = true
                 return .endInView
             case .movedUp:
                 guard atBottom else { return .none }
+                guard readerMoving || seenBefore else {
+                    leaveSeen = true
+                    return .mayHaveLeft
+                }
                 atBottom = false
                 return .leftBottom
             case .endBelow:

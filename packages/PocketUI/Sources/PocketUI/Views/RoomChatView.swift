@@ -964,6 +964,9 @@ public struct RoomChatView: View {
             placeLands(true)
         case .leftBottom:
             placeLands(false)
+        case .mayHaveLeft:
+            // Not by the reader's hand: taken again on the next frame, and the reader leaves only if it still shows.
+            RoomNextFrame.run { recheckPlace(proxy) }
         case .endMovedAway:
             guard ProcessInfo.processInfo.systemUptime >= bottomWatch.easedFollowUntil else { return }
             followToBottom(proxy)

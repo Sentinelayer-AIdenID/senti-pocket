@@ -47,7 +47,9 @@ final class RoomReaderPlaceTests: XCTestCase {
         XCTAssertEqual(tracker.read(reading(9, offset: 1_000)), .none, "at the bottom already")
         XCTAssertEqual(tracker.bottomOffset, 1_000)
         XCTAssertEqual(tracker.read(reading(20, offset: 989)), .none, "still within the bottom")
-        XCTAssertEqual(tracker.read(reading(129, offset: 880)), .leftBottom)
+        XCTAssertEqual(tracker.read(reading(129, offset: 880)), .mayHaveLeft, "not by the reader's hand: held a frame")
+        XCTAssertTrue(tracker.atBottom)
+        XCTAssertEqual(tracker.read(reading(129, offset: 880)), .leftBottom, "still up on the next frame")
         XCTAssertFalse(tracker.atBottom)
         XCTAssertEqual(tracker.read(reading(400, offset: 609)), .none, "further up, already away")
     }
@@ -85,8 +87,24 @@ final class RoomReaderPlaceTests: XCTestCase {
 
         var resting = RoomReaderPlace.Tracker(atBottom: true)
         _ = resting.read(reading(9, offset: 1_000))
+        XCTAssertEqual(resting.read(reading(130, offset: 879)), .mayHaveLeft)
         XCTAssertEqual(resting.read(reading(130, offset: 879)), .leftBottom,
-                       "from the end in view, the list moving up is the reader, whatever moved it")
+                       "from the end in view, the list moving up and staying up is the reader, whatever moved it")
+    }
+
+    /// SwiftUI lays the list out several times within one frame, and one pass can show it a little up for a moment:
+    /// measured in a burst at 60 a second, the end in view at 8998.7, then 31 points up, then the end in view at 8999.7,
+    /// within 3 ms, and the reading taken between them took the reader at the bottom for gone. Not by the reader's
+    /// hand, the list must still be up on the next frame; by their hand (a drag, its coast) it leaves at once.
+    func test_a_leave_not_by_the_readers_hand_holds_for_a_frame() {
+        var tracker = RoomReaderPlace.Tracker(atBottom: true)
+        XCTAssertEqual(tracker.read(reading(9.33, offset: 8_998.667)), .none)
+        XCTAssertEqual(tracker.read(reading(40.67, offset: 8_967.333)), .mayHaveLeft, "one layout pass shows it up")
+        XCTAssertEqual(tracker.read(reading(8.33, offset: 8_999.667)), .none, "the next frame: at the end")
+        XCTAssertTrue(tracker.atBottom)
+        XCTAssertEqual(tracker.read(reading(60, offset: 8_949), readerMoving: true), .leftBottom,
+                       "the reader's drag leaves at once")
+        XCTAssertFalse(tracker.atBottom)
     }
 
     func test_the_end_coming_into_view_is_the_bottom_unless_the_room_says_otherwise() {
@@ -120,6 +138,8 @@ final class RoomReaderPlaceTests: XCTestCase {
             let change = tracker.read(last)
             if change != .none { changes.append("\(change) at \(String(format: "%.2f", base - offset))") }
         }
+        // The room takes the last reading again on the next frame (`Change.mayHaveLeft`).
+        if tracker.read(last) != .none { changes.append("again: \(tracker.atBottom)") }
         return (last, changes)
     }
 }
