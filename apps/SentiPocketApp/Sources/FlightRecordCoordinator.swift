@@ -181,7 +181,7 @@ final class FlightRecordCoordinator: ObservableObject {
         }
         .sorted { ($0.isWorking ? 0 : 1, -( $0.lastActivity?.timeIntervalSince1970 ?? 0)) < ($1.isWorking ? 0 : 1, -($1.lastActivity?.timeIntervalSince1970 ?? 0)) }
         let boxNames = Set(boxes.map { $0.name.lowercased() })
-        state = FlightRecordState(
+        let next = FlightRecordState(
             boxes: boxes,
             agents: agents.filter { !boxNames.contains($0.id.lowercased()) },
             people: people,
@@ -191,6 +191,7 @@ final class FlightRecordCoordinator: ObservableObject {
             totals: summary.flatMap(Self.totals),
             endedBoxNames: endedBoxNames
         )
+        if next != state { state = next }
     }
 
     /// The figures the panel shows: none for a room that never ran a box.

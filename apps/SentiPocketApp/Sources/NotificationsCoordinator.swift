@@ -126,6 +126,21 @@ final class NotificationsCoordinator: ObservableObject {
         pollTask = nil
     }
 
+    /// The bell's list is on screen. While it is, every read shows its time; as it opens, the time of the last read shows.
+    private var isShown = false
+
+    func listShown(_ shown: Bool) {
+        isShown = shown
+        if shown { publish(evenIfOnlyFresher: true) }
+    }
+
+    /// Reads the bell again unless it was read less than `age` seconds ago (the side panel opening: the bell polls on
+    /// its own while the app is in front).
+    func refresh(force: Bool = false, ifOlderThan age: TimeInterval) async {
+        if let updatedAt, now().timeIntervalSince(updatedAt) < age, failure == nil { return }
+        await refresh(force: force)
+    }
+
     /// Reads the bell. The poll skips it after an expired sign-in; opening the side panel or the bell (`force`) tries
     /// again, and a success brings the poll back. A failed read keeps the list and says it could not update.
     func refresh(force: Bool = false) async {
@@ -156,7 +171,10 @@ final class NotificationsCoordinator: ObservableObject {
             if notifications.isEmpty { failure = .network } else { couldNotUpdate = true }
         }
         isLoading = false
-        publish()
+        // A poll that found what the bell shows writes nothing while the bell's list is off screen: only its time would
+        // change, and the root, the side panel and the room under it would all draw again for a time nobody sees. A read
+        // someone asked for, or any read while the list is open, shows its time ("Updated N min ago" never drifts).
+        publish(evenIfOnlyFresher: force || isShown)
     }
 
     /// Marks one read and returns its destination, if it points into a room.
@@ -247,8 +265,8 @@ final class NotificationsCoordinator: ObservableObject {
         for notification in notifications where !notification.isRead { markRead(notification.id) }
     }
 
-    private func publish() {
-        state = NotificationsPresentationState(
+    private func publish(evenIfOnlyFresher: Bool = true) {
+        let next = NotificationsPresentationState(
             rows: notifications.map { notification in
                 let link = notification.link ?? (notification.sessionId.isEmpty ? nil : SentiLink(sessionId: notification.sessionId))
                 return NotificationRow(
@@ -267,5 +285,9 @@ final class NotificationsCoordinator: ObservableObject {
             updatedAt: updatedAt,
             couldNotUpdate: couldNotUpdate
         )
+        guard next != state else { return }
+        if !evenIfOnlyFresher, next.unread == state.unread, next.earlier == state.earlier, next.isLoading == state.isLoading,
+           next.failure == state.failure, next.couldNotUpdate == state.couldNotUpdate { return }
+        state = next
     }
 }

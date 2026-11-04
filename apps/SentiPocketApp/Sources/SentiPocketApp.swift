@@ -126,7 +126,9 @@ struct SentiPocketApp: App {
 
     @ViewBuilder private var rootView: some View {
         #if DEBUG
-        if AgentChatPreview.isRequested {
+        if RootPreview.isRequested {
+            RootPreview.rootView(whisperModel: whisperModel, incomingLinks: incomingLinks)
+        } else if AgentChatPreview.isRequested {
             AgentChatPreview.rootView
         } else if RoomPreview.isRequested {
             RoomPreview.rootView
@@ -217,6 +219,99 @@ struct SentiPocketApp: App {
     #endif
 }
 
+/// What the signed-in app reads and writes through: the Senti API as you in the app; scripted rooms and people in the
+/// DEBUG root preview (`RootPreview`), which hosts this same root, its side panel and its rooms.
+struct RootServices {
+    var sessions: any SessionTransport
+    var room: any RoomTransport
+    var tickets: any RoomTicketsTransport
+    var admissions: any RoomAdmissionsTransport
+    var search: any RoomSearching
+    var notifications: any NotificationsTransport
+    var notificationMarker: (any NotificationReadMarking)?
+    var callLog: any CallLogTransport
+    var waiting: any WaitingTransport
+    var checkpoints: any CheckpointTransport
+    var directMessages: any DirectMessaging
+    var roomFolders: any RoomFoldersServing
+    var admissionDecider: any AdmissionDeciding
+    var sender: any RoomMessageSending
+    var actionSender: any RoomActionSending
+    var ticketWriter: any RoomTicketWriting
+    var ticketLeases: any TicketLeaseStoring
+    var ticketExtras: any RoomTicketExtrasReading
+    var identity: any AccountIdentityProviding
+    var receipts: any RoomReceiptsClient
+    var readMarker: any RoomReadMarking
+    /// Apple push for this phone: the app registers it; a preview never does.
+    var registersPush = true
+
+    /// The Senti API as you.
+    static func live() -> RootServices {
+        let apiURL = GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_API_URL", "SENTI_GATEWAY_URL"])
+        let transport = HTTPSessionTransport(
+            apiBaseURL: apiURL,
+            urlSession: SentiHTTPTransportPolicy.protectedReadSession,
+            streamingSession: SentiHTTPTransportPolicy.roomStreamSession,
+            tokenProvider: { SessionTokenStore.load() }
+        )
+        // Typed room messages go straight to the Senti API as you, like the web; the gateway's confirm-and-receipt
+        // flow stays for AI-drafted writes (the Pocket tab and voice replies).
+        let sender = HTTPRoomMessageSender(apiBaseURL: apiURL)
+        return RootServices(
+            sessions: transport,
+            room: transport,
+            tickets: transport,
+            admissions: transport,
+            search: transport,
+            notifications: transport,
+            notificationMarker: HTTPNotificationReadMarker(apiBaseURL: apiURL),
+            callLog: transport,
+            waiting: transport,
+            checkpoints: HTTPCheckpointTransport(
+                gatewayBaseURL: GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_GATEWAY_URL"]),
+                urlSession: SentiHTTPTransportPolicy.checkpointSession,
+                tokenProvider: { SessionTokenStore.load() }
+            ),
+            // Yours alone, as you: no cache, no cookies, the bearer per request.
+            directMessages: HTTPDirectMessagesClient(apiBaseURL: apiURL,
+                                                     urlSession: SentiHTTPTransportPolicy.protectedReadSession,
+                                                     tokenProvider: { SessionTokenStore.load() }),
+            roomFolders: HTTPRoomFoldersClient(apiBaseURL: apiURL, urlSession: SentiHTTPTransportPolicy.protectedReadSession,
+                                               tokenProvider: { SessionTokenStore.load() }),
+            admissionDecider: HTTPAdmissionDecider(apiBaseURL: apiURL),
+            sender: sender,
+            actionSender: HTTPRoomActionSender(apiBaseURL: apiURL),
+            // Ticket writes as you, like the web; the lease a claim returns is kept in the Keychain to release it.
+            ticketWriter: HTTPRoomTicketWriter(apiBaseURL: apiURL),
+            ticketLeases: KeychainTicketLeaseStore(),
+            ticketExtras: HTTPRoomTicketExtras(apiBaseURL: apiURL),
+            identity: HTTPAccountIdentity(apiBaseURL: apiURL),
+            // Read receipts and presence, as yourself, like the web.
+            receipts: HTTPRoomReceipts(apiBaseURL: apiURL),
+            readMarker: HTTPRoomReadMarker(apiBaseURL: apiURL)
+        )
+    }
+}
+
+/// The room on screen, made again and drawn again only when what it is opened with changes: the room, its saved summary
+/// and whether direct messages are on. The root draws again for every change of the room list, the bell, Waiting on you,
+/// folders and the side panel opening or closing; each of those made a new room screen (with a Keychain read) and drew
+/// the room's whole list again, under the side panel, while it opened (the freezes of build 2026110308 came right after
+/// the side panel opened, and with the bell's read landing over a room just opened).
+struct RoomScreenHost<Content: View>: View, Equatable {
+    let route: RoomRoute
+    let savedSummary: String?
+    let directMessagesOn: Bool
+    let content: () -> Content
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.route == rhs.route && lhs.savedSummary == rhs.savedSummary && lhs.directMessagesOn == rhs.directMessagesOn
+    }
+
+    var body: some View { content() }
+}
+
 /// Release composition of the authenticated repository-backed Sessions surface and the selected-session Pocket flow.
 /// When the open side panel reads its rooms again: open, with the app in front.
 struct DrawerPoll: Equatable {
@@ -225,7 +320,7 @@ struct DrawerPoll: Equatable {
     var runs: Bool { open && active }
 }
 
-private struct AuthenticatedRootView: View {
+struct AuthenticatedRootView: View {
     @StateObject private var sessions: SessionListCoordinator
     @StateObject private var details: SelectedSessionDetailCoordinator
     @StateObject private var checkpointPocket: CheckpointPocketCoordinator
@@ -254,6 +349,9 @@ private struct AuthenticatedRootView: View {
     @State private var drawerOpen = false
     /// How often the open side panel reads the rooms again, in nanoseconds.
     static let openDrawerRefresh: UInt64 = 15_000_000_000
+    /// What the side panel's open reads again: anything not read for this many seconds (the panel's own poll period;
+    /// the bell and Waiting on you poll on their own while the app is in front).
+    static let panelFreshness: TimeInterval = 15
     /// How far the room card moves right when the side panel opens; the panel fits in that space.
     private static let drawerWidth: CGFloat = 300
     @State private var presentsPocket = false
@@ -284,10 +382,14 @@ private struct AuthenticatedRootView: View {
     private let authenticationRevision: UInt64
     private let onSignOut: @MainActor () -> Void
 
+    /// Apple push for this phone is registered by the app's root, and never by a preview of it.
+    private let registersPush: Bool
+
     init(
         authenticationEpoch: UInt64,
         whisperModelCoordinator: WhisperModelProvisioningCoordinator,
         incomingLinks: IncomingLinkInbox,
+        services: RootServices = .live(),
         onSignOut: @escaping @MainActor () -> Void,
         onReauthenticationRequired: @escaping @MainActor @Sendable (UInt64) -> Void,
         onSessionSelectionChanged: @escaping @MainActor (UInt64, String?) -> Void = { _, _ in }
@@ -295,18 +397,7 @@ private struct AuthenticatedRootView: View {
         let guardedReauthentication: @MainActor @Sendable () -> Void = {
             onReauthenticationRequired(authenticationEpoch)
         }
-        let apiURL = GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_API_URL", "SENTI_GATEWAY_URL"])
-        let transport = HTTPSessionTransport(
-            apiBaseURL: apiURL,
-            urlSession: SentiHTTPTransportPolicy.protectedReadSession,
-            streamingSession: SentiHTTPTransportPolicy.roomStreamSession,
-            tokenProvider: { SessionTokenStore.load() }
-        )
-        let checkpointTransport = HTTPCheckpointTransport(
-            gatewayBaseURL: GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_GATEWAY_URL"]),
-            urlSession: SentiHTTPTransportPolicy.checkpointSession,
-            tokenProvider: { SessionTokenStore.load() }
-        )
+        let checkpointTransport = services.checkpoints
         let revocationRelay = AuthenticatedSessionRevocationRelay(
             onReauthenticationRequired: guardedReauthentication
         )
@@ -324,7 +415,7 @@ private struct AuthenticatedRootView: View {
             }
         )
         let details = SelectedSessionDetailCoordinator(
-            transport: transport,
+            transport: services.sessions,
             // The signing gateway is not deployed and Release pins no signing key yet: checkpoints
             // open as the server holds them until it is.
             opensVerifiedCheckpoints: PocketGatewayTrust.verifiesBundles,
@@ -339,7 +430,7 @@ private struct AuthenticatedRootView: View {
             }
         )
         let sessions = SessionListCoordinator(
-            repository: SessionRepository(transport: transport),
+            repository: SessionRepository(transport: services.sessions),
             onReauthenticationRequired: {
                 revocationRelay.invalidateAuthentication()
             },
@@ -365,8 +456,8 @@ private struct AuthenticatedRootView: View {
         _checkpointNarrationRevocation = StateObject(wrappedValue: checkpointNarrationRevocation)
         _revocationRelay = StateObject(wrappedValue: revocationRelay)
         let notifications = NotificationsCoordinator(
-            transport: transport,
-            marker: HTTPNotificationReadMarker(apiBaseURL: apiURL),
+            transport: services.notifications,
+            marker: services.notificationMarker,
             roomTitle: { sessionId in
                 sessions.state.rows.first { UTF8ExactIdentity.matches($0.sessionId, sessionId) }?.title
             },
@@ -374,46 +465,40 @@ private struct AuthenticatedRootView: View {
         )
         _notifications = StateObject(wrappedValue: notifications)
         _callLog = StateObject(wrappedValue: CallLogCoordinator(
-            transport: transport,
+            transport: services.callLog,
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
         ))
         _waiting = StateObject(wrappedValue: WaitingOnYouCoordinator(
-            transport: transport,
-            sender: HTTPRoomMessageSender(apiBaseURL: apiURL),
+            transport: services.waiting,
+            sender: services.sender,
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
         ))
-        // Yours alone, as you: no cache, no cookies, the bearer per request.
         _directMessages = StateObject(wrappedValue: DirectMessagesCenter(
-            client: HTTPDirectMessagesClient(apiBaseURL: apiURL, urlSession: SentiHTTPTransportPolicy.protectedReadSession,
-                                             tokenProvider: { SessionTokenStore.load() }),
+            client: services.directMessages,
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
         ))
         _roomFolders = StateObject(wrappedValue: RoomFoldersCenter(
-            client: HTTPRoomFoldersClient(apiBaseURL: apiURL, urlSession: SentiHTTPTransportPolicy.protectedReadSession,
-                                          tokenProvider: { SessionTokenStore.load() }),
+            client: services.roomFolders,
             // Where each room is filed is the room list's: it is read again after every change.
             onRoomsChanged: { sessions.send(.refreshSessions) },
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
         ))
         _whisperModelCoordinator = ObservedObject(wrappedValue: whisperModelCoordinator)
         _incomingLinks = ObservedObject(wrappedValue: incomingLinks)
-        self.roomTransport = transport
-        self.ticketsTransport = transport
-        self.admissionsTransport = transport
-        self.admissionDecider = HTTPAdmissionDecider(apiBaseURL: apiURL)
-        // Typed room messages go straight to the Senti API as you, like the web; the gateway's confirm-and-receipt
-        // flow stays for AI-drafted writes (the Pocket tab and voice replies).
-        self.roomSender = HTTPRoomMessageSender(apiBaseURL: apiURL)
-        self.roomActionSender = HTTPRoomActionSender(apiBaseURL: apiURL)
-        // Ticket writes as you, like the web; the lease a claim returns is kept in the Keychain to release it later.
-        self.ticketWriter = HTTPRoomTicketWriter(apiBaseURL: apiURL)
-        self.ticketLeases = KeychainTicketLeaseStore()
-        self.ticketExtras = HTTPRoomTicketExtras(apiBaseURL: apiURL)
-        self.accountIdentity = HTTPAccountIdentity(apiBaseURL: apiURL)
-        // Read receipts and presence, as yourself, like the web.
-        self.roomReceipts = HTTPRoomReceipts(apiBaseURL: apiURL)
-        self.roomSearch = transport
-        self.roomReadMarker = HTTPRoomReadMarker(apiBaseURL: apiURL)
+        self.roomTransport = services.room
+        self.ticketsTransport = services.tickets
+        self.admissionsTransport = services.admissions
+        self.admissionDecider = services.admissionDecider
+        self.roomSender = services.sender
+        self.roomActionSender = services.actionSender
+        self.ticketWriter = services.ticketWriter
+        self.ticketLeases = services.ticketLeases
+        self.ticketExtras = services.ticketExtras
+        self.accountIdentity = services.identity
+        self.roomReceipts = services.receipts
+        self.roomSearch = services.search
+        self.roomReadMarker = services.readMarker
+        self.registersPush = services.registersPush
         self.authenticationRevision = authenticationEpoch
         self.onSignOut = onSignOut
     }
@@ -426,6 +511,9 @@ private struct AuthenticatedRootView: View {
     }
 
     var body: some View {
+        #if DEBUG
+        let _ = RootPreview.meter.rootBodyRan()
+        #endif
         ZStack(alignment: .leading) {
             // The side panel sits underneath; opening it pushes the room aside as a card (Carter #55006).
             // The panel ends before the room card begins, so its right edge (unread counts, See all) is never under it.
@@ -500,15 +588,15 @@ private struct AuthenticatedRootView: View {
         // The logo at launch, while your rooms load underneath (Carter, #55287).
         .overlay { LaunchSplash(isReady: roomListSettled) }
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: drawerOpen)
-        // Opening the side panel reads the bell, so its count is never older than the panel; and the rooms, so who is
-        // online and their unread badges are not either.
+        // Opening the side panel reads what it shows that was not read lately: the bell, Waiting on you, whether folders
+        // and direct messages are on, and your folders, so no count is older than `panelFreshness`. The rooms are read
+        // once, at once, by the panel's own poll below (a second read here was the same request again).
         .onChange(of: drawerOpen) { open in
-            if open { Task { await notifications.refresh(force: true) } }
-            if open { Task { await waiting.refresh() } }
-            if open { sessions.send(.refreshSessions) }
-            // Whether folders and direct messages are on, and your folders, as the panel opens.
-            if open { Task { await roomFolders.refresh() } }
-            if open { Task { await directMessages.refresh() } }
+            guard open else { return }
+            Task { await notifications.refresh(force: true, ifOlderThan: Self.panelFreshness) }
+            Task { await waiting.refresh(ifOlderThan: Self.panelFreshness) }
+            Task { await roomFolders.refresh(ifOlderThan: Self.panelFreshness) }
+            Task { await directMessages.refresh(ifOlderThan: Self.panelFreshness) }
         }
         // While the side panel stays open its rooms keep up: a message that arrives in another room shows its unread
         // badge without closing and opening the panel again (Carter, #61188). Only with the app in front, as the bell's
@@ -525,6 +613,22 @@ private struct AuthenticatedRootView: View {
             }
         }
         .preferredColorScheme(theme.wrappedValue.colorScheme)
+        #if DEBUG
+        // The root preview's side panel opens and closes on a signal, so a profile of it has no accessibility client
+        // tapping (each tap of a UI test reads the screen's whole accessibility tree first).
+        .onReceive(RootPreview.drawerRequests) { open in drawerOpen = open }
+        .onAppear {
+            guard RootPreview.isRequested else { return }
+            let meter = RootPreview.meter
+            meter.watch("sessions", sessions)
+            meter.watch("notifications", notifications)
+            meter.watch("waiting", waiting)
+            meter.watch("directMessages", directMessages)
+            meter.watch("roomFolders", roomFolders)
+            meter.watch("details", details)
+            meter.watch("messageReader", messageReader)
+        }
+        #endif
         .sheet(isPresented: $presentsPocket) {
             SelectedSessionPocketView(
                 sessions: sessions,
@@ -570,6 +674,8 @@ private struct AuthenticatedRootView: View {
                     presentsNotifications = false
                 }
             }
+            .onAppear { notifications.listShown(true) }
+            .onDisappear { notifications.listShown(false) }
         }
         .sheet(isPresented: $presentsCallLog) {
             CallLogView(state: callLog.state, readingId: readingCallId) { intent in
@@ -676,7 +782,7 @@ private struct AuthenticatedRootView: View {
             RoomCallDesk.shared.openRoom = { [weak incomingLinks] sessionId in
                 incomingLinks?.receive(SentiLink(sessionId: sessionId))
             }
-            Task { await PushRegistrar.shared.start() }
+            if registersPush { Task { await PushRegistrar.shared.start() } }
             openPendingLinkIfReady()
         }
         .onDisappear {
@@ -883,8 +989,17 @@ private struct AuthenticatedRootView: View {
         )
     }
 
-    @ViewBuilder
+    /// The room on screen, made and drawn again only when what it is opened with changes (`RoomScreenHost`).
     private func roomScreen(_ route: RoomRoute) -> some View {
+        let savedSummary = sessions.state.rows.first { UTF8ExactIdentity.matches($0.sessionId, route.sessionId) }?.summary
+        let direct = directContext
+        return RoomScreenHost(route: route, savedSummary: savedSummary, directMessagesOn: direct != nil) {
+            roomChatScreen(route, savedSummary: savedSummary, direct: direct)
+        }
+        .equatable()
+    }
+
+    private func roomChatScreen(_ route: RoomRoute, savedSummary: String?, direct: RoomDirectContext?) -> some View {
         RoomChatScreen(
             route: route,
             transport: roomTransport,
@@ -910,11 +1025,11 @@ private struct AuthenticatedRootView: View {
             reader: messageReader,
             onRenamed: { sessions.send(.refreshSessions) },
             // What the room list has of the room's summary, for a member who reads it without making one.
-            savedSummary: sessions.state.rows.first { UTF8ExactIdentity.matches($0.sessionId, route.sessionId) }?.summary,
+            savedSummary: savedSummary,
             onRead: { sessionId, sequence, caughtUp in
                 sessions.noteRead(sessionId: sessionId, through: sequence, caughtUp: caughtUp)
             },
-            direct: directContext,
+            direct: direct,
             onReauthenticationRequired: invalidateProtectedAuthentication
         )
     }
