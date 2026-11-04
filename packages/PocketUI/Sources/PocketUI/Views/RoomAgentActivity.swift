@@ -133,10 +133,15 @@ struct RoomWorkingRows: View {
     private func steps(of session: RoomWorkSession) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             ForEach(Self.allSteps(session, record: boxSteps[session.id] ?? [])) { step in
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                // At the largest text sizes the time goes above its step, so neither breaks mid-word.
+                let layout = typeSize.isAccessibilitySize
+                    ? AnyLayout(VStackLayout(alignment: .leading, spacing: 1))
+                    : AnyLayout(HStackLayout(alignment: .firstTextBaseline, spacing: 6))
+                layout {
                     if let at = step.at {
                         Text(at, format: .dateTime.hour().minute().second())
                             .monospacedDigit()
+                            .lineLimit(1)
                     }
                     Text(step.text)
                         .foregroundStyle(PocketPalette.textPrimary)
@@ -146,7 +151,7 @@ struct RoomWorkingRows: View {
                 .foregroundStyle(PocketPalette.textSecondary)
             }
         }
-        .padding(.leading, 22)
+        .padding(.leading, typeSize.isAccessibilitySize ? 10 : 22)
         .padding(.trailing, 10)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("pocket.room.working.\(sequenceId).\(session.id).steps")
