@@ -204,15 +204,23 @@ extension View {
 public struct RoomAIConsentSheet: View {
     private let onAllow: () -> Void
     private let onNotNow: () -> Void
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     public init(onAllow: @escaping () -> Void, onNotNow: @escaping () -> Void) {
         self.onAllow = onAllow
         self.onNotNow = onNotNow
     }
 
+    /// At the accessibility text sizes the buttons below the words would leave them no room: the sheet opens at full
+    /// height and OK and Not now come after the words, so what is shared is read before it is agreed to.
+    public static func wordsFirst(at size: DynamicTypeSize) -> Bool {
+        size.isAccessibilitySize
+    }
+
     public var body: some View {
+        let wordsFirst = Self.wordsFirst(at: typeSize)
         VStack(alignment: .leading, spacing: 14) {
-            // Scrolls, so the words are never cut off at a large text size; the buttons stay in reach below.
+            // Scrolls, so the words are never cut off at a large text size.
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     Image(systemName: "cpu")
@@ -231,27 +239,32 @@ public struct RoomAIConsentSheet: View {
                         .font(.footnote)
                         .foregroundStyle(PocketPalette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
+                    if wordsFirst { answers }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            Button(action: onAllow) {
-                Text("OK").frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .tint(PocketPalette.accent)
-            .accessibilityIdentifier("pocket.aiConsent.ok")
-            Button(action: onNotNow) {
-                Text("Not now").frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.large)
-            .accessibilityIdentifier("pocket.aiConsent.notNow")
+            if !wordsFirst { answers }
         }
         .padding(24)
-        .presentationDetents([.medium, .large])
+        .presentationDetents(wordsFirst ? [.large] : [.medium, .large])
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("pocket.aiConsent")
+    }
+
+    @ViewBuilder private var answers: some View {
+        Button(action: onAllow) {
+            Text("OK").frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .tint(PocketPalette.accent)
+        .accessibilityIdentifier("pocket.aiConsent.ok")
+        Button(action: onNotNow) {
+            Text("Not now").frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.large)
+        .accessibilityIdentifier("pocket.aiConsent.notNow")
     }
 }
 

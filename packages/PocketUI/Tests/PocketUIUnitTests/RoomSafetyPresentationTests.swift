@@ -1,6 +1,9 @@
 import Foundation
 import XCTest
 @testable import PocketUI
+#if canImport(SwiftUI)
+import SwiftUI
+#endif
 
 /// Report, Block and the AI consent, as the room shows them (App Store guidelines 1.2 and 5.1.2(i)).
 final class RoomSafetyPresentationTests: XCTestCase {
@@ -265,6 +268,17 @@ final class RoomSafetyPresentationTests: XCTestCase {
         XCTAssertTrue(RoomBlocking.byId.contains("Blocking a person doesn't hide their agents' messages"))
         XCTAssertTrue(RoomBlocking.byId.contains("blocking one agent id doesn't block the same agent under another id"))
     }
+
+    #if canImport(SwiftUI)
+    func test_at_the_accessibility_text_sizes_the_consent_words_come_before_ok() {
+        for size in [DynamicTypeSize.accessibility1, .accessibility3, .accessibility5] {
+            XCTAssertTrue(RoomAIConsentSheet.wordsFirst(at: size), "\(size): the words are never squeezed out")
+        }
+        for size in [DynamicTypeSize.xSmall, .large, .xxxLarge] {
+            XCTAssertFalse(RoomAIConsentSheet.wordsFirst(at: size), "\(size): OK and Not now stay in reach below")
+        }
+    }
+    #endif
 
     func test_block_names_the_post_it_was_chosen_on() {
         let state = RoomChatPresentationState(sessionId: "room", title: "Room", messages: messages,
