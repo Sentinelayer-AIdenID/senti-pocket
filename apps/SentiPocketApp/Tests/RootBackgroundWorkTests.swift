@@ -176,6 +176,18 @@ final class RootBackgroundWorkTests: XCTestCase {
         let arrival = RenderTrace.snapshot().draws - drawn
         print("BGAUDIT arrival drew \(arrival) rows (the room had drawn \(drawn))")
         XCTAssertLessThanOrEqual(arrival, 3, "an arrival draws the new row, not every row the list has made")
+        // What a row shows still changes it: an edit, a reaction, a receipt draws that row again.
+        let beforeEdit = RenderTrace.snapshot().draws
+        var edited = (1...41).map(input)
+        edited[40] = RoomChatMessageInput(id: "evt-41", sequenceId: 41, kind: .message, authorId: "review-agent",
+                                          authorName: "review-agent", isHuman: false, text: "Message 41, edited.",
+                                          timestamp: edited[40].timestamp, isEdited: true, date: edited[40].date)
+        room.state = RoomChatPresentationState(sessionId: "arrivals", title: "Room", messages: edited,
+                                               ownAuthorIds: ["human-alex"], connection: .live,
+                                               composer: RoomComposerState(canPost: true, disabledReason: nil),
+                                               canReact: true)
+        pump(1.5)
+        XCTAssertGreaterThanOrEqual(RenderTrace.snapshot().draws - beforeEdit, 1, "the edited row is drawn again")
     }
 
     // MARK: - Helpers
