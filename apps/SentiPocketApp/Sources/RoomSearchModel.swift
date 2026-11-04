@@ -170,7 +170,8 @@ final class RoomSearchModel: ObservableObject {
                     return result.message?.authorId.lowercased() == author
                 }
                 self.rows += kept.filter { seen.insert($0.sequenceId).inserted }.map { result in
-                    Self.row(result, hidesText: result.message.map { self.isBlocked($0.authorId) } ?? false)
+                    Self.row(result, query: query,
+                             hidesText: result.message.map { self.isBlocked($0.authorId) } ?? false)
                 }
                 self.nextBeforeSequence = page.nextBeforeSequence
                 self.isSearching = false
@@ -210,18 +211,14 @@ final class RoomSearchModel: ObservableObject {
         )
     }
 
-    nonisolated static func row(_ result: RoomSearchResult) -> RoomSearchRow {
-        row(result, hidesText: false)
-    }
-
-    /// A match; one from someone you blocked shows the room's one line instead of their words.
-    nonisolated static func row(_ result: RoomSearchResult, hidesText: Bool) -> RoomSearchRow {
+    /// A match as one line of text; one from someone you blocked shows the room's one line instead of their words.
+    nonisolated static func row(_ result: RoomSearchResult, query: String = "", hidesText: Bool = false) -> RoomSearchRow {
         RoomSearchRow(
             sequenceId: result.sequenceId,
             author: result.message?.authorName,
             isHuman: result.message?.isHuman ?? false,
             date: result.message.flatMap { ParsedSessionTimestamp($0.timestamp).date },
-            snippet: hidesText ? RoomBlocking.hiddenLine : result.snippet
+            snippet: hidesText ? RoomBlocking.hiddenLine : RoomSearchPresentationState.plainSnippet(result.snippet, query: query)
         )
     }
 }

@@ -227,6 +227,9 @@ final class InlineReplyRowsTests: XCTestCase {
             return nil
         }
         XCTAssertEqual(rows.first { $0.id == "reply-x" }?.replyContext?.hasSuffix("…"), true, "only the first line, kept short")
+        let parent = input("p", seq: 5, at: 0, text: "\n\n  Design packet: continuity  \n" + String(repeating: "more line\n", count: 3_000))
+        XCTAssertEqual(RoomChatPresentationState.replyContext(for: parent), "\(parent.authorName): Design packet: continuity",
+                       "the first line with words, read only that far")
         XCTAssertNil(rows.first { $0.id == "reply-y" }?.replyContext)
         XCTAssertEqual(state.lastMessageId, "reply-y", "a reply can be the newest row, so the view follows it")
     }

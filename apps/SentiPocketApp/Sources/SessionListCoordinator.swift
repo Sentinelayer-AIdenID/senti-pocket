@@ -70,9 +70,12 @@ final class SessionListCoordinator: ObservableObject {
         }
     }
 
+    /// `quietly`: the open side panel's own re-read every few seconds. It never starts over a read still going (so a
+    /// slow link still lands one), and a malformed answer keeps the room you are in and the rows you have.
     @discardableResult
-    func refreshSessions() -> Task<Void, Never> {
-        run(recounts: true) { repository in
+    func refreshSessions(quietly: Bool = false) -> Task<Void, Never> {
+        if quietly, let operation { return operation }
+        return run(recounts: true, quietly: quietly) { repository in
             try await repository.refreshSessions()
         }
     }
@@ -134,6 +137,7 @@ final class SessionListCoordinator: ObservableObject {
 
     private func run(
         recounts: Bool = false,
+        quietly: Bool = false,
         _ request: @escaping @Sendable (SessionRepository) async throws -> SessionListSnapshot
     ) -> Task<Void, Never> {
         operation?.cancel()
@@ -175,7 +179,7 @@ final class SessionListCoordinator: ObservableObject {
                 guard let self,
                       !Task.isCancelled,
                       self.revision == operationRevision else { return }
-                await self.apply(error)
+                await self.apply(error, quietly: quietly)
                 if self.revision == operationRevision {
                     self.operation = nil
                 }
@@ -185,7 +189,7 @@ final class SessionListCoordinator: ObservableObject {
         return task
     }
 
-    private func apply(_ error: Error) async {
+    private func apply(_ error: Error, quietly: Bool = false) async {
         let transportError = error as? SessionTransportError
 
         switch transportError {
@@ -223,6 +227,13 @@ final class SessionListCoordinator: ObservableObject {
             )
 
         case .invalidRequest, .invalidResponse, .invalidData:
+            guard !quietly else {
+                // The panel's own re-read: its malformed answer is never shown; the last good rows stay, as cached,
+                // and so does the room you are in. A refresh you asked for still fails closed, below.
+                if let snapshot { provenance = .cache(cachedAt: snapshot.loadedAt, authenticationExpired: false) }
+                state = render(snapshot: snapshot, provenance: provenance, isRefreshing: false, failure: .service)
+                return
+            }
             setSelectedSession(nil)
             state = render(
                 snapshot: snapshot,

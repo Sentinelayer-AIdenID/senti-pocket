@@ -208,6 +208,13 @@ struct SentiPocketApp: App {
 }
 
 /// Release composition of the authenticated repository-backed Sessions surface and the selected-session Pocket flow.
+/// When the open side panel reads its rooms again: open, with the app in front.
+struct DrawerPoll: Equatable {
+    let open: Bool
+    let active: Bool
+    var runs: Bool { open && active }
+}
+
 private struct AuthenticatedRootView: View {
     @StateObject private var sessions: SessionListCoordinator
     @StateObject private var details: SelectedSessionDetailCoordinator
@@ -239,6 +246,8 @@ private struct AuthenticatedRootView: View {
     @State private var currentRoom: RoomRoute?
     @State private var roomPath: [RoomRoute] = []
     @State private var drawerOpen = false
+    /// How often the open side panel reads the rooms again, in nanoseconds.
+    static let openDrawerRefresh: UInt64 = 15_000_000_000
     /// How far the room card moves right when the side panel opens; the panel fits in that space.
     private static let drawerWidth: CGFloat = 300
     @State private var presentsPocket = false
@@ -480,6 +489,20 @@ private struct AuthenticatedRootView: View {
             if open { Task { await notifications.refresh(force: true) } }
             if open { Task { await waiting.refresh() } }
             if open { sessions.send(.refreshSessions) }
+        }
+        // While the side panel stays open its rooms keep up: a message that arrives in another room shows its unread
+        // badge without closing and opening the panel again (Carter, #61188). Only with the app in front, as the bell's
+        // and Waiting on you's polling, and never over a read still going.
+        .task(id: DrawerPoll(open: drawerOpen, active: rootScenePhase == .active)) {
+            guard DrawerPoll(open: drawerOpen, active: rootScenePhase == .active).runs else { return }
+            // Back in front with the panel open: read at once, not 15 s later (opening it reads too, and a quiet
+            // read never starts over that one).
+            sessions.refreshSessions(quietly: true)
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: Self.openDrawerRefresh)
+                guard !Task.isCancelled, drawerOpen, rootScenePhase == .active else { return }
+                sessions.refreshSessions(quietly: true)
+            }
         }
         .preferredColorScheme(theme.wrappedValue.colorScheme)
         .sheet(isPresented: $presentsPocket) {
@@ -816,6 +839,11 @@ private struct AuthenticatedRootView: View {
             admissionDecider: admissionDecider,
             openRoom: { link in open(link) },
             openChildRoom: { child in roomPath.append(child) },
+            // A New agent's new chat: the room list reads it, and it opens as the room on screen, as a new room does.
+            openNewRoom: { route in
+                sessions.send(.refreshSessions)
+                show(route)
+            },
             receipts: roomReceipts,
             search: roomSearch,
             readMarker: roomReadMarker,

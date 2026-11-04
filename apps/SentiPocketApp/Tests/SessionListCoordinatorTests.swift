@@ -214,6 +214,42 @@ final class SessionListCoordinatorTests: XCTestCase {
         }
     }
 
+    /// Review of #311: the open panel's re-read never starts over one still going, so a slow link still lands one.
+    func test_a_quiet_refresh_never_starts_over_a_read_still_going() async throws {
+        let coordinator = makeCoordinator([.page(try page(ids: ["room-1"], nextCursor: nil, hasMore: false))])
+        let first = coordinator.refreshSessions()
+        let second = coordinator.refreshSessions(quietly: true)
+        XCTAssertEqual(first, second, "the read already going is the answer")
+        await second.value
+        XCTAssertEqual(coordinator.state.rows.map(\.sessionId), ["room-1"])
+        XCTAssertNil(coordinator.state.failure, "no second request (the transport had one answer)")
+    }
+
+    /// Review of #311: a malformed answer to the panel's re-read keeps the room you are in; one you asked for does not.
+    func test_a_quiet_refresh_with_a_malformed_answer_keeps_the_room_you_are_in() async throws {
+        let coordinator = makeCoordinator([
+            .page(try page(ids: ["room-1"], nextCursor: nil, hasMore: false)),
+            .failure(.invalidResponse),
+            .failure(.invalidResponse)
+        ])
+        await coordinator.start()?.value
+        coordinator.send(.selectSession(sessionId: "room-1"))
+        await coordinator.refreshSessions(quietly: true).value
+        XCTAssertEqual(coordinator.selectedSessionId, "room-1")
+        XCTAssertEqual(coordinator.state.rows.map(\.sessionId), ["room-1"])
+        await coordinator.refreshSessions().value
+        XCTAssertNil(coordinator.selectedSessionId, "an asked-for refresh still clears it, as before")
+    }
+
+    /// Review of #311: the panel re-reads only while it is open and the app is in front.
+    func test_the_open_panel_reads_its_rooms_only_with_the_app_in_front() {
+        XCTAssertTrue(DrawerPoll(open: true, active: true).runs)
+        XCTAssertFalse(DrawerPoll(open: true, active: false).runs, "background audio or a call: no reads")
+        XCTAssertFalse(DrawerPoll(open: false, active: true).runs)
+        XCTAssertNotEqual(DrawerPoll(open: true, active: true), DrawerPoll(open: true, active: false),
+                          "a change of either restarts the loop")
+    }
+
     private func makeCoordinator(
         _ responses: [SessionListMockResponse],
         onReauthenticationRequired: @escaping @MainActor () -> Void = {},
