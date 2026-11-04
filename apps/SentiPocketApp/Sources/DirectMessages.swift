@@ -211,29 +211,53 @@ final class RoomProfileModel: ObservableObject {
     }
 }
 
-/// The card a tapped avatar opens, over the room.
+/// The profile a tapped avatar or name opens, over the room (Carter, 11-04): the card on top (Message where direct
+/// messages are on and reach them, Block where the app has it), how their posts come in, a box's live steps and its
+/// Flight record, and their messages, paged, each one a jump back into the room.
 struct RoomProfileSheet: View {
     let roomId: String
-    let context: RoomDirectContext
+    /// Direct messages, where they are on; nil offers no Message.
+    let context: RoomDirectContext?
     /// Block, where the app has a block flow (#312); none yet, so the card shows no Block.
     let onBlock: (() -> Void)?
+    /// A box's flight record entry, while it runs: its live steps.
+    let box: FlightRecordState.Box?
+    /// A message tapped in the list: the sheet closes and the room brings it into view.
+    let onOpenMessage: (Int64) -> Void
+    /// The room's Flight record, for a box.
+    let onOpenFlight: (() -> Void)?
     let onClose: () -> Void
     @StateObject private var model: RoomProfileModel
+    @StateObject private var messages: RoomMemberMessagesModel
 
-    init(target: RoomProfileTarget, roomId: String, sharedRoom: String?, canMessage: Bool, context: RoomDirectContext,
-         onBlock: (() -> Void)? = nil, onClose: @escaping () -> Void) {
+    init(target: RoomProfileTarget, roomId: String, sharedRoom: String?, canMessage: Bool, context: RoomDirectContext?,
+         messages reader: (any RoomAuthorMessagesReading)? = nil, box: FlightRecordState.Box? = nil,
+         onBlock: (() -> Void)? = nil, onOpenMessage: @escaping (Int64) -> Void = { _ in },
+         onOpenFlight: (() -> Void)? = nil, onReauthenticationRequired: @escaping @MainActor () -> Void = {},
+         onClose: @escaping () -> Void) {
         self.roomId = roomId
         self.context = context
         self.onBlock = onBlock
+        self.box = box
+        self.onOpenMessage = onOpenMessage
+        self.onOpenFlight = onOpenFlight
         self.onClose = onClose
         _model = StateObject(wrappedValue: RoomProfileModel(target: target, sharedRoom: sharedRoom,
-                                                            canMessage: canMessage, canBlock: onBlock != nil))
+                                                            canMessage: canMessage && context != nil,
+                                                            canBlock: onBlock != nil))
+        _messages = StateObject(wrappedValue: RoomMemberMessagesModel(
+            sessionId: roomId, authorId: target.senderId, reader: reader,
+            onReauthenticationRequired: onReauthenticationRequired
+        ))
     }
 
     var body: some View {
-        RoomProfileCardView(
-            state: model.state,
+        RoomMemberSheetView(
+            card: model.state,
+            messages: messages.state,
+            box: box,
             onMessage: {
+                guard let context else { return }
                 Task {
                     guard let dm = await model.message(context, from: roomId) else { return }
                     CrashReporter.shared.note("direct message opened")
@@ -243,10 +267,21 @@ struct RoomProfileSheet: View {
                 }
             },
             onBlock: onBlock,
-            onClose: onClose
+            onClose: onClose,
+            onOpenMessage: { sequence in
+                CrashReporter.shared.note("profile message opened")
+                onOpenMessage(sequence)
+            },
+            onLoadMore: { Task { await messages.loadMore() } },
+            onRetry: { Task { await messages.loadMore() } },
+            onOpenFlight: onOpenFlight
         )
         .presentationDetents([.medium, .large])
-        .task { await model.loadSharedRooms(context) }
+        .task {
+            if let context { await model.loadSharedRooms(context) }
+        }
+        // The first page as the sheet opens; the rest as the list scrolls.
+        .task { await messages.loadMore() }
     }
 }
 
