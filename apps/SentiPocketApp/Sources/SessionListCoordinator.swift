@@ -227,7 +227,14 @@ final class SessionListCoordinator: ObservableObject {
             )
 
         case .invalidRequest, .invalidResponse, .invalidData:
-            if !quietly { setSelectedSession(nil) }
+            guard !quietly else {
+                // The panel's own re-read: its malformed answer is never shown; the last good rows stay, as cached,
+                // and so does the room you are in. A refresh you asked for still fails closed, below.
+                if let snapshot { provenance = .cache(cachedAt: snapshot.loadedAt, authenticationExpired: false) }
+                state = render(snapshot: snapshot, provenance: provenance, isRefreshing: false, failure: .service)
+                return
+            }
+            setSelectedSession(nil)
             state = render(
                 snapshot: snapshot,
                 provenance: provenance,
