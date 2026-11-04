@@ -167,12 +167,12 @@ final class RootBackgroundWorkTests: XCTestCase {
         window.rootViewController = UIHostingController(rootView: ArrivingRoomHost(room: room))
         window.makeKeyAndVisible()
         self.window = window
-        pump(3)
+        settleDrawing()
         let drawn = RenderTrace.snapshot().draws
         XCTAssertGreaterThan(drawn, 4, "the room drew its rows")
         // Rows the list made and keeps, as a reader who went up the room and came back leaves it.
         room.state = state(41)
-        pump(1.5)
+        settleDrawing()
         let arrival = RenderTrace.snapshot().draws - drawn
         print("BGAUDIT arrival drew \(arrival) rows (the room had drawn \(drawn))")
         XCTAssertLessThanOrEqual(arrival, 3, "an arrival draws the new row, not every row the list has made")
@@ -268,6 +268,22 @@ final class RootBackgroundWorkTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 2_000_000)
         }
         XCTFail("timed out waiting for: \(description)", file: file, line: line)
+    }
+
+    /// Runs the main run loop until no row has been drawn for a second (at most 15 s): the room has opened and scrolled
+    /// to its newest rows, or taken in what arrived, on a loaded machine too.
+    private func settleDrawing() {
+        let end = Date().addingTimeInterval(15)
+        var last = RenderTrace.snapshot().draws
+        var quietSince = Date()
+        while Date() < end, Date().timeIntervalSince(quietSince) < 1 {
+            pump(0.1)
+            let now = RenderTrace.snapshot().draws
+            if now != last {
+                last = now
+                quietSince = Date()
+            }
+        }
     }
 
     private func pump(_ seconds: TimeInterval) {
