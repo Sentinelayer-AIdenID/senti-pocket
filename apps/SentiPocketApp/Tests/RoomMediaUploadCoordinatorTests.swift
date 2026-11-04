@@ -56,6 +56,8 @@ private final class FakeUploader: RoomMediaUploading, @unchecked Sendable {
     private var _puts: [(file: URL, url: URL)] = []
     private var _completes: [String] = []
     private var _posts: [(text: String, ids: [String], clientId: String)] = []
+    private var _replies: [(target: RoomMediaReplyTarget, text: String?, ids: [String], key: String)] = []
+    private var _replyOutcome: RoomMediaReplyOutcome = .posted
     private var _deletes: [String] = []
     private var _failingPuts = 0
     private var _failingPosts = 0
@@ -111,6 +113,12 @@ private final class FakeUploader: RoomMediaUploading, @unchecked Sendable {
     var puts: [(file: URL, url: URL)] { locked { _puts } }
     var completes: [String] { locked { _completes } }
     var posts: [(text: String, ids: [String], clientId: String)] { locked { _posts } }
+    var replies: [(target: RoomMediaReplyTarget, text: String?, ids: [String], key: String)] { locked { _replies } }
+    /// What the API does with a reply's files: takes them, or (an API without reply attachments) does not.
+    var replyOutcome: RoomMediaReplyOutcome {
+        get { locked { _replyOutcome } }
+        set { locked { _replyOutcome = newValue } }
+    }
     var deletes: [String] { locked { _deletes } }
     var failingPuts: Int {
         get { locked { _failingPuts } }
@@ -258,6 +266,19 @@ private final class FakeUploader: RoomMediaUploading, @unchecked Sendable {
         log("post:\(clientId)")
         if let postError { throw postError }
         if fails { throw RoomSendError.retryable(retryAfterSeconds: nil) }
+    }
+
+    func postReply(sessionId: String, to target: RoomMediaReplyTarget, text: String?, attachments: [RoomMediaAttachment],
+                   idempotencyKey: String) async throws -> RoomMediaReplyOutcome {
+        await shake()
+        try? await postGate?.wait()
+        let outcome = locked { () -> RoomMediaReplyOutcome in
+            _replies.append((target, text, attachments.map(\.attachmentId), idempotencyKey))
+            return _replyOutcome
+        }
+        log("reply:\(idempotencyKey)")
+        if let postError { throw postError }
+        return outcome
     }
 }
 
@@ -1106,5 +1127,120 @@ final class RoomMediaUploadCoordinatorTests: XCTestCase {
         XCTAssertFalse(uploader.puts.contains { $0.url.lastPathComponent.hasSuffix(".pv") },
                        "an unlinked preview would show in the room as a photo of its own")
         XCTAssertEqual(uploader.completes, ["pm_test_000001"])
+    }
+
+    // MARK: - Replies with files (sentinelayer-api #1135)
+
+    /// The "+" in a thread or a swipe to reply: the tray goes as one reply in that thread, never as a room message, with
+    /// no words made up for a photo alone; its card goes once the thread has read it.
+    func test_a_reply_with_files_posts_to_its_thread() async throws {
+        let uploader = FakeUploader()
+        let media = coordinator(uploader)
+        var read: [Int64] = []
+        media.onReplyPosted = { target in read.append(target.sequenceId) }
+        media.add([try source("IMG_0001.jpg"), try source("spec.pdf")])
+        let target = RoomMediaReplyTarget(sequenceId: 42, replyId: "reply-1", name: "pat")
+        media.perform(.sendReply(text: "  ", to: target))
+        XCTAssertTrue(media.board.tray.isEmpty)
+        XCTAssertEqual(media.board.outgoing.first?.replyTo, target, "the card shows at once, in its thread")
+        let clientId = try XCTUnwrap(media.board.outgoing.first?.id)
+        await until("posted and read back", boards: [media.board]) { media.board.outgoing.isEmpty }
+        XCTAssertEqual(uploader.replies.count, 1)
+        XCTAssertEqual(uploader.replies.first?.target, target)
+        XCTAssertNil(uploader.replies.first?.text, "a reply of files alone carries no words")
+        XCTAssertEqual(uploader.replies.first?.ids, ["pm_test_000001", "pm_test_000002"])
+        XCTAssertEqual(uploader.replies.first?.key, RoomMediaUploadCoordinator.replyKey(clientId))
+        XCTAssertTrue(uploader.posts.isEmpty, "never a message in the room")
+        XCTAssertEqual(read, [42], "its thread reads it before the card goes")
+        XCTAssertTrue(uploader.deletes.isEmpty, "a posted reply's files belong to the room")
+        XCTAssertEqual(media.replyAttachments, .supported)
+    }
+
+    /// Pocket ahead of the API (or an API that refuses the field): the files are never dropped without a word. The card
+    /// says why and offers a new message; once known, the API is not asked again.
+    func test_old_server_fallback_offers_send_as_a_new_message() async throws {
+        let uploader = FakeUploader()
+        uploader.replyOutcome = .filesNotTaken(replyPosted: true)
+        let media = coordinator(uploader)
+        media.add([try source("IMG_0001.jpg")])
+        let target = RoomMediaReplyTarget(sequenceId: 42, name: "pat")
+        media.perform(.sendReply(text: "look", to: target))
+        let clientId = try XCTUnwrap(media.board.outgoing.first?.id)
+        await until("refused", boards: [media.board]) { media.board.outgoing.first?.offersSendAsMessage == true }
+        let card = try XCTUnwrap(media.board.outgoing.first)
+        XCTAssertTrue(card.offersSendAsMessage, "the files can go as a new message")
+        XCTAssertEqual(card.statusText, "Photos can't go in a reply yet")
+        XCTAssertFalse(card.canRetry, "the same reply would be refused again")
+        XCTAssertTrue(uploader.posts.isEmpty, "nothing goes to the room unasked")
+        XCTAssertTrue(uploader.deletes.isEmpty, "the files wait on the card")
+        XCTAssertEqual(media.replyAttachments, .unsupported)
+
+        media.perform(.sendAsMessage(clientId: clientId))
+        await until("sent as a message", uploaders: [uploader]) { uploader.posts.count == 1 }
+        XCTAssertEqual(uploader.posts.first?.ids, ["pm_test_000001"], "the same upload")
+        XCTAssertEqual(uploader.posts.first?.text, "Shared a photo.", "its words went in the reply already")
+        XCTAssertNotEqual(uploader.posts.first?.clientId, clientId, "a message of its own")
+        XCTAssertNil(media.board.outgoing.first?.replyTo, "a message in the room now")
+
+        // Known now: the next reply with files is not asked of the API, and its words go with the files.
+        media.add([try source("IMG_0002.jpg")])
+        media.perform(.sendReply(text: "and this", to: target))
+        await until("refused at once", boards: [media.board]) { media.board.outgoing.contains { $0.offersSendAsMessage } }
+        XCTAssertEqual(uploader.replies.count, 1, "the API is not asked again")
+        let second = try XCTUnwrap(media.board.outgoing.first { $0.offersSendAsMessage }?.id)
+        media.perform(.sendAsMessage(clientId: second))
+        await until("second message", uploaders: [uploader]) { uploader.posts.count == 2 }
+        XCTAssertEqual(uploader.posts.last?.text, "and this")
+        XCTAssertEqual(uploader.posts.last?.ids, ["pm_test_000002"])
+    }
+
+    /// Discarding a reply whose files the API refused takes them back on the server: nothing was posted. Where the API
+    /// took the reply itself, they are only let go: its answer cannot prove none is in the reply.
+    func test_a_refused_reply_discarded_takes_its_files_back_only_where_nothing_was_posted() async throws {
+        let uploader = FakeUploader()
+        uploader.replyOutcome = .filesNotTaken(replyPosted: false)
+        let media = coordinator(uploader)
+        media.add([try source("IMG_0001.jpg")])
+        media.perform(.sendReply(text: "", to: RoomMediaReplyTarget(sequenceId: 42, name: "pat")))
+        let clientId = try XCTUnwrap(media.board.outgoing.first?.id)
+        await until("refused", boards: [media.board]) { media.board.outgoing.first?.offersSendAsMessage == true }
+        media.perform(.cancel(clientId: clientId))
+        XCTAssertTrue(media.board.outgoing.isEmpty)
+        await until("deleted", uploaders: [uploader]) { uploader.deletes.contains("pm_test_000001") }
+
+        let older = FakeUploader()
+        older.replyOutcome = .filesNotTaken(replyPosted: true)
+        let room = coordinator(older, session: "room_2")
+        room.add([try source("IMG_0002.jpg")])
+        room.perform(.sendReply(text: "look", to: RoomMediaReplyTarget(sequenceId: 42, name: "pat")))
+        let second = try XCTUnwrap(room.board.outgoing.first?.id)
+        await until("taken without files", boards: [room.board]) { room.board.outgoing.first?.offersSendAsMessage == true }
+        room.perform(.cancel(clientId: second))
+        XCTAssertTrue(room.board.outgoing.isEmpty)
+        XCTAssertTrue(self.discarded.contains("IMG_0002.jpg"), "the phone's copy goes")
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(older.deletes.isEmpty, "nothing is taken back on the server")
+    }
+
+    func test_a_reply_restored_after_the_app_closes_goes_back_to_its_thread() async throws {
+        let uploader = FakeUploader()
+        uploader.failingPuts = 1
+        let media = coordinator(uploader)
+        media.add([try source("IMG_0001.jpg")])
+        let target = RoomMediaReplyTarget(sequenceId: 42, replyId: "reply-1", name: "pat")
+        media.perform(.sendReply(text: "Hi", to: target))
+        let clientId = try XCTUnwrap(media.board.outgoing.first?.id)
+        await until("failed", boards: [media.board]) { media.board.outgoing.first?.isFailed == true }
+
+        // The app closes; at the next launch the room opens again.
+        let again = FakeUploader()
+        let reopened = coordinator(again)
+        XCTAssertEqual(reopened.board.outgoing.first?.replyTo, target, "back in its thread, answering the same reply")
+        reopened.perform(.retry(clientId: clientId))
+        await until("replied", uploaders: [again]) { again.replies.count == 1 }
+        XCTAssertEqual(again.replies.first?.target, target)
+        XCTAssertEqual(again.replies.first?.text, "Hi")
+        XCTAssertEqual(again.replies.first?.key, RoomMediaUploadCoordinator.replyKey(clientId), "the same reply")
+        XCTAssertTrue(again.posts.isEmpty, "never posted to the room as a message")
     }
 }

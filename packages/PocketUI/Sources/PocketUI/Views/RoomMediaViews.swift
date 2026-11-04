@@ -449,15 +449,18 @@ struct RoomComposerPlusButton: View {
     }
 }
 
-/// The send button when files can go with a message: it sends as soon as there are words or files.
+/// The send button when files can go with a message: it sends as soon as there are words or files, and never with
+/// neither (the API refuses an empty reply).
 struct RoomMediaSendButton: View {
     @ObservedObject var board: RoomMediaBoard
     let canSendText: Bool
     let hasProblem: Bool
+    var label = "Send"
+    var identifier = "pocket.room.send"
     let action: () -> Void
 
     var body: some View {
-        let enabled = !hasProblem && (canSendText || !board.tray.isEmpty)
+        let enabled = Self.isEnabled(canSendText: canSendText, hasProblem: hasProblem, attached: board.tray.count)
         Button(action: action) {
             Image(systemName: "arrow.up.circle.fill")
                 .font(.system(size: 32))
@@ -465,19 +468,27 @@ struct RoomMediaSendButton: View {
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
-        .accessibilityLabel(board.tray.isEmpty ? "Send" : "Send with \(board.tray.count) attached")
-        .accessibilityIdentifier("pocket.room.send")
+        .accessibilityLabel(board.tray.isEmpty ? label : "\(label) with \(board.tray.count) attached")
+        .accessibilityIdentifier(identifier)
+    }
+
+    /// Words or files, and nothing in the way: an empty message or reply is never sent.
+    static func isEnabled(canSendText: Bool, hasProblem: Bool, attached: Int) -> Bool {
+        !hasProblem && (canSendText || attached > 0)
     }
 }
 
 /// Messages with files on their way, in the room's own place for them (after the room's rows): each file's picture at
 /// once, with real progress, Cancel while it goes, and Retry if it stopped. Each stays in place until the room shows it.
+/// In a thread, only that thread's replies.
 struct RoomMediaOutgoingList: View {
     @ObservedObject var board: RoomMediaBoard
+    /// The thread shown: only its replies. Nil shows every message and reply on its way (the room).
+    var thread: Int64?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ForEach(board.outgoing) { row in
+            ForEach(board.outgoing.filter { thread == nil || $0.replyTo?.sequenceId == thread }) { row in
                 RoomMediaOutgoingCard(row: row, perform: board.perform)
                     .id("media:\(row.id)")
             }
@@ -491,6 +502,13 @@ struct RoomMediaOutgoingCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if let target = row.replyTo {
+                Label("Replying to \(target.name)", systemImage: "arrowshape.turn.up.left")
+                    .font(.caption)
+                    .foregroundStyle(PocketPalette.textSecondary)
+                    .lineLimit(1)
+                    .accessibilityIdentifier("pocket.room.media.replying")
+            }
             if row.items.count == 1, let item = row.items.first, item.kind != .file, let data = item.thumbnail,
                let image = RoomImageData.image(from: data) {
                 single(item, image: image)
@@ -584,7 +602,11 @@ struct RoomMediaOutgoingCard: View {
                 }
                 VStack(alignment: .leading, spacing: 6) {
                     failedLabel(reason)
-                    HStack(spacing: 16) { failedButtons(canRetry) }
+                    // Large text: the buttons stack when they no longer fit side by side.
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 16) { failedButtons(canRetry) }
+                        VStack(alignment: .leading, spacing: 8) { failedButtons(canRetry) }
+                    }
                 }
             }
         }
@@ -624,9 +646,39 @@ struct RoomMediaOutgoingCard: View {
                 .font(.caption.weight(.semibold))
                 .accessibilityIdentifier("pocket.room.media.retry")
         }
+        if row.offersSendAsMessage {
+            Button("Send as a new message") { perform(.sendAsMessage(clientId: row.id)) }
+                .font(.caption.weight(.semibold))
+                .accessibilityIdentifier("pocket.room.media.sendAsMessage")
+        }
         Button("Discard", role: .destructive) { perform(.cancel(clientId: row.id)) }
             .font(.caption.weight(.semibold))
             .accessibilityIdentifier("pocket.room.media.discard")
+    }
+}
+/// What opens over a sheet on the room (a thread): the photo, camera and file pickers, and a photo or file opened from
+/// it. The app supplies it, and the sheet hosts it itself: the room under a sheet cannot present anything.
+public struct RoomSheetMediaHost: Equatable {
+    let content: () -> AnyView
+
+    public init<Content: View>(@ViewBuilder _ content: @escaping () -> Content) {
+        self.content = { AnyView(content()) }
+    }
+
+    /// Every one the room screen makes presents from that screen's own state, which all its copies share: a new one each
+    /// time the screen draws is the same host, and never redraws the room.
+    public static func == (lhs: RoomSheetMediaHost, rhs: RoomSheetMediaHost) -> Bool { true }
+}
+
+private struct RoomSheetMediaHostKey: EnvironmentKey {
+    static let defaultValue: RoomSheetMediaHost? = nil
+}
+
+extension EnvironmentValues {
+    /// Set by the room screen for its sheets (see `RoomSheetMediaHost`).
+    public var roomSheetMediaHost: RoomSheetMediaHost? {
+        get { self[RoomSheetMediaHostKey.self] }
+        set { self[RoomSheetMediaHostKey.self] = newValue }
     }
 }
 #endif

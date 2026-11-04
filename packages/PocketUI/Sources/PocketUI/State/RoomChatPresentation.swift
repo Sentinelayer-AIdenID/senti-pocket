@@ -366,6 +366,8 @@ public struct RoomChatReplyRow: Equatable, Identifiable, Sendable {
     public let reactions: RoomChatReactions?
     /// This reply is a part of a file posted as base64 (the thread's root sequence): folded behind the file's card.
     public var filePartOf: Int64?
+    /// Its photos and files, shown as a message's are.
+    public let attachments: [RoomAttachmentChip]
 
     public init(
         id: String,
@@ -378,7 +380,8 @@ public struct RoomChatReplyRow: Equatable, Identifiable, Sendable {
         views: RoomChatViews? = nil,
         authorHandle: String = "",
         parentReplyId: String? = nil,
-        reactions: RoomChatReactions? = nil
+        reactions: RoomChatReactions? = nil,
+        attachments: [RoomAttachmentChip] = []
     ) {
         self.id = id
         self.authorName = authorName
@@ -391,6 +394,7 @@ public struct RoomChatReplyRow: Equatable, Identifiable, Sendable {
         self.authorHandle = authorHandle.isEmpty ? authorName : authorHandle
         self.parentReplyId = parentReplyId
         self.reactions = reactions
+        self.attachments = attachments
     }
 
     /// The deepest indent a thread shows; deeper replies sit at this depth, under their parent.
@@ -435,6 +439,8 @@ public struct RoomChatThreadState: Equatable, Sendable {
     public let canReply: Bool
     /// The longest reply the API accepts, in characters; nil when there is no known limit.
     public let maximumReplyLength: Int?
+    /// The reply the thread was opened at (a reply notification): brought into view and marked.
+    public let focusReplyId: String?
 
     public init(
         parent: RoomChatMessageRow,
@@ -443,7 +449,8 @@ public struct RoomChatThreadState: Equatable, Sendable {
         isLoading: Bool = false,
         failureText: String? = nil,
         canReply: Bool = false,
-        maximumReplyLength: Int? = nil
+        maximumReplyLength: Int? = nil,
+        focusReplyId: String? = nil
     ) {
         self.parent = parent
         self.replies = replies
@@ -452,6 +459,7 @@ public struct RoomChatThreadState: Equatable, Sendable {
         self.failureText = failureText
         self.canReply = canReply
         self.maximumReplyLength = maximumReplyLength
+        self.focusReplyId = focusReplyId
     }
 
     /// Why this reply cannot be sent as it is, or nil. A reply over the limit stays in the reply box.
@@ -469,6 +477,8 @@ public struct RoomChatThreadInput: Equatable, Sendable {
     public let failureText: String?
     public let canReply: Bool
     public let maximumReplyLength: Int?
+    /// The reply the thread was opened at, if any.
+    public let focusReplyId: String?
 
     public init(
         sequenceId: Int64,
@@ -477,7 +487,8 @@ public struct RoomChatThreadInput: Equatable, Sendable {
         isLoading: Bool = false,
         failureText: String? = nil,
         canReply: Bool = false,
-        maximumReplyLength: Int? = nil
+        maximumReplyLength: Int? = nil,
+        focusReplyId: String? = nil
     ) {
         self.sequenceId = sequenceId
         self.replies = replies
@@ -486,6 +497,7 @@ public struct RoomChatThreadInput: Equatable, Sendable {
         self.failureText = failureText
         self.canReply = canReply
         self.maximumReplyLength = maximumReplyLength
+        self.focusReplyId = focusReplyId
     }
 }
 
@@ -842,7 +854,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 isLoading: threadInput.isLoading,
                 failureText: threadInput.failureText,
                 canReply: threadInput.canReply,
-                maximumReplyLength: threadInput.maximumReplyLength
+                maximumReplyLength: threadInput.maximumReplyLength,
+                focusReplyId: threadInput.focusReplyId
             )
         } else {
             self.thread = nil

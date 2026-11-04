@@ -154,6 +154,23 @@ public struct RoomMediaItemRow: Identifiable, Equatable {
     }
 }
 
+/// The thread a message with files goes in as a reply: the message it answers, and the reply it answers for a reply to
+/// a reply.
+public struct RoomMediaReplyTarget: Equatable, Sendable {
+    /// The message whose thread it goes in.
+    public let sequenceId: Int64
+    /// The reply it answers (it nests under it); nil answers the message.
+    public let replyId: String?
+    /// Whom it answers, for its card ("Replying to …").
+    public let name: String
+
+    public init(sequenceId: Int64, replyId: String? = nil, name: String) {
+        self.sequenceId = sequenceId
+        self.replyId = replyId
+        self.name = name
+    }
+}
+
 /// A message with photos, videos or files, from Send until the room shows it.
 public struct RoomMediaOutgoingRow: Identifiable, Equatable {
     public enum Status: Equatable, Sendable {
@@ -172,19 +189,30 @@ public struct RoomMediaOutgoingRow: Identifiable, Equatable {
     public var status: Status
     /// All of its files' bytes together.
     public let progress: RoomMediaProgress
+    /// A reply in a thread; nil for a message in the room.
+    public var replyTo: RoomMediaReplyTarget?
+    /// The API took no files on this reply: they can go as a new message instead (`RoomMediaIntent.sendAsMessage`).
+    public var offersSendAsMessage: Bool
 
-    public init(id: String, text: String?, items: [RoomMediaItemRow], status: Status = .uploading, progress: RoomMediaProgress) {
+    public init(id: String, text: String?, items: [RoomMediaItemRow], status: Status = .uploading, progress: RoomMediaProgress,
+                replyTo: RoomMediaReplyTarget? = nil, offersSendAsMessage: Bool = false) {
         self.id = id
         self.text = text
         self.items = items
         self.status = status
         self.progress = progress
+        self.replyTo = replyTo
+        self.offersSendAsMessage = offersSendAsMessage
     }
 
     public static func == (lhs: RoomMediaOutgoingRow, rhs: RoomMediaOutgoingRow) -> Bool {
         lhs.id == rhs.id && lhs.text == rhs.text && lhs.items == rhs.items && lhs.status == rhs.status
-            && lhs.progress === rhs.progress
+            && lhs.progress === rhs.progress && lhs.replyTo == rhs.replyTo && lhs.offersSendAsMessage == rhs.offersSendAsMessage
     }
+
+    /// What a reply's card says when the API takes no files on a reply (Pocket built before the API, or an API that
+    /// refuses them): the files wait, and can go as a new message.
+    public static let replyFilesRefused = "Photos can't go in a reply yet"
 
     public var isFailed: Bool {
         if case .failed = status { return true }
@@ -231,6 +259,10 @@ public enum RoomMediaIntent: Equatable, Sendable {
     case retryItem(itemId: String)
     /// Sends the tray as one message, with what was typed.
     case send(text: String)
+    /// Sends the tray as one reply in a thread, with what was typed (which may be nothing).
+    case sendReply(text: String, to: RoomMediaReplyTarget)
+    /// A reply whose files the API did not take: sends them as a new message instead.
+    case sendAsMessage(clientId: String)
     case retry(clientId: String)
     case cancel(clientId: String)
     case dismissNotice

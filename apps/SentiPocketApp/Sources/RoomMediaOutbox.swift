@@ -44,6 +44,11 @@ struct RoomMediaOutboxEntry: Codable, Equatable {
         /// Its post was asked for and no refusal came back: it may be in the room, so it is never taken back on the
         /// server if it is discarded.
         var postStarted: Bool?
+        /// A reply: the message whose thread it goes in (absent: a message in the room), the reply it answers, and
+        /// whom, so a retry after a relaunch posts it to that thread again.
+        var replyTo: Int64? = nil
+        var replyToReply: String? = nil
+        var replyToName: String? = nil
     }
 
     var version = 1

@@ -19,6 +19,8 @@ public struct RoomChatView: View {
     @State private var threadDrafts: [Int64: String] = [:]
     /// Opens a profile card from an avatar, where direct messages are on.
     @Environment(\.roomProfileOpener) private var profileOpener
+    /// The pickers and viewers a thread opens over itself.
+    @Environment(\.roomSheetMediaHost) private var sheetMediaHost
     @State private var readerAtBottom = true
     /// The reader's place as the bottom marker reports it, settled outside layout, and whether the room is on screen
     /// to take it (see `RoomBottomSettle`). A reference, so keeping it never redraws the room.
@@ -132,6 +134,9 @@ public struct RoomChatView: View {
                     mentionCandidates: state.mentionCandidates,
                     canReact: state.canReact,
                     actions: composerActions,
+                    media: media,
+                    previews: state.attachmentPreviews,
+                    mediaHost: sheetMediaHost,
                     send: send,
                     draft: threadDraft(thread.parent.sequenceId)
                 )
@@ -1297,20 +1302,23 @@ private struct RoomMessageRowView: View {
                 replyQuote
                 if !isMinimized {
                     attachmentsOnTop(alignment: .trailing)
-                    messageText
-                        .font(.body)
-                        .foregroundStyle(PocketPalette.textPrimary)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 9)
-                        // The bubble is dark in both appearances, so what is in it takes the dark colours.
-                        .environment(\.colorScheme, .dark)
-                        .background(PocketPalette.ownBubble, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                        .overlay {
-                            if isHighlighted {
-                                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                                    .strokeBorder(PocketPalette.warning, lineWidth: 2)
+                    // A reply of photos or files alone has no words, and no empty bubble.
+                    if !row.text.isEmpty {
+                        messageText
+                            .font(.body)
+                            .foregroundStyle(PocketPalette.textPrimary)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 9)
+                            // The bubble is dark in both appearances, so what is in it takes the dark colours.
+                            .environment(\.colorScheme, .dark)
+                            .background(PocketPalette.ownBubble, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                            .overlay {
+                                if isHighlighted {
+                                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                                        .strokeBorder(PocketPalette.warning, lineWidth: 2)
+                                }
                             }
-                        }
+                    }
                     footer(showsAttachments: false)
                 }
                 if row.endsRun || row.isEdited {
@@ -1342,12 +1350,14 @@ private struct RoomMessageRowView: View {
                 replyQuote
                 if !isMinimized {
                     attachmentsOnTop(alignment: .leading)
-                    messageText
-                        .font(.body)
-                        .foregroundStyle(PocketPalette.textPrimary)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 9)
-                        .background(bubbleFill, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    if !row.text.isEmpty {
+                        messageText
+                            .font(.body)
+                            .foregroundStyle(PocketPalette.textPrimary)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 9)
+                            .background(bubbleFill, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    }
                     if row.isEdited {
                         Text("edited").font(.caption2).foregroundStyle(PocketPalette.textSecondary)
                     }
@@ -1377,9 +1387,11 @@ private struct RoomMessageRowView: View {
                 replyQuote
                 if !isMinimized {
                     attachmentsOnTop(alignment: .leading)
-                    messageText
-                        .font(.body)
-                        .foregroundStyle(PocketPalette.textPrimary)
+                    if !row.text.isEmpty {
+                        messageText
+                            .font(.body)
+                            .foregroundStyle(PocketPalette.textPrimary)
+                    }
                     if row.isEdited {
                         Text("edited").font(.caption2).foregroundStyle(PocketPalette.textSecondary)
                     }
@@ -1839,6 +1851,13 @@ private struct RoomThreadSheet: View {
     /// What the room's "+" offers, offered here too (Carter, 10-30: "everything I'd have in the chatbox ... inside a
     /// reply too").
     var actions = RoomComposerActions()
+    /// Photos, videos and files for a reply, where the room takes them (Carter, 11-04: replies carry photos and files
+    /// like messages): the room's own tray, sent from here as a reply.
+    var media: RoomMediaBoard?
+    /// Photo previews the room has loaded, for the replies' photos.
+    var previews: [String: Data] = [:]
+    /// The pickers and viewers, hosted by this sheet (the room under it cannot present them).
+    var mediaHost: RoomSheetMediaHost?
     let send: (RoomChatIntent) -> Void
     @Binding var draft: String
     /// The reply being answered (a reply to a reply nests under it); nil answers the message.
@@ -1858,7 +1877,7 @@ private struct RoomThreadSheet: View {
     /// The thread's file parts are shown; otherwise they fold behind the file's card.
     @State private var showsFileParts = false
 
-    /// The + page's actions (Carter, #58635); a reply in a thread carries no files.
+    /// The + page's actions besides files (Carter, #58635).
     private var plusActions: [RoomComposerMore] {
         var items = [
             RoomComposerMore(id: "mention", title: "Mention someone", detail: "Adds an @ to your reply", symbolName: "at") {
@@ -1898,6 +1917,7 @@ private struct RoomThreadSheet: View {
 
     var body: some View {
         NavigationStack {
+            ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     VStack(alignment: .leading, spacing: 4) {
@@ -1934,11 +1954,22 @@ private struct RoomThreadSheet: View {
                                     Text("edited").font(.caption2).foregroundStyle(PocketPalette.textSecondary)
                                 }
                             }
-                            ChatMarkdownView(text: reply.text, ownHandles: ownHandles)
+                            if !reply.text.isEmpty {
+                                ChatMarkdownView(text: reply.text, ownHandles: ownHandles)
+                            }
+                            if !reply.attachments.isEmpty {
+                                RoomAttachmentsView(chips: reply.attachments, previews: previews, send: send)
+                            }
                             if let views = reply.views {
                                 RoomViewedLine(views: views)
                             }
                         }
+                        .id(Self.replyAnchor(reply.id))
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(thread.focusReplyId == reply.id ? PocketPalette.accent.opacity(0.12) : Color.clear)
+                                .padding(-4)
+                        )
                         .onAppear { send(.replyOnScreen(id: reply.id, isOnScreen: true)) }
                         .onDisappear { send(.replyOnScreen(id: reply.id, isOnScreen: false)) }
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1975,10 +2006,18 @@ private struct RoomThreadSheet: View {
                             }
                         )
                     }
+                    // This thread's replies with files on their way, each with its pictures and progress.
+                    if let media {
+                        RoomMediaOutgoingList(board: media, thread: thread.parent.sequenceId)
+                    }
                 }
                 .padding(16)
             }
             .scrollDismissesKeyboard(.interactively)
+            // Opened at a reply (its notification): it comes into view once the replies are loaded.
+            .onAppear { showFocusedReply(proxy) }
+            .onChange(of: thread.replies.count) { _ in showFocusedReply(proxy) }
+            }
             .sheet(item: $editingReply) { reply in
                 MessageEditSheet(original: reply.text) { text in
                     send(.editReply(sequenceId: thread.parent.sequenceId, replyId: reply.id, text: text))
@@ -1991,6 +2030,7 @@ private struct RoomThreadSheet: View {
                     Button("Done") { send(.closeThread) }
                 }
             }
+            .background { mediaHost?.content() }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if thread.canReply {
                     VStack(alignment: .leading, spacing: 4) {
@@ -2075,8 +2115,13 @@ private struct RoomThreadSheet: View {
                         .accessibilityElement(children: .contain)
                         .accessibilityIdentifier("pocket.thread.composer.ticketMode")
                     }
+                    if let media {
+                        RoomMediaTray(board: media)
+                    }
                     HStack(alignment: .bottom, spacing: 8) {
-                        RoomComposerPlusButton(board: nil, more: plusActions, identifier: "pocket.thread.composer.plus")
+                        // Files go with a reply as with a message (never with a ticket).
+                        RoomComposerPlusButton(board: ticketMode ? nil : media, more: plusActions,
+                                               identifier: "pocket.thread.composer.plus")
                             .padding(.bottom, 1)
                         ComposerTextField(placeholder: ticketMode ? "Describe the ticket" : "Reply", text: $draft,
                                           isFocused: $isReplying, identifier: "pocket.thread.composer")
@@ -2088,29 +2133,24 @@ private struct RoomThreadSheet: View {
                             .padding(.horizontal, 12)
                             .padding(.vertical, 9)
                             .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                        Button {
-                            let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-                            guard canSendReply else { return }
-                            let text = ticketMode ? RoomComposerDraft.ticketRequest(typed) : typed
-                            ticketMode = false
-                            if let answering {
-                                send(.sendReplyToReply(sequenceId: thread.parent.sequenceId, replyId: answering.id, text: text))
-                            } else {
-                                send(.sendReply(sequenceId: thread.parent.sequenceId, text: text))
+                        if let media {
+                            // Sends once there are words or files; never with neither.
+                            RoomMediaSendButton(board: media, canSendText: canSendReply,
+                                                hasProblem: thread.replyLengthProblem(for: draft) != nil,
+                                                label: "Send reply", identifier: "pocket.thread.send") {
+                                sendReply()
                             }
-                            replySent = typed
-                            replyWrittenBack.sent()
-                            emptyComposer($draft) { replyWrittenBack.clears($0) }
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                                if replySent == typed { replySent = nil }
+                        } else {
+                            Button {
+                                sendReply()
+                            } label: {
+                                Image(systemName: "arrow.up.circle.fill").font(.system(size: 32))
                             }
-                            answering = nil
-                        } label: {
-                            Image(systemName: "arrow.up.circle.fill").font(.system(size: 32))
+                            .buttonStyle(.plain)
+                            .disabled(!canSendReply)
+                            .accessibilityLabel("Send reply")
+                            .accessibilityIdentifier("pocket.thread.send")
                         }
-                        .buttonStyle(.plain)
-                        .disabled(!canSendReply)
-                        .accessibilityLabel("Send reply")
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 8)
@@ -2126,6 +2166,54 @@ private struct RoomThreadSheet: View {
 
     private var canSendReply: Bool {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && thread.replyLengthProblem(for: draft) == nil
+    }
+
+    /// Sends what is in the reply box: with files in the tray, the words and the files as one reply (its card shows
+    /// here while they upload); otherwise the words, or the ticket they describe. Never a reply with neither.
+    private func sendReply() {
+        let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let media, !media.tray.isEmpty {
+            guard thread.replyLengthProblem(for: draft) == nil else { return }
+            ticketMode = false
+            let target = RoomMediaReplyTarget(sequenceId: thread.parent.sequenceId, replyId: answering?.id,
+                                              name: answering?.authorName ?? thread.parent.authorName)
+            if !typed.isEmpty {
+                replySent = typed
+                replyWrittenBack.sent()
+                emptyComposer($draft) { replyWrittenBack.clears($0) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                    if replySent == typed { replySent = nil }
+                }
+            }
+            answering = nil
+            media.perform(.sendReply(text: typed, to: target))
+            return
+        }
+        guard canSendReply else { return }
+        let text = ticketMode ? RoomComposerDraft.ticketRequest(typed) : typed
+        ticketMode = false
+        if let answering {
+            send(.sendReplyToReply(sequenceId: thread.parent.sequenceId, replyId: answering.id, text: text))
+        } else {
+            send(.sendReply(sequenceId: thread.parent.sequenceId, text: text))
+        }
+        replySent = typed
+        replyWrittenBack.sent()
+        emptyComposer($draft) { replyWrittenBack.clears($0) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            if replySent == typed { replySent = nil }
+        }
+        answering = nil
+    }
+
+    private static func replyAnchor(_ id: String) -> String { "reply:" + id }
+
+    /// Brings the reply the thread was opened at into view, once it is loaded.
+    private func showFocusedReply(_ proxy: ScrollViewProxy) {
+        guard let focus = thread.focusReplyId, thread.replies.contains(where: { $0.id == focus }) else { return }
+        DispatchQueue.main.async {
+            withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(Self.replyAnchor(focus), anchor: .center) }
+        }
     }
 
     /// The same choices as a message in the room: reply, react, listen, copy.
@@ -2345,11 +2433,15 @@ private struct RoomComposerBar: View {
         }
     }
 
-    /// Sends the tray as one message, with what was typed. The words go with the files (never as a reply or a
-    /// ticket), and the message shows at once with each file's picture while they upload.
+    /// Sends the tray as one message, with what was typed: or, swiped to reply, as one reply in that message's thread.
+    /// The words go with the files (never as a ticket), and it shows at once with each file's picture while they
+    /// upload.
     private func sendWithMedia(_ media: RoomMediaBoard, text: String) {
         pasted = []
         ticketMode = false
+        let target = replying.map {
+            RoomMediaReplyTarget(sequenceId: $0.sequenceId, replyId: $0.inlineReplyId, name: $0.authorName)
+        }
         if replying != nil { onCancelReply() }
         if let draftKey { UserDefaults.standard.removeObject(forKey: draftKey) }
         if !text.isEmpty {
@@ -2360,7 +2452,13 @@ private struct RoomComposerBar: View {
             emptyComposer($draft) { writtenBack.clears($0) }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { if sends == sending { justSent = nil } }
         }
-        DispatchQueue.main.async { media.perform(.send(text: text)) }
+        DispatchQueue.main.async {
+            if let target {
+                media.perform(.sendReply(text: text, to: target))
+            } else {
+                media.perform(.send(text: text))
+            }
+        }
     }
 
     private func saveDraft() {
@@ -2526,7 +2624,7 @@ private struct RoomComposerBar: View {
                 .accessibilityIdentifier("pocket.room.composer.ticketMode")
             }
             HStack(alignment: .bottom, spacing: 8) {
-                RoomComposerPlusButton(board: replying == nil && !ticketMode ? media : nil, more: plusActions,
+                RoomComposerPlusButton(board: ticketMode ? nil : media, more: plusActions,
                                        identifier: "pocket.room.composer.plus")
                     .padding(.bottom, 1)
                 ComposerTextField(placeholder: ticketMode ? "Describe the ticket" : (replying == nil ? "Message" : "Reply"),
