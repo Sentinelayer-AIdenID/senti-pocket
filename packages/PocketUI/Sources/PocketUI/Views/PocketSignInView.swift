@@ -5,6 +5,12 @@ import AuthenticationServices
 import UIKit
 #endif
 
+/// The sign-in card button's drawn height, for Apple's button to match.
+private struct SignInCardButtonHeight: PreferenceKey {
+    static let defaultValue: CGFloat? = nil
+    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) { value = nextValue() ?? value }
+}
+
 public struct PocketSignInView: View {
     private let phase: PocketSignInPhase
     private let offersApple: Bool
@@ -13,6 +19,8 @@ public struct PocketSignInView: View {
     /// The sign-in buttons' heights, grown with the text size so Apple's never ends up smaller than the card's.
     @ScaledMetric(relativeTo: .headline) private var appleHeight: CGFloat = PocketSignInView.buttonHeight
     @ScaledMetric(relativeTo: .headline) private var cardLabelHeight: CGFloat = PocketSignInView.cardButtonLabelHeight
+    /// The card button's height as drawn; Apple's button is given exactly this, so the two always match.
+    @State private var cardButtonHeight: CGFloat?
 
     /// `offersApple` adds Sign in with Apple wherever a sign-in can start; the build turns it on.
     public init(phase: PocketSignInPhase, offersApple: Bool = false, send: @escaping (PocketProductIntent) -> Void) {
@@ -91,6 +99,9 @@ public struct PocketSignInView: View {
         .navigationTitle("Account")
         .accessibilityIdentifier("pocket.signin.screen")
         .pocketCanvas()
+        .onPreferenceChange(SignInCardButtonHeight.self) { height in
+            if let height, height > 0, height != cardButtonHeight { cardButtonHeight = height }
+        }
     }
 
     @ViewBuilder
@@ -195,6 +206,9 @@ public struct PocketSignInView: View {
             .buttonBorderShape(.capsule)
             #endif
             .tint(PocketPalette.accent)
+            .background(GeometryReader { proxy in
+                Color.clear.preference(key: SignInCardButtonHeight.self, value: proxy.size.height)
+            })
             .accessibilityIdentifier("pocket.signin.primary")
         }
         .pocketCard()
@@ -203,10 +217,11 @@ public struct PocketSignInView: View {
     @ViewBuilder
     private var appleButton: some View {
         #if canImport(UIKit) && canImport(AuthenticationServices)
-        AppleSignInButton(style: colorScheme == .dark ? .white : .black, cornerRadius: appleHeight / 2) {
+        let height = cardButtonHeight ?? appleHeight
+        AppleSignInButton(style: colorScheme == .dark ? .white : .black, cornerRadius: height / 2) {
             send(.beginAppleSignIn)
         }
-            .frame(maxWidth: .infinity, minHeight: appleHeight, maxHeight: appleHeight)
+            .frame(maxWidth: .infinity, minHeight: height, maxHeight: height)
             .id(colorScheme)   // the button's style is set once, so a new appearance makes a new button
             .accessibilityIdentifier("pocket.signin.apple")
         #else

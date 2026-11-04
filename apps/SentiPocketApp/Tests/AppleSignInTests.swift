@@ -48,6 +48,7 @@ final class AppleSignInTests: XCTestCase {
     /// Review of #308: an inactive account is told by the server's error code, not by the status alone.
     func test_an_inactive_account_is_told_by_its_error_code() async {
         let answers: [(String, NativeAuthError)] = [
+            (#"{"error":{"code":"ACCOUNT_INACTIVE","message":"Account is not active","request_id":"r1"}}"#, .inactive),
             (#"{"detail":{"error":{"code":"ACCOUNT_INACTIVE","message":"Account is not active"}}}"#, .inactive),
             (#"{"detail":{"error":{"code":"APPLE_TOKEN_INVALID"}}}"#, .refused(403)),
             ("not json", .refused(403))
