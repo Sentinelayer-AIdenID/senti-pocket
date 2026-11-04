@@ -1006,6 +1006,12 @@ struct AuthenticatedRootView: View {
             roomChatScreen(route, savedSummary: savedSummary, direct: direct)
         }
         .equatable()
+        // The calendar's ⋯ entry sits outside the host: it follows the calendar's own state, and the room screen
+        // inside is made again only when what it is opened with changes.
+        .modifier(RoomCalendarEntry(center: calendar, sessionId: route.sessionId, roomTitle: route.title,
+                                    canAdd: CalendarCenter.canAdd(role: route.membershipRole),
+                                    isOffered: route.direct == nil,
+                                    onReauthenticationRequired: invalidateProtectedAuthentication))
     }
 
     private func roomChatScreen(_ route: RoomRoute, savedSummary: String?, direct: RoomDirectContext?) -> some View {
@@ -1041,10 +1047,6 @@ struct AuthenticatedRootView: View {
             direct: direct,
             onReauthenticationRequired: invalidateProtectedAuthentication
         )
-        .modifier(RoomCalendarEntry(center: calendar, sessionId: route.sessionId, roomTitle: route.title,
-                                    canAdd: CalendarCenter.canAdd(role: route.membershipRole),
-                                    isOffered: route.direct == nil,
-                                    onReauthenticationRequired: invalidateProtectedAuthentication))
     }
 
     /// Any room you are in, to ask whether drafting is on: a viewer's room answers the flag as well as any.
