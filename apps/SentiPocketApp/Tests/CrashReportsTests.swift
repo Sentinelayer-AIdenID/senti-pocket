@@ -176,6 +176,30 @@ final class CrashReportsTests: XCTestCase {
         XCTAssertNil(older.drawsText, "a record from before the count says nothing about draws")
     }
 
+    /// Build 2026110308's freeze after a room closed had nothing to say where the main thread was. The watch now reads
+    /// its stack, and the report carries it, with a second look if it was elsewhere 8 s in.
+    func test_a_stall_report_carries_where_the_main_thread_was_and_where_it_was_later() {
+        var run = LastRun(build: "2026110309", launchedAt: start, updatedAt: start, isActive: true)
+        run.availableMB = 3_262
+        var stall = MainThreadWatch.Stall(startedAt: start.addingTimeInterval(5), afterStep: "room closed", seconds: 20.5,
+                                          recovered: false, rowDraws: 0, lastRow: 0)
+        stall.frames = ["libsystem_kernel.dylib +0x1234", "SentiPocketApp +0x23849c"]
+        stall.binaries = ["libsystem_kernel.dylib 11111111-2222-3333-4444-555555555555",
+                          "SentiPocketApp 98C87C12-0CB7-32AA-930F-53918605E8A2"]
+        stall.laterFrames = ["SentiPocketApp +0x240000", "SentiPocketApp +0x23849c"]
+        let report = run.closedReport(system: "iOS 26.5.1", device: "iPhone18,2", stall: stall)
+        XCTAssertEqual(report?.frames, stall.frames)
+        XCTAssertEqual(report?.binaries, stall.binaries)
+        XCTAssertTrue(report?.reason.contains("8 s in it was elsewhere: SentiPocketApp +0x240000 · SentiPocketApp +0x23849c.") == true,
+                      report?.reason ?? "")
+
+        stall.laterFrames = stall.frames
+        XCTAssertTrue(run.closedReport(system: "iOS 26.5.1", device: "iPhone18,2", stall: stall)?.reason
+            .contains("8 s in it was at the same place.") == true)
+        let message = CrashReportText.message([report].compactMap { $0 })
+        XCTAssertTrue(message.contains("SentiPocketApp +0x23849c"), message)
+    }
+
     func test_the_render_trace_counts_row_draws_and_keeps_the_last() {
         let before = RenderTrace.snapshot().draws
         RenderTrace.row(41)
