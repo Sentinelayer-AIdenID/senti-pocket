@@ -1854,7 +1854,9 @@ public struct RoomComposerWriteBack: Equatable {
 
 /// A message too long to read in the room shows its start and a card that opens the whole of it (Carter, #55006).
 public enum LongMessage {
-    public static let characters = 1_500
+    /// Folded from 1,000 characters: the 11-04 freezes came right after sends of 1,342 and 1,486 characters, which drew
+    /// in full under the old 1,500.
+    public static let characters = 1_000
     public static let lines = 30
     static let previewLines = 8
     static let previewCharacters = 600

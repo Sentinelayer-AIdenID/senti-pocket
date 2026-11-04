@@ -827,6 +827,221 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         XCTAssertTrue(poster.endings.first?.text.contains("@pocket-forge @claude-warden please post") == true)
     }
 
+    /// With two agents on the call, "Hi Forge" is pocket-forge's turn. Only it is mentioned and it has the floor, so
+    /// the other agent's answer to that turn is kept, not read.
+    func test_a_turn_naming_one_agent_goes_to_that_agent_and_it_has_the_floor() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), poster = FakePoster()
+        let room = room(with: ["claude-warden", "pocket-forge"], handsFree: false, listener: listener, speaker: speaker,
+                        audio: audio, poster: poster)
+        room.begin()
+        await until("rang") { poster.starts.count == 1 }
+        room.receive([message("h1", from: "claude-warden", "Warden here.", secondsAfterStart: 1),
+                      message("h2", from: "pocket-forge", "Forge here.", secondsAfterStart: 2)])
+        await until("both have said hello") { room.state.joined.count == 2 }
+        await until("hello read") { speaker.spoken.count == 1 }
+        speaker.finish()
+
+        room.send(.toggleTalk)
+        await until("listening") { listener.partial != nil }
+        listener.say("Hi Forge")
+        room.send(.toggleTalk)
+        // The hellos already posted who had the floor then; wait for this turn itself.
+        await until("posted") { poster.turns.last?.hasSuffix("Hi Forge") == true }
+        XCTAssertEqual(poster.turns.last, "@pocket-forge Hi Forge", "only the agent named")
+
+        room.receive([message("w1", from: "claude-warden", "Hey Carter.", secondsAfterStart: 5),
+                      message("f1", from: "pocket-forge", "Hi Carter, Forge here.", secondsAfterStart: 6)])
+        await until("forge speaks") { room.state.speaker == "pocket-forge" }
+        XCTAssertTrue(room.state.turns.contains { $0.speaker == "claude-warden" && $0.text == "Hey Carter." && $0.isHeld },
+                      "the agent not named is kept, not read")
+        await room.hangUp()
+    }
+
+    /// Only one agent has said hello (the other was just added): a turn that names no one is that agent's.
+    func test_an_unnamed_turn_goes_to_the_only_agent_that_has_said_hello() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), poster = FakePoster()
+        let room = room(with: ["claude-warden"], handsFree: false, listener: listener, speaker: speaker, audio: audio,
+                        poster: poster)
+        room.begin()
+        await until("rang") { poster.starts.count == 1 }
+        room.receive([message("h1", from: "claude-warden", "Warden here.")])
+        await until("hello") { room.state.speaker == "claude-warden" }
+        speaker.finish()
+        room.send(.add("pocket-forge"))
+        await until("the add went out") { poster.starts.count == 2 }
+
+        room.send(.toggleTalk)
+        await until("listening") { listener.partial != nil }
+        listener.say("How is the release going?")
+        room.send(.toggleTalk)
+        await until("posted") { poster.turns.count == 1 }
+        XCTAssertEqual(poster.turns, ["@claude-warden How is the release going?"])
+        await room.hangUp()
+    }
+
+    func test_who_a_turn_is_for_on_a_call_with_several_agents() {
+        let both = ["claude-warden", "pocket-forge"]
+        XCTAssertEqual(VoiceTurnAddressee.of("Hi Forge", with: both, joined: both), "pocket-forge")
+        XCTAssertEqual(VoiceTurnAddressee.of("Warden, ship it", with: both, joined: both), "claude-warden")
+        XCTAssertNil(VoiceTurnAddressee.of("Who ships tonight?", with: both, joined: both), "everyone's")
+        XCTAssertEqual(VoiceTurnAddressee.of("Who ships tonight?", with: both, joined: ["claude-warden"]),
+                       "claude-warden", "the only one that has said hello")
+        XCTAssertNil(VoiceTurnAddressee.of("Warden and Forge, both of you", with: both, joined: both),
+                     "two named is everyone's")
+        XCTAssertNil(VoiceTurnAddressee.of("It is forged now", with: both, joined: both), "a word, not a name")
+        XCTAssertNil(VoiceTurnAddressee.of("Hi Forge", with: ["pocket-forge"], joined: []),
+                     "a call with one agent is that agent's already")
+        XCTAssertNil(VoiceTurnAddressee.of("Hi Forge", with: [], joined: []), "a meeting is everyone's")
+        XCTAssertNil(VoiceTurnAddressee.of("Hey agent", with: ["review-agent", "build-agent"],
+                                                    joined: ["review-agent", "build-agent"]),
+                     "a word every agent's id shares is no name")
+    }
+
+    /// Review of the first cut: a name counts only where it addresses someone, the agent with the most of its words
+    /// said wins, and a turn for several agents is everyone's, never the sole-hello agent's.
+    func test_a_turn_is_for_the_agent_it_addresses_not_a_name_said_in_passing() {
+        let both = ["pocket-forge", "claude-warden"]
+        XCTAssertEqual(VoiceTurnAddressee.of("Warden, is the Pocket build ready?", with: both, joined: both),
+                       "claude-warden", "addressed first; Pocket is only mentioned")
+        XCTAssertEqual(VoiceTurnAddressee.of("Warden, is the Pocket build ready?", with: both, joined: ["pocket-forge"]),
+                       "claude-warden", "a name addressed beats the only one that has said hello")
+        XCTAssertNil(VoiceTurnAddressee.of("How is Pocket doing today?", with: both, joined: both), "a word in passing")
+        XCTAssertNil(VoiceTurnAddressee.of("How is Pocket doing today?", with: both, joined: ["pocket-forge"]),
+                     "a word of an id said, no one addressed: everyone's, not the only one that has said hello")
+        XCTAssertNil(VoiceTurnAddressee.of("Warden and Forge, both of you", with: both, joined: ["pocket-forge"]),
+                     "several addressed is everyone, never the sole-hello agent")
+        XCTAssertEqual(VoiceTurnAddressee.of("Hi pocket forge", with: ["pocket-forge", "forge-helper"],
+                                             joined: ["pocket-forge", "forge-helper"]),
+                       "pocket-forge", "the most of its words said")
+        XCTAssertEqual(VoiceTurnAddressee.of("What's next, Forge?", with: both, joined: both), "pocket-forge",
+                       "addressed at the end")
+        XCTAssertEqual(VoiceTurnAddressee.of("Okay so... Forge, what is next?", with: both, joined: both), "pocket-forge")
+        XCTAssertEqual(VoiceTurnAddressee.of("Hi build", with: ["build_bot", "docs.writer"],
+                                             joined: ["build_bot", "docs.writer"]),
+                       "build_bot", "ids with _ and . have words too")
+        XCTAssertEqual(VoiceTurnAddressee.nameWords(of: "pocket-forge"), ["pocket", "forge"])
+        XCTAssertEqual(VoiceTurnAddressee.nameWords(of: "review-agent"), ["review"], "agent is no name")
+    }
+
+    /// Who a turn is for, by the ranked rules: a word for everyone first; then a name said to an agent (alone or with a
+    /// greeting, opening a question or a request, or ending a clause right after "me", "you" or "us"); then a name
+    /// thanked. Said any other way (the subject, a possessive, mid-clause) a name addresses no one. Every turn here
+    /// names an agent or says a word for everyone, so who has said hello never changes who it is for.
+    func test_a_turn_is_for_the_one_agent_it_addresses_by_the_ranked_rules() {
+        let forge = "pocket-forge", warden = "claude-warden"
+        let both = [forge, warden]
+        let table: [(said: String, to: String?)] = [
+            ("Okay, Forge said no.", nil),                                      // the subject, after a comma
+            ("Forge finished the build. Warden, can you review it?", warden),  // a subject, then an address
+            ("Thanks Forge, Warden what do you think?", warden),               // thanked, then asked
+            ("Can you ask Forge to check the build?", nil),                    // mid-clause
+            ("Can Forge check the build?", nil),
+            ("Pocket is crashing on launch again.", nil),                      // the product's name as the subject
+            ("Can you both hear me?", nil),
+            ("Hi everyone, welcome Warden.", nil),
+            ("Can you hear me, Warden? Is the Pocket build ready?", warden),
+            ("Forge's build passed. Can someone ship it?", nil),               // a possessive
+            ("Warden, Forge, what do you both think?", nil),
+            ("Hi Forge, hi Warden.", nil),                                     // both greeted
+            ("Welcome Warden!", warden),
+            ("Good morning Warden, can you hear me?", warden),
+            ("Nice to have you Warden.", warden),
+            ("Can you hear me Warden?", warden),
+            ("Glad you could join, Warden. Is the build ready?", warden),
+            ("Warden?", warden),
+            ("So, Warden, Forge said no", warden),
+            ("What's next, Forge?", forge),
+            ("Hey Forge, Warden says hi", forge),
+            ("Forge or Warden, whoever is free", nil),
+            ("Can you check the deploy, Warden?", warden),
+            ("Hey Warden what do you think", warden),                          // a greeting, the name, a question
+            ("Okay so Forge what is next", forge),                             // no punctuation at all
+            ("Forge can you check the build?", forge),
+            ("Forge will handle it.", nil),                                    // "will" asks only with a person after
+            ("Pocket can't launch on the new phone.", nil),
+            ("Thanks Forge", forge),                                           // only thanked: still the one
+            ("Thank you, Forge. Warden, what do you think?", warden),          // the thanks carries to the name after
+            ("Thanks to Forge's fix, the build is green.", nil),               // a possessive is not thanked either
+            ("All right, Forge, what's next?", forge),                         // "all right" is not "all"
+            ("Can you two check the build?", nil),
+            ("Hi Forge, hi Claude Warden.", nil),                              // two agents, however many words each
+            ("Hi Forge and Warden, Warden what do you think?", nil),           // both greeted: everyone's
+            ("Can you hear me Forge, is the build ready?", forge),             // the name ends a clause after "me"
+        ]
+        for row in table {
+            for joined in [both, [forge], [warden]] {
+                XCTAssertEqual(VoiceTurnAddressee.of(row.said, with: both, joined: joined), row.to,
+                               "\"\(row.said)\" when \(joined) said hello")
+            }
+        }
+        // A word two ids share addresses neither: no one's to tell.
+        let shared = ["forge-helper", forge]
+        XCTAssertNil(VoiceTurnAddressee.of("Hi Forge", with: shared, joined: shared))
+        XCTAssertNil(VoiceTurnAddressee.of("Hi Forge", with: shared, joined: [forge]), "named, so not the sole hello")
+        XCTAssertEqual(VoiceTurnAddressee.of("Hi pocket forge", with: shared, joined: shared), forge)
+    }
+
+    /// What you say just after a turn joins it, and the whole turn is asked again who it is for: "Okay so" goes to the
+    /// only agent that has said hello, and "Forge, what is next?" after it makes it pocket-forge's.
+    func test_a_turn_carried_on_is_for_the_agent_its_new_words_address() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), poster = FakePoster()
+        let room = room(with: ["claude-warden", "pocket-forge"], listener: listener, speaker: speaker,
+                        audio: FakeAudio(), poster: poster)
+        room.begin(rings: false)
+        await until("listening") { listener.partial != nil }
+        let microphone = FakeMicrophone(room: room, clock: clock)
+        room.receive([message("h1", from: "claude-warden", "Warden here.")])
+        await until("hello read") { room.state.speaker == "claude-warden" }
+        speaker.finish()
+        await until("listening again") { room.state.isListening && listener.partial != nil }
+
+        microphone.loud(for: 0.6)
+        listener.say("Okay so")
+        microphone.quiet(for: VoiceRoomCoordinator.pauseEndsTurn + 0.1)
+        await until("the pause sent it") { poster.turns.count == 1 }
+        XCTAssertEqual(poster.turns.last, "@claude-warden Okay so", "names no one: the only one that has said hello")
+        await until("still listening a moment") { room.state.isListening && listener.partial != nil }
+        microphone.quiet(for: 0.8)
+        await settle()
+        microphone.loud(for: 0.4)
+        listener.say("Forge, what is next?")
+        microphone.quiet(for: VoiceRoomCoordinator.pauseAfterSentence + 0.1)
+        await until("carried on") { poster.turns.count == 2 }
+        XCTAssertEqual(poster.turns.last, "@pocket-forge …Forge, what is next?")
+        await room.hangUp()
+    }
+
+    /// A turn for one agent ("Forge?") carried on into one for everyone ("And Warden, both of you take a look.") opens
+    /// the floor the first part gave pocket-forge: the other agent's answer is read, not held.
+    func test_a_turn_carried_on_into_everyones_opens_the_floor_again() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), poster = FakePoster()
+        let room = room(with: ["claude-warden", "pocket-forge"], listener: listener, speaker: speaker,
+                        audio: FakeAudio(), poster: poster)
+        room.begin(rings: false)
+        await until("listening") { listener.partial != nil }
+        let microphone = FakeMicrophone(room: room, clock: clock)
+
+        microphone.loud(for: 0.4)
+        listener.say("Forge?")
+        microphone.quiet(for: VoiceRoomCoordinator.pauseAfterSentence + 0.1)
+        await until("the pause sent it") { poster.turns.count == 1 }
+        XCTAssertEqual(poster.turns.first, "@pocket-forge Forge?")
+        await until("still listening a moment") { room.state.isListening && listener.partial != nil }
+        microphone.quiet(for: 0.8)
+        await settle()
+        microphone.loud(for: 0.4)
+        listener.say("And Warden, both of you take a look.")
+        microphone.quiet(for: VoiceRoomCoordinator.pauseAfterSentence + 0.1)
+        await until("carried on") { poster.turns.count == 2 }
+        XCTAssertEqual(poster.turns.last, "@claude-warden @pocket-forge …And Warden, both of you take a look.")
+        await until("listening a moment more") { room.state.isListening }
+        room.receive([message("w1", from: "claude-warden", "Looking now.", secondsAfterStart: 5)])
+        await until("the other agent is read") { room.state.speaker == "claude-warden" }
+        XCTAssertFalse(room.state.turns.contains { $0.id == "msg:w1" && $0.isHeld })
+        XCTAssertEqual(poster.turns.filter { $0.contains("has the floor") }, [], "no one is told to hold")
+        await room.hangUp()
+    }
+
     /// Add an agent mid-call. One message rings it; from then on its answers are read, and your turns
     /// mention it too.
     func test_adding_an_agent_mid_call_rings_it_and_its_answers_are_read() async {
