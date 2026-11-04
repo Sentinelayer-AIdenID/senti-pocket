@@ -11,13 +11,14 @@
     <false/>
     <key>NSPrivacyTrackingDomains</key>
     <array/>
-    <!-- All linked to the account, used only to run the service, never for tracking:
+    <!-- All linked to the account (except search), used only to run the service, never for tracking:
          - what people send to their rooms, which Senti stores so the room can show it: photos and videos, and other
            user content (messages, and the files sent with them);
          - the account: its user id, name and email address, from the sign-in provider;
          - the device: push tokens and the installation id, registered for notifications and calls;
          - diagnostics: the automatic report of a failed request (feature, error code, app version, time, no text), and
-           a crash report when the person sends one to a room. -->
+           a crash report when the person sends one to a room;
+         - search: room search queries, kept in the server's request log, not linked to the account. -->
     <key>NSPrivacyCollectedDataTypes</key>
     <array>
         <dict>
@@ -115,6 +116,20 @@
             <string>NSPrivacyCollectedDataTypeCrashData</string>
             <key>NSPrivacyCollectedDataTypeLinked</key>
             <true/>
+            <key>NSPrivacyCollectedDataTypeTracking</key>
+            <false/>
+            <key>NSPrivacyCollectedDataTypePurposes</key>
+            <array>
+                <string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+            </array>
+        </dict>
+        <dict>
+            <!-- Room search queries: the server's request log keeps full URLs (with ?q=) for hours, under the client IP,
+                 not the account. Not linked. Remove once the API logs paths without query strings. -->
+            <key>NSPrivacyCollectedDataType</key>
+            <string>NSPrivacyCollectedDataTypeSearchHistory</string>
+            <key>NSPrivacyCollectedDataTypeLinked</key>
+            <false/>
             <key>NSPrivacyCollectedDataTypeTracking</key>
             <false/>
             <key>NSPrivacyCollectedDataTypePurposes</key>
