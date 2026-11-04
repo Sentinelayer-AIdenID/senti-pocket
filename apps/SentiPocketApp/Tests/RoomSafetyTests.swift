@@ -112,23 +112,28 @@ private final class FakeBlocksAPI: BlockListClient, @unchecked Sendable {
     }
 }
 
-/// A blocks API whose list answers only when released, and that cannot take changes (as if it went offline).
+/// A blocks API whose first list answers only when released, and that cannot take changes (as if it went offline).
+/// A later list answers at once with the same blocks, so a sync that should have stopped fails its test, never hangs.
 private final class HeldListAPI: BlockListClient, @unchecked Sendable {
     private let lock = NSLock()
     private var waiter: CheckedContinuation<[ServerBlock], Never>?
+    private var released: [ServerBlock]?
 
     var isListing: Bool { lock.withLock { waiter != nil } }
 
     func blocks() async throws -> [ServerBlock] {
-        await withCheckedContinuation { waiter in lock.withLock { self.waiter = waiter } }
+        if let released = lock.withLock({ released }) { return released }
+        return await withCheckedContinuation { waiter in lock.withLock { self.waiter = waiter } }
     }
 
     func release(with actorIds: [String]) {
+        let list = actorIds.map { ServerBlock(actorId: $0, createdAt: nil) }
         let waiter = lock.withLock { () -> CheckedContinuation<[ServerBlock], Never>? in
             defer { self.waiter = nil }
+            released = list
             return self.waiter
         }
-        waiter?.resume(returning: actorIds.map { ServerBlock(actorId: $0, createdAt: nil) })
+        waiter?.resume(returning: list)
     }
 
     func block(_ actorId: String) async throws { throw RoomSendError.retryable(retryAfterSeconds: nil) }
