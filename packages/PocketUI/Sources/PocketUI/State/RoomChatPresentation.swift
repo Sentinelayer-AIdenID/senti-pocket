@@ -263,6 +263,11 @@ public struct RoomChatMessageRow: Equatable, Identifiable, Sendable {
     public var replyContext: String?
     /// Agents' "working on" lines about this message.
     public var work: [RoomChatWorkLine] = []
+    /// The same lines as each agent's Working row (`RoomWorkSession`): live ones first, then newest first.
+    public var workSessions: [RoomWorkSession] = []
+    /// Your newest message, read by Senti or by the agent it is for (it @-names it, or this is that agent's chat), as
+    /// the room's read receipts say: it shows "Seen".
+    public var isSeenByAddressee: Bool = false
     /// The last message of its author's run (the next row is someone else, a header or nothing): it carries the
     /// action row and the time.
     public var endsRun: Bool = true
@@ -745,6 +750,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
             messages.filter { ownIds.contains($0.authorId.lowercased()) }.map(\.sequenceId)
                 + replies.filter { ownIds.contains($0.authorId.lowercased()) }.map(\.sequenceId)
         )
+        // When each agent posted, for its Working rows: an answer after its last step ends its work.
+        let agentPosts = messages.contains { !$0.work.isEmpty } ? Self.agentPostTimes(messages + replies) : [:]
         for input in ordered {
             // The chat's own agent: everything it says is said to you, in full, without the relay's signature line.
             let byRoomAgent = roomAgent != nil && input.kind == .message && input.authorId.lowercased() == roomAgent
@@ -794,6 +801,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 inlineReplyId: input.inlineReplyId,
                 replyContext: input.replyToSequenceId.flatMap { parents[$0] }.map(Self.replyContext(for:)),
                 work: input.isInlineReply ? [] : input.work,
+                workSessions: input.isInlineReply ? [] : RoomWorkSession.sessions(lines: input.work, posts: agentPosts),
                 call: folded.cards[input.id],
                 trail: trails.trails[input.id],
                 repeats: repeated.counts[input.id] ?? 1,
@@ -846,6 +854,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         if !protectedFailure, !files.isEmpty || !fileParts.isEmpty {
             rows = Self.placingFiles(files, parts: fileParts, in: rows)
         }
+        Self.markSeenByAddressee(in: &rows, roomAgent: roomAgent)
         self.rows = rows
         if let threadInput, !protectedFailure,
            case .message(let parent)? = Self.messageRow(in: rows, for: threadInput.sequenceId) {
@@ -865,6 +874,30 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         } else {
             self.thread = nil
         }
+    }
+
+    /// Each agent's post times (messages and replies), by lowercased id.
+    static func agentPostTimes(_ inputs: [RoomChatMessageInput]) -> [String: [Date]] {
+        var times: [String: [Date]] = [:]
+        for input in inputs where !input.isHuman && input.kind == .message {
+            if let date = input.date { times[input.authorId.lowercased(), default: []].append(date) }
+        }
+        return times
+    }
+
+    /// Your newest message shows "Seen" once Senti, or the agent it is for, has viewed it (Carter, #61679). Only what the
+    /// read receipts say: an agent that records no view never shows it.
+    static func markSeenByAddressee(in rows: inout [RoomChatRow], roomAgent: String?) {
+        guard let index = rows.lastIndex(where: { row in
+            if case .message(let message) = row, message.isOwn, message.kind == .message { return true }
+            return false
+        }), case .message(var mine) = rows[index], let viewers = mine.views?.agentViewers, !viewers.isEmpty else { return }
+        var addressed: Set<String> = ["senti"]
+        if let roomAgent { addressed.insert(roomAgent) }
+        addressed.formUnion(ChatReferences.mentionHandles(in: mine.text).map { $0.lowercased() })
+        guard !viewers.isDisjoint(with: addressed) else { return }
+        mine.isSeenByAddressee = true
+        rows[index] = .message(mine)
     }
 
     /// Which shown row the unread line goes before: the first that holds a message at or after the line. A call's
@@ -1573,6 +1606,9 @@ public enum RoomChatIntent: Equatable, Sendable {
     case toggleRepeats(stack: String)
     /// The people list opened: the room screen refreshes which boxes still run.
     case peopleOpened
+    /// An agent's Working row opened (its lowercased id) or closed (nil): the room screen reads a box's own steps while
+    /// it is open.
+    case workStepsOpened(agentId: String?)
     /// The room's owner gave it a new name (`RoomTitle.cleaned` already applied).
     case renameRoom(title: String)
     /// Open the invite sheet (a share link, or an invite by email or username).

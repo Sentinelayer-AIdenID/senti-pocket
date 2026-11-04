@@ -76,6 +76,8 @@ struct RoomChatScreen: View {
     /// Who is working on what (the boxes' flight records), read only while the panel is open.
     @StateObject private var flight: FlightRecordCoordinator
     @State private var showsFlight = false
+    /// The agent whose Working row is open, lowercased: a box's own steps are read for it while it is.
+    @State private var openWorkAgent: String?
     /// The room's artifacts (PRs, tickets, files, links, code), read on their own when the panel opens.
     @StateObject private var artifacts: RoomArtifactsCoordinator
     @State private var showsArtifacts = false
@@ -605,6 +607,8 @@ struct RoomChatScreen: View {
             } else if intent == .peopleOpened {
                 // Which boxes still run, so the people list shows them as here or ended.
                 Task { await flight.refresh() }
+            } else if case .workStepsOpened(let agentId) = intent {
+                openWorkAgent = agentId
             } else {
                 coordinator.send(intent)
             }
@@ -613,6 +617,8 @@ struct RoomChatScreen: View {
         // underneath (warden, #265, #269).
         .environment(\.roomIsCovered, isCovered)
         .environment(\.roomProfileOpener, profileOpener)
+        // A box's own steps for its open Working row.
+        .environment(\.roomBoxSteps, flight.boxSteps)
         // A direct message: whom it is with, the room you share, and for an agent whether it may use this chat there.
         .safeAreaInset(edge: .top, spacing: 0) {
             if let info = route.direct {
@@ -1026,6 +1032,16 @@ struct RoomChatScreen: View {
             // A moment after the room opens, so iOS can hand over its own crash records first and both go together.
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             offerCrashReports()
+        }
+        // An open Working row's box: its record read now and every 10 s while the row is open and the room can be seen,
+        // as the Flight record reads the box it has open. Nothing is read for a closed row.
+        .task(id: "\(openWorkAgent ?? "")|\(isCovered)") {
+            guard let agent = openWorkAgent, !isCovered,
+                  flight.state.boxes.contains(where: { $0.name.lowercased() == agent }) else { return }
+            while !Task.isCancelled {
+                await flight.readSteps(ofBox: agent)
+                try? await Task.sleep(nanoseconds: UInt64(FlightRecordCoordinator.openBoxInterval * 1_000_000_000))
+            }
         }
         // The mint's boxes for this room, as the Flight record reads them: the chat's own agent and the composer's hint.
         .onChange(of: [Set(flight.state.boxes.map(\.name)), flight.state.endedBoxNames]) { boxes in

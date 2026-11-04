@@ -86,6 +86,9 @@ APPROVED_RESOURCE_REFERENCES = frozenset(
         PurePosixPath("Resources/send.caf"),
         # The ringtone CallKit plays for an agent's call (make_sounds.py ring).
         PurePosixPath("Resources/ring.caf"),
+        # What Senti shows while it prepares an answer, and the lines a new room opens with: the same file the web
+        # publishes, refreshed at most once a day (SentiPhrasesStore).
+        PurePosixPath("Resources/senti-thinking-phrases.json"),
     }
 )
 APPROVED_PACKAGE_PRODUCTS = frozenset(

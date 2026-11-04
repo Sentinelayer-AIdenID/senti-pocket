@@ -19,6 +19,10 @@ public struct RoomChatView: View {
     @State private var threadDrafts: [Int64: String] = [:]
     /// Opens a profile card from an avatar, where direct messages are on.
     @Environment(\.roomProfileOpener) private var profileOpener
+    /// The lines a new room opens with (and Senti's thinking phrases).
+    @Environment(\.sentiPhrases) private var sentiPhrases
+    /// When this room was opened: its opening line is chosen for the room and this day, once.
+    @State private var openedAt = Date()
     @State private var readerAtBottom = true
     /// The reader's place as the bottom marker reports it, settled outside layout, and whether the room is on screen
     /// to take it (see `RoomBottomSettle`). A reference, so keeping it never redraws the room.
@@ -287,6 +291,11 @@ public struct RoomChatView: View {
         // closed").
         .onAppear { bottomWatch.isActive = true }
         .onDisappear { bottomWatch.isActive = false }
+        // Senti starting to think is said once; its phrases are not read out as they change.
+        .onChange(of: state.composingAgents.contains { $0.lowercased() == SentiThinking.agentId }) { thinking in
+            guard thinking else { return }
+            SentiThinking.announce()
+        }
         // A container, so the composer, the send button and every row keep their own identifiers and labels
         // (without it the screen's identifier replaced theirs).
         .accessibilityElement(children: .contain)
@@ -415,6 +424,10 @@ public struct RoomChatView: View {
             }
             .onChange(of: state.attachmentPreviews.count) { _ in
                 if let heldAnchor { proxy.scrollTo(heldAnchor, anchor: .center) } else { keepAtBottomIfThere(proxy) }
+            }
+            // Senti thinking (or an agent preparing a reply) shows at the very end: a reader there sees it come.
+            .onChange(of: state.composingAgents) { _ in
+                if heldAnchor == nil { keepAtBottomIfThere(proxy) }
             }
             .onChange(of: state.lastMessageId) { _ in
                 if !didInitialScroll {
@@ -652,12 +665,21 @@ public struct RoomChatView: View {
                     .font(.system(size: 42))
                     .foregroundStyle(state.failure == nil ? PocketPalette.accent : PocketPalette.warning)
                     .accessibilityHidden(true)
-                Text(state.failure?.title ?? "No messages yet")
-                    .font(.title3.bold())
-                Text(state.failure?.detail ?? "Messages posted in this room will appear here as they arrive.")
-                    .foregroundStyle(PocketPalette.textSecondary)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
+                if let failure = state.failure {
+                    Text(failure.title)
+                        .font(.title3.bold())
+                    Text(failure.detail)
+                        .foregroundStyle(PocketPalette.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    // A new room opens with one of the room's lines, for this room and this day (Carter, #61720).
+                    Text(sentiPhrases.roomIntro(roomId: state.sessionId, on: openedAt))
+                        .font(.title3.bold())
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("pocket.room.intro")
+                }
                 if state.failure != nil {
                     Button("Try again") { send(.retry) }
                         .buttonStyle(.borderedProminent)
@@ -1260,8 +1282,8 @@ private struct RoomMessageRowView: View {
             .buttonStyle(.plain)
             .accessibilityIdentifier("pocket.room.repeats.fold")
         }
-        if !row.work.isEmpty {
-            RoomWorkLines(lines: row.work)
+        if !row.workSessions.isEmpty {
+            RoomWorkingRows(sequenceId: row.sequenceId, sessions: row.workSessions) { send(.workStepsOpened(agentId: $0)) }
         }
         if showsAttachments, !row.attachments.isEmpty {
             RoomAttachmentsView(chips: row.attachments, previews: attachmentPreviews, send: send)
@@ -1324,6 +1346,11 @@ private struct RoomMessageRowView: View {
                         if row.isEdited { Text("edited") }
                         if let date = row.date { Text(date, style: .time) }
                         if let views = row.views { RoomReadTicks(views: views) }
+                        if row.isSeenByAddressee {
+                            Text("Seen")
+                                .fontWeight(.semibold)
+                                .accessibilityIdentifier("pocket.room.seen")
+                        }
                     }
                     .font(.caption2)
                     .foregroundStyle(PocketPalette.textSecondary)
@@ -1505,54 +1532,6 @@ private struct RoomMessageRowView: View {
             }
             .disabled(!option.isEnabled)
         }
-    }
-}
-
-/// Who is working on a message, under it: live lines shimmer, finished ones fold into one line that opens to show
-/// every step (as the assistant apps show their steps).
-struct RoomWorkLines: View {
-    let lines: [RoomChatWorkLine]
-    @State private var showsAll = false
-
-    var body: some View {
-        let live = lines.filter(\.isLive)
-        let finished = lines.filter { !$0.isLive }
-        VStack(alignment: .leading, spacing: 3) {
-            ForEach(live) { line in
-                LiveLine(text: "\(line.actorId) · \(line.text)", isLive: true)
-            }
-            if let newest = finished.last {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.2)) { showsAll.toggle() }
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "checkmark.circle")
-                            .font(.caption2)
-                        Text("\(newest.actorId) · \(newest.text)")
-                            .font(.caption)
-                            .lineLimit(1)
-                        if finished.count > 1 {
-                            Image(systemName: showsAll ? "chevron.down" : "chevron.right")
-                                .font(.caption2.weight(.semibold))
-                        }
-                    }
-                    .foregroundStyle(PocketPalette.textSecondary)
-                }
-                .buttonStyle(.plain)
-                .disabled(finished.count < 2)
-                .accessibilityLabel("\(newest.actorId): \(newest.text)")
-                .accessibilityHint(finished.count > 1 ? (showsAll ? "Hides the earlier steps" : "Shows \(finished.count - 1) earlier steps") : "")
-                if showsAll {
-                    ForEach(finished.dropLast()) { line in
-                        Text("\(line.actorId) · \(line.text)")
-                            .font(.caption)
-                            .foregroundStyle(PocketPalette.textSecondary)
-                            .padding(.leading, 16)
-                    }
-                }
-            }
-        }
-        .padding(.top, 2)
     }
 }
 
@@ -2872,24 +2851,47 @@ private struct RoomTurnBreak: View {
     }
 }
 
+/// Who is preparing a reply, at the bottom of the room: Senti with its avatar and thinking phrases, other agents in
+/// words.
 private struct RoomComposingLine: View {
     let agents: [String]
 
     var body: some View {
-        Text(label)
-            .font(.caption)
-            .foregroundStyle(PocketPalette.textSecondary)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .accessibilityIdentifier("pocket.room.composing")
+        let others = agents.filter { $0.lowercased() != SentiThinking.agentId }
+        VStack(alignment: .leading, spacing: 0) {
+            if others.count < agents.count {
+                SentiThinkingLine()
+            }
+            if !others.isEmpty {
+                Text(Self.label(others))
+                    .font(.caption)
+                    .foregroundStyle(PocketPalette.textSecondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .accessibilityIdentifier("pocket.room.composing")
+            }
+        }
     }
 
-    private var label: String {
+    static func label(_ agents: [String]) -> String {
         switch agents.count {
         case 1: return "\(agents[0]) is preparing a reply…"
         case 2: return "\(agents[0]) and \(agents[1]) are preparing replies…"
         default: return "\(agents.count) agents are preparing replies…"
         }
+    }
+}
+
+/// Senti, as the room's composing frames name it.
+enum SentiThinking {
+    static let agentId = "senti"
+
+    /// Said once as Senti starts thinking, to VoiceOver alone.
+    static func announce() {
+        #if os(iOS)
+        guard UIAccessibility.isVoiceOverRunning else { return }
+        UIAccessibility.post(notification: .announcement, argument: SentiThinkingLine.accessibilityText)
+        #endif
     }
 }
 

@@ -18,6 +18,8 @@ struct SentiPocketApp: App {
     @StateObject private var whisperModel = WhisperModelProvisioningCoordinator()
     /// Room links iOS hands the app (universal links), held until a signed-in root opens them.
     @StateObject private var incomingLinks = IncomingLinkInbox()
+    /// Senti's thinking phrases and the new-room lines: the app's copy, or the web's newer one (read once a day).
+    @StateObject private var sentiPhrases = SentiPhrasesStore.shared
     #if DEBUG
     @StateObject private var model = PocketAppModel()
     #endif
@@ -39,6 +41,12 @@ struct SentiPocketApp: App {
         WindowGroup {
             rootView
                 .onAppear { whisperModel.start() }
+                .environment(\.sentiPhrases, sentiPhrases.current)
+                // The web's copy is read only while the app is in use, at most once a day.
+                .onAppear { if scenePhase == .active { sentiPhrases.refreshIfDue() } }
+                .onChange(of: scenePhase) { phase in
+                    if phase == .active { sentiPhrases.refreshIfDue() }
+                }
                 .onOpenURL { url in
                     LaunchUrgency.shared.raise()
                     _ = incomingLinks.receive(url)

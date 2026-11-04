@@ -40,6 +40,28 @@ private final class WorkTransport: RoomTransport, @unchecked Sendable {
 
 @MainActor
 final class FlightRecordTests: XCTestCase {
+    /// An open Working row of a box (Carter, #61655: tap to see the process) reads that box's own record: its
+    /// narration becomes the row's steps between its notes. An agent that is not a running box has none, and nothing
+    /// is read for it.
+    func test_an_open_working_row_reads_its_boxs_narration_as_steps() async {
+        let mint = FakeMint(
+            lives: [MintLife(id: "life-1", agentName: "build-agent", model: "m", phase: "working")],
+            records: ["life-1": MintFlightRecord(narration: [
+                .init(at: "2026-11-04T10:00:05Z", text: "Opened OnboardingForm.swift"),
+                .init(at: "2026-11-04T10:00:40Z", text: "Paste skips validate()")
+            ])]
+        )
+        let coordinator = FlightRecordCoordinator(sessionId: "room", mint: mint, sleep: { _ in })
+        await coordinator.readSteps(ofBox: "build-agent")
+        XCTAssertTrue(coordinator.boxSteps.isEmpty, "the room's boxes are not known yet: nothing is read")
+        await coordinator.refreshBoxes()
+        await coordinator.readSteps(ofBox: "Build-Agent")
+        XCTAssertEqual(coordinator.boxSteps["build-agent"]?.map(\.text), ["Opened OnboardingForm.swift", "Paste skips validate()"])
+        XCTAssertEqual(coordinator.boxSteps["build-agent"]?.first?.at, ParsedSessionTimestamp("2026-11-04T10:00:05Z").date)
+        await coordinator.readSteps(ofBox: "review-agent")
+        XCTAssertNil(coordinator.boxSteps["review-agent"], "not a box")
+    }
+
     /// Carter (#55014): the web's room figures on top of the panel.
     func test_the_room_figures_show_over_the_boxes() async {
         let mint = FakeMint(
