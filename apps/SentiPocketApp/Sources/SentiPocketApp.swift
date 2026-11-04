@@ -664,6 +664,8 @@ struct AuthenticatedRootView: View {
                     presentsNotifications = false
                 }
             }
+            .onAppear { notifications.listShown(true) }
+            .onDisappear { notifications.listShown(false) }
         }
         .sheet(isPresented: $presentsCallLog) {
             CallLogView(state: callLog.state, readingId: readingCallId) { intent in

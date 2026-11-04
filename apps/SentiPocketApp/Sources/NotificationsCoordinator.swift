@@ -87,8 +87,6 @@ final class NotificationsCoordinator: ObservableObject {
 
     /// The web polls the bell about this often.
     static let pollInterval: TimeInterval = 30
-    /// How far the read time may run ahead of the time shown before a quiet poll shows it ("Updated N min ago").
-    static let shownTimeStep: TimeInterval = 60
 
     init(
         transport: any NotificationsTransport,
@@ -128,6 +126,14 @@ final class NotificationsCoordinator: ObservableObject {
         pollTask = nil
     }
 
+    /// The bell's list is on screen. While it is, every read shows its time; as it opens, the time of the last read shows.
+    private var isShown = false
+
+    func listShown(_ shown: Bool) {
+        isShown = shown
+        if shown { publish(evenIfOnlyFresher: true) }
+    }
+
     /// Reads the bell again unless it was read less than `age` seconds ago (the side panel opening: the bell polls on
     /// its own while the app is in front).
     func refresh(force: Bool = false, ifOlderThan age: TimeInterval) async {
@@ -165,10 +171,10 @@ final class NotificationsCoordinator: ObservableObject {
             if notifications.isEmpty { failure = .network } else { couldNotUpdate = true }
         }
         isLoading = false
-        // A poll that found what the bell shows writes nothing while only its time moved by less than a minute: the
-        // root, the side panel and the room under it would all draw again for it. A read someone asked for shows its
-        // time; a minute or more brings the time along too, so "Updated N min ago" never drifts past what was read.
-        publish(evenIfOnlyFresher: force)
+        // A poll that found what the bell shows writes nothing while the bell's list is off screen: only its time would
+        // change, and the root, the side panel and the room under it would all draw again for a time nobody sees. A read
+        // someone asked for, or any read while the list is open, shows its time ("Updated N min ago" never drifts).
+        publish(evenIfOnlyFresher: force || isShown)
     }
 
     /// Marks one read and returns its destination, if it points into a room.
@@ -280,13 +286,8 @@ final class NotificationsCoordinator: ObservableObject {
             couldNotUpdate: couldNotUpdate
         )
         guard next != state else { return }
-        let freshByAMinute = next.updatedAt.map { read in
-            state.updatedAt.map { shown in read.timeIntervalSince(shown) >= Self.shownTimeStep } ?? true
-        } ?? false
-        if !evenIfOnlyFresher, !freshByAMinute, next.unread == state.unread, next.earlier == state.earlier,
-           next.isLoading == state.isLoading, next.failure == state.failure, next.couldNotUpdate == state.couldNotUpdate {
-            return
-        }
+        if !evenIfOnlyFresher, next.unread == state.unread, next.earlier == state.earlier, next.isLoading == state.isLoading,
+           next.failure == state.failure, next.couldNotUpdate == state.couldNotUpdate { return }
         state = next
     }
 }

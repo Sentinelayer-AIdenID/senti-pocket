@@ -248,13 +248,17 @@ final class SessionListCoordinatorTests: XCTestCase {
             .page(try page(ids: ["room-1"], nextCursor: nil, hasMore: false)),
             .page(try page(ids: ["room-2", "room-1"], nextCursor: nil, hasMore: false)),
             .page(try page(ids: ["room-2", "room-1"], titles: ["room-1": "Renamed"], nextCursor: nil, hasMore: false)),
-            .page(try page(ids: ["room-1"], titles: ["room-1": "Renamed"], nextCursor: nil, hasMore: false))
+            .page(try page(ids: ["room-2", "room-1"], titles: ["room-1": "Renamed"], unread: ["room-1": 3], nextCursor: nil,
+                           hasMore: false)),
+            .page(try page(ids: ["room-1"], titles: ["room-1": "Renamed"], unread: ["room-1": 3], nextCursor: nil, hasMore: false))
         ])
         await coordinator.refreshSessions().value
         await coordinator.refreshSessions(quietly: true).value
         XCTAssertEqual(coordinator.state.rows.map(\.sessionId), ["room-2", "room-1"], "a new room shows")
         await coordinator.refreshSessions(quietly: true).value
         XCTAssertEqual(coordinator.state.rows.last?.title, "Renamed", "a new title shows")
+        await coordinator.refreshSessions(quietly: true).value
+        XCTAssertEqual(coordinator.state.rows.last?.activity.unread, 3, "a new unread count shows")
         await coordinator.refreshSessions(quietly: true).value
         XCTAssertEqual(coordinator.state.rows.map(\.sessionId), ["room-1"], "a room that left goes")
     }
@@ -284,14 +288,15 @@ final class SessionListCoordinatorTests: XCTestCase {
         )
     }
 
-    private func page(ids: [String], titles: [String: String] = [:], nextCursor: String?, hasMore: Bool) throws -> SessionListPage {
+    private func page(ids: [String], titles: [String: String] = [:], unread: [String: Int] = [:], nextCursor: String?,
+                      hasMore: Bool) throws -> SessionListPage {
         let sessions = ids.map { id in
             """
             {"sessionId":"\(id)","status":"active","archiveStatus":"active","visibility":"private",
             "membershipRole":"owner","title":"\(titles[id] ?? id)","summaryText":null,"summaryGeneratedAt":null,
             "summaryModel":null,"agentCount":1,"eventCount":1,"totalCostUsd":0,"createdAt":null,
             "lastActivityAt":null,"expiresAt":null,"killedAt":null,"templateName":null,
-            "codebasePath":null,"s3ArchivePath":null}
+            "codebasePath":null,"s3ArchivePath":null\(unread[id].map { #","unread":{"count":\#($0),"firstUnreadSequenceId":100}"# } ?? "")}
             """
         }.joined(separator: ",")
         let cursor = nextCursor.map { "\"\($0)\"" } ?? "null"

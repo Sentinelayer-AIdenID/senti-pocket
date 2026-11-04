@@ -306,9 +306,9 @@ final class NotificationsCoordinatorTests: XCTestCase {
         XCTAssertFalse(coordinator.state.couldNotUpdate)
     }
 
-    /// Review of #325: polls that find the same bell write nothing, but the time shown ("Updated N min ago") is never a
-    /// minute or more behind the last read.
-    func test_quiet_polls_keep_the_shown_time_within_a_minute_of_the_last_read() async {
+    /// Review of #325: with the bell's list off screen, polls that find the same bell write nothing; while it is open,
+    /// each read shows its time, so "Updated N min ago" never drifts behind the last read.
+    func test_polls_show_their_time_only_while_the_list_is_open() async {
         final class Clock: @unchecked Sendable {
             private let lock = NSLock()
             private var date = Date(timeIntervalSince1970: 1_793_300_000)
@@ -325,12 +325,18 @@ final class NotificationsCoordinatorTests: XCTestCase {
         )
         await coordinator.refresh()
         XCTAssertEqual(coordinator.state.updatedAt, start)
+        clock.advance(90)
+        await coordinator.refresh()
+        XCTAssertEqual(coordinator.state.updatedAt, start, "off screen, a poll that finds the same bell writes nothing")
+        coordinator.listShown(true)
+        XCTAssertEqual(coordinator.state.updatedAt, start.addingTimeInterval(90), "opening the list shows the last read")
         clock.advance(30)
         await coordinator.refresh()
-        XCTAssertEqual(coordinator.state.updatedAt, start, "30 s on, the same bell writes nothing")
+        XCTAssertEqual(coordinator.state.updatedAt, start.addingTimeInterval(120), "while it is open, each read shows its time")
+        coordinator.listShown(false)
         clock.advance(30)
         await coordinator.refresh()
-        XCTAssertEqual(coordinator.state.updatedAt, start.addingTimeInterval(60), "a minute on, the time shown moves")
+        XCTAssertEqual(coordinator.state.updatedAt, start.addingTimeInterval(120), "closed again, polls write nothing")
     }
 
     func test_after_an_expired_sign_in_opening_the_bell_reads_again_and_a_success_brings_it_back() async {
