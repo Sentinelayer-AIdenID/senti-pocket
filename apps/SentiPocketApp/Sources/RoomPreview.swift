@@ -99,6 +99,7 @@ enum RoomPreview {
                 ticketWriter: RoomPreviewTicketWriter(),
                 ticketLeases: RoomPreviewTickets.leases,
                 ticketExtras: RoomPreviewExtras(),
+                mint: RoomPreviewMint(),
                 attachmentFetcher: RoomPreviewFiles(),
                 receipts: RoomPreviewReceipts(),
                 search: RoomPreviewSearch(),
@@ -324,6 +325,29 @@ private struct RoomPreviewSender: RoomMessageSending, RoomActionSending, RoomSum
 
     func sendAction(_ action: RoomActionRequest) async throws {
         try? await Task.sleep(nanoseconds: 300_000_000)
+    }
+}
+
+/// New agent in the preview: the new chat is "made" after a moment, and goes nowhere.
+extension RoomPreviewSender: AgentChatCreating {
+    func createAgentChat(sessionId: String, title: String, idempotencyKey: String) async throws {
+        try? await Task.sleep(nanoseconds: 600_000_000)
+    }
+}
+
+/// The mint in the preview: two models, so the room's owner sees New agent; a start "boots" for a few seconds and
+/// starts nothing.
+private struct RoomPreviewMint: MintStarting {
+    func models() async throws -> [MintModel] {
+        [MintModel(id: "preview-strong", label: "Strong model", note: "Plans, writes and reviews code.",
+                   efforts: ["low", "medium", "high"], defaultEffort: "medium"),
+         MintModel(id: "preview-fast", label: "Fast model")]
+    }
+
+    func startAgent(_ request: MintUpRequest) async throws -> MintUpResponse {
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
+        return MintUpResponse(lifeId: "preview-life", agentName: request.agentName ?? "mint-preview",
+                              sessionId: request.sessionId, phase: "booting", consoleURL: nil)
     }
 }
 

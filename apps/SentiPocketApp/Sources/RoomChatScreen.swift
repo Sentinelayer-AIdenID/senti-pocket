@@ -100,14 +100,16 @@ struct RoomChatScreen: View {
     @State private var offersCrashReports = false
     /// A box's console, shown in the app.
     @State private var consolePage: InAppPage?
-    /// Starting agents for tickets (the mint admits only some accounts; the tickets screen asks once). The mint is
-    /// the build's `SENTI_MINT_URL`; a build without one offers no agents.
-    private let ticketMint = HTTPMintClient(
-        baseURL: GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_MINT_URL"]),
-        // No cache and no cookie store for a request that carries the person's token.
-        urlSession: SentiHTTPTransportPolicy.protectedReadSession,
-        tokenProvider: { SessionTokenStore.load() }
-    )
+    /// Starting agents, for tickets and from New agent (the mint admits only some accounts; the tickets screen and the
+    /// New agent button each ask once). The mint is the build's `SENTI_MINT_URL`; a build without one offers no agents.
+    private let agentMint: any MintStarting
+    /// Whether this room shows New agent: to its owners and admins, once the mint admits the account.
+    @StateObject private var newAgentOffer: NewAgentOffer
+    @State private var showsNewAgent = false
+    /// Makes the new chat a New agent can start in.
+    private let chatCreator: (any AgentChatCreating)?
+    /// Opens a chat made here as the room on screen.
+    private let openNewRoom: @MainActor (RoomRoute) -> Void
     /// Agents' calls answered on the call screen; the one this room's voice room is for.
     @ObservedObject private var callDesk = RoomCallDesk.shared
     @State private var answeredCall: RoomCallDesk.Call?
@@ -147,6 +149,8 @@ struct RoomChatScreen: View {
         admissionDecider: (any AdmissionDeciding)? = nil,
         openRoom: @escaping @MainActor (SentiLink) -> Void = { _ in },
         openChildRoom: @escaping @MainActor (RoomRoute) -> Void = { _ in },
+        openNewRoom: @escaping @MainActor (RoomRoute) -> Void = { _ in },
+        mint: (any MintStarting)? = nil,
         attachmentFetcher: any AttachmentFileFetching = URLSessionAttachmentFetcher(),
         receipts: (any RoomReceiptsClient)? = nil,
         search: (any RoomSearching)? = nil,
@@ -175,6 +179,17 @@ struct RoomChatScreen: View {
         self.identity = identity
         self.openRoom = openRoom
         self.openChildRoom = openChildRoom
+        self.openNewRoom = openNewRoom
+        let agentMint = mint ?? HTTPMintClient(
+            baseURL: GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_MINT_URL"]),
+            // No cache and no cookie store for a request that carries the person's token.
+            urlSession: SentiHTTPTransportPolicy.protectedReadSession,
+            tokenProvider: { SessionTokenStore.load() }
+        )
+        self.agentMint = agentMint
+        _newAgentOffer = StateObject(wrappedValue: NewAgentOffer(role: route.membershipRole, isBreakout: route.isBreakout,
+                                                                 mint: agentMint))
+        self.chatCreator = sender as? any AgentChatCreating
         self.onRenamed = onRenamed
         self.onReauthenticationRequired = onReauthenticationRequired
         _coordinator = StateObject(wrappedValue: RoomChatCoordinator(
@@ -550,6 +565,21 @@ struct RoomChatScreen: View {
         // underneath (warden, #265, #269).
         .environment(\.roomIsCovered, isCovered)
         .toolbar {
+            // New agent (Carter: "I don't think I see a new agent button on mobile, put that"), beside the title as on
+            // the web, for owners and admins the mint admits. The first of the room's buttons: iOS keeps the title whole
+            // and moves the buttons that do not fit into its More menu from the last one back, so this is the last to
+            // go there, and is in that menu, by its name, under a title too long for any button.
+            if newAgentOffer.isOffered {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        showsNewAgent = true
+                    } label: {
+                        Label("New agent", systemImage: "cpu")
+                    }
+                    .accessibilityHint("Starts an agent in this room or in a new chat")
+                    .accessibilityIdentifier("pocket.room.newAgent")
+                }
+            }
             if voicePoster != nil {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
@@ -782,7 +812,7 @@ struct RoomChatScreen: View {
                         identity: identity,
                         assignRoster: ticketAssignRoster,
                         extras: ticketExtras,
-                        mint: writesTickets ? ticketMint : nil,
+                        mint: writesTickets ? agentMint : nil,
                         startsFiling: ticketsStartFiling,
                         onOpenMessage: { sequence in
                             // The sheet closes first, then the room goes to the message.
@@ -796,6 +826,16 @@ struct RoomChatScreen: View {
                 .environment(\.openURL, linkAction)
             }
         }
+        .sheet(isPresented: $showsNewAgent) {
+            NewAgentSheet(sessionId: route.sessionId, roomTitle: coordinator.state.title, mint: agentMint,
+                          chats: chatCreator) { chat in
+                // The sheet closes first, then the new chat opens in place of this room.
+                showsNewAgent = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { openNewRoom(chat) }
+            }
+        }
+        .onChange(of: showsNewAgent) { shown in if shown { CrashReporter.shared.note("new agent opened") } }
+        .task { await newAgentOffer.check() }
         .sheet(isPresented: $showsBreakouts) {
             NavigationStack {
                 RoomBreakoutsView(cards: Array(coordinator.state.breakouts.values)) { childSessionId in
@@ -936,7 +976,7 @@ struct RoomChatScreen: View {
                     identity: identity,
                     assignRoster: ticketAssignRoster,
                     extras: ticketExtras,
-                    mint: writesTickets ? ticketMint : nil,
+                    mint: writesTickets ? agentMint : nil,
                     onOpenMessage: { sequence in focus(on: sequence) },
                     onReauthenticationRequired: onReauthenticationRequired
                 )
@@ -964,6 +1004,8 @@ struct RoomChatScreen: View {
             case .active:
                 coordinator.resume()
                 takeAnsweredCall()
+                // Back in front: a mint that gave no answer for New agent is asked again.
+                Task { await newAgentOffer.check() }
             // A call keeps the room live in the background: its answers come through the room.
             case .background where voiceRoom == nil: coordinator.pause()
             default: break

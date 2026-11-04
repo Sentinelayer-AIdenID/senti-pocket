@@ -680,9 +680,11 @@ extension HTTPRoomMessageSender {
 
 extension HTTPRoomMessageSender {
     /// `POST /api/v1/sessions`: a new private room you own, of a type (Carter, #55287: "rooms optimized just for
-    /// specific things like study together"). The id is made here; the mutation token is signed over it and the
-    /// route, as the API checks before anything else.
-    func createRoom(title: String, roomType: String, maxMembers: Int = 25) async throws -> String {
+    /// specific things like study together"). The id is made here, unless the caller kept one to send again (a New
+    /// agent's chat); the mutation token is signed over it and the route, as the API checks before anything else.
+    func createRoom(title: String, roomType: String, maxMembers: Int = 25,
+                    sessionId: String = UUID().uuidString.lowercased(),
+                    idempotencyKey key: String = "create-" + UUID().uuidString.lowercased()) async throws -> String {
         guard let apiBaseURL,
               var components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false) else {
             throw RoomSendError.notConfigured
@@ -691,8 +693,6 @@ extension HTTPRoomMessageSender {
         components.percentEncodedPath = "/api/v1/sessions"
         components.query = nil
         guard let url = components.url else { throw RoomSendError.notConfigured }
-        let sessionId = UUID().uuidString.lowercased()
-        let key = "create-" + UUID().uuidString.lowercased()
         guard let csrf = SessionMutationCSRF.token(bearer: token, sessionId: sessionId, routeTemplate: "POST /api/v1/sessions",
                                                    idempotencyKey: key) else {
             throw RoomSendError.notConfigured

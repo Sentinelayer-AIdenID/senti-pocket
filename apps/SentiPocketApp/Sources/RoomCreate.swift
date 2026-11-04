@@ -53,6 +53,22 @@ extension HTTPRoomMessageSender: RoomCreating {
     }
 }
 
+/// Making the chat a New agent starts in (sentinelayer-web `NewAgentDialog`): a private general room for four, under an
+/// id and key named before it is sent. Sent again with the same ones it makes no second chat: the API replays the key,
+/// and keeps one room per id for its owner.
+protocol AgentChatCreating: Sendable {
+    func createAgentChat(sessionId: String, title: String, idempotencyKey: String) async throws
+}
+
+extension HTTPRoomMessageSender: AgentChatCreating {
+    func createAgentChat(sessionId: String, title: String, idempotencyKey: String) async throws {
+        let made = try await createRoom(title: title, roomType: RoomKind.general.rawValue, maxMembers: NewAgentChat.maxMembers,
+                                        sessionId: sessionId, idempotencyKey: idempotencyKey)
+        // The agent is sent to the id kept with its start, so a chat made under any other is not the one.
+        guard made == sessionId else { throw RoomSendError.rejected }
+    }
+}
+
 /// The New room sheet: what the room is for, then its name.
 struct NewRoomSheet: View {
     let creator: any RoomCreating
