@@ -273,6 +273,8 @@ final class SentiNativeAuth: NSObject {
                     path: "/api/v1/auth/cli/sessions/poll",
                     body: CliPollRequest(session_id: sessionId, challenge: challenge)
                 )
+            } catch NativeAuthError.refused(let status) {
+                throw Self.pollRefusal(status)
             } catch NativeAuthError.rateLimited {
                 rateLimitStrikes += 1
                 guard rateLimitStrikes <= 20 else { throw NativeAuthError.rateLimited } // sustained hammering → surface it
@@ -293,6 +295,12 @@ final class SentiNativeAuth: NSObject {
             }
         }
         throw NativeAuthError.timedOut
+    }
+
+    /// A refused poll: a browser sign-in the server no longer knows (404, 410) has expired, a clean start over like
+    /// "expired"; anything else is the server's refusal.
+    nonisolated static func pollRefusal(_ status: Int) -> NativeAuthError {
+        status == 404 || status == 410 ? .rejected : .refused(status)
     }
 
     // MARK: HTTP

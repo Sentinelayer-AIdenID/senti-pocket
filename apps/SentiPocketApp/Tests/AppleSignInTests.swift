@@ -28,6 +28,15 @@ final class AppleSignInTests: XCTestCase {
         XCTAssertEqual(saved.tokens, ["session-1"])
     }
 
+    /// The browser sign-in's poll: an expired session the server no longer knows starts over cleanly; other refusals
+    /// stay the server's.
+    func test_a_poll_for_a_sign_in_the_server_no_longer_knows_is_a_clean_start_over() {
+        XCTAssertEqual(SentiNativeAuth.pollRefusal(404), .rejected)
+        XCTAssertEqual(SentiNativeAuth.pollRefusal(410), .rejected)
+        XCTAssertEqual(SentiNativeAuth.pollRefusal(403), .refused(403))
+        XCTAssertEqual(SentiNativeAuth.pollRefusal(500), .refused(500))
+    }
+
     func test_a_refusal_or_an_empty_token_keeps_nothing() async {
         let answers: [(Int, String, NativeAuthError)] = [
             (404, #"{"detail":"Not Found"}"#, .refused(404)),

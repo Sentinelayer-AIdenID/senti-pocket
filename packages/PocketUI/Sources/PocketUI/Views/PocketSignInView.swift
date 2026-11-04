@@ -24,6 +24,11 @@ public struct PocketSignInView: View {
         offersApple ? "\(title) with GitHub or Google" : title
     }
 
+    /// Every sign-in button's height: Apple's is drawn at it, and the card's label is sized so the filled capsule
+    /// around it comes out the same (Apple asks that its button be no smaller than the other ways in).
+    static let buttonHeight: CGFloat = 54
+    static let cardButtonLabelHeight: CGFloat = 40
+
     /// The phases with a sign-in button, where Apple is offered beside it.
     static func showsApple(in phase: PocketSignInPhase, offersApple: Bool) -> Bool {
         guard offersApple else { return false }
@@ -173,9 +178,10 @@ public struct PocketSignInView: View {
             Button { send(intent) } label: {
                 Text(buttonTitle)
                     .font(.headline)
-                    .frame(maxWidth: .infinity, minHeight: 50)
+                    .frame(maxWidth: .infinity, minHeight: Self.cardButtonLabelHeight)
             }
             .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.capsule)
             .tint(PocketPalette.accent)
             .accessibilityIdentifier("pocket.signin.primary")
         }
@@ -186,7 +192,7 @@ public struct PocketSignInView: View {
     private var appleButton: some View {
         #if canImport(UIKit) && canImport(AuthenticationServices)
         AppleSignInButton(style: colorScheme == .dark ? .white : .black) { send(.beginAppleSignIn) }
-            .frame(maxWidth: .infinity, minHeight: 50, maxHeight: 50)
+            .frame(maxWidth: .infinity, minHeight: Self.buttonHeight, maxHeight: Self.buttonHeight)
             .id(colorScheme)   // the button's style is set once, so a new appearance makes a new button
             .accessibilityIdentifier("pocket.signin.apple")
         #else
@@ -222,7 +228,7 @@ private struct AppleSignInButton: UIViewRepresentable {
 
     func makeUIView(context: Context) -> ASAuthorizationAppleIDButton {
         let button = ASAuthorizationAppleIDButton(authorizationButtonType: .signIn, authorizationButtonStyle: style)
-        button.cornerRadius = 12
+        button.cornerRadius = PocketSignInView.buttonHeight / 2   // a capsule, like the other sign-in button
         button.addTarget(context.coordinator, action: #selector(Tap.fire), for: .touchUpInside)
         return button
     }
