@@ -1137,7 +1137,7 @@ final class RoomMediaUploadCoordinatorTests: XCTestCase {
         let uploader = FakeUploader()
         let media = coordinator(uploader)
         var read: [Int64] = []
-        media.onReplyPosted = { target in read.append(target.sequenceId) }
+        media.onReplyPosted = { target, _ in read.append(target.sequenceId) }
         media.add([try source("IMG_0001.jpg"), try source("spec.pdf")])
         let target = RoomMediaReplyTarget(sequenceId: 42, replyId: "reply-1", name: "pat")
         media.perform(.sendReply(text: "  ", to: target))

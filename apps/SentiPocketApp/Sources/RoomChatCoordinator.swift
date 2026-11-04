@@ -1236,8 +1236,12 @@ final class RoomChatCoordinator: ObservableObject {
         publish()
     }
 
-    /// A reply with files was posted from this phone: its thread and the room read it now.
-    func replyPosted(to sequenceId: Int64) async {
+    /// A reply with files was posted from this phone: its saved words go, and its thread and the room read it now.
+    func replyPosted(to sequenceId: Int64, answering replyId: String? = nil, text: String? = nil) async {
+        if let draftKey, let text {
+            RoomComposerDraft.forgetSaved(key: draftKey, sent: text)
+            RoomReplyDrafts(base: draftKey).forgetSent(text, thread: sequenceId, reply: replyId)
+        }
         if openThreadSequence == sequenceId { await loadThread(sequenceId) }
         await refreshActions(force: true)
     }
@@ -1359,7 +1363,11 @@ final class RoomChatCoordinator: ObservableObject {
             do {
                 try await actionSender.sendAction(request)
                 guard let self else { return }
-                if let draftKey = self.draftKey { RoomComposerDraft.forgetSaved(key: draftKey, sent: item.text) }
+                // The server has it: its saved text goes (the room box's, for a swipe to reply, or the thread's).
+                if let draftKey = self.draftKey {
+                    RoomComposerDraft.forgetSaved(key: draftKey, sent: item.text)
+                    RoomReplyDrafts(base: draftKey).forgetSent(item.text, thread: item.targetSequenceId, reply: item.toReply)
+                }
                 self.onFeedback?(.sent)
                 if self.openThreadSequence == item.targetSequenceId { await self.loadThread(item.targetSequenceId) }
                 self.pendingReplies.removeAll { $0.clientId == clientId }

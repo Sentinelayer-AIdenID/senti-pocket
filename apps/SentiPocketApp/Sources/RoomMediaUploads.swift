@@ -296,8 +296,9 @@ final class RoomMediaUploadCoordinator: ObservableObject {
     var onPreviewReady: (@MainActor (_ attachmentId: String, _ data: Data) -> Void)?
     /// The message posted: read the room now.
     var onPosted: (@MainActor () -> Void)?
-    /// A reply with files posted: its thread and the room read it now (the card goes once they have).
-    var onReplyPosted: (@MainActor (RoomMediaReplyTarget) async -> Void)?
+    /// A reply with files posted, with its words: its thread and the room read it now (the card goes once they have),
+    /// and its saved words go.
+    var onReplyPosted: (@MainActor (RoomMediaReplyTarget, String?) async -> Void)?
     /// Whether the API takes files on a reply, as the room's reads show; an answer that drops them says no.
     var replyAttachments: RoomReplyAttachmentSupport = .unknown
     /// The sign-in was refused (it expired): the app asks for it again. The file keeps its place for a retry.
@@ -990,7 +991,7 @@ final class RoomMediaUploadCoordinator: ObservableObject {
                 self.setStatus(clientId, .sent)
                 for id in message.itemIds { if let item = self.items[id] { self.persist(item) } }
                 // The thread and the room read it; the card goes once they show it.
-                await self.onReplyPosted?(target)
+                await self.onReplyPosted?(target, message.text)
                 self.finish(clientId)
             } catch {
                 guard let self, !Task.isCancelled else { return }

@@ -1700,7 +1700,8 @@ public enum RoomComposerDraft {
         if kept == gone || gone.contains(kept) { defaults.removeObject(forKey: key) }
     }
 
-    /// Every room's saved text, on sign-out: the next person on the phone does not see it.
+    /// Every room's saved text, on sign-out: the next person on the phone does not see it. Thread replies' saved text
+    /// (`RoomReplyDrafts`) sits under the same prefix and goes with it.
     public static func forgetAllSaved(in defaults: UserDefaults = .standard) {
         for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(savedKeyPrefix) {
             defaults.removeObject(forKey: key)
@@ -1829,5 +1830,65 @@ public enum RoomLinkPolicy {
         }
         guard raw.hasPrefix("/"), !raw.hasPrefix("//"), !raw.hasPrefix("/\\") else { return nil }
         return webOrigin.flatMap { URL(string: raw, relativeTo: $0)?.absoluteURL }
+    }
+}
+
+/// A thread's unsent reply, kept on the phone as the room's own box keeps its text (`RoomComposerDraft`): under the
+/// room's key for this account, per thread, and per reply when it answers one. Written as it is typed, restored when the
+/// thread opens (a new room screen, a relaunch), and let go only once the server has the reply (`forgetSent`), never
+/// on a failed send (Carter lost a half-written reply on the web when new replies folded in, #61872).
+public struct RoomReplyDrafts {
+    /// The room's own saved-text key (`RoomComposerDraft.savedKey(sessionId:account:)`).
+    public let base: String
+    private let defaults: UserDefaults
+
+    public init(base: String, defaults: UserDefaults = .standard) {
+        self.base = base
+        self.defaults = defaults
+    }
+
+    /// Where the reply to `thread` (or to its reply `reply`) is kept.
+    public func key(thread: Int64, reply: String?) -> String {
+        base + "|thread." + String(thread) + (reply.map { "|reply." + $0 } ?? "")
+    }
+
+    /// Which reply the thread's saved text answers, when it answers one.
+    private func answeringKey(thread: Int64) -> String { base + "|thread." + String(thread) + "|answering" }
+
+    /// Keeps what is in the thread's reply box. The box answers one thing at a time, so the text moves with it: saved
+    /// under the reply it answers now, and gone from where it was before. An empty box keeps nothing.
+    public func save(_ text: String, thread: Int64, reply: String?) {
+        let previous = defaults.string(forKey: answeringKey(thread: thread))
+        if previous != reply { defaults.removeObject(forKey: key(thread: thread, reply: previous)) }
+        let current = key(thread: thread, reply: reply)
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            defaults.removeObject(forKey: current)
+            defaults.removeObject(forKey: answeringKey(thread: thread))
+        } else {
+            defaults.set(text, forKey: current)
+            if let reply {
+                defaults.set(reply, forKey: answeringKey(thread: thread))
+            } else {
+                defaults.removeObject(forKey: answeringKey(thread: thread))
+            }
+        }
+    }
+
+    /// What the thread's box held when it was last written, and the reply it answered; nil when nothing was kept.
+    public func restore(thread: Int64) -> (text: String, reply: String?)? {
+        let reply = defaults.string(forKey: answeringKey(thread: thread))
+        guard let text = defaults.string(forKey: key(thread: thread, reply: reply)),
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return (text, reply)
+    }
+
+    /// The server has the reply: its saved text goes, unless newer text was saved since (`RoomComposerDraft.forgetSaved`).
+    public func forgetSent(_ sent: String, thread: Int64, reply: String?) {
+        let current = key(thread: thread, reply: reply)
+        RoomComposerDraft.forgetSaved(key: current, sent: sent, in: defaults)
+        if defaults.string(forKey: current) == nil, reply != nil,
+           defaults.string(forKey: answeringKey(thread: thread)) == reply {
+            defaults.removeObject(forKey: answeringKey(thread: thread))
+        }
     }
 }

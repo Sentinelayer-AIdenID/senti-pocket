@@ -377,4 +377,72 @@ final class ReplyAttachmentsTests: XCTestCase {
         XCTAssertNil(room.state.thread?.focusReplyId, "opened again by hand, it is not marked again")
         room.pause()
     }
+
+    // MARK: - A thread's unsent reply, kept on the phone (#61872)
+
+    /// Answers each reply action as scripted, and counts them.
+    private final class ScriptedActions: RoomActionSending, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _calls = 0
+        let error: Error?
+        init(error: Error? = nil) { self.error = error }
+        var calls: Int { lock.withLock { _calls } }
+        func sendAction(_ action: RoomActionRequest) async throws {
+            lock.withLock { _calls += 1 }
+            if let error { throw error }
+        }
+    }
+
+    private func draftRoom(_ actions: ScriptedActions, account: String) -> RoomChatCoordinator {
+        RoomChatCoordinator(
+            sessionId: "room_1", title: "Room",
+            transport: ThreadTransport(
+                tail: RoomEventPage(messages: [RoomMessage(id: "evt-42", sequenceId: 42, kind: .message, authorId: "agent-a1",
+                                                           authorName: "agent-a1", isHuman: false, text: "the parent",
+                                                           timestamp: "2026-11-04T09:58:00+00:00")]),
+                actions: RoomActionsPage()
+            ),
+            actionSender: actions,
+            ownAuthorIds: ["human-pat"],
+            sleep: { seconds in if seconds > 5 { try? await Task.sleep(nanoseconds: 3_600_000_000_000) } },
+            outboxAccount: account,
+            onReauthenticationRequired: {}
+        )
+    }
+
+    /// What the thread's box saved as it was typed goes only once the server has the reply; a send that failed keeps it,
+    /// answering the same reply, to be sent again.
+    func test_a_reply_draft_is_cleared_after_a_successful_send_and_kept_after_a_failed_one() async {
+        let account = "acct-\(UUID().uuidString)"
+        let drafts = RoomReplyDrafts(base: RoomComposerDraft.savedKey(sessionId: "room_1", account: account))
+        defer {
+            for (thread, reply) in [(Int64(42), String?.none), (43, "reply-9"), (44, nil)] {
+                drafts.save("", thread: thread, reply: reply)
+            }
+        }
+
+        let accepting = ScriptedActions()
+        let room = draftRoom(accepting, account: account)
+        room.resume()
+        drafts.save("on it", thread: 42, reply: nil)
+        room.send(.sendReply(sequenceId: 42, text: "on it"))
+        await waitUntil("accepted and let go") { accepting.calls == 1 && drafts.restore(thread: 42) == nil }
+        XCTAssertNil(drafts.restore(thread: 42), "the server has it: nothing to bring back")
+
+        // A reply with files: its words go once the server has it too.
+        drafts.save("look", thread: 44, reply: nil)
+        await room.replyPosted(to: 44, answering: nil, text: "look")
+        XCTAssertNil(drafts.restore(thread: 44))
+        room.pause()
+
+        let refusing = ScriptedActions(error: RoomSendError.retryable(retryAfterSeconds: nil))
+        let failing = draftRoom(refusing, account: account)
+        failing.resume()
+        drafts.save("@sam later", thread: 43, reply: "reply-9")
+        failing.send(.sendReplyToReply(sequenceId: 43, replyId: "reply-9", text: "@sam later"))
+        await waitUntil("refused") { refusing.calls == 1 && failing.state.notice != nil }
+        XCTAssertEqual(drafts.restore(thread: 43)?.text, "@sam later", "a failed send keeps what was written")
+        XCTAssertEqual(drafts.restore(thread: 43)?.reply, "reply-9", "answering the same reply")
+        failing.pause()
+    }
 }

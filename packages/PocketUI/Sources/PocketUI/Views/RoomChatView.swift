@@ -137,6 +137,7 @@ public struct RoomChatView: View {
                     media: media,
                     previews: state.attachmentPreviews,
                     mediaHost: sheetMediaHost,
+                    draftKey: state.draftKey,
                     send: send,
                     draft: threadDraft(thread.parent.sequenceId)
                 )
@@ -1858,8 +1859,17 @@ private struct RoomThreadSheet: View {
     var previews: [String: Data] = [:]
     /// The pickers and viewers, hosted by this sheet (the room under it cannot present them).
     var mediaHost: RoomSheetMediaHost?
+    /// The room's saved-text key for this account: the reply being written is kept on the phone under it
+    /// (`RoomReplyDrafts`); nil keeps none.
+    var draftKey: String?
     let send: (RoomChatIntent) -> Void
     @Binding var draft: String
+    /// A sent reply's text stays saved until the server has it (the coordinator lets it go then); typing meanwhile is
+    /// saved once that has had time to happen, as in the room's box.
+    @State private var keepsSavedDraft = false
+    @State private var sends = 0
+    /// The reply the restored text answered, until its row is loaded to answer it again.
+    @State private var restoringAnswer: String?
     /// The reply being answered (a reply to a reply nests under it); nil answers the message.
     @State private var answering: RoomChatReplyRow?
     /// "File as a ticket": the reply goes to the room's ticket keeper as a ticket request.
@@ -1907,6 +1917,49 @@ private struct RoomThreadSheet: View {
         let query = editOffset.map { MentionSuggester.activeQuery(in: draft, at: $0)?.query } ?? MentionSuggester.queryAtEnd(of: draft)
         guard let query else { return [] }
         return MentionSuggester.suggestions(for: query, among: mentionCandidates)
+    }
+
+    private var drafts: RoomReplyDrafts? { draftKey.map { RoomReplyDrafts(base: $0) } }
+
+    /// Keeps the box's text on the phone as it is typed, for whatever it answers now.
+    private func saveDraft() {
+        guard !keepsSavedDraft, restoringAnswer == nil, let drafts else { return }
+        drafts.save(draft, thread: thread.parent.sequenceId, reply: answering?.id)
+    }
+
+    /// What was being written in this thread, back in the box when it opens (after the room was left, rebuilt or the
+    /// app relaunched), answering the reply it answered.
+    private func restoreDraft() {
+        guard draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let saved = drafts?.restore(thread: thread.parent.sequenceId) else { return }
+        restoringAnswer = saved.reply
+        lastDraft = saved.text
+        draft = saved.text
+        answerRestoredReply()
+    }
+
+    /// The restored text answered a reply: answer it again once its row is loaded (the message, if it is gone).
+    private func answerRestoredReply() {
+        guard let id = restoringAnswer else { return }
+        if let row = thread.replies.first(where: { $0.id == id }) {
+            answering = row
+            restoringAnswer = nil
+        } else if !thread.isLoading {
+            restoringAnswer = nil
+        }
+    }
+
+    /// A send leaves the sent text saved until the server has it; what is typed after it is saved once that has had
+    /// time to happen.
+    private func holdSavedDraftWhileSending() {
+        keepsSavedDraft = true
+        sends += 1
+        let sending = sends
+        DispatchQueue.main.asyncAfter(deadline: .now() + RoomComposerDraft.savedAfterSend) {
+            guard sends == sending else { return }
+            keepsSavedDraft = false
+            if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { saveDraft() }
+        }
     }
 
     private func answer(_ reply: RoomChatReplyRow) {
@@ -2015,8 +2068,16 @@ private struct RoomThreadSheet: View {
             }
             .scrollDismissesKeyboard(.interactively)
             // Opened at a reply (its notification): it comes into view once the replies are loaded.
-            .onAppear { showFocusedReply(proxy) }
-            .onChange(of: thread.replies.count) { _ in showFocusedReply(proxy) }
+            .onAppear {
+                showFocusedReply(proxy)
+                restoreDraft()
+            }
+            .onChange(of: thread.replies.count) { _ in
+                showFocusedReply(proxy)
+                answerRestoredReply()
+            }
+            .onChange(of: thread.isLoading) { _ in answerRestoredReply() }
+            .onChange(of: answering?.id) { _ in saveDraft() }
             }
             .sheet(item: $editingReply) { reply in
                 MessageEditSheet(original: reply.text) { text in
@@ -2129,6 +2190,7 @@ private struct RoomThreadSheet: View {
                                 replyWrittenBack.changed(from: lastDraft, to: new, sent: replySent)
                                 editOffset = MentionSuggester.editOffsetUnlessAtEnd(from: lastDraft, to: new)
                                 lastDraft = new
+                                saveDraft()
                             }
                             .padding(.horizontal, 12)
                             .padding(.vertical, 9)
@@ -2178,6 +2240,7 @@ private struct RoomThreadSheet: View {
             let target = RoomMediaReplyTarget(sequenceId: thread.parent.sequenceId, replyId: answering?.id,
                                               name: answering?.authorName ?? thread.parent.authorName)
             if !typed.isEmpty {
+                holdSavedDraftWhileSending()
                 replySent = typed
                 replyWrittenBack.sent()
                 emptyComposer($draft) { replyWrittenBack.clears($0) }
@@ -2192,6 +2255,7 @@ private struct RoomThreadSheet: View {
         guard canSendReply else { return }
         let text = ticketMode ? RoomComposerDraft.ticketRequest(typed) : typed
         ticketMode = false
+        holdSavedDraftWhileSending()
         if let answering {
             send(.sendReplyToReply(sequenceId: thread.parent.sequenceId, replyId: answering.id, text: text))
         } else {

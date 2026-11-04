@@ -1105,7 +1105,9 @@ struct RoomChatScreen: View {
         outgoing.onPosted = { [weak room] in room?.pullLatest() }
         // A reply with files: posted only where the API takes them, and read back into its thread before its card goes.
         room.onReplyAttachmentSupport = { [weak outgoing] support in outgoing?.replyAttachments = support }
-        outgoing.onReplyPosted = { [weak room] target in await room?.replyPosted(to: target.sequenceId) }
+        outgoing.onReplyPosted = { [weak room] target, text in
+            await room?.replyPosted(to: target.sequenceId, answering: target.replyId, text: text)
+        }
         outgoing.onPreviewReady = { [weak room] attachmentId, data in room?.seedPreview(data, for: attachmentId) }
         outgoing.onReauthenticationRequired = onReauthenticationRequired
     }
