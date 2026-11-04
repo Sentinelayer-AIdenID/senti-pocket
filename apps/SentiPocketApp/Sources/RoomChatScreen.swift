@@ -182,6 +182,9 @@ struct RoomChatScreen: View {
         direct: RoomDirectContext? = nil,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
+        #if DEBUG
+        RootPreview.meter.roomScreenMade()
+        #endif
         self.route = route
         self.directContext = direct
         self.reader = reader
@@ -564,6 +567,9 @@ struct RoomChatScreen: View {
     }
 
     var body: some View {
+        #if DEBUG
+        let _ = RootPreview.meter.roomScreenBodyRan()
+        #endif
         RoomChatView(
             state: coordinator.state,
             readingAloudId: reader.readingId,
@@ -1065,6 +1071,10 @@ struct RoomChatScreen: View {
             applyRouteLinksOnce()
             #if DEBUG
             if RoomPreview.isLeaderboardSheetRequested { coordinator.send(.openLeaderboard) }
+            if RootPreview.isRequested {
+                RootPreview.meter.watch("room", coordinator)
+                RootPreview.meter.watch("roomFlight", flight)
+            }
             #endif
             takeAnsweredCall()
             connectMedia()
