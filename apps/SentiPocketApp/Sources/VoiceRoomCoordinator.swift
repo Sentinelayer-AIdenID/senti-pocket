@@ -1295,7 +1295,7 @@ enum VoiceTurnAddressee {
         }
     }
 
-    /// The names a turn addresses (rule 2) and those it thanks (rule 3), as runs: "pocket forge" said together is one.
+    /// The names a turn addresses (rule 2) and those it thanks (rule 3), as runs: "build helper" said together is one.
     private static func addressed(in clauses: [[Word]],
                                   names: Set<String>) -> (strong: [[String]], thanked: [[String]]) {
         let isName: (Word) -> Bool = { names.contains($0.text) && !$0.isPossessive }
