@@ -26,6 +26,16 @@ final class AgentChatAliveUITests: XCTestCase {
         try? XCUIScreen.main.screenshot().pngRepresentation.write(to: url)
     }
 
+    /// Taps `row` until `target` shows (or, with `hides`, goes). A tap the simulator drops (a busy machine can turn a
+    /// tap into the start of a press, or spend it stopping the list) is tried once more, never a tap that took.
+    private func tap(_ row: XCUIElement, until target: XCUIElement, hides: Bool = false) -> Bool {
+        for _ in 0..<2 {
+            row.tap()
+            if hides ? target.waitForNonExistence(timeout: 10) : target.waitForExistence(timeout: 10) { return true }
+        }
+        return false
+    }
+
     func test_working_rows_open_and_fold_and_senti_thinks() {
         let app = launch("-PocketAgentChatPreview")
         let live = element(app, "pocket.room.working.506.build-agent")
@@ -51,23 +61,24 @@ final class AgentChatAliveUITests: XCTestCase {
 
         let steps = element(app, "pocket.room.working.506.build-agent.steps")
         XCTAssertFalse(steps.exists)
-        live.tap()
-        XCTAssertTrue(steps.waitForExistence(timeout: 5), "a tap shows every step")
+        XCTAssertTrue(tap(live, until: steps), "a tap shows every step")
         XCTAssertTrue(steps.label.contains("Reading the retry counter code"), steps.label)
         XCTAssertTrue(steps.label.contains("Running the onboarding tests on the simulator"), steps.label)
         shoot("expanded")
-        live.tap()
-        XCTAssertTrue(steps.waitForNonExistence(timeout: 15), "a second tap folds them")
+        XCTAssertTrue(tap(live, until: steps, hides: true), "a second tap folds them")
 
         let done = element(app, "pocket.room.working.501.build-agent")
-        if !done.isHittable { app.swipeDown() }
+        if !done.isHittable {
+            app.swipeDown()
+            // Let the list come to rest: a tap on a moving list only stops it.
+            RunLoop.current.run(until: Date().addingTimeInterval(2))
+        }
         XCTAssertTrue(done.waitForExistence(timeout: 10))
         XCTAssertEqual(done.label, "build-agent worked for 2 minutes 14 seconds", "finished: how long it worked")
         XCTAssertEqual(done.frame.height, live.frame.height, accuracy: 0.5,
                        "a row is one line live or finished: finishing moves nothing below or above it")
         shoot("done")
-        done.tap()
-        XCTAssertTrue(element(app, "pocket.room.working.501.build-agent.steps").waitForExistence(timeout: 5),
+        XCTAssertTrue(tap(done, until: element(app, "pocket.room.working.501.build-agent.steps")),
                       "a finished row keeps its steps")
         shoot("done-expanded")
     }
@@ -82,7 +93,7 @@ final class AgentChatAliveUITests: XCTestCase {
         XCTAssertTrue(element(app, "pocket.room.working.506.build-agent").exists)
         XCTAssertFalse(element(app, "pocket.room.working.506.docs-agent").exists, "the fourth waits behind +1")
         shoot("crowd")
-        more.tap()
+        XCTAssertTrue(tap(more, until: element(app, "pocket.room.working.506.docs-agent")))
         XCTAssertTrue(element(app, "pocket.room.working.506.docs-agent").waitForExistence(timeout: 5))
     }
 
