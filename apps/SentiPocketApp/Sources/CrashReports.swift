@@ -331,11 +331,21 @@ struct LastRun: Codable, Equatable {
         if memoryWarnings > 0 {
             lines.append("iOS warned about memory \(memoryWarnings) \(memoryWarnings == 1 ? "time" : "times") before it ended.")
         }
-        // The watch's last word on this run: the main thread stopped answering and never came back.
+        // The watch's last word on this run: the main thread stopped answering and never came back, and where it was.
+        var frames: [String] = []
+        var binaries: [String] = []
         if let stall, stall.startedAt >= launchedAt {
             lines.append(String(format: "The main thread stopped answering at %@, right after \"%@\", and was still stuck %.1f s later when the app ended.",
                                 CrashReportText.clock(stall.startedAt), stall.afterStep, stall.seconds))
             if let draws = stall.drawsText { lines.append("While it was stuck: \(draws).") }
+            frames = stall.frames ?? []
+            binaries = stall.binaries ?? []
+            let later = stall.laterFrames ?? []
+            if !frames.isEmpty, !later.isEmpty {
+                lines.append(later == frames
+                    ? "\(Int(MainThreadWatch.secondLookAfter)) s in it was at the same place."
+                    : "\(Int(MainThreadWatch.secondLookAfter)) s in it was elsewhere: " + later.prefix(6).joined(separator: " · ") + ".")
+            }
         }
         return CrashReport(
             id: "closed-\(Int(launchedAt.timeIntervalSince1970))",
@@ -345,6 +355,8 @@ struct LastRun: Codable, Equatable {
             system: system,
             device: device,
             reason: lines.joined(separator: "\n"),
+            frames: frames,
+            binaries: binaries,
             trail: trail
         )
     }
@@ -561,6 +573,12 @@ final class MainThreadWatch: @unchecked Sendable {
         /// Message rows drawn while it lasted, and the last one drawn (`RenderTrace`); nil in older records.
         var rowDraws: Int?
         var lastRow: Int64?
+        /// Where the main thread was when the stall was first seen ("binary +0xoffset", innermost first), each binary
+        /// with its UUID, and where it was `secondLookAfter` seconds in if still stuck (`MainThreadStack`); nil in older
+        /// records.
+        var frames: [String]?
+        var binaries: [String]?
+        var laterFrames: [String]?
 
         /// "1,240 row draws, the last #12345", or nil when none were counted.
         var drawsText: String? {
@@ -573,6 +591,9 @@ final class MainThreadWatch: @unchecked Sendable {
 
     static let shared = MainThreadWatch(url: MainThreadWatch.file)
     static let threshold: TimeInterval = 1.5
+    /// A stall still going this long is looked at again: the same place twice is a thread that waits, two places one
+    /// that is busy.
+    static let secondLookAfter: TimeInterval = 8
 
     private let url: URL
     private let lock = NSLock()
@@ -606,6 +627,7 @@ final class MainThreadWatch: @unchecked Sendable {
 
     func start() {
         guard timer == nil else { return }
+        MainThreadStack.rememberMainThread()
         try? FileManager.default.removeItem(at: url)
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 0.5, repeating: 0.5)
@@ -645,6 +667,27 @@ final class MainThreadWatch: @unchecked Sendable {
             written = current
         }
         lock.unlock()
+        // Where the main thread is stuck: read when the stall is first seen, and once more `secondLookAfter` seconds in,
+        // with this watch's lock released (the main thread may be holding it, in `note`). The stall is written first:
+        // naming the frames can wait on a lock the stuck thread holds (the loader's), and the plain record must survive.
+        if let current = written,
+           current.frames == nil || (current.laterFrames == nil && current.seconds >= Self.secondLookAfter) {
+            write(current)
+            let stack = MainThreadStack.capture()
+            lock.lock()
+            if var still = stall {
+                if still.frames == nil {
+                    still.frames = stack.frames
+                    still.binaries = stack.binaries
+                } else {
+                    still.laterFrames = stack.frames
+                    still.binaries = (still.binaries ?? []) + stack.binaries.filter { !(still.binaries ?? []).contains($0) }
+                }
+                stall = still
+                written = still
+            }
+            lock.unlock()
+        }
         if let written { write(written) }
         DispatchQueue.main.async { [weak self] in self?.beat() }
     }
@@ -652,9 +695,10 @@ final class MainThreadWatch: @unchecked Sendable {
     private func beat() {
         lock.lock()
         lastBeat = Date()
-        let ended = stall.map {
-            Stall(startedAt: $0.startedAt, afterStep: $0.afterStep, seconds: $0.seconds, recovered: true,
-                  rowDraws: $0.rowDraws, lastRow: $0.lastRow)
+        let ended = stall.map { stall -> Stall in
+            var ended = stall
+            ended.recovered = true
+            return ended
         }
         stall = nil
         lock.unlock()
