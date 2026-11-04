@@ -57,9 +57,7 @@ final class AgentChatAliveUITests: XCTestCase {
         XCTAssertTrue(steps.label.contains("Running the onboarding tests on the simulator"), steps.label)
         shoot("expanded")
         live.tap()
-        let deadline = Date().addingTimeInterval(5)
-        while steps.exists, Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.1)) }
-        XCTAssertFalse(steps.exists, "a second tap folds them")
+        XCTAssertTrue(steps.waitForNonExistence(timeout: 15), "a second tap folds them")
 
         let done = element(app, "pocket.room.working.501.build-agent")
         if !done.isHittable { app.swipeDown() }

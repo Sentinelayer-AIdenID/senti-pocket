@@ -127,6 +127,8 @@ final class LayerMotionView: UIView {
         addSubview(host.view)
         isAccessibilityElement = false
         accessibilityElementsHidden = true
+        // Only something to look at: a tap goes to the row it sits in.
+        isUserInteractionEnabled = false
     }
 
     @available(*, unavailable)
