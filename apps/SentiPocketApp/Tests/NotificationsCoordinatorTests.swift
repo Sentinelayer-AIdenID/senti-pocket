@@ -306,6 +306,39 @@ final class NotificationsCoordinatorTests: XCTestCase {
         XCTAssertFalse(coordinator.state.couldNotUpdate)
     }
 
+    /// Review of #325: with the bell's list off screen, polls that find the same bell write nothing; while it is open,
+    /// each read shows its time, so "Updated N min ago" never drifts behind the last read.
+    func test_polls_show_their_time_only_while_the_list_is_open() async {
+        final class Clock: @unchecked Sendable {
+            private let lock = NSLock()
+            private var date = Date(timeIntervalSince1970: 1_793_300_000)
+            var now: Date { lock.withLock { date } }
+            func advance(_ seconds: TimeInterval) { lock.withLock { date = date.addingTimeInterval(seconds) } }
+        }
+        let clock = Clock()
+        let start = clock.now
+        let coordinator = NotificationsCoordinator(
+            transport: ScriptedNotifications([.success(SentiNotificationsPage(notifications: [note("n1")]))]),
+            marker: nil,
+            now: { clock.now },
+            onReauthenticationRequired: {}
+        )
+        await coordinator.refresh()
+        XCTAssertEqual(coordinator.state.updatedAt, start)
+        clock.advance(90)
+        await coordinator.refresh()
+        XCTAssertEqual(coordinator.state.updatedAt, start, "off screen, a poll that finds the same bell writes nothing")
+        coordinator.listShown(true)
+        XCTAssertEqual(coordinator.state.updatedAt, start.addingTimeInterval(90), "opening the list shows the last read")
+        clock.advance(30)
+        await coordinator.refresh()
+        XCTAssertEqual(coordinator.state.updatedAt, start.addingTimeInterval(120), "while it is open, each read shows its time")
+        coordinator.listShown(false)
+        clock.advance(30)
+        await coordinator.refresh()
+        XCTAssertEqual(coordinator.state.updatedAt, start.addingTimeInterval(120), "closed again, polls write nothing")
+    }
+
     func test_after_an_expired_sign_in_opening_the_bell_reads_again_and_a_success_brings_it_back() async {
         var asked = 0
         let coordinator = NotificationsCoordinator(

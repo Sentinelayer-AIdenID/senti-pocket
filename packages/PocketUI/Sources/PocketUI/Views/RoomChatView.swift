@@ -546,7 +546,7 @@ public struct RoomChatView: View {
             isPinned: state.isPinned(message),
             pinsFull: state.pinned.count >= state.pinLimit,
             breakouts: state.breakouts,
-            attachmentPreviews: state.attachmentPreviews,
+            attachmentPreviews: RoomMessageRowView.previews(of: message, in: state.attachmentPreviews),
             isReadingAloud: readingAloudId == message.readAloudId,
             isExpanded: expandedQuiet.contains(message.id),
             threadSummary: message.summaryThreadId.flatMap { state.threadSummaries[$0] },
@@ -576,6 +576,8 @@ public struct RoomChatView: View {
             },
             send: send
         )
+        // Drawn again only when what it shows changed (`RoomMessageRowView.==`).
+        .equatable()
         .onAppear { send(.messageOnScreen(id: message.id, isOnScreen: true)) }
         .onDisappear { send(.messageOnScreen(id: message.id, isOnScreen: false)) }
     }
@@ -3448,6 +3450,34 @@ private struct MessageEditSheet: View {
                 }
                 .onAppear { focused = true }
         }
+    }
+}
+
+/// A message row is drawn again only when what it shows changed: its row, the room's settings it reads, its own
+/// previews, its highlight, reading aloud and fold. Its actions are closures, which SwiftUI cannot compare, so without
+/// this every row the list had made was drawn again at every update of the room: an arrival, a presence beat, the side
+/// panel opening. With an accessibility client reading the screen (VoiceOver, Voice Control, a UI test) the list keeps
+/// every row it made, so a busy room's main thread never came to rest and each read of the screen timed out.
+/// The actions still reach the room: they send intents, and set the list's own state, through references that stay.
+extension RoomMessageRowView: Equatable {
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.row == rhs.row && lhs.ownHandles == rhs.ownHandles && lhs.isHighlighted == rhs.isHighlighted
+            && lhs.canReact == rhs.canReact && lhs.canAddEmoji == rhs.canAddEmoji && lhs.canReply == rhs.canReply
+            && lhs.canPin == rhs.canPin && lhs.isPinned == rhs.isPinned && lhs.pinsFull == rhs.pinsFull
+            && lhs.breakouts == rhs.breakouts && lhs.attachmentPreviews == rhs.attachmentPreviews
+            && lhs.isReadingAloud == rhs.isReadingAloud && lhs.isExpanded == rhs.isExpanded
+            && lhs.threadSummary == rhs.threadSummary && lhs.isReadingSummary == rhs.isReadingSummary
+            && lhs.isMinimized == rhs.isMinimized
+    }
+
+    /// The previews of this row's own attachments: another row's preview arriving leaves it as it is.
+    static func previews(of row: RoomChatMessageRow, in previews: [String: Data]) -> [String: Data] {
+        guard !row.attachments.isEmpty, !previews.isEmpty else { return [:] }
+        var own: [String: Data] = [:]
+        for chip in row.attachments {
+            if let data = previews[chip.attachmentId] { own[chip.attachmentId] = data }
+        }
+        return own
     }
 }
 #endif

@@ -83,16 +83,30 @@ final class RoomFoldersCenter: ObservableObject {
         }
     }
 
+    /// When the server last answered a read of the folders, for the side panel's open. A failed read leaves it, so the
+    /// next open asks again.
+    private var readAt: Date?
+
+    /// Reads again unless the folders were read less than `age` seconds ago.
+    func refresh(ifOlderThan age: TimeInterval) async {
+        if let readAt, Date().timeIntervalSince(readAt) < age { return }
+        await refresh()
+    }
+
     /// Reads your folders. A 404 (or 403) means folders are off: everything about them hides. A failure that says
-    /// nothing either way keeps what is shown.
+    /// nothing either way keeps what is shown. A read that finds what is shown writes nothing, so the root and the side
+    /// panel draw only for a change.
     func refresh() async {
         do {
-            folders = try await client.folders()
+            let read = try await client.folders()
+            readAt = Date()
+            if read != folders { folders = read }
         } catch RoomFolderError.unavailable {
-            folders = nil
-            sheet = nil
-            deleting = nil
-            notice = nil
+            readAt = Date()
+            if folders != nil { folders = nil }
+            if sheet != nil { sheet = nil }
+            if deleting != nil { deleting = nil }
+            if notice != nil { notice = nil }
         } catch RoomFolderError.reauthenticationRequired {
             onReauthenticationRequired()
         } catch {
