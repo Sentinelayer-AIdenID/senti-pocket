@@ -284,6 +284,9 @@ public final class RoomMediaBoard: ObservableObject {
     /// Whether the clipboard holds an image, asked when the attach sheet opens (never reads it).
     public var canPaste: () -> Bool
     public var perform: (RoomMediaIntent) -> Void
+    /// A thread's own board (its tray; the cards on their way are the room's), so files picked for a reply never show
+    /// in, or go with, the room's box; nil where threads take no files.
+    public var threadBoard: (Int64) -> RoomMediaBoard? = { _ in nil }
     /// The room on screen, told when a message is sent with files (it scrolls to it).
     var onNewOutgoing: (() -> Void)?
 

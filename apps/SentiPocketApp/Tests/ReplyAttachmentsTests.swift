@@ -448,4 +448,27 @@ final class ReplyAttachmentsTests: XCTestCase {
         XCTAssertEqual(drafts.restore(thread: 43)?.reply, "reply-9", "answering the same reply")
         failing.pause()
     }
+
+    /// The room lets a reply's saved words go when they reached the room another way (an older API took them in the
+    /// reply, or "Send as a new message" posted them): reopening the thread never brings them back to be sent twice.
+    func test_words_that_reached_the_room_another_way_leave_the_thread_draft() async {
+        let account = "acct-\(UUID().uuidString)"
+        let drafts = RoomReplyDrafts(base: RoomComposerDraft.savedKey(sessionId: "room_1", account: account))
+        defer {
+            drafts.save("", thread: 42, reply: nil)
+            drafts.save("", thread: 43, reply: "reply-7")
+        }
+        let room = draftRoom(ScriptedActions(), account: account)
+        drafts.save("look", thread: 42, reply: nil)
+        drafts.save("see this", thread: 43, reply: "reply-7")
+
+        // As the room screen wires "Send as a new message" posting.
+        room.forgetReplyDraft(thread: 43, answering: "reply-7", text: "see this")
+        XCTAssertNil(drafts.restore(thread: 43), "reopening the thread brings nothing back")
+        XCTAssertEqual(drafts.restore(thread: 42)?.text, "look", "another thread's draft stays")
+
+        // As it wires an older API taking the words.
+        await room.replyPosted(to: 42, answering: nil, text: "look")
+        XCTAssertNil(drafts.restore(thread: 42))
+    }
 }

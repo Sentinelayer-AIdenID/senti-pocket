@@ -1253,14 +1253,20 @@ final class RoomChatCoordinator: ObservableObject {
         publish()
     }
 
-    /// A reply with files was posted from this phone: its saved words go, and its thread and the room read it now.
+    /// A reply with files was posted from this phone (or its words were, without the files): its saved words go, and
+    /// its thread and the room read it now.
     func replyPosted(to sequenceId: Int64, answering replyId: String? = nil, text: String? = nil) async {
-        if let draftKey, let text {
-            RoomComposerDraft.forgetSaved(key: draftKey, sent: text)
-            RoomReplyDrafts(base: draftKey).forgetSent(text, thread: sequenceId, reply: replyId)
-        }
+        if let text { forgetReplyDraft(thread: sequenceId, answering: replyId, text: text) }
         if openThreadSequence == sequenceId { await loadThread(sequenceId) }
         await refreshActions(force: true)
+    }
+
+    /// Words typed for a reply reached the room (in the reply, or in a new message carrying its files): their saved
+    /// draft in the thread goes, and in the room's box if they were typed there.
+    func forgetReplyDraft(thread sequenceId: Int64, answering replyId: String?, text: String) {
+        guard let draftKey else { return }
+        RoomComposerDraft.forgetSaved(key: draftKey, sent: text)
+        RoomReplyDrafts(base: draftKey).forgetSent(text, thread: sequenceId, reply: replyId)
     }
 
     private func noteReplyAttachmentSupport(_ support: RoomReplyAttachmentSupport) {

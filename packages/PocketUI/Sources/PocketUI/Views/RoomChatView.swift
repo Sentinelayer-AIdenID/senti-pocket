@@ -134,7 +134,8 @@ public struct RoomChatView: View {
                     mentionCandidates: state.mentionCandidates,
                     canReact: state.canReact,
                     actions: composerActions,
-                    media: media,
+                    // The thread's own tray: files picked here never show in, or go with, the room's box.
+                    media: media?.threadBoard(thread.parent.sequenceId),
                     previews: state.attachmentPreviews,
                     mediaHost: sheetMediaHost,
                     draftKey: state.draftKey,
@@ -1855,7 +1856,7 @@ private struct RoomThreadSheet: View {
     /// reply too").
     var actions = RoomComposerActions()
     /// Photos, videos and files for a reply, where the room takes them (Carter, 11-04: replies carry photos and files
-    /// like messages): the room's own tray, sent from here as a reply.
+    /// like messages): the thread's own tray (`RoomMediaBoard.threadBoard`), sent from here as a reply.
     var media: RoomMediaBoard?
     /// Photo previews the room has loaded, for the replies' photos.
     var previews: [String: Data] = [:]
@@ -1888,6 +1889,8 @@ private struct RoomThreadSheet: View {
     @State private var replyWrittenBack = RoomComposerWriteBack()
     /// The thread's file parts are shown; otherwise they fold behind the file's card.
     @State private var showsFileParts = false
+    /// Writes the reply box's text a moment after typing pauses, not on every keystroke.
+    @State private var draftWriter = RoomDraftDebouncer()
 
     /// The + page's actions besides files (Carter, #58635).
     private var plusActions: [RoomComposerMore] {
@@ -1923,10 +1926,14 @@ private struct RoomThreadSheet: View {
 
     private var drafts: RoomReplyDrafts? { draftKey.map { RoomReplyDrafts(base: $0) } }
 
-    /// Keeps the box's text on the phone as it is typed, for whatever it answers now.
+    /// Keeps the box's text on the phone as it is typed, for whatever it answers now: once typing pauses
+    /// (`RoomDraftDebouncer`), and at once when the thread closes or the reply is sent.
     private func saveDraft() {
         guard !keepsSavedDraft, restoringAnswer == nil, let drafts else { return }
-        drafts.save(draft, thread: thread.parent.sequenceId, reply: answering?.id)
+        let text = draft
+        let sequenceId = thread.parent.sequenceId
+        let reply = answering?.id
+        draftWriter.schedule { drafts.save(text, thread: sequenceId, reply: reply) }
     }
 
     /// What was being written in this thread, back in the box when it opens (after the room was left, rebuilt or the
@@ -1954,6 +1961,8 @@ private struct RoomThreadSheet: View {
     /// A send leaves the sent text saved until the server has it; what is typed after it is saved once that has had
     /// time to happen.
     private func holdSavedDraftWhileSending() {
+        // What was typed last is saved before the box empties, so a failed send keeps all of it.
+        draftWriter.flush()
         keepsSavedDraft = true
         sends += 1
         let sending = sends
@@ -2074,6 +2083,8 @@ private struct RoomThreadSheet: View {
                 showFocusedReply(proxy)
                 restoreDraft()
             }
+            // Closing the thread writes what typing had not yet saved.
+            .onDisappear { draftWriter.flush() }
             .onChange(of: thread.replies.count) { _ in
                 showFocusedReply(proxy)
                 answerRestoredReply()
@@ -2232,14 +2243,20 @@ private struct RoomThreadSheet: View {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && thread.replyLengthProblem(for: draft) == nil
     }
 
+    /// The reply the box answers: the one chosen, or the one restored text answered before its row has loaded, so
+    /// sending early still answers it (never the message instead).
+    private var answeringId: String? { RoomReplyDrafts.answering(chosen: answering?.id, restoring: restoringAnswer) }
+
     /// Sends what is in the reply box: with files in the tray, the words and the files as one reply (its card shows
     /// here while they upload); otherwise the words, or the ticket they describe. Never a reply with neither.
     private func sendReply() {
         let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let answeringId = self.answeringId
         if let media, !media.tray.isEmpty {
             guard thread.replyLengthProblem(for: draft) == nil else { return }
             ticketMode = false
-            let target = RoomMediaReplyTarget(sequenceId: thread.parent.sequenceId, replyId: answering?.id,
+            restoringAnswer = nil
+            let target = RoomMediaReplyTarget(sequenceId: thread.parent.sequenceId, replyId: answeringId,
                                               name: answering?.authorName ?? thread.parent.authorName)
             if !typed.isEmpty {
                 holdSavedDraftWhileSending()
@@ -2257,9 +2274,10 @@ private struct RoomThreadSheet: View {
         guard canSendReply else { return }
         let text = ticketMode ? RoomComposerDraft.ticketRequest(typed) : typed
         ticketMode = false
+        restoringAnswer = nil
         holdSavedDraftWhileSending()
-        if let answering {
-            send(.sendReplyToReply(sequenceId: thread.parent.sequenceId, replyId: answering.id, text: text))
+        if let answeringId {
+            send(.sendReplyToReply(sequenceId: thread.parent.sequenceId, replyId: answeringId, text: text))
         } else {
             send(.sendReply(sequenceId: thread.parent.sequenceId, text: text))
         }

@@ -79,4 +79,99 @@ final class RoomReplyDraftsTests: XCTestCase {
         drafts.forgetSent("🎫 Ticket: a second thought", thread: 42, reply: nil)
         XCTAssertNil(drafts.restore(thread: 42), "a ticket request carries the typed words")
     }
+
+    /// An account keeps at most 50 reply drafts across its rooms: the one written longest ago goes first. Another
+    /// account's are its own.
+    func test_an_account_keeps_at_most_fifty_drafts_and_the_oldest_goes_first() {
+        var clock = Date(timeIntervalSince1970: 1_800_000_000)
+        let first = RoomReplyDrafts(base: base, defaults: defaults, now: { clock })
+        let second = RoomReplyDrafts(base: RoomComposerDraft.savedKey(sessionId: "room_2", account: "acct-1"),
+                                     defaults: defaults, now: { clock })
+        let other = RoomReplyDrafts(base: RoomComposerDraft.savedKey(sessionId: "room_1", account: "acct-2"),
+                                    defaults: defaults, now: { clock })
+        other.save("someone else's", thread: 1, reply: nil)
+        for thread in 1...30 {
+            clock += 60
+            first.save("draft \(thread)", thread: Int64(thread), reply: thread == 1 ? "reply-1" : nil)
+        }
+        for thread in 31...50 {
+            clock += 60
+            second.save("draft \(thread)", thread: Int64(thread), reply: nil)
+        }
+        XCTAssertEqual(first.restore(thread: 1)?.text, "draft 1", "50 are kept")
+
+        clock += 60
+        second.save("draft 51", thread: 51, reply: nil)
+        XCTAssertNil(first.restore(thread: 1), "the 51st lets the one written longest ago go, in any of its rooms")
+        XCTAssertNil(defaults.string(forKey: first.key(thread: 1, reply: "reply-1")))
+        XCTAssertEqual(first.restore(thread: 2)?.text, "draft 2")
+        XCTAssertEqual(second.restore(thread: 51)?.text, "draft 51")
+        XCTAssertEqual(other.restore(thread: 1)?.text, "someone else's", "another account's drafts are not counted")
+
+        // Writing an old one again makes it the newest.
+        clock += 60
+        first.save("draft 2, again", thread: 2, reply: nil)
+        clock += 60
+        second.save("draft 52", thread: 52, reply: nil)
+        XCTAssertEqual(first.restore(thread: 2)?.text, "draft 2, again")
+        XCTAssertNil(first.restore(thread: 3), "the oldest now")
+    }
+
+    /// A draft not written for 14 days is gone: when its thread opens, and when any other is written.
+    func test_a_draft_not_written_for_fourteen_days_is_gone() {
+        var clock = Date(timeIntervalSince1970: 1_800_000_000)
+        let drafts = RoomReplyDrafts(base: base, defaults: defaults, now: { clock })
+        drafts.save("an old thought", thread: 42, reply: "reply-7")
+        drafts.save("another", thread: 77, reply: nil)
+        clock += RoomReplyDrafts.lifetime - 1
+        XCTAssertEqual(drafts.restore(thread: 42)?.text, "an old thought", "13 days and change: kept")
+        clock += 2
+        XCTAssertNil(drafts.restore(thread: 42), "past 14 days")
+        XCTAssertNil(defaults.string(forKey: drafts.key(thread: 42, reply: "reply-7")), "and off the phone")
+
+        drafts.save("today", thread: 99, reply: nil)
+        XCTAssertNil(defaults.string(forKey: drafts.key(thread: 77, reply: nil)), "writing another lets it go too")
+        XCTAssertEqual(drafts.restore(thread: 99)?.text, "today")
+        XCTAssertEqual(RoomReplyDrafts.lifetime, 14 * 24 * 60 * 60)
+    }
+
+    /// Typing is written once it pauses, not on every keystroke, and what is written is the last text; closing the
+    /// thread writes what is waiting at once.
+    func test_typing_is_written_once_it_pauses_and_the_last_text_is_kept() {
+        let drafts = RoomReplyDrafts(base: base, defaults: defaults)
+        let writer = RoomDraftDebouncer(delay: 0.1)
+        var writes = 0
+        for text in ["h", "he", "hel", "hello"] {
+            writer.schedule {
+                writes += 1
+                drafts.save(text, thread: 42, reply: nil)
+            }
+        }
+        XCTAssertNil(drafts.restore(thread: 42), "nothing yet: typing has not paused")
+        let paused = expectation(description: "typing paused")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { paused.fulfill() }
+        wait(for: [paused], timeout: 5)
+        XCTAssertEqual(writes, 1, "one write for four keystrokes")
+        XCTAssertEqual(drafts.restore(thread: 42)?.text, "hello", "the last text")
+
+        writer.schedule {
+            writes += 1
+            drafts.save("hello there", thread: 42, reply: nil)
+        }
+        writer.flush()
+        XCTAssertEqual(drafts.restore(thread: 42)?.text, "hello there", "the thread closing writes it at once")
+        let later = expectation(description: "the delay passed")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { later.fulfill() }
+        wait(for: [later], timeout: 5)
+        XCTAssertEqual(writes, 2, "and only once")
+        XCTAssertEqual(RoomDraftDebouncer.delay, 0.3)
+    }
+
+    /// Restored text that answered a reply is sent answering it even before that reply's row has loaded: never to the
+    /// message instead.
+    func test_restored_text_answers_its_reply_before_the_row_loads() {
+        XCTAssertEqual(RoomReplyDrafts.answering(chosen: nil, restoring: "reply-7"), "reply-7")
+        XCTAssertEqual(RoomReplyDrafts.answering(chosen: "reply-9", restoring: "reply-7"), "reply-9", "a choice wins")
+        XCTAssertNil(RoomReplyDrafts.answering(chosen: nil, restoring: nil), "the message")
+    }
 }

@@ -1145,6 +1145,10 @@ struct RoomChatScreen: View {
         outgoing.onReplyPosted = { [weak room] target, text in
             await room?.replyPosted(to: target.sequenceId, answering: target.replyId, text: text)
         }
+        // "Send as a new message" carried a reply's words: their saved draft in the thread goes once it posts.
+        outgoing.onReplyDraftSent = { [weak room] target, text in
+            room?.forgetReplyDraft(thread: target.sequenceId, answering: target.replyId, text: text)
+        }
         outgoing.onPreviewReady = { [weak room] attachmentId, data in room?.seedPreview(data, for: attachmentId) }
         outgoing.onReauthenticationRequired = onReauthenticationRequired
     }
@@ -1391,7 +1395,7 @@ private struct RoomMediaPresenters: ViewModifier {
                 RoomMediaPickerHost(
                     requests: media.pickers,
                     isActive: isActive,
-                    remaining: { media.board.remainingSlots },
+                    remaining: { media.pickerRemaining },
                     onPicked: { media.add($0) },
                     onRefused: { media.refuse($0) }
                 )
