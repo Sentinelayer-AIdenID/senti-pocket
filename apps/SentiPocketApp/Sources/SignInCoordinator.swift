@@ -288,7 +288,7 @@ final class SignInCoordinator: ObservableObject {
         guard let e = error as? NativeAuthError else { return .unavailable(.service) }
         switch e {
         case .network:                      return .unavailable(.network)
-        case .refused(403):                 return .unavailable(.accountInactive)
+        case .inactive:                     return .unavailable(.accountInactive)
         case .userCancelledWeb, .rejected:  return .signedOut          // user cancelled / denied → clean retry
         case .timedOut, .rateLimited, .malformedResponse, .appleUnavailable, .refused: return .unavailable(.service)
         }

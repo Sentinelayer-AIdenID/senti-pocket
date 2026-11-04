@@ -27,6 +27,7 @@ final class PocketSignInAppleTests: XCTestCase {
         XCTAssertEqual(PocketSignInView.buttonHeight, 54)
         XCTAssertEqual(PocketSignInView.cardButtonLabelHeight, 40)
         XCTAssertTrue(PocketSignInUnavailableReason.accountInactive.userMessage.hasPrefix("This account is not active"))
+        XCTAssertEqual(PocketSignInView.supportURL.absoluteString, "https://sentinelayer.com/support")
         XCTAssertNotEqual(PocketSignInUnavailableReason.accountInactive.userMessage,
                           PocketSignInUnavailableReason.service.userMessage)
     }

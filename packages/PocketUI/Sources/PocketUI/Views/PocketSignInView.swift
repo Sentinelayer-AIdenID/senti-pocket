@@ -10,6 +10,9 @@ public struct PocketSignInView: View {
     private let offersApple: Bool
     private let send: (PocketProductIntent) -> Void
     @Environment(\.colorScheme) private var colorScheme
+    /// The sign-in buttons' heights, grown with the text size so Apple's never ends up smaller than the card's.
+    @ScaledMetric(relativeTo: .headline) private var appleHeight: CGFloat = PocketSignInView.buttonHeight
+    @ScaledMetric(relativeTo: .headline) private var cardLabelHeight: CGFloat = PocketSignInView.cardButtonLabelHeight
 
     /// `offersApple` adds Sign in with Apple wherever a sign-in can start; the build turns it on.
     public init(phase: PocketSignInPhase, offersApple: Bool = false, send: @escaping (PocketProductIntent) -> Void) {
@@ -27,6 +30,8 @@ public struct PocketSignInView: View {
     /// Every sign-in button's height: Apple's is drawn at it, and the card's label is sized so the filled capsule
     /// around it comes out the same (Apple asks that its button be no smaller than the other ways in).
     static let buttonHeight: CGFloat = 54
+    /// Where someone whose account is not active can ask why.
+    static let supportURL = URL(string: "https://sentinelayer.com/support")!
     static let cardButtonLabelHeight: CGFloat = 40
 
     /// The phases with a sign-in button, where Apple is offered beside it.
@@ -157,6 +162,11 @@ public struct PocketSignInView: View {
                 intent: .retryAuthentication,
                 color: PocketPalette.danger
             )
+            if reason == .accountInactive {
+                Link("Contact support", destination: Self.supportURL)
+                    .font(.subheadline.weight(.semibold))
+                    .accessibilityIdentifier("pocket.signin.support")
+            }
         }
     }
 
@@ -178,10 +188,12 @@ public struct PocketSignInView: View {
             Button { send(intent) } label: {
                 Text(buttonTitle)
                     .font(.headline)
-                    .frame(maxWidth: .infinity, minHeight: Self.cardButtonLabelHeight)
+                    .frame(maxWidth: .infinity, minHeight: cardLabelHeight)
             }
             .buttonStyle(.borderedProminent)
+            #if os(iOS)
             .buttonBorderShape(.capsule)
+            #endif
             .tint(PocketPalette.accent)
             .accessibilityIdentifier("pocket.signin.primary")
         }
@@ -191,8 +203,10 @@ public struct PocketSignInView: View {
     @ViewBuilder
     private var appleButton: some View {
         #if canImport(UIKit) && canImport(AuthenticationServices)
-        AppleSignInButton(style: colorScheme == .dark ? .white : .black) { send(.beginAppleSignIn) }
-            .frame(maxWidth: .infinity, minHeight: Self.buttonHeight, maxHeight: Self.buttonHeight)
+        AppleSignInButton(style: colorScheme == .dark ? .white : .black, cornerRadius: appleHeight / 2) {
+            send(.beginAppleSignIn)
+        }
+            .frame(maxWidth: .infinity, minHeight: appleHeight, maxHeight: appleHeight)
             .id(colorScheme)   // the button's style is set once, so a new appearance makes a new button
             .accessibilityIdentifier("pocket.signin.apple")
         #else
@@ -222,19 +236,21 @@ public struct PocketSignInView: View {
 /// Apple's own Sign in with Apple button (its look is Apple's to set); a tap only sends the intent.
 private struct AppleSignInButton: UIViewRepresentable {
     let style: ASAuthorizationAppleIDButton.Style
+    let cornerRadius: CGFloat
     let action: () -> Void
 
     func makeCoordinator() -> Tap { Tap(action: action) }
 
     func makeUIView(context: Context) -> ASAuthorizationAppleIDButton {
         let button = ASAuthorizationAppleIDButton(authorizationButtonType: .signIn, authorizationButtonStyle: style)
-        button.cornerRadius = PocketSignInView.buttonHeight / 2   // a capsule, like the other sign-in button
+        button.cornerRadius = cornerRadius   // a capsule, like the other sign-in button
         button.addTarget(context.coordinator, action: #selector(Tap.fire), for: .touchUpInside)
         return button
     }
 
     func updateUIView(_ button: ASAuthorizationAppleIDButton, context: Context) {
         context.coordinator.action = action
+        button.cornerRadius = cornerRadius
     }
 
     final class Tap: NSObject {

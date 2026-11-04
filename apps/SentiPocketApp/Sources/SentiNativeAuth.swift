@@ -59,6 +59,7 @@ enum NativeAuthError: LocalizedError, Equatable {
     case userCancelledWeb
     case appleUnavailable       // Apple's sheet failed (not a cancel) or returned no usable credential
     case refused(Int)           // the sign-in server answered, but not with a session (its HTTP status)
+    case inactive               // the server says this account is not active (403 ACCOUNT_INACTIVE)
     var errorDescription: String? {
         switch self {
         case .network(let m):    return "Login network error: \(m)"
@@ -69,6 +70,7 @@ enum NativeAuthError: LocalizedError, Equatable {
         case .userCancelledWeb:  return "Login was cancelled."
         case .appleUnavailable:  return "Sign in with Apple is unavailable right now."
         case .refused:           return "The sign-in server could not sign you in right now."
+        case .inactive:          return "This account is not active."
         }
     }
 }
@@ -259,7 +261,7 @@ final class SentiNativeAuth: NSObject {
 
     // MARK: poll loop
 
-    private func pollUntilApproved(sessionId: String, challenge: String) async throws -> String {
+    func pollUntilApproved(sessionId: String, challenge: String) async throws -> String {
         let deadline = ContinuousClock.now.advanced(by: overallTimeout)
         // A 429 while polling for a browser approval is TRANSIENT, not terminal. The reference device flow
         // (create-sentinelayer auth/service.js `pollCliAuthSession`) backs off + keeps polling on 429; a fixed 2s
@@ -297,10 +299,19 @@ final class SentiNativeAuth: NSObject {
         throw NativeAuthError.timedOut
     }
 
-    /// A refused poll: a browser sign-in the server no longer knows (404, 410) has expired, a clean start over like
+    /// A refused poll: a browser sign-in the server no longer knows (404) has expired, a clean start over like
     /// "expired"; anything else is the server's refusal.
     nonisolated static func pollRefusal(_ status: Int) -> NativeAuthError {
-        status == 404 || status == 410 ? .rejected : .refused(status)
+        status == 404 ? .rejected : .refused(status)
+    }
+
+    /// The server's error code in an error answer (`detail.error.code`, `detail.code` or `error.code`), if any.
+    nonisolated static func errorCode(in data: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        let detail = object["detail"] as? [String: Any]
+        let found: [Any?] = [(detail?["error"] as? [String: Any])?["code"], detail?["code"],
+                             (object["error"] as? [String: Any])?["code"]]
+        return found.compactMap { $0 as? String }.first
     }
 
     // MARK: HTTP
@@ -317,7 +328,10 @@ final class SentiNativeAuth: NSObject {
         catch { throw NativeAuthError.network(error.localizedDescription) }
         if let http = response as? HTTPURLResponse {
             if http.statusCode == 429 { throw NativeAuthError.rateLimited }
-            guard (200..<300).contains(http.statusCode) else { throw NativeAuthError.refused(http.statusCode) }
+            guard (200..<300).contains(http.statusCode) else {
+                if http.statusCode == 403, Self.errorCode(in: data) == "ACCOUNT_INACTIVE" { throw NativeAuthError.inactive }
+                throw NativeAuthError.refused(http.statusCode)
+            }
         }
         do { return try JSONDecoder().decode(Res.self, from: data) }
         catch { throw NativeAuthError.malformedResponse }

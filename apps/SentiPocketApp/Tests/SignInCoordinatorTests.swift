@@ -442,7 +442,8 @@ final class SignInCoordinatorTests: XCTestCase {
             (.appleUnavailable, .unavailable(.service)),
             (.network("offline"), .unavailable(.network)),
             (.refused(404), .unavailable(.service)),
-            (.refused(403), .unavailable(.accountInactive))
+            (.inactive, .unavailable(.accountInactive)),
+            (.refused(403), .unavailable(.service))
         ]
         for (error, phase) in cases {
             let coord = makeCoordinator(probe: LoginProbe(), appleLogin: { throw error })

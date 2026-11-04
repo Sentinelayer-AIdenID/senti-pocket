@@ -51,7 +51,7 @@ public enum PocketSignInUnavailableReason: Equatable, Sendable {
         case .service:
             return "Secure sign-in is temporarily unavailable."
         case .accountInactive:
-            return "This account is not active, so it can't sign in. Contact support if you think that's wrong."
+            return "This account is not active, so it can't sign in. If you think that's wrong, contact support."
         }
     }
 }
