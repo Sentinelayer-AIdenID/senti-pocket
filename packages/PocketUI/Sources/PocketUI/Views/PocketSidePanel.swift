@@ -281,34 +281,26 @@ public struct PocketSidePanel: View {
 
             Divider().padding(.vertical, 8)
 
-            HStack(spacing: 8) {
-                // With folders, the rooms in none have their own "Your rooms" after the folders; this heads them all.
-                Text("Rooms")
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(PocketPalette.textSecondary)
-                    .lineLimit(1)
-                    .fixedSize()
-                Spacer(minLength: 0)
-                if let onFolder {
-                    Button {
-                        onFolder(.create(fileRoomId: nil))
-                    } label: {
-                        Image(systemName: "folder.badge.plus")
-                            .font(.footnote.weight(.semibold))
-                            .foregroundStyle(PocketPalette.accentStrong)
-                            .frame(minWidth: 44, minHeight: 44)
-                            .contentShape(Rectangle())
+            // With folders, the rooms in none have their own "Your rooms" after the folders; this heads them all. At the
+            // largest text sizes New folder and See all go under it, so no word is cut.
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: 0) {
+                        roomsTitle
+                        HStack(spacing: 8) {
+                            newFolderButton
+                            Spacer(minLength: 0)
+                            seeAllButton
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("New folder")
-                    .accessibilityIdentifier("pocket.drawer.newFolder")
+                } else {
+                    HStack(spacing: 8) {
+                        roomsTitle
+                        Spacer(minLength: 0)
+                        newFolderButton
+                        seeAllButton
+                    }
                 }
-                Button("See all", action: onAllRooms)
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(PocketPalette.accentStrong)
-                    .lineLimit(1)
-                    .fixedSize()
-                    .accessibilityIdentifier("pocket.drawer.allRooms")
             }
             .padding(.leading, 18)
             .padding(.trailing, onFolder == nil ? 18 : 10)
@@ -338,6 +330,39 @@ public struct PocketSidePanel: View {
                 .accessibilityIdentifier("pocket.drawer.folderNotice")
             }
         }
+    }
+
+    private var roomsTitle: some View {
+        Text("Rooms")
+            .font(.footnote.weight(.semibold))
+            .foregroundStyle(PocketPalette.textSecondary)
+            .lineLimit(1)
+    }
+
+    @ViewBuilder
+    private var newFolderButton: some View {
+        if let onFolder {
+            Button {
+                onFolder(.create(fileRoomId: nil))
+            } label: {
+                Image(systemName: "folder.badge.plus")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(PocketPalette.accentStrong)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("New folder")
+            .accessibilityIdentifier("pocket.drawer.newFolder")
+        }
+    }
+
+    private var seeAllButton: some View {
+        Button("See all", action: onAllRooms)
+            .font(.footnote.weight(.semibold))
+            .foregroundStyle(PocketPalette.accentStrong)
+            .lineLimit(1)
+            .accessibilityIdentifier("pocket.drawer.allRooms")
     }
 
     private func shortcut(_ title: String, icon: String, badge: Int = 0, id: String, action: @escaping () -> Void) -> some View {
@@ -422,7 +447,9 @@ public struct PocketSidePanel: View {
     /// A folder's line: tap to fold or open it; its menu renames it, makes a folder inside it, moves it and deletes it.
     /// Folded, it shows how many rooms are in it (inside its folders too) and their unread.
     private func folderHeader(_ line: SidePanelLayout.FolderLine) -> some View {
-        HStack(spacing: 8) {
+        // At the largest text sizes the name keeps the line (two if it needs them) and the counts go under it.
+        let largeText = dynamicTypeSize.isAccessibilitySize
+        return HStack(spacing: 8) {
             Button {
                 placement.toggleFolded(line.id)
             } label: {
@@ -435,18 +462,16 @@ public struct PocketSidePanel: View {
                     Image(systemName: line.depth == 1 ? "folder.fill" : "folder")
                         .font(.footnote)
                         .foregroundStyle(PocketPalette.accentStrong)
-                    Text(line.folder.name)
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(PocketPalette.textPrimary)
-                        .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
-                    Spacer(minLength: 0)
-                    if line.folded {
-                        Text("\(line.folder.totalRoomCount)")
-                            .font(.caption2)
-                            .foregroundStyle(PocketPalette.textSecondary)
-                            .fixedSize()
-                        PocketCountBadge(count: line.unread)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(line.folder.name)
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(PocketPalette.textPrimary)
+                            .lineLimit(largeText ? 2 : 1)
+                        if largeText, line.folded { folderCounts(line) }
                     }
+                    .layoutPriority(1)
+                    Spacer(minLength: 0)
+                    if !largeText, line.folded { folderCounts(line) }
                 }
                 .frame(minHeight: 44)
                 .contentShape(Rectangle())
@@ -495,6 +520,17 @@ public struct PocketSidePanel: View {
         .padding(.top, 2)
     }
 
+    /// A folded folder's rooms (inside its folders too, as the server counts them) and their unread.
+    private func folderCounts(_ line: SidePanelLayout.FolderLine) -> some View {
+        HStack(spacing: 6) {
+            Text("\(line.folder.totalRoomCount)")
+                .font(.caption2)
+                .foregroundStyle(PocketPalette.textSecondary)
+                .fixedSize()
+            PocketCountBadge(count: line.unread)
+        }
+    }
+
     /// A direct message: the other side's picture and name, and its unread badge; under its room, indented as far as
     /// the room is (`depth`), or on its own line when its room is gone (nil).
     private func directRow(_ room: Room, depth: Int?) -> some View {
@@ -513,7 +549,7 @@ public struct PocketSidePanel: View {
                 Text(name)
                     .font(.subheadline.weight(isCurrent || activity.unread > 0 ? .semibold : .regular))
                     .foregroundStyle(PocketPalette.textPrimary)
-                    .lineLimit(1)
+                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
                 Spacer(minLength: 0)
                 if let date = room.lastActivity, !dynamicTypeSize.isAccessibilitySize {
                     Text(Self.compactAge(of: date))
