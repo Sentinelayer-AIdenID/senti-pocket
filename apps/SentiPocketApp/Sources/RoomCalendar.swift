@@ -146,6 +146,21 @@ enum CalendarHTTP {
     }()
 }
 
+/// No calendar: every route answers as a flag that is off. For a root without one (the DEBUG root preview).
+struct CalendarOff: RoomCalendarServing, CalendarFeedServing {
+    func draftsAvailable(inRoom sessionId: String) async throws -> Bool { false }
+    func events(inRoom sessionId: String) async throws -> [CalendarEvent] { throw CalendarError.unavailable }
+    func agenda() async throws -> [CalendarEvent] { throw CalendarError.unavailable }
+    func draft(inRoom sessionId: String, _ request: CalendarDraftRequest) async throws -> CalendarDraft {
+        throw CalendarError.unavailable
+    }
+    func save(_ event: CalendarEventCreate, inRoom sessionId: String) async throws -> CalendarEvent {
+        throw CalendarError.unavailable
+    }
+    func feedAvailable() async throws -> Bool { false }
+    func newSubscriptionLink() async throws -> CalendarSubscriptionLink { throw CalendarError.unavailable }
+}
+
 /// A room the person can add events to, for the calendar opened from Settings.
 struct CalendarRoomChoice: Equatable, Hashable, Identifiable {
     let id: String
