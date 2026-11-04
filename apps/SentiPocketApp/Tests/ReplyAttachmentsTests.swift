@@ -405,6 +405,9 @@ final class ReplyAttachmentsTests: XCTestCase {
             actionSender: actions,
             ownAuthorIds: ["human-pat"],
             sleep: { seconds in if seconds > 5 { try? await Task.sleep(nanoseconds: 3_600_000_000_000) } },
+            // As the room screen opens it: the account's outbox, under which its text is kept.
+            outbox: RoomSendOutbox(url: FileManager.default.temporaryDirectory
+                .appendingPathComponent("reply-drafts-outbox-\(UUID().uuidString).json")),
             outboxAccount: account,
             onReauthenticationRequired: {}
         )
