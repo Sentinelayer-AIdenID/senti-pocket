@@ -472,9 +472,13 @@ final class RoomSafetyTests: XCTestCase {
 
     func test_auth_me_is_asked_again_when_it_fails_as_the_room_opens() async {
         let identity = SenderAccount(failures: 2)
+        // Only the waits before /auth/me is asked again pass at once; the room's polls wait as they would.
+        let retries = RoomChatCoordinator.identityRetries
         let room = RoomChatCoordinator(
             sessionId: "room_1", title: "Room", transport: QuietRoom(), identity: identity,
-            sleep: { seconds in if seconds > 20 { try? await Task.sleep(nanoseconds: 3_600_000_000_000) } },
+            sleep: { seconds in
+                if !retries.contains(seconds) { try? await Task.sleep(nanoseconds: 3_600_000_000_000) }
+            },
             onReauthenticationRequired: {}
         )
         room.resume()
