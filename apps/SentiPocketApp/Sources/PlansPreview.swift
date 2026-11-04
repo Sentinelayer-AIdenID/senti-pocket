@@ -4,7 +4,8 @@ import SwiftUI
 
 /// DEBUG-only plans preview: `-PocketPlansPreview` opens the real plans screen and coordinator on sample offers, so the
 /// screen can be run and screenshotted on a simulator, which has no App Store products. `-PocketPlansCurrentTier pro`
-/// marks a current plan, `-PocketPlansActive YES` makes its subscription a running one (nothing offered for sale), and
+/// marks a current plan, `-PocketPlansActive YES` makes its subscription a running one (nothing offered for sale),
+/// `-PocketPlansLinkedElsewhere YES` has the server refuse an unfinished purchase as another account's, and
 /// `-PocketPlansSettingsPreview` opens Settings with its Plan row, the plans reaching it through the environment as
 /// they do after sign-in. Never compiled into Release, where every price is StoreKit's own.
 enum PlansPreview {
@@ -16,11 +17,14 @@ enum PlansPreview {
         ProcessInfo.processInfo.arguments.contains("-PocketPlansSettingsPreview")
     }
 
+    private static var isLinkedElsewhere: Bool { UserDefaults.standard.bool(forKey: "PocketPlansLinkedElsewhere") }
+
     @MainActor
     private static let coordinator = AppleSubscriptionsCoordinator(
         server: PlansPreviewServer(tier: UserDefaults.standard.string(forKey: "PocketPlansCurrentTier"),
-                                   isActive: UserDefaults.standard.bool(forKey: "PocketPlansActive")),
-        store: PlansPreviewStore()
+                                   isActive: UserDefaults.standard.bool(forKey: "PocketPlansActive"),
+                                   isLinkedElsewhere: isLinkedElsewhere),
+        store: PlansPreviewStore(hasUnfinishedPurchase: isLinkedElsewhere)
     )
 
     @MainActor
@@ -32,6 +36,7 @@ enum PlansPreview {
             NavigationStack {
                 SubscriptionsView(coordinator: coordinator)
             }
+            .task { await coordinator.retryUnfinished() }
         }
     }
 }
@@ -58,6 +63,7 @@ private struct PlansPreviewSettingsHost: View {
 private struct PlansPreviewServer: AppleSubscriptionsServing {
     let tier: String?
     let isActive: Bool
+    let isLinkedElsewhere: Bool
 
     func plans() async throws -> [AppleSubscriptionPlan] {
         [
@@ -68,7 +74,10 @@ private struct PlansPreviewServer: AppleSubscriptionsServing {
 
     func accountToken() async throws -> UUID { UUID() }
 
-    func submit(signedTransactionInfo: String) async throws -> String { tier ?? "free" }
+    func submit(signedTransactionInfo: String) async throws -> String {
+        if isLinkedElsewhere { throw AppleSubscriptionsServerError.linkedToAnotherAccount }
+        return tier ?? "free"
+    }
 
     func accountStatus() async throws -> AppleSubscriptionsAccountStatus {
         AppleSubscriptionsAccountStatus(tier: tier, hasActiveSubscription: isActive)
@@ -77,6 +86,8 @@ private struct PlansPreviewServer: AppleSubscriptionsServing {
 
 /// Sample products standing in for the App Store's, which a simulator without a StoreKit configuration cannot load.
 private struct PlansPreviewStore: AppleStoreFront {
+    let hasUnfinishedPurchase: Bool
+
     func products(for ids: [String]) async throws -> [AppleStoreProduct] {
         [
             AppleStoreProduct(id: "com.plexaura.sentipocket.pro.monthly", displayName: "Pro", description: "",
@@ -90,7 +101,11 @@ private struct PlansPreviewStore: AppleStoreFront {
 
     func updates() -> AsyncStream<AppleStoreTransaction> { AsyncStream { _ in } }
 
-    func unfinished() async -> [AppleStoreTransaction] { [] }
+    func unfinished() async -> [AppleStoreTransaction] {
+        guard hasUnfinishedPurchase else { return [] }
+        return [AppleStoreTransaction(id: 1, productId: "com.plexaura.sentipocket.pro.monthly",
+                                      signedTransactionInfo: "preview", isVerified: true, finish: {})]
+    }
 
     func currentEntitlements() async -> [AppleStoreTransaction] { [] }
 

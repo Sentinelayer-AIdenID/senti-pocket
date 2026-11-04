@@ -19,6 +19,12 @@ struct SubscriptionsView: View {
 
     var body: some View {
         List {
+            if coordinator.isLinkedToAnotherAccount {
+                Section {
+                    Text(AppleSubscriptionsCoordinator.linkedToAnotherAccountLine)
+                        .accessibilityIdentifier("plans.linked-elsewhere")
+                }
+            }
             switch coordinator.state {
             case .ready(let offers, let currentTier, let isActive), .purchasing(let offers, let currentTier, let isActive):
                 plans(offers, currentTier: currentTier, isActive: isActive)

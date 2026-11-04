@@ -27,8 +27,12 @@ enum AppleSubscriptionsServerError: Error, Equatable {
     case reauthenticationRequired
     /// Another account signed in while the call was out, so its answer belongs to nobody on screen.
     case accountChanged
-    /// The server read the request and would not take it: 403 (another account's purchase or token, not a signed-in
-    /// session), 409 (the subscription is bound to another account), 400 or 422 (a transaction it will not apply).
+    /// 403 or 409 with `APPLE_IAP_ACCOUNT_TOKEN_MISMATCH` (the transaction carries another account's token) or
+    /// `APPLE_IAP_TRANSACTION_ACCOUNT_MISMATCH` (Apple's subscription, by its original transaction, already belongs to
+    /// another Senti account): a refusal, never sent again this session.
+    case linkedToAnotherAccount
+    /// The server read the request and would not take it: 403 (not a signed-in session), 409, 400 or 422 (a
+    /// transaction it will not apply).
     case refused
     /// Network, 408, 425, 429 or 5xx, or an answer the app could not read: nothing changed; try again later.
     case unavailable
@@ -153,8 +157,24 @@ final class HTTPAppleSubscriptionsServer: AppleSubscriptionsServing, @unchecked 
         case 401: throw AppleSubscriptionsServerError.reauthenticationRequired
         case 404: throw AppleSubscriptionsServerError.off
         case 408, 425, 429, 500..<600: throw AppleSubscriptionsServerError.unavailable
+        case 403, 409:
+            let linkedElsewhere = Self.accountMismatchCodes.contains(Self.errorCode(in: data) ?? "")
+            throw linkedElsewhere ? AppleSubscriptionsServerError.linkedToAnotherAccount : .refused
         default: throw AppleSubscriptionsServerError.refused
         }
+    }
+
+    /// The server's codes for a purchase that belongs to another Senti account.
+    static let accountMismatchCodes: Set<String> = [
+        "APPLE_IAP_ACCOUNT_TOKEN_MISMATCH", "APPLE_IAP_TRANSACTION_ACCOUNT_MISMATCH",
+    ]
+
+    /// The code of an error answer: `{"detail": {"error": {"code": ...}}}`.
+    static func errorCode(in data: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let detail = object["detail"] as? [String: Any],
+              let error = detail["error"] as? [String: Any] else { return nil }
+        return error["code"] as? String
     }
 }
 
@@ -384,11 +404,16 @@ final class AppleSubscriptionsCoordinator: ObservableObject {
         case unavailable
         case off
         case signedOut
+        /// The App Store subscription belongs to another Senti account.
+        case linkedToAnotherAccount
         /// The same transaction is already on its way.
         case alreadyDelivering
     }
 
     @Published private(set) var state: State = .hidden
+    /// The server refused a transaction because this Apple ID's subscription belongs to another Senti account; the
+    /// plans screen says so in one line.
+    @Published private(set) var isLinkedToAnotherAccount = false
     /// A word after a purchase or restore (waiting for approval, restored, not applied), shown once.
     @Published private(set) var notice: String?
 
@@ -584,6 +609,10 @@ final class AppleSubscriptionsCoordinator: ObservableObject {
                 return .signedOut
             case .accountChanged:
                 return .signedOut
+            case .linkedToAnotherAccount:
+                notTaken[transaction.id] = .linkedToAnotherAccount
+                isLinkedToAnotherAccount = true
+                return .linkedToAnotherAccount
             case .refused:
                 notTaken[transaction.id] = .refused
                 return .refused
@@ -618,13 +647,17 @@ final class AppleSubscriptionsCoordinator: ObservableObject {
         case .off: hide()
         case .reauthenticationRequired: onReauthenticationRequired()
         case .accountChanged: break
+        case .linkedToAnotherAccount: isLinkedToAnotherAccount = true
         case .refused: notice = "Purchases aren't available for this account."
         case .unavailable: notice = "Could not reach Senti. Check your connection and try again."
         }
     }
 
     private static func notice(after deliveries: [Delivery], restoring: Bool) -> String? {
-        if deliveries.contains(.off) || deliveries.contains(.signedOut) { return nil }
+        // Another account's subscription is said in one line on the plans screen, not in an alert.
+        if deliveries.contains(.off) || deliveries.contains(.signedOut) || deliveries.contains(.linkedToAnotherAccount) {
+            return nil
+        }
         if deliveries.contains(.refused) {
             return "A purchase could not be added to this account. Restore it while signed in to the account that bought it."
         }
@@ -639,6 +672,8 @@ final class AppleSubscriptionsCoordinator: ObservableObject {
         return deliveries.isEmpty ? "No subscription to restore for this Apple ID." : "Your purchases are restored."
     }
 
+    static let linkedToAnotherAccountLine = "This Apple ID's subscription is linked to another Senti account. "
+        + "Contact help@plexaura.io."
     static let alreadySubscribed = "Your plan is active. To change or cancel it, open Settings, tap your name, then "
         + "Subscriptions."
     private static let storeUnavailable = "Plans could not be loaded from the App Store. Try again later."

@@ -310,6 +310,48 @@ final class AppleSubscriptionsCoordinatorTests: XCTestCase {
         XCTAssertEqual(events.finished, [])
     }
 
+    func test_another_accounts_subscription_is_left_unfinished() async {
+        let coordinator = await readyCoordinator()
+        server.submitAnswers = [.failure(.linkedToAnotherAccount)]
+
+        let delivery = await coordinator.deliver(store.transaction(60))
+
+        XCTAssertEqual(delivery, .linkedToAnotherAccount)
+        XCTAssertEqual(events.posted, ["jws-60"])
+        XCTAssertEqual(events.finished, [], "another account's subscription stays with the App Store")
+    }
+
+    func test_another_accounts_subscription_is_not_sent_again_this_session() async {
+        let coordinator = await readyCoordinator()
+        server.submitAnswers = [.failure(.linkedToAnotherAccount)]
+        _ = await coordinator.deliver(store.transaction(61))
+
+        let again = await coordinator.deliver(store.transaction(61))
+        store.unfinishedTransactions = [store.transaction(61)]
+        await coordinator.retryUnfinished()
+        store.entitlements = [store.transaction(61)]
+        await coordinator.restore()
+
+        XCTAssertEqual(again, .linkedToAnotherAccount)
+        XCTAssertEqual(events.posted, ["jws-61"], "a refusal, not a passing failure: posted once")
+        XCTAssertEqual(events.finished, [])
+    }
+
+    func test_another_accounts_subscription_is_said_in_one_line_on_the_plans_screen() async {
+        let coordinator = await readyCoordinator()
+        XCTAssertFalse(coordinator.isLinkedToAnotherAccount)
+        store.entitlements = [store.transaction(62)]
+        server.submitAnswers = [.failure(.linkedToAnotherAccount)]
+
+        await coordinator.restore()
+
+        XCTAssertTrue(coordinator.isLinkedToAnotherAccount)
+        XCTAssertEqual(AppleSubscriptionsCoordinator.linkedToAnotherAccountLine,
+                       "This Apple ID's subscription is linked to another Senti account. Contact help@plexaura.io.")
+        XCTAssertNil(coordinator.notice, "said on the screen, not in an alert")
+        guard case .ready = coordinator.state else { return XCTFail("\(coordinator.state)") }
+    }
+
     func test_pending_and_cancelled_are_quiet_outcomes() async {
         let coordinator = await readyCoordinator()
 
@@ -729,6 +771,44 @@ final class AppleSubscriptionsHTTPTests: XCTestCase {
         }
         let offline = await error { _ = try await self.makeServer([:]).submit(signedTransactionInfo: "jws") }
         XCTAssertEqual(offline, .unavailable)
+    }
+
+    func test_the_servers_account_mismatch_codes_read_as_another_account() async {
+        func body(_ code: String) -> String { #"{"detail":{"error":{"code":"\#(code)","message":"m","request_id":"r"}}}"# }
+        let cases: [(Int, String, AppleSubscriptionsServerError)] = [
+            (403, body("APPLE_IAP_ACCOUNT_TOKEN_MISMATCH"), .linkedToAnotherAccount),
+            (403, body("APPLE_IAP_TRANSACTION_ACCOUNT_MISMATCH"), .linkedToAnotherAccount),
+            (409, body("APPLE_IAP_TRANSACTION_ACCOUNT_MISMATCH"), .linkedToAnotherAccount),
+            (403, #"{"detail":"Apple purchases require a signed-in user session"}"#, .refused),
+            (403, body("APPLE_IAP_PRODUCT_NOT_ALLOWED"), .refused),
+            (400, body("APPLE_IAP_ACCOUNT_TOKEN_MISMATCH"), .refused),
+        ]
+        for (status, answer, expected) in cases {
+            let result = await error {
+                _ = try await self.makeServer([Self.transactions: (status, answer)]).submit(signedTransactionInfo: "jws")
+            }
+            XCTAssertEqual(result, expected, "\(status) \(answer)")
+        }
+    }
+
+    func test_a_web_subscription_blocks_buying_another_plan_here() async {
+        // A Pro subscription bought on the web: the server would apply an App Store Max as well, so the app must not
+        // sell one.
+        let web = #"{"membership_tier":"pro","unlimited_prompt_builder":false,"unlimited_runs":false,"#
+            + #""donation_total_usd":0.0,"active_subscription":{"status":"active","#
+            + #""current_period_end":"2026-12-03T00:00:00Z","cancel_at_period_end":false},"monthly_membership_usd":29}"#
+        let server = makeServer([Self.products: (200, Self.plansBody), Self.status: (200, web)])
+        let store = FakeStore(events: Events())
+        let coordinator = AppleSubscriptionsCoordinator(server: server, store: store)
+        await coordinator.refresh()
+        guard case .ready(_, let tier, let active) = coordinator.state else { return XCTFail("\(coordinator.state)") }
+        XCTAssertEqual(tier, "pro")
+        XCTAssertTrue(active, "a web subscription is a running one")
+
+        await coordinator.subscribe(to: maxId)
+
+        XCTAssertTrue(store.purchases.isEmpty, "no App Store Max on top of a web Pro")
+        XCTAssertEqual(coordinator.notice, AppleSubscriptionsCoordinator.alreadySubscribed)
     }
 
     func test_an_answer_for_an_account_no_longer_signed_in_is_not_used() async {
