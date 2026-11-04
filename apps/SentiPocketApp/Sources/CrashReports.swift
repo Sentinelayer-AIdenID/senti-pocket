@@ -340,11 +340,11 @@ struct LastRun: Codable, Equatable {
             if let draws = stall.drawsText { lines.append("While it was stuck: \(draws).") }
             frames = stall.frames ?? []
             binaries = stall.binaries ?? []
-            if let later = stall.laterFrames, !later.isEmpty, later != frames {
-                lines.append("\(Int(MainThreadWatch.secondLookAfter)) s in it was elsewhere: "
-                             + later.prefix(6).joined(separator: " · ") + ".")
-            } else if stall.laterFrames != nil, !frames.isEmpty {
-                lines.append("\(Int(MainThreadWatch.secondLookAfter)) s in it was at the same place.")
+            let later = stall.laterFrames ?? []
+            if !frames.isEmpty, !later.isEmpty {
+                lines.append(later == frames
+                    ? "\(Int(MainThreadWatch.secondLookAfter)) s in it was at the same place."
+                    : "\(Int(MainThreadWatch.secondLookAfter)) s in it was elsewhere: " + later.prefix(6).joined(separator: " · ") + ".")
             }
         }
         return CrashReport(
@@ -668,9 +668,11 @@ final class MainThreadWatch: @unchecked Sendable {
         }
         lock.unlock()
         // Where the main thread is stuck: read when the stall is first seen, and once more `secondLookAfter` seconds in,
-        // with this watch's lock released (the main thread may be holding it, in `note`).
+        // with this watch's lock released (the main thread may be holding it, in `note`). The stall is written first:
+        // naming the frames can wait on a lock the stuck thread holds (the loader's), and the plain record must survive.
         if let current = written,
            current.frames == nil || (current.laterFrames == nil && current.seconds >= Self.secondLookAfter) {
+            write(current)
             let stack = MainThreadStack.capture()
             lock.lock()
             if var still = stall {

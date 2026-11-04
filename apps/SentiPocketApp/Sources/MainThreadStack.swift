@@ -39,40 +39,46 @@ enum MainThreadStack {
     /// Writes the main thread's return addresses, innermost first, into `buffer`, and says how many.
     private static func read(into buffer: UnsafeMutablePointer<UInt>) -> Int {
         let thread = mainThread
-        guard thread != 0, thread_suspend(thread) == KERN_SUCCESS else { return 0 }
-        defer { thread_resume(thread) }
-        var state = arm_thread_state64_t()
-        var stateCount = mach_msg_type_number_t(MemoryLayout<arm_thread_state64_t>.size / MemoryLayout<natural_t>.size)
-        let result = withUnsafeMutablePointer(to: &state) { pointer in
-            pointer.withMemoryRebound(to: natural_t.self, capacity: Int(stateCount)) {
-                thread_get_state(thread, ARM_THREAD_STATE64, $0, &stateCount)
-            }
+        guard thread != 0 else { return 0 }
+        // Everything the stopped window touches is made here, before the thread stops, and reached through raw
+        // pointers: no allocation, generic code or type lookup runs while it is stopped (a debug build would otherwise
+        // run the generic `withUnsafeMutablePointer` forms there).
+        let stateWords = MemoryLayout<arm_thread_state64_t>.size / MemoryLayout<natural_t>.size
+        let state = UnsafeMutablePointer<arm_thread_state64_t>.allocate(capacity: 1)
+        let stateRaw = UnsafeMutableRawPointer(state).bindMemory(to: natural_t.self, capacity: stateWords)
+        let record = UnsafeMutablePointer<UInt>.allocate(capacity: 2)
+        let recordAddress = vm_address_t(UInt(bitPattern: record))
+        let recordSize = vm_size_t(2 * MemoryLayout<UInt>.size)
+        defer {
+            state.deallocate()
+            record.deallocate()
         }
-        guard result == KERN_SUCCESS else { return 0 }
+        var stateCount = mach_msg_type_number_t(stateWords)
+        var copiedSize: vm_size_t = 0
         var count = 0
-        buffer[count] = strip(state.__pc)
-        count += 1
-        buffer[count] = strip(state.__lr)
-        count += 1
-        // Each frame record is two words at the frame pointer: the caller's frame pointer, then the return address.
-        var frame = strip(state.__fp)
-        var record: (UInt, UInt) = (0, 0)
-        while count < maximumFrames, frame != 0, frame % 8 == 0 {
-            var size: vm_size_t = 0
-            let copied = withUnsafeMutablePointer(to: &record) { pointer in
-                vm_read_overwrite(mach_task_self_, vm_address_t(frame), vm_size_t(MemoryLayout<(UInt, UInt)>.size),
-                                  vm_address_t(UInt(bitPattern: pointer)), &size)
-            }
-            guard copied == KERN_SUCCESS else { break }
-            let returnAddress = strip(UInt64(record.1))
-            guard returnAddress != 0 else { break }
-            buffer[count] = returnAddress
+
+        guard thread_suspend(thread) == KERN_SUCCESS else { return 0 }
+        if thread_get_state(thread, ARM_THREAD_STATE64, stateRaw, &stateCount) == KERN_SUCCESS {
+            buffer[count] = strip(state.pointee.__pc)
             count += 1
-            let caller = strip(UInt64(record.0))
-            // Frames grow toward higher addresses as they unwind; anything else is the end of the chain (or garbage).
-            guard caller > frame else { break }
-            frame = caller
+            buffer[count] = strip(state.pointee.__lr)
+            count += 1
+            // Each frame record is two words at the frame pointer: the caller's frame pointer, then the return address.
+            var frame = strip(state.pointee.__fp)
+            while count < maximumFrames, frame != 0, frame % 8 == 0 {
+                guard vm_read_overwrite(mach_task_self_, vm_address_t(frame), recordSize, recordAddress, &copiedSize)
+                        == KERN_SUCCESS else { break }
+                let returnAddress = strip(UInt64(record[1]))
+                guard returnAddress != 0 else { break }
+                buffer[count] = returnAddress
+                count += 1
+                let caller = strip(UInt64(record[0]))
+                // Frames grow toward higher addresses as they unwind; anything else is the end of the chain (or garbage).
+                guard caller > frame else { break }
+                frame = caller
+            }
         }
+        thread_resume(thread)
         return count
     }
 
@@ -94,7 +100,8 @@ enum MainThreadStack {
                 continue
             }
             let name = (String(cString: path) as NSString).lastPathComponent
-            frames.append("\(name) +0x\(String(address - UInt(bitPattern: base), radix: 16))")
+            let start = UInt(bitPattern: base)
+            frames.append(address >= start ? "\(name) +0x\(String(address - start, radix: 16))" : "\(name) ? 0x\(String(address, radix: 16))")
             let binary = "\(name) \(uuid(ofImageAt: UnsafeRawPointer(base)) ?? "?")"
             if !binaries.contains(binary) { binaries.append(binary) }
         }
