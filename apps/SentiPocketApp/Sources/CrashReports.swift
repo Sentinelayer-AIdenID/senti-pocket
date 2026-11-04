@@ -306,7 +306,7 @@ struct LastRun: Codable, Equatable {
     var availableMB: Int?
     var memoryWarnings = 0
 
-    static let keptSteps = 12
+    static let keptSteps = 24
 
     mutating func note(_ step: String, at date: Date) {
         trail.append("\(CrashReportText.clock(date)) \(step)")
@@ -451,6 +451,7 @@ final class CrashReporter: NSObject, ObservableObject, MXMetricManagerSubscriber
     func note(_ intent: RoomChatIntent, rows: Int) {
         guard let step = Self.step(for: intent) else { return }
         var details = ["\(rows) rows"]
+        if case .longMessageOpened(let characters) = intent { details.append("\(characters) chars") }
         if let length = Self.sentLength(intent) {
             details.append("\(length) chars")
             if KeyboardInput.isDictating { details.append("dictating") }
@@ -700,5 +701,18 @@ enum KeyboardInput {
 extension UIResponder {
     @objc fileprivate func pocketCaptureFirstResponder() {
         KeyboardInput.captured(self)
+    }
+}
+
+/// A random value made once per install for the freeze trail's room tags, so a shared report's tags match only on
+/// this phone. Never sent anywhere on its own.
+enum CrashTrailSalt {
+    private static let key = "pocket.crashTrailSalt"
+
+    static var current: String {
+        if let kept = UserDefaults.standard.string(forKey: key), !kept.isEmpty { return kept }
+        let made = UUID().uuidString
+        UserDefaults.standard.set(made, forKey: key)
+        return made
     }
 }

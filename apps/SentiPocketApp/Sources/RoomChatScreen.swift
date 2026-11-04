@@ -1,3 +1,4 @@
+import CryptoKit
 import SwiftUI
 import UIKit
 import PocketSyncClient
@@ -500,6 +501,13 @@ struct RoomChatScreen: View {
         OpenURLAction { url in handle(url) }
     }
 
+    /// Which room, for the freeze recorder: four hex characters of a hash of its id salted per install, never its
+    /// title. Unsalted, the id's own start would let anyone in that room match a shared report to rooms they share.
+    static func tag(_ sessionId: String, salt: String = CrashTrailSalt.current) -> String {
+        let digest = SHA256.hash(data: Data((salt + ":" + sessionId).utf8))
+        return String(digest.map { String(format: "%02x", $0) }.joined().prefix(4))
+    }
+
     var body: some View {
         RoomChatView(
             state: coordinator.state,
@@ -945,7 +953,7 @@ struct RoomChatScreen: View {
         }
         .environment(\.openURL, linkAction)
         .onAppear {
-            CrashReporter.shared.note("room opened")
+            CrashReporter.shared.note("room opened \(Self.tag(route.sessionId))")
             coordinator.resume()
             applyRouteLinksOnce()
             #if DEBUG
@@ -955,7 +963,7 @@ struct RoomChatScreen: View {
             connectMedia()
         }
         .onDisappear {
-            CrashReporter.shared.note("room closed")
+            CrashReporter.shared.note("room closed \(Self.tag(route.sessionId))")
             coordinator.pause()
             // Reading aloud goes on after you leave (Carter, 10-30); the app's player follows you to the next screen.
         }

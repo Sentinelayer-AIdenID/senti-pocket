@@ -552,7 +552,7 @@ public struct RoomChatView: View {
                     expandedQuiet.insert(message.id)
                 }
             },
-            onOpenLong: { longRow = $0 },
+            onOpenLong: { longRow = $0; send(.longMessageOpened(characters: $0.text.count)) },
             onReply: { replyTarget = $0 },
             onAddReaction: { reactingRow = $0 },
             isMinimized: message.isInlineReply && message.replyToSequenceId.map { minimizedThreads.contains($0) } == true,

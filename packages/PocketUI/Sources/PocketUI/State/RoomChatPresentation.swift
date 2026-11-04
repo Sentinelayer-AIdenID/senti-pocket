@@ -1465,6 +1465,8 @@ public enum RoomChatIntent: Equatable, Sendable {
     /// The bottom marker flapped, so the reader's place was held still for a moment: for the freeze recorder, with how
     /// many rows the room had and its longest message's length, never what it says.
     case bottomFlapHeld(rows: Int, longestText: Int)
+    /// A long message's whole text opened over the room: for the freeze recorder, with its length, never what it says.
+    case longMessageOpened(characters: Int)
     /// Send was tapped, before the box empties: for the freeze recorder, since the room hears of the send only on the
     /// next turn of the run loop and a freeze in the update that empties the box left no step (build 07, #58648).
     /// How long the text is, never what it says.
