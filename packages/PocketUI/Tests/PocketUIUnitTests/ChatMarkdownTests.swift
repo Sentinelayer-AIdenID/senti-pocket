@@ -72,6 +72,33 @@ final class ChatMarkdownTests: XCTestCase {
     }
 
     /// Carter and warden: the keeper's ticket links sat side by side; each is its own row now.
+    /// A phone froze on a room for 31 s (build 2026110306). Not proven the cause, but the separators' cleanup could
+    /// do it: a keeper's list of tickets followed by more text made the old pattern try every way to share the spaces
+    /// between the separators (about 3x per ticket). The same answer now comes in one pass.
+    func test_many_ticket_links_before_more_text_split_at_once_and_read_the_same() {
+        let links = (0..<16).map { index in
+            "[Ticket: Item \(index)](/dashboard/sessions/11111111-2222-4333-8444-555555555555?ticket=t" + String(index) + ")"
+        }
+        let digest = "Tickets: " + links.joined(separator: " · ") + "\n\nNext: the build goes out tonight."
+        let started = Date()
+        let split = ChatReferences.ticketLinks(in: digest)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.5, "one pass, not every way to share the spaces")
+        XCTAssertEqual(split.tickets.count, 16)
+        XCTAssertEqual(split.prose, "Tickets: · Next: the build goes out tonight.", "what the nested pattern made of it")
+        XCTAssertEqual(ChatReferences.ticketLinks(in: links[0] + " · " + links[1] + " · ").prose, "", "trailing separators go")
+        XCTAssertEqual(ChatReferences.ticketLinks(in: "x " + links[0] + " ·  · y").prose, "x · y", "a run becomes one")
+
+        // Review: a very long run of separators and spaces, not at the end, is tried once, not at each character.
+        let run = links[0] + String(repeating: " · ", count: 10_000) + "then text"
+        let longStart = Date()
+        XCTAssertEqual(ChatReferences.ticketLinks(in: run).prose, "· then text")
+        XCTAssertLessThan(Date().timeIntervalSince(longStart), 0.5)
+        // The shared-things list wants only the tickets: the text comes back as it was.
+        let onlyTickets = ChatReferences.ticketLinks(in: digest, cleaningProse: false)
+        XCTAssertEqual(onlyTickets.tickets.count, 16)
+        XCTAssertEqual(onlyTickets.prose, digest)
+    }
+
     func test_ticket_links_come_out_of_the_text_one_per_row() {
         let keeper = "🎫 Tickets for this message: [Ticket: Fix Phone notifications that stop updating]"
             + "(/dashboard/sessions/11111111-2222-4333-8444-555555555555?ticket=aaaaaaaa-1111-4222-8333-444444444444) · "
