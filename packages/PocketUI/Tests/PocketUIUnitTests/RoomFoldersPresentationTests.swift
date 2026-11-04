@@ -107,11 +107,8 @@ final class RoomFoldersPresentationTests: XCTestCase {
         XCTAssertEqual(RoomFolderSheetCheck.check("", isNew: true, folderCount: 3), .problem("Give the folder a name."))
         XCTAssertEqual(RoomFolderSheetCheck.check(String(repeating: "a", count: 61), isNew: false, folderCount: 3),
                        .problem("A folder name is at most 60 characters."))
-        if case .problem(let text) = RoomFolderSheetCheck.check("Launch", isNew: true, folderCount: 100) {
-            XCTAssertTrue(text.contains("100 folders"))
-        } else {
-            XCTFail("a 101st folder was allowed")
-        }
+        XCTAssertEqual(RoomFolderSheetCheck.check("Launch", isNew: true, folderCount: 100),
+                       .problem(RoomFolderName.limitMessage), "a 101st folder is not offered")
         XCTAssertEqual(RoomFolderSheetCheck.check("Launch", isNew: false, folderCount: 100), .ok("Launch"),
                        "renaming at the cap is fine")
     }

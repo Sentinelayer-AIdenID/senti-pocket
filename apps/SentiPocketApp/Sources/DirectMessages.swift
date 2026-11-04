@@ -97,6 +97,17 @@ final class DirectMessagesCenter: ObservableObject {
         }
     }
 
+    /// What a room opened by its id is (from a push, a banner or a link): what the room list says, and when the list has
+    /// not loaded it (a direct message that just arrived), what the server says, so a direct message opens as one,
+    /// with its header, and never as a plain room whose avatars would offer Message from inside it. Nil is a room.
+    func directInfo(for sessionId: String, row: SessionRowPresentation?,
+                    rows: [SessionRowPresentation]) async -> DirectRoomInfo? {
+        if let row { return DirectRoomInfo(row: row, rows: rows) }
+        if !isAvailable { await refresh() }
+        guard isAvailable, let dm = try? await client.directMessage(sessionId) else { return nil }
+        return DirectRoomInfo(dm)
+    }
+
     enum OpenOutcome: Equatable {
         case opened(DirectMessage)
         /// The server's one answer for blocked, off, not sharing a room and unknown.
@@ -118,6 +129,23 @@ final class DirectMessagesCenter: ObservableObject {
         } catch {
             return .failed("Couldn't open the conversation. Check your connection and try again.")
         }
+    }
+}
+
+/// Which header a direct message shows: Carter's pick, one line to change. `.compact` is one line ("From <room> ›" and a
+/// "Memory: Off" pill that opens the switch); `.expanded` is the full header with the switch always shown.
+enum DirectRoomHeaderChoice {
+    static let pick: DirectRoomHeaderStyle = .compact
+
+    /// The pick, or in a DEBUG build the one a launch argument asks for (`-PocketDMHeaderExpanded`,
+    /// `-PocketDMHeaderCompact`), so both can be shown from one build.
+    static var current: DirectRoomHeaderStyle {
+        #if DEBUG
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("-PocketDMHeaderExpanded") { return .expanded }
+        if arguments.contains("-PocketDMHeaderCompact") { return .compact }
+        #endif
+        return pick
     }
 }
 
@@ -268,17 +296,21 @@ final class DirectRoomModel: ObservableObject {
 struct DirectRoomHeaderHost: View {
     let info: DirectRoomInfo
     let sessionId: String
-    let lastMessageIsOwn: Bool
     let center: DirectMessagesCenter?
     let openRoom: @MainActor (String) -> Void
+    let style: DirectRoomHeaderStyle
+    /// The compact header's switch starts open (DEBUG previews only).
+    let memoryOpen: Bool
     @StateObject private var model: DirectRoomModel
 
-    init(info: DirectRoomInfo, sessionId: String, lastMessageIsOwn: Bool, center: DirectMessagesCenter?,
+    init(info: DirectRoomInfo, sessionId: String, center: DirectMessagesCenter?,
+         style: DirectRoomHeaderStyle = DirectRoomHeaderChoice.current, memoryOpen: Bool = false,
          openRoom: @escaping @MainActor (String) -> Void) {
         self.info = info
         self.sessionId = sessionId
-        self.lastMessageIsOwn = lastMessageIsOwn
         self.center = center
+        self.style = style
+        self.memoryOpen = memoryOpen
         self.openRoom = openRoom
         _model = StateObject(wrappedValue: DirectRoomModel(sessionId: sessionId))
     }
@@ -299,7 +331,6 @@ struct DirectRoomHeaderHost: View {
             mutual: (dm?.mutualRooms ?? []).map { (id: $0.sessionId, title: $0.title) },
             memoryShare: dm.map { Dictionary($0.memoryShare.map { ($0.roomId, $0.enabled) }, uniquingKeysWith: { $1 }) },
             isSaving: model.isSaving,
-            lastMessageIsOwn: lastMessageIsOwn,
             notice: model.notice
         )
     }
@@ -307,6 +338,8 @@ struct DirectRoomHeaderHost: View {
     var body: some View {
         DirectRoomHeaderView(
             state: state,
+            style: style,
+            memoryOpen: memoryOpen,
             onOpenSharedRoom: { openRoom($0) },
             onSetMemory: { enabled in
                 guard let center, let roomId = state.memory?.roomId else { return }

@@ -26,6 +26,20 @@ struct RoomRoute: Hashable {
 }
 
 extension RoomRoute {
+    /// The controls that change who is in a room or what it is: New agent, Invite, Rename and agent requests. A room's
+    /// alone: a breakout follows its parent, and a direct message has none (the API refuses them in a direct room).
+    var hasRoomControls: Bool { !isBreakout && direct == nil }
+
+    /// The owner renames a room (the API's rule).
+    var canRename: Bool { hasRoomControls && membershipRole.lowercased() == "owner" }
+
+    /// Owners and admins invite people (the API enforces it).
+    var canInvite: Bool { hasRoomControls && ["owner", "admin"].contains(membershipRole.lowercased()) }
+
+    /// A profile card offers Message from a room, never from inside a direct message: the server would be sent the
+    /// direct message itself as the room you share.
+    var cardsOfferMessage: Bool { direct == nil }
+
     /// The room already open, asked for again with nothing new (picked again in the side panel), stays as it is,
     /// where you are in it: an unread count the room list made before you read it there never reopens it at an old
     /// unread line. Anything else opens as asked.
@@ -196,7 +210,7 @@ struct RoomChatScreen: View {
         )
         self.agentMint = agentMint
         _newAgentOffer = StateObject(wrappedValue: NewAgentOffer(role: route.membershipRole, isBreakout: route.isBreakout,
-                                                                 mint: agentMint))
+                                                                 isDirect: route.direct != nil, mint: agentMint))
         self.chatCreator = sender as? any AgentChatCreating
         self.onRenamed = onRenamed
         self.onReauthenticationRequired = onReauthenticationRequired
@@ -208,10 +222,11 @@ struct RoomChatScreen: View {
             actionSender: actionSender,
             identity: identity,
             membershipRole: route.membershipRole,
-            // The API lets the owner rename a room, and nobody a breakout.
-            canRename: route.membershipRole.lowercased() == "owner" && !route.isBreakout,
-            // Owners and admins invite people (the API enforces it); a breakout follows its parent room.
-            canInvite: ["owner", "admin"].contains(route.membershipRole.lowercased()) && !route.isBreakout,
+            // The API lets the owner rename a room, and nobody a breakout or a direct message.
+            canRename: route.canRename,
+            // Owners and admins invite people (the API enforces it); a breakout follows its parent room, and a direct
+            // message is between two.
+            canInvite: route.canInvite,
             // Thread summaries are written on the phone, where Apple's on-device model is available.
             summarizer: OnDeviceThreadSummarizer(),
             focusSequenceId: route.focusSequenceId,
@@ -502,7 +517,7 @@ struct RoomChatScreen: View {
 
     /// Only owners and admins decide agent requests (the API enforces it; the screen follows it).
     private var decidesAdmissions: Bool {
-        !route.isBreakout && admissionsTransport != nil && admissionDecider != nil
+        route.hasRoomControls && admissionsTransport != nil && admissionDecider != nil
             && ["owner", "admin"].contains(route.membershipRole.lowercased())
     }
 
@@ -539,9 +554,13 @@ struct RoomChatScreen: View {
         route.direct == nil ? coordinator.state.title : route.direct?.originTitle
     }
 
-    /// In a direct message, its other side's card has nothing to open: you are already here.
-    private func isCounterpart(_ target: RoomProfileTarget) -> Bool {
-        route.direct?.counterpart.senderId.lowercased() == target.senderId.lowercased()
+    /// The compact header's switch starts open: only in a DEBUG preview (`-PocketDMMemoryOpen`).
+    private var directMemoryOpen: Bool {
+        #if DEBUG
+        return ProcessInfo.processInfo.arguments.contains("-PocketDMMemoryOpen")
+        #else
+        return false
+        #endif
     }
 
     var body: some View {
@@ -600,8 +619,8 @@ struct RoomChatScreen: View {
                 DirectRoomHeaderHost(
                     info: info,
                     sessionId: route.sessionId,
-                    lastMessageIsOwn: DirectRoomActivity.lastMessageIsOwn(coordinator.state.rows),
                     center: directContext?.center,
+                    memoryOpen: directMemoryOpen,
                     openRoom: { openRoom(SentiLink(sessionId: $0)) }
                 )
             }
@@ -612,7 +631,7 @@ struct RoomChatScreen: View {
                     target: target,
                     roomId: route.sessionId,
                     sharedRoom: profileSharedRoom,
-                    canMessage: !isCounterpart(target),
+                    canMessage: route.cardsOfferMessage,
                     context: directContext,
                     // Block comes with the room's block flow (#312) once it lands; until then the card has none.
                     onBlock: nil,

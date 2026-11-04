@@ -249,6 +249,8 @@ private struct AuthenticatedRootView: View {
     @State private var presentsPocket = false
     @State private var presentsActivity = false
     @State private var accountName: String?
+    /// A room being opened from its id while the server says what it is; any other open replaces it.
+    @State private var pendingOpen: UUID?
     /// The room opened last, reopened when the app starts (as the big assistant apps reopen your last chat).
     @AppStorage("pocket.lastRoomId") private var lastRoomId = ""
     @State private var restoredLastRoom = false
@@ -695,17 +697,33 @@ private struct AuthenticatedRootView: View {
         presentsSettings = false
         presentsPocket = false
         presentsActivity = false
-        show(RoomRoute(
-            sessionId: link.sessionId,
-            title: row?.title ?? "Room",
-            membershipRole: row?.membershipRole ?? "",
-            focusSequenceId: link.messageSequence,
-            focusTicketId: link.ticketId,
-            opensAdmissions: link.admissionId != nil,
-            readMark: row.map(RoomReadMark.init(row:)),
-            // A direct message (from its push, too) opens as one: whom it is with, and its room.
-            direct: DirectRoomInfo(row: row, rows: sessions.state.rows)
-        ))
+        func route(direct: DirectRoomInfo?) -> RoomRoute {
+            RoomRoute(
+                sessionId: link.sessionId,
+                title: row?.title ?? direct?.counterpart.displayName ?? "Room",
+                membershipRole: row?.membershipRole ?? "",
+                focusSequenceId: link.messageSequence,
+                focusTicketId: link.ticketId,
+                opensAdmissions: link.admissionId != nil,
+                readMark: row.map(RoomReadMark.init(row:)),
+                // A direct message (from its push, too) opens as one: whom it is with, and its room.
+                direct: direct
+            )
+        }
+        guard row == nil else {
+            show(route(direct: DirectRoomInfo(row: row, rows: sessions.state.rows)))
+            return
+        }
+        // Not in the room list yet (the push of a direct message that just started): ask the server what it is first,
+        // so it opens with its header. A room the list reads meanwhile, or another open, wins.
+        sessions.send(.refreshSessions)
+        let token = UUID()
+        pendingOpen = token
+        Task { @MainActor in
+            let direct = await directMessages.directInfo(for: link.sessionId, row: nil, rows: sessions.state.rows)
+            guard pendingOpen == token else { return }
+            show(route(direct: direct))
+        }
     }
 
     /// A direct message the server opened from a profile card: the room on screen, and the room list reads it.
@@ -737,6 +755,7 @@ private struct AuthenticatedRootView: View {
     /// selection Pocket and Activity follow in step, and remembers it for the next launch.
     @MainActor
     private func show(_ route: RoomRoute) {
+        pendingOpen = nil
         if !UTF8ExactIdentity.matches(sessions.selectedSessionId, route.sessionId) {
             sessions.send(.selectSession(sessionId: route.sessionId))
         }

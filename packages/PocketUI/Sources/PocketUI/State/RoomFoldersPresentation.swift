@@ -45,7 +45,7 @@ public enum RoomFolderSheetCheck: Equatable, Sendable {
     /// - Parameter isNew: a new folder also counts against the most a person can have.
     public static func check(_ name: String, isNew: Bool, folderCount: Int) -> RoomFolderSheetCheck {
         if isNew, folderCount >= RoomFolderName.maximumFolders {
-            return .problem("You have \(RoomFolderName.maximumFolders) folders, the most there can be. Delete one first.")
+            return .problem(RoomFolderName.limitMessage)
         }
         switch RoomFolderName.validate(name) {
         case .success(let cleaned): return .ok(cleaned)

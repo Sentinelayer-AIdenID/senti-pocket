@@ -52,6 +52,8 @@ public enum RoomFolderError: Error, Equatable, Sendable {
     case gone
     /// 409: you already have a folder with that name.
     case duplicateName
+    /// 409 `ROOM_FOLDER_LIMIT`: you have as many folders as one person can.
+    case limitReached
     /// The name is not one the API takes (see `RoomFolderName`), or the API refused the request.
     case rejected
     case reauthenticationRequired
@@ -125,6 +127,13 @@ public final class HTTPRoomFoldersClient: RoomFoldersServing, @unchecked Sendabl
         _ = try await send("DELETE", Self.base + [folderId, "rooms", sessionId], notFound: .gone)
     }
 
+    /// The error's code, as the API writes it (`{"error": {"code": ...}}`), or under FastAPI's `detail`.
+    static func errorCode(_ json: JSONValue?) -> String? {
+        json?["error"]?["code"]?.stringValue
+            ?? json?["detail"]?["code"]?.stringValue
+            ?? json?["code"]?.stringValue
+    }
+
     private func folder(in answer: JSONValue?) throws -> RoomFolder {
         guard let folder = RoomFolder(json: answer?["folder"]) else { throw RoomFolderError.invalidData }
         return folder
@@ -150,7 +159,9 @@ public final class HTTPRoomFoldersClient: RoomFoldersServing, @unchecked Sendabl
         case 200..<300: return answer.json
         case 401: throw RoomFolderError.reauthenticationRequired
         case 403, 404: throw notFound
-        case 409: throw RoomFolderError.duplicateName
+        case 409:
+            // A 409 is a taken name unless the server says it is the cap.
+            throw Self.errorCode(answer.json) == "ROOM_FOLDER_LIMIT" ? RoomFolderError.limitReached : RoomFolderError.duplicateName
         case 408, 425, 429, 500..<600: throw RoomFolderError.retryable
         default: throw RoomFolderError.rejected
         }

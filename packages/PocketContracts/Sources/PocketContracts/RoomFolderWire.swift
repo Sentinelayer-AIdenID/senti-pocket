@@ -4,8 +4,11 @@ import Foundation
 /// 1 to 60 characters, no control characters. Counted in Unicode code points, as the API counts with Python's len.
 public enum RoomFolderName {
     public static let maximumLength = 60
-    /// The most folders one person can have.
+    /// The most folders one person can have (the API answers 409 `ROOM_FOLDER_LIMIT` past it).
     public static let maximumFolders = 100
+
+    /// What the sheet says at the cap, whether the phone counted it or the server refused it.
+    public static let limitMessage = "You have \(maximumFolders) folders, the most there can be. Delete one first."
 
     /// Why a name cannot be sent.
     public enum Problem: Error, Equatable, Sendable {
@@ -26,7 +29,9 @@ public enum RoomFolderName {
     public static func validate(_ raw: String) -> Result<String, Problem> {
         let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if name.isEmpty { return .failure(.empty) }
-        if name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) {
+        // True control characters only (Cc). Format characters such as the zero-width joiner that builds "👩‍💻" are
+        // part of a name.
+        if name.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }) {
             return .failure(.controlCharacters)
         }
         if name.unicodeScalars.count > maximumLength { return .failure(.tooLong) }

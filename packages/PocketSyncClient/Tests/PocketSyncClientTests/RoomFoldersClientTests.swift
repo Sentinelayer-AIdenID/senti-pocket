@@ -70,6 +70,26 @@ final class RoomFoldersClientTests: XCTestCase {
         }
     }
 
+    /// A 409 is a taken name unless the server's code says it is the cap (pinned: `ROOM_FOLDER_LIMIT`).
+    func test_a_409_at_the_cap_is_the_cap_not_a_taken_name() async {
+        let cases: [(String, RoomFolderError)] = [
+            (#"{"error": {"code": "ROOM_FOLDER_LIMIT"}}"#, .limitReached),
+            (#"{"detail": {"code": "ROOM_FOLDER_LIMIT"}}"#, .limitReached),
+            (#"{"error": {"code": "ROOM_FOLDER_NAME_TAKEN"}}"#, .duplicateName),
+            (#"{"detail": "duplicate"}"#, .duplicateName),
+            ("", .duplicateName)
+        ]
+        for (body, expected) in cases {
+            let folders = client { _ in (409, body) }
+            do {
+                _ = try await folders.createFolder(named: "One more")
+                XCTFail("made a folder on a 409")
+            } catch {
+                XCTAssertEqual(error as? RoomFolderError, expected, body)
+            }
+        }
+    }
+
     func test_a_name_the_api_would_refuse_is_never_sent() async {
         let folders = client { _ in (201, "{}") }
         for name in ["", "   ", String(repeating: "a", count: 61), "tab\there"] {

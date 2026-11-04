@@ -22,8 +22,8 @@ enum RoomPreview {
         ProcessInfo.processInfo.arguments.contains("-PocketProfileCardPreview")
     }
 
-    /// `-PocketDMPreview` opens a direct message with an agent: its header, the memory switch (off, as the server
-    /// starts it), and your last message, of which the agent was notified.
+    /// `-PocketDMPreview` opens a direct message with an agent: its header (compact unless `-PocketDMHeaderExpanded`;
+    /// `-PocketDMMemoryOpen` opens the compact one's switch) and the memory switch, off as the server starts it.
     static var isDirectRequested: Bool {
         ProcessInfo.processInfo.arguments.contains("-PocketDMPreview")
     }

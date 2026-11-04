@@ -78,6 +78,8 @@ public struct RoomProfileCardView: View {
                         .foregroundStyle(PocketPalette.textSecondary)
                         .frame(width: 30, height: 30)
                         .background(PocketPalette.inset, in: Circle())
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Close")
@@ -150,113 +152,239 @@ public struct RoomProfileCardView: View {
         .background(PocketPalette.canvas.ignoresSafeArea())
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("pocket.profile.card")
+        // VoiceOver says why Message did nothing ("You can't message Sam right now") as soon as it shows.
+        .onChange(of: state.phase) { phase in
+            if case .notice(let text) = phase { announceToVoiceOver(text) }
+        }
     }
 }
 
-/// The top of a direct message: whom it is with, a chip back to the room you share, and for an agent the switch that
-/// lets it use this chat there (off until you turn it on), and that it was notified of your last message.
+/// Says `text` to VoiceOver now, where there is one.
+func announceToVoiceOver(_ text: String) {
+    #if os(iOS)
+    UIAccessibility.post(notification: .announcement, argument: text)
+    #endif
+}
+
+/// The top of a direct message, in either layout (`DirectRoomHeaderStyle`). Compact: one line, "From <room> ›" (opens
+/// the room) and, for an agent, a "Memory: Off" pill that opens the switch, folded by default. Expanded: whom it is with,
+/// the "Shared room" chip and the switch with its note. The switch shows only the server's value: off until you turn
+/// it on. Nothing here says what the other side is doing.
 public struct DirectRoomHeaderView: View {
     private let state: DirectRoomHeaderState
+    private let style: DirectRoomHeaderStyle
     private let onOpenSharedRoom: (String) -> Void
     private let onSetMemory: (Bool) -> Void
     private let onDismissNotice: () -> Void
+    /// The compact header's switch, opened from its pill.
+    @State private var memoryOpen: Bool
 
-    public init(state: DirectRoomHeaderState, onOpenSharedRoom: @escaping (String) -> Void,
-                onSetMemory: @escaping (Bool) -> Void, onDismissNotice: @escaping () -> Void = {}) {
+    public init(state: DirectRoomHeaderState, style: DirectRoomHeaderStyle = .compact, memoryOpen: Bool = false,
+                onOpenSharedRoom: @escaping (String) -> Void, onSetMemory: @escaping (Bool) -> Void,
+                onDismissNotice: @escaping () -> Void = {}) {
         self.state = state
+        self.style = style
         self.onOpenSharedRoom = onOpenSharedRoom
         self.onSetMemory = onSetMemory
         self.onDismissNotice = onDismissNotice
+        _memoryOpen = State(initialValue: memoryOpen)
+    }
+
+    /// Nothing to show: no room to go back to, no switch, nothing to say.
+    private var isEmpty: Bool {
+        style == .compact && state.fromChip == nil && state.memoryPill == nil && state.notice == nil
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                RoomAvatar(name: state.name, isHuman: !state.isAgent, size: 34)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(state.name)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(PocketPalette.textPrimary)
-                        .lineLimit(1)
-                    Text(state.isAgent ? "Direct message · agent" : "Direct message")
-                        .font(.caption)
-                        .foregroundStyle(PocketPalette.textSecondary)
+        if !isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                switch style {
+                case .compact: compact
+                case .expanded: expanded
                 }
-                .accessibilityElement(children: .combine)
+                if let notice = state.notice {
+                    noticeRow(notice)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, style == .compact ? 2 : 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.bar)
+            .overlay(alignment: .bottom) { Divider() }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("pocket.direct.header")
+        }
+    }
+
+    // MARK: - Compact
+
+    /// One line: the room it came from, and the switch's pill. When the two do not fit side by side (the largest text
+    /// sizes) the pill goes under the chip, each whole.
+    @ViewBuilder
+    private var compact: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) {
+                fromRoomChip(whole: true)
                 Spacer(minLength: 0)
+                memoryPillButton
             }
-
-            // On a line of its own, so the room's name is read whole.
-            if let id = state.sharedRoomId, let title = state.sharedRoomTitle {
-                Button {
-                    onOpenSharedRoom(id)
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "bubble.left.and.bubble.right")
-                        Text("Shared room: \(title)")
-                            .lineLimit(1)
-                        Image(systemName: "chevron.right")
-                            .font(.caption2.weight(.bold))
-                    }
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(PocketPalette.accentStrong)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(PocketPalette.inset, in: Capsule())
-                }
-                .buttonStyle(.plain)
-                .accessibilityHint("Opens that room")
-                .accessibilityIdentifier("pocket.direct.sharedRoom")
-            }
-
-            if let memory = state.memory {
-                VStack(alignment: .leading, spacing: 3) {
-                    Toggle(isOn: Binding(get: { memory.isOn }, set: { onSetMemory($0) })) {
-                        HStack(spacing: 6) {
-                            Text(DirectRoomHeaderState.memoryLabel(agent: state.name, room: memory.roomTitle))
-                                .font(.footnote.weight(.semibold))
-                                .foregroundStyle(PocketPalette.textPrimary)
-                            if memory.isSaving { ProgressView().controlSize(.small) }
-                        }
-                    }
-                    .tint(PocketPalette.accent)
-                    .disabled(memory.isSaving)
-                    .accessibilityIdentifier("pocket.direct.memory")
-                    Text(DirectRoomHeaderState.memoryFootnote(agent: state.name, room: memory.roomTitle))
-                        .font(.caption2)
-                        .foregroundStyle(PocketPalette.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-
-            if state.notified {
-                Label(DirectRoomHeaderState.notifiedLine(agent: state.name), systemImage: "bell.badge")
-                    .font(.caption)
-                    .foregroundStyle(PocketPalette.textSecondary)
-                    .accessibilityIdentifier("pocket.direct.notified")
-            }
-
-            if let notice = state.notice {
-                HStack(spacing: 6) {
-                    Image(systemName: "exclamationmark.circle.fill").foregroundStyle(PocketPalette.warning)
-                    Text(notice).font(.caption).foregroundStyle(PocketPalette.textPrimary)
-                    Spacer(minLength: 0)
-                    Button(action: onDismissNotice) {
-                        Image(systemName: "xmark").font(.caption2.weight(.semibold))
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(PocketPalette.textSecondary)
-                    .accessibilityLabel("Dismiss")
-                }
-                .accessibilityIdentifier("pocket.direct.notice")
+            VStack(alignment: .leading, spacing: 0) {
+                fromRoomChip(whole: false)
+                memoryPillButton
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(.bar)
-        .overlay(alignment: .bottom) { Divider() }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("pocket.direct.header")
+        if memoryOpen {
+            memorySwitch
+                .padding(.bottom, 8)
+                .transition(.opacity)
+        }
+    }
+
+    /// `whole`: on the shared line, at its full width (the line is chosen only when it fits); on a line of its own, the
+    /// room's name wraps instead of running off the screen.
+    @ViewBuilder
+    private func fromRoomChip(whole: Bool) -> some View {
+        if let id = state.sharedRoomId, let chip = state.fromChip {
+            Button {
+                onOpenSharedRoom(id)
+            } label: {
+                HStack(spacing: 4) {
+                    Text(chip).lineLimit(whole ? 1 : 3)
+                    Image(systemName: "chevron.right").font(.caption2.weight(.bold))
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(PocketPalette.accentStrong)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(PocketPalette.inset, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .fixedSize(horizontal: whole, vertical: true)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(chip)
+            .accessibilityHint("Opens that room")
+            .accessibilityIdentifier("pocket.direct.fromRoom")
+        }
+    }
+
+    @ViewBuilder
+    private var memoryPillButton: some View {
+        if let pill = state.memoryPill, let memory = state.memory {
+            Button {
+                withAnimation(.easeOut(duration: 0.2)) { memoryOpen.toggle() }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: memory.isOn ? "brain.head.profile" : "lock")
+                    Text(pill)
+                    Image(systemName: memoryOpen ? "chevron.up" : "chevron.down").font(.caption2.weight(.bold))
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(memory.isOn ? PocketPalette.accentStrong : PocketPalette.textSecondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(PocketPalette.inset, in: Capsule())
+                .fixedSize()
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(pill)
+            .accessibilityHint(memoryOpen ? "Hides the switch" : "Shows the switch")
+            .accessibilityIdentifier("pocket.direct.memoryPill")
+        }
+    }
+
+    // MARK: - Expanded
+
+    @ViewBuilder
+    private var expanded: some View {
+        HStack(spacing: 10) {
+            RoomAvatar(name: state.name, isHuman: !state.isAgent, size: 34)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(state.name)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(PocketPalette.textPrimary)
+                    .lineLimit(1)
+                Text(state.subtitle)
+                    .font(.caption)
+                    .foregroundStyle(PocketPalette.textSecondary)
+            }
+            .accessibilityElement(children: .combine)
+            Spacer(minLength: 0)
+        }
+        // On a line of its own, so the room's name is read whole.
+        if let id = state.sharedRoomId, let chip = state.sharedRoomChip {
+            Button {
+                onOpenSharedRoom(id)
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "bubble.left.and.bubble.right")
+                    Text(chip).lineLimit(3)
+                    Image(systemName: "chevron.right").font(.caption2.weight(.bold))
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(PocketPalette.accentStrong)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(PocketPalette.inset, in: Capsule())
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Opens that room")
+            .accessibilityIdentifier("pocket.direct.sharedRoom")
+        }
+        if state.memory != nil {
+            memorySwitch
+        }
+    }
+
+    // MARK: - Shared parts
+
+    /// "Let <agent> use this chat in <room>", the server's value, and what that value means.
+    @ViewBuilder
+    private var memorySwitch: some View {
+        if let memory = state.memory, let label = state.memoryLabel, let note = state.memoryNote {
+            VStack(alignment: .leading, spacing: 3) {
+                Toggle(isOn: Binding(get: { memory.isOn }, set: { onSetMemory($0) })) {
+                    HStack(spacing: 6) {
+                        Text(label)
+                            .font(.footnote)
+                            .foregroundStyle(PocketPalette.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if memory.isSaving { ProgressView().controlSize(.small) }
+                    }
+                }
+                .tint(PocketPalette.accent)
+                .disabled(memory.isSaving)
+                .accessibilityIdentifier("pocket.direct.memory")
+                Text(note)
+                    .font(.caption2)
+                    .foregroundStyle(PocketPalette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("pocket.direct.memoryNote")
+            }
+        }
+    }
+
+    private func noticeRow(_ notice: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "exclamationmark.circle.fill").foregroundStyle(PocketPalette.warning)
+            Text(notice).font(.caption).foregroundStyle(PocketPalette.textPrimary)
+            Spacer(minLength: 0)
+            Button(action: onDismissNotice) {
+                Image(systemName: "xmark")
+                    .font(.caption2.weight(.semibold))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(PocketPalette.textSecondary)
+            .accessibilityLabel("Dismiss")
+        }
+        .accessibilityIdentifier("pocket.direct.notice")
+        .onAppear { announceToVoiceOver(notice) }
     }
 }
 

@@ -11,6 +11,7 @@ private final class FakeDirectMessages: DirectMessaging, @unchecked Sendable {
     private let lock = NSLock()
     private var _on = true
     private var _settingsFails = false
+    private var _settingsInvalid = false
     private var _refuses = false
     private var _patchFails: DirectMessageError?
     private var _allowance: DirectMessagesAllowance? = .sharedRooms
@@ -21,6 +22,7 @@ private final class FakeDirectMessages: DirectMessaging, @unchecked Sendable {
 
     var on: Bool { get { lock.withLock { _on } } set { lock.withLock { _on = newValue } } }
     var settingsFails: Bool { get { lock.withLock { _settingsFails } } set { lock.withLock { _settingsFails = newValue } } }
+    var settingsInvalid: Bool { get { lock.withLock { _settingsInvalid } } set { lock.withLock { _settingsInvalid = newValue } } }
     var refuses: Bool { get { lock.withLock { _refuses } } set { lock.withLock { _refuses = newValue } } }
     var patchFails: DirectMessageError? { get { lock.withLock { _patchFails } } set { lock.withLock { _patchFails = newValue } } }
     var calls: [String] { lock.withLock { _calls } }
@@ -66,6 +68,7 @@ private final class FakeDirectMessages: DirectMessaging, @unchecked Sendable {
     func directMessageSettings() async throws -> DirectMessagesAllowance? {
         try note("settings")
         if settingsFails { throw DirectMessageError.retryable }
+        if settingsInvalid { throw DirectMessageError.invalidData }
         return lock.withLock { _allowance }
     }
 
@@ -216,10 +219,77 @@ final class DirectMessagesTests: XCTestCase {
         let info = DirectRoomInfo(FakeDirectMessages.dm())
         let header = DirectRoomHeaderState.make(name: info.counterpart.displayName, isAgent: true,
                                                 origin: (id: "room-1", title: "Design review"), mutual: [],
-                                                memoryShare: model.dm.map { _ in [:] }, isSaving: false,
-                                                lastMessageIsOwn: true)
+                                                memoryShare: model.dm.map { _ in [:] }, isSaving: false)
         XCTAssertNil(header.memory)
-        XCTAssertTrue(header.notified)
+        XCTAssertNil(header.memoryPill)
+    }
+
+    /// Carter picks the header; the pick is one constant, and the build ships the compact one until he says otherwise.
+    func test_the_header_choice_is_one_constant_and_compact() {
+        XCTAssertEqual(DirectRoomHeaderChoice.pick, .compact)
+        XCTAssertEqual(DirectRoomHeaderChoice.current, .compact, "no launch argument in the test host")
+    }
+
+    func test_a_200_without_the_settings_does_not_turn_dms_on() async {
+        let fake = FakeDirectMessages()
+        fake.settingsInvalid = true
+        let center = DirectMessagesCenter(client: fake)
+        await center.refresh()
+        XCTAssertFalse(center.isAvailable, "only the settings themselves (allowDms) turn direct messages on")
+        XCTAssertNil(RoomDirectContext.ifAvailable(center, existing: { _ in nil }, open: { _ in }))
+    }
+
+    // MARK: - Opening a direct message the room list has not loaded
+
+    func test_a_direct_message_the_list_has_not_loaded_is_asked_for_before_it_opens() async {
+        let fake = FakeDirectMessages()
+        let center = DirectMessagesCenter(client: fake)
+        let info = await center.directInfo(for: "dm-1", row: nil, rows: [])
+        XCTAssertEqual(info?.counterpart.senderId, "review-agent", "it opens as the direct message it is, with its header")
+        XCTAssertEqual(info?.originRoomId, "room-1")
+        XCTAssertEqual(fake.calls, ["settings", "get"], "whether DMs are on is read first, then the direct message")
+    }
+
+    func test_a_room_the_list_has_loaded_opens_from_the_list_without_asking() async throws {
+        let fake = FakeDirectMessages()
+        let center = DirectMessagesCenter(client: fake)
+        await center.refresh()
+        let rows = try rows()
+        let fromList = await center.directInfo(for: "dm-1", row: rows[1], rows: rows)
+        XCTAssertEqual(fromList?.originTitle, "Design review")
+        let room = await center.directInfo(for: "room-1", row: rows[0], rows: rows)
+        XCTAssertNil(room)
+        XCTAssertEqual(fake.calls, ["settings"], "nothing asked for a room the list knows")
+    }
+
+    func test_with_dms_off_a_room_the_list_has_not_loaded_opens_as_a_room() async {
+        let fake = FakeDirectMessages()
+        fake.on = false
+        let center = DirectMessagesCenter(client: fake)
+        let info = await center.directInfo(for: "room-9", row: nil, rows: [])
+        XCTAssertNil(info)
+        XCTAssertFalse(fake.calls.contains("get"), "direct messages off: no direct message is asked for")
+    }
+
+    // MARK: - Room-only controls
+
+    /// New agent, Invite, Rename and agent requests are a room's: never a direct message's (the API refuses them there).
+    func test_a_direct_message_has_none_of_a_rooms_controls() {
+        let info = DirectRoomInfo(FakeDirectMessages.dm())
+        let room = RoomRoute(sessionId: "room-1", title: "Design review", membershipRole: "owner")
+        let direct = RoomRoute(sessionId: "dm-1", title: "review-agent", membershipRole: "owner", direct: info)
+        XCTAssertTrue(room.hasRoomControls)
+        XCTAssertTrue(room.canRename)
+        XCTAssertTrue(room.canInvite)
+        XCTAssertTrue(room.cardsOfferMessage)
+        XCTAssertFalse(direct.hasRoomControls)
+        XCTAssertFalse(direct.canRename, "an owner of a direct message cannot rename it")
+        XCTAssertFalse(direct.canInvite, "nor invite anyone into it")
+        XCTAssertFalse(direct.cardsOfferMessage, "a card inside a direct message never offers Message from it")
+        XCTAssertTrue(NewAgentOffer.admits(role: "owner", isBreakout: false))
+        XCTAssertFalse(NewAgentOffer.admits(role: "owner", isBreakout: false, isDirect: true), "no New agent there")
+        let admin = RoomRoute(sessionId: "dm-1", title: "review-agent", membershipRole: "admin", direct: info)
+        XCTAssertFalse(admin.canInvite)
     }
 
     // MARK: - Opening one: from the list, and from its push

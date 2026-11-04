@@ -229,6 +229,19 @@ final class DirectMessagesClientTests: XCTestCase {
         XCTAssertNil(unknown, "a value this build does not know is no value, but the feature answered: it is on")
     }
 
+    /// Only the settings themselves turn direct messages on: a 200 without `allowDms` is not them.
+    func test_a_200_without_allow_dms_is_not_the_settings() async {
+        for body in ["{}", #"{"allowDms": null}"#, #"{"allowDms": 1}"#, "<html>ok</html>", ""] {
+            let dms = client { _ in (200, body) }
+            do {
+                _ = try await dms.directMessageSettings()
+                XCTFail("\(body) read as the settings")
+            } catch {
+                XCTAssertEqual(error as? DirectMessageError, .invalidData, body)
+            }
+        }
+    }
+
     func test_no_request_without_a_sign_in_or_with_an_id_that_is_not_one() async {
         tokens.value = nil
         let dms = client { _ in (200, Self.dm) }

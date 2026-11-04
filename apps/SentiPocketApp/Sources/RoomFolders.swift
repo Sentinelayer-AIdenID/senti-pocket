@@ -116,6 +116,11 @@ final class RoomFoldersCenter: ObservableObject {
             }
         } catch RoomFolderError.duplicateName {
             sheetProblem = "You already have a folder named “\(cleaned)”."
+        } catch RoomFolderError.limitReached {
+            // The server counted 100 where the phone counted fewer: say so, and read the folders again so the sheet
+            // counts what the server has.
+            sheetProblem = RoomFolderName.limitMessage
+            await refresh()
         } catch RoomFolderError.gone {
             self.sheet = nil
             notice = Self.gone

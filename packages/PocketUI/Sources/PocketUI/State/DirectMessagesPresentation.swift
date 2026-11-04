@@ -24,14 +24,12 @@ public struct RoomProfileTarget: Identifiable, Equatable, Hashable, Sendable {
 }
 
 public enum RoomProfile {
-    /// The room's own voice: it posts as `senti`, and is nobody to message.
-    public static let roomVoice = "senti"
-
-    /// Whether tapping `senderId`'s avatar opens a profile card: never on yourself, never on the room's own voice, and
-    /// never on someone without an id.
+    /// Whether tapping `senderId`'s avatar opens a profile card: never on yourself, never on the room's own voices
+    /// (`senti`, the orchestrator and the ticket keeper, which the server refuses as it refuses you), and never on
+    /// someone without an id.
     public static func opens(senderId: String, ownAuthorIds: Set<String>) -> Bool {
         let id = senderId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !id.isEmpty, id != roomVoice, id != "human-" else { return false }
+        guard !id.isEmpty, !RoomChatQuiet.isRoomVoice(id), id != "human-" else { return false }
         return !ownAuthorIds.contains { $0.lowercased() == id }
     }
 }
@@ -124,8 +122,15 @@ public struct RoomProfileCardState: Equatable, Sendable {
     }
 }
 
+/// How the top of a direct message is laid out: `compact` is one line, "From <room> ›" and a "Memory: Off" pill that
+/// opens the switch; `expanded` shows whom it is with, the "Shared room" chip and the switch with its note.
+public enum DirectRoomHeaderStyle: String, Equatable, Sendable {
+    case compact
+    case expanded
+}
+
 /// The top of a direct message: whom it is with, the room you share, and for an agent, whether it may use this chat
-/// there.
+/// there. Every word it shows comes from here (`texts`).
 public struct DirectRoomHeaderState: Equatable, Sendable {
     public struct MemorySwitch: Equatable, Sendable {
         public let roomId: String
@@ -142,20 +147,46 @@ public struct DirectRoomHeaderState: Equatable, Sendable {
     public let sharedRoomTitle: String?
     /// Only for an agent, and only once the server has said what it is.
     public let memory: MemorySwitch?
-    /// Your newest message is the last word and the other side is an agent: it was notified, nothing more. A direct
-    /// message never wakes a paid model by itself, so the app never says it is typing.
-    public let notified: Bool
     public let notice: String?
 
     public init(name: String, isAgent: Bool, sharedRoomId: String?, sharedRoomTitle: String?, memory: MemorySwitch?,
-                notified: Bool, notice: String? = nil) {
+                notice: String? = nil) {
         self.name = name
         self.isAgent = isAgent
         self.sharedRoomId = sharedRoomId
         self.sharedRoomTitle = sharedRoomTitle
         self.memory = memory
-        self.notified = notified
         self.notice = notice
+    }
+
+    /// Under the name in the expanded header.
+    public var subtitle: String { isAgent ? "Direct message · agent" : "Direct message" }
+
+    /// The expanded header's chip back to the room.
+    public var sharedRoomChip: String? { sharedRoomTitle.map { "Shared room: \($0)" } }
+
+    /// The compact header's chip back to the room (drawn with a chevron after it).
+    public var fromChip: String? { sharedRoomTitle.map { "From \($0)" } }
+
+    /// The compact header's pill: the server's value of the switch, which a tap opens.
+    public var memoryPill: String? { memory.map { "Memory: \($0.isOn ? "On" : "Off")" } }
+
+    /// The switch's label asks, so it never reads as already on: "Let <agent> use this chat in <room>".
+    public var memoryLabel: String? { memory.map { "Let \(name) use this chat in \($0.roomTitle)" } }
+
+    /// The one short line under the switch, saying what the value now means.
+    public var memoryNote: String? {
+        memory.map { memory in
+            memory.isOn
+                ? "On: \(name) can use this chat when it works in \(memory.roomTitle)."
+                : "Off: \(name) can't see this chat anywhere else."
+        }
+    }
+
+    /// Every word the header can show, in either layout. It says whom the chat is with, where it came from and what the
+    /// switch does: never what the other side is doing (no contract field backs "notified" or "typing").
+    public var texts: [String] {
+        [name, subtitle, sharedRoomChip, fromChip, memoryPill, memoryLabel, memoryNote, notice].compactMap { $0 }
     }
 
     /// - Parameters:
@@ -169,7 +200,6 @@ public struct DirectRoomHeaderState: Equatable, Sendable {
         mutual: [(id: String, title: String)],
         memoryShare: [String: Bool]?,
         isSaving: Bool,
-        lastMessageIsOwn: Bool,
         notice: String? = nil
     ) -> DirectRoomHeaderState {
         let shared = origin ?? mutual.first
@@ -179,32 +209,6 @@ public struct DirectRoomHeaderState: Equatable, Sendable {
                                   isSaving: isSaving)
         }
         return DirectRoomHeaderState(name: name, isAgent: isAgent, sharedRoomId: shared?.id,
-                                     sharedRoomTitle: shared?.title, memory: memory,
-                                     notified: isAgent && lastMessageIsOwn, notice: notice)
-    }
-
-    /// The switch's line: "<agent> can use this chat in <room>".
-    public static func memoryLabel(agent: String, room: String) -> String {
-        "\(agent) can use this chat in \(room)"
-    }
-
-    /// The one short line under it, saying what turning it on shares.
-    public static func memoryFootnote(agent: String, room: String) -> String {
-        "On: \(agent) may use what's said here when it works in \(room). Off by default."
-    }
-
-    public static func notifiedLine(agent: String) -> String {
-        "\(agent) was notified. It answers when it next checks in."
-    }
-}
-
-/// Whether the newest message in what is loaded is your own: in a direct message with an agent, that agent was
-/// notified and has not answered yet.
-public enum DirectRoomActivity {
-    public static func lastMessageIsOwn(_ rows: [RoomChatRow]) -> Bool {
-        for row in rows.reversed() {
-            if case .message(let message) = row { return message.isOwn }
-        }
-        return false
+                                     sharedRoomTitle: shared?.title, memory: memory, notice: notice)
     }
 }

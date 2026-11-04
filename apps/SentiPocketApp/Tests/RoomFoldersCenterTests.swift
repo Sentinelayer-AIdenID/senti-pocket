@@ -122,6 +122,20 @@ final class RoomFoldersCenterTests: XCTestCase {
         XCTAssertEqual(roomReads, 0)
     }
 
+    /// The server counted 100 folders where the phone counted fewer (another device made some): the sheet says it is
+    /// the cap, not a taken name, and the folders are read again so the phone counts what the server has.
+    func test_the_servers_cap_says_so_and_reads_the_folders_again() async {
+        let fake = FakeRoomFolders(three)
+        let folders = center(fake)
+        await folders.refresh()
+        folders.send(.create(fileRoomId: nil))
+        fake.failNext = .limitReached
+        await folders.save(name: "One more")
+        XCTAssertEqual(folders.sheetProblem, RoomFolderName.limitMessage)
+        XCTAssertEqual(fake.calls, ["list", "create One more", "list"], "the folders are read again")
+        XCTAssertEqual(folders.sheet, .create(fileRoomId: nil), "the sheet stays, with the reason")
+    }
+
     func test_a_name_the_api_would_refuse_is_never_sent() async {
         let fake = FakeRoomFolders(three)
         let folders = center(fake)

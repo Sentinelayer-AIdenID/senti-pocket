@@ -219,7 +219,7 @@ public struct PocketSidePanel: View {
 
             Divider().padding(.vertical, 8)
 
-            HStack(spacing: 14) {
+            HStack(spacing: 8) {
                 // With folders, the rooms in none have their own "Rooms" under the folders; this heads them all.
                 Text(folders?.isEmpty == false ? "Your rooms" : "Rooms")
                     .font(.footnote.weight(.semibold))
@@ -232,6 +232,8 @@ public struct PocketSidePanel: View {
                         Image(systemName: "folder.badge.plus")
                             .font(.footnote.weight(.semibold))
                             .foregroundStyle(PocketPalette.accentStrong)
+                            .frame(minWidth: 44, minHeight: 44)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("New folder")
@@ -242,8 +244,9 @@ public struct PocketSidePanel: View {
                     .foregroundStyle(PocketPalette.accentStrong)
                     .accessibilityIdentifier("pocket.drawer.allRooms")
             }
-            .padding(.horizontal, 18)
-            .padding(.bottom, 4)
+            .padding(.leading, 18)
+            .padding(.trailing, onFolder == nil ? 18 : 10)
+            .padding(.bottom, onFolder == nil ? 4 : 0)
 
             if let folderNotice {
                 HStack(spacing: 6) {
@@ -254,15 +257,18 @@ public struct PocketSidePanel: View {
                     Button {
                         onFolder?(.dismissNotice)
                     } label: {
-                        Image(systemName: "xmark").font(.caption2.weight(.semibold))
+                        Image(systemName: "xmark")
+                            .font(.caption2.weight(.semibold))
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(PocketPalette.textSecondary)
                     .accessibilityLabel("Dismiss")
                 }
-                .padding(.horizontal, 18)
-                .padding(.vertical, 6)
-                .accessibilityElement(children: .combine)
+                .padding(.leading, 18)
+                .padding(.trailing, 6)
+                .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("pocket.drawer.folderNotice")
             }
 
@@ -415,6 +421,7 @@ public struct PocketSidePanel: View {
                     Spacer(minLength: 0)
                     if isFolded { PocketCountBadge(count: section.unread) }
                 }
+                .frame(minHeight: 44)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -441,7 +448,7 @@ public struct PocketSidePanel: View {
                     Image(systemName: "ellipsis")
                         .font(.footnote.weight(.semibold))
                         .foregroundStyle(PocketPalette.textSecondary)
-                        .frame(width: 30, height: 26)
+                        .frame(width: 44, height: 44)
                         .contentShape(Rectangle())
                 }
                 .accessibilityLabel("\(section.folder.name) folder menu")
@@ -449,9 +456,8 @@ public struct PocketSidePanel: View {
             }
         }
         .padding(.leading, 14)
-        .padding(.trailing, 10)
-        .padding(.top, 8)
-        .padding(.bottom, 2)
+        .padding(.trailing, 2)
+        .padding(.top, 2)
     }
 
     /// A direct message: the other side's picture and name, and its unread badge; under its room, indented.

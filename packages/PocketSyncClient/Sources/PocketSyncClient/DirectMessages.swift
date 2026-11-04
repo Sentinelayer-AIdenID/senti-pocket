@@ -136,7 +136,8 @@ public protocol DirectMessaging: Sendable {
     func directMessage(_ sessionId: String) async throws -> DirectMessage
     /// Turns the agent's use of this chat in `roomId` on or off; answers the server's switches after it.
     func setMemoryShare(_ sessionId: String, roomId: String, enabled: Bool) async throws -> [DirectMemoryShare]
-    /// Who can message you. Nil is a value this build does not know; a 404 throws `.unavailable` (the feature is off).
+    /// Who can message you. Nil is a value this build does not know; a 404 throws `.unavailable` (the feature is off),
+    /// and a 200 that does not carry `allowDms` throws `.invalidData` (it does not turn the feature on).
     func directMessageSettings() async throws -> DirectMessagesAllowance?
     func setDirectMessageSettings(_ allowance: DirectMessagesAllowance) async throws -> DirectMessagesAllowance?
 }
@@ -177,9 +178,12 @@ public final class HTTPDirectMessagesClient: DirectMessaging, @unchecked Sendabl
         return shares
     }
 
+    /// Direct messages are on only when the answer is the settings themselves: a 200 without `allowDms` (a proxy's page,
+    /// another route) is not, and reads as data this build cannot use.
     public func directMessageSettings() async throws -> DirectMessagesAllowance? {
         let answer = try await send("GET", ["api", "v1", "me", "dm-settings"])
-        return answer?["allowDms"]?.stringValue.flatMap(DirectMessagesAllowance.init(rawValue:))
+        guard let value = answer?["allowDms"]?.stringValue else { throw DirectMessageError.invalidData }
+        return DirectMessagesAllowance(rawValue: value)
     }
 
     public func setDirectMessageSettings(_ allowance: DirectMessagesAllowance) async throws -> DirectMessagesAllowance? {

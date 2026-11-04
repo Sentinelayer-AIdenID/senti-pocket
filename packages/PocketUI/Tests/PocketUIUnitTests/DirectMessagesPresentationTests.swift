@@ -18,7 +18,17 @@ final class DirectMessagesPresentationTests: XCTestCase {
         XCTAssertFalse(RoomProfile.opens(senderId: "Senti", ownAuthorIds: own))
         XCTAssertFalse(RoomProfile.opens(senderId: "  ", ownAuthorIds: own))
         XCTAssertFalse(RoomProfile.opens(senderId: "human-", ownAuthorIds: own))
-        XCTAssertTrue(RoomProfile.opens(senderId: "senti-helper", ownAuthorIds: own), "only the room's own voice is out")
+        XCTAssertTrue(RoomProfile.opens(senderId: "senti-helper", ownAuthorIds: own), "only the room's own voices are out")
+    }
+
+    /// The server refuses the room's own voices as it refuses you (the same 404), so they get no card and no Message.
+    func test_the_orchestrator_and_the_ticket_keeper_open_no_card() {
+        XCTAssertFalse(RoomProfile.opens(senderId: "respawn-orchestrator", ownAuthorIds: []))
+        XCTAssertFalse(RoomProfile.opens(senderId: "Ticket-Keeper", ownAuthorIds: []))
+        var opened = 0
+        let opener = RoomProfileOpener(ownAuthorIds: ["human-alex"]) { _ in opened += 1 }
+        XCTAssertFalse(opener(RoomProfileTarget(senderId: "ticket-keeper", name: "ticket-keeper", isAgent: true)))
+        XCTAssertEqual(opened, 0)
     }
 
     func test_the_opener_opens_nothing_for_yourself_and_the_card_for_anyone_else() {
@@ -60,10 +70,9 @@ final class DirectMessagesPresentationTests: XCTestCase {
     // MARK: - The direct message's header
 
     private func header(isAgent: Bool = true, origin: (id: String, title: String)? = ("room-1", "Design review"),
-                        mutual: [(id: String, title: String)] = [], memory: [String: Bool]?, ownLast: Bool = false)
-        -> DirectRoomHeaderState {
+                        mutual: [(id: String, title: String)] = [], memory: [String: Bool]?) -> DirectRoomHeaderState {
         DirectRoomHeaderState.make(name: "review-agent", isAgent: isAgent, origin: origin, mutual: mutual,
-                                   memoryShare: memory, isSaving: false, lastMessageIsOwn: ownLast)
+                                   memoryShare: memory, isSaving: false)
     }
 
     func test_the_memory_switch_shows_only_the_servers_value_and_is_off_by_default() {
@@ -76,12 +85,12 @@ final class DirectMessagesPresentationTests: XCTestCase {
         XCTAssertEqual(header(memory: ["room-9": true]).memory?.isOn, false, "another room's switch is not this one")
     }
 
-    func test_only_an_agent_has_the_switch_and_is_notified() {
-        let person = header(isAgent: false, memory: ["room-1": true], ownLast: true)
+    func test_only_an_agent_has_the_switch() {
+        let person = header(isAgent: false, memory: ["room-1": true])
         XCTAssertNil(person.memory)
-        XCTAssertFalse(person.notified)
-        XCTAssertTrue(header(memory: [:], ownLast: true).notified)
-        XCTAssertFalse(header(memory: [:], ownLast: false).notified, "the agent answered last")
+        XCTAssertNil(person.memoryPill)
+        XCTAssertNil(person.memoryLabel)
+        XCTAssertEqual(person.subtitle, "Direct message")
     }
 
     func test_the_shared_room_is_where_it_started_else_one_you_share_now() {
@@ -96,27 +105,42 @@ final class DirectMessagesPresentationTests: XCTestCase {
         XCTAssertNil(none.memory, "no room, no switch")
     }
 
-    func test_the_switch_says_what_turning_it_on_shares() {
-        XCTAssertEqual(DirectRoomHeaderState.memoryLabel(agent: "review-agent", room: "Design review"),
-                       "review-agent can use this chat in Design review")
-        XCTAssertTrue(DirectRoomHeaderState.memoryFootnote(agent: "review-agent", room: "Design review").contains("Off by default"))
-        XCTAssertFalse(DirectRoomHeaderState.notifiedLine(agent: "review-agent").localizedCaseInsensitiveContains("typing"))
+    /// The switch asks, so it never reads as already on beside its Off; its note says what the value means now.
+    func test_the_switch_asks_and_its_note_says_what_off_and_on_mean() {
+        let off = header(memory: [:])
+        XCTAssertEqual(off.memoryLabel, "Let review-agent use this chat in Design review")
+        XCTAssertEqual(off.memoryNote, "Off: review-agent can't see this chat anywhere else.")
+        XCTAssertEqual(off.memoryPill, "Memory: Off")
+        let on = header(memory: ["room-1": true])
+        XCTAssertEqual(on.memoryLabel, "Let review-agent use this chat in Design review", "the label stays the question")
+        XCTAssertEqual(on.memoryNote, "On: review-agent can use this chat when it works in Design review.")
+        XCTAssertEqual(on.memoryPill, "Memory: On")
     }
 
-    func test_your_message_last_means_the_agent_was_notified() {
-        func message(_ seq: Int64, own: Bool) -> RoomChatMessageInput {
-            RoomChatMessageInput(id: "m\(seq)", sequenceId: seq, kind: .message,
-                                 authorId: own ? "human-alex" : "review-agent", authorName: own ? "alex" : "review-agent",
-                                 isHuman: own, text: "message \(seq)", timestamp: "",
-                                 date: Date(timeIntervalSince1970: Double(seq) * 600))
+    func test_the_compact_header_says_where_it_came_from_and_the_expanded_one_names_the_shared_room() {
+        let state = header(memory: [:])
+        XCTAssertEqual(state.fromChip, "From Design review")
+        XCTAssertEqual(state.sharedRoomChip, "Shared room: Design review")
+        XCTAssertEqual(state.subtitle, "Direct message · agent")
+        XCTAssertNil(header(origin: nil, memory: [:]).fromChip)
+    }
+
+    /// Nothing in the contract says what the other side did with a message, so the header never says it: no
+    /// "notified", no "typing", whoever wrote last.
+    func test_the_header_never_claims_what_the_agent_is_doing() {
+        for state in [header(memory: [:]), header(memory: ["room-1": true]), header(isAgent: false, memory: nil),
+                      header(origin: nil, mutual: [("room-2", "Release train")], memory: [:])] {
+            XCTAssertFalse(state.texts.isEmpty)
+            for text in state.texts {
+                for claim in ["notified", "typing", "is reading", "will answer", "answers when"] {
+                    XCTAssertFalse(text.localizedCaseInsensitiveContains(claim), "\(text) claims \(claim)")
+                }
+            }
         }
-        func rows(_ inputs: [RoomChatMessageInput]) -> [RoomChatRow] {
-            RoomChatPresentationState(sessionId: "dm-1", title: "review-agent", messages: inputs,
-                                      ownAuthorIds: ["human-alex"]).rows
-        }
-        XCTAssertTrue(DirectRoomActivity.lastMessageIsOwn(rows([message(1, own: false), message(2, own: true)])))
-        XCTAssertFalse(DirectRoomActivity.lastMessageIsOwn(rows([message(1, own: true), message(2, own: false)])))
-        XCTAssertFalse(DirectRoomActivity.lastMessageIsOwn([]))
+        XCTAssertEqual(header(memory: [:]).texts, [
+            "review-agent", "Direct message · agent", "Shared room: Design review", "From Design review", "Memory: Off",
+            "Let review-agent use this chat in Design review", "Off: review-agent can't see this chat anywhere else."
+        ], "every word the header shows")
     }
 
     // MARK: - A direct row in the list

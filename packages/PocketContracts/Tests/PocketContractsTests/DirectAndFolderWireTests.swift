@@ -87,4 +87,13 @@ final class DirectAndFolderWireTests: XCTestCase {
         XCTAssertEqual(RoomFolderName.validate(String(repeating: "🇫🇷", count: 31)), .failure(.tooLong))
         XCTAssertEqual(RoomFolderName.maximumFolders, 100)
     }
+
+    /// Only true control characters (Cc) are refused: the zero-width joiner that builds an emoji is part of a name.
+    func test_a_name_with_a_joined_emoji_is_a_name() {
+        XCTAssertEqual(RoomFolderName.cleaned("👩‍💻 Dev"), "👩‍💻 Dev")
+        XCTAssertEqual(RoomFolderName.cleaned("a\u{200D}b"), "a\u{200D}b")
+        XCTAssertEqual(RoomFolderName.validate("tab\there"), .failure(.controlCharacters))
+        XCTAssertEqual(RoomFolderName.validate("del\u{007F}"), .failure(.controlCharacters))
+        XCTAssertEqual(RoomFolderName.validate("c1\u{0085}x"), .failure(.controlCharacters))
+    }
 }
