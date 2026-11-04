@@ -37,6 +37,8 @@ public enum PocketSignInUnavailableReason: Equatable, Sendable {
     case network
     case secureStorage
     case service
+    /// The server answered that this account is not active (403), so trying again will not help.
+    case accountInactive
 
     public var userMessage: String {
         switch self {
@@ -48,6 +50,8 @@ public enum PocketSignInUnavailableReason: Equatable, Sendable {
             return "Senti could not securely store your session on this device."
         case .service:
             return "Secure sign-in is temporarily unavailable."
+        case .accountInactive:
+            return "This account is not active, so it can't sign in. If you think that's wrong, contact support."
         }
     }
 }

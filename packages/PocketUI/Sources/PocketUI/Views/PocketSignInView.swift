@@ -5,11 +5,22 @@ import AuthenticationServices
 import UIKit
 #endif
 
+/// The sign-in card button's drawn height, for Apple's button to match.
+private struct SignInCardButtonHeight: PreferenceKey {
+    static let defaultValue: CGFloat? = nil
+    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) { value = nextValue() ?? value }
+}
+
 public struct PocketSignInView: View {
     private let phase: PocketSignInPhase
     private let offersApple: Bool
     private let send: (PocketProductIntent) -> Void
     @Environment(\.colorScheme) private var colorScheme
+    /// The sign-in buttons' heights, grown with the text size so Apple's never ends up smaller than the card's.
+    @ScaledMetric(relativeTo: .headline) private var appleHeight: CGFloat = PocketSignInView.buttonHeight
+    @ScaledMetric(relativeTo: .headline) private var cardLabelHeight: CGFloat = PocketSignInView.cardButtonLabelHeight
+    /// The card button's height as drawn; Apple's button is given exactly this, so the two always match.
+    @State private var cardButtonHeight: CGFloat?
 
     /// `offersApple` adds Sign in with Apple wherever a sign-in can start; the build turns it on.
     public init(phase: PocketSignInPhase, offersApple: Bool = false, send: @escaping (PocketProductIntent) -> Void) {
@@ -17,6 +28,19 @@ public struct PocketSignInView: View {
         self.offersApple = offersApple
         self.send = send
     }
+
+    /// With Apple's own button on screen, the card's button says it is the GitHub or Google sign-in, so "Try again"
+    /// after a failed Sign in with Apple never quietly opens a different one.
+    static func browserButtonTitle(_ title: String, offersApple: Bool) -> String {
+        offersApple ? "\(title) with GitHub or Google" : title
+    }
+
+    /// Every sign-in button's height: Apple's is drawn at it, and the card's label is sized so the filled capsule
+    /// around it comes out the same (Apple asks that its button be no smaller than the other ways in).
+    static let buttonHeight: CGFloat = 54
+    /// Where someone whose account is not active can ask why.
+    static let supportURL = URL(string: "https://sentinelayer.com/support")!
+    static let cardButtonLabelHeight: CGFloat = 40
 
     /// The phases with a sign-in button, where Apple is offered beside it.
     static func showsApple(in phase: PocketSignInPhase, offersApple: Bool) -> Bool {
@@ -47,25 +71,22 @@ public struct PocketSignInView: View {
                 }
 
                 ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 18) {
-                        providerLabel("GitHub", systemImage: "chevron.left.forwardslash.chevron.right")
-                        providerLabel("Google", systemImage: "g.circle.fill")
-                    }
-                    VStack(spacing: 10) {
-                        providerLabel("GitHub", systemImage: "chevron.left.forwardslash.chevron.right")
-                        providerLabel("Google", systemImage: "g.circle.fill")
-                    }
+                    HStack(spacing: 18) { providerLabels }
+                    VStack(spacing: 10) { providerLabels }
                 }
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel("Sign-in providers: GitHub or Google")
+                .accessibilityLabel(offersApple ? "Sign-in providers: Apple, GitHub or Google" : "Sign-in providers: GitHub or Google")
 
-                phaseCard
-
+                // Apple's button comes first, above the fold on every phone (Apple: never make people scroll to it).
                 if Self.showsApple(in: phase, offersApple: offersApple) {
                     appleButton
                 }
 
-                Text("Sign-in opens Senti’s secure authorization page. Pocket never asks for or stores your GitHub or Google password.")
+                phaseCard
+
+                Text(offersApple
+                     ? "GitHub and Google sign-in open Senti’s secure authorization page. Pocket never asks for or stores your password."
+                     : "Sign-in opens Senti’s secure authorization page. Pocket never asks for or stores your GitHub or Google password.")
                     .font(.footnote)
                     .foregroundStyle(PocketPalette.textSecondary)
                     .multilineTextAlignment(.center)
@@ -78,6 +99,9 @@ public struct PocketSignInView: View {
         .navigationTitle("Account")
         .accessibilityIdentifier("pocket.signin.screen")
         .pocketCanvas()
+        .onPreferenceChange(SignInCardButtonHeight.self) { height in
+            if let height, height > 0, height != cardButtonHeight { cardButtonHeight = height }
+        }
     }
 
     @ViewBuilder
@@ -123,7 +147,7 @@ public struct PocketSignInView: View {
             actionCard(
                 title: "Sign in again",
                 detail: "Your authorization is no longer valid. Protected cached content stays hidden until you sign in.",
-                buttonTitle: "Sign in again",
+                buttonTitle: Self.browserButtonTitle("Sign in again", offersApple: offersApple),
                 intent: .retryAuthentication,
                 color: PocketPalette.warning
             )
@@ -145,10 +169,15 @@ public struct PocketSignInView: View {
             actionCard(
                 title: "Secure sign-in unavailable",
                 detail: reason.userMessage,
-                buttonTitle: "Try again",
+                buttonTitle: Self.browserButtonTitle("Try again", offersApple: offersApple),
                 intent: .retryAuthentication,
                 color: PocketPalette.danger
             )
+            if reason == .accountInactive {
+                Link("Contact support", destination: Self.supportURL)
+                    .font(.subheadline.weight(.semibold))
+                    .accessibilityIdentifier("pocket.signin.support")
+            }
         }
     }
 
@@ -170,10 +199,16 @@ public struct PocketSignInView: View {
             Button { send(intent) } label: {
                 Text(buttonTitle)
                     .font(.headline)
-                    .frame(maxWidth: .infinity, minHeight: 50)
+                    .frame(maxWidth: .infinity, minHeight: cardLabelHeight)
             }
             .buttonStyle(.borderedProminent)
+            #if os(iOS)
+            .buttonBorderShape(.capsule)
+            #endif
             .tint(PocketPalette.accent)
+            .background(GeometryReader { proxy in
+                Color.clear.preference(key: SignInCardButtonHeight.self, value: proxy.size.height)
+            })
             .accessibilityIdentifier("pocket.signin.primary")
         }
         .pocketCard()
@@ -182,14 +217,26 @@ public struct PocketSignInView: View {
     @ViewBuilder
     private var appleButton: some View {
         #if canImport(UIKit) && canImport(AuthenticationServices)
-        AppleSignInButton(style: colorScheme == .dark ? .white : .black) { send(.beginAppleSignIn) }
-            .frame(maxWidth: .infinity, minHeight: 50, maxHeight: 50)
+        let height = cardButtonHeight ?? appleHeight
+        AppleSignInButton(style: colorScheme == .dark ? .white : .black, cornerRadius: height / 2) {
+            send(.beginAppleSignIn)
+        }
+            .frame(maxWidth: .infinity, minHeight: height, maxHeight: height)
             .id(colorScheme)   // the button's style is set once, so a new appearance makes a new button
             .accessibilityIdentifier("pocket.signin.apple")
         #else
         Button("Sign in with Apple") { send(.beginAppleSignIn) }
             .accessibilityIdentifier("pocket.signin.apple")
         #endif
+    }
+
+    @ViewBuilder
+    private var providerLabels: some View {
+        if offersApple {
+            providerLabel("Apple", systemImage: "apple.logo")
+        }
+        providerLabel("GitHub", systemImage: "chevron.left.forwardslash.chevron.right")
+        providerLabel("Google", systemImage: "g.circle.fill")
     }
 
     private func providerLabel(_ title: String, systemImage: String) -> some View {
@@ -204,19 +251,29 @@ public struct PocketSignInView: View {
 /// Apple's own Sign in with Apple button (its look is Apple's to set); a tap only sends the intent.
 private struct AppleSignInButton: UIViewRepresentable {
     let style: ASAuthorizationAppleIDButton.Style
+    let cornerRadius: CGFloat
     let action: () -> Void
 
     func makeCoordinator() -> Tap { Tap(action: action) }
 
     func makeUIView(context: Context) -> ASAuthorizationAppleIDButton {
         let button = ASAuthorizationAppleIDButton(authorizationButtonType: .signIn, authorizationButtonStyle: style)
-        button.cornerRadius = 12
+        button.cornerRadius = cornerRadius   // a capsule, like the other sign-in button
         button.addTarget(context.coordinator, action: #selector(Tap.fire), for: .touchUpInside)
+        button.setContentHuggingPriority(.defaultLow, for: .vertical)
         return button
+    }
+
+    /// Fill the frame SwiftUI gives it: left to its own size, Apple's button drew 51 pt inside a 54 pt frame, so it
+    /// looked shorter than the card's button even with the frames equal.
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: ASAuthorizationAppleIDButton, context: Context) -> CGSize? {
+        let natural = uiView.intrinsicContentSize
+        return CGSize(width: proposal.width ?? natural.width, height: proposal.height ?? natural.height)
     }
 
     func updateUIView(_ button: ASAuthorizationAppleIDButton, context: Context) {
         context.coordinator.action = action
+        button.cornerRadius = cornerRadius
     }
 
     final class Tap: NSObject {

@@ -118,7 +118,9 @@ struct SentiPocketApp: App {
 
     @ViewBuilder private var rootView: some View {
         #if DEBUG
-        if RoomPreview.isRequested {
+        if let phase = SignInPreview.requestedPhase {
+            NavigationStack { PocketSignInView(phase: phase, offersApple: true, send: { _ in }) }
+        } else if RoomPreview.isRequested {
             RoomPreview.rootView
         } else {
             RootAppView(model: model, whisperModelCoordinator: whisperModel)
@@ -1446,5 +1448,22 @@ private struct StatusView: View {
 #if DEBUG
 #Preview("Root — verify-gated canonical fixture") {
     RootView()
+}
+#endif
+
+#if DEBUG
+/// `-PocketSignInPreview signedOut|inactive|network|reauth` opens the sign-in screen in that state (DEBUG only), for
+/// screenshots and the UI test that compares the sign-in buttons' sizes.
+enum SignInPreview {
+    static var requestedPhase: PocketSignInPhase? {
+        let args = ProcessInfo.processInfo.arguments
+        guard let index = args.firstIndex(of: "-PocketSignInPreview"), index + 1 < args.count else { return nil }
+        switch args[index + 1] {
+        case "inactive": return .unavailable(.accountInactive)
+        case "network": return .unavailable(.network)
+        case "reauth": return .reauthenticationRequired
+        default: return .signedOut
+        }
+    }
 }
 #endif

@@ -28,10 +28,46 @@ final class AppleSignInTests: XCTestCase {
         XCTAssertEqual(saved.tokens, ["session-1"])
     }
 
+    /// The browser sign-in's poll: an expired session the server no longer knows starts over cleanly; other refusals
+    /// stay the server's.
+    func test_a_poll_for_a_sign_in_the_server_no_longer_knows_is_a_clean_start_over() async {
+        XCTAssertEqual(SentiNativeAuth.pollRefusal(404), .rejected)
+        XCTAssertEqual(SentiNativeAuth.pollRefusal(403), .refused(403))
+        XCTAssertEqual(SentiNativeAuth.pollRefusal(500), .refused(500))
+        // Through the poll itself: a 404 ends it as a clean start over, at once.
+        let auth = makeAuth(saved: Saved(), status: 404, body: #"{"detail":"Not Found"}"#)
+        do {
+            _ = try await auth.pollUntilApproved(sessionId: "s1", challenge: "c1")
+            XCTFail("a session the server no longer knows ends the poll")
+        } catch {
+            XCTAssertEqual(error as? NativeAuthError, .rejected)
+        }
+        XCTAssertEqual(AppleSignInURLProtocol.last()?.request.url?.path, "/api/v1/auth/cli/sessions/poll")
+    }
+
+    /// Review of #308: an inactive account is told by the server's error code, not by the status alone.
+    func test_an_inactive_account_is_told_by_its_error_code() async {
+        let answers: [(String, NativeAuthError)] = [
+            (#"{"error":{"code":"ACCOUNT_INACTIVE","message":"Account is not active","request_id":"r1"}}"#, .inactive),
+            (#"{"detail":{"error":{"code":"ACCOUNT_INACTIVE","message":"Account is not active"}}}"#, .inactive),
+            (#"{"detail":{"error":{"code":"APPLE_TOKEN_INVALID"}}}"#, .refused(403)),
+            ("not json", .refused(403))
+        ]
+        for (body, expected) in answers {
+            let auth = makeAuth(saved: Saved(), status: 403, body: body)
+            do {
+                try await auth.finishAppleSignIn(identityToken: "t", authorizationCode: "c", nonce: "n")
+                XCTFail("refused")
+            } catch {
+                XCTAssertEqual(error as? NativeAuthError, expected, body)
+            }
+        }
+    }
+
     func test_a_refusal_or_an_empty_token_keeps_nothing() async {
         let answers: [(Int, String, NativeAuthError)] = [
-            (404, #"{"detail":"Not Found"}"#, .network("HTTP 404")),
-            (401, #"{"detail":"x"}"#, .network("HTTP 401")),
+            (404, #"{"detail":"Not Found"}"#, .refused(404)),
+            (401, #"{"detail":"x"}"#, .refused(401)),
             (429, "{}", .rateLimited),
             (200, #"{"token":""}"#, .malformedResponse),
             (200, "not json", .malformedResponse)
