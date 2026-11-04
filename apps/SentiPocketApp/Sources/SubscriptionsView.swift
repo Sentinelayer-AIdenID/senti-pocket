@@ -8,16 +8,20 @@ struct SubscriptionsView: View {
     /// Apple's standard license agreement.
     static let termsOfUseURL = URL(string: "https://www.apple.com/legal/internet-services/itunes/dev/stdeula/")!
     static let privacyPolicyURL = URL(string: "https://sentinelayer.com/privacy")!
-    static let renewalTerms = "Payment is charged to your Apple ID when you confirm the purchase. Your plan renews "
-        + "every month at the price shown unless you cancel at least 24 hours before the current period ends; the "
-        + "renewal is charged within the 24 hours before it ends. Manage or cancel your plan in Settings, under your "
-        + "name, then Subscriptions."
+
+    /// The renewal terms, the period taken from the App Store's products.
+    static func renewalTerms(for offers: [AppleSubscriptionOffer]) -> String {
+        "Payment is charged to your Apple ID when you confirm the purchase. Your plan renews "
+            + "\(AppleSubscriptionOffer.renewal(of: offers)) at the price shown unless you cancel at least 24 hours "
+            + "before the current period ends; the renewal is charged within the 24 hours before it ends. Manage or "
+            + "cancel your plan in Settings, under your name, then Subscriptions."
+    }
 
     var body: some View {
         List {
             switch coordinator.state {
-            case .ready(let offers, let currentTier), .purchasing(let offers, let currentTier):
-                plans(offers, currentTier: currentTier)
+            case .ready(let offers, let currentTier, let isActive), .purchasing(let offers, let currentTier, let isActive):
+                plans(offers, currentTier: currentTier, isActive: isActive)
             case .loading:
                 Section {
                     HStack(spacing: 12) {
@@ -45,7 +49,7 @@ struct SubscriptionsView: View {
                     .accessibilityIdentifier("plans.restore")
             } footer: {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text(Self.renewalTerms)
+                    Text(Self.renewalTerms(for: offersOnScreen))
                     HStack(spacing: 16) {
                         Link("Terms of Use", destination: Self.termsOfUseURL)
                             .accessibilityIdentifier("plans.terms")
@@ -68,7 +72,14 @@ struct SubscriptionsView: View {
     }
 
     @ViewBuilder
-    private func plans(_ offers: [AppleSubscriptionOffer], currentTier: String?) -> some View {
+    private func plans(_ offers: [AppleSubscriptionOffer], currentTier: String?, isActive: Bool) -> some View {
+        if isActive {
+            Section {
+                Text(AppleSubscriptionsCoordinator.alreadySubscribed)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("plans.active")
+            }
+        }
         if isPurchasing {
             Section {
                 HStack(spacing: 12) {
@@ -80,12 +91,12 @@ struct SubscriptionsView: View {
         }
         ForEach(offers) { offer in
             Section {
-                planRow(offer, isCurrent: offer.tier == currentTier)
+                planRow(offer, isCurrent: offer.tier == currentTier, canBuy: !isActive)
             }
         }
     }
 
-    private func planRow(_ offer: AppleSubscriptionOffer, isCurrent: Bool) -> some View {
+    private func planRow(_ offer: AppleSubscriptionOffer, isCurrent: Bool, canBuy: Bool) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(offer.name)
@@ -116,12 +127,19 @@ struct SubscriptionsView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
-            .disabled(isCurrent || !canAct)
+            .disabled(isCurrent || !canBuy || !canAct)
             .accessibilityIdentifier("plans.subscribe.\(offer.tier)")
         }
         .padding(.vertical, 6)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("plans.offer.\(offer.tier)")
+    }
+
+    private var offersOnScreen: [AppleSubscriptionOffer] {
+        switch coordinator.state {
+        case .ready(let offers, _, _), .purchasing(let offers, _, _): return offers
+        case .hidden, .loading, .failed: return []
+        }
     }
 
     private var canAct: Bool {

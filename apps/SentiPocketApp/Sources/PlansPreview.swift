@@ -4,8 +4,9 @@ import SwiftUI
 
 /// DEBUG-only plans preview: `-PocketPlansPreview` opens the real plans screen and coordinator on sample offers, so the
 /// screen can be run and screenshotted on a simulator, which has no App Store products. `-PocketPlansCurrentTier pro`
-/// marks a current plan; `-PocketPlansSettingsPreview` opens Settings with its Plan row, the plans reaching it through
-/// the environment as they do after sign-in. Never compiled into Release, where every price is StoreKit's own.
+/// marks a current plan, `-PocketPlansActive YES` makes its subscription a running one (nothing offered for sale), and
+/// `-PocketPlansSettingsPreview` opens Settings with its Plan row, the plans reaching it through the environment as
+/// they do after sign-in. Never compiled into Release, where every price is StoreKit's own.
 enum PlansPreview {
     static var isRequested: Bool {
         ProcessInfo.processInfo.arguments.contains("-PocketPlansPreview") || isSettingsRequested
@@ -17,7 +18,8 @@ enum PlansPreview {
 
     @MainActor
     private static let coordinator = AppleSubscriptionsCoordinator(
-        server: PlansPreviewServer(tier: UserDefaults.standard.string(forKey: "PocketPlansCurrentTier")),
+        server: PlansPreviewServer(tier: UserDefaults.standard.string(forKey: "PocketPlansCurrentTier"),
+                                   isActive: UserDefaults.standard.bool(forKey: "PocketPlansActive")),
         store: PlansPreviewStore()
     )
 
@@ -55,6 +57,7 @@ private struct PlansPreviewSettingsHost: View {
 
 private struct PlansPreviewServer: AppleSubscriptionsServing {
     let tier: String?
+    let isActive: Bool
 
     func plans() async throws -> [AppleSubscriptionPlan] {
         [
@@ -65,9 +68,11 @@ private struct PlansPreviewServer: AppleSubscriptionsServing {
 
     func accountToken() async throws -> UUID { UUID() }
 
-    func submit(signedTransactionInfo: String) async throws -> String? { nil }
+    func submit(signedTransactionInfo: String) async throws -> String { tier ?? "free" }
 
-    func currentTier() async throws -> String? { tier }
+    func accountStatus() async throws -> AppleSubscriptionsAccountStatus {
+        AppleSubscriptionsAccountStatus(tier: tier, hasActiveSubscription: isActive)
+    }
 }
 
 /// Sample products standing in for the App Store's, which a simulator without a StoreKit configuration cannot load.
