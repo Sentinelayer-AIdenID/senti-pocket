@@ -1,0 +1,279 @@
+import Foundation
+import PocketUI
+import SwiftUI
+import UIKit
+import XCTest
+@testable import SentiPocketApp
+
+/// A reader who is not at the very bottom of a room is never moved, by an arrival or by their own send; a reader at the
+/// very bottom follows what arrives (Carter, #61581). These host the room in a window on the simulator, as
+/// `RoomBottomFlapTests` do, and move its list as a reader would, through its scroll view.
+///
+/// "At the bottom" is the end of the room within `RoomReaderPlace.atBottomDistance` of the bottom of what can be read,
+/// from the scroll view's own geometry (iOS 18 and later). It used to be a 1-point marker at the end of the lazy list
+/// coming into view, which it does while still hidden under the composer: a reader a few lines up was taken for one at
+/// the bottom, and the next message scrolled them down.
+@MainActor
+final class RoomReaderStaysPutTests: XCTestCase {
+    private var window: UIWindow?
+
+    /// The coordinator's side of the reader's place, as `RoomChatCoordinator` keeps it: arrivals while away are counted,
+    /// coming back clears them.
+    private final class Room: ObservableObject {
+        @Published private(set) var state: RoomChatPresentationState
+        private var inputs: [RoomChatMessageInput]
+        private var pending: [RoomChatPendingRow] = []
+        private var unread = 0
+        private(set) var atBottom = true
+        static let own: Set<String> = ["human-reader"]
+
+        init(_ inputs: [RoomChatMessageInput]) {
+            self.inputs = inputs
+            state = RoomChatPresentationState(sessionId: "stays", title: "Room", messages: [])
+            publish()
+        }
+
+        func send(_ intent: RoomChatIntent) {
+            guard case .readerAtBottom(let value) = intent, value != atBottom else { return }
+            atBottom = value
+            if value, unread > 0 {
+                unread = 0
+                publish()
+            }
+        }
+
+        func arrive(_ more: [RoomChatMessageInput]) {
+            inputs += more
+            if !atBottom { unread += more.count }
+            publish()
+        }
+
+        /// The reader sends: the message waits at the bottom as a pending row, as the coordinator shows it.
+        func sendMessage(_ text: String) {
+            pending.append(RoomChatPendingRow(clientId: "sent-\(pending.count)", text: text, status: .sending))
+            publish()
+        }
+
+        var unreadCount: Int { unread }
+
+        private func publish() {
+            state = RoomChatPresentationState(
+                sessionId: "stays",
+                title: "Room",
+                messages: inputs,
+                ownAuthorIds: Self.own,
+                unreadCount: unread,
+                connection: .live,
+                pending: pending,
+                composer: RoomComposerState(canPost: true, disabledReason: nil)
+            )
+        }
+    }
+
+    private struct Host: View {
+        @ObservedObject var room: Room
+
+        var body: some View {
+            NavigationStack {
+                RoomChatView(state: room.state) { room.send($0) }
+            }
+        }
+    }
+
+    // MARK: - The room
+
+    private static let start = Date(timeIntervalSince1970: 1_793_000_000)
+
+    private static func input(_ seq: Int64, _ author: String, _ text: String) -> RoomChatMessageInput {
+        let date = start.addingTimeInterval(Double(seq) * 30)
+        return RoomChatMessageInput(
+            id: "evt-\(seq)", sequenceId: seq, kind: .message, authorId: author, authorName: author,
+            isHuman: author.hasPrefix("human-"), text: text, timestamp: ISO8601DateFormatter().string(from: date), date: date
+        )
+    }
+
+    /// Several screens of messages of every length.
+    private static func messages() -> [RoomChatMessageInput] {
+        (1...60).map { index -> RoomChatMessageInput in
+            let seq = Int64(index)
+            switch index % 4 {
+            case 0: return input(seq, "human-reader", "A note from the phone, \(index).")
+            case 1: return input(seq, "review-agent", "Findings \(index):\n1. The **first** step.\n2. The `second` step.")
+            case 2: return input(seq, "build-agent", String(repeating: "A longer status line about build \(index). ", count: 6))
+            default: return input(seq, "design-agent", "Done, \(index).")
+            }
+        }
+    }
+
+    private static func arrival(_ seq: Int64) -> RoomChatMessageInput {
+        input(seq, "review-agent", "An arrival, \(seq): " + String(repeating: "more words ", count: Int(seq % 5) * 6))
+    }
+
+    /// The rows a room draws small: the orchestrator's cost lines (background, and alike but for their numbers, so
+    /// they fold into one row with a count), an agent speaking to another agent (a background line), an agent's notice
+    /// repeating with only its numbers changing (one row with its count), a checkpoint and an agent joining.
+    private static func compactArrivals(from seq: Int64) -> [(kind: String, row: RoomChatMessageInput)] {
+        let date = start.addingTimeInterval(Double(seq) * 30)
+        let stamp = ISO8601DateFormatter().string(from: date)
+        func row(_ offset: Int64, _ kind: RoomChatMessageInput.Kind, _ author: String, _ text: String) -> RoomChatMessageInput {
+            RoomChatMessageInput(id: "evt-\(seq + offset)", sequenceId: seq + offset, kind: kind, authorId: author,
+                                 authorName: author, isHuman: false, text: text, timestamp: stamp, date: date)
+        }
+        return [
+            ("cost line", row(0, .message, "respawn-orchestrator", "[cost] box-1: $12.64 est over 140 calls")),
+            ("cost line folding", row(1, .message, "respawn-orchestrator", "[cost] box-2: $13.71 est over 143 calls")),
+            ("background line", row(2, .message, "build-agent", "@review-agent the build is green on shard 3.")),
+            ("repeated notice", row(3, .message, "build-agent", "Retrying the upload of build 319: attempt 1 of 40")),
+            ("repeated notice folding", row(4, .message, "build-agent", "Retrying the upload of build 319: attempt 2 of 40")),
+            ("checkpoint", row(5, .checkpoint, "senti", "Build 319 reviewed: 2 findings, both fixed")),
+            ("join", row(6, .memberJoined, "senti", "agent-7"))
+        ]
+    }
+
+    // MARK: - The cases
+
+    /// 120 points up the end of the room is under the composer, where the marker still counted as in view: the reader
+    /// is away from the bottom, the arrival is counted for the arrow, and it moves nothing.
+    func test_a_few_lines_up_is_away_from_the_bottom_and_an_arrival_moves_nothing() throws {
+        try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
+        let room = Room(Self.messages())
+        let list = try host(room)
+        let up = Self.bottomOffset(of: list) - 120
+        list.setContentOffset(CGPoint(x: 0, y: up), animated: false)
+        wait("away from the bottom", seconds: 3) { !room.atBottom }
+        XCTAssertFalse(room.atBottom, "120 points up is away from the bottom")
+
+        room.arrive([Self.arrival(61)])
+        pump(1)
+        XCTAssertEqual(list.contentOffset.y, up, accuracy: 1, "the arrival moved the reader")
+        XCTAssertEqual(room.unreadCount, 1, "and it is counted for the arrow")
+    }
+
+    /// A couple of lines up, the end of the room still under the composer: the rows a room draws small arriving one by
+    /// one (each a few points tall, so the old marker was still "in view" under the composer) move nothing.
+    func test_a_couple_of_lines_up_small_rows_arriving_move_nothing() throws {
+        try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
+        let room = Room(Self.messages())
+        let list = try host(room)
+        let up = Self.bottomOffset(of: list) - 60
+        list.setContentOffset(CGPoint(x: 0, y: up), animated: false)
+        wait("away from the bottom", seconds: 3) { !room.atBottom }
+        XCTAssertFalse(room.atBottom, "60 points up is away from the bottom")
+
+        for arrival in Self.compactArrivals(from: 61) {
+            room.arrive([arrival.row])
+            pump(0.4)
+            XCTAssertEqual(list.contentOffset.y, up, accuracy: 1, "a \(arrival.kind) arriving moved the reader")
+        }
+        XCTAssertFalse(room.atBottom)
+    }
+
+    /// Within the bottom's 24 points the reader is at the bottom, and follows what arrives.
+    func test_at_the_very_bottom_the_reader_follows_what_arrives() throws {
+        try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
+        let room = Room(Self.messages())
+        let list = try host(room)
+        list.setContentOffset(CGPoint(x: 0, y: Self.bottomOffset(of: list) - 10), animated: false)
+        pump(0.5)
+        XCTAssertTrue(room.atBottom, "10 points up is still the bottom")
+
+        let height = list.contentSize.height
+        for seq in Int64(61)...66 {
+            room.arrive([Self.arrival(seq)])
+            pump(0.15)
+        }
+        wait("followed to the new bottom", seconds: 3) { list.contentSize.height > height && Self.atBottom(list) }
+        XCTAssertTrue(Self.atBottom(list), "at the bottom after the arrivals")
+        XCTAssertTrue(room.atBottom)
+        XCTAssertEqual(room.unreadCount, 0, "nothing is unread at the bottom")
+    }
+
+    /// A send from up the room used to put the room back at its newest rows as a new list. The list is the same one,
+    /// still where the reader had it, and the reader is still away from the bottom.
+    func test_sending_from_up_the_room_keeps_the_list_and_the_readers_place() throws {
+        let room = Room(Self.messages())
+        let list = try host(room)
+        let up = Self.bottomOffset(of: list) - 600
+        list.setContentOffset(CGPoint(x: 0, y: up), animated: false)
+        wait("away from the bottom", seconds: 3) { !room.atBottom }
+
+        room.sendMessage("Sent from up the room.")
+        pump(1)
+        let now = try XCTUnwrap(window.flatMap { Self.list(in: $0) })
+        XCTAssertTrue(now === list, "the room was put back at its newest rows as a new list")
+        XCTAssertEqual(list.contentOffset.y, up, accuracy: 1, "the send moved the reader")
+        XCTAssertFalse(room.atBottom, "still away from the bottom")
+    }
+
+    /// Sending at the bottom follows the message there.
+    func test_sending_at_the_bottom_follows_the_message_down() throws {
+        let room = Room(Self.messages())
+        let list = try host(room)
+        let height = list.contentSize.height
+        room.sendMessage("Sent at the bottom.")
+        wait("followed to the message", seconds: 3) { list.contentSize.height > height && Self.atBottom(list) }
+        XCTAssertTrue(Self.atBottom(list), "at the bottom with the message")
+        XCTAssertTrue(room.atBottom)
+    }
+
+    // MARK: - Running it
+
+    private static var readsGeometry: Bool {
+        if #available(iOS 18.0, *) { return true }
+        return false
+    }
+
+    /// The room in a window, opened at its newest rows.
+    private func host(_ room: Room) throws -> UIScrollView {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.windowLevel = .normal + 5
+        window.rootViewController = UIHostingController(rootView: Host(room: room))
+        window.makeKeyAndVisible()
+        self.window = window
+        addTeardownBlock { [weak self] in
+            self?.window?.isHidden = true
+            self?.window = nil
+        }
+        var list: UIScrollView?
+        // A hosted runner's first SwiftUI window can take a few seconds.
+        wait("the room opened at its newest rows", seconds: 15) {
+            list = Self.list(in: window)
+            guard let list, list.contentSize.height > list.bounds.height * 2 else { return false }
+            return Self.atBottom(list)
+        }
+        pump(0.5)
+        return try XCTUnwrap(list, "the room's list")
+    }
+
+    private func pump(_ seconds: TimeInterval) {
+        let end = Date().addingTimeInterval(seconds)
+        while Date() < end { RunLoop.main.run(until: min(end, Date().addingTimeInterval(0.02))) }
+    }
+
+    private func wait(_ what: String, seconds: TimeInterval, _ condition: () -> Bool) {
+        let end = Date().addingTimeInterval(seconds)
+        while !condition(), Date() < end { pump(0.05) }
+        if !condition() { XCTFail("timed out waiting: \(what)") }
+    }
+
+    /// The content offset at which the list shows its end.
+    private static func bottomOffset(of scroll: UIScrollView) -> CGFloat {
+        scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom
+    }
+
+    /// The end of the room within the bottom's 24 points of the composer (`RoomReaderPlace.atBottomDistance`): the room
+    /// rests there, a few points above the very end (the list's own padding).
+    private static func atBottom(_ scroll: UIScrollView) -> Bool {
+        bottomOffset(of: scroll) - scroll.contentOffset.y < 24
+    }
+
+    /// The room's list: the tallest scroll view in the window.
+    private static func list(in view: UIView) -> UIScrollView? {
+        var found = view as? UIScrollView
+        for child in view.subviews {
+            if let inner = list(in: child), inner.contentSize.height > (found?.contentSize.height ?? 0) { found = inner }
+        }
+        return found
+    }
+}
