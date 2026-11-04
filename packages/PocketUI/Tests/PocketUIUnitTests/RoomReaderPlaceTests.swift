@@ -66,6 +66,29 @@ final class RoomReaderPlaceTests: XCTestCase {
         XCTAssertEqual(tracker.read(reading(9.2, offset: 1_181)), .none)
     }
 
+    /// While a burst arrives faster than the room follows, SwiftUI settles the lazy list's rows and moves the list up
+    /// by itself, with the end already pushed below by what arrived (measured in the room on the simulator: 15 points,
+    /// then 35, at 60 messages a second). That is not the reader leaving: the room follows once it may. The reader
+    /// moving the list themselves still leaves, the end pushed below or not.
+    func test_the_list_settling_up_while_the_end_is_pushed_below_is_not_the_reader_leaving() {
+        var tracker = RoomReaderPlace.Tracker(atBottom: true)
+        XCTAssertEqual(tracker.read(reading(0, offset: 7_919)), .none)
+        XCTAssertEqual(tracker.read(reading(441, offset: 7_919)), .endMovedAway, "arrivals pushed the end below")
+        XCTAssertEqual(tracker.read(reading(456, offset: 7_904)), .endMovedAway, "SwiftUI moved the list up 15 points")
+        XCTAssertTrue(tracker.atBottom)
+        XCTAssertEqual(tracker.read(reading(9, offset: 8_539.333)), .none, "followed")
+        XCTAssertEqual(tracker.read(reading(196, offset: 8_539.333)), .endMovedAway)
+        XCTAssertEqual(tracker.read(reading(520, offset: 8_504.333)), .endMovedAway, "and up 35 points")
+        XCTAssertEqual(tracker.read(reading(560, offset: 8_480), readerMoving: true), .leftBottom,
+                       "the reader dragging the list up leaves, the end pushed below or not")
+        XCTAssertFalse(tracker.atBottom)
+
+        var resting = RoomReaderPlace.Tracker(atBottom: true)
+        _ = resting.read(reading(9, offset: 1_000))
+        XCTAssertEqual(resting.read(reading(130, offset: 879)), .leftBottom,
+                       "from the end in view, the list moving up is the reader, whatever moved it")
+    }
+
     func test_the_end_coming_into_view_is_the_bottom_unless_the_room_says_otherwise() {
         var tracker = RoomReaderPlace.Tracker(atBottom: false)
         XCTAssertEqual(tracker.read(reading(300, offset: 500)), .none)

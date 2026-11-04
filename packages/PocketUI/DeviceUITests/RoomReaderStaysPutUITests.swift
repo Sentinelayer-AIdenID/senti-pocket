@@ -86,9 +86,14 @@ final class RoomReaderStaysPutUITests: XCTestCase {
         let app = launch(kind: "arrivals")
         scrollUp(app, screens: 3)
         try readerStaysPut(app, case: "three-screens-up") { Self.beginBurst() }
-        let label = readScreen(app)?.jumpLabel
-        print("READER-STAYS-PUT three-screens-up arrow=\(label ?? "none")")
-        XCTAssertEqual(label, "\(Self.mixedMessages) new messages, jump to the first one", "the arrow says how many arrived")
+        // On a loaded machine the burst can still be arriving: the count is read once it has all arrived.
+        let expected = "\(Self.mixedMessages) new messages, jump to the first one"
+        let arrow = app.descendants(matching: .any)["pocket.room.jumpToLatest"]
+        let counted = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", expected), object: arrow)
+        let waited = XCTWaiter().wait(for: [counted], timeout: 30)
+        let label = arrow.exists ? arrow.label : nil
+        print("READER-STAYS-PUT three-screens-up arrow=\(label ?? "none") waited=\(waited.rawValue)")
+        XCTAssertEqual(label, expected, "the arrow says how many arrived")
     }
 
     // MARK: - Rows above changing height: not held yet
@@ -179,20 +184,28 @@ final class RoomReaderStaysPutUITests: XCTestCase {
 
     // MARK: - A slow coast a little way up
 
-    /// At the bottom, the reader drags the list up slowly, about 50 points at 10 points a second (a sixth of a point a
-    /// frame at 60 Hz, a third of a point now and then once rounded to the screen's pixels, like the end of a gentle
-    /// coast), and lets go; then messages arrive. The reader is away from the bottom and stays where they are.
+    /// At the bottom, the reader drags the list up slowly, about 50 points at 10 points a second (under half a point a
+    /// frame, like the end of a gentle coast), and lets go; then messages arrive. Measured frame to frame, that never
+    /// looked like leaving, and the next message pulled the reader down. Now they are away from the bottom and stay
+    /// where they are. The finger goes down in the list's left margin, outside every row: held that long on a message,
+    /// it opens the message's menu.
     func test_a_slow_drag_a_little_way_up_then_arrivals_move_nothing() throws {
+        try slowDrag(case: "slow-drag-up", speed: 10)
+    }
+
+    private func slowDrag(case name: String, speed: CGFloat) throws {
         let app = launch(kind: "messages")
         let screen = try XCTUnwrap(readScreen(app), "the app could be read")
         let origin = app.coordinate(withNormalizedOffset: .zero)
-        let from = origin.withOffset(CGVector(dx: app.frame.midX, dy: screen.top + (screen.bottom - screen.top) * 0.3))
+        let from = origin.withOffset(CGVector(dx: 6, dy: screen.top + (screen.bottom - screen.top) * 0.3))
         from.press(forDuration: 0.05, thenDragTo: from.withOffset(CGVector(dx: 0, dy: 60)),
-                   withVelocity: XCUIGestureVelocity(rawValue: 10), thenHoldForDuration: 0)
+                   withVelocity: XCUIGestureVelocity(rawValue: speed), thenHoldForDuration: 0)
         pause(1.5)
         let after = try XCTUnwrap(readScreen(app), "the app could be read")
-        print("READER-STAYS-PUT slow-drag end-below=\(after.endBelow) arrow=\(after.jumpLabel ?? "none")")
-        try readerStaysPut(app, case: "slow-drag-up") { Self.beginBurst() }
+        print("READER-STAYS-PUT \(name) end-below=\(after.endBelow) (at the bottom \(screen.endBelow)) "
+            + "arrow=\(after.jumpLabel ?? "none")")
+        XCTAssertGreaterThan(after.endBelow - screen.endBelow, 24, "\(name): the list was dragged away from the bottom")
+        try readerStaysPut(app, case: name) { Self.beginBurst() }
     }
 
     func test_a_reader_at_the_bottom_follows_the_burst() {

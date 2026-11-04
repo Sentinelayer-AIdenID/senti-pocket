@@ -476,6 +476,7 @@ public struct RoomChatView: View {
             .modifier(StartsAtBottom())
             // Where the reader is, from the scroll view's own geometry (iOS 18 and later).
             .modifier(RoomScrollReading { readingSeen($0, proxy: proxy) })
+            .modifier(RoomReaderScrolling { bottomWatch.readerMoving = $0 })
             // The whole list, its handlers with it, so a new one opens as the room does.
             .id(listEpoch)
         }
@@ -910,6 +911,8 @@ public struct RoomChatView: View {
         bottomWatch.followQueued = true
         DispatchQueue.main.async {
             bottomWatch.followQueued = false
+            // The reader may have left the bottom since this was asked for.
+            guard followsBottom else { return }
             guard eased else {
                 proxy.scrollTo(Self.bottomId, anchor: .bottom)
                 return
@@ -934,7 +937,6 @@ public struct RoomChatView: View {
         let sight = bottomWatch.see(reading)
         guard bottomWatch.isActive, sight != bottomWatch.takenSight, !bottomWatch.readingQueued else { return }
         bottomWatch.readingQueued = true
-        RoomScrollTrace.readingQueued()
         RoomNextFrame.run { placeFromReading(proxy) }
     }
 
@@ -946,8 +948,10 @@ public struct RoomChatView: View {
         if bottomWatch.readingQueued { RoomScrollTrace.readingTaken() }
         bottomWatch.readingQueued = false
         guard bottomWatch.isActive, bottomWatch.readsGeometry, let reading = bottomWatch.reading else { return }
-        bottomWatch.takenSight = bottomWatch.tracker.see(reading)
-        switch bottomWatch.tracker.read(reading, mayBeAtBottom: !state.canLoadNewer && heldAnchor == nil) {
+        let moving = bottomWatch.readerMoving
+        bottomWatch.takenSight = bottomWatch.tracker.see(reading, readerMoving: moving)
+        switch bottomWatch.tracker.read(reading, mayBeAtBottom: !state.canLoadNewer && heldAnchor == nil,
+                                        readerMoving: moving) {
         case .none:
             break
         case .endInView:
@@ -1029,8 +1033,10 @@ private final class RoomBottomWatch {
     /// changes what SwiftUI shows.
     func see(_ reading: RoomReaderPlace.Reading) -> RoomReaderPlace.Sight {
         self.reading = reading
-        return tracker.see(reading)
+        return tracker.see(reading, readerMoving: readerMoving)
     }
+    /// The reader is dragging the list, or it is coasting from their drag (iOS 18 and later).
+    var readerMoving = false
     /// A reading is to be taken on the next frame; what the last one taken showed.
     var readingQueued = false
     var takenSight: RoomReaderPlace.Sight?
@@ -1109,13 +1115,34 @@ private struct RoomScrollReading: ViewModifier {
     func body(content: Content) -> some View {
         if #available(iOS 18.0, macOS 15.0, *) {
             content.onScrollGeometryChange(for: Bool.self) { geometry in
-                seen(RoomReaderPlace.Reading(
-                    distanceToEnd: geometry.contentSize.height
-                        - (geometry.contentOffset.y + geometry.contentInsets.top + geometry.containerSize.height),
-                    offset: geometry.contentOffset.y
-                ))
+                RoomScrollTrace.whileReadingGeometry {
+                    seen(RoomReaderPlace.Reading(
+                        distanceToEnd: geometry.contentSize.height
+                            - (geometry.contentOffset.y + geometry.contentInsets.top + geometry.containerSize.height),
+                        offset: geometry.contentOffset.y
+                    ))
+                }
                 return true
             } action: { _, _ in }
+        } else {
+            content
+        }
+    }
+}
+
+/// Whether the reader is moving the list: dragging it, or its coast from their drag (iOS 18 and later). Not the room's
+/// own scrolls, nor SwiftUI settling the list's rows.
+private struct RoomReaderScrolling: ViewModifier {
+    let moving: (Bool) -> Void
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, macOS 15.0, *) {
+            content.onScrollPhaseChange { _, phase in
+                switch phase {
+                case .tracking, .interacting, .decelerating: moving(true)
+                default: moving(false)
+                }
+            }
         } else {
             content
         }

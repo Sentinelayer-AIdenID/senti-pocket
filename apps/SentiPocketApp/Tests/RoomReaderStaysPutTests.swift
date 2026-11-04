@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import PocketUI
 import SwiftUI
 import UIKit
@@ -192,28 +193,62 @@ final class RoomReaderStaysPutTests: XCTestCase {
 
     /// The scroll view's readings come while the list is laid out. Acting on one there (a follow, the reader's place)
     /// changes the list again in the same frame, and SwiftUI warns "tried to update multiple times per frame". Each is
-    /// only kept, and taken on a later frame: through a follow at the bottom, the reader leaving, and arrivals while
-    /// away, readings are taken, and never in the turn of the run loop that queued them.
-    func test_a_reading_is_never_taken_in_the_turn_it_came_in() throws {
+    /// only kept, and taken when the screen next draws: through a follow at the bottom, the reader leaving, and arrivals
+    /// while away, readings are taken, and never while the geometry is being read.
+    func test_a_reading_is_never_taken_while_the_list_is_laid_out() throws {
         try XCTSkipUnless(Self.readsGeometry, "the scroll view's readings are iOS 18 and later")
         let room = Room(Self.messages())
         let list = try host(room)
-        RoomScrollTrace.reset()
-        for seq in Int64(61)...64 {
-            room.arrive([Self.arrival(seq)])
-            pump(0.2)
-        }
-        wait("followed", seconds: 3) { Self.atBottom(list) }
-        list.setContentOffset(CGPoint(x: 0, y: Self.bottomOffset(of: list) - 300), animated: false)
-        wait("away from the bottom", seconds: 3) { !room.atBottom }
-        for seq in Int64(65)...67 {
-            room.arrive([Self.arrival(seq)])
-            pump(0.2)
-        }
+        RoomScrollTrace.start()
+        try followLeaveAndArrive(room, list)
         let trace = RoomScrollTrace.snapshot()
-        print("ROOM-SCROLL-TRACE taken=\(trace.taken) taken-in-their-turn=\(trace.takenInTheirTurn)")
+        print("ROOM-SCROLL-TRACE taken=\(trace.taken) taken-while-reading=\(trace.takenWhileReading)")
         XCTAssertGreaterThan(trace.taken, 2, "readings were taken: the follow, the leaving")
-        XCTAssertEqual(trace.takenInTheirTurn, 0, "a reading was acted on in the turn it came in")
+        XCTAssertEqual(trace.takenWhileReading, 0, "a reading was acted on while the list was laid out")
+    }
+
+    /// SwiftUI's own word on it, from the app's log: through arrivals followed at the bottom, the composer focused and
+    /// typed into (the list laid out again and again as the keyboard rises), the reader leaving and arrivals while
+    /// away, nothing says the scroll geometry "tried to update multiple times per frame".
+    func test_swiftui_never_says_the_scroll_geometry_updated_twice_in_a_frame() throws {
+        try XCTSkipUnless(Self.readsGeometry, "the scroll view's readings are iOS 18 and later")
+        let since = Date()
+        let room = Room(Self.messages())
+        let list = try host(room)
+        let box = try XCTUnwrap(window.flatMap { Self.textViews(in: $0).first }, "the room's composer")
+        box.becomeFirstResponder()
+        pump(1)
+        for character in "Typing at the bottom." {
+            box.insertText(String(character))
+            pump(0.03)
+        }
+        try followLeaveAndArrive(room, list)
+        box.resignFirstResponder()
+        pump(1)
+        let store = try OSLogStore(scope: .currentProcessIdentifier)
+        let matching = NSPredicate(format: "composedMessage CONTAINS %@", "multiple times per frame")
+        let warnings = try store.getEntries(at: store.position(date: since), matching: matching)
+            .compactMap { $0 as? OSLogEntryLog }
+            .filter { $0.date >= since && $0.composedMessage.contains("multiple times per frame") }
+        print("ROOM-SCROLL-WARNINGS \(warnings.count)")
+        XCTAssertEqual(warnings.count, 0, warnings.prefix(3).map(\.composedMessage).joined(separator: " | "))
+    }
+
+    /// At the bottom, a burst faster than the room follows (more than `RoomBottomWatch`'s 20 a second): the follow
+    /// over the limit is made once the second is up, not dropped, so the reader ends at the bottom with the last of it.
+    func test_a_burst_faster_than_twenty_a_second_still_ends_at_the_bottom() throws {
+        try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
+        let room = Room(Self.messages())
+        let list = try host(room)
+        let height = list.contentSize.height
+        for seq in Int64(61)...100 {
+            room.arrive([Self.arrival(seq)])
+            pump(1.0 / 60.0)
+        }
+        wait("followed to the end of the burst", seconds: 4) { list.contentSize.height > height && Self.atBottom(list) }
+        XCTAssertTrue(Self.atBottom(list), "the last of the burst was not followed")
+        XCTAssertTrue(room.atBottom)
+        XCTAssertEqual(room.unreadCount, 0)
     }
 
     /// Within the bottom's 24 points the reader is at the bottom, and follows what arrives.
@@ -266,6 +301,21 @@ final class RoomReaderStaysPutTests: XCTestCase {
 
     // MARK: - Running it
 
+    /// Arrivals followed at the bottom, the reader leaving, arrivals while away.
+    private func followLeaveAndArrive(_ room: Room, _ list: UIScrollView) throws {
+        for seq in Int64(61)...64 {
+            room.arrive([Self.arrival(seq)])
+            pump(0.2)
+        }
+        wait("followed", seconds: 3) { Self.atBottom(list) }
+        list.setContentOffset(CGPoint(x: 0, y: Self.bottomOffset(of: list) - 300), animated: false)
+        wait("away from the bottom", seconds: 3) { !room.atBottom }
+        for seq in Int64(65)...67 {
+            room.arrive([Self.arrival(seq)])
+            pump(0.2)
+        }
+    }
+
     private static var readsGeometry: Bool {
         if #available(iOS 18.0, *) { return true }
         return false
@@ -314,6 +364,10 @@ final class RoomReaderStaysPutTests: XCTestCase {
     /// rests there, a few points above the very end (the list's own padding).
     private static func atBottom(_ scroll: UIScrollView) -> Bool {
         bottomOffset(of: scroll) - scroll.contentOffset.y < 24
+    }
+
+    private static func textViews(in view: UIView) -> [UITextView] {
+        (view as? UITextView).map { [$0] } ?? view.subviews.flatMap { textViews(in: $0) }
     }
 
     /// The room's list: the tallest scroll view in the window.

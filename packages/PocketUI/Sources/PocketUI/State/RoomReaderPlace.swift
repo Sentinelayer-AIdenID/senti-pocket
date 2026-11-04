@@ -9,7 +9,8 @@ import CoreGraphics
 /// - only the list moving up takes the reader away from the bottom, measured from where it was the last time the end was
 ///   in view, by any movement at all (a coast near its end moves a third of a point a frame, under the half point the
 ///   room once took for rounding). The end moving away from a reader who is there (a message arriving, a row growing,
-///   the keyboard rising) is followed;
+///   the keyboard rising) is followed, and until the end is back in view the list moving up is the room settling its
+///   rows, not the reader, unless the reader is moving it;
 /// - a reader away from the bottom is never moved, and the jump button says how many messages arrived meanwhile.
 public enum RoomReaderPlace {
     /// The end of the room closer than this to the bottom of the screen is the reader at the bottom.
@@ -43,12 +44,11 @@ public enum RoomReaderPlace {
     }
 
     /// A difference this small in where the list is scrolled is the same place (arithmetic, not movement). A list moves
-    /// at least a pixel at a time: a third of a point on the phone. Content arriving or growing never moves it.
+    /// at least a pixel at a time: a third of a point on the phone.
     static let samePlace: CGFloat = 0.01
 
-    /// A reading as the room acts on it. This is the value SwiftUI watches for the room, so it changes only when the
-    /// reader's place may have changed, not with every point the list moves (SwiftUI warns when that value changes more
-    /// than once in a frame, and during one layout it can be read several times).
+    /// A reading as the room acts on it: the room takes a new reading only when this changes (`RoomChatView`), not
+    /// with every point the list moves.
     public enum Sight: Equatable, Sendable {
         /// The end of the room is in view.
         case endInView
@@ -66,6 +66,12 @@ public enum RoomReaderPlace {
         /// Where the list was the last time the end was in view: leaving the bottom is measured from here, not from the
         /// last frame (a coast that ends 24 to 45 points up moves too little from one frame to the next to count).
         public private(set) var bottomOffset: CGFloat?
+        /// The end went out of view without the list moving up (a message arriving, a row growing). Until it is in view
+        /// again, the list moving up is not the reader leaving: while a burst arrives faster than the room follows,
+        /// SwiftUI settles the lazy list's rows and moves the list up by itself, 15 and 35 points at a time at 60
+        /// messages a second, and a reader taken for gone was never followed again. The reader moving the list
+        /// (dragging it, or its coast) still leaves.
+        public private(set) var endPushedDown = false
 
         public init(atBottom: Bool = true) {
             self.atBottom = atBottom
@@ -79,20 +85,26 @@ public enum RoomReaderPlace {
             if atBottom { bottomOffset = nil }
         }
 
-        /// What a reading is, noting where the list is while the end is in view.
-        public mutating func see(_ reading: Reading) -> Sight {
+        /// What a reading is, noting where the list is while the end is in view. `readerMoving`: the reader is
+        /// dragging the list, or it is coasting from their drag.
+        public mutating func see(_ reading: Reading, readerMoving: Bool = false) -> Sight {
             if reading.endInView {
                 bottomOffset = reading.offset
+                endPushedDown = false
                 return .endInView
             }
-            if let bottomOffset, reading.offset < bottomOffset - RoomReaderPlace.samePlace { return .movedUp }
+            if let bottomOffset, reading.offset < bottomOffset - RoomReaderPlace.samePlace,
+               readerMoving || !endPushedDown {
+                return .movedUp
+            }
+            endPushedDown = true
             return .endBelow
         }
 
         /// What `reading` changes. `mayBeAtBottom` is false while the end in view is not the live room's bottom (a
         /// window further back) or a message the reader was taken to holds them.
-        public mutating func read(_ reading: Reading, mayBeAtBottom: Bool = true) -> Change {
-            switch see(reading) {
+        public mutating func read(_ reading: Reading, mayBeAtBottom: Bool = true, readerMoving: Bool = false) -> Change {
+            switch see(reading, readerMoving: readerMoving) {
             case .endInView:
                 guard !atBottom, mayBeAtBottom else { return .none }
                 atBottom = true
