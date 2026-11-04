@@ -90,6 +90,14 @@ final class RoomBottomFlapTests: XCTestCase {
             publish()
         }
 
+        /// The coordinator's send from up the history (`keepLatestForTheJumpDown`): only the newest rows are kept, then
+        /// the reader's own message arrives and the room goes to the bottom.
+        func sendFromUpTheHistory(_ message: RoomChatMessageInput, keeping: Int) {
+            inputs = Array(inputs.suffix(keeping))
+            inputs.append(message)
+            publish()
+        }
+
         func publish() {
             state = RoomChatPresentationState(
                 sessionId: "flap-\(key)",
@@ -304,6 +312,43 @@ final class RoomBottomFlapTests: XCTestCase {
             VoiceCallWindow.shared.hide()
             room.covered = false
         }
+    }
+
+    /// Carter's freezes on build 2026110307 (03:36 and 03:50, 11-04): up the history of a room of ~128 rows, he sent a
+    /// message of 1,342 / 1,486 characters (just under the 1,500 that folds a message); the room kept its newest 60 rows,
+    /// jumped to the bottom, and the main thread stopped answering (0 row draws while stuck). The short send is the
+    /// control.
+    func test_a_long_send_from_up_the_history_lets_the_room_settle() throws {
+        for (label, length) in [("short send", 200), ("long send", 1_486)] {
+            let rows = Self.reviewRoom()
+            let room = Room(rows)
+            try host(room)
+            settles("open (\(label))") {}
+            let scroll = try XCTUnwrap(window.flatMap { Self.list(in: $0) }, "the room's list")
+            settles("up the history (\(label))", seconds: 1) {
+                scroll.setContentOffset(CGPoint(x: 0, y: max(0, scroll.contentOffset.y - 3_000)), animated: false)
+            }
+            let last = rows.last?.sequenceId ?? 0
+            settles(label, seconds: 3) {
+                room.sendFromUpTheHistory(Self.input(last + 1, "human-mrrcarter", Self.dictated(length)), keeping: 60)
+            }
+            close()
+        }
+    }
+
+    /// A long message as dictated: sentences, a few paragraphs, a list.
+    private static func dictated(_ length: Int) -> String {
+        let sentence = "Okay so the next thing is the build, it needs to go out tonight with the sign in and the new agent button. "
+        var text = ""
+        var paragraph = 0
+        while text.count < length {
+            text += sentence
+            if text.count / 400 > paragraph {
+                paragraph += 1
+                text += "\n\n- one more thing about that\n- and another one\n\n"
+            }
+        }
+        return String(text.prefix(length))
     }
 
     /// The second freeze: from the side panel the reader opened another room; it loaded while the panel closed, and the
