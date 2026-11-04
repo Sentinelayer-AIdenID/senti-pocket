@@ -1831,7 +1831,7 @@ private struct RoomThreadSheet: View {
     @State private var answering: RoomChatReplyRow?
     /// "File as a ticket": the reply goes to the room's ticket keeper as a ticket request.
     @State private var ticketMode = false
-    @FocusState private var isReplying: Bool
+    @State private var isReplying = false
     /// Your own reply being edited.
     @State private var editingReply: RoomChatReplyRow?
     /// Where the reply text last changed (the field does not say where the caret is), for an @ anywhere in it.
@@ -2062,10 +2062,8 @@ private struct RoomThreadSheet: View {
                     HStack(alignment: .bottom, spacing: 8) {
                         RoomComposerPlusButton(board: nil, more: plusActions, identifier: "pocket.thread.composer.plus")
                             .padding(.bottom, 1)
-                        TextField(ticketMode ? "Describe the ticket" : "Reply", text: $draft, axis: .vertical)
-                            .lineLimit(1...6)
-                            .textFieldStyle(.plain)
-                            .focused($isReplying)
+                        ComposerTextField(placeholder: ticketMode ? "Describe the ticket" : "Reply", text: $draft,
+                                          isFocused: $isReplying, identifier: "pocket.thread.composer")
                             .onChange(of: draft) { new in
                                 replyWrittenBack.changed(from: lastDraft, to: new, sent: replySent)
                                 editOffset = MentionSuggester.editOffset(from: lastDraft, to: new)
@@ -2074,7 +2072,6 @@ private struct RoomThreadSheet: View {
                             .padding(.horizontal, 12)
                             .padding(.vertical, 9)
                             .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                            .accessibilityIdentifier("pocket.thread.composer")
                         Button {
                             let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
                             guard canSendReply else { return }
@@ -2268,7 +2265,7 @@ private struct RoomComposerBar: View {
     /// While a send settles, the sent text stays saved (see `sendDraft()`); which send that is.
     @State private var keepsSavedDraft = false
     @State private var sends = 0
-    @FocusState private var isEditing: Bool
+    @State private var isEditing = false
     /// "File as a ticket": what you type goes to the room as a ticket request, and the ticket keeper files it.
     @State private var ticketMode = false
     /// Where the text last changed (the field does not say where the caret is), for an @ anywhere in it.
@@ -2514,10 +2511,8 @@ private struct RoomComposerBar: View {
                 RoomComposerPlusButton(board: replying == nil && !ticketMode ? media : nil, more: plusActions,
                                        identifier: "pocket.room.composer.plus")
                     .padding(.bottom, 1)
-                TextField(ticketMode ? "Describe the ticket" : (replying == nil ? "Message" : "Reply"), text: $draft, axis: .vertical)
-                    .lineLimit(1...6)
-                    .textFieldStyle(.plain)
-                    .focused($isEditing)
+                ComposerTextField(placeholder: ticketMode ? "Describe the ticket" : (replying == nil ? "Message" : "Reply"),
+                                  text: $draft, isFocused: $isEditing, identifier: "pocket.room.composer")
                     .onChange(of: draft) { new in
                         writtenBack.changed(from: lastDraft, to: new, sent: justSent)
                         if writtenBack.text != nil {
@@ -2544,7 +2539,6 @@ private struct RoomComposerBar: View {
                         RoundedRectangle(cornerRadius: 18, style: .continuous)
                             .stroke(PocketPalette.separator.opacity(0.6), lineWidth: 0.5)
                     )
-                    .accessibilityIdentifier("pocket.room.composer")
                 if let media {
                     RoomMediaSendButton(board: media, canSendText: canSend, hasProblem: problem != nil) {
                         sendDraft()
