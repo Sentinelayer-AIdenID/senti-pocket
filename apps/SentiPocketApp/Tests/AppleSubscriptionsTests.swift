@@ -815,7 +815,13 @@ final class AppleSubscriptionsHTTPTests: XCTestCase {
         }
     }
 
+    /// An error answer as the API sends it: its own envelope, `error` at the top.
     private static func errorBody(_ code: String) -> String {
+        #"{"error":{"code":"\#(code)","message":"m","request_id":"r"}}"#
+    }
+
+    /// The same answer in the framework's own shape, under `detail` (what a bare app would send).
+    private static func nestedErrorBody(_ code: String) -> String {
         #"{"detail":{"error":{"code":"\#(code)","message":"m","request_id":"r"}}}"#
     }
 
@@ -921,23 +927,40 @@ final class AppleSubscriptionsHTTPTests: XCTestCase {
     }
 
     func test_the_servers_codes_map_to_what_the_app_does() async {
+        // The API's own envelope (production) and the framework's nested one: the code is read from either.
+        for body in [Self.errorBody, Self.nestedErrorBody] {
+            await codesMap(body)
+        }
+    }
+
+    func test_the_code_is_read_from_the_apis_own_envelope_first() {
+        XCTAssertEqual(HTTPAppleSubscriptionsServer.errorCode(in: Data(Self.errorBody("APPLE_IAP_SANDBOX_NOT_ALLOWED").utf8)),
+                       "APPLE_IAP_SANDBOX_NOT_ALLOWED")
+        XCTAssertEqual(HTTPAppleSubscriptionsServer.errorCode(in: Data(Self.nestedErrorBody("APPLE_IAP_OWNERSHIP_CONFLICT").utf8)),
+                       "APPLE_IAP_OWNERSHIP_CONFLICT")
+        // An OAuth-style answer carries `error` as a string: no code, so a plain refusal.
+        XCTAssertNil(HTTPAppleSubscriptionsServer.errorCode(in: Data(#"{"error":"invalid_grant"}"#.utf8)))
+        XCTAssertNil(HTTPAppleSubscriptionsServer.errorCode(in: Data("not json".utf8)))
+    }
+
+    private func codesMap(_ errorBody: (String) -> String) async {
         let cases: [(Int, String, AppleSubscriptionsServerError)] = [
-            (403, Self.errorBody("APPLE_IAP_SIGNED_IN_SESSION_REQUIRED"), .reauthenticationRequired),
-            (409, Self.errorBody("APPLE_IAP_ACCOUNT_NOT_FOUND"), .accountNotFound),
-            (403, Self.errorBody("APPLE_IAP_ACCOUNT_TOKEN_MISMATCH"), .linkedToAnotherAccount),
-            (403, Self.errorBody("APPLE_IAP_TRANSACTION_ACCOUNT_MISMATCH"), .linkedToAnotherAccount),
-            (409, Self.errorBody("APPLE_IAP_TRANSACTION_ACCOUNT_MISMATCH"), .linkedToAnotherAccount),
-            (409, Self.errorBody("APPLE_IAP_OWNERSHIP_CONFLICT"), .ownershipConflict),
-            (403, Self.errorBody("APPLE_IAP_SANDBOX_NOT_ALLOWED"), .sandboxNotAllowed),
-            (403, Self.errorBody("APPLE_IAP_FAMILY_SHARING_NOT_SUPPORTED"), .familySharingNotSupported),
-            (400, Self.errorBody("APPLE_IAP_PRODUCT_NOT_ALLOWED"), .productNotAllowed),
-            (400, Self.errorBody("APPLE_IAP_INVALID_TRANSACTION"), .invalidTransaction),
+            (403, errorBody("APPLE_IAP_SIGNED_IN_SESSION_REQUIRED"), .reauthenticationRequired),
+            (409, errorBody("APPLE_IAP_ACCOUNT_NOT_FOUND"), .accountNotFound),
+            (403, errorBody("APPLE_IAP_ACCOUNT_TOKEN_MISMATCH"), .linkedToAnotherAccount),
+            (403, errorBody("APPLE_IAP_TRANSACTION_ACCOUNT_MISMATCH"), .linkedToAnotherAccount),
+            (409, errorBody("APPLE_IAP_TRANSACTION_ACCOUNT_MISMATCH"), .linkedToAnotherAccount),
+            (409, errorBody("APPLE_IAP_OWNERSHIP_CONFLICT"), .ownershipConflict),
+            (403, errorBody("APPLE_IAP_SANDBOX_NOT_ALLOWED"), .sandboxNotAllowed),
+            (403, errorBody("APPLE_IAP_FAMILY_SHARING_NOT_SUPPORTED"), .familySharingNotSupported),
+            (400, errorBody("APPLE_IAP_PRODUCT_NOT_ALLOWED"), .productNotAllowed),
+            (400, errorBody("APPLE_IAP_INVALID_TRANSACTION"), .invalidTransaction),
             // A finishing code with any other status is a plain refusal: it never finishes a transaction.
-            (409, Self.errorBody("APPLE_IAP_FAMILY_SHARING_NOT_SUPPORTED"), .refused),
-            (403, Self.errorBody("APPLE_IAP_PRODUCT_NOT_ALLOWED"), .refused),
-            (422, Self.errorBody("APPLE_IAP_INVALID_TRANSACTION"), .refused),
-            (400, Self.errorBody("APPLE_IAP_PRODUCT_TYPE_NOT_ALLOWED"), .refused),
-            (400, Self.errorBody("APPLE_IAP_INVALID_SIGNED_DATA"), .refused),
+            (409, errorBody("APPLE_IAP_FAMILY_SHARING_NOT_SUPPORTED"), .refused),
+            (403, errorBody("APPLE_IAP_PRODUCT_NOT_ALLOWED"), .refused),
+            (422, errorBody("APPLE_IAP_INVALID_TRANSACTION"), .refused),
+            (400, errorBody("APPLE_IAP_PRODUCT_TYPE_NOT_ALLOWED"), .refused),
+            (400, errorBody("APPLE_IAP_INVALID_SIGNED_DATA"), .refused),
             (403, #"{"detail":"Forbidden"}"#, .refused),
             (401, "{}", .reauthenticationRequired),
             (404, #"{"detail":"Not Found"}"#, .off),

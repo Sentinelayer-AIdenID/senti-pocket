@@ -22,7 +22,7 @@ struct AppleSubscriptionsAccountStatus: Equatable, Sendable {
 }
 
 /// Why a call to the server's in-app plans gave no answer the app can use. The transaction refusals follow the
-/// server's codes (`{"detail": {"error": {"code"}}}`); only three of them finish the transaction.
+/// server's codes (`{"error": {"code"}}`, or the same under `detail`); only three of them finish the transaction.
 enum AppleSubscriptionsServerError: Error, Equatable {
     /// 404 (the route is missing: the feature is off or not deployed), or no API configured: the app shows nothing.
     case off
@@ -174,10 +174,14 @@ final class HTTPAppleSubscriptionsServer: AppleSubscriptionsServing, @unchecked 
         }
     }
 
-    /// The code of an error answer: `{"detail": {"error": {"code": ...}}}`.
+    /// The code of an error answer. The API sends its own envelope, `{"error": {"code": ...}}`; the framework's shape,
+    /// `{"detail": {"error": {"code": ...}}}`, is read too. An `error` that is a string (an OAuth answer) has no code.
     static func errorCode(in data: Data) -> String? {
-        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let detail = object["detail"] as? [String: Any],
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        if let error = object["error"] as? [String: Any] {
+            return error["code"] as? String
+        }
+        guard let detail = object["detail"] as? [String: Any],
               let error = detail["error"] as? [String: Any] else { return nil }
         return error["code"] as? String
     }
