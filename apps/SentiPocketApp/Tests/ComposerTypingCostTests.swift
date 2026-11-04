@@ -31,6 +31,25 @@ final class ComposerTypingCostTests: XCTestCase {
                           "a keystroke into 1,450 characters must not cost many times one into 100")
     }
 
+    /// Long drafts must type smoothly even at 10,000 characters (Carter, 11-04). Measured on the Mac's simulator in one
+    /// run, alternating builds: a keystroke into 10,000 characters (one paragraph) cost about 9x one into 100 before
+    /// (22–23 ms), and 3.7–4.9x after (7–9 ms): no character walk for an edit at the end, and TextKit 1 laying out only
+    /// what shows. Putting TextKit 2 back measured 9.9x.
+    func test_a_keystroke_into_ten_thousand_characters_stays_under_seven_times_one_into_a_hundred() throws {
+        var short: [TimeInterval] = []
+        var long: [TimeInterval] = []
+        for _ in 0..<3 {
+            short.append(try typingTime(draftLength: 100))
+            long.append(try typingTime(draftLength: 10_000))
+        }
+        let fastestShort = try XCTUnwrap(short.min())
+        let fastestLong = try XCTUnwrap(long.min())
+        print("COMPOSERCOST10K short=\(short.map { Int($0 * 1_000) }) long=\(long.map { Int($0 * 1_000) }) ms for "
+              + "\(Self.keystrokes) keystrokes, ratio \(String(format: "%.2f", fastestLong / fastestShort))")
+        XCTAssertLessThan(fastestLong, fastestShort * 7,
+                          "a keystroke into 10,000 characters must not cost many times one into 100")
+    }
+
     /// The time to type `keystrokes` characters into the room's box holding a draft of `draftLength` characters, each
     /// one carried through to the room's layout before the next.
     private func typingTime(draftLength: Int) throws -> TimeInterval {

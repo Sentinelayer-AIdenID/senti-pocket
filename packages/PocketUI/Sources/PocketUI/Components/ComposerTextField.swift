@@ -71,7 +71,10 @@ private struct ComposerTextView: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeUIView(context: Context) -> HeightReportingTextView {
-        let view = HeightReportingTextView()
+        // TextKit 1 with non-contiguous layout: a keystroke lays out what is on screen, not the whole paragraph it
+        // falls in (TextKit 2 re-laid out a 10,000-character paragraph on every keystroke: 23 ms, halved here).
+        let view = HeightReportingTextView(usingTextLayoutManager: false)
+        view.layoutManager.allowsNonContiguousLayout = true
         view.delegate = context.coordinator
         view.font = .preferredFont(forTextStyle: .body)
         view.adjustsFontForContentSizeCategory = true
