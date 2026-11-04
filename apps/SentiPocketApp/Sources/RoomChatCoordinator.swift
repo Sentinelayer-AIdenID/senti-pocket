@@ -1401,9 +1401,8 @@ final class RoomChatCoordinator: ObservableObject {
             return nil
         }
         let clientId = Self.makeClientId()
-        // Sending from a window further back returns to the live room, where the message appears.
-        jumpToLatest()
-        keepLatestForTheJumpDown()
+        // Sending never moves the reader (Carter, #61581): from up the room, or from a window further back, the rows
+        // they are reading stay loaded and their place stays; the message shows at the bottom of the room.
         pending.append(PendingSend(clientId: clientId, text: text, status: .sending))
         if let outbox, let account = outboxAccount,
            !outbox.add(RoomSendOutbox.Item(clientId: clientId, text: text, createdAt: now()), account: account,
@@ -1411,9 +1410,11 @@ final class RoomChatCoordinator: ObservableObject {
             // The send goes ahead; only its recovery after a kill is lost, and the crash report should say so.
             CrashReporter.shared.note("unsent message not kept on the phone (write failed)")
         }
-        readerAtBottom = true
-        // Your message goes to the bottom, and so do you: no line is left to come back to.
-        unread.caughtUp()
+        if readerAtBottom {
+            // Your message is in view at the bottom, and so are you: no line is left to come back to. Away from the
+            // bottom, the arrow keeps counting what arrived since you left it.
+            unread.caughtUp()
+        }
         publish()
         readAtBottomAfterDwell()
         deliver(clientId)
@@ -1428,10 +1429,11 @@ final class RoomChatCoordinator: ObservableObject {
         !timeline.hasMoreNewer && timeline.messages.count > Self.rowsKeptForTheJumpDown
     }
 
-    /// Going to the bottom of a long loaded history (a send, or Jump to latest) made iOS measure every row in between on
-    /// the main thread: Carter's freezes on 10-30 (07:39, 08:06, 13:43) all came after loading older messages and then
-    /// sending, and the freeze recorder caught the last one "right after sendMessage (497 rows)", stuck 16.9 s. Before
-    /// that jump, only the newest rows are kept; older ones load again when the reader scrolls up.
+    /// Going to the bottom of a long loaded history made iOS measure every row in between on the main thread: Carter's
+    /// freezes on 10-30 (07:39, 08:06, 13:43) all came after loading older messages and then sending (a send took the
+    /// reader down then; it no longer moves them), and the freeze recorder caught the last one "right after sendMessage
+    /// (497 rows)", stuck 16.9 s. Before Jump to latest goes down, only the newest rows are kept; older ones load again
+    /// when the reader scrolls up.
     private func keepLatestForTheJumpDown() {
         guard !readerAtBottom, historyTooLongToJumpDown else { return }
         let oldest = timeline.oldestSequence

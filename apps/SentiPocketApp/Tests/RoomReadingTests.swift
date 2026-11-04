@@ -325,13 +325,26 @@ final class RoomReadingTests: XCTestCase {
         room.pause()
     }
 
-    func test_a_send_takes_the_line_away() async {
+    func test_a_send_at_the_bottom_takes_the_line_away() async {
+        let room = makeRoom(PagedRoom(before: [page(1...10, hasMore: true)]), mark: mark(3, first: 8, lastRead: 7),
+                            sender: TakesEverything())
+        await open(room)
+        room.send(.readerAtBottom(true))
+        room.send(.sendMessage(text: "On it."))
+        XCTAssertNil(underTheLine(room.state), "your message is at the bottom, and so are you")
+        XCTAssertEqual(room.state.openPosition(reopening: true), .latest)
+        room.pause()
+    }
+
+    /// A send from where the reader is reading moves nothing (Carter, #61581): they are still up the room, and the line
+    /// they opened at stays, as it does while they read.
+    func test_a_send_from_up_the_room_keeps_the_line() async {
         let room = makeRoom(PagedRoom(before: [page(1...10, hasMore: true)]), mark: mark(3, first: 8, lastRead: 7),
                             sender: TakesEverything())
         await open(room)
         room.send(.sendMessage(text: "On it."))
-        XCTAssertNil(underTheLine(room.state), "your message is at the bottom, and so are you")
-        XCTAssertEqual(room.state.openPosition(reopening: true), .latest)
+        XCTAssertEqual(underTheLine(room.state), 8, "the reader is still up the room")
+        XCTAssertEqual(room.state.pending.map(\.text), ["On it."])
         room.pause()
     }
 

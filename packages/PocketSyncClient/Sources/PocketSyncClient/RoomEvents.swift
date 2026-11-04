@@ -420,8 +420,8 @@ public struct RoomTimeline: Equatable, Sendable {
 /// the bottom clears both.
 ///
 /// A room opened from the room list with messages you had not read opens at the first of them: that
-/// line stays while the room is open, wherever you scroll, as Discord's does. Only a send, which takes
-/// you to your own message at the bottom, lets it go.
+/// line stays while the room is open, wherever you scroll, as Discord's does. Only a send made at the
+/// bottom, with your own message in view, lets it go (a send from up the room moves nothing).
 public struct RoomUnreadState: Equatable, Sendable {
     public private(set) var unreadCount = 0
     /// The first message you had not read when the room opened.
@@ -463,7 +463,7 @@ public struct RoomUnreadState: Equatable, Sendable {
         return true
     }
 
-    /// You sent a message: you are at the newest, and every line goes.
+    /// You sent a message at the bottom: you are at the newest, and every line goes.
     public mutating func caughtUp() {
         unreadCount = 0
         arrivedAt = nil

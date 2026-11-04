@@ -374,18 +374,70 @@ final class RoomChatCoordinatorTests: XCTestCase {
         coordinator.pause()
     }
 
-    /// Carter's freezes came from sending far up a long history (10-30, "sendMessage (497 rows)").
-    func test_sending_from_up_a_long_history_keeps_only_the_newest_rows_first() async {
+    /// Sending from up a long history never moves the reader (Carter, #61581): the rows they are reading stay loaded
+    /// (the send used to keep only the newest 60, for a jump down that no longer happens: Carter's 10-30 freezes came
+    /// from that jump), they stay away from the bottom, and arrivals after it are still counted for the arrow.
+    func test_sending_from_up_a_long_history_keeps_the_rows_being_read_and_the_count() async {
         let transport = ScriptedRoomTransport(before: [.success(page(Array(1...497), hasMore: true))])
         let coordinator = makeCoordinator(transport, sender: AcceptingSender())
         coordinator.resume()
         await waitUntil("loaded") { messageSequences(coordinator).count == 497 }
 
         coordinator.send(.readerAtBottom(false))
-        coordinator.send(.sendMessage(text: "on my way down"))
-        XCTAssertEqual(messageSequences(coordinator), Array(438...497), "only the newest 60 are crossed on the way down")
-        XCTAssertTrue(coordinator.state.canLoadOlder)
-        XCTAssertEqual(coordinator.state.pending.map(\.text), ["on my way down"])
+        coordinator.handle(.message(message(498)))
+        XCTAssertEqual(coordinator.state.unreadCount, 1)
+        coordinator.send(.sendMessage(text: "from where I am"))
+        XCTAssertEqual(messageSequences(coordinator), Array(1...498), "the rows being read stay")
+        XCTAssertEqual(coordinator.state.pending.map(\.text), ["from where I am"])
+        XCTAssertEqual(coordinator.state.unreadCount, 1, "the arrow still counts what arrived since the reader left")
+        coordinator.handle(.message(message(499)))
+        XCTAssertEqual(coordinator.state.unreadCount, 2, "and keeps counting: the reader is still away from the bottom")
+
+        coordinator.send(.readerAtBottom(true))
+        XCTAssertEqual(coordinator.state.unreadCount, 0, "reaching the bottom clears it")
+        coordinator.pause()
+    }
+
+    /// Sending from a window further back (a search result, a link) stays in the window: the live room is not loaded
+    /// over the rows being read.
+    func test_sending_from_a_window_further_back_stays_in_the_window() async {
+        let transport = ScriptedRoomTransport(
+            before: [
+                .success(page([990, 1_000], hasMore: true)),
+                .success(page([760, 770], hasMore: true))
+            ],
+            after: [.success(RoomEventPage(messages: [message(780)], rawCount: 50, maxSequence: 820))]
+        )
+        let coordinator = makeCoordinator(transport, sender: AcceptingSender())
+        coordinator.resume()
+        await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
+        coordinator.focus(on: 770)
+        await waitUntil("window") { coordinator.state.canLoadNewer && !coordinator.state.isLoadingOlder }
+        let window = messageSequences(coordinator)
+
+        coordinator.send(.sendMessage(text: "about this one"))
+        XCTAssertEqual(coordinator.state.pending.map(\.text), ["about this one"])
+        XCTAssertFalse(coordinator.state.isLoadingOlder, "no page of the live room is asked for")
+        XCTAssertTrue(coordinator.state.canLoadNewer, "still the window")
+        XCTAssertEqual(messageSequences(coordinator), window)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(transport.snapshot().before.count, 2, "only the room's first page and the window's")
+        XCTAssertEqual(messageSequences(coordinator), window)
+        coordinator.pause()
+    }
+
+    /// At the bottom, a send keeps the reader there with their message, and nothing is left unread.
+    func test_sending_at_the_bottom_leaves_nothing_unread() async {
+        let transport = ScriptedRoomTransport(before: [.success(page([1, 2]))])
+        let coordinator = makeCoordinator(transport, sender: AcceptingSender())
+        coordinator.resume()
+        await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
+        coordinator.send(.readerAtBottom(false))
+        coordinator.handle(.message(message(3)))
+        coordinator.send(.readerAtBottom(true))
+        coordinator.send(.sendMessage(text: "here"))
+        XCTAssertEqual(coordinator.state.unreadCount, 0)
+        XCTAssertFalse(coordinator.state.rows.contains(.unreadDivider))
         coordinator.pause()
     }
 
