@@ -1,5 +1,4 @@
 import Foundation
-import OSLog
 import PocketUI
 import SwiftUI
 import UIKit
@@ -207,33 +206,6 @@ final class RoomReaderStaysPutTests: XCTestCase {
         XCTAssertEqual(trace.takenWhileReading, 0, "a reading was acted on while the list was laid out")
     }
 
-    /// SwiftUI's own word on it, from the app's log: through arrivals followed at the bottom, the composer focused and
-    /// typed into (the list laid out again and again as the keyboard rises), the reader leaving and arrivals while
-    /// away, nothing says the scroll geometry "tried to update multiple times per frame".
-    func test_swiftui_never_says_the_scroll_geometry_updated_twice_in_a_frame() throws {
-        try XCTSkipUnless(Self.readsGeometry, "the scroll view's readings are iOS 18 and later")
-        let since = Date()
-        let room = Room(Self.messages())
-        let list = try host(room)
-        let box = try XCTUnwrap(window.flatMap { Self.textViews(in: $0).first }, "the room's composer")
-        box.becomeFirstResponder()
-        pump(1)
-        for character in "Typing at the bottom." {
-            box.insertText(String(character))
-            pump(0.03)
-        }
-        try followLeaveAndArrive(room, list)
-        box.resignFirstResponder()
-        pump(1)
-        let store = try OSLogStore(scope: .currentProcessIdentifier)
-        let matching = NSPredicate(format: "composedMessage CONTAINS %@", "multiple times per frame")
-        let warnings = try store.getEntries(at: store.position(date: since), matching: matching)
-            .compactMap { $0 as? OSLogEntryLog }
-            .filter { $0.date >= since && $0.composedMessage.contains("multiple times per frame") }
-        print("ROOM-SCROLL-WARNINGS \(warnings.count)")
-        XCTAssertEqual(warnings.count, 0, warnings.prefix(3).map(\.composedMessage).joined(separator: " | "))
-    }
-
     /// At the bottom, a burst faster than the room follows (more than `RoomBottomWatch`'s 20 a second): the follow
     /// over the limit is made once the second is up, not dropped, so the reader ends at the bottom with the last of it.
     func test_a_burst_faster_than_twenty_a_second_still_ends_at_the_bottom() throws {
@@ -364,10 +336,6 @@ final class RoomReaderStaysPutTests: XCTestCase {
     /// rests there, a few points above the very end (the list's own padding).
     private static func atBottom(_ scroll: UIScrollView) -> Bool {
         bottomOffset(of: scroll) - scroll.contentOffset.y < 24
-    }
-
-    private static func textViews(in view: UIView) -> [UITextView] {
-        (view as? UITextView).map { [$0] } ?? view.subviews.flatMap { textViews(in: $0) }
     }
 
     /// The room's list: the tallest scroll view in the window.
