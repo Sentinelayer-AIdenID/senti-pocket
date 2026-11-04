@@ -87,6 +87,16 @@ final class ChatMarkdownTests: XCTestCase {
         XCTAssertEqual(split.prose, "Tickets: · Next: the build goes out tonight.", "what the nested pattern made of it")
         XCTAssertEqual(ChatReferences.ticketLinks(in: links[0] + " · " + links[1] + " · ").prose, "", "trailing separators go")
         XCTAssertEqual(ChatReferences.ticketLinks(in: "x " + links[0] + " ·  · y").prose, "x · y", "a run becomes one")
+
+        // Review: a very long run of separators and spaces, not at the end, is tried once, not at each character.
+        let run = links[0] + String(repeating: " · ", count: 10_000) + "then text"
+        let longStart = Date()
+        XCTAssertEqual(ChatReferences.ticketLinks(in: run).prose, "· then text")
+        XCTAssertLessThan(Date().timeIntervalSince(longStart), 0.5)
+        // The shared-things list wants only the tickets: the text comes back as it was.
+        let onlyTickets = ChatReferences.ticketLinks(in: digest, cleaningProse: false)
+        XCTAssertEqual(onlyTickets.tickets.count, 16)
+        XCTAssertEqual(onlyTickets.prose, digest)
     }
 
     func test_ticket_links_come_out_of_the_text_one_per_row() {
