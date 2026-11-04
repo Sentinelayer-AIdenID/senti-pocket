@@ -190,6 +190,32 @@ final class RoomReaderStaysPutTests: XCTestCase {
         XCTAssertEqual(list.contentOffset.y, offset, accuracy: 1, "the arrival moved the reader")
     }
 
+    /// The scroll view's readings come while the list is laid out. Acting on one there (a follow, the reader's place)
+    /// changes the list again in the same frame, and SwiftUI warns "tried to update multiple times per frame". Each is
+    /// only kept, and taken on a later frame: through a follow at the bottom, the reader leaving, and arrivals while
+    /// away, readings are taken, and never in the turn of the run loop that queued them.
+    func test_a_reading_is_never_taken_in_the_turn_it_came_in() throws {
+        try XCTSkipUnless(Self.readsGeometry, "the scroll view's readings are iOS 18 and later")
+        let room = Room(Self.messages())
+        let list = try host(room)
+        RoomScrollTrace.reset()
+        for seq in Int64(61)...64 {
+            room.arrive([Self.arrival(seq)])
+            pump(0.2)
+        }
+        wait("followed", seconds: 3) { Self.atBottom(list) }
+        list.setContentOffset(CGPoint(x: 0, y: Self.bottomOffset(of: list) - 300), animated: false)
+        wait("away from the bottom", seconds: 3) { !room.atBottom }
+        for seq in Int64(65)...67 {
+            room.arrive([Self.arrival(seq)])
+            pump(0.2)
+        }
+        let trace = RoomScrollTrace.snapshot()
+        print("ROOM-SCROLL-TRACE taken=\(trace.taken) taken-in-their-turn=\(trace.takenInTheirTurn)")
+        XCTAssertGreaterThan(trace.taken, 2, "readings were taken: the follow, the leaving")
+        XCTAssertEqual(trace.takenInTheirTurn, 0, "a reading was acted on in the turn it came in")
+    }
+
     /// Within the bottom's 24 points the reader is at the bottom, and follows what arrives.
     func test_at_the_very_bottom_the_reader_follows_what_arrives() throws {
         try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
