@@ -4,7 +4,7 @@ import PocketUI
 
 // SUPPORT CONTACT: the one address the app gives for help (Settings, Account). To change it, change `email` here.
 enum PocketSupport {
-    static let email = "support@sentinelayer.com"
+    static let email = "help@plexaura.io"
 
     static var mailURL: URL? { URL(string: "mailto:\(email)") }
 }

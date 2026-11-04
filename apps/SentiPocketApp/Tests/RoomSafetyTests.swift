@@ -764,7 +764,7 @@ final class RoomSafetyTests: XCTestCase {
     // MARK: Support
 
     func test_the_support_contact_is_one_address() {
-        XCTAssertEqual(PocketSupport.email, "support@sentinelayer.com")
-        XCTAssertEqual(PocketSupport.mailURL?.absoluteString, "mailto:support@sentinelayer.com")
+        XCTAssertEqual(PocketSupport.email, "help@plexaura.io")
+        XCTAssertEqual(PocketSupport.mailURL?.absoluteString, "mailto:help@plexaura.io")
     }
 }
