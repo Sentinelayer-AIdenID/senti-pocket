@@ -61,14 +61,15 @@ final class DirectMessagesCenter: ObservableObject {
         reading = nil
     }
 
+    /// A read that finds what is shown writes nothing, so the root and the side panel draw only for a change.
     private func read() async {
         do {
             let value = try await client.directMessageSettings()
-            isAvailable = true
-            allowance = value
+            if !isAvailable { isAvailable = true }
+            if allowance != value { allowance = value }
         } catch DirectMessageError.unavailable {
-            isAvailable = false
-            allowance = nil
+            if isAvailable { isAvailable = false }
+            if allowance != nil { allowance = nil }
         } catch DirectMessageError.reauthenticationRequired {
             onReauthenticationRequired()
         } catch {

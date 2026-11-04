@@ -53,14 +53,16 @@ final class RoomFoldersCenter: ObservableObject {
 
     /// Reads your folders. A 404 (or 403) means folders are off: everything about them hides. A failure that says
     /// nothing either way keeps what is shown.
+    /// A read that finds what is shown writes nothing, so the root and the side panel draw only for a change.
     func refresh() async {
         do {
-            folders = try await client.folders()
+            let read = try await client.folders()
+            if read != folders { folders = read }
         } catch RoomFolderError.unavailable {
-            folders = nil
-            sheet = nil
-            deleting = nil
-            notice = nil
+            if folders != nil { folders = nil }
+            if sheet != nil { sheet = nil }
+            if deleting != nil { deleting = nil }
+            if notice != nil { notice = nil }
         } catch RoomFolderError.reauthenticationRequired {
             onReauthenticationRequired()
         } catch {

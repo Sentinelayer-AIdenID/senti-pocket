@@ -156,7 +156,9 @@ final class NotificationsCoordinator: ObservableObject {
             if notifications.isEmpty { failure = .network } else { couldNotUpdate = true }
         }
         isLoading = false
-        publish()
+        // A poll that found what the bell shows writes nothing: only its time would change, and the root, the side
+        // panel and the room under it would all draw again for it. A read someone asked for shows its time.
+        publish(evenIfOnlyFresher: force)
     }
 
     /// Marks one read and returns its destination, if it points into a room.
@@ -247,8 +249,8 @@ final class NotificationsCoordinator: ObservableObject {
         for notification in notifications where !notification.isRead { markRead(notification.id) }
     }
 
-    private func publish() {
-        state = NotificationsPresentationState(
+    private func publish(evenIfOnlyFresher: Bool = true) {
+        let next = NotificationsPresentationState(
             rows: notifications.map { notification in
                 let link = notification.link ?? (notification.sessionId.isEmpty ? nil : SentiLink(sessionId: notification.sessionId))
                 return NotificationRow(
@@ -267,5 +269,9 @@ final class NotificationsCoordinator: ObservableObject {
             updatedAt: updatedAt,
             couldNotUpdate: couldNotUpdate
         )
+        guard next != state else { return }
+        if !evenIfOnlyFresher, next.unread == state.unread, next.earlier == state.earlier, next.isLoading == state.isLoading,
+           next.failure == state.failure, next.couldNotUpdate == state.couldNotUpdate { return }
+        state = next
     }
 }

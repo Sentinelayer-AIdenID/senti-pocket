@@ -2275,7 +2275,7 @@ final class RoomChatCoordinator: ObservableObject {
             )
         }
         let replyInputs = inlineReplyInputs()
-        state = RoomChatPresentationState(
+        let next = RoomChatPresentationState(
             sessionId: sessionId,
             title: title,
             messages: inputs,
@@ -2320,6 +2320,9 @@ final class RoomChatCoordinator: ObservableObject {
             fileParts: placedFiles?.parts ?? [:],
             draftKey: draftKey
         )
+        // A poll, a presence beat or a read of who viewed what that changed nothing writes nothing: every write draws
+        // the room's whole list again.
+        if next != state { state = next }
         summarizeNextThread(replyInputs, messages: inputs)
     }
 

@@ -59,7 +59,8 @@ final class WaitingOnYouCoordinator: ObservableObject {
     }
 
     func refresh() async {
-        if items.isEmpty { state.isLoading = true }
+        if items.isEmpty, !state.isLoading { state.isLoading = true }
+        var next = state
         do {
             let page = try await transport.waiting(limit: 50)
             // The signal model's name never shows, here or in the answer posted (warden, #270).
@@ -67,20 +68,26 @@ final class WaitingOnYouCoordinator: ObservableObject {
             total = page.total
             // The server's word wins once it no longer lists an answered ask.
             answered = answered.filter { key in items.contains { $0.askKey == key } }
-            state.isAvailable = true
-            state.notice = nil
+            next.isAvailable = true
+            next.notice = nil
         } catch SessionTransportError.accessDenied {
             // An older server without the list answers 404, which the shared fetch reads as access denied; so does a
             // server that will not show it to this sign-in. Either way the side panel leaves it out.
-            state.isAvailable = false
+            next.isAvailable = false
         } catch SessionTransportError.reauthenticationRequired {
             onReauthenticationRequired()
         } catch SessionTransportError.cancelled {
         } catch {
-            if state.isAvailable { state.notice = "Could not update. Pull to try again." }
+            if next.isAvailable { next.notice = "Could not update. Pull to try again." }
         }
-        state.isLoading = false
-        publish()
+        next.isLoading = false
+        publish(into: &next)
+        show(next)
+    }
+
+    /// One write, and none when the list shows the same: the root and the side panel draw only for a change.
+    private func show(_ next: WaitingOnYouState) {
+        if next != state { state = next }
     }
 
     func send(_ intent: WaitingOnYouIntent) -> SentiLink? {
@@ -105,11 +112,14 @@ final class WaitingOnYouCoordinator: ObservableObject {
         // The same answer again (a retry) keeps its id; a different answer is a new message.
         let clientId = pending[key].flatMap { $0.line == line ? $0.clientId : nil } ?? "hm_" + UUID().uuidString.lowercased()
         pending[key] = (line, clientId)
-        state.sending.insert(id)
-        state.notice = nil
-        publish()
+        var next = state
+        next.sending.insert(id)
+        next.notice = nil
+        publish(into: &next)
+        show(next)
         Task { [weak self] in
             guard let self else { return }
+            var notice: String?
             do {
                 try await self.sender.sendHumanMessage(sessionId: item.roomId, text: line, clientId: clientId)
                 self.pending[key] = nil
@@ -119,19 +129,22 @@ final class WaitingOnYouCoordinator: ObservableObject {
             } catch RoomSendError.notAllowed {
                 // Said plainly, with no retry to offer (warden, #270).
                 self.pending[key] = nil
-                self.state.notice = "You can't post in that room any more, so your answer to \"\(item.title)\" was not sent."
+                notice = "You can't post in that room any more, so your answer to \"\(item.title)\" was not sent."
             } catch RoomSendError.rejected {
                 self.pending[key] = nil
-                self.state.notice = "Senti did not accept your answer to \"\(item.title)\". Open the ticket to answer there."
+                notice = "Senti did not accept your answer to \"\(item.title)\". Open the ticket to answer there."
             } catch {
-                self.state.notice = "Your answer to \"\(item.title)\" did not go. Tap it again to retry."
+                notice = "Your answer to \"\(item.title)\" did not go. Tap it again to retry."
             }
-            self.state.sending.remove(id)
-            self.publish()
+            var next = self.state
+            if let notice { next.notice = notice }
+            next.sending.remove(id)
+            self.publish(into: &next)
+            self.show(next)
         }
     }
 
-    private func publish() {
+    private func publish(into state: inout WaitingOnYouState) {
         let shown = items.filter { !answered.contains($0.askKey) }
         state.rows = shown.map { item in
             WaitingOnYouRow(
