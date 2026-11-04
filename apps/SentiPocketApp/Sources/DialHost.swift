@@ -110,6 +110,7 @@ final class DialHost: ObservableObject {
         )
         let coord = DialCoordinator(
             hydrate: selectedHydrator.hydrate,
+            mayShareWithAI: { await AIConsentAsker.shared.allows() },
             runDial: { ring, callUUID in
                 guard let fence = ring.core.binding,
                       callAuthorizationGate.permits(callUUID),

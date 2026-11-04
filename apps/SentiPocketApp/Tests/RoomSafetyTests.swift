@@ -13,11 +13,15 @@ import XCTest
 private final class SafetyURLProtocol: URLProtocol {
     private static let lock = NSLock()
     private static var answers: [String: (status: Int, body: String)] = [:]
+    private static var rule: ((String, Data) -> (status: Int, body: String)?)?
     private static var captured: [(request: URLRequest, body: Data)] = []
 
-    static func reset(_ answers: [String: (status: Int, body: String)]) {
+    /// `rule`, when it answers, answers by what was sent; else `answers` by method and path.
+    static func reset(_ answers: [String: (status: Int, body: String)],
+                      rule: ((String, Data) -> (status: Int, body: String)?)? = nil) {
         lock.withLock {
             self.answers = answers
+            self.rule = rule
             captured = []
         }
     }
@@ -42,7 +46,7 @@ private final class SafetyURLProtocol: URLProtocol {
         let key = "\(request.httpMethod ?? "GET") \(request.url?.path ?? "")"
         let answer = Self.lock.withLock { () -> (status: Int, body: String) in
             Self.captured.append((request, body))
-            return Self.answers[key] ?? (404, "{}")
+            return Self.rule?(key, body) ?? Self.answers[key] ?? (404, "{}")
         }
         let response = HTTPURLResponse(url: request.url!, statusCode: answer.status, httpVersion: nil, headerFields: nil)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
@@ -74,6 +78,7 @@ private final class FakeBlocksAPI: BlockListClient, @unchecked Sendable {
     private var _online: Bool
     private var _server: [String]
     private var _calls: [String] = []
+    private var _references: [BlockReference?] = []
 
     init(online: Bool, server: [String] = []) {
         _online = online
@@ -86,6 +91,8 @@ private final class FakeBlocksAPI: BlockListClient, @unchecked Sendable {
     }
     var server: [String] { lock.withLock { _server } }
     var calls: [String] { lock.withLock { _calls } }
+    /// The post each block the server took was chosen on.
+    var references: [BlockReference?] { lock.withLock { _references } }
 
     func blocks() async throws -> [ServerBlock] {
         try lock.withLock {
@@ -95,10 +102,11 @@ private final class FakeBlocksAPI: BlockListClient, @unchecked Sendable {
         }
     }
 
-    func block(_ actorId: String) async throws {
+    func block(_ actorId: String, from reference: BlockReference?) async throws {
         try lock.withLock {
             _calls.append("POST \(actorId)")
             guard _online else { throw RoomSendError.retryable(retryAfterSeconds: nil) }
+            _references.append(reference)
             if !_server.contains(actorId) { _server.append(actorId) }
         }
     }
@@ -136,7 +144,9 @@ private final class HeldListAPI: BlockListClient, @unchecked Sendable {
         waiter?.resume(returning: list)
     }
 
-    func block(_ actorId: String) async throws { throw RoomSendError.retryable(retryAfterSeconds: nil) }
+    func block(_ actorId: String, from reference: BlockReference?) async throws {
+        throw RoomSendError.retryable(retryAfterSeconds: nil)
+    }
     func unblock(_ actorId: String) async throws { throw RoomSendError.retryable(retryAfterSeconds: nil) }
 }
 
@@ -233,6 +243,15 @@ private final class SenderAccount: AccountIdentityProviding, @unchecked Sendable
             return SignedInAccount(githubUsername: "sam", accountId: "6F1C2B9E-0000-4000-8000-00000000000A",
                                    senderId: "HUMAN-G.6f1c2b9e00004000800000000000000a")
         }
+    }
+}
+
+/// A Google account (its email name is `sam-rivera`), as an API with `sender_id` says it: it posts under its account id
+/// now, and posted as `human-sam-rivera` before sentinelayer-api #1105.
+private struct GoogleAccount: AccountIdentityProviding {
+    func currentAccount() async -> SignedInAccount? {
+        SignedInAccount(githubUsername: "sam-rivera", accountId: "6F1C2B9E-0000-4000-8000-00000000000A",
+                        senderId: "human-g.6f1c2b9e00004000800000000000000a")
     }
 }
 
@@ -358,7 +377,7 @@ final class RoomSafetyTests: XCTestCase {
         }
         // The server's own 404: that message can't be reported.
         SafetyURLProtocol.reset(["POST /api/v1/sessions/room_1/reports":
-            (404, #"{"detail":{"error":{"code":"MESSAGE_NOT_FOUND","message":"No message"}}}"#)])
+            (404, #"{"error":{"code":"MESSAGE_NOT_FOUND","message":"No message","request_id":"req-1"}}"#)])
         do {
             try await sender.report(sessionId: "room_1", RoomReportRequest(target: target, reason: .spam, note: ""))
             XCTFail("a refusal is not a report sent")
@@ -368,19 +387,24 @@ final class RoomSafetyTests: XCTestCase {
     }
 
     func test_what_a_reports_answer_means() {
-        func outcome(_ status: Int, _ code: String? = nil) -> RoomSendError? {
-            let body = code.map { Data(#"{"detail":{"error":{"code":"\#($0)"}}}"#.utf8) } ?? Data("{}".utf8)
+        // As the API sends it (its error handler lifts the error out of `detail`); `detail` is read too.
+        func outcome(_ status: Int, _ code: String? = nil, underDetail: Bool = false) -> RoomSendError? {
+            let error = code.map { #"{"code":"\#($0)","message":"No","request_id":"req-1"}"# }
+            let json = error.map { underDetail ? #"{"detail":{"error":\#($0)}}"# : #"{"error":\#($0)}"# } ?? "{}"
             do {
-                try HTTPRoomMessageSender.reportOutcome(status: status, body: body)
+                try HTTPRoomMessageSender.reportOutcome(status: status, body: Data(json.utf8))
                 return nil
             } catch {
                 return error as? RoomSendError
             }
         }
         XCTAssertNil(outcome(201))
-        XCTAssertEqual(outcome(404, "SESSION_NOT_FOUND"), .rejected, "not in that room: can't be reported")
-        XCTAssertEqual(outcome(404, "MESSAGE_NOT_FOUND"), .rejected)
-        XCTAssertEqual(outcome(422, "CANNOT_REPORT_OWN_MESSAGE"), .rejected)
+        for underDetail in [false, true] {
+            XCTAssertEqual(outcome(404, "SESSION_NOT_FOUND", underDetail: underDetail), .rejected,
+                           "not in that room: can't be reported")
+            XCTAssertEqual(outcome(404, "MESSAGE_NOT_FOUND", underDetail: underDetail), .rejected)
+            XCTAssertEqual(outcome(422, "CANNOT_REPORT_OWN_MESSAGE", underDetail: underDetail), .rejected)
+        }
         XCTAssertEqual(outcome(403), .notAllowed)
         XCTAssertEqual(outcome(404), .retryable(retryAfterSeconds: nil), "a bare 404 is an API without the route yet")
         XCTAssertEqual(outcome(429), .retryable(retryAfterSeconds: nil))
@@ -468,10 +492,31 @@ final class RoomSafetyTests: XCTestCase {
         )
         room.resume()
         room.handle(.message(message(2, author: "human-g.6f1c2b9e00004000800000000000000a", text: "Mine")))
-        room.handle(.message(message(3, author: "human-sam", text: "Someone else called sam")))
+        room.handle(.message(message(3, author: "human-alex", text: "Someone else")))
         await waitUntil("yours") { self.rows(room)["evt-2"]?.isOwn == true }
-        XCTAssertEqual(rows(room)["evt-3"]?.isOwn, false, "the GitHub-shaped id is not yours when the server says otherwise")
+        XCTAssertEqual(rows(room)["evt-3"]?.isOwn, false)
         XCTAssertNotNil(rows(room)["evt-3"]?.reportTarget)
+        room.pause()
+    }
+
+    func test_your_posts_under_your_old_id_are_never_offered_to_report_or_block() async {
+        let room = RoomChatCoordinator(
+            sessionId: "room_1", title: "Room", transport: QuietRoom(), identity: GoogleAccount(),
+            sleep: { seconds in if seconds > 5 { try? await Task.sleep(nanoseconds: 3_600_000_000_000) } },
+            reporter: FakeReporter(), blocks: BlockList(account: "sub:a", store: temporaryStore(), client: nil),
+            onReauthenticationRequired: {}
+        )
+        room.resume()
+        room.handle(.message(message(2, author: "human-g.6f1c2b9e00004000800000000000000a", text: "Mine")))
+        room.handle(.message(message(3, author: "human-sam-rivera", text: "Mine, from before the change")))
+        room.handle(.message(message(4, author: "human-alex", text: "Someone else")))
+        await waitUntil("yours") { self.rows(room)["evt-2"]?.isOwn == true }
+        let old = rows(room)["evt-3"]
+        XCTAssertNil(old?.reportTarget, "your own old post: no Report")
+        XCTAssertEqual(old?.isBlockable, false, "and no Block")
+        XCTAssertEqual(old?.isOwn, false, "it shows as it did: a GitHub login of that name may post under that id too")
+        XCTAssertNotNil(rows(room)["evt-4"]?.reportTarget)
+        XCTAssertEqual(rows(room)["evt-4"]?.isBlockable, true)
         room.pause()
     }
 
@@ -640,7 +685,7 @@ final class RoomSafetyTests: XCTestCase {
         let listed = try await client.blocks()
         XCTAssertEqual(listed.map(\.actorId), ["human-sam"])
         XCTAssertNotNil(listed.first?.createdAt)
-        try await client.block("review-agent")
+        try await client.block("review-agent", from: nil)
         try await client.unblock("human-sam")
         let sent = SafetyURLProtocol.requests
         XCTAssertEqual(sent.map { "\($0.request.httpMethod ?? "") \($0.request.url?.path ?? "")" },
@@ -651,15 +696,16 @@ final class RoomSafetyTests: XCTestCase {
         // Before the API has the route (404): may work later, so the change is kept.
         SafetyURLProtocol.reset([:])
         do {
-            try await client.block("human-x")
+            try await client.block("human-x", from: nil)
             XCTFail("a 404 is not a block taken")
         } catch {
             XCTAssertEqual(error as? RoomSendError, .retryable(retryAfterSeconds: nil))
         }
         // Yourself (422): never, so the change goes.
-        SafetyURLProtocol.reset(["POST /api/v1/me/blocks": (422, #"{"detail":{"code":"CANNOT_BLOCK_SELF"}}"#)])
+        SafetyURLProtocol.reset(["POST /api/v1/me/blocks":
+            (422, #"{"error":{"code":"CANNOT_BLOCK_SELF","message":"No","request_id":"req-1"}}"#)])
         do {
-            try await client.block("human-me")
+            try await client.block("human-me", from: nil)
             XCTFail("a 422 is a refusal")
         } catch {
             XCTAssertEqual(error as? RoomSendError, .rejected)
@@ -676,6 +722,90 @@ final class RoomSafetyTests: XCTestCase {
             XCTAssertEqual(error as? RoomSendError, .reauthenticationRequired)
         }
         XCTAssertTrue(SafetyURLProtocol.requests.isEmpty, "nothing was sent")
+    }
+
+    func test_a_block_names_the_message_or_reply_it_was_chosen_on() async throws {
+        SafetyURLProtocol.reset(["POST /api/v1/me/blocks": (201, #"{"block":{"actorId":"human-sam"}}"#)])
+        let client = HTTPBlockListClient(apiBaseURL: URL(string: "https://api.example.test"), account: "sub:user-a",
+                                         urlSession: SafetyURLProtocol.session, tokenProvider: { token(subject: "user-a") })
+        let reply = "3f0c2a8e-2c4d-4c38-9e0f-2b1f5f1d7a10"
+        try await client.block("human-sam", from: BlockReference(sessionId: "room_1", sequenceId: 42, replyId: reply))
+        try await client.block("human-sam", from: BlockReference(sessionId: "room_1", sequenceId: 42, replyId: nil))
+        let bodies = try SafetyURLProtocol.requests.map {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: $0.body) as? [String: Any])
+        }
+        XCTAssertEqual(bodies.count, 2)
+        XCTAssertEqual(Set(bodies[0].keys), ["actorId", "sessionId", "sequenceId", "replyId"], "the report route's names")
+        XCTAssertEqual(bodies[0]["actorId"] as? String, "human-sam")
+        XCTAssertEqual(bodies[0]["sessionId"] as? String, "room_1")
+        XCTAssertEqual(bodies[0]["sequenceId"] as? Int, 42)
+        XCTAssertEqual(bodies[0]["replyId"] as? String, reply)
+        XCTAssertEqual(Set(bodies[1].keys), ["actorId", "sessionId", "sequenceId"], "a message: no replyId")
+
+        // The API's own refusal (yourself) is final: not sent again without the post.
+        SafetyURLProtocol.reset(["POST /api/v1/me/blocks":
+            (422, #"{"error":{"code":"CANNOT_BLOCK_SELF","message":"No","request_id":"req-1"}}"#)])
+        do {
+            try await client.block("human-me", from: BlockReference(sessionId: "room_1", sequenceId: 7, replyId: nil))
+            XCTFail("a refusal")
+        } catch {
+            XCTAssertEqual(error as? RoomSendError, .rejected)
+        }
+        XCTAssertEqual(SafetyURLProtocol.requests.count, 1)
+    }
+
+    func test_an_api_from_before_the_post_reference_still_takes_the_block_by_id() async throws {
+        // As the API before the reference: it refuses any field it doesn't know, with a validation error and no code.
+        SafetyURLProtocol.reset([:], rule: { key, body in
+            guard key == "POST /api/v1/me/blocks",
+                  let sent = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else { return nil }
+            if Set(sent.keys) == ["actorId"] { return (201, #"{"block":{"actorId":"human-sam"}}"#) }
+            return (422, #"{"detail":[{"type":"extra_forbidden","loc":["body","sessionId"],"msg":"Extra inputs are not permitted"}]}"#)
+        })
+        let client = HTTPBlockListClient(apiBaseURL: URL(string: "https://api.example.test"), account: "sub:user-a",
+                                         urlSession: SafetyURLProtocol.session, tokenProvider: { token(subject: "user-a") })
+        try await client.block("human-sam", from: BlockReference(sessionId: "room_1", sequenceId: 42, replyId: nil))
+        let bodies = try SafetyURLProtocol.requests.map {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: $0.body) as? [String: Any])
+        }
+        XCTAssertEqual(bodies.count, 2, "sent again, by id alone")
+        XCTAssertEqual(Set(bodies[0].keys), ["actorId", "sessionId", "sequenceId"])
+        XCTAssertEqual(bodies[1] as? [String: String], ["actorId": "human-sam"])
+    }
+
+    func test_block_from_a_message_or_reply_sends_that_post_and_keeps_it_offline() async {
+        let store = temporaryStore()
+        let api = FakeBlocksAPI(online: false)
+        let blocks = BlockList(account: "sub:a", store: store, client: api)
+        let reply = RoomReply(id: "act-1", targetSequenceId: 3, authorId: "review-agent", text: "A reply",
+                              createdAt: "2026-11-03T18:00:05.000000+00:00")
+        let room = room(QuietRoom(replies: [reply]), blocks: blocks)
+        room.handle(.message(message(2, author: "human-sam", text: "Something unkind")))
+        room.handle(.message(message(3, author: "human-alex", text: "Build 319 is green")))
+        await waitUntil("reply in the room") { self.rows(room)["reply-act-1"] != nil }
+        room.send(.block(rows(room)["evt-2"]!.blockTarget))
+        room.send(.block(rows(room)["reply-act-1"]!.blockTarget))
+        XCTAssertEqual(blocks.changes.map(\.reference), [
+            BlockReference(sessionId: "room_1", sequenceId: 2, replyId: nil),
+            BlockReference(sessionId: "room_1", sequenceId: 3, replyId: "act-1")
+        ])
+
+        // Kept on the phone with the post, and sent with it once the server can take it.
+        let relaunched = BlockList(account: "sub:a", store: store, client: api)
+        XCTAssertEqual(relaunched.changes, blocks.changes)
+        api.online = true
+        await relaunched.sync()
+        XCTAssertEqual(api.references, [
+            BlockReference(sessionId: "room_1", sequenceId: 2, replyId: nil),
+            BlockReference(sessionId: "room_1", sequenceId: 3, replyId: "act-1")
+        ])
+
+        // Unblocking (Blocked people) is by id, and so is a block chosen anywhere but on a post.
+        relaunched.unblock("human-sam")
+        await waitUntil("unblocked on the server") { api.calls.contains("DELETE human-sam") }
+        relaunched.block(RoomBlockTarget(actorId: "build-agent", name: "build-agent"))
+        await waitUntil("blocked by id") { api.references.count == 3 }
+        XCTAssertEqual(api.references.last, .some(nil))
     }
 
     // MARK: AI consent
@@ -764,6 +894,74 @@ final class RoomSafetyTests: XCTestCase {
         let reads: [RoomTicketsIntent] = [.setShowsArchived(true), .search("x"), .refresh,
                                           .openSourceMessage(sequenceId: 1), .loadComments(ticketId: "t1")]
         XCTAssertFalse(reads.contains(where: \.writesToTheRoom))
+    }
+
+    func test_the_pocket_sheet_drafts_what_you_dictate_only_after_the_ok() {
+        OutboxStore.clear()
+        defer { OutboxStore.clear() }
+        let consent = AIConsent(account: "sub:a", defaults: temporaryDefaults())
+        let write = PhoneWriteViewModel(sessionId: "6cf7e861", receiptTrustAvailable: true,
+                                        client: PocketWriteClient(apiBaseURL: nil, tokenProvider: { nil }))
+        var asked: (() -> Void)?
+        PocketPhoneView.review("Ship it", write: write, aiConsent: consent) { asked = $0 }
+        XCTAssertNotNil(asked, "asked first, with the rooms' question")
+        XCTAssertEqual(write.state, .composing, "nothing drafted before the answer (Not now leaves it in the box)")
+
+        consent.grant()
+        asked?()
+        guard case .confirming = write.state else { return XCTFail("drafted after OK, got \(write.state)") }
+
+        write.cancel()
+        var askedAgain = false
+        PocketPhoneView.review("Ship it now", write: write, aiConsent: consent) { _ in askedAgain = true }
+        XCTAssertFalse(askedAgain, "said once: not asked again")
+        guard case .confirming = write.state else { return XCTFail("drafted at once, got \(write.state)") }
+    }
+
+    func test_a_dial_asks_the_same_question_and_goes_on_only_after_ok() async {
+        let consent = AIConsent(account: "sub:a", defaults: temporaryDefaults())
+        let asker = AIConsentAsker(storedConsent: { consent })
+
+        // Not now: the dial doesn't go on.
+        let declined = Task { await asker.allows() }
+        await waitUntil("asked") { asker.held != nil }
+        let first = asker.held
+        asker.held = nil
+        first?.decline()
+        let declinedAnswer = await declined.value
+        XCTAssertFalse(declinedAnswer)
+        XCTAssertFalse(consent.isGiven)
+
+        // OK: it does.
+        let allowed = Task { await asker.allows() }
+        await waitUntil("asked again") { asker.held != nil }
+        let second = asker.held
+        asker.held = nil
+        consent.grant()
+        second?.proceed()
+        let allowedAnswer = await allowed.value
+        XCTAssertTrue(allowedAnswer)
+
+        // Said: at once, with nothing asked.
+        let atOnce = await asker.allows()
+        XCTAssertTrue(atOnce)
+        XCTAssertNil(asker.held)
+
+        // Hung up while it asks: it doesn't go on, and the question goes.
+        consent.withdraw()
+        let hungUp = Task { await asker.allows() }
+        await waitUntil("asked") { asker.held != nil }
+        hungUp.cancel()
+        let hungUpAnswer = await hungUp.value
+        XCTAssertFalse(hungUpAnswer)
+        await waitUntil("question gone") { asker.held == nil }
+
+        // The signed-in screens' consent is the one asked.
+        let screens = AIConsent(account: "sub:a", defaults: temporaryDefaults())
+        screens.grant()
+        asker.consent = screens
+        let fromScreens = await asker.allows()
+        XCTAssertTrue(fromScreens)
     }
 
     // MARK: Support

@@ -1506,7 +1506,7 @@ private struct RoomMessageRowView: View {
         } else if option.kind == .block {
             // Once the menu that offered it has gone, so the question is never dropped.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                blocking = RoomBlockTarget(actorId: row.authorId, name: row.authorName)
+                blocking = row.blockTarget
             }
         } else if option.kind == .copy {
             copyToPasteboard(row.text)
@@ -2191,7 +2191,9 @@ private struct RoomThreadSheet: View {
         .accessibilityAction(named: "Reply") { answer(reply) }
         // Asked at the reply, so the question points at it.
         .roomBlockConfirmation(Binding(
-            get: { blockingReply?.id == reply.id ? RoomBlockTarget(actorId: reply.authorId, name: reply.authorName) : nil },
+            get: {
+                blockingReply?.id == reply.id ? reply.reportTarget(inThread: thread.parent.sequenceId).map { RoomBlockTarget($0) } : nil
+            },
             set: { if $0 == nil { blockingReply = nil } }
         ), send: send)
     }

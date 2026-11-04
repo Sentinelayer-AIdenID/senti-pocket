@@ -300,6 +300,8 @@ public struct RoomChatMessageRow: Equatable, Identifiable, Sendable {
     public var hidesAsBlocked = false
     /// The server takes a report on it (`RoomChatMessageInput.isReportable`).
     public var isReportable = true
+    /// Yours, under the id this account had before (`formerOwnAuthorIds`): never reported or blocked.
+    public var wasYours = false
 }
 
 public enum RoomChatRow: Equatable, Identifiable, Sendable {
@@ -380,6 +382,8 @@ public struct RoomChatReplyRow: Equatable, Identifiable, Sendable {
     public var isAuthorBlocked = false
     /// You blocked its author and have not asked to see this one: it shows as one line with Show.
     public var hidesAsBlocked = false
+    /// Yours, under the id this account had before (`formerOwnAuthorIds`): never reported or blocked.
+    public var wasYours = false
 
     public init(
         id: String,
@@ -671,6 +675,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         fileParts: [String: Int64] = [:],
         draftKey: String? = nil,
         blockedAuthorIds: Set<String> = [],
+        formerOwnAuthorIds: Set<String> = [],
         revealedBlocked: Set<String> = [],
         canReport: Bool = false,
         canBlock: Bool = false,
@@ -774,6 +779,9 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         func isBlocked(_ authorId: String) -> Bool {
             !blocked.isEmpty && blocked.contains(authorId.lowercased()) && !ownIds.contains(authorId.lowercased())
         }
+        // Your posts under the id you had before: they show as they did, but you are never offered to report or block
+        // yourself.
+        let formerIds = Set(formerOwnAuthorIds.map { $0.lowercased() })
         for input in ordered {
             if let date = input.date {
                 let day = calendar.dateComponents([.year, .month, .day], from: date)
@@ -846,7 +854,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 hidesAsBlocked: input.kind == .message && isBlocked(input.authorId)
                     && !revealedBlocked.contains(input.inlineReplyId.map(RoomBlocking.revealKey(reply:))
                         ?? RoomBlocking.revealKey(message: input.id)),
-                isReportable: input.isReportable
+                isReportable: input.isReportable,
+                wasYours: formerIds.contains(input.authorId.lowercased())
             )))
             if input.kind == .message, let date = input.date {
                 run = (input.authorId, date)
@@ -893,6 +902,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                     reply.isAuthorBlocked = !reply.isOwn && isBlocked(reply.authorId)
                     reply.hidesAsBlocked = reply.isAuthorBlocked
                         && !revealedBlocked.contains(RoomBlocking.revealKey(reply: reply.id))
+                    reply.wasYours = formerIds.contains(reply.authorId.lowercased())
                     return reply
                 },
                 pending: threadInput.pending,
@@ -1519,14 +1529,20 @@ extension RoomChatMessageRow {
     /// Someone else's message or reply whose author can be blocked: not yours, not already blocked, and never the
     /// server's own posts.
     public var isBlockable: Bool {
-        !isOwn && kind == .message && !authorId.isEmpty && !isAuthorBlocked
+        !isOwn && !wasYours && kind == .message && !authorId.isEmpty && !isAuthorBlocked
             && authorId.lowercased() != RoomBlocking.serverAuthor
+    }
+
+    /// What Block names: the author, and this message (or the reply shown here), so the server ties the block to the
+    /// author you saw.
+    public var blockTarget: RoomBlockTarget {
+        RoomBlockTarget(actorId: authorId, name: authorName, sequenceId: sequenceId, replyId: inlineReplyId)
     }
 
     /// What Report and Block act on: someone else's message or reply, with an author to name. None for your own, for
     /// what the room itself posts (a checkpoint, a join, a breakout), or for a row the server takes no report on.
     public var reportTarget: RoomReportTarget? {
-        guard !isOwn, kind == .message, isReportable, !authorId.isEmpty else { return nil }
+        guard !isOwn, !wasYours, kind == .message, isReportable, !authorId.isEmpty else { return nil }
         return RoomReportTarget(sequenceId: sequenceId, replyId: inlineReplyId, authorId: authorId, authorName: authorName)
     }
 }
@@ -1534,7 +1550,7 @@ extension RoomChatMessageRow {
 extension RoomChatReplyRow {
     /// Someone else's reply in an open thread, for Report and Block; none for your own, or without an author.
     public func reportTarget(inThread sequenceId: Int64) -> RoomReportTarget? {
-        guard !isOwn, !authorId.isEmpty else { return nil }
+        guard !isOwn, !wasYours, !authorId.isEmpty else { return nil }
         return RoomReportTarget(sequenceId: sequenceId, replyId: id, authorId: authorId, authorName: authorName)
     }
 }

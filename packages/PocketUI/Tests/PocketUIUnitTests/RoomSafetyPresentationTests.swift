@@ -247,13 +247,70 @@ final class RoomSafetyPresentationTests: XCTestCase {
     }
 
     func test_blocking_says_plainly_what_it_does_and_does_not() {
-        let agent = RoomBlocking.confirmation(for: RoomBlockTarget(actorId: "build-agent", name: "build-agent"))
-        XCTAssertTrue(agent.contains("every agent called build-agent"), "an agent is blocked by its name")
-        XCTAssertTrue(agent.contains("Calls from them still ring"))
-        XCTAssertTrue(agent.contains("Waiting on you still shows"))
+        let agent = RoomBlocking.confirmation(for: RoomBlockTarget(actorId: "Build-Agent", name: "Build Agent"))
+        XCTAssertTrue(agent.contains("blocks this one id, build-agent"), "an agent is blocked by its id")
+        XCTAssertTrue(agent.contains("the same agent under another id isn't blocked"))
+        XCTAssertFalse(agent.contains("their agents' messages"))
         let person = RoomBlocking.confirmation(for: RoomBlockTarget(actorId: "human-sam", name: "Sam"))
-        XCTAssertFalse(person.contains("every agent"))
-        XCTAssertTrue(person.contains("Calls from them still ring"))
+        XCTAssertTrue(person.contains("Blocking a person doesn't hide their agents' messages"))
+        XCTAssertFalse(person.contains("another id"))
+        for said in [agent, person] {
+            // The server doesn't ring you for someone you blocked (sentinelayer-api #1118).
+            XCTAssertTrue(said.contains("Their calls don't ring your phone and may show as missed"))
+            XCTAssertFalse(said.contains("still ring"))
+            XCTAssertTrue(said.contains("Waiting on you still shows their questions"))
+            XCTAssertTrue(said.contains("They aren't told"))
+        }
+        // Blocked people says both, for anyone on the list.
+        XCTAssertTrue(RoomBlocking.byId.contains("Blocking a person doesn't hide their agents' messages"))
+        XCTAssertTrue(RoomBlocking.byId.contains("blocking one agent id doesn't block the same agent under another id"))
+    }
+
+    func test_block_names_the_post_it_was_chosen_on() {
+        let state = RoomChatPresentationState(sessionId: "room", title: "Room", messages: messages,
+                                              ownAuthorIds: ["human-me"], replies: replies)
+        let rows = rows(state)
+        XCTAssertEqual(rows["m2"]?.blockTarget,
+                       RoomBlockTarget(actorId: "human-sam", name: "sam", sequenceId: 2, replyId: nil))
+        XCTAssertEqual(rows["reply-r1"]?.blockTarget,
+                       RoomBlockTarget(actorId: "Human-Sam", name: "Human-Sam", sequenceId: 3, replyId: "r1"),
+                       "a reply shown in the room names the reply, on its message")
+        let reply = RoomChatReplyRow(id: "r9", authorName: "sam", isHuman: true, isOwn: false, text: "x", date: nil,
+                                     isEdited: false, authorId: "human-sam")
+        let fromThread = reply.reportTarget(inThread: 4).map { RoomBlockTarget($0) }
+        XCTAssertEqual(fromThread, RoomBlockTarget(actorId: "human-sam", name: "sam", sequenceId: 4, replyId: "r9"))
+        let afterReport = RoomBlockTarget(RoomReportTarget(sequenceId: 2, authorId: "human-sam", authorName: "sam"),
+                                          name: "Sam")
+        XCTAssertEqual(afterReport, RoomBlockTarget(actorId: "human-sam", name: "Sam", sequenceId: 2))
+        XCTAssertNil(RoomBlockTarget(actorId: "human-sam", name: "sam").sequenceId, "from Blocked people: no post")
+    }
+
+    func test_your_posts_under_the_id_you_had_before_are_never_reported_or_blocked() {
+        let old = [input("o1", seq: 5, at: 300, author: "human-sam-rivera", text: "From before the change"),
+                   input("reply-o2", seq: 2, at: 330, author: "human-sam-rivera", text: "An old reply", replyTo: 2,
+                         inline: true)]
+        let thread = RoomChatThreadInput(sequenceId: 2, replies: [
+            RoomChatReplyRow(id: "o3", authorName: "sam-rivera", isHuman: true, isOwn: false, text: "Old", date: nil,
+                             isEdited: false, authorId: "Human-Sam-Rivera")
+        ])
+        let state = RoomChatPresentationState(
+            sessionId: "room", title: "Room", messages: messages + [old[0]], ownAuthorIds: ["human-g.0a1b"],
+            thread: thread, replies: [old[1]], formerOwnAuthorIds: ["human-sam-rivera"], canReport: true, canBlock: true
+        )
+        let rows = rows(state)
+        for id in ["o1", "reply-o2"] {
+            let row = rows[id]!
+            let options = row.options(canReply: true, canReact: true, canPin: true, isPinned: false, pinsFull: false,
+                                      canReport: true, canBlock: true)
+            XCTAssertFalse(options.contains { $0.kind == .report || $0.kind == .block }, "\(id): never yourself")
+            XCTAssertNil(row.reportTarget)
+            XCTAssertFalse(row.isBlockable)
+            XCTAssertFalse(row.isOwn, "\(id) shows as it did: a GitHub login of that name may have posted there too")
+        }
+        XCTAssertNil(state.thread?.replies.first { $0.id == "o3" }?.reportTarget(inThread: 2), "nor in a thread")
+        let someoneElse = rows["m2"]!.options(canReply: true, canReact: true, canPin: true, isPinned: false,
+                                              pinsFull: false, canReport: true, canBlock: true)
+        XCTAssertTrue(someoneElse.contains { $0.kind == .report } && someoneElse.contains { $0.kind == .block })
     }
 
     func test_nothing_to_report_or_block_beside_an_access_failure() {

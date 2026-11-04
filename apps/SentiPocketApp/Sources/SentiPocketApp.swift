@@ -237,6 +237,8 @@ private struct AuthenticatedRootView: View {
     @State private var waitingConsentHeld: AIConsentHeld?
     /// A new room, held for that OK.
     @State private var newRoomConsentHeld: AIConsentHeld?
+    /// A dial (Senti calling you about a decision) waiting for that OK.
+    @ObservedObject private var dialConsent = AIConsentAsker.shared
     @Environment(\.scenePhase) private var rootScenePhase
     @ObservedObject private var whisperModelCoordinator: WhisperModelProvisioningCoordinator
     @ObservedObject private var incomingLinks: IncomingLinkInbox
@@ -515,7 +517,8 @@ private struct AuthenticatedRootView: View {
                     presentsPocket = false
                     presentsActivity = true
                 },
-                onReauthenticationRequired: invalidateProtectedAuthentication
+                onReauthenticationRequired: invalidateProtectedAuthentication,
+                aiConsent: aiConsent
             )
         }
         .sheet(isPresented: $presentsActivity) {
@@ -616,6 +619,7 @@ private struct AuthenticatedRootView: View {
             )
         }
         .aiConsentPrompt($newRoomConsentHeld) { aiConsent.grant() }
+        .aiConsentPrompt($dialConsent.held) { aiConsent.grant() }
         .sheet(isPresented: $presentsNewRoom) {
             if let creator = roomSender as? any RoomCreating {
                 NewRoomSheet(
@@ -642,6 +646,8 @@ private struct AuthenticatedRootView: View {
             sessions.start()
             notifications.startPolling()
             Task { await blocks.sync() }
+            // A dial asks this account, with this screen.
+            AIConsentAsker.shared.consent = aiConsent
             // Waiting on you is read from sign-in on, not only once the app comes back to the front (warden, #270).
             waiting.startPolling()
             // Apple push: a tap opens its room at the message; the room on screen gets no banner.
@@ -928,6 +934,8 @@ private struct SelectedSessionPocketView: View {
     @ObservedObject var checkpointNarrationRevocation: VerifiedCheckpointNarrationRevocationRelay
     let onCheckpointDone: @MainActor () -> Void
     let onReauthenticationRequired: @MainActor @Sendable () -> Void
+    /// This account's OK to share with AI, for what you dictate here.
+    let aiConsent: AIConsent
 
     @ViewBuilder var body: some View {
         switch checkpointPocket.phase {
@@ -971,6 +979,7 @@ private struct SelectedSessionPocketView: View {
         if let sessionId = sessions.selectedSessionId {
             PhoneRootView(
                 sessionId: sessionId,
+                aiConsent: aiConsent,
                 onReauthenticationRequired: onReauthenticationRequired,
                 isWriteAuthorized: {
                     UTF8ExactIdentity.matches(sessions.selectedSessionId, sessionId)
@@ -1174,12 +1183,15 @@ private struct SelectedSessionActivityBoundary: View {
 struct PhoneRootView: View {
     @StateObject private var reasoning: RealReasoningCoordinator
     @StateObject private var write: PhoneWriteViewModel
+    private let aiConsent: AIConsent
 
     init(
         sessionId: String,
+        aiConsent: AIConsent,
         onReauthenticationRequired: @escaping @MainActor @Sendable () -> Void = {},
         isWriteAuthorized: @escaping @MainActor () -> Bool = { true }
     ) {
+        self.aiConsent = aiConsent
         let unavailable = UnavailableSessionReasoningProvider()
         let gatewayURL = GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_GATEWAY_URL"])
         let authenticationExpiry = AuthenticationExpiryRelay()
@@ -1223,7 +1235,7 @@ struct PhoneRootView: View {
             isWriteAuthorized: isWriteAuthorized))
     }
 
-    var body: some View { PocketPhoneView(reasoning: reasoning, write: write) }
+    var body: some View { PocketPhoneView(reasoning: reasoning, write: write, aiConsent: aiConsent) }
 }
 
 private struct UnavailableSessionReasoningProvider: ReasoningProvider {

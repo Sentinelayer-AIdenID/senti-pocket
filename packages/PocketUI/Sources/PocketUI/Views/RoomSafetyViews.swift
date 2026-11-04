@@ -168,7 +168,7 @@ struct RoomReportSheet: View {
                     .foregroundStyle(PocketPalette.textSecondary)
             } else if report.canBlock {
                 Button(role: .destructive) {
-                    blocking = RoomBlockTarget(actorId: report.target.authorId, name: name)
+                    blocking = RoomBlockTarget(report.target, name: name)
                 } label: {
                     Label("Block \(name) too", systemImage: "hand.raised")
                 }
@@ -258,8 +258,10 @@ public struct RoomAIConsentSheet: View {
 /// A send held until the person answers the AI consent sheet.
 public struct AIConsentHeld: Identifiable {
     public let id = UUID()
-    let proceed: () -> Void
-    let decline: () -> Void
+    /// What OK does, after the consent is recorded.
+    public let proceed: () -> Void
+    /// What Not now does.
+    public let decline: () -> Void
 
     /// `proceed` runs after OK; `decline` after Not now (an answered call ends there).
     public init(_ proceed: @escaping () -> Void, onDecline decline: @escaping () -> Void = {}) {
@@ -281,6 +283,13 @@ private struct AIConsentPrompt: ViewModifier {
         content
             .onChange(of: held?.id) { id in
                 guard id != nil else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    if asking == nil, let held { asking = held }
+                }
+            }
+            // Asked before this screen was up (a call answered as the app opened): asked once it is.
+            .onAppear {
+                guard held != nil else { return }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                     if asking == nil, let held { asking = held }
                 }

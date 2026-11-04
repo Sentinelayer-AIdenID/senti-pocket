@@ -26,6 +26,9 @@ final class RoomChatCoordinator: ObservableObject {
     private let sender: (any RoomMessageSending)?
     private let identity: (any AccountIdentityProviding)?
     private var ownAuthorIds: Set<String>
+    /// The id this account posted under before the server bound ids to accounts (sentinelayer-api #1105): what it
+    /// wrote there is its own, so it is never offered to report or block it.
+    private var formerOwnAuthorIds: Set<String> = []
     private var postingRefusedReason: String?
     private let sleep: @Sendable (TimeInterval) async -> Void
     private let now: @Sendable () -> Date
@@ -544,7 +547,8 @@ final class RoomChatCoordinator: ObservableObject {
             report = nil
             publish()
         case .block(let target):
-            blocks?.block(target)
+            // Chosen on a message or a reply here, the server is told which post.
+            blocks?.block(target, in: sessionId)
             publish()
         case .revealBlocked(let key):
             revealedBlocked.insert(key)
@@ -1646,6 +1650,10 @@ final class RoomChatCoordinator: ObservableObject {
         if let senderId = account.senderId {
             // The id the server writes your posts under (sentinelayer-api #1115): yours, and no other.
             ownAuthorIds.insert(senderId)
+            // A Google or Apple account wrote under its old form (`human-<email name>`, `human-apple_<hex>`) until
+            // #1105: those posts are yours too, for Report and Block. They show as they did, since a GitHub login of
+            // the same name may have posted under that id too.
+            if senderId != account.authorId { formerOwnAuthorIds.insert(account.authorId) }
         } else {
             // An API without it: the GitHub form, and without a verified GitHub login the account-bound one.
             ownAuthorIds.insert(account.authorId)
@@ -2471,6 +2479,7 @@ final class RoomChatCoordinator: ObservableObject {
             fileParts: placedFiles?.parts ?? [:],
             draftKey: draftKey,
             blockedAuthorIds: blocks?.actorIds ?? [],
+            formerOwnAuthorIds: formerOwnAuthorIds,
             revealedBlocked: revealedBlocked,
             canReport: reporter != nil && !failureIsTerminal,
             canBlock: blocks != nil,

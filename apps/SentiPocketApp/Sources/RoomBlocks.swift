@@ -17,11 +17,23 @@ struct BlockedAuthor: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+/// The post a block was chosen on (`POST /api/v1/me/blocks`, the report route's fields): the server ties the block to
+/// the author stamped on it, the one you saw, even after a rename or a reclaimed login (sentinelayer-api #1118).
+struct BlockReference: Codable, Equatable, Sendable {
+    let sessionId: String
+    /// The message, or the message the reply is on.
+    let sequenceId: Int64
+    /// The reply, by its action id.
+    let replyId: String?
+}
+
 /// A block or unblock the server has not taken yet.
 struct BlockChange: Codable, Equatable, Sendable {
     let actorId: String
     /// True blocks, false unblocks.
     let blocks: Bool
+    /// The post a block was chosen on; nil for an unblock, or a block from anywhere else.
+    var reference: BlockReference? = nil
 }
 
 /// One block as the server lists it (`GET /api/v1/me/blocks`).
@@ -33,7 +45,8 @@ struct ServerBlock: Equatable, Sendable {
 /// The blocks API (`GET`, `POST` and `DELETE /api/v1/me/blocks`). A protocol so the list is testable without a network.
 protocol BlockListClient: Sendable {
     func blocks() async throws -> [ServerBlock]
-    func block(_ actorId: String) async throws
+    /// Blocks `actorId`, naming the post it was chosen on when there is one.
+    func block(_ actorId: String, from reference: BlockReference?) async throws
     func unblock(_ actorId: String) async throws
 }
 
@@ -117,7 +130,8 @@ final class BlockList: ObservableObject {
         actorIds.contains(actorId.lowercased())
     }
 
-    func block(_ target: RoomBlockTarget) {
+    /// Blocks the target's author; chosen on a message or a reply in room `sessionId`, the server is told which.
+    func block(_ target: RoomBlockTarget, in sessionId: String? = nil) {
         let id = target.actorId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !id.isEmpty else { return }
         if !actorIds.contains(id) {
@@ -125,7 +139,10 @@ final class BlockList: ObservableObject {
             blocked.insert(BlockedAuthor(actorId: id, name: name.isEmpty ? BlockedAuthor.name(for: id) : name,
                                          blockedAt: now()), at: 0)
         }
-        note(BlockChange(actorId: id, blocks: true))
+        let reference = sessionId.flatMap { sessionId in
+            target.sequenceId.map { BlockReference(sessionId: sessionId, sequenceId: $0, replyId: target.replyId) }
+        }
+        note(BlockChange(actorId: id, blocks: true, reference: reference))
     }
 
     func unblock(_ actorId: String) {
@@ -167,7 +184,7 @@ final class BlockList: ObservableObject {
         while let change = changes.first {
             do {
                 if change.blocks {
-                    try await client.block(change.actorId)
+                    try await client.block(change.actorId, from: change.reference)
                 } else {
                     try await client.unblock(change.actorId)
                 }
@@ -247,8 +264,20 @@ final class HTTPBlockListClient: BlockListClient, @unchecked Sendable {
         }
     }
 
-    func block(_ actorId: String) async throws {
-        let (_, status) = try await send("POST", path: "/api/v1/me/blocks", body: ["actorId": actorId])
+    func block(_ actorId: String, from reference: BlockReference?) async throws {
+        var body: [String: Any] = ["actorId": actorId]
+        if let reference {
+            body["sessionId"] = reference.sessionId
+            body["sequenceId"] = reference.sequenceId
+            if let replyId = reference.replyId { body["replyId"] = replyId }
+        }
+        let (data, status) = try await send("POST", path: "/api/v1/me/blocks", body: body)
+        // An API from before the reference refuses fields it doesn't know (a 422 with no error code of its own): the
+        // block goes by id alone.
+        if reference != nil, status == 422,
+           HTTPRoomTicketWriter.errorCode(try? JSONDecoder().decode(JSONValue.self, from: data)) == nil {
+            return try await block(actorId, from: nil)
+        }
         guard (200..<300).contains(status) else { throw Self.error(status) }
     }
 

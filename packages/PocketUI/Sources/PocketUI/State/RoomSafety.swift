@@ -106,20 +106,33 @@ public enum RoomReport {
     }
 }
 
-/// Someone you blocked: their messages and replies show as one line in every room, which Show opens once.
+/// Someone to block: their messages and replies show as one line in every room, which Show opens once. Chosen on a
+/// message or a reply, it names that post too, so the server ties the block to the author you saw there.
 public struct RoomBlockTarget: Equatable, Identifiable, Sendable {
     /// As messages carry it (`human-<login>` or an agent id).
     public let actorId: String
     public let name: String
+    /// The message Block was chosen on, or the message the reply is on; nil from Blocked people.
+    public let sequenceId: Int64?
+    /// The reply Block was chosen on (its action id, the API's `replyId`).
+    public let replyId: String?
 
-    public init(actorId: String, name: String) {
+    public init(actorId: String, name: String, sequenceId: Int64? = nil, replyId: String? = nil) {
         self.actorId = actorId
         self.name = name
+        self.sequenceId = sequenceId
+        self.replyId = replyId
+    }
+
+    /// The author of a post you reported, with that post.
+    public init(_ post: RoomReportTarget, name: String? = nil) {
+        self.init(actorId: post.authorId, name: name ?? post.authorName, sequenceId: post.sequenceId,
+                  replyId: post.replyId)
     }
 
     public var id: String { actorId.lowercased() }
 
-    /// An agent, not a person: blocked by its name, so every agent with that name is blocked.
+    /// An agent, not a person: blocked by this one id, so the same agent under another id is not.
     public var isAgent: Bool { !actorId.lowercased().hasPrefix("human-") }
 }
 
@@ -128,15 +141,21 @@ public enum RoomBlocking {
 
     /// What blocking does and doesn't do, said before you block.
     public static func confirmation(for target: RoomBlockTarget) -> String {
-        let who = target.isAgent
-            ? "Blocking an agent blocks its name: every agent called \(target.name), in every room. Their"
-            : "Their"
-        return who + " messages and replies show as one line in every room, and room search hides their words. "
-            + calls + " They aren't told, and you can unblock them in Settings."
+        let what = target.isAgent
+            ? "Blocking an agent blocks this one id, \(target.id): the same agent under another id isn't blocked."
+            : "Blocking a person doesn't hide their agents' messages."
+        return "Their messages and replies show as one line in every room, and room search hides their words. "
+            + calls + " " + what + " They aren't told, and you can unblock them in Settings."
     }
 
-    /// What blocking leaves as it is.
-    public static let calls = "Calls from them still ring, and Waiting on you still shows their questions."
+    /// What blocking does to calls (the server doesn't ring you for someone you blocked, so the call shows as missed),
+    /// and what it leaves as it is.
+    public static let calls = "Their calls don't ring your phone and may show as missed, and Waiting on you still "
+        + "shows their questions."
+
+    /// Blocks are by author id: a person's agents post under their own ids, and an agent can post under more than one.
+    public static let byId = "Blocking a person doesn't hide their agents' messages, and blocking one agent id doesn't "
+        + "block the same agent under another id."
 
     /// The server's own posts (checkpoints, joins) can't be blocked.
     public static let serverAuthor = "senti"

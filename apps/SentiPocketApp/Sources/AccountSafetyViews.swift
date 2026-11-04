@@ -61,8 +61,8 @@ struct BlockedPeopleView: View {
                     }
                 } footer: {
                     Text("Their messages and replies show as one line in every room, with Show to see one, and room "
-                         + "search hides their words. " + RoomBlocking.calls + " Blocking an agent blocks its name, so "
-                         + "every agent with that name is blocked. They aren't told when you block or unblock them.")
+                         + "search hides their words. " + RoomBlocking.calls + " " + RoomBlocking.byId
+                         + " They aren't told when you block or unblock them.")
                 }
             }
         }
