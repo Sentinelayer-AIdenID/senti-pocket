@@ -27,6 +27,7 @@ struct WhisperModelSettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                PlanSettingsSection()
                 inAppSection
                 notificationsSection
                 if let directMessages {
