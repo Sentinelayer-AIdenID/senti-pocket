@@ -118,7 +118,9 @@ struct SentiPocketApp: App {
 
     @ViewBuilder private var rootView: some View {
         #if DEBUG
-        if RoomPreview.isRequested {
+        if let design = SignInDesignPreview.requested {
+            SignInDesignPreview.view(design)
+        } else if RoomPreview.isRequested {
             RoomPreview.rootView
         } else {
             RootAppView(model: model, whisperModelCoordinator: whisperModel)
