@@ -145,14 +145,22 @@ final class LazyListBuildTests: XCTestCase {
         XCTAssertTrue(room.intents.contains(.focusHandled), "the room was told the message is in view")
         let held = scroll.contentOffset.y
         // The held row is scrolled to again as the rows change, by its id in the room's loop: the rows on screen are
-        // built, not every row of the room to look the id up.
-        step("two arrivals with a message held far up", rows: 402, list: .roomRow) {
-            room.state = Self.room(rows: 402, focus: 60)
+        // built, not every row of the room to look the id up. Ten rounds of two arrivals: at master the held message
+        // once moved 1,264 points in the one round this test made (run 42105631345), and passed in other runs.
+        for round in 1...Self.heldRounds {
+            let rows = 400 + 2 * round
+            step("two arrivals with a message held far up, round \(round)", rows: rows, list: .roomRow) {
+                room.state = Self.room(rows: rows, focus: 60)
+            }
+            let moved = abs(scroll.contentOffset.y - held)
+            print("LAZYLIST held message: moved \(Int(moved)) pt as two messages arrived (round \(round))")
+            XCTAssertLessThan(moved, scroll.bounds.height / 2,
+                              "round \(round): the held message stays in view as messages arrive below")
         }
-        let moved = abs(scroll.contentOffset.y - held)
-        print("LAZYLIST held message: moved \(Int(moved)) pt as two messages arrived")
-        XCTAssertLessThan(moved, scroll.bounds.height / 2, "the held message stays in view as messages arrive below")
     }
+
+    /// Rounds of two arrivals with a message held far up.
+    static let heldRounds = 10
 
     /// Scrolled to the top, the room asks for older messages; when they load above, the row that was at the top is
     /// scrolled back to the top (by its loop id), so the reader's place does not jump to the oldest loaded message.
