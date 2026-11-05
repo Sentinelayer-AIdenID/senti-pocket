@@ -44,9 +44,11 @@ final class VoiceCallScreenLayoutTests: XCTestCase {
         let title3 = UIFont.preferredFont(forTextStyle: .title3, compatibleWith: Self.ax5)
         XCTAssertGreaterThanOrEqual(caption.height + 1, 2 * title3.lineHeight * 0.6, "the caption shows two lines: \(caption)")
 
-        // The whole call screen fits on the phone, between its top and bottom edges.
+        // The whole call screen fits on the phone, between its top and bottom edges, and its controls stay one row:
+        // Hands-free is one line under Skip, not a tall block that takes the caption's room.
         let header = try XCTUnwrap(frames["header"])
         let controls = try XCTUnwrap(frames["controls"])
+        XCTAssertLessThanOrEqual(controls.height, 120, "the controls stay one row: \(controls)")
         let window = try XCTUnwrap(self.window)
         XCTAssertGreaterThanOrEqual(header.minY, window.safeAreaInsets.top - 1, "the header is on screen: \(header)")
         XCTAssertLessThanOrEqual(controls.maxY, window.bounds.height - window.safeAreaInsets.bottom + 1,

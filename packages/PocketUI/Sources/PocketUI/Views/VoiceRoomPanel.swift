@@ -298,12 +298,17 @@ public struct VoiceRoomPanel: View {
                 .accessibilityIdentifier("pocket.voice.skip")
                 .roundButtonLargeContent("Skip this answer", systemImage: "forward.end.fill")
                 Toggle(isOn: Binding(get: { state.isHandsFree }, set: { send(.setHandsFree($0)) })) {
-                    Text("Hands-free").font(.caption2)
+                    Text("Hands-free").font(.caption2).lineLimit(1)
                 }
                 .toggleStyle(.button)
                 .font(.caption2)
+                // Like the round buttons: its text stops growing at the largest standard size, so it stays one line
+                // under Skip and the controls stay one row; a long press shows it large.
+                .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
                 .tint(PocketPalette.listening)
                 .accessibilityIdentifier("pocket.voice.handsFree")
+                .roundButtonLargeContent("Hands-free", systemImage: "waveform")
+                .voiceLayoutProbe("handsFree")
             }
             Spacer()
             talkButton
