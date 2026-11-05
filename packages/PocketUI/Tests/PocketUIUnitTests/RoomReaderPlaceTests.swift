@@ -11,6 +11,37 @@ final class RoomReaderPlaceTests: XCTestCase {
         RoomReaderPlace.Reading(distanceToEnd: distanceToEnd, offset: offset)
     }
 
+    /// A follow that stops short, injected: at the bottom a message arrives and the end goes 300 points below (taken:
+    /// the end moved away, followed); the follow lands 120 points short, the end still below, as the reading that
+    /// made the follow showed. It is taken, because the follow set the last reading aside, and followed again; the
+    /// next follow lands with the end in view. Kept as the last taken, the short landing would not be taken at all.
+    func test_a_follow_that_lands_short_is_taken_again_and_followed_again() {
+        var tracker = RoomReaderPlace.Tracker()
+        var taking = RoomReaderPlace.Taking()
+        tracker.set(atBottom: true)
+        // As the room does: seen while laid out, taken once the frame is done if it shows something new.
+        func take(_ reading: RoomReaderPlace.Reading) -> RoomReaderPlace.Change? {
+            let sight = tracker.see(reading)
+            guard taking.takes(sight) else { return nil }
+            taking.took(tracker.see(reading))
+            return tracker.read(reading)
+        }
+        XCTAssertEqual(take(reading(0, offset: 1000)), RoomReaderPlace.Change.none, "at the end, at the bottom")
+        XCTAssertEqual(take(reading(300, offset: 1000)), .endMovedAway, "a message arrived below: followed")
+        taking.followMade()
+        XCTAssertEqual(take(reading(120, offset: 1180)), .endMovedAway, "the follow's short landing was not taken")
+        taking.followMade()
+        XCTAssertEqual(take(reading(0, offset: 1300)), RoomReaderPlace.Change.none, "at the end")
+        XCTAssertTrue(tracker.atBottom)
+
+        // Without the follow setting the last reading aside, the same short landing is not taken.
+        var kept = RoomReaderPlace.Taking()
+        kept.took(.endBelow)
+        XCTAssertFalse(kept.takes(.endBelow))
+        kept.followMade()
+        XCTAssertTrue(kept.takes(.endBelow))
+    }
+
     func test_the_bottom_is_the_end_of_the_room_within_24_points() {
         XCTAssertEqual(RoomReaderPlace.atBottomDistance, 24)
         XCTAssertTrue(reading(0, offset: 900).endInView)

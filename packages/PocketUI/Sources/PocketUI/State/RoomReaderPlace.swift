@@ -68,6 +68,27 @@ public enum RoomReaderPlace {
         case endBelow
     }
 
+    /// Which of the scroll view's readings the room takes (acts on, once the frame is done): one that shows something
+    /// other than the last one taken, not every point the list moves. A follow to the bottom sets the last one aside,
+    /// so where it lands is taken whatever it shows: a follow that goes by the heights the list estimates for rows it
+    /// has not drawn can stop short with the end still below (102 to 436 points short in a burst at 60 a second),
+    /// which looks like the reading that made the follow, and would never be followed again.
+    public struct Taking: Equatable, Sendable {
+        /// What the last reading taken showed; nil once a follow set it aside, until the next is taken.
+        public private(set) var lastTaken: Sight?
+
+        public init() {}
+
+        /// Whether a reading that shows `sight` is taken.
+        public func takes(_ sight: Sight) -> Bool { sight != lastTaken }
+
+        /// A reading was taken.
+        public mutating func took(_ sight: Sight) { lastTaken = sight }
+
+        /// A follow to the bottom was made: where it lands is taken, whatever it shows.
+        public mutating func followMade() { lastTaken = nil }
+    }
+
     /// The reader's place, kept from reading to reading. Readings are seen while the list is laid out (`see`, which
     /// only notes where the list was the last time the end was in view) and taken once the frame is done (`read`).
     public struct Tracker: Equatable, Sendable {
