@@ -32,6 +32,15 @@ struct RoomPeopleAvatars: View {
     /// How long a note stays before it fades.
     static let noteLifetime: TimeInterval = 3.2
 
+    /// How tall the arc of up to six coins stands, and the ring past six.
+    static let arcHeight: CGFloat = 44
+    static let ringHeight: CGFloat = 56
+    /// The gap between the top of the room and the coins.
+    static let topGap: CGFloat = 4
+    /// What the room keeps clear above its first message so the coins never cover it (`RoomChatView`): the taller of the
+    /// two shapes, so the ring coming or going never moves the messages.
+    static let reservedHeight: CGFloat = max(arcHeight, ringHeight) + topGap
+
     private struct Note: Identifiable, Equatable {
         let id = UUID()
         let change: RoomPresenceChange
@@ -126,7 +135,7 @@ struct RoomPeopleAvatars: View {
                     .zIndex(isRing ? 3 : 2)
             }
         }
-        .frame(width: PresenceRingLayout.radius(items.count) * 2 + 32, height: isRing ? 56 : 44)
+        .frame(width: PresenceRingLayout.radius(items.count) * 2 + 32, height: isRing ? Self.ringHeight : Self.arcHeight)
         .contentShape(Rectangle())
         .gesture(DragGesture(minimumDistance: 4)
             .onChanged { value in
