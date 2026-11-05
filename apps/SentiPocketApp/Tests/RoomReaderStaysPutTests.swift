@@ -350,8 +350,7 @@ final class RoomReaderStaysPutTests: XCTestCase {
         let before = watch.frames[..<tappedAt].map(\.drawn).sorted()
         let during = Array(watch.frames[tappedAt...])
         let usual = before.isEmpty ? 0 : before[before.count / 2]
-        // A frame under the cover shows the screen as it was before the tap.
-        let fewest = during.map { $0.covered ? usual : $0.drawn }.min() ?? 0
+        let fewest = during.map(\.drawn).min() ?? 0
         let visible = list.bounds.height - list.adjustedContentInset.top - list.adjustedContentInset.bottom
         let steps = zip(during, during.dropFirst()).map { $1.offset - $0.offset }
         let scrolling = steps.filter { $0 > 0.5 && $0 < visible * 0.9 }.count
@@ -359,13 +358,11 @@ final class RoomReaderStaysPutTests: XCTestCase {
             + "scrolling-frames=\(scrolling) row-draws=\(draws) steps=\(steps.filter { $0 != 0 }.map { String(format: "%.0f", $0) })")
         // Each frame from the last before the tap: where the list was, and what was drawn in the band.
         print("READER-STAYS-PUT arrow-jump each-frame " + watch.frames[max(0, tappedAt - 1)...].prefix(24)
-            .map { "\(String(format: "%.0f", $0.offset))/\($0.drawn)\($0.covered ? "c" : "")\($0.sameList ? "" : "*")" }
-            .joined(separator: " "))
+            .map { "\(String(format: "%.0f", $0.offset))/\($0.drawn)\($0.sameList ? "" : "*")" }.joined(separator: " "))
         XCTAssertGreaterThan(usual, 0, "what is drawn could be read before the tap")
         XCTAssertGreaterThan(during.count, 10, "frames were recorded on the way down")
         XCTAssertTrue(during.allSatisfy(\.sameList), "the room was built again as a new list")
         XCTAssertGreaterThanOrEqual(fewest, max(1, usual / 3), "a frame on the way down had no messages drawn")
-        XCTAssertFalse(during.last?.covered ?? true, "the cover was still over the list at the end")
         XCTAssertGreaterThanOrEqual(scrolling, 4, "the way down was not seen scrolling")
         XCTAssertTrue(Self.list(in: window).map(Self.atBottom) ?? false, "it ended at the bottom")
         XCTAssertTrue(room.atBottom)
@@ -381,8 +378,6 @@ final class RoomReaderStaysPutTests: XCTestCase {
             let offset: CGFloat
             let drawn: Int
             let sameList: Bool
-            /// The far jump's cover, the screen as it was, lay over the list (`RoomChatView.jumpCoverId`).
-            let covered: Bool
         }
 
         private(set) var frames: [Frame] = []
@@ -409,16 +404,7 @@ final class RoomReaderStaysPutTests: XCTestCase {
         @objc private func tick() {
             let current = RoomReaderStaysPutTests.list(in: window) ?? list
             frames.append(Frame(offset: current.contentOffset.y, drawn: Self.drawn(in: current),
-                                sameList: current === list, covered: Self.cover(in: window) != nil))
-        }
-
-        /// The far jump's cover, while it is in the window and not yet faded out.
-        static func cover(in view: UIView) -> UIView? {
-            if view.accessibilityIdentifier == RoomChatView.jumpCoverId, view.alpha > 0.01 { return view }
-            for child in view.subviews {
-                if let found = cover(in: child) { return found }
-            }
-            return nil
+                                sameList: current === list))
         }
 
         /// Layers with something drawn in them (text, an image, a fill) inside the list, overlapping what can be read.
