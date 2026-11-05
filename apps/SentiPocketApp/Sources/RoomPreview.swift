@@ -28,8 +28,10 @@ enum RoomPreview {
         ProcessInfo.processInfo.arguments.contains("-PocketDMPreview")
     }
 
-    /// `-PocketSidePanelFoldersPreview` shows the side panel with two folders, direct messages under the rooms they
-    /// were opened from, and one whose room is gone under Messages.
+    /// `-PocketSidePanelFoldersPreview` shows the side panel with folders three levels deep, direct messages under the
+    /// rooms they were opened from, and one whose room is gone under Messages. `-PocketFolderShot <state>` sets it up
+    /// for a screenshot: `folded` (two folders folded), `newInside` (New folder inside a level-2 folder), `moveTo` (Move
+    /// to… for a level-2 folder that has one inside it) or `delete` (the delete confirmation).
     static var isSidePanelFoldersRequested: Bool {
         ProcessInfo.processInfo.arguments.contains("-PocketSidePanelFoldersPreview")
     }
@@ -230,10 +232,16 @@ private final class RoomPreviewDirectMessages: DirectMessaging, @unchecked Senda
     }
 }
 
-/// The side panel with folders and direct messages, beside a stand-in for the room it slides over.
+/// The side panel with folders three levels deep and direct messages, beside a stand-in for the room it slides over.
+/// The folders are the app's own (`RoomFoldersCenter` and its sheets) over an in-memory stand-in for the server.
 private struct SidePanelFoldersPreview: View {
     @State private var theme = PocketThemePreference.system
+    @StateObject private var center = RoomFoldersCenter(client: RoomPreviewFolders(SidePanelFoldersPreview.folders),
+                                                        onRoomsChanged: {})
+    @StateObject private var placement = SidePanelPlacement(defaults: nil)
     private static let now = Date()
+    /// `-PocketFolderShot <state>`.
+    private static let shot = UserDefaults.standard.string(forKey: "PocketFolderShot") ?? "open"
 
     private static func room(_ id: String, _ title: String, minutesAgo: Double, unread: Int = 0, folder: String? = nil,
                              summary: String? = nil, humans: Int? = nil, agents: Int? = nil) -> PocketSidePanel.Room {
@@ -251,25 +259,34 @@ private struct SidePanelFoldersPreview: View {
 
     private static let rooms: [PocketSidePanel.Room] = [
         direct("dm-review", "review-agent", agent: true, from: "room-design", minutesAgo: 3, unread: 2),
-        room("room-design", "Design review", minutesAgo: 4, unread: 5, folder: "f-launch",
+        room("room-design", "Design review", minutesAgo: 4, unread: 5, folder: "f-studio",
              summary: "Onboarding fixes before the next build.", humans: 2, agents: 3),
         direct("dm-priya", "Priya", agent: false, from: "room-design", minutesAgo: 25),
+        room("room-sketch", "Daily sketch", minutesAgo: 12, unread: 1, folder: "f-sketches", humans: 1),
+        room("room-color", "Color study", minutesAgo: 30, unread: 2, folder: "f-ideas"),
         room("room-weekly", "Weekly sync", minutesAgo: 40, humans: 4, agents: 1),
         direct("dm-build", "build-agent", agent: true, from: "room-weekly", minutesAgo: 55, unread: 1),
-        room("room-release", "Release train", minutesAgo: 90, folder: "f-launch", agents: 2),
-        room("room-merchant", "Merchant pilot", minutesAgo: 180, unread: 3, folder: "f-clients", humans: 1),
+        room("room-supply", "Supply run", minutesAgo: 70, folder: "f-ops", agents: 2),
+        room("room-pager", "Pager drill", minutesAgo: 95, unread: 3, folder: "f-night"),
+        room("room-book", "Book club", minutesAgo: 240),
         direct("dm-sam", "Sam", agent: false, from: nil, minutesAgo: 300)
     ]
 
+    /// Studio holds Sketches, which holds Ideas (three levels); Ops holds Night shift; Notes is empty.
     private static let folders = [
-        RoomFolderItem(id: "f-launch", name: "Pocket launch", position: 0, roomCount: 2),
-        RoomFolderItem(id: "f-clients", name: "Clients", position: 1, roomCount: 1)
+        RoomFolder(id: "f-studio", name: "Studio", position: 0, roomCount: 1, totalRoomCount: 3),
+        RoomFolder(id: "f-sketches", name: "Sketches", parentFolderId: "f-studio", position: 0, roomCount: 1,
+                   totalRoomCount: 2),
+        RoomFolder(id: "f-ideas", name: "Ideas", parentFolderId: "f-sketches", position: 0, roomCount: 1),
+        RoomFolder(id: "f-ops", name: "Ops", position: 1, roomCount: 1, totalRoomCount: 2),
+        RoomFolder(id: "f-night", name: "Night shift", parentFolderId: "f-ops", position: 0, roomCount: 1),
+        RoomFolder(id: "f-notes", name: "Notes", position: 2)
     ]
 
     var body: some View {
         HStack(spacing: 0) {
             PocketSidePanel(
-                rooms: Self.rooms,
+                placement: placement,
                 currentRoomId: "room-design",
                 unreadNotifications: 3,
                 accountName: "Alex",
@@ -280,12 +297,95 @@ private struct SidePanelFoldersPreview: View {
                 onCalls: {},
                 onActivity: {},
                 onSettings: {},
-                folders: Self.folders,
-                onFolder: { _ in }
+                folderNotice: center.notice,
+                onFolder: center.items == nil ? nil : { center.send($0) }
             )
             .frame(width: 300)
             Color.black.opacity(0.12)
                 .ignoresSafeArea()
+        }
+        .modifier(RoomFolderSheets(center: center))
+        .onChange(of: center.folders) { _ in placement.update(rooms: Self.rooms, folders: center.items) }
+        .task {
+            if Self.shot == "folded" {
+                placement.toggleFolded("f-studio")
+                placement.toggleFolded("f-night")
+            }
+            await center.refresh()
+            placement.update(rooms: Self.rooms, folders: center.items)
+            await placement.settle()
+            switch Self.shot {
+            case "newInside": center.send(.createInside(folderId: "f-night"))
+            case "moveTo": center.send(.pickParent(folderId: "f-sketches"))
+            case "delete": center.send(.delete(folderId: "f-studio"))
+            default: break
+            }
+        }
+    }
+}
+
+/// The preview's folders, kept in memory as the server keeps them: a create goes after the folders beside it, a move
+/// into another folder goes after the ones there, a delete moves what was inside up one level.
+private final class RoomPreviewFolders: RoomFoldersServing, @unchecked Sendable {
+    private let lock = NSLock()
+    private var list: [RoomFolder]
+    private var made = 0
+
+    init(_ list: [RoomFolder]) {
+        self.list = list
+    }
+
+    func folders() async throws -> [RoomFolder] {
+        lock.withLock { list }
+    }
+
+    func createFolder(named name: String, in parentFolderId: String?, idempotencyKey: String?) async throws -> RoomFolder {
+        lock.withLock {
+            made += 1
+            let folder = RoomFolder(id: "f-made-\(made)", name: name, parentFolderId: parentFolderId,
+                                    position: list.filter { $0.parentFolderId == parentFolderId }.count)
+            list.append(folder)
+            return folder
+        }
+    }
+
+    func renameFolder(_ folderId: String, to name: String) async throws -> RoomFolder {
+        try change(folderId) { RoomFolder(id: $0.id, name: name, parentFolderId: $0.parentFolderId, position: $0.position,
+                                          roomCount: $0.roomCount, totalRoomCount: $0.totalRoomCount) }
+    }
+
+    func moveFolder(_ folderId: String, to position: Int) async throws -> RoomFolder {
+        try change(folderId) { RoomFolder(id: $0.id, name: $0.name, parentFolderId: $0.parentFolderId, position: position,
+                                          roomCount: $0.roomCount, totalRoomCount: $0.totalRoomCount) }
+    }
+
+    func moveFolder(_ folderId: String, into parentFolderId: String?) async throws -> RoomFolder {
+        let after = lock.withLock { list.filter { $0.parentFolderId == parentFolderId }.count }
+        return try change(folderId) { RoomFolder(id: $0.id, name: $0.name, parentFolderId: parentFolderId, position: after,
+                                                 roomCount: $0.roomCount, totalRoomCount: $0.totalRoomCount) }
+    }
+
+    func deleteFolder(_ folderId: String) async throws {
+        lock.withLock {
+            guard let gone = list.first(where: { $0.id == folderId }) else { return }
+            list = list.filter { $0.id != folderId }.map { folder in
+                guard folder.parentFolderId == folderId else { return folder }
+                return RoomFolder(id: folder.id, name: folder.name, parentFolderId: gone.parentFolderId,
+                                  position: gone.position, roomCount: folder.roomCount,
+                                  totalRoomCount: folder.totalRoomCount)
+            }
+        }
+    }
+
+    func file(room sessionId: String, in folderId: String) async throws {}
+
+    func unfile(room sessionId: String, from folderId: String) async throws {}
+
+    private func change(_ id: String, _ update: (RoomFolder) -> RoomFolder) throws -> RoomFolder {
+        try lock.withLock {
+            guard let index = list.firstIndex(where: { $0.id == id }) else { throw RoomFolderError.gone }
+            list[index] = update(list[index])
+            return list[index]
         }
     }
 }

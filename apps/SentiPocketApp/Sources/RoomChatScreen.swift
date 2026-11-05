@@ -49,6 +49,8 @@ struct RoomRoute: Hashable {
     var membershipRole: String = ""
     /// A message to open the room at (from a notification or link).
     var focusSequenceId: Int64?
+    /// A reply in that message's thread to open the thread at (a reply notification's `?reply=`).
+    var focusReplyId: String?
     /// A ticket to open over the room (a link's `?ticket=`, like the web's ticket drawer).
     var focusTicketId: String?
     /// Opens the room's agent requests (a link's `?admission=`), for owners and admins.
@@ -655,6 +657,13 @@ struct RoomChatScreen: View {
         // underneath (#265, #269). The app's cover passes through as it is, read only by what rests.
         .transformEnvironment(\.roomIsCovered) { [coversItself] covered in covered = covered || coversItself }
         .environment(\.roomProfileOpener, profileOpener)
+        // A thread opens its photos, files and pickers over itself.
+        .environment(\.roomSheetMediaHost, RoomSheetMediaHost {
+            Color.clear
+                .frame(width: 0, height: 0)
+                .accessibilityHidden(true)
+                .modifier(mediaPresenters(isActive: true))
+        })
         // A direct message: whom it is with, the room you share, and for an agent whether it may use this chat there.
         .safeAreaInset(edge: .top, spacing: 0) {
             if let info = route.direct {
@@ -995,52 +1004,12 @@ struct RoomChatScreen: View {
                 )
             }
         }
-        .sheet(item: $attachmentPreview) { item in
-            AttachmentQuickLook(url: item.url)
-                .ignoresSafeArea()
-        }
-        .fullScreenCover(item: $mediaViewer) { item in
-            switch item {
-            case .image(let attachmentId, let filename, let preview):
-                RoomImageViewer(
-                    filename: filename,
-                    preview: preview,
-                    loadOriginal: { try await coordinator.prepareAttachment(attachmentId) },
-                    onClose: { mediaViewer = nil }
-                )
-            case .video(let attachmentId, let url):
-                RoomVideoViewer(
-                    url: url,
-                    // A link that stops working mid-play (it expired, or storage refused it) is asked for again.
-                    refresh: { try await coordinator.mediaLink(attachmentId, fresh: true).url },
-                    onClose: { mediaViewer = nil }
-                )
-            }
-        }
-        .sheet(item: $shareItem) { item in
-            RoomShareSheet(items: [item.url], deletesWhenDone: true)
-                .presentationDetents([.medium, .large])
-        }
-        // The photo, camera and file pickers, opened from the composer's attach sheet.
-        .background(
-            RoomMediaPickerHost(
-                requests: media.pickers,
-                remaining: { media.board.remainingSlots },
-                onPicked: { media.add($0) },
-                onRefused: { media.refuse($0) }
-            )
-        )
+        // Photos, videos and files opened from the room, and the pickers its composer opens; while a thread is open,
+        // the thread presents them over itself instead (`roomSheetMediaHost`).
+        .modifier(mediaPresenters(isActive: coordinator.state.thread == nil))
         .sheet(item: $consolePage) { page in
             SafariSheet(url: page.url)
                 .ignoresSafeArea()
-        }
-        .alert("Couldn't open the file", isPresented: Binding(
-            get: { attachmentProblem != nil },
-            set: { if !$0 { attachmentProblem = nil } }
-        )) {
-            Button("OK", role: .cancel) { attachmentProblem = nil }
-        } message: {
-            Text(attachmentProblem ?? "")
         }
         .alert("Can't read aloud now", isPresented: Binding(
             get: { listenProblem != nil },
@@ -1150,11 +1119,14 @@ struct RoomChatScreen: View {
         offersCrashReports = true
     }
 
-    /// A link that opened this room may also name a ticket or the agent requests: open those once, over the room.
+    /// A link that opened this room may also name a reply, a ticket or the agent requests: open those once, over the
+    /// room. A reply opens its thread at it.
     private func applyRouteLinksOnce() {
         guard !appliedRouteLinks else { return }
         appliedRouteLinks = true
-        if let ticketId = route.focusTicketId, ticketsTransport != nil {
+        if let replyId = route.focusReplyId, let sequence = route.focusSequenceId {
+            coordinator.openThread(sequence, at: replyId)
+        } else if let ticketId = route.focusTicketId, ticketsTransport != nil {
             linkedTicket = LinkedTicket(id: ticketId)
         } else if route.opensAdmissions, decidesAdmissions {
             showsAdmissions = true
@@ -1168,8 +1140,31 @@ struct RoomChatScreen: View {
         let outgoing = media
         room.onOwnEcho = { [weak outgoing] clientIds in outgoing?.echoed(clientIds) }
         outgoing.onPosted = { [weak room] in room?.pullLatest() }
+        // A reply with files: posted only where the API takes them, and read back into its thread before its card goes.
+        room.onReplyAttachmentSupport = { [weak outgoing] support in outgoing?.replyAttachments = support }
+        outgoing.onReplyPosted = { [weak room] target, text in
+            await room?.replyPosted(to: target.sequenceId, answering: target.replyId, text: text)
+        }
+        // "Send as a new message" carried a reply's words: their saved draft in the thread goes once it posts.
+        outgoing.onReplyDraftSent = { [weak room] target, text in
+            room?.forgetReplyDraft(thread: target.sequenceId, answering: target.replyId, text: text)
+        }
         outgoing.onPreviewReady = { [weak room] attachmentId, data in room?.seedPreview(data, for: attachmentId) }
         outgoing.onReauthenticationRequired = onReauthenticationRequired
+    }
+
+    /// The viewers, the file preview, the share sheet, the pickers and the "Couldn't open the file" alert, presented
+    /// from the room or (`isActive` there) from a sheet over it.
+    private func mediaPresenters(isActive: Bool) -> RoomMediaPresenters {
+        RoomMediaPresenters(
+            isActive: isActive,
+            media: media,
+            coordinator: coordinator,
+            attachmentPreview: $attachmentPreview,
+            mediaViewer: $mediaViewer,
+            shareItem: $shareItem,
+            attachmentProblem: $attachmentProblem
+        )
     }
 
     /// A photo opens in the zoomable viewer (its preview at once), a video plays from its storage link, and any other
@@ -1348,4 +1343,70 @@ struct VoiceRoomHost: View {
 @MainActor
 private final class HeardLevel {
     weak var room: VoiceRoomCoordinator?
+}
+
+/// What a photo, video or file opens in, and the photo, camera and file pickers: presented by the room, or by a sheet
+/// over it (a thread), since the room under a sheet cannot present anything. Only the active one presents.
+private struct RoomMediaPresenters: ViewModifier {
+    let isActive: Bool
+    let media: RoomMediaUploadCoordinator
+    let coordinator: RoomChatCoordinator
+    @Binding var attachmentPreview: AttachmentPreviewItem?
+    @Binding var mediaViewer: RoomMediaViewerItem?
+    @Binding var shareItem: RoomShareItem?
+    @Binding var attachmentProblem: String?
+
+    /// The binding as this presenter sees it: nothing while it is not the active one.
+    private func gated<Item>(_ binding: Binding<Item?>) -> Binding<Item?> {
+        let isActive = self.isActive
+        return Binding(get: { isActive ? binding.wrappedValue : nil }, set: { binding.wrappedValue = $0 })
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .sheet(item: gated($attachmentPreview)) { item in
+                AttachmentQuickLook(url: item.url)
+                    .ignoresSafeArea()
+            }
+            .fullScreenCover(item: gated($mediaViewer)) { item in
+                switch item {
+                case .image(let attachmentId, let filename, let preview):
+                    RoomImageViewer(
+                        filename: filename,
+                        preview: preview,
+                        loadOriginal: { try await coordinator.prepareAttachment(attachmentId) },
+                        onClose: { mediaViewer = nil }
+                    )
+                case .video(let attachmentId, let url):
+                    RoomVideoViewer(
+                        url: url,
+                        // A link that stops working mid-play (it expired, or storage refused it) is asked for again.
+                        refresh: { try await coordinator.mediaLink(attachmentId, fresh: true).url },
+                        onClose: { mediaViewer = nil }
+                    )
+                }
+            }
+            .sheet(item: gated($shareItem)) { item in
+                RoomShareSheet(items: [item.url], deletesWhenDone: true)
+                    .presentationDetents([.medium, .large])
+            }
+            // The photo, camera and file pickers, opened from a composer's attach sheet.
+            .background(
+                RoomMediaPickerHost(
+                    requests: media.pickers,
+                    isActive: isActive,
+                    remaining: { media.pickerRemaining },
+                    onPicked: { media.add($0) },
+                    onRefused: { media.refuse($0) }
+                )
+            )
+            .alert("Couldn't open the file", isPresented: Binding(
+                get: { isActive && attachmentProblem != nil },
+                set: { if !$0 { attachmentProblem = nil } }
+            )) {
+                Button("OK", role: .cancel) { attachmentProblem = nil }
+            } message: {
+                Text(attachmentProblem ?? "")
+            }
+    }
 }
