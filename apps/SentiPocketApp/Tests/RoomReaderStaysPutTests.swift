@@ -415,6 +415,9 @@ final class RoomReaderStaysPutTests: XCTestCase {
         let scrolling = steps.filter { $0 > 0.5 && $0 < visible * 0.9 }.count
         print("READER-STAYS-PUT arrow-jump frames=\(during.count) usual-drawn=\(usual) fewest-drawn=\(fewest) "
             + "scrolling-frames=\(scrolling) row-draws=\(draws) steps=\(steps.filter { $0 != 0 }.map { String(format: "%.0f", $0) })")
+        // Each frame from the last before the tap: where the list was, and what was drawn in the band.
+        print("READER-STAYS-PUT arrow-jump each-frame " + watch.frames[max(0, tappedAt - 1)...].prefix(24)
+            .map { "\(String(format: "%.0f", $0.offset))/\($0.drawn)\($0.sameList ? "" : "*")" }.joined(separator: " "))
         XCTAssertGreaterThan(usual, 0, "what is drawn could be read before the tap")
         XCTAssertGreaterThan(during.count, 10, "frames were recorded on the way down")
         XCTAssertTrue(during.allSatisfy(\.sameList), "the room was built again as a new list")
