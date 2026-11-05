@@ -565,6 +565,11 @@ struct CalendarSettingsSection: View {
                         }
                         .disabled(center.isWorkingOnFeed)
                         .accessibilityIdentifier("settings.calendar.subscribe")
+                        // Subscribe with no kept link: a new link replaces any made before, so it asks first, in a
+                        // sheet. The sheet hangs on this row: put on the Section, it never presented.
+                        .sheet(isPresented: $center.confirmsNewLink) {
+                            CalendarNewLinkQuestion { Task { await center.confirmNewLink() } }
+                        }
                         Button(role: .destructive) {
                             confirmsReset = true
                         } label: {
@@ -588,10 +593,6 @@ struct CalendarSettingsSection: View {
                     Button("Cancel", role: .cancel) {}
                 } message: {
                     Text(CalendarCenter.resetWarning)
-                }
-                // Subscribe with no kept link: a new link replaces any made before, so it asks first, in a sheet.
-                .sheet(isPresented: $center.confirmsNewLink) {
-                    CalendarNewLinkQuestion { Task { await center.confirmNewLink() } }
                 }
             }
         }
