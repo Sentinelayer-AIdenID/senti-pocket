@@ -61,8 +61,15 @@ final class VoiceCallWindow {
         self.window = nil
         for watch in editingWatch { NotificationCenter.default.removeObserver(watch) }
         editingWatch = []
-        // The room has the keys again, so a tap in its box writes there as before.
-        if let keyBefore, !keyBefore.isHidden, keyBefore.windowScene != nil { keyBefore.makeKey() }
+        // The room has the keys again, so a tap in its box writes there as before. If the window that had them is gone
+        // (or none had them), the front window the call covered takes them: the call's window never keeps them.
+        let below = window.windowScene?.windows.filter {
+            $0 !== window && !$0.isHidden && $0.windowLevel.rawValue < window.windowLevel.rawValue
+        } ?? []
+        let front = below.map { $0.windowLevel.rawValue }.max()
+        let back = keyBefore.flatMap { $0.isHidden || $0.windowScene == nil ? nil : $0 }
+            ?? below.last { $0.windowLevel.rawValue == front }
+        back?.makeKey()
         keyBefore = nil
         let view = window.rootViewController?.view
         UIView.animate(withDuration: 0.25, animations: {

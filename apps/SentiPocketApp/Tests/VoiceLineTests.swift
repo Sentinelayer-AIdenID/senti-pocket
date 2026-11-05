@@ -88,8 +88,22 @@ final class VoiceLineEventReaderTests: XCTestCase {
             XCTAssertEqual(read("turn_assigned", data), .none, name)
         }
         XCTAssertEqual(read("turn_started", "{}"), .event(.turnStarted(turnId: nil)),
-                       "a start without its turn is the current answer's")
-        XCTAssertEqual(read("turn_ended", "not JSON"), .event(.turnEnded(turnId: nil)))
+                       "a start that names no turn is the current answer's")
+        XCTAssertEqual(read("turn_ended", #"{"turnId":null}"#), .event(.turnEnded(turnId: nil)))
+        // A turn named but unreadable is no turn this phone knows: skipped, so a garbled end never clears who is
+        // answering.
+        let garbled: [(String, String)] = [
+            ("not JSON", "turn t1 ended"),
+            ("not an object", #"["t1"]"#),
+            ("a number", #"{"turnId":7}"#),
+            ("empty", #"{"turnId":""}"#),
+            ("with a space", #"{"turnId":"t 1"}"#),
+            ("too long", "{\"turnId\":\"\(String(repeating: "t", count: 129))\"}")
+        ]
+        for (name, data) in garbled {
+            XCTAssertEqual(read("turn_ended", data), .none, "turn_ended, \(name)")
+            XCTAssertEqual(read("turn_started", data), .none, "turn_started, \(name)")
+        }
         XCTAssertEqual(read("turn_reassigned", #"{"turnId":"t6","agentId":"build-agent"}"#), .none,
                        "an event this phone does not know says nothing")
 
@@ -428,6 +442,33 @@ final class VoiceLineCallTests: XCTestCase {
                        "still read aloud as the agent: its face stays while its words are said")
         speaker.finish()
         XCTAssertNil(room.state.face)
+        await room.hangUp()
+    }
+
+    /// The stream's own lines, read as the phone reads them: a garbled `turn_ended` reaches the call as nothing, so who is
+    /// answering stays until the answer's real end.
+    func test_a_garbled_turn_end_never_clears_who_is_answering() async {
+        let line = ScriptedVoiceLine()
+        let listener = LineListener(), speaker = LineSpeaker(), poster = LinePoster()
+        let room = call(line, listener: listener, speaker: speaker, poster: poster, with: ["review-agent"])
+        room.begin()
+        await turn(room, listener, "What shipped tonight?")
+        await until("asked") { line.askCount == 1 }
+        var reader = VoiceLineEventReader()
+        func stream(_ lines: [String]) {
+            for text in lines {
+                if case .event(let event) = reader.read(text) { line.send(event) }
+            }
+        }
+        stream(["event: turn_assigned", #"data: {"turnId":"t1","agentId":"review-agent","displayName":"Reviewer"}"#])
+        await until("assigned") { room.state.answering != nil }
+
+        stream(["event: turn_ended", #"data: {"turnId":7}"#, "event: turn_ended", "data: turn t1 ended"])
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(room.state.answeringLine, "Reviewer is answering", "a garbled end is no end")
+
+        stream(["event: turn_ended", #"data: {"turnId":"t1"}"#])
+        await until("its real end") { room.state.answering == nil }
         await room.hangUp()
     }
 

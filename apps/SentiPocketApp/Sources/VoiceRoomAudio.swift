@@ -67,7 +67,9 @@ protocol VoiceRoomAudioSession: AnyObject {
 
 /// The loudspeaker or the earpiece for a voice room (Carter, 11-05: a call picked up on the speaker by accident had no
 /// way back). The choice is the category's own default route, not a one-off override, so it holds for the whole call:
-/// through every turn's listening and every route change that is not a new headset.
+/// through every turn's listening and every route change that is not a new headset. It is the call's only: when the
+/// call ends the phone's audio is put back on the speaker, so what plays next (a room video sets no audio of its own)
+/// is not left on the earpiece.
 final class VoiceRoomSpeakerRoute {
     private let mode: AVAudioSession.Mode
     private let options: AVAudioSession.CategoryOptions
@@ -114,6 +116,15 @@ final class VoiceRoomSpeakerRoute {
     func stopWatching() {
         if let watch { NotificationCenter.default.removeObserver(watch) }
         watch = nil
+    }
+
+    /// The call ended: the phone's audio goes back to its default, the speaker, whatever the call chose.
+    func restore() {
+        stopWatching()
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playAndRecord, mode: mode, options: Self.options(speaker: true, base: options))
+        try? session.overrideOutputAudioPort(.none)
+        speaker = true
     }
 }
 
@@ -204,7 +215,7 @@ final class PhoneVoiceRoomAudioSession: VoiceRoomAudioSession {
     }
 
     func deactivate() {
-        route.stopWatching()
+        route.restore()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
@@ -226,7 +237,7 @@ final class CallKitVoiceRoomAudioSession: VoiceRoomAudioSession {
     }
 
     func deactivate() {
-        route.stopWatching()
+        route.restore()
     }
 
     var isSpeakerOn: Bool { route.isSpeakerOn }
@@ -236,15 +247,126 @@ final class CallKitVoiceRoomAudioSession: VoiceRoomAudioSession {
     func watchRoute(_ changed: @escaping @MainActor () -> Void) { route.watch(changed) }
 }
 
+/// The microphone's audio engine as the listener uses it: `AVAudioEngine`, or a fake in tests.
+protocol VoiceInputEngine: AnyObject {
+    var isRunning: Bool { get }
+    /// The microphone's format now. It changes with the route (the speaker, the earpiece, a headset).
+    var inputFormat: AVAudioFormat { get }
+    func installInputTap(bufferSize: AVAudioFrameCount, format: AVAudioFormat, block: @escaping AVAudioNodeTapBlock)
+    func removeInputTap()
+    func prepare()
+    func start() throws
+    func stop()
+}
+
+extension AVAudioEngine: VoiceInputEngine {
+    var inputFormat: AVAudioFormat { inputNode.outputFormat(forBus: 0) }
+
+    func installInputTap(bufferSize: AVAudioFrameCount, format: AVAudioFormat, block: @escaping AVAudioNodeTapBlock) {
+        inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: format, block: block)
+    }
+
+    func removeInputTap() {
+        inputNode.removeTap(onBus: 0)
+    }
+}
+
+/// The microphone feeding a turn's recognition. The audio engine stops when the phone's audio is set up again (the
+/// Speaker button, a headset plugged in or out): while a turn is being heard, the tap goes back on in the new format
+/// and the engine starts again, so the turn goes on and what is said after the change is heard. It used to stop for
+/// good, and listening went quiet.
+final class MicrophoneTap {
+    private let engine: any VoiceInputEngine
+    /// Runs on the audio thread, for each buffer the microphone hears.
+    private var onBuffer: (@Sendable (AVAudioPCMBuffer) -> Void)?
+    private var tapped = false
+    private var watches: [NSObjectProtocol] = []
+    /// How many times the engine was started again after a change.
+    private(set) var restarts = 0
+
+    init(engine: any VoiceInputEngine) {
+        self.engine = engine
+    }
+
+    /// Whether the microphone gives usable audio now.
+    var hasInput: Bool { Self.usable(engine.inputFormat) }
+
+    /// Feeds the microphone's audio to `onBuffer` until `stop()`, across changes to the phone's audio setup.
+    func start(_ onBuffer: @escaping @Sendable (AVAudioPCMBuffer) -> Void) throws {
+        stop()
+        let format = engine.inputFormat
+        guard Self.usable(format) else { throw VoiceRoomAudioError.invalidAudioFormat }
+        self.onBuffer = onBuffer
+        tap(format)
+        engine.prepare()
+        do {
+            try engine.start()
+        } catch {
+            stop()
+            throw error
+        }
+        let center = NotificationCenter.default
+        watches = [
+            // The engine stopped because the audio setup changed.
+            center.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
+                self?.setUpAgain()
+            },
+            // The route moved; if that stopped the engine without a configuration change, it starts again too.
+            center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] _ in
+                guard let self, !self.engine.isRunning else { return }
+                self.setUpAgain()
+            }
+        ]
+    }
+
+    func stop() {
+        for watch in watches { NotificationCenter.default.removeObserver(watch) }
+        watches = []
+        if engine.isRunning { engine.stop() }
+        if tapped {
+            engine.removeInputTap()
+            tapped = false
+        }
+        onBuffer = nil
+    }
+
+    /// The audio setup changed while listening: the tap goes back on in the new format and the engine starts again.
+    /// Without usable audio or a start, listening stays stopped, as before, and the turn ends with what was heard.
+    func setUpAgain() {
+        guard onBuffer != nil else { return }
+        if engine.isRunning { engine.stop() }
+        if tapped {
+            engine.removeInputTap()
+            tapped = false
+        }
+        let format = engine.inputFormat
+        guard Self.usable(format) else { return }
+        tap(format)
+        engine.prepare()
+        guard (try? engine.start()) != nil else { return }
+        restarts += 1
+    }
+
+    private func tap(_ format: AVAudioFormat) {
+        guard let onBuffer else { return }
+        engine.installInputTap(bufferSize: 1_024, format: format) { buffer, _ in onBuffer(buffer) }
+        tapped = true
+    }
+
+    private static func usable(_ format: AVAudioFormat) -> Bool {
+        format.sampleRate > 0 && format.channelCount > 0
+    }
+}
+
 /// Apple's on-device recognizer, as in push-to-talk, but it leaves the audio session to the voice room and reports
 /// partial results. It never falls back to server recognition.
 final class OnDeviceVoiceListener: VoiceListening {
     /// How loud the microphone is, 0 to 1, about fifty times a second while listening (for the call's waveform).
     var onLevel: (@MainActor @Sendable (Double) -> Void)?
-    private let engine = AVAudioEngine()
+    /// The microphone, which keeps a turn going when the Speaker button or a headset changes the audio setup.
+    private let microphone = MicrophoneTap(engine: AVAudioEngine())
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
-    private var hasTap = false
     private var best = ""
     private var isFinal = false
 
@@ -260,9 +382,7 @@ final class OnDeviceVoiceListener: VoiceListening {
         request.requiresOnDeviceRecognition = true
         request.shouldReportPartialResults = true
         if #available(iOS 16.0, *) { request.addsPunctuation = true }
-        let input = engine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0 else { throw VoiceRoomAudioError.invalidAudioFormat }
+        guard microphone.hasInput else { throw VoiceRoomAudioError.invalidAudioFormat }
         best = ""
         isFinal = false
         self.request = request
@@ -279,16 +399,13 @@ final class OnDeviceVoiceListener: VoiceListening {
             }
         }
         let onLevel = self.onLevel
-        input.installTap(onBus: 0, bufferSize: 1_024, format: format) { buffer, _ in
-            request.append(buffer)
-            guard let onLevel else { return }
-            let level = Self.level(of: buffer)
-            Task { @MainActor in onLevel(level) }
-        }
-        hasTap = true
-        engine.prepare()
         do {
-            try engine.start()
+            try microphone.start { buffer in
+                request.append(buffer)
+                guard let onLevel else { return }
+                let level = Self.level(of: buffer)
+                Task { @MainActor in onLevel(level) }
+            }
         } catch {
             cancel()
             throw error
@@ -315,11 +432,7 @@ final class OnDeviceVoiceListener: VoiceListening {
     }
 
     private func stopEngine() {
-        if engine.isRunning { engine.stop() }
-        if hasTap {
-            engine.inputNode.removeTap(onBus: 0)
-            hasTap = false
-        }
+        microphone.stop()
     }
 
     private func finish() {

@@ -230,6 +230,13 @@ final class RoomCallDesk: ObservableObject {
         if roomOnScreen?.token == token { roomOnScreen = nil }
     }
 
+    /// The room on screen's voice room ended: an answered call that was waiting for it starts now, rather than ending
+    /// unheard when its wait runs out.
+    func roomIsFree(_ token: UUID) {
+        guard roomOnScreen?.token == token else { return }
+        handOffWaiting()
+    }
+
     /// Hands the waiting call to the room on screen once it is the room's and ready (`takeWaiting`), and the room's
     /// voice room is free. Run after every change that can make the call ready, never while one is being published.
     func handOffWaiting() {

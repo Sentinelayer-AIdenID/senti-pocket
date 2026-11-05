@@ -9,11 +9,14 @@ import XCTest
 @MainActor
 final class VoiceCallWindowTests: XCTestCase {
     private var roomWindow: UIWindow?
+    private var otherWindow: UIWindow?
 
     override func tearDown() {
         VoiceCallWindow.shared.hide()
         roomWindow?.isHidden = true
         roomWindow = nil
+        otherWindow?.isHidden = true
+        otherWindow = nil
         pump(0.4)
         super.tearDown()
     }
@@ -34,8 +37,7 @@ final class VoiceCallWindowTests: XCTestCase {
         XCTAssertTrue(VoiceCallWindow.shared.show(Color.black.ignoresSafeArea()))
         pump(0.5)
         XCTAssertFalse(box.isFirstResponder, "the call has no box to type in: the room's lets its keyboard go")
-        let keys = scene.windows.filter { !$0.isHidden }.map { "level \(Int($0.windowLevel.rawValue)) key \($0.isKeyWindow)" }
-        print("CALLWINDOW keys while the call is up: \(keys)")
+        XCTAssertEqual(scene.keyWindow?.windowLevel, UIWindow.Level.normal + 1, "the call's window has the keys")
 
         // The box under the call starts editing again (focus given back to it, or iOS restoring it as Pocket comes back
         // to the front): it lets its keyboard go at once.
@@ -48,6 +50,33 @@ final class VoiceCallWindowTests: XCTestCase {
         XCTAssertTrue(window.isKeyWindow, "after the call, the room has the keys again")
         XCTAssertTrue(box.becomeFirstResponder(), "and its box writes as before")
         box.resignFirstResponder()
+    }
+
+    /// The window that had the keys went while the call was up (another room replaced it): when the call closes, the
+    /// front window it covered takes the keys, so the call's window does not keep them once it is gone.
+    func test_the_call_gives_the_keys_back_even_when_the_window_that_had_them_is_gone() throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = UIViewController()
+        window.makeKeyAndVisible()
+        roomWindow = window
+        pump(0.3)
+        XCTAssertTrue(VoiceCallWindow.shared.show(Color.black.ignoresSafeArea()))
+        pump(0.5)
+        let call = try XCTUnwrap(scene.keyWindow, "a window has the keys while the call is up")
+        XCTAssertEqual(call.windowLevel, UIWindow.Level.normal + 1, "the call's window has them")
+
+        window.isHidden = true
+        let other = UIWindow(windowScene: scene)
+        other.rootViewController = UIViewController()
+        other.isHidden = false
+        otherWindow = other
+        VoiceCallWindow.shared.hide()
+        pump(0.5)
+        XCTAssertTrue(call.isHidden, "the call's window is gone")
+        XCTAssertFalse(call.isKeyWindow, "and does not keep the keys")
+        let key = try XCTUnwrap(scene.keyWindow, "a window has the keys after the call")
+        XCTAssertFalse(key.isHidden, "one on screen")
     }
 
     private func pump(_ seconds: TimeInterval) {

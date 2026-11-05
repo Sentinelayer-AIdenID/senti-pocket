@@ -618,6 +618,34 @@ final class RoomCallsTests: XCTestCase {
         desk.roomLeft(newer)
     }
 
+    /// A call answered while its room's voice room is busy (a meeting going) waits. When that voice room ends, the call
+    /// starts there, instead of ending unheard when its wait runs out.
+    func test_a_call_waiting_for_a_busy_voice_room_starts_when_that_voice_room_ends() async {
+        let api = FakeCallsAPI(details: details())
+        let desk = RoomCallDesk(api: api, ringFor: 3_600, takeWithin: 1.5, sleep: { seconds in
+            try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+        })
+        var busy = true
+        var taken: [UUID] = []
+        let onScreen = desk.roomShowing(doorbell.sessionId, canTake: { !busy }, take: { taken.append($0.uuid) })
+        defer { desk.roomLeft(onScreen) }
+        let uuid = UUID()
+        desk.received(doorbell, uuid: uuid)
+        desk.answered(uuid)
+        desk.audioActivated(uuid)
+        await confirmed(desk)
+        XCTAssertTrue(taken.isEmpty, "the room's voice room is busy: the call waits")
+
+        busy = false
+        desk.roomIsFree(UUID())
+        XCTAssertTrue(taken.isEmpty, "only the room on screen says its own voice room ended")
+        desk.roomIsFree(onScreen)
+        XCTAssertEqual(taken, [uuid], "its voice room ended: the call starts there")
+        try? await Task.sleep(nanoseconds: 1_700_000_000)
+        XCTAssertTrue(desk.isLive(uuid), "and it is not ended when the wait runs out")
+        XCTAssertEqual(api.sent, ["answered"])
+    }
+
     /// Two agents rang at once with their room on screen and Pocket in front (11-05: one, then the other 3 s later).
     /// CallKit keeps one call, so answering the first ends the second's ring. The server must hear the second declined
     /// and the first answered, and the answered call must reach the room on screen and stay up. It used to wait unheard

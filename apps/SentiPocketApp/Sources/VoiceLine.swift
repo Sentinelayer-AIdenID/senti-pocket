@@ -66,7 +66,8 @@ struct VoiceLineEventReader {
         }
         guard line.hasPrefix("data:") else { return .none }
         let data = Data(line.dropFirst("data:".count).trimmingCharacters(in: .whitespaces).utf8)
-        let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        let json = object ?? [:]
         defer { event = "" }
         switch event {
         case "sentence":
@@ -81,10 +82,16 @@ struct VoiceLineEventReader {
             }
             let name = Self.displayName(json["displayName"]) ?? agentId
             return .event(.turnAssigned(VoiceTurnAssignment(turnId: turnId, agentId: agentId, displayName: name)))
-        case "turn_started":
-            return .event(.turnStarted(turnId: Self.identifier(json["turnId"])))
-        case "turn_ended":
-            return .event(.turnEnded(turnId: Self.identifier(json["turnId"])))
+        case "turn_started", "turn_ended":
+            // No turn named is the current one's; a turn named but unreadable (or data that is no object) is no turn
+            // this phone knows, so it is skipped and never ends the answer showing.
+            guard object != nil else { return .none }
+            var turnId: String?
+            if let named = json["turnId"], !(named is NSNull) {
+                guard let readable = Self.identifier(named) else { return .none }
+                turnId = readable
+            }
+            return .event(event == "turn_started" ? .turnStarted(turnId: turnId) : .turnEnded(turnId: turnId))
         case "error":
             return .failed
         default:

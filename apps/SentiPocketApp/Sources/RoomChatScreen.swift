@@ -532,6 +532,8 @@ struct RoomChatScreen: View {
             RoomCallDesk.shared.voiceRoomEnded(answeredCall)
             self.answeredCall = nil
         }
+        // An answered call that waited for this voice room to end starts now.
+        if let token = callDeskPlace.token { callDesk.roomIsFree(token) }
     }
 
     /// An agent's call answered on the call screen, handed over by the desk once the server took the answer and
