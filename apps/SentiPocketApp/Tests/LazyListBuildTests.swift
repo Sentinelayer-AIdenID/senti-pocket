@@ -131,9 +131,10 @@ final class LazyListBuildTests: XCTestCase {
     // MARK: - A scroll to a row finds it by the loop's own id
 
     /// The rows carry no `.id` of their own: every scroll to a row (a focused message, a held row, the place kept as
-    /// older rows load) finds it by the loop's id, `RoomChatRow.id` in a type of its own (`RoomRowScrollId`). Opened at a message far up a room of 400, the room
-    /// is there, far from its bottom (where it would be had the scroll found nothing), and it stays there while
-    /// messages arrive below (the held row, scrolled to again at every change of the rows).
+    /// older rows load) finds it by the loop's id, `RoomChatRow.id` in a type of its own (`RoomRowScrollId`). Opened at
+    /// a message far up a room of 400, the room is there, far from its bottom (where it would be had the scroll found
+    /// nothing), and it stays there while messages arrive below (the held row, scrolled to again at every change of the
+    /// rows).
     func test_a_room_opened_at_a_message_far_up_goes_there_and_holds_it_while_messages_arrive() throws {
         let room = Room(Self.room(rows: 400, focus: 60))
         try host(RoomHost(room: room))
