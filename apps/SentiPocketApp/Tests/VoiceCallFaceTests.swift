@@ -63,14 +63,19 @@ final class VoiceCallFaceTests: XCTestCase {
         let drawn = VoiceCallTrace.faceDraws
         let mouth = try XCTUnwrap(Self.views(of: VoiceCallMouthView.self, in: window).first, "the face has its mouth")
 
-        // Two seconds of speech, a word every 200 ms.
-        var widest = 0.0
+        // Two seconds of speech, a word every 200 ms; the mouth looked at every 20 ms, as it opens on each word and
+        // closes as the word fades.
+        var widest = 0.0, narrowest = 1.0
         for length in [4, 7, 2, 9, 5, 3, 8, 6, 4, 7] {
             meter.hear(VoiceLevelMeter.level(wordLength: length), from: .agent)
-            pump(0.2)
-            widest = max(widest, mouth.level)
+            for _ in 0..<10 {
+                pump(0.02)
+                widest = max(widest, mouth.level)
+                narrowest = min(narrowest, mouth.level)
+            }
         }
-        XCTAssertGreaterThan(widest, 0.5, "the mouth moved with the words")
+        XCTAssertGreaterThan(widest, 0.6, "each word opens the mouth")
+        XCTAssertLessThan(narrowest, widest - 0.2, "and it closes as the word fades: it moves with the words")
         XCTAssertEqual(VoiceCallTrace.faceDraws - drawn, 0, "the face is not drawn again per tick of the voice")
         meter.reset()
     }

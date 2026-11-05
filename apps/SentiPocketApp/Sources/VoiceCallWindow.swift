@@ -10,6 +10,8 @@ final class VoiceCallWindow {
     private var window: UIWindow?
     /// The window that had the keys before the call (the room's), given them back when the call ends.
     private weak var keyBefore: UIWindow?
+    /// While the call is up: a box under it that starts editing lets its keyboard go.
+    private var editingWatch: [NSObjectProtocol] = []
 
     /// Whether a call is on screen: banners stay quiet under it, so a tap can't take the room away mid-call.
     var isShowing: Bool { window != nil }
@@ -29,13 +31,20 @@ final class VoiceCallWindow {
             ?? .unspecified
         let host = UIHostingController(rootView: content)
         made.rootViewController = host
-        // The call has no box to type in. A box being written in under it (the room's) lets its keyboard go, and the
-        // call's window takes the keys, so nothing it covers brings a keyboard back over the call (Carter, 11-05: a
-        // keyboard came up during a call with no box, and could not be put away).
+        // The call has no box to type in (Carter, 11-05: a keyboard came up during a call with no box, and could not be
+        // put away). A box being written in under it (the room's) lets its keyboard go, and the call's window asks for
+        // the keys. While the call is up, a box under it that starts editing again (focus given back to it, or iOS
+        // restoring it as Pocket comes back to the front) lets its keyboard go at once.
         keyBefore = scene.windows.first { $0.isKeyWindow }
         for other in scene.windows { other.endEditing(true) }
         made.makeKeyAndVisible()
         window = made
+        editingWatch = [UITextView.textDidBeginEditingNotification, UITextField.textDidBeginEditingNotification].map {
+            NotificationCenter.default.addObserver(forName: $0, object: nil, queue: .main) { note in
+                let box = note.object as? UIView
+                MainActor.assumeIsolated { VoiceCallWindow.shared.keepKeyboardAway(from: box) }
+            }
+        }
         // It slides up. The view moves, not the window: a window's own transform is not reliably drawn.
         let below = CGAffineTransform(translationX: 0, y: made.bounds.height)
         host.view.transform = below
@@ -50,6 +59,8 @@ final class VoiceCallWindow {
     func hide() {
         guard let window else { return }
         self.window = nil
+        for watch in editingWatch { NotificationCenter.default.removeObserver(watch) }
+        editingWatch = []
         // The room has the keys again, so a tap in its box writes there as before.
         if let keyBefore, !keyBefore.isHidden, keyBefore.windowScene != nil { keyBefore.makeKey() }
         keyBefore = nil
@@ -59,5 +70,16 @@ final class VoiceCallWindow {
         }, completion: { _ in
             window.isHidden = true
         })
+    }
+
+    /// A box began editing while the call is up. One the call covers (in a window under it) lets its keyboard go on the
+    /// next turn of the run loop, after its own begin-editing work; one above the call (an alert's) keeps it.
+    private func keepKeyboardAway(from box: UIView?) {
+        guard let box, let call = window, let under = box.window, under !== call,
+              under.windowLevel <= call.windowLevel else { return }
+        DispatchQueue.main.async { [weak box] in
+            guard let box, box.isFirstResponder, self.window != nil else { return }
+            box.resignFirstResponder()
+        }
     }
 }

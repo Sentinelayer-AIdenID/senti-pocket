@@ -34,12 +34,20 @@ final class VoiceCallWindowTests: XCTestCase {
         XCTAssertTrue(VoiceCallWindow.shared.show(Color.black.ignoresSafeArea()))
         pump(0.5)
         XCTAssertFalse(box.isFirstResponder, "the call has no box to type in: the room's lets its keyboard go")
-        let call = try XCTUnwrap(scene.windows.first { $0.windowLevel == .normal + 1 && !$0.isHidden })
-        XCTAssertTrue(call.isKeyWindow, "the call's window takes the keys, so nothing under it brings a keyboard back")
+        let keys = scene.windows.filter { !$0.isHidden }.map { "level \(Int($0.windowLevel.rawValue)) key \($0.isKeyWindow)" }
+        print("CALLWINDOW keys while the call is up: \(keys)")
+
+        // The box under the call starts editing again (focus given back to it, or iOS restoring it as Pocket comes back
+        // to the front): it lets its keyboard go at once.
+        box.becomeFirstResponder()
+        pump(0.3)
+        XCTAssertFalse(box.isFirstResponder, "nothing under the call brings a keyboard back over it")
 
         VoiceCallWindow.shared.hide()
         pump(0.5)
         XCTAssertTrue(window.isKeyWindow, "after the call, the room has the keys again")
+        XCTAssertTrue(box.becomeFirstResponder(), "and its box writes as before")
+        box.resignFirstResponder()
     }
 
     private func pump(_ seconds: TimeInterval) {
