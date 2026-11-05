@@ -317,8 +317,8 @@ final class RoomReaderStaysPutTests: XCTestCase {
     /// arrives after it moves nothing.
     func test_voiceover_scrolling_up_while_messages_arrive_leaves_the_bottom() throws {
         try scrollsUpWhileMessagesArrive("voiceover") { list in
-            // A three-finger swipe down: the page above.
-            _ = list.accessibilityScroll(.down)
+            // The page above, toward older messages (in CI `.down` went toward the end, or nowhere at the end).
+            _ = list.accessibilityScroll(.up)
         }
     }
 
@@ -341,11 +341,18 @@ final class RoomReaderStaysPutTests: XCTestCase {
                 pump(interval)
             }
         }
-        // Far more than the room follows in a second (`RoomBottomWatch.followLimit`), at once: the end stays below until
-        // the second is up. Then a moment for a follow already asked for to have been made.
-        arrive(40, every: 0.004)
-        pump(0.05)
-        XCTAssertFalse(Self.atBottom(list), "the end is below when the reader scrolls (the arrivals pushed it)")
+        // Messages arrive faster than the room follows them (`RoomBottomWatch.followLimit`, 20 a second), until the end
+        // is below and stays below once a follow already asked for has had time to run: the room's follows for this
+        // second are spent, and the next comes when it is up.
+        var pushed = false
+        for _ in 0..<150 where !pushed {
+            arrive(1, every: 0.004)
+            if !Self.atBottom(list) {
+                pump(0.03)
+                pushed = !Self.atBottom(list)
+            }
+        }
+        XCTAssertTrue(pushed, "the end is below when the reader scrolls (the arrivals pushed it)")
         let before = list.contentOffset.y
         scroll(list)
         // The scroll's animation lands before the room's next follow is due (the follow limit's second is up).
