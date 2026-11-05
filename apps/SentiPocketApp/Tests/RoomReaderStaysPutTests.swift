@@ -112,10 +112,13 @@ final class RoomReaderStaysPutTests: XCTestCase {
     }
 
     /// A long report, drawn whole (under `LongMessage`'s 1,000 characters and 30 lines): many times taller than the
-    /// room's rows, whose heights are what the list estimates the rows it has not drawn yet by.
+    /// room's rows, whose heights are what the list estimates the rows it has not drawn yet by. Each one's words differ
+    /// from the next one's: reports alike but for their numbers fold into one row with a count (`RoomChatRepeats`).
     private static func longArrival(_ seq: Int64) -> RoomChatMessageInput {
-        input(seq, "review-agent", (1...12).map { "Part \($0) of report \(seq): the second screen still crowds its "
-            + "buttons." }.joined(separator: "\n\n"))
+        let screen = ["sign-in", "room list", "composer", "call", "settings", "search", "thread", "profile", "inbox",
+                      "files"][Int(seq % 10)]
+        return input(seq, "review-agent", (1...12).map { "Part \($0) of report \(seq): the \(screen) screen still "
+            + "crowds its buttons." }.joined(separator: "\n\n"))
     }
 
     /// The rows a room draws small: the orchestrator's cost lines (background, and alike but for their numbers, so
