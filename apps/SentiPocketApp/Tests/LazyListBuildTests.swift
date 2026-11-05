@@ -46,27 +46,43 @@ final class LazyListBuildTests: XCTestCase {
 
         // Opening at its newest rows, the list finds its end by the rows' ids, which makes each row once, and the
         // first update after an open goes over the rows it made once more. How many depends on when the open's own
-        // updates land (measured: 437 to 1,212 of 404, and in CI 314 to 636 for a room of 300), so the open is not
-        // counted against the bound; it must still end, idle. Every later update builds only what is on screen.
-        step("open", rows: rows, list: .roomRow, most: nil) {}
-        step("the first update after the open", rows: rows, list: .roomRow, most: nil) { room.objectWillChange.send() }
+        // updates land (measured: 437 to 1,212 of 404 rows; in CI 314 to 636 for a room of 300), so these steps have a
+        // ceiling of a few passes over the rows the room holds, not a count of what is on screen: a list that walks
+        // its rows at every layout pass never ends, and one that rebuilds them over and over goes past it.
+        let ceiling = Self.passesAtMost * rows
+        step("open", rows: rows, list: .roomRow, most: ceiling) {}
+        step("the first update after the open", rows: rows, list: .roomRow, most: ceiling) {
+            room.objectWillChange.send()
+        }
         // The room drawn again with nothing changed: its screen's body runs again at every draw of the root.
         step("drawn again, nothing changed", rows: rows, list: .roomRow) { room.objectWillChange.send() }
         // A message arrives, and another.
         step("an arrival", rows: rows, list: .roomRow) { room.state = Self.room(rows: 401) }
         step("another arrival", rows: rows, list: .roomRow) { room.state = Self.room(rows: 402) }
-        // Another room put on screen in its place, as a room picked from the side panel: an open again.
-        step("another room", rows: rows, list: .roomRow, most: nil) { room.state = Self.room(rows: 300, id: "other") }
-        step("the first update in the other room", rows: rows, list: .roomRow, most: nil) {
+        // Another room put on screen in its place, as a room picked from the side panel (the 08:06 freeze): an open
+        // again. After it the list keeps every row it made, and each update goes over them once (as master's did at
+        // every update): at most one pass over the room's rows and a few more, never more.
+        // The swap goes over the rows of the room it leaves as well (1,209 measured: 3 passes over 403).
+        let other = 300
+        step("another room", rows: other, list: .roomRow, most: Self.passesAtMost * max(rows, other)) {
+            room.state = Self.room(rows: other, id: "other")
+        }
+        step("the first update in the other room", rows: other, list: .roomRow,
+             most: Self.passesAtMost * max(rows, other)) {
             room.objectWillChange.send()
         }
-        step("drawn again, nothing changed, in the other room", rows: rows, list: .roomRow) {
+        step("drawn again, nothing changed, in the other room", rows: other, list: .roomRow,
+             most: other + Self.mostBuiltPerStep) {
             room.objectWillChange.send()
         }
-        step("an arrival in the other room", rows: rows, list: .roomRow) {
-            room.state = Self.room(rows: 301, id: "other")
+        step("an arrival in the other room", rows: other, list: .roomRow, most: other + Self.mostBuiltPerStep) {
+            room.state = Self.room(rows: other + 1, id: "other")
         }
     }
+
+    /// The most passes over its rows an open, a room put in another's place, or the first update after either may
+    /// make: the most measured was 3 (1,212 rows built in a room of 404).
+    static let passesAtMost = 4
 
     /// A message that is a part of a file posted as base64 folds behind the file's card and shows nothing. It keeps its
     /// row and its id, and takes no height and no space between rows: the room with it is exactly as tall as the room

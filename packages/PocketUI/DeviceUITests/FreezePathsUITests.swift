@@ -78,12 +78,12 @@ final class FreezePathsUITests: XCTestCase {
         replyAfterJumpDown(launch(room: "long"), upTo: 705, path: "path4")
     }
 
-    /// Path 4 at the largest text size (AX5), where the rows are a screen tall: up the room to its 900th message (about
-    /// 100 rows), the jump down, a send, and the long press that opens a message's menu for the reply. Without each
-    /// row's `.id`, that press set the room laying itself out without end here.
+    /// Path 4 at the largest text size (AX5), where a row can be taller than the screen: up the room to its 975th
+    /// message, the jump down, a send, and the long press that opens a message's menu for the reply. Without each row's
+    /// `.id`, that press set the room laying itself out without end here.
     func test_path4_at_the_largest_text_size() throws {
         let app = launch(room: "long", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL")
-        replyAfterJumpDown(app, upTo: 900, path: "path4-ax5")
+        replyAfterJumpDown(app, upTo: 975, path: "path4-ax5")
     }
 
     private func replyAfterJumpDown(_ app: XCUIApplication, upTo sequence: Int, path: String) {
