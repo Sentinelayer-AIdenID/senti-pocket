@@ -657,13 +657,7 @@ public struct RoomChatView: View {
     private func scrollDown(to target: String, anchor: UnitPoint, _ proxy: ScrollViewProxy) {
         let tapped = ProcessInfo.processInfo.systemUptime
         let start = jumpStart(above: target)
-        if let start {
-            proxy.scrollTo(start, anchor: .top)
-            // SwiftUI puts the rows at a far place one layout pass after the list moves there, so the jump's own frame
-            // showed none (measured in the hosted frame test: 0 drawn, then 32). Laid out now, the move and its rows
-            // are in the same frame.
-            RoomLayoutNow.passes(2)
-        }
+        if let start { proxy.scrollTo(start, anchor: .top) }
         let scroll: () -> Void = {
             withAnimation(.easeOut(duration: Self.jumpEase)) { proxy.scrollTo(target, anchor: anchor) }
             DispatchQueue.main.asyncAfter(deadline: .now() + Self.jumpEase + 0.05) {
@@ -1082,23 +1076,6 @@ private final class RoomBottomWatch {
     /// How long until another follow may be made.
     func nextFollow(at now: TimeInterval) -> TimeInterval {
         max(0, (follows.first ?? now) + 1 - now)
-    }
-}
-
-/// Lays the key window out now, `count` passes, instead of at the end of this turn of the run loop: the first pass
-/// takes in what was just changed (a scroll asked of the list), the next lays out what that change revealed.
-private enum RoomLayoutNow {
-    static func passes(_ count: Int) {
-        #if os(iOS)
-        guard let window = UIApplication.shared.connectedScenes
-            .compactMap({ $0 as? UIWindowScene })
-            .flatMap(\.windows)
-            .first(where: \.isKeyWindow) else { return }
-        for _ in 0..<count {
-            window.rootViewController?.view.setNeedsLayout()
-            window.layoutIfNeeded()
-        }
-        #endif
     }
 }
 
