@@ -72,11 +72,13 @@ final class RoomReaderStaysPutTests: XCTestCase {
 
     private struct Host: View {
         @ObservedObject var room: Room
+        var textSize: DynamicTypeSize = .large
 
         var body: some View {
             NavigationStack {
                 RoomChatView(state: room.state) { room.send($0) }
             }
+            .dynamicTypeSize(textSize)
         }
     }
 
@@ -107,6 +109,13 @@ final class RoomReaderStaysPutTests: XCTestCase {
 
     private static func arrival(_ seq: Int64) -> RoomChatMessageInput {
         input(seq, "review-agent", "An arrival, \(seq): " + String(repeating: "more words ", count: Int(seq % 5) * 6))
+    }
+
+    /// A long report: many times taller than the room's rows, whose heights are what the list estimates the rows it
+    /// has not drawn yet by.
+    private static func longArrival(_ seq: Int64) -> RoomChatMessageInput {
+        input(seq, "review-agent", (1...24).map { "Part \($0) of report \(seq): the step reads well on a small phone, though "
+            + "the second screen still crowds its buttons." }.joined(separator: "\n\n"))
     }
 
     /// The rows a room draws small: the orchestrator's cost lines (background, and alike but for their numbers, so
@@ -223,6 +232,36 @@ final class RoomReaderStaysPutTests: XCTestCase {
         XCTAssertEqual(room.unreadCount, 0)
     }
 
+    /// At the bottom, a follow scrolls to the end by the heights the list estimates for rows it has not drawn yet, and
+    /// stops short when they are taller (in a burst at 60 a second, 102 to 436 points short; more at the largest text
+    /// sizes): the reader is left a little up from the end, at a place they never chose. Where each follow lands is
+    /// taken as a new reading, so one that stopped short is followed again until the end is in view. Here eight long
+    /// reports arrive at once under a room of short rows.
+    func test_a_follow_that_stops_short_of_the_end_is_followed_again() throws {
+        try followsTallArrivalsToTheEnd(textSize: .large)
+    }
+
+    func test_a_follow_that_stops_short_of_the_end_is_followed_again_at_the_largest_text_size() throws {
+        try followsTallArrivalsToTheEnd(textSize: .accessibility5)
+    }
+
+    private func followsTallArrivalsToTheEnd(textSize: DynamicTypeSize) throws {
+        try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
+        let room = Room(Self.messages())
+        let list = try host(room, textSize: textSize)
+        let height = list.contentSize.height
+        room.arrive((61...68).map { Self.longArrival($0) })
+        wait("followed to the end of the long reports", seconds: 6) {
+            list.contentSize.height > height * 2 && Self.atBottom(list)
+        }
+        pump(1)
+        print("READER-STAYS-PUT tall-arrivals \(textSize) end-below=\(Self.bottomOffset(of: list) - list.contentOffset.y) "
+            + "content=\(list.contentSize.height) (was \(height))")
+        XCTAssertTrue(Self.atBottom(list), "the follow stopped short of the end and stayed there")
+        XCTAssertTrue(room.atBottom)
+        XCTAssertEqual(room.unreadCount, 0)
+    }
+
     /// Within the bottom's 24 points the reader is at the bottom, and follows what arrives.
     func test_at_the_very_bottom_the_reader_follows_what_arrives() throws {
         try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
@@ -271,6 +310,57 @@ final class RoomReaderStaysPutTests: XCTestCase {
         XCTAssertTrue(room.atBottom)
     }
 
+    // MARK: - Scrolling up without touching the list, while messages arrive
+
+    /// VoiceOver's three-finger scroll moves the list a page with an animation, not by touch. While messages arrive
+    /// faster than the room follows them, the end is pushed below, and a list moving up then was taken for the room
+    /// settling its rows: the reader was pulled back down. The scroll is the reader's: they leave the bottom, and what
+    /// arrives after it moves nothing.
+    func test_voiceover_scrolling_up_while_messages_arrive_leaves_the_bottom() throws {
+        try scrollsUpWhileMessagesArrive("voiceover") { list in
+            // A three-finger swipe down: the page above.
+            _ = list.accessibilityScroll(.down)
+        }
+    }
+
+    /// A tap on the status bar, and a keyboard's arrows or Page Up, scroll the list with an animation too, not by touch.
+    func test_an_animated_scroll_up_not_by_touch_while_messages_arrive_leaves_the_bottom() throws {
+        try scrollsUpWhileMessagesArrive("animated") { list in
+            list.setContentOffset(CGPoint(x: 0, y: list.contentOffset.y - list.bounds.height * 0.8), animated: true)
+        }
+    }
+
+    private func scrollsUpWhileMessagesArrive(_ name: String, scroll: (UIScrollView) -> Void) throws {
+        try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
+        let room = Room(Self.messages())
+        let list = try host(room)
+        var seq: Int64 = 61
+        func arrive(_ count: Int) {
+            for _ in 0..<count {
+                room.arrive([Self.arrival(seq)])
+                seq += 1
+                pump(1.0 / 60.0)
+            }
+        }
+        // More than the room follows in a second (`RoomBottomWatch.followLimit`): the end stays below until the second
+        // is up.
+        arrive(26)
+        XCTAssertFalse(Self.atBottom(list), "the end is below when the reader scrolls (the arrivals pushed it)")
+        let before = list.contentOffset.y
+        scroll(list)
+        // The scroll's animation lands before the room's next follow is due (the follow limit's second is up).
+        pump(0.4)
+        let scrolledTo = list.contentOffset.y
+        print("READER-STAYS-PUT \(name) scroll: \(before) -> \(scrolledTo) (end at \(Self.bottomOffset(of: list)))")
+        XCTAssertLessThan(scrolledTo, before - 100, "\(name): the list moved up")
+        arrive(14)
+        pump(1.5)
+        print("READER-STAYS-PUT \(name) after: \(list.contentOffset.y) unread=\(room.unreadCount)")
+        XCTAssertEqual(list.contentOffset.y, scrolledTo, accuracy: 1, "\(name): the reader was pulled back down")
+        XCTAssertFalse(room.atBottom, "\(name): the reader left the bottom")
+        XCTAssertGreaterThan(room.unreadCount, 0, "\(name): what arrived after is counted for the arrow")
+    }
+
     // MARK: - Running it
 
     /// Arrivals followed at the bottom, the reader leaving, arrivals while away.
@@ -294,11 +384,11 @@ final class RoomReaderStaysPutTests: XCTestCase {
     }
 
     /// The room in a window, opened at its newest rows.
-    private func host(_ room: Room) throws -> UIScrollView {
+    private func host(_ room: Room, textSize: DynamicTypeSize = .large) throws -> UIScrollView {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let window = UIWindow(windowScene: scene)
         window.windowLevel = .normal + 5
-        window.rootViewController = UIHostingController(rootView: Host(room: room))
+        window.rootViewController = UIHostingController(rootView: Host(room: room, textSize: textSize))
         window.makeKeyAndVisible()
         self.window = window
         addTeardownBlock { [weak self] in

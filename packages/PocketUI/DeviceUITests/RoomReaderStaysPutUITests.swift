@@ -147,6 +147,112 @@ final class RoomReaderStaysPutUITests: XCTestCase {
                       "the reader is still up the room: the arrow shows")
     }
 
+    // MARK: - Starting a reply
+
+    /// Starting a reply: a message swiped to the right brings up the reply line and the keyboard; a tap on the message
+    /// box brings up the keyboard. Starting one in a busy room sometimes left the reader somewhere they never scrolled
+    /// to (Carter). A reader a couple of lines up stays where they are, as the composer opens and while messages arrive
+    /// after it; a reader at the very bottom keeps the end of the room in view above the composer, and follows what
+    /// arrives.
+    private enum ReplyStart: String {
+        case swipe, tapTheBox
+    }
+
+    func test_swiping_to_reply_a_couple_of_lines_up_moves_nothing() throws {
+        try replyACoupleOfLinesUp(by: .swipe)
+    }
+
+    func test_tapping_the_message_box_a_couple_of_lines_up_moves_nothing() throws {
+        try replyACoupleOfLinesUp(by: .tapTheBox)
+    }
+
+    func test_swiping_to_reply_at_the_bottom_keeps_the_end_in_view() throws {
+        try replyAtTheBottom(by: .swipe)
+    }
+
+    func test_tapping_the_message_box_at_the_bottom_keeps_the_end_in_view() throws {
+        try replyAtTheBottom(by: .tapTheBox)
+    }
+
+    /// How long the composer is watched opening before messages start arriving.
+    private static let composerOpening: TimeInterval = 3
+
+    private func replyACoupleOfLinesUp(by start: ReplyStart) throws {
+        let app = launch(kind: "messages")
+        scrollUntilTheEndIsBelow(app, points: Self.coupleOfLines)
+        let swipe = try XCTUnwrap(readScreen(app).map { swipeTarget(app, on: $0) }, "the app could be read")
+        try readerStaysPut(app, case: "reply-\(start.rawValue)-near", watch: Self.composerOpening + Self.burstTime,
+                           then: (after: Self.composerOpening, Self.beginBurst)) {
+            startReply(app, by: start, swiping: swipe)
+        }
+    }
+
+    private func replyAtTheBottom(by start: ReplyStart) throws {
+        let app = launch(kind: "messages")
+        let name = "reply-\(start.rawValue)-bottom"
+        let opened = try XCTUnwrap(readScreen(app), "the app could be read")
+        print("READER-STAYS-PUT \(name) before end-below=\(opened.endBelow) arrow=\(opened.jumpLabel ?? "none")")
+        XCTAssertLessThanOrEqual(opened.endBelow, 0, "the room opened at its very bottom")
+        let swipe = swipeTarget(app, on: opened)
+        keep(XCUIScreen.main.screenshot(), as: "\(name)-0-before")
+        startReply(app, by: start, swiping: swipe)
+        // The keyboard rises under the end of the room: it stays in view above the composer, there and after.
+        var worst = -CGFloat.greatestFiniteMagnitude
+        let opening = Date()
+        while Date().timeIntervalSince(opening) < Self.composerOpening {
+            pause(0.75)
+            guard let screen = readScreen(app) else { continue }
+            print("READER-STAYS-PUT \(name) t=\(String(format: "%.1f", Date().timeIntervalSince(opening))) "
+                + "end-below=\(screen.endBelow) arrow=\(screen.jumpLabel ?? "none")")
+            // The keyboard's own rise is not over before a second has passed.
+            if Date().timeIntervalSince(opening) > 1.2 { worst = max(worst, screen.endBelow) }
+            XCTAssertNil(screen.jumpLabel, "\(name): the reader was taken for gone from the bottom")
+        }
+        keep(XCUIScreen.main.screenshot(), as: "\(name)-1-composer-open")
+        XCTAssertLessThanOrEqual(worst, 0, "\(name): the end of the room went under the composer (\(worst) points)")
+        XCTAssertGreaterThan(worst, -80, "\(name): the end of the room is far above the composer (\(worst) points)")
+        // Then messages arrive: followed to the last.
+        Self.beginBurst()
+        waitForBurst()
+        keep(XCUIScreen.main.screenshot(), as: "\(name)-9-after")
+        let screen = try XCTUnwrap(readScreen(app), "the app could be read")
+        let last = screen.messages[Self.lastArrival]
+        print("READER-STAYS-PUT \(name) final newest-visible=\(screen.newestVisible() ?? "none") "
+            + "last=\(last.map { "\($0.minY)...\($0.maxY)" } ?? "absent") end-below=\(screen.endBelow) "
+            + "arrow=\(screen.jumpLabel ?? "none")")
+        XCTAssertEqual(screen.newestVisible(), Self.lastArrival, "\(name): the burst's last message is the newest in view")
+        XCTAssertLessThanOrEqual(screen.endBelow, 0, "\(name): the end of the room is in view above the composer")
+        XCTAssertNil(screen.jumpLabel, "\(name): still at the bottom: no arrow")
+    }
+
+    /// Where a swipe to reply starts: on the lowest message wholly in the reading band and clear of the strips the
+    /// measuring reads, a little in from its left edge.
+    private func swipeTarget(_ app: XCUIApplication, on screen: Screen) -> XCUICoordinate? {
+        let candidates = screen.messages.filter {
+            $0.value.minY > Self.stripTo + 20 && $0.value.maxY < screen.bottom - 4 && $0.value.height > 30
+        }
+        guard let target = candidates.max(by: { $0.value.minY < $1.value.minY }) else { return nil }
+        print("READER-STAYS-PUT swipe target=\(target.key) frame=\(target.value)")
+        return app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: target.value.minX + 48, dy: target.value.midY))
+    }
+
+    /// Opens the composer: a swipe to the right on a message (the reply line comes up), or a tap on the message box;
+    /// the keyboard comes up either way.
+    private func startReply(_ app: XCUIApplication, by start: ReplyStart, swiping target: XCUICoordinate?) {
+        switch start {
+        case .swipe:
+            guard let target else { return XCTFail("no message to swipe in the reading band") }
+            target.press(forDuration: 0.05, thenDragTo: target.withOffset(CGVector(dx: 150, dy: 0)),
+                         withVelocity: .default, thenHoldForDuration: 0.05)
+            XCTAssertTrue(app.descendants(matching: .any)["pocket.room.composer.replying"].waitForExistence(timeout: 5),
+                          "the reply line came up")
+        case .tapTheBox:
+            app.descendants(matching: .any)["pocket.room.composer"].tap()
+        }
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "the keyboard came up")
+    }
+
     // MARK: - The arrow goes to the first new message
 
     /// Three screens up, the burst arrives; the arrow takes the reader to the first message that arrived, read from its
@@ -252,7 +358,7 @@ final class RoomReaderStaysPutUITests: XCTestCase {
     /// unmeasured. A second before `action` is measured too, so a room still moving on its own is told apart from one
     /// moved by the action.
     private func readerStaysPut(_ app: XCUIApplication, case name: String, watch: TimeInterval = burstTime,
-                                _ action: () -> Void) throws {
+                                then: (after: TimeInterval, run: () -> Void)? = nil, _ action: () -> Void) throws {
         if let start = readScreen(app) {
             print("READER-STAYS-PUT \(name) top=\(start.topMessage()?.id ?? "none") end-below=\(start.endBelow) "
                 + "arrow-before=\(start.jumpLabel ?? "none")")
@@ -278,8 +384,14 @@ final class RoomReaderStaysPutUITests: XCTestCase {
         var samples = 0
         var keptMoved = false
         let started = Date()
+        var thenDone = false
         while !Self.burstWatched(since: started, least: watch) {
             defer { pause(0.1) }
+            // What comes next while it is measured (messages arriving after the composer opened).
+            if let then, !thenDone, Date().timeIntervalSince(started) >= then.after {
+                thenDone = true
+                then.run()
+            }
             guard let drawn = Drawn(XCUIScreen.main.screenshot()) else { continue }
             samples += 1
             if let dy = drawn.shift(of: strips, in: reference, within: Self.searched) {
@@ -468,7 +580,8 @@ final class RoomReaderStaysPutUITests: XCTestCase {
             } else if id.hasPrefix("pocket.room.reply.") || id.hasPrefix("pocket.room.quiet.")
                         || id.hasPrefix("pocket.room.checkpoint.") {
                 screen.rows[id] = node.frame
-            } else if id == "pocket.room.composer" {
+            } else if id == "pocket.room.composer" || id == "pocket.room.composer.replying" {
+                // The message box, or the reply line above it.
                 screen.bottom = min(screen.bottom, node.frame.minY)
             } else if id == "pocket.room.jumpToLatest" {
                 screen.jumpLabel = node.label

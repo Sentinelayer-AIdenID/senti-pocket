@@ -107,6 +107,20 @@ final class RoomReaderPlaceTests: XCTestCase {
         XCTAssertFalse(tracker.atBottom)
     }
 
+    /// Put at the bottom by the room (it opened there, the jump button went there), the list may still be on its way:
+    /// until the end has been in view there is no place to measure leaving from, and the end below is followed. The
+    /// reader moving the list then is not followed back against their hand.
+    func test_the_readers_hand_before_the_end_was_in_view_is_not_followed() {
+        var tracker = RoomReaderPlace.Tracker(atBottom: false)
+        tracker.set(atBottom: true)
+        XCTAssertNil(tracker.bottomOffset)
+        XCTAssertEqual(tracker.read(reading(300, offset: 500)), .endMovedAway, "on its way down: followed")
+        XCTAssertEqual(tracker.read(reading(420, offset: 380), readerMoving: true), .leftBottom,
+                       "the reader moved the list up before the end was in view")
+        XCTAssertFalse(tracker.atBottom)
+        XCTAssertEqual(tracker.read(reading(520, offset: 380)), .none, "an arrival below is not followed")
+    }
+
     func test_the_end_coming_into_view_is_the_bottom_unless_the_room_says_otherwise() {
         var tracker = RoomReaderPlace.Tracker(atBottom: false)
         XCTAssertEqual(tracker.read(reading(300, offset: 500)), .none)
