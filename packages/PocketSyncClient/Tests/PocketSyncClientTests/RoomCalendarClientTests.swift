@@ -13,6 +13,8 @@ final class CalendarRoutesURLProtocol: URLProtocol {
         let path: String
         let query: [String: String]
         let authorization: String?
+        let accept: String?
+        let idempotencyKey: String?
         let body: JSONValue?
         let rawBody: Data?
     }
@@ -66,6 +68,8 @@ final class CalendarRoutesURLProtocol: URLProtocol {
             path: request.url?.path ?? "",
             query: query,
             authorization: request.value(forHTTPHeaderField: "Authorization"),
+            accept: request.value(forHTTPHeaderField: "Accept"),
+            idempotencyKey: request.value(forHTTPHeaderField: "Idempotency-Key"),
             body: data.flatMap { $0.isEmpty ? nil : try? JSONDecoder().decode(JSONValue.self, from: $0) },
             rawBody: data
         )
@@ -96,6 +100,29 @@ final class RoomCalendarClientTests: XCTestCase {
     }
 
     private func zone(_ id: String) -> TimeZone { TimeZone(identifier: id)! }
+
+    // MARK: - One personal request
+
+    /// #330 and #331 merged: one `send` takes a query (the calendar's reads) and extra headers (an idempotency key on
+    /// folder writes) together, and an extra header never replaces the Accept or the bearer every call carries.
+    func test_one_personal_request_carries_a_query_and_extra_headers_and_keeps_its_own() async throws {
+        CalendarRoutesURLProtocol.reset { _ in (200, "{}") }
+        let request = PersonalRequest(apiBaseURL: URL(string: "https://api.example.test"),
+                                      urlSession: CalendarRoutesURLProtocol.session(), tokenProvider: { "person-token" })
+        let answer = try await request.send("POST", ["api", "v1", "me", "room-folders"],
+                                            query: [URLQueryItem(name: "days", value: "90")], body: ["name": "Studio"],
+                                            headers: ["Idempotency-Key": "key-1", "Authorization": "Bearer someone-else",
+                                                      "Accept": "text/plain"])
+        XCTAssertEqual(answer.status, 200)
+        let seen = try XCTUnwrap(CalendarRoutesURLProtocol.requests.first)
+        XCTAssertEqual(seen.method, "POST")
+        XCTAssertEqual(seen.path, "/api/v1/me/room-folders")
+        XCTAssertEqual(seen.query, ["days": "90"], "the query is sent")
+        XCTAssertEqual(seen.idempotencyKey, "key-1", "the extra header is sent")
+        XCTAssertEqual(seen.authorization, "Bearer person-token", "an extra header never replaces the bearer")
+        XCTAssertEqual(seen.accept, "application/json", "an extra header never replaces the Accept")
+        XCTAssertEqual(seen.body, .object(["name": .string("Studio")]))
+    }
 
     // MARK: - Reading
 
