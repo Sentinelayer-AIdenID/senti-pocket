@@ -484,6 +484,31 @@ final class RoomReaderStaysPutTests: XCTestCase {
     /// (about 0.25 s) is, a reader stranded mid-room with the arrow hidden is not (warden).
     private static let strandedLimit: TimeInterval = 1
 
+    /// At the largest text size, forty tall reports arriving at once under a room of short rows, twice: the room's own
+    /// scroll follows them to the end. Moved here from #323, where SwiftUI's follows could stop short of it (6,911 pt
+    /// in CI) and the arrow had to take the reader down.
+    func test_tall_arrivals_at_the_largest_text_size_are_followed_to_the_end() throws {
+        try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
+        let room = Room(Self.messages())
+        let list = try host(room, textSize: .accessibility5)
+        var seq: Int64 = 61
+        for batch in 1...2 {
+            let height = list.contentSize.height
+            room.arrive((seq..<seq + 40).map { Self.longArrival($0) })
+            seq += 40
+            wait("batch \(batch) followed to the end", seconds: 8) {
+                list.contentSize.height > height && Self.atBottom(list)
+            }
+            print("READER-STAYS-PUT tall-arrivals reach batch=\(batch) "
+                + "end-below=\(Int(Self.bottomOffset(of: list) - list.contentOffset.y)) content=\(Int(list.contentSize.height)) "
+                + "(was \(Int(height))) at-bottom=\(room.atBottom)")
+            XCTAssertGreaterThan(list.contentSize.height, height, "batch \(batch): the reports did not grow the room")
+            XCTAssertTrue(Self.atBottom(list), "batch \(batch): the follows did not reach the end")
+            XCTAssertTrue(room.atBottom, "batch \(batch): the room does not say the reader is at the bottom")
+            pump(1)
+        }
+    }
+
     /// Within the bottom's 24 points the reader is at the bottom, and follows what arrives.
     func test_at_the_very_bottom_the_reader_follows_what_arrives() throws {
         try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
@@ -725,14 +750,17 @@ final class RoomReaderStaysPutTests: XCTestCase {
         return bottomOffset(of: list) - visible * 2
     }
 
-    /// The reader's finger, as far as the room can tell: at frame `from` the room's scroll is stopped as a touch stops
-    /// it (the list set where it is), then the list moves up 30 points a frame for six frames. `put` is where it was
-    /// left.
+    /// The reader's finger, as far as the room can tell: at frame `from` a drag begins (the scroll view's delegate is
+    /// told, as UIKit tells it, so SwiftUI's scroll phase is interacting) and the room's scroll is stopped as a touch
+    /// stops it (the list set where it is); the list moves up 30 points a frame for six frames, and the drag ends.
+    /// `put` is where it was left.
     private static func dragUp(_ list: UIScrollView, at frame: Int, from: Int, put: inout CGFloat?) {
         guard frame >= from, frame <= from + 6 else { return }
+        if frame == from { list.delegate?.scrollViewWillBeginDragging?(list) }
         let y = frame == from ? list.contentOffset.y : (put ?? list.contentOffset.y) - 30
         list.setContentOffset(CGPoint(x: list.contentOffset.x, y: y), animated: false)
         put = y
+        if frame == from + 6 { list.delegate?.scrollViewDidEndDragging?(list, willDecelerate: false) }
     }
 
     /// What a jump down did, frame by frame from the tap.

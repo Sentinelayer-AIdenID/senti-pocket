@@ -89,6 +89,57 @@ public enum RoomReaderPlace {
         public mutating func followMade() { lastTaken = nil }
     }
 
+    /// The room's own scroll to its end (a follow, the jump button) and the moment just after it lands, while SwiftUI
+    /// settles the rows it measured on its way and moves the list by itself (up to 186 pt at once in a burst, in CI):
+    /// the list moving up then is not the reader unless their hand is on it (`Tracker.see`, `ownScroll`). The moment
+    /// ends at the earlier of `stillFrames` still frames after the scroll landed and `limit` after it started (warden),
+    /// so a page up not by touch just after it (VoiceOver, a keyboard's Page Up) still leaves the bottom.
+    public struct OwnScroll: Equatable, Sendable {
+        public static let limit: TimeInterval = 1.5
+        public static let stillFrames = 2
+        private var started: TimeInterval?
+        private var landed = false
+        private var still = 0
+
+        public init() {}
+
+        /// The room's own scroll started (or goes on: the first start counts for `limit`).
+        public mutating func start(at time: TimeInterval) {
+            if started == nil { started = time }
+            landed = false
+            still = 0
+        }
+
+        /// It landed.
+        public mutating func land() {
+            landed = true
+            still = 0
+        }
+
+        /// The reader took the list: the moment is over.
+        public mutating func end() {
+            started = nil
+            landed = false
+            still = 0
+        }
+
+        /// A frame after it landed: the list moved in it, or not.
+        public mutating func frame(moved: Bool) {
+            guard landed else { return }
+            still = moved ? 0 : still + 1
+        }
+
+        /// Whether a reading at `time` is still in the moment.
+        public mutating func exempts(at time: TimeInterval) -> Bool {
+            guard let started else { return false }
+            guard time - started < Self.limit, !(landed && still >= Self.stillFrames) else {
+                end()
+                return false
+            }
+            return true
+        }
+    }
+
     /// The reader's place, kept from reading to reading. Readings are seen while the list is laid out (`see`, which
     /// only notes where the list was the last time the end was in view) and taken once the frame is done (`read`).
     public struct Tracker: Equatable, Sendable {
@@ -124,13 +175,21 @@ public enum RoomReaderPlace {
         }
 
         /// What a reading is, noting where the list is while the end is in view. `readerMoving`: the reader is
-        /// dragging the list, or it is coasting from their drag.
-        public mutating func see(_ reading: Reading, readerMoving: Bool = false) -> Sight {
+        /// dragging the list, or it is coasting from their drag. `ownScroll`: the room's own scroll to its end is on its
+        /// way or settling (`OwnScroll`): the list moving then is not the reader unless their hand is on it, and where
+        /// it is becomes where leaving is measured from.
+        public mutating func see(_ reading: Reading, readerMoving: Bool = false, ownScroll: Bool = false) -> Sight {
             if reading.endInView {
                 bottomOffset = reading.offset
                 deepestOffset = reading.offset
                 endPushedDown = false
                 return .endInView
+            }
+            if ownScroll, !readerMoving {
+                deepestOffset = reading.offset
+                if bottomOffset != nil { bottomOffset = reading.offset }
+                endPushedDown = true
+                return .endBelow
             }
             let deepest = max(deepestOffset ?? reading.offset, reading.offset)
             deepestOffset = deepest
@@ -152,8 +211,9 @@ public enum RoomReaderPlace {
 
         /// What `reading` changes. `mayBeAtBottom` is false while the end in view is not the live room's bottom (a
         /// window further back) or a message the reader was taken to holds them.
-        public mutating func read(_ reading: Reading, mayBeAtBottom: Bool = true, readerMoving: Bool = false) -> Change {
-            let sight = see(reading, readerMoving: readerMoving)
+        public mutating func read(_ reading: Reading, mayBeAtBottom: Bool = true, readerMoving: Bool = false,
+                                  ownScroll: Bool = false) -> Change {
+            let sight = see(reading, readerMoving: readerMoving, ownScroll: ownScroll)
             let seenBefore = leaveSeen
             leaveSeen = false
             switch sight {

@@ -42,6 +42,33 @@ final class RoomReaderPlaceTests: XCTestCase {
         XCTAssertTrue(kept.takes(.endBelow))
     }
 
+    /// The room's own scroll and the rows settling after it are not the reader: while it is on its way, SwiftUI moving
+    /// the list up 186 pt at once (a burst, in CI) leaves nothing. Its moment ends at two still frames after it landed
+    /// (or 1.5 s after it started): a page up not by touch 0.2 s after a follow landed, the end pushed below, leaves the
+    /// bottom (warden).
+    func test_the_rooms_own_scroll_is_not_the_reader_only_until_it_has_settled() {
+        var tracker = RoomReaderPlace.Tracker()
+        var own = RoomReaderPlace.OwnScroll()
+        XCTAssertEqual(tracker.read(reading(0, offset: 1000)), RoomReaderPlace.Change.none)
+        own.start(at: 10)
+        XCTAssertEqual(tracker.read(reading(300, offset: 1600), ownScroll: own.exempts(at: 10.1)), .endMovedAway)
+        XCTAssertEqual(tracker.read(reading(486, offset: 1414), ownScroll: own.exempts(at: 10.2)), .endMovedAway,
+                       "the rows settling while the room's own scroll is on its way is not the reader")
+        XCTAssertTrue(tracker.atBottom)
+        own.land()
+        own.frame(moved: false)
+        own.frame(moved: false)
+        XCTAssertFalse(own.exempts(at: 10.4), "two still frames after it landed, its moment is over")
+        XCTAssertEqual(tracker.read(reading(1300, offset: 600), ownScroll: own.exempts(at: 10.4)), .mayHaveLeft,
+                       "a page up not by touch 0.2 s after the follow landed was taken for the room's own scroll")
+        XCTAssertEqual(tracker.read(reading(1300, offset: 600), ownScroll: own.exempts(at: 10.42)), .leftBottom)
+        // At most 1.5 s from its start, still frames or not.
+        var long = RoomReaderPlace.OwnScroll()
+        long.start(at: 0)
+        XCTAssertTrue(long.exempts(at: 1.0))
+        XCTAssertFalse(long.exempts(at: 1.5))
+    }
+
     func test_the_bottom_is_the_end_of_the_room_within_24_points() {
         XCTAssertEqual(RoomReaderPlace.atBottomDistance, 24)
         XCTAssertTrue(reading(0, offset: 900).endInView)
