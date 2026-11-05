@@ -91,7 +91,6 @@ struct CalendarSheet: View {
 /// The month, the day picked, its events, and the Add field.
 struct CalendarScreen: View {
     @ObservedObject var board: CalendarBoard
-    @Environment(\.openURL) private var openURL
 
     var body: some View {
         ScrollView {
@@ -189,7 +188,8 @@ struct CalendarScreen: View {
                     .foregroundStyle(.secondary)
             }
             ForEach(events) { event in
-                eventRow(event)
+                CalendarEventRow(event: event, time: CalendarEventTime.text(event, calendar: board.calendar),
+                                 room: board.roomTitle(event.sessionId))
             }
             if board.canAdd {
                 if board.isPast(day) {
@@ -201,58 +201,6 @@ struct CalendarScreen: View {
                 }
             }
         }
-    }
-
-    /// An event: what VoiceOver reads as one element (title, time, room, notes), and its link as a button of its own
-    /// after it, so the link can be reached and opened on its own.
-    private func eventRow(_ event: CalendarEvent) -> some View {
-        let time = CalendarEventTime.text(event, calendar: board.calendar)
-        let room = board.roomTitle(event.sessionId)
-        return HStack(alignment: .top, spacing: 10) {
-            RoundedRectangle(cornerRadius: 2)
-                .fill(Color.accentColor)
-                .frame(width: 4)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 3) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(event.title)
-                        .font(.body.weight(.semibold))
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(time)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    if let room {
-                        Text(room)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                    if let notes = event.notes, !notes.isEmpty {
-                        Text(notes)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(CalendarEventRowLabel.text(event, time: time, room: room))
-                .accessibilityIdentifier("pocket.calendar.event.\(event.id)")
-                if let link = event.link {
-                    Button {
-                        openURL(link)
-                    } label: {
-                        Label("Open link", systemImage: "link")
-                            .font(.subheadline)
-                    }
-                    .buttonStyle(.borderless)
-                    .accessibilityLabel("Open link for \(event.title)")
-                    .accessibilityIdentifier("pocket.calendar.event.\(event.id).link")
-                }
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(10)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color(uiColor: .secondarySystemBackground)))
-        .accessibilityElement(children: .contain)
     }
 
     private func addField(_ day: CalendarDay) -> some View {
@@ -375,6 +323,63 @@ struct CalendarDayCell: View {
         .accessibilityValue(cell.isToday ? "Today" : "")
         .accessibilityAddTraits(isSelected ? .isSelected : [])
         .accessibilityIdentifier("pocket.calendar.day.\(day.key)")
+    }
+}
+
+/// An event: what VoiceOver reads as one element (title, time, room, notes), and its link as a button of its own
+/// after it, so the link can be reached and opened on its own.
+struct CalendarEventRow: View {
+    let event: CalendarEvent
+    let time: String
+    let room: String?
+    @Environment(\.openURL) private var openURL
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(Color.accentColor)
+                .frame(width: 4)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(event.title)
+                        .font(.body.weight(.semibold))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(time)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    if let room {
+                        Text(room)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let notes = event.notes, !notes.isEmpty {
+                        Text(notes)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(CalendarEventRowLabel.text(event, time: time, room: room))
+                .accessibilityIdentifier("pocket.calendar.event.\(event.id)")
+                if let link = event.link {
+                    Button {
+                        openURL(link)
+                    } label: {
+                        Label("Open link", systemImage: "link")
+                            .font(.subheadline)
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Open link for \(event.title)")
+                    .accessibilityIdentifier("pocket.calendar.event.\(event.id).link")
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color(uiColor: .secondarySystemBackground)))
+        .accessibilityElement(children: .contain)
     }
 }
 

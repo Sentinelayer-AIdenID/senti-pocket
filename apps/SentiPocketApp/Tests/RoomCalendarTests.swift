@@ -1,6 +1,8 @@
 import Foundation
 import PocketSyncClient
 import Security
+import SwiftUI
+import UIKit
 import XCTest
 @testable import SentiPocketApp
 
@@ -1070,6 +1072,38 @@ final class RoomCalendarTests: XCTestCase {
         let call = CalendarEvent(id: "e2", sessionId: "room-1", title: "Call", startsAt: at("2026-11-13T00:00:00Z"),
                                  notes: " ")
         XCTAssertEqual(CalendarEventRowLabel.text(call, time: "7:00 PM", room: nil), "Call, 7:00 PM")
+    }
+
+    /// Review P3 (#330): the rows hosted on the simulator and read the way VoiceOver reads them (UI automation on, the
+    /// accessibility tree walked). A row is one element with its notes; its link is an element of its own, a button,
+    /// after it. A row combined into one element again, as under review, folds the link into the row and fails here.
+    func test_voiceover_reaches_an_events_link_on_its_own() throws {
+        let rehearsal = CalendarEvent(id: "e-link", sessionId: "room-1", title: "Launch rehearsal",
+                                      startsAt: at("2026-11-12T15:00:00Z"),
+                                      link: URL(string: "https://docs.example.test/rehearsal"))
+        let dinner = CalendarEvent(id: "e-notes", sessionId: "room-1", title: "Team dinner",
+                                   startsAt: at("2026-11-13T00:00:00Z"), notes: "Table for eight.")
+        let window = try HostedSummary.host(VStack(alignment: .leading, spacing: 12) {
+            Text("Calendar rows").accessibilityIdentifier("calendar.rows.drawn")
+            CalendarEventRow(event: rehearsal, time: "10:00 AM", room: "Launch planning")
+            CalendarEventRow(event: dinner, time: "7:00 PM", room: nil)
+        })
+        defer { HostedSummary.close(window) }
+        XCTAssertNotNil(HostedSummary.wait(for: "calendar.rows.drawn", in: window), "the rows were drawn")
+        HostedSummary.pump(0.3)
+
+        let elements = HostedSummary.elements(in: window).filter { $0.isAccessibilityElement }
+        func element(_ identifier: String) -> [NSObject] {
+            elements.filter { HostedSummary.identifier(of: $0) == identifier }
+        }
+        let links = element("pocket.calendar.event.e-link.link")
+        XCTAssertEqual(links.count, 1, "the link is an element of its own")
+        XCTAssertEqual(links.first?.accessibilityLabel, "Open link for Launch rehearsal")
+        XCTAssertEqual(links.first.map { $0.accessibilityTraits.contains(.button) }, true, "the link is a button")
+        XCTAssertEqual(element("pocket.calendar.event.e-link").first?.accessibilityLabel,
+                       "Launch rehearsal, 10:00 AM, Launch planning", "the row reads without its link")
+        XCTAssertEqual(element("pocket.calendar.event.e-notes").first?.accessibilityLabel,
+                       "Team dinner, 7:00 PM, Table for eight.", "the row reads its notes")
     }
 
     func test_voiceover_reads_each_day_with_its_events() {
