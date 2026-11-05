@@ -54,15 +54,18 @@ final class LazyListBuildTests: XCTestCase {
         step("the first update after the open", rows: rows, list: .roomRow, most: ceiling) {
             room.objectWillChange.send()
         }
+        // Every later update builds what is on screen, and the rows an arrival's scroll to the bottom passes on its way
+        // there (8 to 21 measured on the build Mac; once 139 in CI, where the list had drifted from its bottom): never
+        // every row of the room, which master built at every update (404 to 407 of 404).
+        let update = Self.lessThanAPass(rows)
         // The room drawn again with nothing changed: its screen's body runs again at every draw of the root.
-        step("drawn again, nothing changed", rows: rows, list: .roomRow) { room.objectWillChange.send() }
+        step("drawn again, nothing changed", rows: rows, list: .roomRow, most: update) { room.objectWillChange.send() }
         // A message arrives, and another.
-        step("an arrival", rows: rows, list: .roomRow) { room.state = Self.room(rows: 401) }
-        step("another arrival", rows: rows, list: .roomRow) { room.state = Self.room(rows: 402) }
+        step("an arrival", rows: rows, list: .roomRow, most: update) { room.state = Self.room(rows: 401) }
+        step("another arrival", rows: rows, list: .roomRow, most: update) { room.state = Self.room(rows: 402) }
         // Another room put on screen in its place, as a room picked from the side panel (the 08:06 freeze): an open
-        // again. After it the list keeps every row it made, and each update goes over them once (as master's did at
-        // every update): at most one pass over the room's rows and a few more, never more.
-        // The swap goes over the rows of the room it leaves as well (1,209 measured: 3 passes over 403).
+        // again, with the same ceiling. The swap goes over the rows of the room it leaves as well (1,209 measured at
+        // master: 3 passes over 403). After it, updates build what is on screen (8 to 10 measured; master 303 to 305).
         let other = 300
         step("another room", rows: other, list: .roomRow, most: Self.passesAtMost * max(rows, other)) {
             room.state = Self.room(rows: other, id: "other")
@@ -72,10 +75,10 @@ final class LazyListBuildTests: XCTestCase {
             room.objectWillChange.send()
         }
         step("drawn again, nothing changed, in the other room", rows: other, list: .roomRow,
-             most: other + Self.mostBuiltPerStep) {
+             most: Self.lessThanAPass(other)) {
             room.objectWillChange.send()
         }
-        step("an arrival in the other room", rows: other, list: .roomRow, most: other + Self.mostBuiltPerStep) {
+        step("an arrival in the other room", rows: other, list: .roomRow, most: Self.lessThanAPass(other)) {
             room.state = Self.room(rows: other + 1, id: "other")
         }
     }
@@ -83,6 +86,10 @@ final class LazyListBuildTests: XCTestCase {
     /// The most passes over its rows an open, a room put in another's place, or the first update after either may
     /// make: the most measured was 3 (1,212 rows built in a room of 404).
     static let passesAtMost = 4
+
+    /// The most rows an update of a room of `rows` may build: two thirds of them. A list that walks every row at each
+    /// update builds all of them or more.
+    static func lessThanAPass(_ rows: Int) -> Int { rows * 2 / 3 }
 
     /// A message that is a part of a file posted as base64 folds behind the file's card and shows nothing. It keeps its
     /// row and its id, and takes no height and no space between rows: the room with it is exactly as tall as the room
