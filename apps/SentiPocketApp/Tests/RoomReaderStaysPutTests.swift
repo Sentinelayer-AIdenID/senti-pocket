@@ -95,8 +95,8 @@ final class RoomReaderStaysPutTests: XCTestCase {
     }
 
     /// Several screens of messages of every length.
-    private static func messages() -> [RoomChatMessageInput] {
-        (1...60).map { index -> RoomChatMessageInput in
+    private static func messages(count: Int = 60) -> [RoomChatMessageInput] {
+        (1...count).map { index -> RoomChatMessageInput in
             let seq = Int64(index)
             switch index % 4 {
             case 0: return input(seq, "human-reader", "A note from the phone, \(index).")
@@ -359,6 +359,145 @@ final class RoomReaderStaysPutTests: XCTestCase {
         XCTAssertEqual(list.contentOffset.y, scrolledTo, accuracy: 1, "\(name): the reader was pulled back down")
         XCTAssertFalse(room.atBottom, "\(name): the reader left the bottom")
         XCTAssertGreaterThan(room.unreadCount, 0, "\(name): what arrived after is counted for the arrow")
+    }
+
+    // MARK: - The arrow's way down a long room
+
+    /// From far up a long room the arrow takes the reader down to the latest in the list as it is. It used to build the
+    /// room again as a new list at its newest rows: the screen went dark, glitched, then showed the bottom (Carter).
+    /// Every frame on the way is captured from the screen: the list is the same one throughout, no frame is without
+    /// messages, the last stretch is seen scrolling, and it ends at the bottom. The rows on the way are not drawn: an
+    /// animated scroll the whole way down draws every one, which once froze the app from up a long history.
+    func test_the_arrow_takes_a_reader_far_up_a_long_room_down_in_the_same_list_frame_by_frame() throws {
+        try XCTSkipUnless(Self.readsGeometry, "how far the end is comes from the scroll view's geometry (iOS 18 and later)")
+        let rows = 400
+        let room = Room(Self.messages(count: rows))
+        let window = try HostedSummary.host(Host(room: room))
+        addTeardownBlock { HostedSummary.close(window) }
+        var opened: UIScrollView?
+        wait("the room opened at its newest rows", seconds: 20) {
+            opened = Self.list(in: window)
+            guard let list = opened, list.contentSize.height > list.bounds.height * 2 else { return false }
+            return Self.atBottom(list)
+        }
+        let list = try XCTUnwrap(opened, "the room's list")
+        pump(0.5)
+        // Far up the room: a fifth of the way down it.
+        list.setContentOffset(CGPoint(x: 0, y: Self.bottomOffset(of: list) * 0.2), animated: false)
+        wait("away from the bottom", seconds: 3) { !room.atBottom }
+        pump(1)
+        let arrow = try XCTUnwrap(HostedSummary.wait(for: "pocket.room.jumpToLatest", in: window), "the arrow shows")
+
+        let watch = FrameWatch(window: window, list: list)
+        watch.start()
+        pump(0.5)
+        let tappedAt = watch.frames.count
+        let drawsBefore = RenderTrace.snapshot().draws
+        XCTAssertTrue(arrow.accessibilityActivate(), "the arrow could be pressed")
+        wait("down at the latest", seconds: 4) { Self.list(in: window).map(Self.atBottom) ?? false }
+        pump(0.6)
+        watch.stop()
+        let draws = RenderTrace.snapshot().draws - drawsBefore
+
+        let before = watch.frames[..<tappedAt].map(\.ink).sorted()
+        let during = Array(watch.frames[tappedAt...])
+        let usual = before.isEmpty ? 0 : before[before.count / 2]
+        let darkest = during.map(\.ink).min() ?? 0
+        let visible = list.bounds.height - list.adjustedContentInset.top - list.adjustedContentInset.bottom
+        let steps = zip(during, during.dropFirst()).map { $1.offset - $0.offset }
+        let scrolling = steps.filter { $0 > 0.5 && $0 < visible * 0.9 }.count
+        print("READER-STAYS-PUT arrow-jump frames=\(during.count) usual-ink=\(usual) darkest-ink=\(darkest) "
+            + "scrolling-frames=\(scrolling) row-draws=\(draws) steps=\(steps.map { String(format: "%.0f", $0) })")
+        XCTAssertGreaterThan(usual, 0.01, "the screen could be read before the tap")
+        XCTAssertGreaterThan(during.count, 10, "frames were captured on the way down")
+        XCTAssertTrue(during.allSatisfy(\.sameList), "the room was built again as a new list")
+        XCTAssertGreaterThan(darkest, usual * 0.4, "a frame on the way down showed no messages")
+        XCTAssertGreaterThanOrEqual(scrolling, 4, "the way down was not seen scrolling")
+        XCTAssertTrue(Self.list(in: window).map(Self.atBottom) ?? false, "it ended at the bottom")
+        XCTAssertTrue(room.atBottom)
+        XCTAssertLessThan(draws, rows / 4, "rows drawn on the way down: \(draws) of \(rows)")
+    }
+
+    /// Captures each frame the screen draws: where the list is, how much of what can be read is drawn (the share of
+    /// its pixels that differ from the background), and whether it is still the same list.
+    @MainActor
+    private final class FrameWatch: NSObject {
+        struct Frame {
+            let offset: CGFloat
+            let ink: Double
+            let sameList: Bool
+        }
+
+        private(set) var frames: [Frame] = []
+        private let window: UIWindow
+        private let list: UIScrollView
+        /// What can be read, in the window: under the navigation bar, over the composer, the left part (the jump
+        /// button sits on the right).
+        private let band: CGRect
+        private var link: CADisplayLink?
+
+        init(window: UIWindow, list: UIScrollView) {
+            self.window = window
+            self.list = list
+            let frame = list.convert(list.bounds, to: window)
+            let insets = list.adjustedContentInset
+            band = CGRect(x: frame.minX, y: frame.minY + insets.top, width: frame.width * 0.6,
+                          height: frame.height - insets.top - insets.bottom).integral
+        }
+
+        func start() {
+            let link = CADisplayLink(target: self, selector: #selector(tick))
+            link.add(to: .main, forMode: .common)
+            self.link = link
+        }
+
+        func stop() {
+            link?.invalidate()
+            link = nil
+        }
+
+        @objc private func tick() {
+            let current = RoomReaderStaysPutTests.list(in: window)
+            frames.append(Frame(offset: (current ?? list).contentOffset.y, ink: ink(), sameList: current === list))
+        }
+
+        private func ink() -> Double {
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 1
+            format.opaque = true
+            let image = UIGraphicsImageRenderer(bounds: band, format: format).image { _ in
+                window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
+            }
+            guard let cg = image.cgImage else { return 0 }
+            let width = cg.width, height = cg.height
+            var pixels = [UInt8](repeating: 0, count: width * height * 4)
+            let drew: Bool = pixels.withUnsafeMutableBytes { raw in
+                guard let context = CGContext(data: raw.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                                              bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+                context.draw(cg, in: CGRect(x: 0, y: 0, width: width, height: height))
+                return true
+            }
+            guard drew else { return 0 }
+            var lightness: [Int] = []
+            lightness.reserveCapacity(width * height / 4)
+            var y = 0
+            while y < height {
+                var x = 0
+                while x < width {
+                    let i = (y * width + x) * 4
+                    lightness.append((Int(pixels[i]) * 3 + Int(pixels[i + 1]) * 6 + Int(pixels[i + 2])) / 10)
+                    x += 2
+                }
+                y += 2
+            }
+            // The background is the commonest lightness; ink is what is well away from it.
+            var buckets = [Int](repeating: 0, count: 32)
+            for value in lightness { buckets[value / 8] += 1 }
+            let background = (buckets.indices.max { buckets[$0] < buckets[$1] } ?? 0) * 8 + 4
+            let inked = lightness.filter { abs($0 - background) > 48 }.count
+            return lightness.isEmpty ? 0 : Double(inked) / Double(lightness.count)
+        }
     }
 
     // MARK: - Running it

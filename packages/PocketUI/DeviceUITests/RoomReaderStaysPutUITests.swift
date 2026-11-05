@@ -294,6 +294,39 @@ final class RoomReaderStaysPutUITests: XCTestCase {
         XCTAssertEqual(after.newestVisible(), Self.lastArrival, "the second tap goes to the latest")
     }
 
+    /// Far up the burst room's eighty messages with nothing new, the arrow takes the reader down to the latest, and the
+    /// screen shows messages all the way: measured from the screen's own pixels in the second after the tap (it used to
+    /// go blank while the room was built again as a new list, then show the bottom at once). The lane samples the app's
+    /// main thread from "arrow-jump ready" on.
+    func test_the_arrow_takes_a_reader_far_up_down_to_the_latest() throws {
+        let app = launch(kind: "messages")
+        scrollUp(app, screens: 6)
+        let arrow = app.descendants(matching: .any)["pocket.room.jumpToLatest"]
+        XCTAssertTrue(arrow.waitForExistence(timeout: 10), "the arrow shows")
+        let reference = try XCTUnwrap(Drawn(XCUIScreen.main.screenshot()), "the screen could be read")
+        let usual = reference.inked(from: Self.stripFrom, to: Self.stripTo + 300)
+        print("READER-STAYS-PUT arrow-jump ready ink=\(String(format: "%.3f", usual))")
+        pause(2)
+        arrow.tap()
+        var darkest = Double.greatestFiniteMagnitude
+        var shots = 0
+        let tapped = Date()
+        while Date().timeIntervalSince(tapped) < 1.5 {
+            guard let drawn = Drawn(XCUIScreen.main.screenshot()) else { continue }
+            shots += 1
+            let ink = drawn.inked(from: Self.stripFrom, to: Self.stripTo + 300)
+            if ink < darkest { darkest = ink; keep(drawn.shot, as: "arrow-jump-darkest") }
+        }
+        pause(1.5)
+        let screen = try XCTUnwrap(readScreen(app), "the app could be read")
+        print("READER-STAYS-PUT arrow-jump darkest=\(String(format: "%.3f", darkest)) shots=\(shots) "
+            + "newest-visible=\(screen.newestVisible() ?? "none") arrow=\(screen.jumpLabel ?? "none")")
+        XCTAssertGreaterThan(usual, 0.02, "the screen could be read before the tap")
+        XCTAssertGreaterThan(darkest, usual * 0.4, "a screen on the way down showed no messages")
+        XCTAssertEqual(screen.newestVisible(), Self.newestHistory, "down at the latest")
+        XCTAssertNil(screen.jumpLabel, "at the bottom: no arrow")
+    }
+
     // MARK: - A slow coast a little way up
 
     /// At the bottom, the reader drags the list up slowly, about 50 points at 10 points a second (under half a point a
@@ -472,6 +505,15 @@ final class RoomReaderStaysPutUITests: XCTestCase {
                 }
             }
             self.rows = rows
+        }
+
+        /// The share of pixel rows between `from` and `to` (points) with something drawn on them, not one plain colour
+        /// across the left of the screen: about none when no message is drawn there.
+        func inked(from: CGFloat, to: CGFloat) -> Double {
+            let range = Int(from * scale)..<min(Int(to * scale), rows.count)
+            guard !range.isEmpty else { return 0 }
+            let drawn = range.filter { (rows[$0].max() ?? 0) - (rows[$0].min() ?? 0) > 150 }.count
+            return Double(drawn) / Double(range.count)
         }
 
         /// Up to three 16-point strips between `from` and `to` (points), apart, whose rows differ most: text, not plain
