@@ -258,10 +258,22 @@ final class RoomReaderStaysPutTests: XCTestCase {
             RoomScrollTrace.start()
             room.arrive((seq..<seq + 40).map { Self.longArrival($0) })
             seq += 40
+            // Every 50 ms until the end is reached (at most 8 s): where the list is, how far the end is below, the
+            // content's height, the follows made and the short landings retaken so far, the room's place.
+            var timeline: [String] = []
+            let end = Date().addingTimeInterval(8)
             pump(0.1)
-            wait("batch \(batch) followed to the end of the long reports", seconds: 8) {
-                list.contentSize.height > height && Self.atBottom(list)
+            while Date() < end, !(list.contentSize.height > height && Self.atBottom(list)) {
+                let below = Self.bottomOffset(of: list) - list.contentOffset.y
+                let snap = RoomScrollTrace.snapshot()
+                timeline.append("\(Int(list.contentOffset.y))/\(Int(below))/\(Int(list.contentSize.height))/"
+                    + "f\(RoomScrollTrace.followsMade)r\(RoomScrollTrace.shortLandingsRetaken)t\(snap.taken)"
+                    + "\(room.atBottom ? "B" : "")")
+                pump(0.05)
             }
+            print("READER-STAYS-PUT tall-arrivals timeline batch=\(batch) " + timeline.joined(separator: " "))
+            XCTAssertTrue(list.contentSize.height > height && Self.atBottom(list),
+                          "batch \(batch) followed to the end of the long reports")
             pump(1)
             let follows = RoomScrollTrace.followsMade
             let shortLandings = RoomScrollTrace.shortLandingsRetaken
