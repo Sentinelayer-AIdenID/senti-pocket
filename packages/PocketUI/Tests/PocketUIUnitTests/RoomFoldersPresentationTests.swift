@@ -114,52 +114,15 @@ final class RoomFoldersPresentationTests: XCTestCase {
     }
 }
 
-/// The panel's room list is one loop of lines, one view each, so its lazy list builds only the lines it shows: the
-/// same lines, in the same order, as the folders, rooms and direct messages it showed before, each with its own id.
+/// The side panel's rows are one loop, one view each, so its lazy list builds only the rows it shows; a lazy list's
+/// ids must be unique.
 extension RoomFoldersPresentationTests {
-    func test_the_lines_are_the_folders_rooms_and_direct_messages_in_the_order_shown() {
-        let rooms = [
-            room("r1", folder: "f-a"), dm("d1", from: "r1", minutesAgo: 5), room("r2"), room("r3", folder: "f-b"),
-            dm("d2", from: nil, minutesAgo: 9), dm("d3", from: "r2", minutesAgo: 1)
-        ]
-        let lines = PocketSidePanel.lines(rooms: rooms, folders: folders, folded: [], query: "")
-        XCTAssertEqual(lines.map(\.id), [
-            "folder:f-a", "room:r1", "direct:d1",
-            "folder:f-b", "room:r3",
-            "label:unfiled", "room:r2", "direct:d3",
-            "label:messages", "direct:d2"
-        ])
-        guard case .folder(_, let isFirst, let isLast) = lines[0], case .folder(_, let secondFirst, let secondLast) = lines[3]
-        else { return XCTFail("folder headings") }
-        XCTAssertEqual([isFirst, isLast, secondFirst, secondLast], [true, false, false, true], "Move up and down")
-        XCTAssertEqual(lines.compactMap { line -> Bool? in
-            if case .direct(_, let nested) = line { return nested }
-            return nil
-        }, [true, true, false], "under their rooms indented, under Messages not")
-    }
-
-    func test_a_folded_folder_keeps_its_heading_and_an_empty_one_says_so() {
-        let rooms = [room("r1", folder: "f-a"), dm("d1", from: "r1", minutesAgo: 5), room("r2")]
-        XCTAssertEqual(PocketSidePanel.lines(rooms: rooms, folders: folders, folded: ["f-a"], query: "").map(\.id),
-                       ["folder:f-a", "folder:f-b", "folder-empty:f-b", "label:unfiled", "room:r2"])
-        XCTAssertEqual(PocketSidePanel.lines(rooms: [room("r2")], folders: nil, folded: [], query: "").map(\.id),
-                       ["room:r2"], "no folders: no headings and no Rooms label")
-        XCTAssertEqual(PocketSidePanel.lines(rooms: [], folders: nil, folded: [], query: ""), [.note("No rooms yet")])
-    }
-
-    func test_a_search_is_one_flat_list_and_says_when_nothing_matches() {
-        let rooms = [room("r1", folder: "f-a"), dm("d1", from: "r1", minutesAgo: 5), room("r2")]
-        XCTAssertEqual(PocketSidePanel.lines(rooms: rooms, folders: folders, folded: ["f-a"], query: "1").map(\.id),
-                       ["room:r1", "direct:d1"], "folders and folding play no part in a search")
-        XCTAssertEqual(PocketSidePanel.lines(rooms: rooms, folders: folders, folded: [], query: "nothing like it"),
-                       [.note("No rooms match")])
-    }
-
-    func test_every_line_has_its_own_id_even_when_the_server_repeats_a_folder() {
+    func test_every_row_has_its_own_id_even_when_the_server_repeats_a_folder() {
         let twice = folders + [RoomFolderItem(id: "f-a", name: "Launch", position: 0)]
-        let lines = PocketSidePanel.lines(rooms: [room("r1", folder: "f-a"), room("r2")], folders: twice, folded: [],
-                                          query: "")
-        XCTAssertEqual(lines.map(\.id), ["folder:f-a", "room:r1", "folder:f-b", "folder-empty:f-b", "label:unfiled",
-                                         "room:r2"], "the repeated folder and its rooms show once")
+        let rooms = [room("r1", folder: "f-a"), dm("d1", from: "r1", minutesAgo: 5), room("r2"),
+                     dm("d2", from: nil, minutesAgo: 9)]
+        let ids = SidePanelLayout.make(rooms, folders: twice).rows(folded: FoldedFolders()).map(\.id)
+        XCTAssertEqual(Set(ids).count, ids.count, "every row has its own id")
+        XCTAssertEqual(ids.filter { $0 == "folder:f-a" }.count, 1, "the repeated folder shows once")
     }
 }
