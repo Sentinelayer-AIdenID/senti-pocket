@@ -375,6 +375,9 @@ jobs:
           ')"
           echo "device_id=$device_id" >> "$GITHUB_OUTPUT"
       - name: Run hosted unit tests
+        id: hosted_tests
+        # bash runs with pipefail: the step fails when the tests do; their output is kept for the next step.
+        shell: bash
         run: >-
           xcodebuild
           -project apps/SentiPocketApp/SentiPocketApp.xcodeproj
@@ -386,7 +389,33 @@ jobs:
           -derivedDataPath "$RUNNER_TEMP/DerivedData"
           -resultBundlePath "$RUNNER_TEMP/SentiPocketAppTests.xcresult"
           CODE_SIGNING_ALLOWED=NO
-          test
+          test 2>&1 | tee "$RUNNER_TEMP/SentiPocketAppTests.log"
+      - name: The room's scroll reading never updates twice in a frame
+        if: ${{ always() && (steps.hosted_tests.outcome == 'success' || steps.hosted_tests.outcome == 'failure') }}
+        shell: bash
+        run: |
+          # The room reads its scroll view's geometry while the list is laid out (RoomChatView, RoomScrollReading). If
+          # it acted on a reading there, SwiftUI would lay the list out again in the same frame and log
+          # "<OnScrollGeometryChange Modifier> tried to update multiple times per frame" in the app's output, which the
+          # hosted tests' output carries. No test can see that line, so this step fails the job on any. Other
+          # "multiple times per frame" lines are listed but do not fail it: older handlers can log one in a fast burst.
+          log="$RUNNER_TEMP/SentiPocketAppTests.log"
+          if [ ! -s "$log" ]; then
+            echo "::error::The hosted tests left no output to check."
+            exit 1
+          fi
+          geometry=$(grep -c 'OnScrollGeometryChange.*multiple times per frame' "$log" || true)
+          other=$(grep 'multiple times per frame' "$log" | grep -vc 'OnScrollGeometryChange' || true)
+          echo "Scroll geometry updated more than once in a frame: $geometry. Other updates more than once in a frame: $other."
+          if [ "$other" -gt 0 ]; then
+            grep 'multiple times per frame' "$log" | grep -v 'OnScrollGeometryChange' \
+              | sed -E 's/.*\[Invalid Configuration\] //' | sort | uniq -c
+          fi
+          if [ "$geometry" -gt 0 ]; then
+            grep 'OnScrollGeometryChange.*multiple times per frame' "$log" | head -20
+            echo "::error::The room's scroll geometry was updated more than once in a frame, $geometry times."
+            exit 1
+          fi
       - name: Upload XCTest result bundle
         if: always()
         uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874 # v4.4.0
