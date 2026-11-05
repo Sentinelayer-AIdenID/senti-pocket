@@ -26,6 +26,8 @@ public struct NotificationRow: Equatable, Identifiable, Sendable {
     var symbol: String {
         switch kind {
         case "mention": return "at"
+        // Someone answered your message or reply in its thread (sentinelayer-api #1135).
+        case "reply": return "arrowshape.turn.up.left"
         case "invite_accepted", "join_link_accepted": return "person.badge.plus"
         case "member_returned": return "person.wave.2"
         default: return "bell"

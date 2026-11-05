@@ -831,6 +831,8 @@ struct AuthenticatedRootView: View {
                 title: row?.title ?? direct?.counterpart.displayName ?? "Room",
                 membershipRole: row?.membershipRole ?? "",
                 focusSequenceId: link.messageSequence,
+                // A reply notification opens the thread at the reply.
+                focusReplyId: link.messageSequence == nil ? nil : link.replyId,
                 focusTicketId: link.ticketId,
                 opensAdmissions: link.admissionId != nil,
                 readMark: row.map(RoomReadMark.init(row:)),
