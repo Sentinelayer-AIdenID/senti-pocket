@@ -25,6 +25,12 @@ final class RoomReaderStaysPutTests: XCTestCase {
         private var pending: [RoomChatPendingRow] = []
         private var unread = 0
         private(set) var atBottom = true
+        /// Every place the room was told (`readerAtBottom`), in order, as told.
+        private(set) var placesTold: [Bool] = []
+        /// Shows no messages, as while it loads: its list is put away, and built anew when they show again.
+        var emptied = false {
+            didSet { publish() }
+        }
         static let own: Set<String> = ["human-reader"]
 
         init(_ inputs: [RoomChatMessageInput]) {
@@ -34,7 +40,9 @@ final class RoomReaderStaysPutTests: XCTestCase {
         }
 
         func send(_ intent: RoomChatIntent) {
-            guard case .readerAtBottom(let value) = intent, value != atBottom else { return }
+            guard case .readerAtBottom(let value) = intent else { return }
+            placesTold.append(value)
+            guard value != atBottom else { return }
             atBottom = value
             if value, unread > 0 {
                 unread = 0
@@ -60,7 +68,7 @@ final class RoomReaderStaysPutTests: XCTestCase {
             state = RoomChatPresentationState(
                 sessionId: "stays",
                 title: "Room",
-                messages: inputs,
+                messages: emptied ? [] : inputs,
                 ownAuthorIds: Self.own,
                 unreadCount: unread,
                 connection: .live,
@@ -73,12 +81,14 @@ final class RoomReaderStaysPutTests: XCTestCase {
     private struct Host: View {
         @ObservedObject var room: Room
         var textSize: DynamicTypeSize = .large
+        var reduceMotion = false
 
         var body: some View {
             NavigationStack {
                 RoomChatView(state: room.state) { room.send($0) }
             }
             .dynamicTypeSize(textSize)
+            .environment(\._accessibilityReduceMotion, reduceMotion)
         }
     }
 
@@ -107,15 +117,40 @@ final class RoomReaderStaysPutTests: XCTestCase {
         }
     }
 
+    /// A room where every other message holds a code block, which scrolls sideways inside its row.
+    private static func codeMessages(count: Int) -> [RoomChatMessageInput] {
+        (1...count).map { index -> RoomChatMessageInput in
+            let seq = Int64(index)
+            guard index % 2 == 0 else { return input(seq, "human-reader", "A note from the phone, \(index).") }
+            return input(seq, "build-agent", "Build \(index):\n```\nxcodebuild test -scheme SentiPocket -destination "
+                + "'platform=iOS Simulator,name=iPhone 17 Pro' -only-testing:SentiPocketAppTests \(index)\n```")
+        }
+    }
+
+    /// Rows of very different heights: long reports, code, one-line notes, paragraphs.
+    private static func unevenMessages(from first: Int64, count: Int) -> [RoomChatMessageInput] {
+        (first..<first + Int64(count)).map { seq -> RoomChatMessageInput in
+            switch seq % 5 {
+            case 0: return longArrival(seq)
+            case 2: return input(seq, "build-agent", "Build \(seq):\n```\nswift build -c release \(seq)\nswift test\n```")
+            case 4: return input(seq, "design-agent", String(repeating: "A paragraph about screen \(seq). ", count: 7))
+            default: return input(seq, "human-reader", "OK, \(seq).")
+            }
+        }
+    }
+
     private static func arrival(_ seq: Int64) -> RoomChatMessageInput {
         input(seq, "review-agent", "An arrival, \(seq): " + String(repeating: "more words ", count: Int(seq % 5) * 6))
     }
 
     /// A long report, drawn whole (under `LongMessage`'s 1,000 characters and 30 lines): many times taller than the
-    /// room's rows, whose heights are what the list estimates the rows it has not drawn yet by.
+    /// room's rows, whose heights are what the list estimates the rows it has not drawn yet by. Each one's words differ
+    /// from the next one's: reports alike but for their numbers fold into one row with a count (`RoomChatRepeats`).
     private static func longArrival(_ seq: Int64) -> RoomChatMessageInput {
-        input(seq, "review-agent", (1...12).map { "Part \($0) of report \(seq): the second screen still crowds its "
-            + "buttons." }.joined(separator: "\n\n"))
+        let screen = ["sign-in", "room list", "composer", "call", "settings", "search", "thread", "profile", "inbox",
+                      "files"][Int(seq % 10)]
+        return input(seq, "review-agent", (1...12).map { "Part \($0) of report \(seq): the \(screen) screen still "
+            + "crowds its buttons." }.joined(separator: "\n\n"))
     }
 
     /// The rows a room draws small: the orchestrator's cost lines (background, and alike but for their numbers, so
@@ -232,42 +267,116 @@ final class RoomReaderStaysPutTests: XCTestCase {
         XCTAssertEqual(room.unreadCount, 0)
     }
 
-    /// At the bottom, a follow scrolls to the end by the heights the list estimates for rows it has not drawn yet, and
-    /// stops short when they are taller (in a burst at 60 a second, 102 to 436 points short; more at the largest text
-    /// sizes): the reader is left a little up from the end, at a place they never chose. Where each follow lands is
-    /// taken as a new reading, so one that stopped short is followed again until the end is in view. Here, at the
-    /// largest text size, twenty long reports arrive at once under a room of short rows, up to four times, until a
-    /// first follow did stop short (at the default size it reached the end, in CI).
-    func test_a_follow_that_stops_short_of_the_end_is_followed_again() throws {
+    /// At the bottom, what arrives is followed by the room's own scroll to its end (the list's scroll view's, as the
+    /// arrow's): on its way the rows that come into sight are measured, and where that moves the end it goes on to the
+    /// new end, so it lands there the first time. SwiftUI's animated scroll to the bottom marker went by the heights the
+    /// list estimated for rows it had not drawn, and stopped short when they were taller (in a burst at 60 a second,
+    /// 102 to 436 points short; at the largest text size every batch of twenty long reports in CI took a second
+    /// follow). At the largest text size, twenty long reports arrive at once under a room of short rows, three times;
+    /// each is followed once, to the end, and never read as the reader leaving.
+    func test_a_follow_lands_at_the_end_the_first_time_at_the_largest_text_size() throws {
+        try followLandsFirstTime(textSize: .accessibility5, room: Self.messages()) { seq in
+            (seq..<seq + 20).map { Self.longArrival($0) }
+        }
+    }
+
+    /// The same at the default size in a room of rows of very different heights (long reports, code, one-line notes,
+    /// paragraphs), twenty of them arriving at once.
+    func test_a_follow_lands_at_the_end_the_first_time_in_a_room_of_uneven_rows() throws {
+        try followLandsFirstTime(textSize: .large, room: Self.unevenMessages(from: 1, count: 120)) { seq in
+            Self.unevenMessages(from: seq, count: 20)
+        }
+    }
+
+    private func followLandsFirstTime(textSize: DynamicTypeSize, room messages: [RoomChatMessageInput],
+                                      arrivals: (Int64) -> [RoomChatMessageInput]) throws {
         try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
-        let textSize = DynamicTypeSize.accessibility5
-        let room = Room(Self.messages())
+        let room = Room(messages)
         let list = try host(room, textSize: textSize)
-        // Up to four batches: whether a follow stops short depends on the heights the list has measured so far, and
-        // one batch did not always make it stop short. Every batch must end at the end; one at least must have
-        // needed more than one follow.
-        var stoppedShort = false
-        var seq: Int64 = 61
-        for batch in 1...4 where !stoppedShort {
+        var seq = Int64(messages.count + 1)
+        for batch in 1...3 {
             let height = list.contentSize.height
+            let told = room.placesTold.count
             RoomScrollTrace.start()
-            room.arrive((seq..<seq + 20).map { Self.longArrival($0) })
-            seq += 20
+            let batchArrivals = arrivals(seq)
+            seq += Int64(batchArrivals.count)
+            room.arrive(batchArrivals)
             pump(0.1)
-            wait("batch \(batch) followed to the end of the long reports", seconds: 6) {
-                list.contentSize.height > height && Self.atBottom(list)
-            }
+            wait("batch \(batch) followed to the end", seconds: 8) { list.contentSize.height > height && Self.atBottom(list) }
             pump(1)
             let follows = RoomScrollTrace.followsMade
-            print("READER-STAYS-PUT tall-arrivals \(textSize) batch=\(batch) follows=\(follows) "
+            print("READER-STAYS-PUT follow-lands \(textSize) batch=\(batch) follows=\(follows) "
                 + "end-below=\(Self.bottomOffset(of: list) - list.contentOffset.y) content=\(list.contentSize.height) "
-                + "(was \(height))")
-            XCTAssertTrue(Self.atBottom(list), "batch \(batch): the follow stopped short of the end and stayed there")
-            stoppedShort = follows > 1
+                + "(was \(height)) told=\(room.placesTold.dropFirst(told))")
+            XCTAssertTrue(Self.atBottom(list), "batch \(batch): the follow did not reach the end")
+            XCTAssertEqual(follows, 1, "batch \(batch): the follow did not land at the end the first time")
+            XCTAssertFalse(room.placesTold.dropFirst(told).contains(false),
+                           "batch \(batch): the room's own follow was read as the reader leaving")
         }
-        XCTAssertTrue(stoppedShort, "no batch's first follow stopped short: this case did not test a follow stopping short")
         XCTAssertTrue(room.atBottom)
         XCTAssertEqual(room.unreadCount, 0)
+    }
+
+    /// A burst at the bottom is followed by the room's own scroll to its end, retaken as more arrives: the reader is
+    /// never taken to have left, and the last of it lands with no step bigger than a few points.
+    func test_a_burst_at_the_bottom_is_followed_by_the_rooms_own_scroll_never_as_the_reader_leaving() throws {
+        try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
+        let room = Room(Self.messages())
+        let list = try host(room)
+        let window = try XCTUnwrap(self.window)
+        let height = list.contentSize.height
+        let told = room.placesTold.count
+        let watch = FrameWatch(window: window, list: list)
+        watch.mark = { room.atBottom }
+        RoomScrollTrace.start()
+        watch.start()
+        for seq in Int64(61)...120 {
+            room.arrive([Self.arrival(seq)])
+            pump(1.0 / 60.0)
+        }
+        wait("followed to the end of the burst", seconds: 4) { list.contentSize.height > height && Self.atBottom(list) }
+        pump(0.6)
+        watch.stop()
+        let steps = zip(watch.frames, watch.frames.dropFirst()).map { $1.offset - $0.offset }
+        let landing = steps.last { abs($0) > 0.01 } ?? 0
+        let landings = RoomScrollTrace.listLandings
+        let mostInAFrame = Self.mostBuiltInAFrame(watch.frames)
+        print("READER-STAYS-PUT burst-follow frames=\(watch.frames.count) up-steps=\(steps.filter { $0 < -2 }.count) "
+            + "landing=\(String(format: "%.1f", landing)) told=\(room.placesTold.dropFirst(told)) "
+            + "landings=\(landings.all) moved-by-swiftui=\(landings.movedBySwiftUI) "
+            + "largest-snap=\(String(format: "%.1f", landings.largestSnap)) most-built-in-a-frame=\(mostInAFrame)")
+        print("READER-STAYS-PUT burst-follow each-frame " + Self.eachFrame(watch.frames))
+        XCTAssertEqual(landings.movedBySwiftUI, 0, "SwiftUI's scroll to the marker moved the list after UIKit's")
+        XCTAssertGreaterThanOrEqual(landings.all, 1, "the room's own follow did not land")
+        XCTAssertLessThanOrEqual(mostInAFrame, LazyListBuildTests.mostBuiltPerStep, "rows built in one frame")
+        XCTAssertLessThanOrEqual(landings.largestSnap, Self.landingStep, "it landed with a snap of \(landings.largestSnap) pt")
+        XCTAssertTrue(Self.atBottom(list), "the last of the burst was not followed")
+        XCTAssertFalse(room.placesTold.dropFirst(told).contains(false), "the room's own follow was read as the reader leaving")
+        XCTAssertEqual(steps.filter { $0 < -2 }.count, 0, "the list went up on its way down")
+    }
+
+    /// A finger on the list while the room follows an arrival stops the follow, and the list is the reader's: here the
+    /// room's scroll is stopped as a touch stops it, two frames into it, and the list moved up 180 points; it stays
+    /// where it was put, and the reader has left the bottom.
+    func test_a_drag_while_an_arrival_is_followed_stops_the_follow_where_the_reader_puts_the_list() throws {
+        try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
+        let room = Room(Self.messages())
+        let list = try host(room)
+        let window = try XCTUnwrap(self.window)
+        let watch = FrameWatch(window: window, list: list)
+        var put: CGFloat?
+        watch.onFrame = { frame in
+            Self.dragUp(list, at: frame, from: 2, put: &put)
+        }
+        watch.start()
+        room.arrive([Self.longArrival(61)])
+        pump(1.5)
+        watch.stop()
+        let leftAt = try XCTUnwrap(put, "the list was taken")
+        print("READER-STAYS-PUT drag-during-follow put=\(Int(leftAt)) now=\(Int(list.contentOffset.y)) "
+            + "end=\(Int(Self.bottomOffset(of: list))) atBottom=\(room.atBottom)")
+        XCTAssertEqual(list.contentOffset.y, leftAt, accuracy: 1, "the follow went on after the reader took the list")
+        XCTAssertFalse(room.atBottom, "the reader moved the list up and is away from the bottom")
     }
 
     /// Within the bottom's 24 points the reader is at the bottom, and follows what arrives.
@@ -327,20 +436,25 @@ final class RoomReaderStaysPutTests: XCTestCase {
     /// frame later: that one frame (8 to 16 ms) has none, and is allowed; no other may. The rows on the way are not
     /// drawn: an animated scroll the whole way down draws every one, which once froze the app from up a long history.
     func test_the_arrow_takes_a_reader_far_up_a_long_room_down_in_the_same_list_frame_by_frame() throws {
-        try farJump(textSize: .large)
+        let jump = try farJump(textSize: .large)
+        XCTAssertGreaterThanOrEqual(jump.scrolling, 4, "the way down was not seen scrolling")
+        assertLands(jump)
     }
 
     /// The same at the largest text size, where a row can be taller than the screen. Put six rows above the end by the
     /// rows' estimated heights, the list can already be at the end or past it (in CI it was 827 points past): it is then
     /// placed there at once, not animated back up. At most one step up, the placing, and never a scroll up.
     func test_the_arrow_takes_a_reader_far_up_a_long_room_down_at_the_largest_text_size() throws {
-        try farJump(textSize: .accessibility5)
+        let jump = try farJump(textSize: .accessibility5)
+        XCTAssertFalse(jump.placesTold.contains(false), "the jump was read as the reader leaving")
     }
 
     /// The rows the list builds on the way are the ones around where it lands: no more than a list builds in any one
     /// step (`LazyListBuildTests.mostBuiltPerStep`), of a room of 400.
-    private func farJump(textSize: DynamicTypeSize) throws {
-        let jump = try arrowJump(rows: 400, textSize: textSize) { list in Self.bottomOffset(of: list) * 0.2 }
+    private func farJump(textSize: DynamicTypeSize, reduceMotion: Bool = false) throws -> Jump {
+        let jump = try arrowJump(rows: 400, textSize: textSize, reduceMotion: reduceMotion) { list in
+            Self.bottomOffset(of: list) * 0.2
+        }
         XCTAssertLessThanOrEqual(jump.blankFrames, 1, "frames on the way down with no messages drawn")
         XCTAssertLessThan(jump.draws, 100, "rows drawn on the way down: \(jump.draws) of 400")
         XCTAssertLessThanOrEqual(jump.built, LazyListBuildTests.mostBuiltPerStep,
@@ -348,38 +462,247 @@ final class RoomReaderStaysPutTests: XCTestCase {
         // After the jump's own step: down, or a single placing step up, never an animation back up.
         let up = jump.steps.dropFirst().filter { $0 < -2 }
         XCTAssertLessThanOrEqual(up.count, 1, "the list went back up on its way down: \(up)")
-        if textSize == .large {
-            XCTAssertGreaterThanOrEqual(jump.scrolling, 4, "the way down was not seen scrolling")
-        }
+        return jump
     }
 
     /// Two screens up the same room, the arrow scrolls the whole way, with messages drawn in every frame.
     func test_the_arrow_takes_a_reader_a_short_way_up_down_with_every_frame_drawn() throws {
-        let jump = try arrowJump(rows: 400) { list in
-            let visible = list.bounds.height - list.adjustedContentInset.top - list.adjustedContentInset.bottom
-            return Self.bottomOffset(of: list) - visible * 2
-        }
+        try shortJump(textSize: .large)
+    }
+
+    /// The same at the largest text size.
+    func test_the_arrow_takes_a_reader_a_short_way_up_down_at_the_largest_text_size() throws {
+        try shortJump(textSize: .accessibility5)
+    }
+
+    private func shortJump(textSize: DynamicTypeSize) throws {
+        let jump = try arrowJump(rows: 400, textSize: textSize, from: Self.twoScreensUp)
         XCTAssertEqual(jump.blankFrames, 0, "frames on the way down with no messages drawn")
         XCTAssertGreaterThanOrEqual(jump.scrolling, 4, "the way down was not seen scrolling")
         XCTAssertLessThanOrEqual(jump.built, LazyListBuildTests.mostBuiltPerStep,
                                  "rows built on the way down: \(jump.built) of the room's")
+        assertLands(jump)
     }
 
-    /// Opens a room of `rows` messages, puts the reader at `from` (an offset of the list), presses the arrow, and
-    /// records every frame until a moment after the reader is down at the latest. Checks what every jump down must
-    /// do: the same list throughout, the last stretch seen scrolling, the end reached.
-    private func arrowJump(rows: Int, textSize: DynamicTypeSize = .large,
-                           from: (UIScrollView) -> CGFloat) throws
-        -> (blankFrames: Int, draws: Int, built: Int, scrolling: Int, steps: [CGFloat]) {
+    /// With Reduce Motion on, the arrow places the room at its latest: one step, nothing blank but the frame the rows
+    /// there are drawn in, and no second step where it lands.
+    func test_with_reduce_motion_the_arrow_places_the_room_at_its_latest() throws {
+        let jump = try farJump(textSize: .large, reduceMotion: true)
+        let big = jump.steps.filter { abs($0) > Self.landingStep }
+        XCTAssertLessThanOrEqual(big.count, 1, "more than one step: \(big)")
+        XCTAssertLessThanOrEqual(jump.scrolling, 1, "it was animated")
+        XCTAssertFalse(jump.placesTold.contains(false), "the jump was read as the reader leaving")
+    }
+
+    /// In a room whose rows scroll sideways (code blocks), the arrow scrolls the room's list, never a row's: the way
+    /// down is seen scrolling and no row's own scroll view moved.
+    func test_in_a_room_whose_rows_scroll_sideways_the_arrow_scrolls_the_room() throws {
+        let jump = try arrowJump(rows: 400, inputs: Self.codeMessages(count: 400), from: Self.twoScreensUp)
+        XCTAssertGreaterThan(jump.rowScrolls, 0, "rows with their own scroll views were on screen")
+        XCTAssertEqual(jump.rowScrollsMoved, 0, "a row's own scroll view was scrolled")
+        XCTAssertGreaterThanOrEqual(jump.scrolling, 4, "the way down was not seen scrolling")
+        XCTAssertLessThanOrEqual(jump.built, LazyListBuildTests.mostBuiltPerStep,
+                                 "rows built on the way down: \(jump.built) of the room's")
+        assertLands(jump)
+    }
+
+    /// The room emptied (as while it loads) and filled again puts its list away and builds it anew: the arrow scrolls
+    /// the new list, not the one put away.
+    func test_after_the_list_is_built_anew_the_arrow_scrolls_the_new_list() throws {
+        let jump = try arrowJump(rows: 400, rebuiltFirst: true, from: Self.twoScreensUp)
+        XCTAssertGreaterThanOrEqual(jump.scrolling, 4, "the way down was not seen scrolling")
+        assertLands(jump)
+    }
+
+    /// A message arriving while the arrow takes the reader down is not followed on its own (the reader is not at the
+    /// bottom yet): the way down goes on, never back up, and ends at the latest, the arrival with it.
+    func test_a_message_arriving_on_the_arrows_way_down_does_not_replace_it() throws {
+        let jump = try arrowJump(rows: 400, from: Self.twoScreensUp) { frame, _, room in
+            if frame == 3 { room.arrive([Self.arrival(401)]) }
+        }
+        let firstScroll = jump.steps.firstIndex { $0 > 0.5 } ?? 0
+        let up = jump.steps.dropFirst(firstScroll).filter { $0 < -2 }
+        XCTAssertEqual(up.count, 0, "the list went back up on its way down: \(up)")
+        XCTAssertGreaterThanOrEqual(jump.scrolling, 4, "the way down was not seen scrolling")
+        XCTAssertLessThanOrEqual(jump.built, LazyListBuildTests.mostBuiltPerStep,
+                                 "rows built on the way down: \(jump.built) of the room's")
+        XCTAssertFalse(jump.placesTold.contains(false), "the jump was read as the reader leaving")
+    }
+
+    /// A finger on the list on the arrow's way down stops it, and the list is the reader's: the room's scroll is
+    /// stopped as a touch stops it, three frames into it, and the list moved up 180 points; it stays where it was put,
+    /// away from the bottom.
+    func test_a_drag_on_the_arrows_way_down_stops_it_where_the_reader_puts_the_list() throws {
+        var put: CGFloat?
+        let jump = try arrowJump(rows: 400, endsAtBottom: false, from: Self.twoScreensUp) { frame, list, _ in
+            Self.dragUp(list, at: frame, from: 3, put: &put)
+        }
+        let leftAt = try XCTUnwrap(put, "the list was taken")
+        print("READER-STAYS-PUT drag-during-jump put=\(Int(leftAt)) now=\(Int(jump.finalOffset)) told=\(jump.placesTold)")
+        XCTAssertEqual(jump.finalOffset, leftAt, accuracy: 1, "the jump went on after the reader took the list")
+        XCTAssertFalse(jump.placesTold.contains(true), "the reader was taken to be at the bottom")
+    }
+
+    /// Where the arrow's scroll lands: no frame without messages once it was seen scrolling, no step bigger than a few
+    /// points, never read as the reader leaving, and told once it is at the bottom.
+    private func assertLands(_ jump: Jump, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(jump.blankAfterScrolling, 0, "frames with no messages drawn once it was scrolling",
+                       file: file, line: line)
+        XCTAssertFalse(jump.placesTold.contains(false), "the jump was read as the reader leaving", file: file, line: line)
+        XCTAssertTrue(jump.placesTold.contains(true), "the room was not told the reader is at the bottom",
+                      file: file, line: line)
+        XCTAssertGreaterThanOrEqual(jump.landings, 1, "the room's own scroll did not land", file: file, line: line)
+        XCTAssertLessThanOrEqual(jump.largestSnap, Self.landingStep, "it landed with a snap of \(jump.largestSnap) pt",
+                                 file: file, line: line)
+        XCTAssertEqual(jump.voiceOverFocus.last, jump.newestRowId, "VoiceOver's focus was not put on the newest message",
+                       file: file, line: line)
+    }
+
+    /// The far jump lands at the latest and says so, three times over: at `45d201a` its scroll stalled 343 points
+    /// short of the end (SwiftUI laying the rows out stopped UIKit's scroll) and stayed there, never told at the
+    /// bottom.
+    func test_the_arrows_far_jump_lands_at_the_latest_every_time() throws {
+        for round in 1...3 {
+            let jump = try arrowJump(rows: 400) { list in Self.bottomOffset(of: list) * 0.2 }
+            print("READER-STAYS-PUT far-jump round \(round): landings=\(jump.landings) told=\(jump.placesTold)")
+            XCTAssertTrue(jump.placesTold.contains(true), "round \(round): not told the reader is at the bottom")
+            XCTAssertGreaterThanOrEqual(jump.landings, 1, "round \(round): the room's own scroll did not land")
+        }
+    }
+
+    /// The arrow during a burst at 60 a second: each chase reaches an end that has moved on, so after a second the
+    /// room's follow takes it, the reader at the bottom. No frame builds more than a step may, SwiftUI's scroll never
+    /// moves the list after UIKit's, it never goes up, and where it lands the step is a few points at most.
+    func test_the_arrow_during_a_burst_lands_with_no_full_pass_and_no_snap() throws {
+        let jump = try arrowJump(rows: 400, from: Self.twoScreensUp) { frame, _, room in
+            if frame < 60 { room.arrive([Self.arrival(Int64(401 + frame))]) }
+        }
+        let firstScroll = jump.steps.firstIndex { $0 > 0.5 } ?? 0
+        let up = jump.steps.dropFirst(firstScroll).filter { $0 < -2 }
+        XCTAssertEqual(up.count, 0, "the list went back up on its way down: \(up)")
+        XCTAssertLessThanOrEqual(jump.largestSnap, Self.landingStep, "it landed with a snap of \(jump.largestSnap) pt")
+        XCTAssertFalse(jump.placesTold.contains(false), "the jump was read as the reader leaving")
+    }
+
+    /// With messages waiting, the arrow goes to the New messages line, and VoiceOver's focus goes there; the second
+    /// tap goes to the latest, and the focus to the newest message (UIKit's scroll does not move it, and it could be
+    /// left on a row now off screen).
+    func test_after_the_arrow_voiceovers_focus_is_where_it_went() throws {
+        try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
+        let room = Room(Self.messages())
+        let list = try host(room)
+        let window = try XCTUnwrap(self.window)
+        list.setContentOffset(CGPoint(x: 0, y: Self.bottomOffset(of: list) - 3 * list.bounds.height), animated: false)
+        wait("away from the bottom", seconds: 3) { !room.atBottom }
+        room.arrive((61...90).map { Self.arrival(Int64($0)) })
+        wait("the arrivals counted", seconds: 3) { room.unreadCount == 30 }
+        RoomScrollTrace.start()
+        let arrow = try XCTUnwrap(HostedSummary.wait(for: "pocket.room.jumpToLatest", in: window), "the arrow shows")
+        XCTAssertTrue(arrow.accessibilityActivate(), "the arrow could be pressed")
+        pump(1.5)
+        let first = RoomScrollTrace.listLandings.voiceOverFocus
+        print("READER-STAYS-PUT voiceover first-tap focus=\(first)")
+        XCTAssertEqual(first.last, RoomChatRow.unreadDivider.id, "VoiceOver's focus was not put on the New messages line")
+        let again = try XCTUnwrap(HostedSummary.wait(for: "pocket.room.jumpToLatest", in: window), "the arrow shows")
+        XCTAssertTrue(again.accessibilityActivate(), "the arrow could be pressed again")
+        wait("down at the latest", seconds: 4) { Self.atBottom(list) }
+        pump(1)
+        let second = RoomScrollTrace.listLandings.voiceOverFocus
+        print("READER-STAYS-PUT voiceover second-tap focus=\(second)")
+        XCTAssertEqual(second.last, Self.newestRowId(room), "VoiceOver's focus was not put on the newest message")
+    }
+
+    /// "A few points": the most a frame may move the list where the room's own scroll lands.
+    private static let landingStep: CGFloat = 4
+
+    private static func twoScreensUp(_ list: UIScrollView) -> CGFloat {
+        let visible = list.bounds.height - list.adjustedContentInset.top - list.adjustedContentInset.bottom
+        return bottomOffset(of: list) - visible * 2
+    }
+
+    /// The reader's finger, as far as the room can tell: at frame `from` the room's scroll is stopped as a touch stops
+    /// it (the list set where it is), then the list moves up 30 points a frame for six frames. `put` is where it was
+    /// left.
+    private static func dragUp(_ list: UIScrollView, at frame: Int, from: Int, put: inout CGFloat?) {
+        guard frame >= from, frame <= from + 6 else { return }
+        let y = frame == from ? list.contentOffset.y : (put ?? list.contentOffset.y) - 30
+        list.setContentOffset(CGPoint(x: list.contentOffset.x, y: y), animated: false)
+        put = y
+    }
+
+    /// What a jump down did, frame by frame from the tap.
+    private struct Jump {
+        let blankFrames: Int
+        /// Frames with no messages drawn once the list was seen scrolling (its landing included).
+        let blankAfterScrolling: Int
+        let draws: Int
+        let built: Int
+        let scrolling: Int
+        let steps: [CGFloat]
+        /// The list's last step, where it landed.
+        let landing: CGFloat
+        let finalOffset: CGFloat
+        /// Scroll views inside rows (a code block) on screen at the tap, and those of them that moved.
+        let rowScrolls: Int
+        let rowScrollsMoved: Int
+        /// The places the room was told after the tap, in order.
+        let placesTold: [Bool]
+        /// The room's own scroll landed this many times, and SwiftUI's scroll to the marker after UIKit's moved the
+        /// list this many times (`RoomScrollTrace.listLandings`); the most rows built in one frame; where VoiceOver's
+        /// focus was put; the newest message's row.
+        let landings: Int
+        let landingsMovedBySwiftUI: Int
+        /// The largest step put at once where the room's own scroll landed.
+        let largestSnap: CGFloat
+        let mostBuiltInAFrame: Int
+        let voiceOverFocus: [String]
+        let newestRowId: String?
+    }
+
+    /// The most rows built in any one frame of `frames` (each frame records the rows built so far).
+    private static func mostBuiltInAFrame(_ frames: [FrameWatch.Frame]) -> Int {
+        zip(frames, frames.dropFirst()).map { $1.built - $0.built }.max() ?? 0
+    }
+
+    /// Each frame: where the list was, what was drawn in the band, the rows built in it, "B" once the room says the
+    /// reader is at the bottom.
+    private static func eachFrame(_ frames: [FrameWatch.Frame]) -> String {
+        zip(frames, [frames.first?.built ?? 0] + frames.map(\.built)).map { frame, before in
+            "\(String(format: "%.0f", frame.offset))/\(frame.drawn)/+\(frame.built - before)"
+                + "\(frame.mark ? "B" : "")\(frame.sameList ? "" : "*")"
+        }.joined(separator: " ")
+    }
+
+    /// The newest message's row in the room as it is.
+    private static func newestRowId(_ room: Room) -> String? {
+        room.state.rows.last { if case .message = $0 { return true } else { return false } }?.id
+    }
+
+    /// Opens a room of `rows` messages (or `inputs`), puts the reader at `from` (an offset of the list), presses the
+    /// arrow, and records every frame until a moment after the reader is down at the latest. `eachFrame` runs at each
+    /// frame from the tap (its number, the list, the room). Checks what every jump down must do: the same list
+    /// throughout, and (unless the reader takes the list on the way) the end reached.
+    private func arrowJump(rows: Int, textSize: DynamicTypeSize = .large, reduceMotion: Bool = false,
+                           inputs: [RoomChatMessageInput]? = nil, rebuiltFirst: Bool = false, endsAtBottom: Bool = true,
+                           from: (UIScrollView) -> CGFloat,
+                           eachFrame: ((Int, UIScrollView, Room) -> Void)? = nil) throws -> Jump {
         try XCTSkipUnless(Self.readsGeometry, "how far the end is comes from the scroll view's geometry (iOS 18 and later)")
-        let room = Room(Self.messages(count: rows))
-        let window = try HostedSummary.host(Host(room: room, textSize: textSize))
+        let room = Room(inputs ?? Self.messages(count: rows))
+        let window = try HostedSummary.host(Host(room: room, textSize: textSize, reduceMotion: reduceMotion))
         addTeardownBlock { HostedSummary.close(window) }
         var opened: UIScrollView?
-        wait("the room opened at its newest rows", seconds: 20) {
+        let openedAtBottom = {
             opened = Self.list(in: window)
             guard let list = opened, list.contentSize.height > list.bounds.height * 2 else { return false }
             return Self.atBottom(list)
+        }
+        wait("the room opened at its newest rows", seconds: 20, openedAtBottom)
+        if rebuiltFirst, let first = opened {
+            room.emptied = true
+            wait("the list put away", seconds: 5) { Self.list(in: window).map { $0.contentSize.height < 400 } ?? true }
+            room.emptied = false
+            wait("the room shown again at its newest rows", seconds: 20) { openedAtBottom() && opened !== first }
+            XCTAssertFalse(opened === first, "the list was built anew")
         }
         let list = try XCTUnwrap(opened, "the room's list")
         pump(0.5)
@@ -388,16 +711,30 @@ final class RoomReaderStaysPutTests: XCTestCase {
         pump(1)
         let arrow = try XCTUnwrap(HostedSummary.wait(for: "pocket.room.jumpToLatest", in: window), "the arrow shows")
 
+        let rowScrollViews = Self.scrollViews(in: list).map { ($0, $0.contentOffset) }
         let watch = FrameWatch(window: window, list: list)
+        watch.mark = { room.atBottom }
         watch.start()
         pump(0.5)
         let tappedAt = watch.frames.count
+        let told = room.placesTold.count
+        RoomScrollTrace.start()
+        watch.onFrame = { frame in
+            if frame >= tappedAt { eachFrame?(frame - tappedAt, list, room) }
+        }
         let drawsBefore = RenderTrace.snapshot().draws
         let builtBefore = RenderTrace.builtCount(.roomRow)
         XCTAssertTrue(arrow.accessibilityActivate(), "the arrow could be pressed")
-        wait("down at the latest", seconds: 4) { Self.list(in: window).map(Self.atBottom) ?? false }
-        pump(0.6)
+        if endsAtBottom {
+            wait("down at the latest", seconds: 4) { Self.list(in: window).map(Self.atBottom) ?? false }
+            pump(0.6)
+        } else {
+            pump(1.5)
+        }
         watch.stop()
+        let rowScrollsMoved = rowScrollViews.filter { view, offset in
+            view.window != nil && (abs(view.contentOffset.x - offset.x) > 0.5 || abs(view.contentOffset.y - offset.y) > 0.5)
+        }.count
         let draws = RenderTrace.snapshot().draws - drawsBefore
         let built = RenderTrace.builtCount(.roomRow) - builtBefore
 
@@ -408,18 +745,49 @@ final class RoomReaderStaysPutTests: XCTestCase {
         let visible = list.bounds.height - list.adjustedContentInset.top - list.adjustedContentInset.bottom
         let steps = zip(during, during.dropFirst()).map { $1.offset - $0.offset }
         let scrolling = steps.filter { $0 > 0.5 && $0 < visible * 0.9 }.count
-        print("READER-STAYS-PUT arrow-jump rows=\(rows) text=\(textSize) frames=\(during.count) usual-drawn=\(usual) "
-            + "blank-frames=\(blankFrames) scrolling-frames=\(scrolling) row-draws=\(draws) rows-built=\(built) "
+        let firstScroll = steps.firstIndex { $0 > 0.5 && $0 < visible * 0.9 }
+        let blankAfterScrolling = firstScroll.map { first in
+            during.dropFirst(first + 1).filter { $0.drawn < max(1, usual / 3) }.count
+        } ?? 0
+        let landing = steps.last { abs($0) > 0.01 } ?? 0
+        let placesTold = Array(room.placesTold.dropFirst(told))
+        let landings = RoomScrollTrace.listLandings
+        let mostInAFrame = Self.mostBuiltInAFrame(Array(watch.frames[max(0, tappedAt - 1)...]))
+        print("READER-STAYS-PUT arrow-jump landings=\(landings.all) moved-by-swiftui=\(landings.movedBySwiftUI) "
+            + "largest-snap=\(String(format: "%.1f", landings.largestSnap)) most-built-in-a-frame=\(mostInAFrame) "
+            + "voiceover-focus=\(landings.voiceOverFocus)")
+        print("READER-STAYS-PUT arrow-jump rows=\(rows) text=\(textSize) reduce-motion=\(reduceMotion) "
+            + "frames=\(during.count) usual-drawn=\(usual) blank-frames=\(blankFrames) "
+            + "blank-after-scrolling=\(blankAfterScrolling) scrolling-frames=\(scrolling) row-draws=\(draws) "
+            + "rows-built=\(built) landing=\(String(format: "%.1f", landing)) row-scrolls=\(rowScrollViews.count) "
+            + "row-scrolls-moved=\(rowScrollsMoved) told=\(placesTold) "
             + "steps=\(steps.filter { $0 != 0 }.map { String(format: "%.0f", $0) })")
-        // Each frame from the last before the tap: where the list was, and what was drawn in the band.
-        print("READER-STAYS-PUT arrow-jump each-frame " + watch.frames[max(0, tappedAt - 1)...].prefix(24)
-            .map { "\(String(format: "%.0f", $0.offset))/\($0.drawn)\($0.sameList ? "" : "*")" }.joined(separator: " "))
+        // Each frame from the last before the tap: where the list was, what was drawn in the band, the rows built in
+        // that frame, and "B" once the room says the reader is at the bottom.
+        print("READER-STAYS-PUT arrow-jump each-frame " + Self.eachFrame(Array(watch.frames[max(0, tappedAt - 1)...])))
+        // The full pass a SwiftUI scroll made after UIKit's: never, and no frame builds more than a step may.
+        XCTAssertEqual(landings.movedBySwiftUI, 0, "SwiftUI's scroll to the marker moved the list after UIKit's")
+        XCTAssertLessThanOrEqual(mostInAFrame, LazyListBuildTests.mostBuiltPerStep, "rows built in one frame")
         XCTAssertGreaterThan(usual, 0, "what is drawn could be read before the tap")
         XCTAssertGreaterThan(during.count, 10, "frames were recorded on the way down")
         XCTAssertTrue(during.allSatisfy(\.sameList), "the room was built again as a new list")
-        XCTAssertTrue(Self.list(in: window).map(Self.atBottom) ?? false, "it ended at the bottom")
-        XCTAssertTrue(room.atBottom)
-        return (blankFrames, draws, built, scrolling, steps)
+        if endsAtBottom {
+            XCTAssertTrue(Self.list(in: window).map(Self.atBottom) ?? false, "it ended at the bottom")
+            XCTAssertTrue(room.atBottom)
+        }
+        return Jump(blankFrames: blankFrames, blankAfterScrolling: blankAfterScrolling, draws: draws, built: built,
+                    scrolling: scrolling, steps: steps, landing: landing, finalOffset: list.contentOffset.y,
+                    rowScrolls: rowScrollViews.count, rowScrollsMoved: rowScrollsMoved, placesTold: placesTold,
+                    landings: landings.all, landingsMovedBySwiftUI: landings.movedBySwiftUI,
+                    largestSnap: landings.largestSnap, mostBuiltInAFrame: mostInAFrame, voiceOverFocus: landings.voiceOverFocus,
+                    newestRowId: Self.newestRowId(room))
+    }
+
+    /// The scroll views inside `view` (in a room's list: the rows' own, a code block's).
+    private static func scrollViews(in view: UIView) -> [UIScrollView] {
+        view.subviews.flatMap { child -> [UIScrollView] in
+            ((child as? UIScrollView).map { [$0] } ?? []) + scrollViews(in: child)
+        }
     }
 
     /// Records each frame the screen draws (on the display link): where the list is, how many layers with something
@@ -431,9 +799,16 @@ final class RoomReaderStaysPutTests: XCTestCase {
             let offset: CGFloat
             let drawn: Int
             let sameList: Bool
+            /// The room's rows built so far (`RenderTrace`), and what `mark` said, at this frame.
+            let built: Int
+            let mark: Bool
         }
 
         private(set) var frames: [Frame] = []
+        /// Read at each frame (the room says the reader is at the bottom).
+        var mark: () -> Bool = { false }
+        /// Runs at each frame recorded, with its number (from 0), after it is recorded.
+        var onFrame: ((Int) -> Void)?
         private let window: UIWindow
         private let list: UIScrollView
         private var link: CADisplayLink?
@@ -457,7 +832,8 @@ final class RoomReaderStaysPutTests: XCTestCase {
         @objc private func tick() {
             let current = RoomReaderStaysPutTests.list(in: window) ?? list
             frames.append(Frame(offset: current.contentOffset.y, drawn: Self.drawn(in: current),
-                                sameList: current === list))
+                                sameList: current === list, built: RenderTrace.builtCount(.roomRow), mark: mark()))
+            onFrame?(frames.count - 1)
         }
 
         /// Layers with something drawn in them (text, an image, a fill) inside the list, overlapping what can be read.
