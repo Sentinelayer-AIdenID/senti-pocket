@@ -4,60 +4,135 @@ import SwiftUI
 /// Files under a message. Photos show their preview, videos their poster frame with a play button, and other files a
 /// card with the name, size and type, and a Share button. Tapping opens a photo full size (zoomable), plays a video
 /// straight from storage, and previews any other file. A file taken back after it was sent shows only its name and
-/// "Attachment removed", and nothing opens it.
+/// "Attachment removed", and nothing opens it. Two or more photos show as one strip of smaller thumbnails, side by side,
+/// that scrolls sideways when they do not fit (`RoomAttachmentLayoutItem`).
 struct RoomAttachmentsView: View {
     let chips: [RoomAttachmentChip]
     let previews: [String: Data]
     /// Your own message's files line up on the right, with its bubble.
     var alignment: HorizontalAlignment = .leading
     let send: (RoomChatIntent) -> Void
+    /// A strip's thumbnail side: about 120 pt, as the web shows them, growing with the text size up to 200 pt.
+    @ScaledMetric(relativeTo: .caption) private var thumbnailSide: CGFloat = 120
 
     var body: some View {
         VStack(alignment: alignment, spacing: 6) {
-            ForEach(chips) { chip in
-                if chip.isRemoved {
-                    removed(chip)
-                } else if chip.isVisual {
-                    Button {
-                        send(.openAttachment(attachmentId: chip.attachmentId))
-                    } label: {
-                        visual(chip)
-                    }
-                    .buttonStyle(.plain)
-                    .onAppear { send(.attachmentAppeared(attachmentId: chip.attachmentId)) }
-                    .accessibilityLabel(chip.accessibilityLabel)
-                    .accessibilityHint(chip.accessibilityHint)
-                    .accessibilityIdentifier(chip.kind == .video ? "pocket.room.attachment.video" : "pocket.room.attachment")
-                } else {
-                    HStack(spacing: 6) {
-                        Button {
-                            send(.openAttachment(attachmentId: chip.attachmentId))
-                        } label: {
-                            card(chip)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(chip.accessibilityLabel)
-                        .accessibilityHint(chip.accessibilityHint)
-                        .accessibilityIdentifier("pocket.room.attachment")
-                        Button {
-                            send(.shareAttachment(attachmentId: chip.attachmentId))
-                        } label: {
-                            Image(systemName: "square.and.arrow.up")
-                                .font(.body.weight(.semibold))
-                                .foregroundStyle(PocketPalette.accent)
-                                .frame(width: 40, height: 40)
-                                .background(PocketPalette.inset, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Share \(chip.filename)")
-                        .accessibilityHint("Save it to Files or send it to another app")
-                        .accessibilityIdentifier("pocket.room.attachment.share")
-                    }
-                    .frame(maxWidth: 320, alignment: .leading)
+            ForEach(RoomAttachmentLayoutItem.items(chips)) { item in
+                switch item {
+                case .strip(let photos):
+                    strip(photos)
+                case .single(let chip):
+                    single(chip)
                 }
             }
         }
         .padding(.top, 4)
+    }
+
+    /// Photos side by side: as they are when they fit, in a sideways scroll when they do not. Each opens as one alone
+    /// does. The strip's own horizontal scroll view sits inside the message's one row.
+    private func strip(_ photos: [RoomAttachmentChip]) -> some View {
+        let side = min(thumbnailSide, 200)
+        return ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) {
+                stripPhotos(photos, side: side)
+            }
+            ScrollView(.horizontal, showsIndicators: true) {
+                LazyHStack(spacing: 8) {
+                    stripPhotos(photos, side: side)
+                }
+                .padding(.bottom, 8)
+            }
+            .frame(height: side + 8)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("pocket.room.attachment.strip")
+    }
+
+    private func stripPhotos(_ photos: [RoomAttachmentChip], side: CGFloat) -> some View {
+        ForEach(Array(photos.enumerated()), id: \.element.id) { index, chip in
+            Button {
+                send(.openAttachment(attachmentId: chip.attachmentId))
+            } label: {
+                thumbnail(chip, side: side)
+            }
+            .buttonStyle(.plain)
+            .onAppear { send(.attachmentAppeared(attachmentId: chip.attachmentId)) }
+            .accessibilityLabel(RoomAttachmentLayoutItem.stripLabel(chip, index: index, count: photos.count))
+            .accessibilityHint(chip.accessibilityHint)
+            .accessibilityIdentifier("pocket.room.attachment.strip.photo")
+        }
+    }
+
+    /// A photo's thumbnail, cropped to a square; until its preview arrives, a placeholder of the same size.
+    private func thumbnail(_ chip: RoomAttachmentChip, side: CGFloat) -> some View {
+        ZStack {
+            if let data = previews[chip.attachmentId], let image = RoomImageData.image(from: data) {
+                image
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                PocketPalette.inset
+                Image(systemName: "photo")
+                    .font(.title3)
+                    .foregroundStyle(PocketPalette.textSecondary)
+            }
+        }
+        .frame(width: side, height: side)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(alignment: .bottomTrailing) {
+            if chip.processingStatus == "dead_letter" {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(PocketPalette.danger)
+                    .padding(6)
+            }
+        }
+        .accessibilityHidden(true)
+    }
+
+    /// One file as before: a photo or a video's picture, a removed file, or a file's card with Share.
+    @ViewBuilder
+    private func single(_ chip: RoomAttachmentChip) -> some View {
+        if chip.isRemoved {
+            removed(chip)
+        } else if chip.isVisual {
+            Button {
+                send(.openAttachment(attachmentId: chip.attachmentId))
+            } label: {
+                visual(chip)
+            }
+            .buttonStyle(.plain)
+            .onAppear { send(.attachmentAppeared(attachmentId: chip.attachmentId)) }
+            .accessibilityLabel(chip.accessibilityLabel)
+            .accessibilityHint(chip.accessibilityHint)
+            .accessibilityIdentifier(chip.kind == .video ? "pocket.room.attachment.video" : "pocket.room.attachment")
+        } else {
+            HStack(spacing: 6) {
+                Button {
+                    send(.openAttachment(attachmentId: chip.attachmentId))
+                } label: {
+                    card(chip)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(chip.accessibilityLabel)
+                .accessibilityHint(chip.accessibilityHint)
+                .accessibilityIdentifier("pocket.room.attachment")
+                Button {
+                    send(.shareAttachment(attachmentId: chip.attachmentId))
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(PocketPalette.accent)
+                        .frame(width: 40, height: 40)
+                        .background(PocketPalette.inset, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Share \(chip.filename)")
+                .accessibilityHint("Save it to Files or send it to another app")
+                .accessibilityIdentifier("pocket.room.attachment.share")
+            }
+            .frame(maxWidth: 320, alignment: .leading)
+        }
     }
 
     /// A photo's preview, or a video's poster with a play button. Until the preview arrives, a placeholder of the

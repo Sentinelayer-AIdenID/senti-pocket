@@ -98,3 +98,40 @@ public struct RoomAttachmentChip: Equatable, Identifiable, Sendable {
         }
     }
 }
+
+/// How a message's files line up (Carter, ticket 3b458212: "smaller and side by side horizontal with scrollers for large
+/// numbers"): two or more photos as one strip of thumbnails, where the first photo was; one photo, videos, removed
+/// files and other files one by one, as before.
+public enum RoomAttachmentLayoutItem: Equatable, Identifiable, Sendable {
+    case strip([RoomAttachmentChip])
+    case single(RoomAttachmentChip)
+
+    public var id: String {
+        switch self {
+        case .strip(let photos): return "strip-" + (photos.first?.id ?? "")
+        case .single(let chip): return chip.id
+        }
+    }
+
+    /// A photo that goes in a strip: an image, not removed.
+    static func isStripPhoto(_ chip: RoomAttachmentChip) -> Bool { chip.kind == .image && !chip.isRemoved }
+
+    public static func items(_ chips: [RoomAttachmentChip]) -> [RoomAttachmentLayoutItem] {
+        let photos = chips.filter(isStripPhoto)
+        guard photos.count >= 2 else { return chips.map { .single($0) } }
+        var items: [RoomAttachmentLayoutItem] = []
+        for chip in chips {
+            if !isStripPhoto(chip) {
+                items.append(.single(chip))
+            } else if chip.id == photos.first?.id {
+                items.append(.strip(photos))
+            }
+        }
+        return items
+    }
+
+    /// What VoiceOver says for a photo in a strip: its name and its place, "beach.jpg, 2 of 3" (and its state, if any).
+    public static func stripLabel(_ chip: RoomAttachmentChip, index: Int, count: Int) -> String {
+        [chip.filename, "\(index + 1) of \(count)", chip.statusLabel].compactMap { $0 }.joined(separator: ", ")
+    }
+}
