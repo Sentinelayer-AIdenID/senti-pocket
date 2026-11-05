@@ -155,8 +155,8 @@ final class RootBackgroundWorkTests: XCTestCase {
         try measureCalendarAnswer(on: false)
     }
 
-    /// The same with the calendar on: the ⋯ entry, a modifier on the navigation root, gains its Calendar item, and the
-    /// room screen inside it is not made again.
+    /// The same with the calendar on: the ⋯ entry, a modifier on the navigation root, gains its Calendar item (it watches
+    /// the calendar itself, so it updates without the root), and the room screen inside it is not made again.
     func test_the_calendar_turning_on_after_the_root_settles_makes_no_new_room_screen() throws {
         try measureCalendarAnswer(on: true)
     }
@@ -188,6 +188,7 @@ final class RootBackgroundWorkTests: XCTestCase {
         while Date() < end, gate.asks == 0 { pump(0.1) }
         XCTAssertEqual(gate.asks, 1, "the room's ⋯ entry asked about the calendar once")
         let meter = RootPreview.meter
+        XCTAssertEqual(meter.calendarEntryOffers, false, "before the answer the room's ⋯ entry offers no Calendar")
         let rootBodies = meter.rootBodies
         let screens = meter.roomScreens
         let draws = RenderTrace.snapshot().draws
@@ -197,6 +198,9 @@ final class RootBackgroundWorkTests: XCTestCase {
         XCTAssertEqual(meter.roomScreens - screens, 0, "a calendar change makes no new room screen")
         XCTAssertEqual(meter.rootBodies - rootBodies, 0, "a calendar change does not draw the root again")
         XCTAssertEqual(RenderTrace.snapshot().draws - draws, 0, "a calendar change draws none of the room's rows")
+        XCTAssertEqual(meter.calendarEntryOffers, on,
+                       on ? "the room's ⋯ entry offers Calendar once the answer is on: it watched the answer"
+                          : "the room's ⋯ entry still offers no Calendar")
         print("BGAUDIT calendar answer \(on): root bodies \(meter.rootBodies - rootBodies), "
               + "room screens \(meter.roomScreens - screens)")
     }

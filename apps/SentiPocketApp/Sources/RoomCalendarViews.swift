@@ -27,7 +27,10 @@ struct RoomCalendarEntry: ViewModifier {
     }
 
     func body(content: Content) -> some View {
-        content
+        #if DEBUG
+        RootPreview.meter.calendarEntryRan(offers: isOffered && center.showsCalendar)
+        #endif
+        return content
             .toolbar {
                 if isOffered, center.showsCalendar {
                     ToolbarItem(placement: .secondaryAction) {
