@@ -67,14 +67,15 @@ final class LazyListBuildTests: XCTestCase {
         step("another arrival", rows: rows, list: .roomRow) { room.state = Self.room(rows: 402) }
         // An arrival while the list has drifted three screens up from its bottom and the reader still counts as there
         // (the marker's report has not landed): the room follows with a 0.2-s animated scroll back to its bottom, and
-        // every frame of it makes the rows then on screen (169 of 404 built here, 139 in CI): never every row of the
-        // room, which master built (408). Held to half the room's rows, and it must end at the bottom (within a quarter
-        // of a screen: rows measured on the way can grow the list under the scroll's last frame).
+        // every frame of it makes the rows then on screen, so what it builds grows with the frames a machine draws
+        // (110 to 169 of 404 on the build Mac, 139 and 353 in CI). Only the runaway ceiling of 4 passes applies; it must
+        // end idle and at its bottom (within a quarter of a screen: rows measured on the way can grow the list under the
+        // scroll's last frame). The walk at every layout pass is caught at rest, by the steps above and below.
         settleAtBottom()
         if let scroll = window.flatMap({ Self.list(in: $0) }) {
             scroll.setContentOffset(CGPoint(x: 0, y: max(0, Self.bottomOffset(of: scroll) - 3 * scroll.bounds.height)),
                                    animated: false)
-            step("an arrival three screens up (followed)", rows: rows, list: .roomRow, most: rows / 2) {
+            step("an arrival three screens up (followed)", rows: rows, list: .roomRow, most: ceiling) {
                 room.state = Self.room(rows: 403)
             }
             XCTAssertLessThan(abs(scroll.contentOffset.y - Self.bottomOffset(of: scroll)), scroll.bounds.height / 4,
