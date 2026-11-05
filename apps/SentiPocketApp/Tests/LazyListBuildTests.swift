@@ -96,13 +96,11 @@ final class LazyListBuildTests: XCTestCase {
         step("drawn again, nothing changed, in the other room", rows: other, list: .roomRow) {
             room.objectWillChange.send()
         }
-        // An arrival in the room put in place of another: about 10 rows, but in 2 of 10 runs on the build Mac at 1d832b6
-        // one pass over the room's rows (295 and 297 of 300), as the arrival's scroll to the bottom marker looked its id
-        // up through the rows (their file cards carry ids of the same type). One pass per arrival, never the walk at
-        // every layout pass that froze the phone, which master makes at every update: one pass and 80 more at most.
-        // Back to ≤ 80 when b508c37d lands.
+        // An arrival in the room put in place of another: its scroll to the bottom marker finds the marker by an id of
+        // the marker's own type, so it looks through no row (their file cards carry string ids). It built one pass over
+        // the room's rows in 2 of 10 runs when the marker's id was a string too.
         settleAtBottom()
-        step("an arrival in the other room", rows: other, list: .roomRow, most: other + Self.mostBuiltPerStep) {
+        step("an arrival in the other room", rows: other, list: .roomRow) {
             room.state = Self.room(rows: other + 1, id: "other")
         }
     }

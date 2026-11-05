@@ -833,8 +833,14 @@ public struct RoomChatView: View {
         }
     }
 
-    private static let bottomId = "room-bottom"
+    /// The bottom marker's id, of a type of its own: a scroll to it finds it without looking through the rows, whose
+    /// file cards and pending rows carry string ids (with a string here, an arrival's scroll to the bottom could build
+    /// every row of the room once to look).
+    private static let bottomId = RoomBottomMarkerId()
 }
+
+/// The type of the room's bottom marker id, which no other view in the room has.
+private struct RoomBottomMarkerId: Hashable {}
 
 /// What the room keeps about its bottom marker without redrawing for it: the settled place, and whether the room is on
 /// screen to take it.
