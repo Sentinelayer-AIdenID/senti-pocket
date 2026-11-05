@@ -386,11 +386,6 @@ public struct RoomChatView: View {
                     jumpToLatestButton(proxy: proxy)
                 }
             }
-            // The list starts below who is here, so the ring never covers the first message (Carter, #61679); rows
-            // scrolled up pass under it. Always the same height, so the ring coming or changing shape moves nothing.
-            .safeAreaInset(edge: .top, spacing: 0) {
-                Color.clear.frame(height: RoomPeopleAvatars.reservedHeight)
-            }
             // Who is here floats at the top center, under the top bar and the pins, over the messages (Carter, #55354,
             // #55424).
             .overlay(alignment: .top) {
