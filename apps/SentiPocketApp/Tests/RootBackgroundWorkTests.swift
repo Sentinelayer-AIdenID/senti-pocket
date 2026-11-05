@@ -16,6 +16,12 @@ final class RootBackgroundWorkTests: XCTestCase {
     private var window: UIWindow?
     private var watching: AnyCancellable?
 
+    /// Each test reads only its own root's calendar entry: a window left by an earlier test could still write it.
+    override func setUp() {
+        super.setUp()
+        RootPreview.meter.forgetCalendarEntry()
+    }
+
     override func tearDown() {
         window?.isHidden = true
         window = nil

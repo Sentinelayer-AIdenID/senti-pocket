@@ -589,14 +589,9 @@ struct CalendarSettingsSection: View {
                 } message: {
                     Text(CalendarCenter.resetWarning)
                 }
-                // Subscribe with no kept link: a new link replaces any made before, so it asks first.
-                .confirmationDialog("Make a new subscribe link?", isPresented: $center.confirmsNewLink,
-                                    titleVisibility: .visible) {
-                    Button("Make a new link") { Task { await center.confirmNewLink() } }
-                        .accessibilityIdentifier("settings.calendar.newLink.confirm")
-                    Button("Cancel", role: .cancel) {}
-                } message: {
-                    Text(CalendarCenter.newLinkWarning)
+                // Subscribe with no kept link: a new link replaces any made before, so it asks first, in a sheet.
+                .sheet(isPresented: $center.confirmsNewLink) {
+                    CalendarNewLinkQuestion { Task { await center.confirmNewLink() } }
                 }
             }
         }
@@ -607,6 +602,52 @@ struct CalendarSettingsSection: View {
             ? "Apple Calendar shows the events from your rooms and keeps them up to date. Subscribe opens your link "
                 + "again; Reset link makes a new one and stops the old."
             : "Events from your rooms, by day."
+    }
+}
+
+/// Subscribe's question when no link is kept, as a sheet: its title and message wrap at the sheet's full width and
+/// scroll, and at the accessibility sizes the sheet takes the whole height, so the message shows whole. (A confirmation
+/// dialog put them in a narrow popover that cut the message off at AX5 and broke "subscribe" in two on an SE.)
+struct CalendarNewLinkQuestion: View {
+    let onConfirm: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("Make a new subscribe link?")
+                    .font(.title3.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityAddTraits(.isHeader)
+                    .accessibilityIdentifier("settings.calendar.newLink.title")
+                Text(CalendarCenter.newLinkWarning)
+                    .font(.body)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("settings.calendar.newLink.message")
+                Button {
+                    dismiss()
+                    onConfirm()
+                } label: {
+                    Text("Make a new link")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("settings.calendar.newLink.confirm")
+                Button(role: .cancel) {
+                    dismiss()
+                } label: {
+                    Text("Cancel")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("settings.calendar.newLink.cancel")
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .presentationDetents(typeSize.isAccessibilitySize ? [.large] : [.medium, .large])
+        .presentationDragIndicator(.visible)
     }
 }
 

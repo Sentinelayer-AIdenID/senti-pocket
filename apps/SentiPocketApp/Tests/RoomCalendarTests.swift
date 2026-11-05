@@ -953,6 +953,48 @@ final class RoomCalendarTests: XCTestCase {
         XCTAssertEqual(fake.mints, 1, "the link made when it did not open is kept and opened again")
     }
 
+    /// Follow-up to #330: at the largest text size on an iPhone SE, Subscribe's question (no link kept) shows its whole
+    /// message at once and at the sheet's full width, and "subscribe" fits on a line of its title. A confirmation dialog
+    /// put it in a narrow popover that cut the message off and broke the word in two.
+    func test_the_new_link_question_shows_its_whole_message_at_the_largest_text_size() async throws {
+        guard #available(iOS 17.0, *) else { throw XCTSkip("trait overrides need iOS 17") }
+        let center = makeCenter(FakeCalendar())
+        await center.refresh(probeRoom: "room-1")
+        XCTAssertTrue(center.showsSubscribe)
+        let window = try HostedSummary.host(Form {
+            CalendarSettingsSection(context: CalendarSettingsContext(center: center, rooms: []))
+        })
+        defer { HostedSummary.close(window) }
+        window.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge
+        XCTAssertNotNil(HostedSummary.wait(for: "settings.calendar.subscribe", in: window), "the calendar rows were drawn")
+
+        await center.subscribe()
+        XCTAssertTrue(center.confirmsNewLink, "no link kept: Subscribe asks first")
+        let message = try XCTUnwrap(HostedSummary.wait(for: "settings.calendar.newLink.message", in: window),
+                                    "the question shows its message in a sheet of its own")
+        HostedSummary.pump(1)
+        XCTAssertEqual(message.accessibilityLabel, CalendarCenter.newLinkWarning)
+
+        let ax5 = UITraitCollection(preferredContentSizeCategory: .accessibilityExtraExtraExtraLarge)
+        let body = UIFont.preferredFont(forTextStyle: .body, compatibleWith: ax5)
+        let frame = message.accessibilityFrame
+        let needed = (CalendarCenter.newLinkWarning as NSString).boundingRect(
+            with: CGSize(width: frame.width, height: .greatestFiniteMagnitude), options: [.usesLineFragmentOrigin],
+            attributes: [.font: body], context: nil).height
+        let sheet = try XCTUnwrap(window.rootViewController?.presentedViewController?.view, "the question is a sheet")
+        let visible = sheet.convert(sheet.bounds, to: nil).intersection(window.bounds)
+        print("CALAX5 message \(frame) needs \(needed) visible \(visible) window \(window.bounds)")
+        XCTAssertGreaterThanOrEqual(frame.height, needed - body.lineHeight / 2, "every line of the message is drawn: none cut")
+        XCTAssertLessThanOrEqual(frame.height, visible.height, "the whole message fits on the screen at once")
+        XCTAssertGreaterThanOrEqual(frame.width, visible.width * 0.75, "the message runs at the sheet's full width")
+
+        let title = try XCTUnwrap(HostedSummary.element("settings.calendar.newLink.title", in: window))
+        let titleSize = UIFont.preferredFont(forTextStyle: .title3, compatibleWith: ax5).pointSize
+        let word = ("subscribe" as NSString).size(
+            withAttributes: [.font: UIFont.systemFont(ofSize: titleSize, weight: .semibold)]).width
+        XCTAssertLessThanOrEqual(word, title.accessibilityFrame.width, "\"subscribe\" fits on a line of the title")
+    }
+
     // MARK: - Asking the server again (review P3, #330)
 
     /// While the routes answer 503 (or nothing), a room switch or a Settings open does not ask again at once: the next
