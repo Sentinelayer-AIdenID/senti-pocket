@@ -353,8 +353,10 @@ struct AuthenticatedRootView: View {
     @StateObject private var directMessages: DirectMessagesCenter
     /// Your room folders: on when the server lists them (ROOM_FOLDERS_ENABLED), else nothing shows.
     @StateObject private var roomFolders: RoomFoldersCenter
-    /// The calendar: on when the server answers its routes (CALENDAR_DRAFTS_ENABLED, CALENDAR_FEED_ENABLED).
-    @StateObject private var calendar: CalendarCenter
+    /// The calendar: on when the server answers its routes (CALENDAR_DRAFTS_ENABLED, CALENDAR_FEED_ENABLED). Kept, not
+    /// watched, as the side panel's placement is: the room's calendar entry and Settings watch it, so its answers draw
+    /// them and never the root (each draw of the root can make the room screen under it again).
+    @State private var calendar: CalendarCenter
     /// The side panel's rooms in your folders, placed off the main thread when the rooms or the folders change. Kept,
     /// not watched: the panel watches it, so a new placing draws the panel and not the root (and the room under it).
     @State private var sidePanelPlacement = SidePanelPlacement()
@@ -507,7 +509,7 @@ struct AuthenticatedRootView: View {
         ))
         let calendarClient = services.calendar ?? CalendarOff()
         let identity = services.identity
-        _calendar = StateObject(wrappedValue: CalendarCenter(
+        _calendar = State(initialValue: CalendarCenter(
             client: calendarClient,
             feed: calendarClient,
             // The link is kept for the signed-in person in this phone's Keychain only (gone with the sign-in).
