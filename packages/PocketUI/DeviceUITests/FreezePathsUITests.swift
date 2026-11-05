@@ -84,7 +84,23 @@ final class FreezePathsUITests: XCTestCase {
     /// Up a long room until about 300 rows are loaded (each page loads as its top comes into view), Jump to latest (the
     /// room keeps its newest 60 rows), then a reply to the newest message in view, from its menu, sent.
     func test_path4_reply_in_a_long_room_after_a_jump_down_trim() throws {
-        replyAfterJumpDown(launch(room: "long"), upTo: 705, path: "path4")
+        // At the accessibility text sizes (the simulator's own setting) a screen holds a row or two: 25 rows up, as in
+        // the AX5 case below, rather than 300.
+        let large = UIApplication.shared.preferredContentSizeCategory.isAccessibilityCategory
+        replyAfterJumpDown(launch(room: "long"), upTo: large ? 975 : 705, path: "path4")
+    }
+
+    /// The order that hung at 30b4d3b: a message sent first (the keyboard up), then the long press on a message in view
+    /// above it, its menu, and the reply.
+    func test_path4_send_then_reply_from_the_menu() throws {
+        let large = UIApplication.shared.preferredContentSizeCategory.isAccessibilityCategory
+        replyAfterJumpDown(launch(room: "long"), upTo: large ? 975 : 705, path: "path4-send", sendFirst: true)
+    }
+
+    /// The same order with the app at the largest text size.
+    func test_path4_send_then_reply_from_the_menu_at_the_largest_text_size() throws {
+        let app = launch(room: "long", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL")
+        replyAfterJumpDown(app, upTo: 975, path: "path4-send-ax5", sendFirst: true)
     }
 
     /// Path 4 at the largest text size (AX5), where a row can be taller than the screen: up the room to its 975th
@@ -95,34 +111,52 @@ final class FreezePathsUITests: XCTestCase {
         replyAfterJumpDown(app, upTo: 975, path: "path4-ax5")
     }
 
-    private func replyAfterJumpDown(_ app: XCUIApplication, upTo sequence: Int, path: String) {
+    private func replyAfterJumpDown(_ app: XCUIApplication, upTo sequence: Int, path: String, sendFirst: Bool = false) {
         let screen = app.descendants(matching: .any)["pocket.room.screen"]
         let far = app.descendants(matching: .any)["pocket.room.message.\(sequence)"]
-        for _ in 0..<60 {
-            if far.exists { break }
+        // Up the room until the message is in view, within four minutes (each page of earlier messages loads as its top
+        // comes into view; a swipe and its check take about 3 s on the build Mac, and 300 rows take up to 80 swipes).
+        let deadline = Date().addingTimeInterval(240)
+        while !far.exists, Date() < deadline {
             screen.swipeDown(velocity: .fast)
         }
-        XCTAssertTrue(far.exists, "up the room to message \(sequence)")
+        XCTAssertTrue(far.exists, "up the room to message \(sequence) within four minutes")
         let jump = app.descendants(matching: .any)["pocket.room.jumpToLatest"]
         XCTAssertTrue(jump.waitForExistence(timeout: 10), "the arrow shows up the room")
         jump.tap()
         pause(3)
+        if sendFirst {
+            send(app, "On it.")
+        }
         // The newest message with some of it in view, pressed where it shows: at the largest text size a message can
-        // be taller than the screen (its middle off it), and the one before the note just sent may be out of view.
+        // be taller than the screen (its middle off it), and the note just sent can fill what the keyboard leaves, so
+        // the room is moved down a little at a time (a short drag) until one shows.
         let window = app.windows.firstMatch
-        var band = window.frame
-        let bar = app.navigationBars.firstMatch
-        if bar.exists { band = band.divided(atDistance: max(0, bar.frame.maxY - band.minY), from: .minYEdge).remainder }
-        let composer = app.descendants(matching: .any)["pocket.room.composer"]
-        if composer.exists { band.size.height = max(0, composer.frame.minY - 16 - band.minY) }
         let messages = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@", "pocket.room.message."))
-        let all = messages.allElementsBoundByIndex
-        guard let message = all.last(where: { $0.frame.intersection(band).height >= 40 }) else {
-            print("FREEZE-PRESS none in \(band): \(all.suffix(4).map { "\($0.identifier) \($0.frame)" })")
+        var target: (element: XCUIElement, shown: CGRect)?
+        for attempt in 0..<8 {
+            var band = window.frame
+            let bar = app.navigationBars.firstMatch
+            if bar.exists { band = band.divided(atDistance: max(0, bar.frame.maxY - band.minY), from: .minYEdge).remainder }
+            let composer = app.descendants(matching: .any)["pocket.room.composer"]
+            if composer.exists { band.size.height = max(0, composer.frame.minY - 16 - band.minY) }
+            let all = messages.allElementsBoundByIndex
+            if let found = all.last(where: { $0.frame.intersection(band).height >= 40 }) {
+                target = (found, found.frame.intersection(band))
+                break
+            }
+            print("FREEZE-PRESS none in \(band) (try \(attempt)): \(all.suffix(3).map { "\($0.identifier) \($0.frame)" })")
+            let start = window.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: band.midX, dy: band.minY + 20))
+            start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: min(160, band.height - 30))),
+                        withVelocity: .slow, thenHoldForDuration: 0.2)
+            pause(1)
+        }
+        guard let target else {
             return XCTFail("no message in view to press")
         }
-        let shown = message.frame.intersection(band)
+        let message = target.element
+        let shown = target.shown
         print("FREEZE-PRESS \(message.identifier) at \(Int(shown.midX)),\(Int(shown.midY))")
         window.coordinate(withNormalizedOffset: .zero)
             .withOffset(CGVector(dx: shown.midX - window.frame.minX, dy: shown.midY - window.frame.minY))
