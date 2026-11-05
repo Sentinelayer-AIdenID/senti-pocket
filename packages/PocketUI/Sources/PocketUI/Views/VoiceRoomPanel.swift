@@ -13,6 +13,7 @@ public struct VoiceRoomPanel: View {
     private let addable: () -> [String]
     private let send: (VoiceRoomIntent) -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var typeSize
     @State private var pressStarted = Date()
     @State private var startedByPress = false
     @State private var pulse = false
@@ -31,21 +32,24 @@ public struct VoiceRoomPanel: View {
         self.send = send
     }
 
+    /// The accessibility text sizes: the words get the room, so the face, the coin and the gaps between parts shrink.
+    private var largeText: Bool { typeSize.isAccessibilitySize }
+
     public var body: some View {
         VStack(spacing: 0) {
             header
-            Spacer(minLength: 12)
+            Spacer(minLength: largeText ? 4 : 12)
             partner
             VoiceWaveform(meter: meter, agentTint: partnerTint)
-                .padding(.top, 28)
+                .padding(.top, largeText ? 12 : 28)
             nowLine
-                .padding(.top, 16)
-            Spacer(minLength: 12)
+                .padding(.top, largeText ? 8 : 16)
+            Spacer(minLength: largeText ? 4 : 12)
             controls
         }
         .padding(.horizontal, 22)
-        .padding(.top, 20)
-        .padding(.bottom, 22)
+        .padding(.top, largeText ? 8 : 20)
+        .padding(.bottom, largeText ? 8 : 22)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay(alignment: .topLeading) {
             speakerButton
@@ -78,8 +82,9 @@ public struct VoiceRoomPanel: View {
     /// by accident had no way back). Filled while on; VoiceOver reads it as "Speaker, On" or "Speaker, Off".
     private var speakerButton: some View {
         Button { send(.setSpeaker(!state.isSpeakerOn)) } label: {
-            Image(systemName: state.isSpeakerOn ? "speaker.wave.2.fill" : "speaker.fill")
+            Image(systemName: speakerSymbol)
                 .font(.title3)
+                .roundGlyph()
                 .voiceLayoutProbe("speaker.glyph")
                 .frame(width: 44, height: 44)
                 .background(state.isSpeakerOn ? PocketPalette.textPrimary : PocketPalette.inset, in: Circle())
@@ -92,7 +97,10 @@ public struct VoiceRoomPanel: View {
         .accessibilityValue(state.speakerValue)
         .accessibilityHint(state.isSpeakerOn ? "Plays the call through the earpiece" : "Plays the call through the speaker")
         .accessibilityIdentifier("pocket.voice.speaker")
+        .roundButtonLargeContent("Speaker", systemImage: speakerSymbol)
     }
+
+    private var speakerSymbol: String { state.isSpeakerOn ? "speaker.wave.2.fill" : "speaker.fill" }
 
     /// Brings someone else into the call: whoever can answer now and isn't in it already.
     private var addButton: some View {
@@ -103,6 +111,7 @@ public struct VoiceRoomPanel: View {
         } label: {
             Image(systemName: "person.badge.plus")
                 .font(.title3)
+                .roundGlyph()
                 .voiceLayoutProbe("add.glyph")
                 .frame(width: 44, height: 44)
                 .background(PocketPalette.inset, in: Circle())
@@ -112,6 +121,7 @@ public struct VoiceRoomPanel: View {
         .foregroundStyle(PocketPalette.textPrimary)
         .accessibilityLabel("Add someone to the call")
         .accessibilityIdentifier("pocket.voice.add")
+        .roundButtonLargeContent("Add someone to the call", systemImage: "person.badge.plus")
     }
 
     /// The called agent's lab, only while the call has one agent: a group shows no one's logo.
@@ -163,7 +173,9 @@ public struct VoiceRoomPanel: View {
                 coin
             }
         }
-        .frame(height: 220)
+        // At the accessibility text sizes the face (or the coin) is drawn smaller, so the words below it fit.
+        .scaleEffect(largeText ? 0.7 : 1)
+        .frame(height: largeText ? 154 : 220)
         .accessibilityHidden(true)
     }
 
@@ -216,16 +228,25 @@ public struct VoiceRoomPanel: View {
                     Text(answering)
                         .font(.footnote.weight(.semibold))
                         .foregroundStyle(PocketPalette.textPrimary)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                         .voiceLayoutProbe("answering")
                         .accessibilityIdentifier("pocket.voice.answering")
                 } else if let speaker = state.speaker {
                     Text("\(speaker) is speaking")
                         .font(.footnote.weight(.semibold))
                         .foregroundStyle(PocketPalette.textPrimary)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 } else {
                     Text(statusText)
                         .font(.footnote.weight(.semibold))
                         .foregroundStyle(state.isListening ? PocketPalette.accentStrong : PocketPalette.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if state.waiting > 0 {
                     Text("\(state.waiting) more")
@@ -240,8 +261,8 @@ public struct VoiceRoomPanel: View {
                 .font(.title3)
                 .foregroundStyle(PocketPalette.textPrimary)
                 .multilineTextAlignment(.center)
-                .lineLimit(6)
-                .minimumScaleFactor(0.8)
+                .lineLimit(largeText ? 2 : 6)
+                .minimumScaleFactor(largeText ? 0.6 : 0.8)
                 .frame(maxWidth: .infinity)
                 .animation(.easeOut(duration: 0.15), value: lineText)
                 .voiceLayoutProbe("caption")
@@ -264,6 +285,7 @@ public struct VoiceRoomPanel: View {
                 Button { send(.skip) } label: {
                     Image(systemName: "forward.end.fill")
                         .font(.title3)
+                        .roundGlyph()
                         .voiceLayoutProbe("skip.glyph")
                         .frame(width: 48, height: 48)
                         .background(PocketPalette.inset, in: Circle())
@@ -274,6 +296,7 @@ public struct VoiceRoomPanel: View {
                 .disabled(state.speaker == nil)
                 .accessibilityLabel("Skip this answer")
                 .accessibilityIdentifier("pocket.voice.skip")
+                .roundButtonLargeContent("Skip this answer", systemImage: "forward.end.fill")
                 Toggle(isOn: Binding(get: { state.isHandsFree }, set: { send(.setHandsFree($0)) })) {
                     Text("Hands-free").font(.caption2)
                 }
@@ -290,6 +313,7 @@ public struct VoiceRoomPanel: View {
                 Button { send(.hangUp) } label: {
                     Image(systemName: "phone.down.fill")
                         .font(.title3)
+                        .roundGlyph()
                         .foregroundStyle(.white)
                         .voiceLayoutProbe("end.glyph")
                         .frame(width: 52, height: 52)
@@ -300,6 +324,7 @@ public struct VoiceRoomPanel: View {
                 .disabled(state.phase == .ending || state.phase == .ended)
                 .accessibilityLabel("End the voice room")
                 .accessibilityIdentifier("pocket.voice.end")
+                .roundButtonLargeContent("End the voice room", systemImage: "phone.down.fill")
             }
         }
         .voiceLayoutProbe("controls")
@@ -312,6 +337,7 @@ public struct VoiceRoomPanel: View {
         Button { send(.setMuted(!state.isMuted)) } label: {
             Image(systemName: "mic.slash")
                 .font(.title3.weight(.semibold))
+                .roundGlyph()
                 .voiceLayoutProbe("mute.glyph")
                 .frame(width: 48, height: 48)
                 .background(state.isMuted ? PocketPalette.textPrimary : PocketPalette.inset, in: Circle())
@@ -322,6 +348,7 @@ public struct VoiceRoomPanel: View {
         .disabled(state.phase == .ending || state.phase == .ended)
         .accessibilityLabel(state.muteLabel)
         .accessibilityIdentifier("pocket.voice.mute")
+        .roundButtonLargeContent(state.muteLabel, systemImage: "mic.slash")
     }
 
     /// Muted, it is greyed out like Skip with nothing to skip, says so under it, and takes no turn.
@@ -421,6 +448,24 @@ public enum VoiceRoomPanelLayout {
     }
 }
 #endif
+
+private extension View {
+    /// A round button's glyph: its text size stops growing at the largest standard size, so it stays inside its circle
+    /// at every text size. With an accessibility size, a long press on the button shows it large instead.
+    func roundGlyph() -> some View {
+        dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+    }
+
+    /// A long press on a round button shows its glyph and name large, as the system's own bars do (iOS).
+    @ViewBuilder
+    func roundButtonLargeContent(_ title: String, systemImage: String) -> some View {
+        #if os(iOS)
+        accessibilityShowsLargeContentViewer { Label(title, systemImage: systemImage) }
+        #else
+        self
+        #endif
+    }
+}
 
 private extension View {
     /// Records this part's frame in DEBUG builds; nothing in Release.
