@@ -389,6 +389,7 @@ final class RoomReaderStaysPutTests: XCTestCase {
         let arrow = try XCTUnwrap(HostedSummary.wait(for: "pocket.room.jumpToLatest", in: window), "the arrow shows")
 
         let watch = FrameWatch(window: window, list: list)
+        watch.mark = { room.atBottom }
         watch.start()
         pump(0.5)
         let tappedAt = watch.frames.count
@@ -411,9 +412,14 @@ final class RoomReaderStaysPutTests: XCTestCase {
         print("READER-STAYS-PUT arrow-jump rows=\(rows) text=\(textSize) frames=\(during.count) usual-drawn=\(usual) "
             + "blank-frames=\(blankFrames) scrolling-frames=\(scrolling) row-draws=\(draws) rows-built=\(built) "
             + "steps=\(steps.filter { $0 != 0 }.map { String(format: "%.0f", $0) })")
-        // Each frame from the last before the tap: where the list was, and what was drawn in the band.
-        print("READER-STAYS-PUT arrow-jump each-frame " + watch.frames[max(0, tappedAt - 1)...].prefix(24)
-            .map { "\(String(format: "%.0f", $0.offset))/\($0.drawn)\($0.sameList ? "" : "*")" }.joined(separator: " "))
+        // Each frame from the last before the tap: where the list was, what was drawn in the band, the rows built in
+        // that frame, and "B" once the room says the reader is at the bottom.
+        let shown = Array(watch.frames[max(0, tappedAt - 1)...])
+        print("READER-STAYS-PUT arrow-jump each-frame " + zip(shown, [shown.first?.built ?? 0] + shown.map(\.built))
+            .map { frame, before in
+                "\(String(format: "%.0f", frame.offset))/\(frame.drawn)/+\(frame.built - before)"
+                    + "\(frame.mark ? "B" : "")\(frame.sameList ? "" : "*")"
+            }.joined(separator: " "))
         XCTAssertGreaterThan(usual, 0, "what is drawn could be read before the tap")
         XCTAssertGreaterThan(during.count, 10, "frames were recorded on the way down")
         XCTAssertTrue(during.allSatisfy(\.sameList), "the room was built again as a new list")
@@ -431,9 +437,14 @@ final class RoomReaderStaysPutTests: XCTestCase {
             let offset: CGFloat
             let drawn: Int
             let sameList: Bool
+            /// The room's rows built so far (`RenderTrace`), and what `mark` said, at this frame.
+            let built: Int
+            let mark: Bool
         }
 
         private(set) var frames: [Frame] = []
+        /// Read at each frame (the room says the reader is at the bottom).
+        var mark: () -> Bool = { false }
         private let window: UIWindow
         private let list: UIScrollView
         private var link: CADisplayLink?
@@ -457,7 +468,7 @@ final class RoomReaderStaysPutTests: XCTestCase {
         @objc private func tick() {
             let current = RoomReaderStaysPutTests.list(in: window) ?? list
             frames.append(Frame(offset: current.contentOffset.y, drawn: Self.drawn(in: current),
-                                sameList: current === list))
+                                sameList: current === list, built: RenderTrace.builtCount(.roomRow), mark: mark()))
         }
 
         /// Layers with something drawn in them (text, an image, a fill) inside the list, overlapping what can be read.
