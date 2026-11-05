@@ -273,17 +273,14 @@ public struct PocketSidePanel: View {
             }
 
             ScrollView {
+                // One loop of lines, one view each (`Line`), so the lazy list builds only the lines it shows. Folders
+                // holding their rooms, and rooms holding their direct messages, made a varying number of views per
+                // item, and a lazy list that cannot tell how many builds every item at every layout pass to count
+                // them: Carter's phone froze inside that walk with the panel open (11-04).
                 LazyVStack(spacing: 2) {
-                    if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        placedRooms
-                    } else {
-                        // A search is one flat list of what matches, rooms and direct messages alike.
-                        let shown = Self.filter(rooms, by: query)
-                        if shown.isEmpty {
-                            emptyLine("No rooms match")
-                        }
-                        ForEach(shown) { room in
-                            if room.direct != nil { directRow(room, nested: false) } else { roomRow(room) }
+                    ForEach(Self.lines(rooms: rooms, folders: folders, folded: folded, query: query)) { line in
+                        VStack(alignment: .leading, spacing: 0) {
+                            lineView(line)
                         }
                     }
                 }
@@ -340,49 +337,85 @@ public struct PocketSidePanel: View {
         foldedRaw = set.sorted().joined(separator: "\n")
     }
 
-    /// Your folders, then Rooms, then Messages; each direct message under the room it was opened from, where Carter
-    /// asked for it to live.
-    @ViewBuilder
-    private var placedRooms: some View {
-        let layout = SidePanelLayout.make(rooms, folders: folders)
-        if layout.isEmpty {
-            emptyLine("No rooms yet")
-        }
-        ForEach(Array(layout.folders.enumerated()), id: \.element.id) { index, section in
-            folderHeader(section, isFirst: index == 0, isLast: index == layout.folders.count - 1)
-            if !folded.contains(section.id) {
-                if section.entries.isEmpty {
-                    Text("No rooms in this folder")
-                        .font(.caption)
-                        .foregroundStyle(PocketPalette.textSecondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.leading, 40)
-                        .padding(.vertical, 4)
-                }
-                ForEach(section.entries) { entry in
-                    entryRows(entry)
-                }
-            }
-        }
-        if !layout.folders.isEmpty, !layout.rooms.isEmpty {
-            sectionLabel("Rooms", id: "unfiled")
-        }
-        ForEach(layout.rooms) { entry in
-            entryRows(entry)
-        }
-        if !layout.messages.isEmpty {
-            sectionLabel("Messages", id: "messages")
-            ForEach(layout.messages) { room in
-                directRow(room, nested: false)
+    /// One line of the room list.
+    enum Line: Identifiable, Equatable {
+        /// "No rooms yet", or "No rooms match" a search.
+        case note(String)
+        /// A folder's heading, and where it sits in your order (for Move up and Move down).
+        case folder(SidePanelLayout.FolderSection, isFirst: Bool, isLast: Bool)
+        /// "No rooms in this folder", under its open heading.
+        case emptyFolder(folderId: String)
+        case room(Room)
+        /// A direct message, indented under the room it was opened from (`nested`).
+        case direct(Room, nested: Bool)
+        /// "Rooms" over the rooms in no folder, or "Messages" over direct messages whose room is not listed.
+        case label(String, id: String)
+
+        var id: String {
+            switch self {
+            case .note: return "note"
+            case .folder(let section, _, _): return "folder:\(section.id)"
+            case .emptyFolder(let folderId): return "folder-empty:\(folderId)"
+            case .room(let room): return "room:\(room.id)"
+            case .direct(let room, _): return "direct:\(room.id)"
+            case .label(_, let id): return "label:\(id)"
             }
         }
     }
 
+    /// The room list as lines, in the order shown: your folders (each heading, then its rooms unless folded), then
+    /// Rooms, then Messages, each direct message under the room it was opened from, where Carter asked for it to live.
+    /// A search is one flat list of what matches, rooms and direct messages alike. A line whose id came already is left
+    /// out: a lazy list's ids must be unique.
+    static func lines(rooms: [Room], folders: [RoomFolderItem]?, folded: Set<String>, query: String) -> [Line] {
+        var lines: [Line] = []
+        if !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let shown = filter(rooms, by: query)
+            if shown.isEmpty { lines.append(.note("No rooms match")) }
+            lines += shown.map { $0.direct != nil ? .direct($0, nested: false) : .room($0) }
+        } else {
+            let layout = SidePanelLayout.make(rooms, folders: folders)
+            if layout.isEmpty { lines.append(.note("No rooms yet")) }
+            func entry(_ entry: SidePanelLayout.Entry) -> [Line] {
+                [.room(entry.room)] + entry.directs.map { .direct($0, nested: true) }
+            }
+            for (index, section) in layout.folders.enumerated() {
+                lines.append(.folder(section, isFirst: index == 0, isLast: index == layout.folders.count - 1))
+                guard !folded.contains(section.id) else { continue }
+                if section.entries.isEmpty { lines.append(.emptyFolder(folderId: section.id)) }
+                lines += section.entries.flatMap(entry)
+            }
+            if !layout.folders.isEmpty, !layout.rooms.isEmpty { lines.append(.label("Rooms", id: "unfiled")) }
+            lines += layout.rooms.flatMap(entry)
+            if !layout.messages.isEmpty {
+                lines.append(.label("Messages", id: "messages"))
+                lines += layout.messages.map { .direct($0, nested: false) }
+            }
+        }
+        var seen = Set<String>()
+        return lines.filter { seen.insert($0.id).inserted }
+    }
+
     @ViewBuilder
-    private func entryRows(_ entry: SidePanelLayout.Entry) -> some View {
-        roomRow(entry.room)
-        ForEach(entry.directs) { direct in
-            directRow(direct, nested: true)
+    private func lineView(_ line: Line) -> some View {
+        switch line {
+        case .note(let text):
+            emptyLine(text)
+        case .folder(let section, let isFirst, let isLast):
+            folderHeader(section, isFirst: isFirst, isLast: isLast)
+        case .emptyFolder:
+            Text("No rooms in this folder")
+                .font(.caption)
+                .foregroundStyle(PocketPalette.textSecondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, 40)
+                .padding(.vertical, 4)
+        case .room(let room):
+            roomRow(room)
+        case .direct(let room, let nested):
+            directRow(room, nested: nested)
+        case .label(let title, let id):
+            sectionLabel(title, id: id)
         }
     }
 

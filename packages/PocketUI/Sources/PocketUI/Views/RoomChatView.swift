@@ -298,9 +298,18 @@ public struct RoomChatView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     olderHistoryHeader
+                    // One view per row, always. Unwrapped, a row made none (a folded file part), one, two (a turn break
+                    // and its message) or more (file cards), and a lazy list that cannot tell how many builds every row
+                    // of the room, on screen or not, at every layout pass, to count them. Carter's phone froze inside
+                    // that walk (11-04 and 11-05: 12 to 13.5 s in a lazy list's placement, going item by item). Wrapped,
+                    // the list builds only the rows it shows. Spacing 0, as the list's own, so nothing moves.
+                    // Each row's id is the loop's own (`RoomChatRow.id`), which the scrolls to a row find; an `.id` of
+                    // the same value on every row made the list build every row again at the first update after it
+                    // opened (LazyListBuildTests: 404 of 404 rows, against 8 without it).
                     ForEach(state.rows) { row in
-                        rowView(row, proxy: proxy)
-                            .id(row.id)
+                        VStack(alignment: .leading, spacing: 0) {
+                            rowView(row, proxy: proxy)
+                        }
                     }
                     ForEach(state.pending) { pending in
                         RoomPendingRowView(
