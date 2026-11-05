@@ -84,7 +84,10 @@ final class FreezePathsUITests: XCTestCase {
     /// Up a long room until about 300 rows are loaded (each page loads as its top comes into view), Jump to latest (the
     /// room keeps its newest 60 rows), then a reply to the newest message in view, from its menu, sent.
     func test_path4_reply_in_a_long_room_after_a_jump_down_trim() throws {
-        replyAfterJumpDown(launch(room: "long"), upTo: 705, path: "path4")
+        // At the accessibility text sizes (the simulator's own setting) a screen holds a row or two: 25 rows up, as in
+        // the AX5 case below, rather than 300.
+        let large = UIApplication.shared.preferredContentSizeCategory.isAccessibilityCategory
+        replyAfterJumpDown(launch(room: "long"), upTo: large ? 975 : 705, path: "path4")
     }
 
     /// Path 4 at the largest text size (AX5), where a row can be taller than the screen: up the room to its 975th
@@ -98,11 +101,13 @@ final class FreezePathsUITests: XCTestCase {
     private func replyAfterJumpDown(_ app: XCUIApplication, upTo sequence: Int, path: String) {
         let screen = app.descendants(matching: .any)["pocket.room.screen"]
         let far = app.descendants(matching: .any)["pocket.room.message.\(sequence)"]
-        for _ in 0..<60 {
-            if far.exists { break }
+        // Up the room until the message is in view, within two minutes (each page of earlier messages loads as its top
+        // comes into view).
+        let deadline = Date().addingTimeInterval(120)
+        while !far.exists, Date() < deadline {
             screen.swipeDown(velocity: .fast)
         }
-        XCTAssertTrue(far.exists, "up the room to message \(sequence)")
+        XCTAssertTrue(far.exists, "up the room to message \(sequence) within two minutes")
         let jump = app.descendants(matching: .any)["pocket.room.jumpToLatest"]
         XCTAssertTrue(jump.waitForExistence(timeout: 10), "the arrow shows up the room")
         jump.tap()
