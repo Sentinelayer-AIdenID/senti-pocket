@@ -145,6 +145,16 @@ final class LazyListBuildTests: XCTestCase {
         XCTAssertGreaterThan(away, 3 * scroll.bounds.height, "at the message, far up the room")
         XCTAssertTrue(room.intents.contains(.focusHandled), "the room was told the message is in view")
         let held = scroll.contentOffset.y
+        // The first update after the open, nothing changed, the room settled: measured on its own with the main
+        // test's ceiling for the first update after an open (`passesAtMost` passes over the rows), so that what the
+        // first arrival builds is the arrival's. The held message stays where it is.
+        step("the first update after the open, a message held far up", rows: 400, list: .roomRow,
+             most: Self.passesAtMost * 400) {
+            room.objectWillChange.send()
+        }
+        let settled = abs(scroll.contentOffset.y - held)
+        print("LAZYLIST held message: moved \(Int(settled)) pt at the first update after the open")
+        XCTAssertLessThan(settled, scroll.bounds.height / 2, "the held message stays in view at the first update")
         // The held row is scrolled to again as the rows change, by its id in the room's loop: the rows on screen are
         // built, not every row of the room to look the id up. Ten rounds of two arrivals: at master the held message
         // once moved 1,264 points in the one round this test made (run 42105631345), and passed in other runs.
