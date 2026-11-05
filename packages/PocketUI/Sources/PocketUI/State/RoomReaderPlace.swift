@@ -99,8 +99,14 @@ public enum RoomReaderPlace {
                 endPushedDown = false
                 return .endInView
             }
-            if let bottomOffset, reading.offset < bottomOffset - RoomReaderPlace.samePlace,
-               readerMoving || !endPushedDown {
+            guard let bottomOffset else {
+                // Put at the bottom by the room, with the end not yet in view since: the reader moving the list then is
+                // not followed against their hand.
+                if readerMoving { return .movedUp }
+                endPushedDown = true
+                return .endBelow
+            }
+            if reading.offset < bottomOffset - RoomReaderPlace.samePlace, readerMoving || !endPushedDown {
                 return .movedUp
             }
             endPushedDown = true

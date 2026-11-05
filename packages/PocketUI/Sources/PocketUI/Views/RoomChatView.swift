@@ -476,7 +476,7 @@ public struct RoomChatView: View {
             .modifier(StartsAtBottom())
             // Where the reader is, from the scroll view's own geometry (iOS 18 and later).
             .modifier(RoomScrollReading { readingSeen($0, proxy: proxy) })
-            .modifier(RoomReaderScrolling { bottomWatch.readerMoving = $0 })
+            .modifier(RoomReaderScrolling { bottomWatch.scrolling = $0 })
             // The whole list, its handlers with it, so a new one opens as the room does.
             .id(listEpoch)
         }
@@ -649,7 +649,7 @@ public struct RoomChatView: View {
                 reopenAtLatest()
                 return
             }
-            withAnimation(.easeOut(duration: 0.25)) {
+            roomScroll(.easeOut(duration: 0.25), lasting: 0.25) {
                 proxy.scrollTo(Self.bottomId, anchor: .bottom)
             }
             // Landed with the end in view: the reading says so even if the last frame of the scroll did not.
@@ -683,7 +683,7 @@ public struct RoomChatView: View {
             reopenAtLatest(atLine: true)
             return
         }
-        withAnimation(.easeOut(duration: 0.25)) {
+        roomScroll(.easeOut(duration: 0.25), lasting: 0.25) {
             proxy.scrollTo(RoomChatRow.unreadDivider.id, anchor: Self.unreadLineAnchor)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.openLanding) { recheckPlace(proxy) }
@@ -835,7 +835,7 @@ public struct RoomChatView: View {
         }
         setReaderAtBottom(true)
         DispatchQueue.main.async {
-            withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
+            roomScroll(.easeOut(duration: 0.2), lasting: 0.2) { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
         }
     }
 
@@ -854,7 +854,7 @@ public struct RoomChatView: View {
         setReaderAtBottom(false)
         heldAnchor = rowId
         DispatchQueue.main.async {
-            withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(rowId, anchor: .center) }
+            roomScroll(.easeInOut(duration: 0.25), lasting: 0.25) { proxy.scrollTo(rowId, anchor: .center) }
             highlightedRowId = rowId
             send(.focusHandled)
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
@@ -871,7 +871,7 @@ public struct RoomChatView: View {
         }
         setReaderAtBottom(false)
         heldAnchor = target.id
-        withAnimation(.easeInOut(duration: 0.25)) {
+        roomScroll(.easeInOut(duration: 0.25), lasting: 0.25) {
             proxy.scrollTo(target.id, anchor: .center)
         }
         highlightedRowId = target.id
@@ -924,7 +924,9 @@ public struct RoomChatView: View {
                 return
             }
             bottomWatch.easedFollowUntil = ProcessInfo.processInfo.systemUptime + Self.followEase
-            withAnimation(.easeOut(duration: Self.followEase)) { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
+            roomScroll(.easeOut(duration: Self.followEase), lasting: Self.followEase) {
+                proxy.scrollTo(Self.bottomId, anchor: .bottom)
+            }
             // Anything that arrived while it eased is followed once it has landed.
             DispatchQueue.main.asyncAfter(deadline: .now() + Self.followEase + 0.05) { recheckPlace(proxy) }
         }
@@ -932,6 +934,13 @@ public struct RoomChatView: View {
 
     /// How long an arrival's follow eases.
     static let followEase: TimeInterval = 0.2
+
+    /// A scroll of the room's own, animated. While it is on its way the list is animating because the room moves it;
+    /// any other animated scroll is the reader's (`RoomBottomWatch.readerMoving`).
+    private func roomScroll(_ animation: Animation, lasting duration: TimeInterval, _ scroll: () -> Void) {
+        bottomWatch.roomScrollUntil = ProcessInfo.processInfo.systemUptime + duration + RoomBottomWatch.roomScrollMargin
+        withAnimation(animation, scroll)
+    }
 
     /// A reading of the scroll view, while the list is laid out (iOS 18 and later). Acting on it here (a follow, the
     /// reader's place) would change the list again in the same frame, and SwiftUI warns ("tried to update multiple
@@ -1044,8 +1053,23 @@ private final class RoomBottomWatch {
         self.reading = reading
         return tracker.see(reading, readerMoving: readerMoving)
     }
-    /// The reader is dragging the list, or it is coasting from their drag (iOS 18 and later).
-    var readerMoving = false
+    /// How the list is moving now (iOS 18 and later, `RoomReaderScrolling`).
+    var scrolling = RoomScrolling.still
+    /// The room's own animated scroll is on its way until then (`RoomChatView.roomScroll`).
+    var roomScrollUntil: TimeInterval = 0
+    /// Past an animated scroll's own length: its last frame, on a slow phone.
+    static let roomScrollMargin: TimeInterval = 0.05
+    /// The reader is moving the list (iOS 18 and later): dragging it, its coast, or an animated scroll the room did not
+    /// make, which is the reader's without touching the list: VoiceOver's three-finger scroll, a tap on the status bar,
+    /// a keyboard's arrows or Page Up. Taken for the room settling its rows, those were pulled back to the bottom while
+    /// messages arrived. Not the room's own scrolls, nor SwiftUI settling the list's rows (no animation).
+    var readerMoving: Bool {
+        switch scrolling {
+        case .still: return false
+        case .byHand: return true
+        case .animated: return ProcessInfo.processInfo.systemUptime >= roomScrollUntil
+        }
+    }
     /// A reading is to be taken on the next frame; what the last one taken showed.
     var readingQueued = false
     var takenSight: RoomReaderPlace.Sight?
@@ -1139,17 +1163,28 @@ private struct RoomScrollReading: ViewModifier {
     }
 }
 
-/// Whether the reader is moving the list: dragging it, or its coast from their drag (iOS 18 and later). Not the room's
-/// own scrolls, nor SwiftUI settling the list's rows.
+/// How the list is moving (iOS 18 and later).
+private enum RoomScrolling: Equatable {
+    case still
+    /// Dragged, or coasting from a drag.
+    case byHand
+    /// An animated scroll: the room's own (`RoomChatView.roomScroll`), or one not by touch (VoiceOver, the status
+    /// bar, a keyboard).
+    case animated
+}
+
+/// How the list is moving, from the scroll view's phase (iOS 18 and later). SwiftUI settling the list's rows moves it
+/// with no phase at all.
 private struct RoomReaderScrolling: ViewModifier {
-    let moving: (Bool) -> Void
+    let changed: (RoomScrolling) -> Void
 
     func body(content: Content) -> some View {
         if #available(iOS 18.0, macOS 15.0, *) {
             content.onScrollPhaseChange { _, phase in
                 switch phase {
-                case .tracking, .interacting, .decelerating: moving(true)
-                default: moving(false)
+                case .tracking, .interacting, .decelerating: changed(.byHand)
+                case .animating: changed(.animated)
+                default: changed(.still)
                 }
             }
         } else {
