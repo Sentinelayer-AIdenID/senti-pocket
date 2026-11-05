@@ -269,8 +269,12 @@ final class RootPreviewAPI: @unchecked Sendable {
         self.openRoomId = openRoomId
     }
 
-    /// How many times each read was asked for: "rooms", "bell", "waiting", "folders", "dmSettings".
+    /// How many times each read was asked for: "rooms", "bell", "waiting", "folders", "dmSettings", and the open room's
+    /// "history" (a page of its messages), "actions" (reactions and replies), "views" (who viewed what) and "presence".
     func callCount(_ name: String) -> Int { lock.withLock { calls[name, default: 0] } }
+
+    /// All the reads above, together: a hosted test waits until this stops moving.
+    var totalCalls: Int { lock.withLock { calls.values.reduce(0, +) } }
 
     private func count(_ name: String) { lock.withLock { calls[name, default: 0] += 1 } }
 
@@ -444,6 +448,7 @@ extension RootPreviewAPI: SessionTransport {
 
 extension RootPreviewAPI: RoomTransport {
     func roomEventsBefore(sessionId: String, beforeSequence: Int64?, limit: Int) async throws -> RoomEventPage {
+        count("history")
         try? await Task.sleep(nanoseconds: 150_000_000)
         let all = allMessages(sessionId).filter { $0.sequenceId < (beforeSequence ?? .max) }
         let page = Array(all.suffix(limit))
@@ -478,6 +483,7 @@ extension RootPreviewAPI: RoomTransport {
     }
 
     func roomActions(sessionId: String, targetSequenceId: Int64?, limit: Int) async throws -> RoomActionsPage {
+        count("actions")
         let messages = history(sessionId)
         guard let newest = messages.last?.sequenceId else { return RoomActionsPage() }
         if let targetSequenceId {
@@ -628,6 +634,7 @@ extension RootPreviewAPI: RoomReceiptsClient, RoomReadMarking {
     func recordViews(sessionId: String, targets: [RoomViewTarget]) async throws {}
 
     func views(sessionId: String, targets: [RoomViewTarget]) async throws -> [RoomViewSummary] {
+        count("views")
         // Each viewer saw each message once, at launch: a read again finds what it found before.
         let seen = stamp(started)
         return targets.map { target in
@@ -640,10 +647,11 @@ extension RootPreviewAPI: RoomReceiptsClient, RoomReadMarking {
     func publishPresence(sessionId: String, active: Bool, clientInstanceId: String) async throws -> Int? { 90 }
 
     func presence(sessionId: String) async throws -> RoomPresence {
-        RoomPresence(isAvailable: true,
-                     participants: [RoomPresentParticipant(id: Self.me, isHuman: true, displayName: "Alex")]
-                        + Self.agents.prefix(4).map { RoomPresentParticipant(id: $0, isHuman: false) },
-                     humansOnline: 1, agentsOnline: 4, ttlSeconds: 90)
+        count("presence")
+        return RoomPresence(isAvailable: true,
+                            participants: [RoomPresentParticipant(id: Self.me, isHuman: true, displayName: "Alex")]
+                                + Self.agents.prefix(4).map { RoomPresentParticipant(id: $0, isHuman: false) },
+                            humansOnline: 1, agentsOnline: 4, ttlSeconds: 90)
     }
 
     func markRead(sessionId: String, through sequenceId: Int64) async throws -> RoomReadReceipt {

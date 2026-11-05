@@ -289,17 +289,34 @@ struct RootServices {
 /// folders and the side panel opening or closing; each of those made a new room screen (with a Keychain read) and drew
 /// the room's whole list again, under the side panel, while it opened (the freezes of build 2026110308 came right after
 /// the side panel opened, and with the bell's read landing over a room just opened).
-struct RoomScreenHost<Content: View>: View, Equatable {
+///
+/// It holds only what it is opened with and one reference that is the same for the root's life (`RoomScreenMaker`), so
+/// every part of it is equal when nothing it is opened with changed. It used to hold the closure that makes the screen,
+/// which is new at every draw of the root. In some app processes (seen in CI, iOS 26.4 simulator) every draw of the
+/// root then made the room screen again although its `==` held, the side panel's open and close included.
+struct RoomScreenHost: View, Equatable {
     let route: RoomRoute
     let savedSummary: String?
     let directMessagesOn: Bool
-    let content: () -> Content
+    let maker: RoomScreenMaker
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.route == rhs.route && lhs.savedSummary == rhs.savedSummary && lhs.directMessagesOn == rhs.directMessagesOn
+            && lhs.maker === rhs.maker
     }
 
-    var body: some View { content() }
+    var body: some View {
+        if let make = maker.make {
+            make(route, savedSummary)
+        }
+    }
+}
+
+/// Makes a room screen from what the root has at its latest draw. The root keeps one for its life and gives it the way
+/// to make a screen at every draw; that changes nothing a `RoomScreenHost` compares.
+@MainActor
+final class RoomScreenMaker {
+    var make: (@MainActor (RoomRoute, String?) -> RoomChatScreen)?
 }
 
 /// Release composition of the authenticated repository-backed Sessions surface and the selected-session Pocket flow.
@@ -340,6 +357,8 @@ struct AuthenticatedRootView: View {
     @State private var currentRoom: RoomRoute?
     @State private var roomPath: [RoomRoute] = []
     @State private var drawerOpen = false
+    /// Makes the room screen for `RoomScreenHost`; the same one for the root's life.
+    @State private var roomScreenMaker = RoomScreenMaker()
     /// How often the open side panel reads the rooms again, in nanoseconds.
     static let openDrawerRefresh: UInt64 = 15_000_000_000
     /// What the side panel's open reads again: anything not read for this many seconds (the panel's own poll period;
@@ -981,14 +1000,15 @@ struct AuthenticatedRootView: View {
     /// The room on screen, made and drawn again only when what it is opened with changes (`RoomScreenHost`).
     private func roomScreen(_ route: RoomRoute) -> some View {
         let savedSummary = sessions.state.rows.first { UTF8ExactIdentity.matches($0.sessionId, route.sessionId) }?.summary
-        let direct = directContext
-        return RoomScreenHost(route: route, savedSummary: savedSummary, directMessagesOn: direct != nil) {
-            roomChatScreen(route, savedSummary: savedSummary, direct: direct)
+        roomScreenMaker.make = { route, savedSummary in
+            roomChatScreen(route, savedSummary: savedSummary, direct: directContext)
         }
-        .equatable()
+        return RoomScreenHost(route: route, savedSummary: savedSummary, directMessagesOn: directContext != nil,
+                              maker: roomScreenMaker)
+            .equatable()
     }
 
-    private func roomChatScreen(_ route: RoomRoute, savedSummary: String?, direct: RoomDirectContext?) -> some View {
+    private func roomChatScreen(_ route: RoomRoute, savedSummary: String?, direct: RoomDirectContext?) -> RoomChatScreen {
         RoomChatScreen(
             route: route,
             transport: roomTransport,

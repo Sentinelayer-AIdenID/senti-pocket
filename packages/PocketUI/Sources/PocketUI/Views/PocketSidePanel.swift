@@ -219,8 +219,11 @@ public struct PocketSidePanel: View {
                         if shown.isEmpty {
                             emptyLine("No rooms match")
                         }
+                        // One view per item (the wrapper), so the lazy list builds only the lines it shows.
                         ForEach(shown) { room in
-                            if room.direct != nil { directRow(room, depth: nil) } else { roomRow(room, depth: 0) }
+                            VStack(alignment: .leading, spacing: 0) {
+                                if room.direct != nil { directRow(room, depth: nil) } else { roomRow(room, depth: 0) }
+                            }
                         }
                     }
                 }
@@ -404,25 +407,30 @@ public struct PocketSidePanel: View {
         if rows.isEmpty {
             emptyLine("No rooms yet")
         }
+        // One view per row (the wrapper around the switch), so the lazy list builds only the rows it shows. An item that
+        // can make a varying number of views makes a lazy list build every item at every layout pass to count them:
+        // Carter's phone froze inside that walk with the panel open (11-04).
         ForEach(rows) { row in
-            switch row {
-            case .folder(let line):
-                folderHeader(line)
-            case .emptyFolder(_, let depth):
-                Text("No rooms in this folder")
-                    .font(.caption)
-                    .foregroundStyle(PocketPalette.textSecondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.leading, 40 + Self.indent(depth))
-                    .padding(.vertical, 4)
-            case .room(let room, let depth):
-                roomRow(room, depth: depth)
-            case .direct(let room, let depth):
-                directRow(room, depth: depth)
-            case .message(let room):
-                directRow(room, depth: nil)
-            case .label(let id, let title):
-                sectionLabel(title, id: id)
+            VStack(alignment: .leading, spacing: 0) {
+                switch row {
+                case .folder(let line):
+                    folderHeader(line)
+                case .emptyFolder(_, let depth):
+                    Text("No rooms in this folder")
+                        .font(.caption)
+                        .foregroundStyle(PocketPalette.textSecondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.leading, 40 + Self.indent(depth))
+                        .padding(.vertical, 4)
+                case .room(let room, let depth):
+                    roomRow(room, depth: depth)
+                case .direct(let room, let depth):
+                    directRow(room, depth: depth)
+                case .message(let room):
+                    directRow(room, depth: nil)
+                case .label(let id, let title):
+                    sectionLabel(title, id: id)
+                }
             }
         }
     }
@@ -534,6 +542,7 @@ public struct PocketSidePanel: View {
     /// A direct message: the other side's picture and name, and its unread badge; under its room, indented as far as
     /// the room is (`depth`), or on its own line when its room is gone (nil).
     private func directRow(_ room: Room, depth: Int?) -> some View {
+        RenderTrace.built(.sidePanel)
         let isCurrent = room.id == currentRoomId
         let activity = Self.shownActivity(of: room, currentRoomId: currentRoomId)
         let name = room.direct?.name ?? room.title
@@ -579,6 +588,7 @@ public struct PocketSidePanel: View {
 
     /// A room, in a folder at `depth` (0: in none).
     private func roomRow(_ room: Room, depth: Int) -> some View {
+        RenderTrace.built(.sidePanel)
         let isCurrent = room.id == currentRoomId
         let activity = Self.shownActivity(of: room, currentRoomId: currentRoomId)
         let largeText = dynamicTypeSize.isAccessibilitySize

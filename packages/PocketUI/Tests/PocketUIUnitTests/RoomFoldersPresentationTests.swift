@@ -113,3 +113,16 @@ final class RoomFoldersPresentationTests: XCTestCase {
                        "renaming at the cap is fine")
     }
 }
+
+/// The side panel's rows are one loop, one view each, so its lazy list builds only the rows it shows; a lazy list's
+/// ids must be unique.
+extension RoomFoldersPresentationTests {
+    func test_every_row_has_its_own_id_even_when_the_server_repeats_a_folder() {
+        let twice = folders + [RoomFolderItem(id: "f-a", name: "Launch", position: 0)]
+        let rooms = [room("r1", folder: "f-a"), dm("d1", from: "r1", minutesAgo: 5), room("r2"),
+                     dm("d2", from: nil, minutesAgo: 9)]
+        let ids = SidePanelLayout.make(rooms, folders: twice).rows(folded: FoldedFolders()).map(\.id)
+        XCTAssertEqual(Set(ids).count, ids.count, "every row has its own id")
+        XCTAssertEqual(ids.filter { $0 == "folder:f-a" }.count, 1, "the repeated folder shows once")
+    }
+}
