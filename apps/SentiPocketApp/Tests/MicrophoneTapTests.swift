@@ -10,6 +10,8 @@ private final class FakeEngine: VoiceInputEngine {
     private(set) var starts = 0
     private(set) var taps = 0
     private(set) var removals = 0
+    /// The engine refuses to start (after a change the phone's audio cannot give it).
+    var refusesToStart = false
     private var tap: AVAudioNodeTapBlock?
 
     func installInputTap(bufferSize: AVAudioFrameCount, format: AVAudioFormat, block: @escaping AVAudioNodeTapBlock) {
@@ -25,6 +27,7 @@ private final class FakeEngine: VoiceInputEngine {
     func prepare() {}
 
     func start() throws {
+        if refusesToStart { throw VoiceRoomAudioError.invalidAudioFormat }
         starts += 1
         isRunning = true
     }
@@ -103,6 +106,8 @@ final class MicrophoneTapTests: XCTestCase {
         let engine = FakeEngine()
         var logged: [String] = []
         let microphone = MicrophoneTap(engine: engine, log: { logged.append($0) })
+        var gaveUp = 0
+        microphone.onGaveUp = { gaveUp += 1 }
         let heard = Heard()
         let formats = [48_000.0, 16_000.0].map { AVAudioFormat(standardFormatWithSampleRate: $0, channels: 1)! }
         try microphone.start { _ in heard.add() }
@@ -119,17 +124,45 @@ final class MicrophoneTapTests: XCTestCase {
         XCTAssertFalse(engine.isRunning, "a fourth change in one turn does not start it again: it can never loop")
         XCTAssertEqual(engine.starts, 1 + MicrophoneTap.setUpsPerTurn)
         XCTAssertEqual(logged.count, 1, "the record says why")
+        XCTAssertEqual(gaveUp, 1, "the turn is told: it ends now")
         XCTAssertTrue(logged.first?.contains("more than 3 times in one turn") == true, "\(logged)")
         NotificationCenter.default.post(name: AVAudioSession.routeChangeNotification, object: nil)
         engine.reconfigure(to: formats[0])
         pump(0.05)
         XCTAssertEqual(engine.starts, 1 + MicrophoneTap.setUpsPerTurn, "nor any change after it")
         XCTAssertEqual(logged.count, 1, "said once")
+        XCTAssertEqual(gaveUp, 1, "and told once")
 
         try microphone.start { _ in heard.add() }
         engine.reconfigure(to: formats[1])
         pump(0.05)
         XCTAssertTrue(engine.isRunning, "the next turn may set it up again")
+        microphone.stop()
+    }
+
+    /// After a change the engine will not start again: the microphone gives up on the turn at once (the turn is told,
+    /// and the record says why, once), rather than leaving the turn listening to nothing.
+    func test_a_microphone_that_will_not_start_again_gives_up_on_the_turn_once() throws {
+        let engine = FakeEngine()
+        var logged: [String] = []
+        let microphone = MicrophoneTap(engine: engine, log: { logged.append($0) })
+        var gaveUp = 0
+        microphone.onGaveUp = { gaveUp += 1 }
+        try microphone.start { _ in }
+        engine.refusesToStart = true
+        engine.reconfigure(to: AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!)
+        pump(0.05)
+        XCTAssertFalse(engine.isRunning)
+        XCTAssertEqual(gaveUp, 1, "the turn is told at once")
+        XCTAssertEqual(logged, ["microphone not started again: it would not start after the change"])
+        engine.refusesToStart = false
+        engine.reconfigure(to: AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!)
+        pump(0.05)
+        XCTAssertFalse(engine.isRunning, "a turn given up on stays given up")
+        XCTAssertEqual(gaveUp, 1)
+        XCTAssertEqual(logged.count, 1, "the record says it once")
+        try microphone.start { _ in }
+        XCTAssertTrue(engine.isRunning, "the next turn starts as usual")
         microphone.stop()
     }
 

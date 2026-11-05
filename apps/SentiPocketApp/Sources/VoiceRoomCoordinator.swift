@@ -49,6 +49,8 @@ final class VoiceRoomCoordinator: ObservableObject {
     private var voiceLineAsk: Task<Void, Never>?
     /// After a 429 the voice line rests until then (the server's Retry-After).
     private var voiceLineRestsUntil = Date.distantPast
+    /// The microphone gave up on the last turn: listening waits for your next turn rather than opening right after it.
+    private var microphoneGaveUp = false
     /// Asks whether a pause ends the turn (the signal model, through the server); nil without it.
     private let endpointer: (any VoiceEndpointing)?
     private var endpointerOff = false
@@ -201,6 +203,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         state = VoiceRoomState(with: agents, startedAt: now())
         state.about = about.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
         state.hasCallScreen = callScreen != nil
+        listener.onMicrophoneLost = { [weak self] in self?.microphoneLost() }
     }
 
     /// Rings the agents (one message that mentions them and opens the call's card), takes the phone's audio and plays
@@ -370,6 +373,20 @@ final class VoiceRoomCoordinator: ObservableObject {
             // The call screen could not (its call is already going away): the tap still does what it says here.
             if !done { self?.setMuted(on) }
         }
+    }
+
+    /// What the call says when the microphone gave up on a turn.
+    static let microphoneStopped = "The microphone stopped because the phone's sound kept changing. Tap Talk to go on."
+
+    /// The microphone gave up on the turn being heard (the phone's sound kept changing, or could not be set up again).
+    /// The turn ends now with what was heard, if anything, instead of waiting out the longest turn in silence; the
+    /// screen says why, and listening starts again with your next turn (Talk, or after the next answer), not by itself
+    /// right after this one.
+    private func microphoneLost() {
+        guard state.isListening else { return }
+        microphoneGaveUp = true
+        endTurn()
+        state.notice = Self.microphoneStopped
     }
 
     /// The panel's Speaker (Carter, 11-05): the loudspeaker or the earpiece, chosen for the rest of the call. Listening,
@@ -591,6 +608,7 @@ final class VoiceRoomCoordinator: ObservableObject {
     /// `turn` is the turn that just went, when this listening is the moment after it: what you say joins that turn.
     private func startListening(joining turn: SentTurn? = nil) {
         guard !state.isMuted, state.phase == .ready || state.speaker != nil else { return }
+        microphoneGaveUp = false
         // Talking while it rings: no need to keep ringing.
         stopRinging()
         if state.speaker != nil {
@@ -870,7 +888,7 @@ final class VoiceRoomCoordinator: ObservableObject {
     /// Hands-free, listening stays on a moment after a turn goes, so what you say next joins it instead of being lost.
     /// Not once an answer is being read: the phone never listens over an answer (no barge-in yet).
     private func listenForMore(after turn: SentTurn) {
-        guard state.isHandsFree, state.phase == .ready else { return }
+        guard state.isHandsFree, state.phase == .ready, !microphoneGaveUp else { return }
         startListening(joining: turn)
     }
 

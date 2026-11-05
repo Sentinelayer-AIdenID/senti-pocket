@@ -293,6 +293,8 @@ final class MicrophoneTap {
     private var setUpsThisTurn = 0
     private var gaveUp = false
     private let log: (String) -> Void
+    /// Runs once when the microphone gives up on the turn: nothing more is heard in it.
+    var onGaveUp: (() -> Void)?
 
     init(engine: any VoiceInputEngine,
          log: @escaping (String) -> Void = { step in Task { @MainActor in CrashReporter.shared.note(step) } }) {
@@ -345,14 +347,12 @@ final class MicrophoneTap {
     }
 
     /// The audio setup changed while listening: the tap goes back on in the new format and the engine starts again.
-    /// Without usable audio or a start, listening stays stopped, as before, and the turn ends with what was heard.
+    /// Past the turn's limit, without usable audio, or when the engine will not start, the microphone gives up on the
+    /// turn: the call's record says why, once, and the turn is told, so it ends now with what was heard.
     func setUpAgain() {
-        guard onBuffer != nil else { return }
+        guard onBuffer != nil, !gaveUp else { return }
         guard setUpsThisTurn < Self.setUpsPerTurn else {
-            if !gaveUp {
-                gaveUp = true
-                log("microphone not started again: the audio changed more than \(Self.setUpsPerTurn) times in one turn")
-            }
+            giveUp("microphone not started again: the audio changed more than \(Self.setUpsPerTurn) times in one turn")
             return
         }
         setUpsThisTurn += 1
@@ -362,11 +362,24 @@ final class MicrophoneTap {
             tapped = false
         }
         let format = engine.inputFormat
-        guard Self.usable(format) else { return }
+        guard Self.usable(format) else {
+            giveUp("microphone not started again: no usable audio after the change")
+            return
+        }
         tap(format)
         engine.prepare()
-        guard (try? engine.start()) != nil else { return }
+        guard (try? engine.start()) != nil else {
+            giveUp("microphone not started again: it would not start after the change")
+            return
+        }
         restarts += 1
+    }
+
+    private func giveUp(_ why: String) {
+        guard !gaveUp else { return }
+        gaveUp = true
+        log(why)
+        onGaveUp?()
     }
 
     private func tap(_ format: AVAudioFormat) {
@@ -422,6 +435,10 @@ final class OnDeviceVoiceListener: VoiceListening {
             }
         }
         let onLevel = self.onLevel
+        // The microphone gave up on this turn: the call ends it now.
+        microphone.onGaveUp = { [weak self] in
+            Task { @MainActor [weak self] in self?.onMicrophoneLost?() }
+        }
         do {
             try microphone.start { buffer in
                 request.append(buffer)
