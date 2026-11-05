@@ -15,6 +15,25 @@ public enum RoomScrollTrace {
     private static var takenWhileReading = 0
     private static var follows = 0
     private static var shortLandings = 0
+    private static var retries = 0
+    private static var gaveUp = 0
+
+    /// Test seams (DEBUG builds only; none in a release build): placed follows that move nothing, and how the room's
+    /// one retry of such a follow goes, so the hosted tests can make a follow chain stop short at will.
+    public enum InjectedRetry: Sendable {
+        /// The retry moves nothing either: the room gives up, and the arrow shows.
+        case movesNothing
+        /// The retry lands above the end (ten rows up): it must not be taken for the reader leaving.
+        case landsAbove
+    }
+
+    #if DEBUG
+    public static var followMovesNothing = false
+    public static var injectedRetry: InjectedRetry?
+    #else
+    public static let followMovesNothing = false
+    public static let injectedRetry: InjectedRetry? = nil
+    #endif
 
     /// The scroll view's geometry is read: `body` runs while the list is laid out. Main thread only.
     public static func whileReadingGeometry(_ body: () -> Void) {
@@ -54,6 +73,30 @@ public enum RoomScrollTrace {
         shortLandings &+= 1
     }
 
+    /// The room tried a follow that moved nothing once more. Main thread only.
+    public static func stallRetried() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard counting else { return }
+        retries &+= 1
+    }
+
+    /// The room gave up on a follow chain that moved nothing, and no longer says the reader is at the bottom. Main
+    /// thread only.
+    public static func followGaveUp() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard counting else { return }
+        gaveUp &+= 1
+    }
+
+    /// Retries and give-ups since `start()`.
+    public static var stalls: (retries: Int, gaveUp: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (retries, gaveUp)
+    }
+
     /// Readings taken since `start()`, and those taken while the geometry was being read.
     public static func snapshot() -> (taken: Int, takenWhileReading: Int) {
         lock.lock()
@@ -83,6 +126,8 @@ public enum RoomScrollTrace {
         takenWhileReading = 0
         follows = 0
         shortLandings = 0
+        retries = 0
+        gaveUp = 0
         lock.unlock()
     }
 }

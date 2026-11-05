@@ -946,7 +946,7 @@ public struct RoomChatView: View {
             RoomScrollTrace.followMade()
             guard eased else {
                 let before = bottomWatch.reading
-                proxy.scrollTo(Self.bottomId, anchor: .bottom)
+                if !RoomScrollTrace.followMovesNothing { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
                 // A follow that moved nothing gives no new reading, and nothing would follow again: where it landed
                 // is read two frames on, whatever it shows (`followLanded`).
                 RoomNextFrame.run { RoomNextFrame.run { followLanded(from: before, proxy) } }
@@ -977,10 +977,19 @@ public struct RoomChatView: View {
         }
         if !bottomWatch.stallRetried, let last = state.rows.last {
             bottomWatch.stallRetried = true
-            proxy.scrollTo(last.id, anchor: .bottom)
+            RoomScrollTrace.stallRetried()
+            // The retry is the room's own scroll: where it lands is judged from there, not from how far down the list
+            // had been (by the bottom's 120-point rule, a retry that landed 754 pt up was taken for the reader leaving).
+            bottomWatch.tracker.set(atBottom: true)
+            switch RoomScrollTrace.injectedRetry {
+            case .none: proxy.scrollTo(last.id, anchor: .bottom)
+            case .movesNothing: break
+            case .landsAbove: proxy.scrollTo(state.rows[max(0, state.rows.count - 10)].id, anchor: .bottom)
+            }
             RoomNextFrame.run { RoomNextFrame.run { followLanded(from: now, proxy) } }
             return
         }
+        RoomScrollTrace.followGaveUp()
         setReaderAtBottom(false)
     }
 

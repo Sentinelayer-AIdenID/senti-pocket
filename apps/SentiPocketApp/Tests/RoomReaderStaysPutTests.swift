@@ -25,6 +25,8 @@ final class RoomReaderStaysPutTests: XCTestCase {
         private var pending: [RoomChatPendingRow] = []
         private var unread = 0
         private(set) var atBottom = true
+        /// Every place the room was told (`readerAtBottom`), in order, as told.
+        private(set) var placesTold: [Bool] = []
         static let own: Set<String> = ["human-reader"]
 
         init(_ inputs: [RoomChatMessageInput]) {
@@ -34,7 +36,9 @@ final class RoomReaderStaysPutTests: XCTestCase {
         }
 
         func send(_ intent: RoomChatIntent) {
-            guard case .readerAtBottom(let value) = intent, value != atBottom else { return }
+            guard case .readerAtBottom(let value) = intent else { return }
+            placesTold.append(value)
+            guard value != atBottom else { return }
             atBottom = value
             if value, unread > 0 {
                 unread = 0
@@ -307,8 +311,18 @@ final class RoomReaderStaysPutTests: XCTestCase {
     /// says the reader is at the bottom while the end has been out of view for longer than `strandedLimit` (a reader
     /// stranded mid-room with the arrow hidden; at 32cca3f the follows stopped 5,597 pt short and the room said so for
     /// 7.6 s). Where the follows stop short, the arrow shows within that second, and it takes the reader to the end.
+    /// So that this always happens (in CI both batches reached the end), the room's placed follows and its one retry
+    /// move nothing here (`RoomScrollTrace`'s DEBUG seam): every batch ends short, and the room must give up and show
+    /// the arrow.
     func test_tall_arrivals_never_strand_the_reader_and_the_arrow_takes_them_down() throws {
         try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
+        RoomScrollTrace.followMovesNothing = true
+        RoomScrollTrace.injectedRetry = .movesNothing
+        addTeardownBlock {
+            RoomScrollTrace.followMovesNothing = false
+            RoomScrollTrace.injectedRetry = nil
+        }
+        var endedShort = 0
         let room = Room(Self.messages())
         let window = try HostedSummary.host(Host(room: room, textSize: .accessibility5))
         addTeardownBlock { HostedSummary.close(window) }
@@ -350,6 +364,7 @@ final class RoomReaderStaysPutTests: XCTestCase {
             XCTAssertLessThanOrEqual(longestStranded, Self.strandedLimit, "batch \(batch): the room said the reader "
                 + "is at the bottom with the end out of view for \(String(format: "%.2f", longestStranded)) s")
             guard below > RoomReaderPlace.atBottomDistance else { continue }
+            endedShort += 1
             // Short of the end and not at the bottom: the arrow shows, and takes the reader down.
             let arrow = try XCTUnwrap(HostedSummary.wait(for: "pocket.room.jumpToLatest", in: window,
                                                          timeout: Self.strandedLimit),
@@ -361,6 +376,34 @@ final class RoomReaderStaysPutTests: XCTestCase {
             XCTAssertTrue(Self.list(in: window).map(Self.atBottom) ?? false, "batch \(batch): at the end")
             pump(1)
         }
+        XCTAssertGreaterThan(endedShort, 0, "no batch ended short of the end: the arrow was not tested")
+    }
+
+    /// The room's one retry of a follow that moved nothing is the room's own scroll: where it lands is judged from
+    /// there. In CI (`9f968e3`) the retry landed 754 pt up, the bottom's 120-point rule took that for the reader
+    /// leaving, and the room showed the arrow 6,911 pt short. Here the placed follows move nothing and the retry lands
+    /// ten rows above the end (`RoomScrollTrace`'s DEBUG seam): every "left" the room tells comes from its giving up,
+    /// none from the retry.
+    func test_the_rooms_own_retry_never_takes_the_reader_for_leaving() throws {
+        try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
+        RoomScrollTrace.followMovesNothing = true
+        RoomScrollTrace.injectedRetry = .landsAbove
+        addTeardownBlock {
+            RoomScrollTrace.followMovesNothing = false
+            RoomScrollTrace.injectedRetry = nil
+        }
+        let room = Room(Self.messages())
+        let list = try host(room, textSize: .accessibility5)
+        let told = room.placesTold.count
+        RoomScrollTrace.start()
+        room.arrive((61..<101).map { Self.longArrival(Int64($0)) })
+        pump(3)
+        let stalls = RoomScrollTrace.stalls
+        let left = room.placesTold.dropFirst(told).filter { !$0 }.count
+        print("READER-STAYS-PUT own-retry retries=\(stalls.retries) gave-up=\(stalls.gaveUp) told=\(room.placesTold.dropFirst(told)) "
+            + "end-below=\(Int(Self.bottomOffset(of: list) - list.contentOffset.y))")
+        XCTAssertGreaterThanOrEqual(stalls.retries, 1, "the room never retried: this case did not test it")
+        XCTAssertLessThanOrEqual(left, stalls.gaveUp, "the room's own retry was taken for the reader leaving")
     }
 
     /// The longest the room may say the reader is at the bottom while the end has been more than
