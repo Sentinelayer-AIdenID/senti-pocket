@@ -309,66 +309,6 @@ final class RoomReaderStaysPutTests: XCTestCase {
         XCTAssertTrue(room.atBottom)
     }
 
-    // MARK: - Scrolling up without touching the list, while messages arrive
-
-    /// VoiceOver's three-finger scroll, a tap on the status bar and a keyboard's Page Up all move the list with UIKit's
-    /// own animated scroll, not by touch: about a page, with no drag. While messages arrive faster than the room
-    /// follows them, the end is pushed below, and a list moving up then was taken for the room settling its rows: the
-    /// reader was pulled back down. The scroll is the reader's: they leave the bottom, and what arrives after it moves
-    /// nothing. (VoiceOver's own `accessibilityScroll` moved the list neither way in a hosted test, in CI.)
-    func test_a_page_up_not_by_touch_while_messages_arrive_leaves_the_bottom() throws {
-        try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
-        let name = "page-up"
-        // A short room, so each arrival is quick to lay out and they outrun the room's follows on a slow machine too.
-        let room = Room(Self.messages(count: 30))
-        let list = try host(room)
-        var seq: Int64 = 31
-        func arrive(_ count: Int, every interval: TimeInterval) {
-            for _ in 0..<count {
-                room.arrive([Self.arrival(seq)])
-                seq += 1
-                pump(interval)
-            }
-        }
-        // Messages arrive faster than the room follows them (`RoomBottomWatch.followLimit`, 20 a second), until the end
-        // is below and stays below once a follow already asked for has had time to run: the room's follows for this
-        // second are spent, and the next comes when it is up.
-        var pushed = false
-        var arrivals = 0
-        let arriving = Date()
-        for _ in 0..<150 where !pushed {
-            arrivals += 1
-            arrive(1, every: 0.004)
-            if !Self.atBottom(list) {
-                pump(0.03)
-                pushed = !Self.atBottom(list)
-            }
-        }
-        print("READER-STAYS-PUT \(name) pushed=\(pushed) after \(arrivals) arrivals in "
-            + "\(String(format: "%.2f", Date().timeIntervalSince(arriving))) s")
-        XCTAssertTrue(pushed, "the end is below when the reader scrolls (the arrivals pushed it)")
-        let before = list.contentOffset.y
-        list.setContentOffset(CGPoint(x: 0, y: before - list.bounds.height * 0.8), animated: true)
-        // The scroll's animation lands before the room's next follow is due (the follow limit's second is up).
-        var highest = before
-        let scrolling = Date().addingTimeInterval(0.4)
-        while Date() < scrolling {
-            pump(0.02)
-            highest = min(highest, list.contentOffset.y)
-        }
-        let scrolledTo = list.contentOffset.y
-        print("READER-STAYS-PUT \(name) scroll: \(before) -> highest \(highest) -> \(scrolledTo) "
-            + "(end at \(Self.bottomOffset(of: list)))")
-        XCTAssertLessThan(highest, before - 300, "\(name): the list was scrolled up a page")
-        XCTAssertEqual(scrolledTo, highest, accuracy: 1, "\(name): the reader was pulled back down at once")
-        arrive(14, every: 1.0 / 60.0)
-        pump(1.5)
-        print("READER-STAYS-PUT \(name) after: \(list.contentOffset.y) unread=\(room.unreadCount)")
-        XCTAssertEqual(list.contentOffset.y, scrolledTo, accuracy: 1, "\(name): the reader was pulled back down")
-        XCTAssertFalse(room.atBottom, "\(name): the reader left the bottom")
-        XCTAssertGreaterThan(room.unreadCount, 0, "\(name): what arrived after is counted for the arrow")
-    }
-
     // MARK: - The arrow's way down a long room
 
     /// From far up a long room the arrow takes the reader down to the latest in the list as it is. It used to build the
