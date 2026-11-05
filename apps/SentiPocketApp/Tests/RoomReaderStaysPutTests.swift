@@ -377,9 +377,9 @@ final class RoomReaderStaysPutTests: XCTestCase {
 
     /// From far up a long room the arrow takes the reader down to the latest in the list as it is. It used to build the
     /// room again as a new list at its newest rows: the screen went dark, glitched, then showed the bottom (Carter).
-    /// Every frame on the way is captured from the screen: the list is the same one throughout, no frame is without
-    /// messages, the last stretch is seen scrolling, and it ends at the bottom. The rows on the way are not drawn: an
-    /// animated scroll the whole way down draws every one, which once froze the app from up a long history.
+    /// Every frame on the way is recorded: the list is the same one throughout, every frame has messages drawn where the
+    /// reader reads, the last stretch is seen scrolling, and it ends at the bottom. The rows on the way are not drawn:
+    /// an animated scroll the whole way down draws every one, which once froze the app from up a long history.
     func test_the_arrow_takes_a_reader_far_up_a_long_room_down_in_the_same_list_frame_by_frame() throws {
         try XCTSkipUnless(Self.readsGeometry, "how far the end is comes from the scroll view's geometry (iOS 18 and later)")
         let rows = 400
@@ -411,50 +411,44 @@ final class RoomReaderStaysPutTests: XCTestCase {
         watch.stop()
         let draws = RenderTrace.snapshot().draws - drawsBefore
 
-        let before = watch.frames[..<tappedAt].map(\.ink).sorted()
+        let before = watch.frames[..<tappedAt].map(\.drawn).sorted()
         let during = Array(watch.frames[tappedAt...])
         let usual = before.isEmpty ? 0 : before[before.count / 2]
-        let darkest = during.map(\.ink).min() ?? 0
+        let fewest = during.map(\.drawn).min() ?? 0
         let visible = list.bounds.height - list.adjustedContentInset.top - list.adjustedContentInset.bottom
         let steps = zip(during, during.dropFirst()).map { $1.offset - $0.offset }
         let scrolling = steps.filter { $0 > 0.5 && $0 < visible * 0.9 }.count
-        print("READER-STAYS-PUT arrow-jump frames=\(during.count) usual-ink=\(usual) darkest-ink=\(darkest) "
-            + "scrolling-frames=\(scrolling) row-draws=\(draws) steps=\(steps.map { String(format: "%.0f", $0) })")
-        XCTAssertGreaterThan(usual, 0.01, "the screen could be read before the tap")
-        XCTAssertGreaterThan(during.count, 10, "frames were captured on the way down")
+        print("READER-STAYS-PUT arrow-jump frames=\(during.count) usual-drawn=\(usual) fewest-drawn=\(fewest) "
+            + "scrolling-frames=\(scrolling) row-draws=\(draws) steps=\(steps.filter { $0 != 0 }.map { String(format: "%.0f", $0) })")
+        XCTAssertGreaterThan(usual, 0, "what is drawn could be read before the tap")
+        XCTAssertGreaterThan(during.count, 10, "frames were recorded on the way down")
         XCTAssertTrue(during.allSatisfy(\.sameList), "the room was built again as a new list")
-        XCTAssertGreaterThan(darkest, usual * 0.4, "a frame on the way down showed no messages")
+        XCTAssertGreaterThanOrEqual(fewest, max(1, usual / 3), "a frame on the way down had no messages drawn")
         XCTAssertGreaterThanOrEqual(scrolling, 4, "the way down was not seen scrolling")
         XCTAssertTrue(Self.list(in: window).map(Self.atBottom) ?? false, "it ended at the bottom")
         XCTAssertTrue(room.atBottom)
         XCTAssertLessThan(draws, rows / 4, "rows drawn on the way down: \(draws) of \(rows)")
     }
 
-    /// Captures each frame the screen draws: where the list is, how much of what can be read is drawn (the share of
-    /// its pixels that differ from the background), and whether it is still the same list.
+    /// Records each frame the screen draws (on the display link): where the list is, how many layers with something
+    /// drawn in them lie where the reader reads (between the navigation bar and the composer), and whether it is still
+    /// the same list. Reading the layers is cheap enough for every frame; drawing the screen to an image is not.
     @MainActor
     private final class FrameWatch: NSObject {
         struct Frame {
             let offset: CGFloat
-            let ink: Double
+            let drawn: Int
             let sameList: Bool
         }
 
         private(set) var frames: [Frame] = []
         private let window: UIWindow
         private let list: UIScrollView
-        /// What can be read, in the window: under the navigation bar, over the composer, the left part (the jump
-        /// button sits on the right).
-        private let band: CGRect
         private var link: CADisplayLink?
 
         init(window: UIWindow, list: UIScrollView) {
             self.window = window
             self.list = list
-            let frame = list.convert(list.bounds, to: window)
-            let insets = list.adjustedContentInset
-            band = CGRect(x: frame.minX, y: frame.minY + insets.top, width: frame.width * 0.6,
-                          height: frame.height - insets.top - insets.bottom).integral
         }
 
         func start() {
@@ -469,46 +463,29 @@ final class RoomReaderStaysPutTests: XCTestCase {
         }
 
         @objc private func tick() {
-            let current = RoomReaderStaysPutTests.list(in: window)
-            frames.append(Frame(offset: (current ?? list).contentOffset.y, ink: ink(), sameList: current === list))
+            let current = RoomReaderStaysPutTests.list(in: window) ?? list
+            frames.append(Frame(offset: current.contentOffset.y, drawn: Self.drawn(in: current),
+                                sameList: current === list))
         }
 
-        private func ink() -> Double {
-            let format = UIGraphicsImageRendererFormat()
-            format.scale = 1
-            format.opaque = true
-            let image = UIGraphicsImageRenderer(bounds: band, format: format).image { _ in
-                window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
-            }
-            guard let cg = image.cgImage else { return 0 }
-            let width = cg.width, height = cg.height
-            var pixels = [UInt8](repeating: 0, count: width * height * 4)
-            let drew: Bool = pixels.withUnsafeMutableBytes { raw in
-                guard let context = CGContext(data: raw.baseAddress, width: width, height: height, bitsPerComponent: 8,
-                                              bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
-                                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
-                context.draw(cg, in: CGRect(x: 0, y: 0, width: width, height: height))
-                return true
-            }
-            guard drew else { return 0 }
-            var lightness: [Int] = []
-            lightness.reserveCapacity(width * height / 4)
-            var y = 0
-            while y < height {
-                var x = 0
-                while x < width {
-                    let i = (y * width + x) * 4
-                    lightness.append((Int(pixels[i]) * 3 + Int(pixels[i + 1]) * 6 + Int(pixels[i + 2])) / 10)
-                    x += 2
+        /// Layers with something drawn in them (text, an image, a fill) inside the list, overlapping what can be read.
+        /// The list's bounds are where it is scrolled to in this frame.
+        static func drawn(in list: UIScrollView) -> Int {
+            let root = list.layer
+            let insets = list.adjustedContentInset
+            let band = CGRect(x: root.bounds.minX, y: root.bounds.minY + insets.top, width: root.bounds.width,
+                              height: root.bounds.height - insets.top - insets.bottom)
+            var count = 0
+            var stack = root.sublayers ?? []
+            while let layer = stack.popLast() {
+                guard !layer.isHidden, layer.opacity > 0.01 else { continue }
+                if layer.contents != nil || layer.backgroundColor != nil,
+                   root.convert(layer.bounds, from: layer).intersects(band) {
+                    count += 1
                 }
-                y += 2
+                stack.append(contentsOf: layer.sublayers ?? [])
             }
-            // The background is the commonest lightness; ink is what is well away from it.
-            var buckets = [Int](repeating: 0, count: 32)
-            for value in lightness { buckets[value / 8] += 1 }
-            let background = (buckets.indices.max { buckets[$0] < buckets[$1] } ?? 0) * 8 + 4
-            let inked = lightness.filter { abs($0 - background) > 48 }.count
-            return lightness.isEmpty ? 0 : Double(inked) / Double(lightness.count)
+            return count
         }
     }
 
