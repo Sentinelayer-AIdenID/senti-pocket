@@ -157,22 +157,26 @@ public struct RoomMemberSheetView: View {
                     .padding(.vertical, 8)
                     .accessibilityIdentifier(emptyLineIdentifier)
             }
+            // One view per message (the message and its divider in one stack), as the room and the side panel have it,
+            // so the lazy list never builds its items to count their views.
             ForEach(messages.listedRows) { row in
-                Button {
-                    onOpenMessage(row.sequenceId)
-                } label: {
-                    rowLabel(row)
+                VStack(alignment: .leading, spacing: 0) {
+                    Button {
+                        onOpenMessage(row.sequenceId)
+                    } label: {
+                        rowLabel(row)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Shows it in the room")
+                    .accessibilityIdentifier("pocket.member.message.\(row.sequenceId)")
+                    // The list reads its next page as its last row comes into view, unless pages stopped bringing
+                    // their messages: then "Load older" reads on.
+                    .onAppear {
+                        if row.id == messages.rows.last?.id, messages.canLoadMore, messages.phase == .idle,
+                           !messages.olderNeedsTap { onLoadMore() }
+                    }
+                    Divider().padding(.leading, 20)
                 }
-                .buttonStyle(.plain)
-                .accessibilityHint("Shows it in the room")
-                .accessibilityIdentifier("pocket.member.message.\(row.sequenceId)")
-                // The list reads its next page as its last row comes into view, unless pages stopped bringing their
-                // messages: then "Load older" reads on.
-                .onAppear {
-                    if row.id == messages.rows.last?.id, messages.canLoadMore, messages.phase == .idle,
-                       !messages.olderNeedsTap { onLoadMore() }
-                }
-                Divider().padding(.leading, 20)
             }
             switch messages.phase {
             case .loading:

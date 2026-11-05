@@ -100,12 +100,14 @@ final class RootBackgroundWorkTests: XCTestCase {
     func test_opening_the_side_panel_draws_no_message_row_and_reads_only_the_rooms() throws {
         let api = Self.api()
         UserDefaults.standard.set(RootPreviewAPI.midRoom, forKey: "pocket.lastRoomId")
+        // The root observes its link inbox: a change announced there draws the root again and changes nothing else.
+        let links = IncomingLinkInbox()
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let window = UIWindow(windowScene: scene)
         window.rootViewController = UIHostingController(rootView: AuthenticatedRootView(
             authenticationEpoch: 1,
             whisperModelCoordinator: WhisperModelProvisioningCoordinator(),
-            incomingLinks: IncomingLinkInbox(),
+            incomingLinks: links,
             services: api.services,
             onSignOut: {},
             onReauthenticationRequired: { _ in }
@@ -114,11 +116,12 @@ final class RootBackgroundWorkTests: XCTestCase {
         .environment(\.scenePhase, .active))
         window.makeKeyAndVisible()
         self.window = window
-        // The room opens at its newest rows and settles; the first reads of the bell, Waiting on you, folders and the
-        // direct-message settings land.
-        let opened = Date().addingTimeInterval(30)
-        while RenderTrace.snapshot().draws == 0 || api.callCount("bell") == 0, Date() < opened { pump(0.1) }
-        pump(6)
+        let shown = Date()
+        // The room opens at its newest rows, the root's first reads land, and the root settles (`settleRoot`).
+        settleRoot(api) { links.objectWillChange.send() }
+        // The reads the root made as it was shown count as fresh for `panelFreshness` (15 s), which the reads asserted
+        // below rely on: how long the root took to settle is printed.
+        print("BGAUDIT settled \(String(format: "%.1f", Date().timeIntervalSince(shown))) s after the root was shown")
         let draws = RenderTrace.snapshot().draws
         let reads = Self.reads(api)
         let meter = RootPreview.meter
@@ -167,7 +170,8 @@ final class RootBackgroundWorkTests: XCTestCase {
         window.rootViewController = UIHostingController(rootView: ArrivingRoomHost(room: room))
         window.makeKeyAndVisible()
         self.window = window
-        settleDrawing()
+        // Opened and scrolled to its newest rows, and an update that changes nothing draws no row (`settle`).
+        settle(updating: { room.objectWillChange.send() }) { [RenderTrace.snapshot().draws] }
         let drawn = RenderTrace.snapshot().draws
         XCTAssertGreaterThan(drawn, 4, "the room drew its rows")
         // Rows the list made and keeps, as a reader who went up the room and came back leaves it.
@@ -270,20 +274,59 @@ final class RootBackgroundWorkTests: XCTestCase {
         XCTFail("timed out waiting for: \(description)", file: file, line: line)
     }
 
-    /// Runs the main run loop until no row has been drawn for a second (at most 15 s): the room has opened and scrolled
-    /// to its newest rows, or taken in what arrived, on a loaded machine too.
+    /// Runs the main run loop until no row has been drawn for a second (at most 15 s): the room has taken in what
+    /// arrived, on a loaded machine too.
     private func settleDrawing() {
+        quiet { [RenderTrace.snapshot().draws] }
+    }
+
+    /// Runs the main run loop until `activity` has not moved for a second (at most 15 s).
+    private func quiet(_ activity: () -> [Int]) {
         let end = Date().addingTimeInterval(15)
-        var last = RenderTrace.snapshot().draws
+        var last = activity()
         var quietSince = Date()
         while Date() < end, Date().timeIntervalSince(quietSince) < 1 {
             pump(0.1)
-            let now = RenderTrace.snapshot().draws
+            let now = activity()
             if now != last {
                 last = now
                 quietSince = Date()
             }
         }
+    }
+
+    /// Settled: `activity` has not moved for a second, and then an update that changes nothing (`update`) moves nothing
+    /// either. Measured, not assumed: a view SwiftUI first built during layout (the room screen under the navigation
+    /// stack, the rows the list made as it scrolled to its newest) can run its body once more at the next update, with
+    /// nothing it shows changed and without its `==` being asked. Started cold on a loaded machine, that next update was
+    /// the one a test measured: the side panel's open (a room screen made again, no row drawn) or an arrival (the four
+    /// rows made by the last scroll drawn again with the new one). So the room is updated with nothing changed until
+    /// such an update moves nothing, up to five times; a room that still moves is measured as it is, and the assertions
+    /// say what it did.
+    private func settle(updating update: () -> Void, _ activity: () -> [Int]) {
+        quiet(activity)
+        for attempt in 1...5 {
+            let before = activity()
+            update()
+            quiet(activity)
+            let after = activity()
+            print("BGAUDIT settle: update \(attempt) that changed nothing moved \(before) to \(after)")
+            if after == before { return }
+        }
+    }
+
+    /// The hosted root has settled (`settle`): its first reads were asked for (the rooms, the bell, Waiting on you,
+    /// folders and direct-message settings, and the open room's history, reactions and who is here), then nothing was
+    /// read (who viewed what included), no row drawn and no room screen made for a second, and an update of the root
+    /// that changes nothing (`update`) read, drew and made nothing. Who viewed what is not waited for by name: in 1 of
+    /// 15 runs on the build Mac the room did not read it in 33 s, which would leave the reads the root made at launch
+    /// older than the panel's 15 s.
+    private func settleRoot(_ api: RootPreviewAPI, update: () -> Void) {
+        let firstReads = ["rooms", "bell", "waiting", "folders", "dmSettings", "history", "actions", "presence"]
+        let end = Date().addingTimeInterval(30)
+        while Date() < end, firstReads.contains(where: { api.callCount($0) == 0 }) { pump(0.1) }
+        XCTAssertEqual(firstReads.filter { api.callCount($0) == 0 }, [], "the root and its room made their first reads")
+        settle(updating: update) { [RenderTrace.snapshot().draws, RootPreview.meter.roomScreens, api.totalCalls] }
     }
 
     private func pump(_ seconds: TimeInterval) {
