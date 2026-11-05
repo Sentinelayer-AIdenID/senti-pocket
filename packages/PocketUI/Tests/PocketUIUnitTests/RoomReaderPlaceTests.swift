@@ -92,6 +92,23 @@ final class RoomReaderPlaceTests: XCTestCase {
                        "from the end in view, the list moving up and staying up is the reader, whatever moved it")
     }
 
+    /// While arrivals push the end below, a scroll the reader makes without touching the list (VoiceOver's three-finger
+    /// scroll, a tap on the status bar, a keyboard's Page Up: an animated scroll of about a page, with no drag) was
+    /// taken for SwiftUI settling the rows, and the reader was followed back down. Further up than settling ever moves
+    /// the list, measured from the furthest down it has been, it is the reader: away once it holds for a frame.
+    func test_a_page_up_not_by_touch_while_the_end_is_pushed_below_leaves_the_bottom() {
+        var tracker = RoomReaderPlace.Tracker(atBottom: true)
+        XCTAssertEqual(tracker.read(reading(0, offset: 7_919)), .none)
+        XCTAssertEqual(tracker.read(reading(441, offset: 7_919)), .endMovedAway, "arrivals pushed the end below")
+        XCTAssertEqual(tracker.read(reading(300, offset: 8_060)), .endMovedAway, "a follow stopped short of the end")
+        XCTAssertEqual(tracker.read(reading(330, offset: 8_030)), .endMovedAway, "SwiftUI settled the rows: 30 points up")
+        XCTAssertEqual(tracker.read(reading(900, offset: 7_460)), .mayHaveLeft, "a page up, not by touch")
+        XCTAssertTrue(tracker.atBottom)
+        XCTAssertEqual(tracker.read(reading(960, offset: 7_400)), .leftBottom, "still up on the next frame")
+        XCTAssertFalse(tracker.atBottom)
+        XCTAssertEqual(tracker.read(reading(1_100, offset: 7_400)), .none, "an arrival below is not followed")
+    }
+
     /// SwiftUI lays the list out several times within one frame, and one pass can show it a little up for a moment:
     /// measured in a burst at 60 a second, the end in view at 8998.7, then 31 points up, then the end in view at 8999.7,
     /// within 3 ms, and the reading taken between them took the reader at the bottom for gone. Not by the reader's

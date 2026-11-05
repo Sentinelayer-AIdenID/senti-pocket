@@ -10,7 +10,7 @@ import CoreGraphics
 ///   in view, by any movement at all (a coast near its end moves a third of a point a frame, under the half point the
 ///   room once took for rounding). The end moving away from a reader who is there (a message arriving, a row growing,
 ///   the keyboard rising) is followed, and until the end is back in view the list moving up is the room settling its
-///   rows, not the reader, unless the reader is moving it;
+///   rows, not the reader, unless the reader is moving it or it moves further up than settling ever does;
 /// - a reader away from the bottom is never moved, and the jump button says how many messages arrived meanwhile.
 public enum RoomReaderPlace {
     /// The end of the room closer than this to the bottom of the screen is the reader at the bottom.
@@ -51,6 +51,12 @@ public enum RoomReaderPlace {
     /// at least a pixel at a time: a third of a point on the phone.
     static let samePlace: CGFloat = 0.01
 
+    /// While arrivals push the end below, SwiftUI settling the lazy list's rows moved the list up 15 and 35 points
+    /// (measured, 60 messages a second). A scroll the reader makes without touching the list moves it about a page:
+    /// VoiceOver's three-finger scroll, a tap on the status bar, a keyboard's Page Up. The list moving up further than
+    /// this from the furthest down it has been since the end was in view is the reader, however it moved.
+    public static let settlingReach: CGFloat = 120
+
     /// A reading as the room acts on it: the room takes a new reading only when this changes (`RoomChatView`), not
     /// with every point the list moves.
     public enum Sight: Equatable, Sendable {
@@ -74,10 +80,12 @@ public enum RoomReaderPlace {
         /// again, the list moving up is not the reader leaving: while a burst arrives faster than the room follows,
         /// SwiftUI settles the lazy list's rows and moves the list up by itself, 15 and 35 points at a time at 60
         /// messages a second, and a reader taken for gone was never followed again. The reader moving the list
-        /// (dragging it, or its coast) still leaves.
+        /// (dragging it, or its coast) still leaves, and so does the list moving up further than `settlingReach`.
         public private(set) var endPushedDown = false
         /// The last reading read showed the list moved up, not by the reader's hand (`Change.mayHaveLeft`).
         public private(set) var leaveSeen = false
+        /// The furthest down the list has been since the end was last in view (the room's follows move it down).
+        public private(set) var deepestOffset: CGFloat?
 
         public init(atBottom: Bool = true) {
             self.atBottom = atBottom
@@ -88,7 +96,10 @@ public enum RoomReaderPlace {
         /// before is no longer where it left from.
         public mutating func set(atBottom: Bool) {
             self.atBottom = atBottom
-            if atBottom { bottomOffset = nil }
+            if atBottom {
+                bottomOffset = nil
+                deepestOffset = nil
+            }
         }
 
         /// What a reading is, noting where the list is while the end is in view. `readerMoving`: the reader is
@@ -96,9 +107,14 @@ public enum RoomReaderPlace {
         public mutating func see(_ reading: Reading, readerMoving: Bool = false) -> Sight {
             if reading.endInView {
                 bottomOffset = reading.offset
+                deepestOffset = reading.offset
                 endPushedDown = false
                 return .endInView
             }
+            let deepest = max(deepestOffset ?? reading.offset, reading.offset)
+            deepestOffset = deepest
+            // Further up than the room's settling ever moves it: the reader, scrolling without touching the list.
+            if deepest - reading.offset > RoomReaderPlace.settlingReach { return .movedUp }
             guard let bottomOffset else {
                 // Put at the bottom by the room, with the end not yet in view since: the reader moving the list then is
                 // not followed against their hand.
