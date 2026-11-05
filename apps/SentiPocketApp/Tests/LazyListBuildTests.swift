@@ -131,7 +131,7 @@ final class LazyListBuildTests: XCTestCase {
     // MARK: - A scroll to a row finds it by the loop's own id
 
     /// The rows carry no `.id` of their own: every scroll to a row (a focused message, a held row, the place kept as
-    /// older rows load) finds it by the loop's id, `RoomChatRow.id`. Opened at a message far up a room of 400, the room
+    /// older rows load) finds it by the loop's id, `RoomChatRow.id` in a type of its own (`RoomRowScrollId`). Opened at a message far up a room of 400, the room
     /// is there, far from its bottom (where it would be had the scroll found nothing), and it stays there while
     /// messages arrive below (the held row, scrolled to again at every change of the rows).
     func test_a_room_opened_at_a_message_far_up_goes_there_and_holds_it_while_messages_arrive() throws {
@@ -144,8 +144,11 @@ final class LazyListBuildTests: XCTestCase {
         XCTAssertGreaterThan(away, 3 * scroll.bounds.height, "at the message, far up the room")
         XCTAssertTrue(room.intents.contains(.focusHandled), "the room was told the message is in view")
         let held = scroll.contentOffset.y
-        room.state = Self.room(rows: 402, focus: 60)
-        XCTAssertTrue(quiet { [RenderTrace.builtCount(.roomRow), RenderTrace.snapshot().draws] })
+        // The held row is scrolled to again as the rows change, by its id in the room's loop: the rows on screen are
+        // built, not every row of the room to look the id up.
+        step("two arrivals with a message held far up", rows: 402, list: .roomRow) {
+            room.state = Self.room(rows: 402, focus: 60)
+        }
         let moved = abs(scroll.contentOffset.y - held)
         print("LAZYLIST held message: moved \(Int(moved)) pt as two messages arrived")
         XCTAssertLessThan(moved, scroll.bounds.height / 2, "the held message stays in view as messages arrive below")

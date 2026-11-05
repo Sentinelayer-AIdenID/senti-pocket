@@ -303,10 +303,12 @@ public struct RoomChatView: View {
                     // of the room, on screen or not, at every layout pass, to count them. Carter's phone froze inside
                     // that walk (11-04 and 11-05: 12 to 13.5 s in a lazy list's placement, going item by item). Wrapped,
                     // the list builds only the rows it shows. Spacing 0, as the list's own, so nothing moves.
-                    // A row's id is the loop's own (`RoomChatRow.id`), which every scroll to a row targets. No `.id`
-                    // of the same value on the row: with one, the list kept every row it made as it opened and built
-                    // them all again at each update (in CI 404 of 404 at every redraw and arrival), as master did.
-                    ForEach(state.rows) { row in
+                    // A row's id is the loop's own, which every scroll to a row targets: `RoomRowScrollId`, a type
+                    // no other view in the room has, so a scroll finds the row among the loop's ids and never looks
+                    // through the string ids of the rows' own content (file cards, a thread's replies). No `.id` of the
+                    // same value on the row: with one, the list kept every row it made as it opened and built them all
+                    // again at each update (in CI 404 of 404 at every redraw and arrival), as master did.
+                    ForEach(state.rows, id: \.scrollId) { row in
                         VStack(alignment: .leading, spacing: 0) {
                             rowView(row, proxy: proxy)
                         }
@@ -411,13 +413,13 @@ public struct RoomChatView: View {
             // arriving. A reader scrolled up is never moved.
             .onChange(of: state.rows) { _ in
                 if let heldAnchor {
-                    proxy.scrollTo(heldAnchor, anchor: .center)
+                    proxy.scrollTo(row: heldAnchor, anchor: .center)
                 } else {
                     keepAtBottomIfThere(proxy)
                 }
             }
             .onChange(of: state.attachmentPreviews.count) { _ in
-                if let heldAnchor { proxy.scrollTo(heldAnchor, anchor: .center) } else { keepAtBottomIfThere(proxy) }
+                if let heldAnchor { proxy.scrollTo(row: heldAnchor, anchor: .center) } else { keepAtBottomIfThere(proxy) }
             }
             .onChange(of: state.lastMessageId) { _ in
                 if !didInitialScroll {
@@ -443,10 +445,10 @@ public struct RoomChatView: View {
             .onChange(of: state.firstMessageId) { _ in
                 // Older rows were prepended: keep the row the reader was looking at in place.
                 if let heldAnchor {
-                    proxy.scrollTo(heldAnchor, anchor: .center)
+                    proxy.scrollTo(row: heldAnchor, anchor: .center)
                     anchorBeforeOlderLoad = nil
                 } else if let anchor = anchorBeforeOlderLoad {
-                    proxy.scrollTo(anchor, anchor: .top)
+                    proxy.scrollTo(row: anchor, anchor: .top)
                     anchorBeforeOlderLoad = nil
                 }
             }
@@ -694,7 +696,7 @@ public struct RoomChatView: View {
         setReaderAtBottom(!opensAtLine)
         DispatchQueue.main.async {
             if opensAtLine {
-                proxy.scrollTo(RoomChatRow.unreadDivider.id, anchor: Self.unreadLineAnchor)
+                proxy.scrollTo(row: RoomChatRow.unreadDivider.id, anchor: Self.unreadLineAnchor)
             } else {
                 proxy.scrollTo(Self.bottomId, anchor: .bottom)
             }
@@ -715,7 +717,7 @@ public struct RoomChatView: View {
     private func placeLineAgain(_ proxy: ScrollViewProxy) {
         guard bottomWatch.isActive, !bottomWatch.readerScrolled, heldAnchor == nil,
               state.rows.contains(.unreadDivider) else { return }
-        proxy.scrollTo(RoomChatRow.unreadDivider.id, anchor: Self.unreadLineAnchor)
+        proxy.scrollTo(row: RoomChatRow.unreadDivider.id, anchor: Self.unreadLineAnchor)
     }
 
     /// Where the unread line sits when the room opens at it: a little below the top, under the people floating there,
@@ -798,7 +800,7 @@ public struct RoomChatView: View {
         setReaderAtBottom(false)
         heldAnchor = rowId
         DispatchQueue.main.async {
-            withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(rowId, anchor: .center) }
+            withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(row: rowId, anchor: .center) }
             highlightedRowId = rowId
             send(.focusHandled)
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
@@ -816,7 +818,7 @@ public struct RoomChatView: View {
         setReaderAtBottom(false)
         heldAnchor = target.id
         withAnimation(.easeInOut(duration: 0.25)) {
-            proxy.scrollTo(target.id, anchor: .center)
+            proxy.scrollTo(row: target.id, anchor: .center)
         }
         highlightedRowId = target.id
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
@@ -841,6 +843,25 @@ public struct RoomChatView: View {
 
 /// The type of the room's bottom marker id, which no other view in the room has.
 private struct RoomBottomMarkerId: Hashable {}
+
+/// The type of a room row's id in the room's loop, which no other view in the room has (the rows' own content, file
+/// cards, a thread's replies, pending rows, carry string ids). A scroll to a row by a string looked its id up through
+/// those, building every row of the room once to do it.
+private struct RoomRowScrollId: Hashable {
+    let rowId: String
+}
+
+private extension RoomChatRow {
+    /// This row's id in the room's loop (`RoomRowScrollId`).
+    var scrollId: RoomRowScrollId { RoomRowScrollId(rowId: id) }
+}
+
+private extension ScrollViewProxy {
+    /// Scrolls to the room's row with this id (`RoomChatRow.id`), by its id in the room's loop.
+    func scrollTo(row rowId: String, anchor: UnitPoint) {
+        scrollTo(RoomRowScrollId(rowId: rowId), anchor: anchor)
+    }
+}
 
 /// What the room keeps about its bottom marker without redrawing for it: the settled place, and whether the room is on
 /// screen to take it.
