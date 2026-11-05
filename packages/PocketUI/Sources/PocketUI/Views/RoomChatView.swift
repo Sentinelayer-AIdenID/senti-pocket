@@ -352,6 +352,9 @@ public struct RoomChatView: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.bottom, 8)
+                // The list's own UIKit scroll view, for the jump button's animated stretch (`scrollDown`): found from
+                // inside the list's content, so never a scroll view inside a row.
+                .background(RoomListScrollViewProbe(watch: bottomWatch))
             }
             // Dragging the messages lowers the keyboard with the finger, as in Messages.
             .scrollDismissesKeyboard(.interactively)
@@ -667,36 +670,47 @@ public struct RoomChatView: View {
         scrollDown(to: .row(RoomChatRow.unreadDivider.id), anchor: Self.unreadLineAnchor, proxy)
     }
 
-    /// The jump button's way down, to the latest or to the New messages line, in the list as it is: the reader sees it
-    /// scroll there (Carter: from up a long room the arrow went dark, glitched and then showed the bottom, when the
-    /// room was built again as a new list at its newest rows). A long way down, an animated scroll draws every row
-    /// on its way, which once froze the app from up a long history: so the list is first put, at once, `jumpRows`
-    /// rows above where it goes, and scrolls the rest. The rows in between are never drawn. Once it has landed it is
-    /// placed again, as the rows it reached are measured by then, and the reader's place is read.
+    /// The jump button's way down, to the latest or to the New messages line, in the list as it is (Carter: from up a
+    /// long room the arrow went dark, glitched and then showed the bottom, when the room was built again as a new list
+    /// at its newest rows). To the latest the reader sees it scroll: a long way down, the list is first put, at once,
+    /// `jumpRows` rows above the end, and scrolls the rest; the rows in between are never built. The scroll is the
+    /// list's own UIKit scroll view's (`RoomBottomWatch.scrollListToEnd`): SwiftUI's animated scroll to an id built
+    /// every row of the room on its way (390 and 398 of about 400 in CI), which once froze the app from up a long
+    /// history. Once it has landed it is placed exactly at the end, as the rows it reached are measured by then, and
+    /// the reader's place is read. To the New messages line (no offset is known for it), with Reduce Motion on, or
+    /// without the list's scroll view, the room is placed there at once.
     private func scrollDown(to target: JumpTarget, anchor: UnitPoint, _ proxy: ScrollViewProxy) {
+        let place = {
+            target.scroll(proxy, anchor: anchor)
+            RoomNextFrame.run { recheckPlace(proxy) }
+        }
+        guard target == .bottom, !Self.reducesMotion else { return place() }
         let tapped = ProcessInfo.processInfo.systemUptime
         let start = jumpStart(above: target)
         if let start { proxy.scrollTo(row: start, anchor: .top) }
-        let place = { target.scroll(proxy, anchor: anchor) }
         let scroll: () -> Void = {
             // Put by the rows' estimated heights, a far jump to the end can already show it, or go past it (rows taller
             // than the screen, at the largest text sizes, in CI): it is placed there, not animated back up.
-            if start != nil, target == .bottom, let reading = bottomWatch.reading, reading.endInView {
-                place()
-                RoomNextFrame.run { recheckPlace(proxy) }
-                return
-            }
-            withAnimation(.easeOut(duration: Self.jumpEase)) { place() }
+            let endShown = start != nil && bottomWatch.reading?.endInView == true
+            guard !endShown, bottomWatch.scrollListToEnd() else { return place() }
+            // Landed, unless the reader has taken the list again.
             DispatchQueue.main.asyncAfter(deadline: .now() + Self.jumpEase + 0.05) {
-                // Not once the reader has taken the list again.
                 guard bottomWatch.isActive, heldAnchor == nil, bottomWatch.lastDrag < tapped, !bottomWatch.readerMoving
                 else { return }
                 place()
-                RoomNextFrame.run { recheckPlace(proxy) }
             }
         }
         // The animated scroll starts from where the list was put, once that has been drawn.
         if start != nil { RoomNextFrame.run(scroll) } else { scroll() }
+    }
+
+    /// Reduce Motion is on: the jump is placed, not animated.
+    private static var reducesMotion: Bool {
+        #if os(iOS)
+        return UIAccessibility.isReduceMotionEnabled
+        #else
+        return false
+        #endif
     }
 
     /// Where the jump button goes: the room's latest (its bottom marker), or a row (the New messages line).
@@ -1110,6 +1124,30 @@ private final class RoomBottomWatch {
     var reading: RoomReaderPlace.Reading?
     /// The height of what can be read, at the last reading.
     var visibleHeight: CGFloat = 0
+    #if os(iOS)
+    /// The list's own UIKit scroll view, found by the probe in the list's content (`RoomListScrollViewProbe`) as it
+    /// came into a window; neither is kept once gone.
+    weak var listScrollView: UIScrollView?
+    weak var listProbe: UIView?
+    #endif
+
+    /// Scrolls the list to its end with UIKit's own animation, which moves the content and builds only the rows that
+    /// come into sight; false, and nothing done, where the list's scroll view is not known for sure: then the jump is
+    /// placed.
+    func scrollListToEnd() -> Bool {
+        #if os(iOS)
+        guard let list = listScrollView, let probe = listProbe, list.window != nil, probe.isDescendant(of: list)
+        else { return false }
+        // The probe is the list's content (the rows' stack): it ends where the scroll view's content ends, which a
+        // scroll view inside a row would not.
+        guard abs(probe.convert(probe.bounds, to: list).maxY - list.contentSize.height) <= 2 else { return false }
+        let end = max(0, list.contentSize.height - list.bounds.height + list.adjustedContentInset.bottom)
+        list.setContentOffset(CGPoint(x: 0, y: end), animated: true)
+        return true
+        #else
+        return false
+        #endif
+    }
 
     /// A reading, while the list is laid out: kept, and what it is (`RoomReaderPlace.Tracker.see`). Nothing here
     /// changes what SwiftUI shows.
@@ -1146,6 +1184,55 @@ private final class RoomBottomWatch {
     func nextFollow(at now: TimeInterval) -> TimeInterval {
         max(0, (follows.first ?? now) + 1 - now)
     }
+}
+
+/// Finds the room list's own UIKit scroll view: the nearest scroll view above this probe, which sits in the list's
+/// content (the background of its rows' stack), not in a row, so a scroll view inside a row (a photo carousel, a wide
+/// code block) is never taken for it. Found when the probe comes into a window, let go when it leaves one (the room
+/// put away, the list built again); never looked for at a frame or an update.
+private struct RoomListScrollViewProbe: View {
+    let watch: RoomBottomWatch
+
+    var body: some View {
+        #if os(iOS)
+        Probe(watch: watch).allowsHitTesting(false).accessibilityHidden(true)
+        #else
+        Color.clear
+        #endif
+    }
+
+    #if os(iOS)
+    private struct Probe: UIViewRepresentable {
+        let watch: RoomBottomWatch
+
+        func makeUIView(context: Context) -> ProbeView { ProbeView(watch: watch) }
+        func updateUIView(_ view: ProbeView, context: Context) {}
+
+        final class ProbeView: UIView {
+            let watch: RoomBottomWatch
+
+            init(watch: RoomBottomWatch) {
+                self.watch = watch
+                super.init(frame: .zero)
+                isUserInteractionEnabled = false
+            }
+
+            required init?(coder: NSCoder) { return nil }
+
+            override func didMoveToWindow() {
+                super.didMoveToWindow()
+                guard window != nil else {
+                    if watch.listProbe === self { watch.listProbe = nil; watch.listScrollView = nil }
+                    return
+                }
+                var view = superview
+                while let current = view, !(current is UIScrollView) { view = current.superview }
+                watch.listScrollView = view as? UIScrollView
+                watch.listProbe = self
+            }
+        }
+    }
+    #endif
 }
 
 /// Runs work when the screen next draws a frame (a turn of the run loop can come several times within one frame).
