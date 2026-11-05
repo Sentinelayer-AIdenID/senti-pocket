@@ -3,9 +3,10 @@ import CoreFoundation
 import UIKit
 import XCTest
 
-/// The three ways Carter's phone froze on build 2026110310, on the app's `-PocketRootPreview` data (made-up rooms; no
+/// The four ways Carter's phone froze on build 2026110310, on the app's `-PocketRootPreview` data (made-up rooms; no
 /// network): the side panel opened and closed over a room; the app sent to the background and back with the panel open;
-/// and, after Jump to latest kept a room's newest 60 rows, a room opened from the panel. Each ends with a quiet spell in
+/// after Jump to latest kept a room's newest 60 rows, a room opened from the panel; and a reply sent in a long room
+/// read far up, sent to, and trimmed for the jump down, with no panel at all. Each ends with a quiet spell in
 /// which nothing reads the screen, announced as `FREEZE-IDLE begin` and `FREEZE-IDLE end`, for the lane to sample the
 /// app's main thread: it must be asleep, not laying out. Then the screen must answer a read within a second.
 final class FreezePathsUITests: XCTestCase {
@@ -64,7 +65,42 @@ final class FreezePathsUITests: XCTestCase {
         idle(app, "path3")
     }
 
+    /// Up a long room until about 300 rows are loaded (each page loads as its top comes into view), Jump to latest (the
+    /// room keeps its newest 60 rows), a message sent, then a reply to the newest message sent from its menu.
+    func test_path4_reply_in_a_long_room_after_a_jump_down_trim() throws {
+        let app = launch(room: "long")
+        let screen = app.descendants(matching: .any)["pocket.room.screen"]
+        for _ in 0..<60 {
+            if app.descendants(matching: .any)["pocket.room.message.705"].exists { break }
+            screen.swipeDown(velocity: .fast)
+        }
+        XCTAssertTrue(app.descendants(matching: .any)["pocket.room.message.705"].exists, "about 300 rows loaded")
+        let jump = app.descendants(matching: .any)["pocket.room.jumpToLatest"]
+        XCTAssertTrue(jump.waitForExistence(timeout: 10), "the arrow shows up the room")
+        jump.tap()
+        pause(3)
+        send(app, "A note sent after the jump down, as long as a paragraph would be in a busy room.")
+        let newest = app.descendants(matching: .any)["pocket.room.message.1000"]
+        XCTAssertTrue(newest.waitForExistence(timeout: 30), "the newest message is in view")
+        newest.press(forDuration: 1.2)
+        // The menu's Reply: the first of the buttons so named (the rows' own reply links come after it).
+        let reply = app.buttons.matching(identifier: "Reply").firstMatch
+        XCTAssertTrue(reply.waitForExistence(timeout: 10), "the message's menu offers Reply")
+        reply.tap()
+        send(app, "A short reply now")
+        idle(app, "path4", seconds: 25)
+    }
+
     // MARK: - Helpers
+
+    private func send(_ app: XCUIApplication, _ text: String) {
+        let composer = app.descendants(matching: .any)["pocket.room.composer"]
+        guard composer.waitForExistence(timeout: 10) else { return XCTFail("no composer") }
+        composer.tap()
+        composer.typeText(text)
+        app.descendants(matching: .any)["pocket.room.send"].tap()
+        pause(1)
+    }
 
     /// Nothing reads the screen for `seconds` while the lane samples the main thread; then a read must answer in 1 s.
     private func idle(_ app: XCUIApplication, _ path: String, seconds: TimeInterval = 20) {
