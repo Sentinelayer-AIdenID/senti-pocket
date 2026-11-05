@@ -1,5 +1,7 @@
 #if canImport(CallKit) && canImport(PushKit)
+import AVFoundation
 import CallKit
+import Combine
 import Foundation
 import PocketContracts
 import XCTest
@@ -11,6 +13,8 @@ import XCTest
 private final class FakeCallsAPI: RoomCallsAPI, @unchecked Sendable {
     private let lock = NSLock()
     private var statuses: [String] = []
+    /// Each report as "<callId> <status>", in the order the server got them.
+    private var reports: [String] = []
     private var reads = 0
     private var answerTried = false
     let details: RoomCallDetails?
@@ -49,12 +53,14 @@ private final class FakeCallsAPI: RoomCallsAPI, @unchecked Sendable {
     func setStatus(sessionId: String, callId: String, status: String) async throws {
         lock.withLock {
             statuses.append(status)
+            reports.append("\(callId) \(status)")
             if status == "answered" { answerTried = true }
         }
         if status == "answered", let answerFailure { throw answerFailure }
     }
 
     var sent: [String] { lock.withLock { statuses } }
+    var sentTo: [String] { lock.withLock { reports } }
     var readCount: Int { lock.withLock { reads } }
 }
 
@@ -574,6 +580,69 @@ final class RoomCallsTests: XCTestCase {
             XCTAssertEqual(api.sent, ["answered"], "\(name): nothing else is told to the server")
             XCTAssertEqual(api.readCount, 1, "\(name): not read back")
         }
+    }
+    /// Two agents rang at once with their room on screen and Pocket in front (11-05: pocket-forge, then claude-warden
+    /// 3 s later). CallKit keeps one call, so answering forge's ends warden's ring. The server must hear warden's call
+    /// declined and forge's answered, and forge's call must reach the room on screen and stay up. It used to wait
+    /// unheard for a minute and end, while the room showed only "declined claude-warden's call".
+    func test_two_calls_at_once_answering_one_declines_the_other_and_the_room_on_screen_takes_the_answered_one() async {
+        let room = doorbell.sessionId
+        let api = FakeCallsAPI(details: nil, others: [details(callId: "call_forge", caller: "pocket-forge"),
+                                                      details(callId: "call_warden", caller: "claude-warden")])
+        let desk = RoomCallDesk(api: api, ringFor: 3_600, takeWithin: 0.4, sleep: { seconds in
+            try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+        })
+        let provider = CXProvider(configuration: CXProviderConfiguration())
+        var rung: [(uuid: UUID, caller: String?)] = []
+        var systemEnded: [UUID] = []
+        let manager = SentiCallManager(
+            provider: provider,
+            reportIncomingCall: { id, update, completion in
+                rung.append((id, update.localizedCallerName))
+                completion(true)
+            },
+            reportEndedCall: { systemEnded.append($0) }
+        )
+        // As DialHost wires an agent's room call: the desk owns these UUIDs.
+        manager.isRoomCallAuthorized = { true }
+        manager.onRoomCallReceived = { desk.received($0, uuid: $1) }
+        manager.onAnswered = { desk.answered($0.id) }
+        manager.onEnded = { desk.ended($0) }
+        manager.onAudioSessionActivated = { _, uuid in desk.audioActivated(uuid) }
+        desk.endSystemCall = { manager.end($0) }
+        // The room on screen, watching the desk as the room screen does.
+        var taken: [RoomCallDesk.Call] = []
+        let watch = desk.$waiting.sink { _ in
+            if let call = desk.takeWaiting(for: room) { taken.append(call) }
+        }
+        defer { watch.cancel() }
+
+        for (callId, caller) in [("call_forge", "pocket-forge"), ("call_warden", "claude-warden")] {
+            manager.handleIncomingPushPayload(["callId": callId, "sessionId": room, "callerName": caller,
+                                               "aps": [String: Any]()]) {}
+        }
+        await until("both ring and are read") { rung.count == 2 && api.readCount == 2 }
+        guard rung.count == 2 else { return }
+        let forge = rung[0].uuid, warden = rung[1].uuid
+        XCTAssertEqual(rung.map(\.caller), ["pocket-forge", "claude-warden"])
+
+        // Answer on forge's ring. CallKit holds one call, so it ends warden's ring, then answers forge's.
+        manager.provider(provider, perform: CXEndCallAction(call: warden))
+        manager.provider(provider, perform: CXAnswerCallAction(call: forge))
+        manager.provider(provider, didActivate: AVAudioSession.sharedInstance())
+
+        await until("the server heard both") { api.sentTo.count == 2 }
+        XCTAssertEqual(api.sentTo, ["call_warden declined", "call_forge answered"],
+                       "the call not taken is declined, the one tapped is answered")
+        await until("the room on screen has forge's call") { !taken.isEmpty }
+        XCTAssertEqual(taken.map(\.uuid), [forge], "the room's voice room talks with the call that was answered")
+        XCTAssertEqual(taken.first?.partner, "pocket-forge")
+        XCTAssertFalse(desk.isLive(warden))
+        // Past the time an answered call nobody took is ended: forge's is still up, and the server heard nothing more.
+        try? await Task.sleep(nanoseconds: 700_000_000)
+        XCTAssertTrue(desk.isLive(forge), "the answered call stays up")
+        XCTAssertFalse(systemEnded.contains(forge))
+        XCTAssertEqual(api.sentTo, ["call_warden declined", "call_forge answered"])
     }
 }
 #endif
