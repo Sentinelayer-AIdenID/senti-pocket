@@ -462,6 +462,7 @@ public struct PocketSidePanel: View {
 
     /// A direct message: the other side's picture and name, and its unread badge; under its room, indented.
     private func directRow(_ room: Room, nested: Bool) -> some View {
+        RenderTrace.built(.sidePanel)
         let isCurrent = room.id == currentRoomId
         let activity = Self.shownActivity(of: room, currentRoomId: currentRoomId)
         let name = room.direct?.name ?? room.title
@@ -501,6 +502,7 @@ public struct PocketSidePanel: View {
     }
 
     private func roomRow(_ room: Room) -> some View {
+        RenderTrace.built(.sidePanel)
         let isCurrent = room.id == currentRoomId
         let activity = Self.shownActivity(of: room, currentRoomId: currentRoomId)
         let largeText = dynamicTypeSize.isAccessibilitySize

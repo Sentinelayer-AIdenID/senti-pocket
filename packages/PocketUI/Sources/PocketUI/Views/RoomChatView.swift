@@ -492,6 +492,7 @@ public struct RoomChatView: View {
 
     @ViewBuilder
     private func rowView(_ row: RoomChatRow, proxy: ScrollViewProxy) -> some View {
+        let _ = RenderTrace.built(.roomRow)
         switch row {
         case .dayHeader(_, let label):
             Text(label)
