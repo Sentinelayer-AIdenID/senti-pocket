@@ -90,6 +90,19 @@ final class FreezePathsUITests: XCTestCase {
         replyAfterJumpDown(launch(room: "long"), upTo: large ? 975 : 705, path: "path4")
     }
 
+    /// The order that hung at 30b4d3b: a message sent first (the keyboard up), then the long press on a message in view
+    /// above it, its menu, and the reply.
+    func test_path4_send_then_reply_from_the_menu() throws {
+        let large = UIApplication.shared.preferredContentSizeCategory.isAccessibilityCategory
+        replyAfterJumpDown(launch(room: "long"), upTo: large ? 975 : 705, path: "path4-send", sendFirst: true)
+    }
+
+    /// The same order with the app at the largest text size.
+    func test_path4_send_then_reply_from_the_menu_at_the_largest_text_size() throws {
+        let app = launch(room: "long", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL")
+        replyAfterJumpDown(app, upTo: 975, path: "path4-send-ax5", sendFirst: true)
+    }
+
     /// Path 4 at the largest text size (AX5), where a row can be taller than the screen: up the room to its 975th
     /// message, the jump down, and the long press that opens a message's menu for the reply. Without each row's
     /// `.id`, that press set the room laying itself out without end here.
@@ -98,7 +111,7 @@ final class FreezePathsUITests: XCTestCase {
         replyAfterJumpDown(app, upTo: 975, path: "path4-ax5")
     }
 
-    private func replyAfterJumpDown(_ app: XCUIApplication, upTo sequence: Int, path: String) {
+    private func replyAfterJumpDown(_ app: XCUIApplication, upTo sequence: Int, path: String, sendFirst: Bool = false) {
         let screen = app.descendants(matching: .any)["pocket.room.screen"]
         let far = app.descendants(matching: .any)["pocket.room.message.\(sequence)"]
         // Up the room until the message is in view, within two minutes (each page of earlier messages loads as its top
@@ -112,6 +125,9 @@ final class FreezePathsUITests: XCTestCase {
         XCTAssertTrue(jump.waitForExistence(timeout: 10), "the arrow shows up the room")
         jump.tap()
         pause(3)
+        if sendFirst {
+            send(app, "A note sent after the jump down, as long as a paragraph would be in a busy room.")
+        }
         // The newest message with some of it in view, pressed where it shows: at the largest text size a message can
         // be taller than the screen (its middle off it), and the one before the note just sent may be out of view.
         let window = app.windows.firstMatch
