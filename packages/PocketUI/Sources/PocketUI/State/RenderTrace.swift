@@ -4,10 +4,23 @@ import Foundation
 /// watch while the main thread is stuck (build 14's freeze after coming back with the side panel open: its stack
 /// was inside a row's drawing). A stall with thousands of row draws is the room redrawing itself over and over; one
 /// with a handful is one slow piece of work.
+///
+/// Also how many items of the app's long lists were built (the room's rows, the side panel's rooms): a lazy list builds
+/// the items it shows, and one that builds every item it holds at each layout pass is walking the whole list.
 public enum RenderTrace {
+    /// A long list whose items are counted as they are built.
+    public enum List: Sendable {
+        /// The room's timeline: one item per row of the room.
+        case roomRow
+        /// The side panel's rooms and direct messages.
+        case sidePanel
+    }
+
     private static let lock = NSLock()
     private static var draws = 0
     private static var last: Int64 = 0
+    private static var builtRoomRows = 0
+    private static var builtSidePanel = 0
 
     /// One row drawn (its body evaluated).
     public static func row(_ sequenceId: Int64) {
@@ -22,5 +35,25 @@ public enum RenderTrace {
         lock.lock()
         defer { lock.unlock() }
         return (draws, last)
+    }
+
+    /// One item of `list` built (its content made by the list's loop).
+    public static func built(_ list: List) {
+        lock.lock()
+        switch list {
+        case .roomRow: builtRoomRows &+= 1
+        case .sidePanel: builtSidePanel &+= 1
+        }
+        lock.unlock()
+    }
+
+    /// Items of `list` built so far; safe from any thread.
+    public static func builtCount(_ list: List) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        switch list {
+        case .roomRow: return builtRoomRows
+        case .sidePanel: return builtSidePanel
+        }
     }
 }
