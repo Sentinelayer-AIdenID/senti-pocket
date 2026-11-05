@@ -38,9 +38,12 @@ final class CalendarEntryUITests: XCTestCase {
         app.launchArguments = ["-PocketCalendarPreview", "-PocketCalendarStage", "day"]
         app.launch()
 
-        let link = app.buttons["pocket.calendar.event.p4.link"]
+        // Queried as a set, so a link folded into a combined row fails this test's own assertions, not the query.
+        let links = app.buttons.matching(identifier: "pocket.calendar.event.p4.link")
+        let link = links.firstMatch
         XCTAssertTrue(link.waitForExistence(timeout: 60), "the link is its own button\n\(app.debugDescription)")
-        XCTAssertEqual(link.label, "Open link for Launch rehearsal")
+        XCTAssertEqual(links.count, 1, "the link is its own button, one element apart from its row")
+        XCTAssertEqual(link.label, "Open link for Launch rehearsal", "the link is its own button, read as itself")
         var swipes = 0
         while !link.isHittable, swipes < 8 {
             app.swipeUp(velocity: .slow)
@@ -48,11 +51,11 @@ final class CalendarEntryUITests: XCTestCase {
         }
         XCTAssertTrue(link.isHittable, "the link can be reached on its own")
 
-        let rehearsal = app.descendants(matching: .any)["pocket.calendar.event.p4"]
+        let rehearsal = app.descendants(matching: .any).matching(identifier: "pocket.calendar.event.p4").firstMatch
         XCTAssertTrue(rehearsal.exists)
         XCTAssertTrue(rehearsal.label.hasPrefix("Launch rehearsal, "), rehearsal.label)
         XCTAssertFalse(rehearsal.label.contains("Open link"), "the link is not read inside the row: \(rehearsal.label)")
-        let dinner = app.descendants(matching: .any)["pocket.calendar.event.p6"]
+        let dinner = app.descendants(matching: .any).matching(identifier: "pocket.calendar.event.p6").firstMatch
         XCTAssertTrue(dinner.exists)
         XCTAssertTrue(dinner.label.hasSuffix("Table for eight."), "the row reads its notes: \(dinner.label)")
         shot("day-events")
