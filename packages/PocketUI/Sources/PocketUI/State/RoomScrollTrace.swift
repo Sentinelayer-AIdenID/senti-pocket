@@ -4,8 +4,9 @@ import Foundation
 /// room acted on it there (a follow, the reader's place), the list would change again in the same frame, and SwiftUI
 /// warns ("tried to update multiple times per frame"). So a reading is only kept, and taken when the screen next
 /// draws a frame. This counts, once started, the readings taken, those taken while the scroll view's geometry was
-/// being read (always none), and the follows to the bottom made. Read by the hosted `RoomReaderStaysPutTests`; nothing
-/// is counted until they start it.
+/// being read (always none), the follows to the bottom made, and the follows' landings found short of the end that were
+/// taken only because the follow set the last reading aside. Read by the hosted `RoomReaderStaysPutTests`; nothing is
+/// counted until they start it.
 public enum RoomScrollTrace {
     private static let lock = NSLock()
     private static var counting = false
@@ -17,6 +18,7 @@ public enum RoomScrollTrace {
     private static var landingsMoved = 0
     private static var largestSnap: CGFloat = 0
     private static var focused: [String] = []
+    private static var shortLandings = 0
 
     /// The scroll view's geometry is read: `body` runs while the list is laid out. Main thread only.
     public static func whileReadingGeometry(_ body: () -> Void) {
@@ -75,6 +77,15 @@ public enum RoomScrollTrace {
         return (landings, landingsMoved, largestSnap, focused)
     }
 
+    /// A follow's landing showed the end still below, the same as the reading before the follow: it was taken only
+    /// because the follow set that reading aside, and is followed again. Main thread only.
+    public static func shortLandingRetaken() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard counting else { return }
+        shortLandings &+= 1
+    }
+
     /// Readings taken since `start()`, and those taken while the geometry was being read.
     public static func snapshot() -> (taken: Int, takenWhileReading: Int) {
         lock.lock()
@@ -89,6 +100,13 @@ public enum RoomScrollTrace {
         return follows
     }
 
+    /// Follows' landings short of the end, taken again since `start()` (`shortLandingRetaken`).
+    public static var shortLandingsRetaken: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return shortLandings
+    }
+
     /// Starts counting from nothing (tests).
     public static func start() {
         lock.lock()
@@ -100,6 +118,7 @@ public enum RoomScrollTrace {
         landingsMoved = 0
         largestSnap = 0
         focused = []
+        shortLandings = 0
         lock.unlock()
     }
 }

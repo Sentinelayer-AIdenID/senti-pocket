@@ -1053,6 +1053,7 @@ public struct RoomChatView: View {
             // Where the follow lands is taken as a new reading, even if it looks like the last one taken: in a lazy
             // list the scroll to the end goes by the rows' estimated heights, and can stop short of an end that is
             // still below (seen in a burst of 40 at 60 a second), which would otherwise never be followed again.
+            bottomWatch.sightBeforeFollow = bottomWatch.taking.lastTaken
             bottomWatch.taking.followMade()
             RoomScrollTrace.followMade()
             // An arrival is followed with the room's own scroll to its end (`animateToEnd`); anything arriving on its
@@ -1061,11 +1062,37 @@ public struct RoomChatView: View {
                 // Placed by UIKit where the list is known, then SwiftUI's scroll to the marker finds it there: a
                 // SwiftUI scroll that moved the list after UIKit's built every row of the room (117 in a frame of a
                 // burst, in CI).
+                let before = bottomWatch.reading
                 bottomWatch.placeListAtEnd()
                 proxy.scrollTo(Self.bottomId, anchor: .bottom)
+                // A follow that moved nothing gives no new reading, and nothing would follow again: where it landed
+                // is read two frames on, whatever it shows (`followLanded`).
+                RoomNextFrame.run { RoomNextFrame.run { followLanded(from: before, proxy) } }
                 return
             }
         }
+    }
+
+    /// Where a placed follow landed, two frames on (`scrollToBottomSoon`). One that moved nothing while the end is still
+    /// out of view gives the room no new reading, and it would never follow again, saying the reader is at the bottom
+    /// with the end far below (at the largest text size, tall reports arriving at once: 5,597 pt in CI, for 7.6 s).
+    /// Once a chain, such a follow is tried again by the last row's id; if that moves nothing too, the reader is no
+    /// longer taken to be at the bottom, and the arrow shows. Otherwise the reader's place is read as usual.
+    private func followLanded(from before: RoomReaderPlace.Reading?, _ proxy: ScrollViewProxy) {
+        guard bottomWatch.isActive, bottomWatch.readsGeometry, let now = bottomWatch.reading else { return }
+        if now.endInView { bottomWatch.stallRetried = false }
+        let movedNothing = before.map { abs($0.offset - now.offset) < 0.5 } ?? false
+        guard movedNothing, !now.endInView, followsBottom else {
+            recheckPlace(proxy)
+            return
+        }
+        if !bottomWatch.stallRetried, let last = state.rows.last {
+            bottomWatch.stallRetried = true
+            proxy.scrollTo(row: last.id, anchor: .bottom)
+            RoomNextFrame.run { RoomNextFrame.run { followLanded(from: now, proxy) } }
+            return
+        }
+        setReaderAtBottom(false)
     }
 
     /// A reading of the scroll view, while the list is laid out (iOS 18 and later). Acting on it here (a follow, the
@@ -1079,6 +1106,8 @@ public struct RoomChatView: View {
         let sight = bottomWatch.see(reading)
         guard bottomWatch.isActive, bottomWatch.taking.takes(sight), !bottomWatch.readingQueued else { return }
         bottomWatch.readingQueued = true
+        bottomWatch.queuedOnlyAfterFollow = bottomWatch.taking.lastTaken == nil
+            && sight == bottomWatch.sightBeforeFollow
         RoomNextFrame.run { placeFromReading(proxy) }
     }
 
@@ -1089,7 +1118,9 @@ public struct RoomChatView: View {
     /// way (`animateToEnd`): that is not the reader moving, and the place is read once it lands or is stopped.
     private func placeFromReading(_ proxy: ScrollViewProxy) {
         if bottomWatch.readingQueued { RoomScrollTrace.readingTaken() }
+        let onlyAfterFollow = bottomWatch.readingQueued && bottomWatch.queuedOnlyAfterFollow
         bottomWatch.readingQueued = false
+        bottomWatch.queuedOnlyAfterFollow = false
         guard bottomWatch.isActive, bottomWatch.readsGeometry, let reading = bottomWatch.reading else { return }
         let moving = bottomWatch.readerMoving
         bottomWatch.taking.took(bottomWatch.tracker.see(reading, readerMoving: moving))
@@ -1106,6 +1137,7 @@ public struct RoomChatView: View {
             // Not by the reader's hand: taken again on the next frame, and the reader leaves only if it still shows.
             RoomNextFrame.run { recheckPlace(proxy) }
         case .endMovedAway:
+            if onlyAfterFollow { RoomScrollTrace.shortLandingRetaken() }
             followToBottom(proxy)
         }
     }
@@ -1391,6 +1423,12 @@ private final class RoomBottomWatch {
     /// A reading is to be taken on the next frame; what the last one taken showed.
     var readingQueued = false
     var taking = RoomReaderPlace.Taking()
+    /// What the last reading taken showed when a follow set it aside, and whether the reading waiting for the next
+    /// frame shows the same: it is taken only because the follow set the last one aside (a follow that stopped short).
+    var sightBeforeFollow: RoomReaderPlace.Sight?
+    var queuedOnlyAfterFollow = false
+    /// This follow chain already tried a follow that moved nothing again (`followLanded`).
+    var stallRetried = false
     /// A scroll to the bottom is waiting for the next turn of the run loop, or for the follow limit's second to pass.
     var followQueued = false
     var trailingFollowQueued = false

@@ -380,6 +380,71 @@ final class RoomReaderStaysPutTests: XCTestCase {
         XCTAssertFalse(room.atBottom, "the reader moved the list up and is away from the bottom")
     }
 
+    /// At the largest text size, forty tall reports arriving at once under a room of short rows, twice: the room never
+    /// says the reader is at the bottom while the end has been out of view for longer than `strandedLimit` (a reader
+    /// stranded mid-room with the arrow hidden; at 32cca3f the follows stopped 5,597 pt short and the room said so for
+    /// 7.6 s). Where the follows stop short, the arrow shows within that second, and it takes the reader to the end.
+    func test_tall_arrivals_never_strand_the_reader_and_the_arrow_takes_them_down() throws {
+        try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
+        let room = Room(Self.messages())
+        let window = try HostedSummary.host(Host(room: room, textSize: .accessibility5))
+        addTeardownBlock { HostedSummary.close(window) }
+        wait("the room opened at its newest rows", seconds: 20) {
+            guard let list = Self.list(in: window), list.contentSize.height > list.bounds.height * 2 else { return false }
+            return Self.atBottom(list)
+        }
+        pump(0.5)
+        var seq: Int64 = 61
+        for batch in 1...2 {
+            let list = try XCTUnwrap(Self.list(in: window), "the room's list")
+            let height = list.contentSize.height
+            room.arrive((seq..<seq + 40).map { Self.longArrival($0) })
+            seq += 40
+            var outOfViewSince: Date?
+            var longestStranded: TimeInterval = 0
+            var leftAt: Date?
+            let end = Date().addingTimeInterval(8)
+            pump(0.1)
+            while Date() < end, !(list.contentSize.height > height && Self.atBottom(list)) {
+                let below = Self.bottomOffset(of: list) - list.contentOffset.y
+                if below > RoomReaderPlace.atBottomDistance {
+                    let since = outOfViewSince ?? Date()
+                    outOfViewSince = since
+                    if room.atBottom {
+                        longestStranded = max(longestStranded, Date().timeIntervalSince(since))
+                    } else if leftAt == nil {
+                        leftAt = Date()
+                    }
+                } else {
+                    outOfViewSince = nil
+                }
+                if leftAt != nil { break }
+                pump(0.05)
+            }
+            let below = Self.bottomOffset(of: list) - list.contentOffset.y
+            print("READER-STAYS-PUT tall-arrivals arrow batch=\(batch) end-below=\(Int(below)) "
+                + "longest-stranded=\(String(format: "%.2f", longestStranded)) s at-bottom=\(room.atBottom)")
+            XCTAssertLessThanOrEqual(longestStranded, Self.strandedLimit, "batch \(batch): the room said the reader "
+                + "is at the bottom with the end out of view for \(String(format: "%.2f", longestStranded)) s")
+            guard below > RoomReaderPlace.atBottomDistance else { continue }
+            // Short of the end and not at the bottom: the arrow shows, and takes the reader down.
+            let arrow = try XCTUnwrap(HostedSummary.wait(for: "pocket.room.jumpToLatest", in: window,
+                                                         timeout: Self.strandedLimit),
+                                      "batch \(batch): the arrow shows within \(Self.strandedLimit) s")
+            XCTAssertTrue(arrow.accessibilityActivate(), "batch \(batch): the arrow could be pressed")
+            wait("batch \(batch): the arrow took the reader to the end", seconds: 8) {
+                Self.list(in: window).map(Self.atBottom) ?? false
+            }
+            XCTAssertTrue(Self.list(in: window).map(Self.atBottom) ?? false, "batch \(batch): at the end")
+            pump(1)
+        }
+    }
+
+    /// The longest the room may say the reader is at the bottom while the end has been more than
+    /// `RoomReaderPlace.atBottomDistance` (the arrow's own threshold) out of view without a break: a follow on its way
+    /// (about 0.25 s) is, a reader stranded mid-room with the arrow hidden is not (warden).
+    private static let strandedLimit: TimeInterval = 1
+
     /// Within the bottom's 24 points the reader is at the bottom, and follows what arrives.
     func test_at_the_very_bottom_the_reader_follows_what_arrives() throws {
         try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
