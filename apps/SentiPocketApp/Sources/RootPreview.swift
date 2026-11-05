@@ -591,11 +591,17 @@ extension RootPreviewAPI: DirectMessaging, RoomFoldersServing {
         return Self.folders
     }
 
-    func createFolder(named name: String) async throws -> RoomFolder { throw SessionTransportError.notConfigured }
+    func createFolder(named name: String, in parentFolderId: String?, idempotencyKey: String?) async throws -> RoomFolder {
+        throw SessionTransportError.notConfigured
+    }
 
     func renameFolder(_ folderId: String, to name: String) async throws -> RoomFolder { throw SessionTransportError.notConfigured }
 
     func moveFolder(_ folderId: String, to position: Int) async throws -> RoomFolder { throw SessionTransportError.notConfigured }
+
+    func moveFolder(_ folderId: String, into parentFolderId: String?) async throws -> RoomFolder {
+        throw SessionTransportError.notConfigured
+    }
 
     func deleteFolder(_ folderId: String) async throws { throw SessionTransportError.notConfigured }
 
