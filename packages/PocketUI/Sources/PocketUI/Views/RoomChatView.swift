@@ -32,9 +32,6 @@ public struct RoomChatView: View {
     /// A message the reader was taken to (a link, notification, search result or pin). It stays in place through
     /// pages loading above or below it and messages arriving, until the reader scrolls.
     @State private var heldAnchor: String?
-    /// Where VoiceOver's focus is put after the room's own scroll (`focusForVoiceOver`): UIKit's scroll does not
-    /// move it.
-    @AccessibilityFocusState private var voiceOverRow: String?
     /// A checkpoint opened from its row: read it, listen to it.
     @State private var openCheckpoint: RoomChatMessageRow?
     /// A thread summary opened whole, and what reads it aloud.
@@ -322,7 +319,6 @@ public struct RoomChatView: View {
                         VStack(alignment: .leading, spacing: 0) {
                             rowView(row, proxy: proxy)
                         }
-                        .accessibilityFocused($voiceOverRow, equals: row.id)
                     }
                     ForEach(state.pending) { pending in
                         RoomPendingRowView(
@@ -775,20 +771,26 @@ public struct RoomChatView: View {
     /// After the jump button's scroll, VoiceOver's focus goes where it went (UIKit's scroll does not move it, and it
     /// could be left on a row now off screen): the newest message, or the New messages line. Not after a follow: what
     /// arrives is announced (`announceArrivals`), and focus stays where the reader put it. Noted for the tests.
+    ///
+    /// Posted by UIKit at the row's own element, found by its identifier in the list's accessibility tree, and only
+    /// while VoiceOver runs: a focus state shared by the rows made the room's next update walk every row of the list.
     private func focusForVoiceOver(on target: JumpTarget) {
-        let rowId: String?
+        let row: RoomChatRow?
         switch target {
         case .bottom:
-            rowId = state.rows.last { if case .message = $0 { return true } else { return false } }?.id
+            row = state.rows.last { if case .message = $0 { return true } else { return false } }
         case .row(let id):
-            rowId = id
+            row = state.rows.first { $0.id == id }
         }
-        guard let rowId else { return }
-        RoomScrollTrace.voiceOverFocused(on: rowId)
-        #if os(iOS)
-        guard UIAccessibility.isVoiceOverRunning else { return }
-        #endif
-        voiceOverRow = rowId
+        guard let row else { return }
+        RoomScrollTrace.voiceOverFocused(on: row.id)
+        let identifier: String
+        switch row {
+        case .message(let message): identifier = message.accessibilityId
+        case .unreadDivider: identifier = "pocket.room.unreadDivider"
+        case .dayHeader: return
+        }
+        bottomWatch.postVoiceOverFocus(onIdentifier: identifier)
     }
 
     /// Where the jump button goes: the room's latest (its bottom marker), or a row (the New messages line).
@@ -1056,6 +1058,10 @@ public struct RoomChatView: View {
             // An arrival is followed with the room's own scroll to its end (`animateToEnd`); anything arriving on its
             // way is followed by it. Placed where it cannot be animated.
             guard eased, animateToEnd(proxy) else {
+                // Placed by UIKit where the list is known, then SwiftUI's scroll to the marker finds it there: a
+                // SwiftUI scroll that moved the list after UIKit's built every row of the room (117 in a frame of a
+                // burst, in CI).
+                bottomWatch.placeListAtEnd()
                 proxy.scrollTo(Self.bottomId, anchor: .bottom)
                 return
             }
@@ -1218,6 +1224,8 @@ private final class RoomBottomWatch {
         var still = 0
         var deepest: CGFloat?
         var retargets = 0
+        /// The end where the scroll reached it, the frame before: it lands once the end holds still.
+        var endWhenReached: CGFloat?
     }
 
     /// On its way; at the end (the room is placed at its bottom marker, exactly); short of an end that moved on after
@@ -1292,9 +1300,18 @@ private final class RoomBottomWatch {
         if reached || scroll.still >= 3 {
             // There, or stalled short: on to the end as it is now, unless already there or done going on.
             guard abs(end - offset) > 1 else {
-                listScroll = nil
-                return .landed
+                // There: landed once the end has held still a frame more (rows measured as they came into sight can
+                // move it a frame later, which would take another follow).
+                if let before = scroll.endWhenReached, abs(before - end) < 0.5 {
+                    listScroll = nil
+                    return .landed
+                }
+                scroll.endWhenReached = end
+                scroll.last = offset
+                listScroll = scroll
+                return .moving
             }
+            scroll.endWhenReached = nil
             let now = ProcessInfo.processInfo.systemUptime
             guard scroll.retargets < Self.listScrollRetargets, now - scroll.started < Self.listScrollChaseTime else {
                 listScroll = nil
@@ -1327,6 +1344,26 @@ private final class RoomBottomWatch {
         return moved
         #else
         return 0
+        #endif
+    }
+
+    /// Moves VoiceOver's focus to the element with this identifier in the list, while VoiceOver runs (UIKit's own
+    /// notification: nothing in SwiftUI's state changes). The list's accessibility tree is read once, at most 5,000
+    /// nodes.
+    func postVoiceOverFocus(onIdentifier identifier: String) {
+        #if os(iOS)
+        guard UIAccessibility.isVoiceOverRunning, let list = listScrollView else { return }
+        var stack: [NSObject] = [list]
+        var visited = 0
+        while let node = stack.popLast(), visited < 5_000 {
+            visited += 1
+            if (node as? UIAccessibilityIdentification)?.accessibilityIdentifier == identifier {
+                UIAccessibility.post(notification: .layoutChanged, argument: node)
+                return
+            }
+            if let view = node as? UIView { stack.append(contentsOf: view.subviews) }
+            if let elements = node.accessibilityElements as? [NSObject] { stack.append(contentsOf: elements) }
+        }
         #endif
     }
 

@@ -70,6 +70,7 @@ final class RoomReaderStaysPutTests: XCTestCase {
                 title: "Room",
                 messages: emptied ? [] : inputs,
                 ownAuthorIds: Self.own,
+                unreadDividerSequence: unread > 0 ? inputs[inputs.count - unread].sequenceId : nil,
                 unreadCount: unread,
                 connection: .live,
                 pending: pending,
@@ -753,6 +754,19 @@ final class RoomReaderStaysPutTests: XCTestCase {
         let placesTold = Array(room.placesTold.dropFirst(told))
         let landings = RoomScrollTrace.listLandings
         let mostInAFrame = Self.mostBuiltInAFrame(Array(watch.frames[max(0, tappedAt - 1)...]))
+        // The frame the room first says the reader is at the bottom: what it built (a body update there once walked
+        // every row). And how far the list moved after it first stopped once it had been scrolling (a drift after
+        // the landing).
+        let fromTap = Array(watch.frames[max(0, tappedAt - 1)...])
+        let flip = zip(fromTap, fromTap.dropFirst()).first { !$0.0.mark && $0.1.mark }.map { pair in pair.1.built - pair.0.built }
+        let stopped = firstScroll.flatMap { first in steps[(first + 1)...].firstIndex { abs($0) < 0.5 } }
+        let drift = stopped.map { steps[$0...].reduce(0, +) } ?? 0
+        print("READER-STAYS-PUT arrow-jump at-bottom-frame-built=\(flip.map(String.init) ?? "none") "
+            + "drift-after-stop=\(String(format: "%.1f", drift))")
+        if let flip {
+            XCTAssertLessThanOrEqual(flip, LazyListBuildTests.mostBuiltPerStep,
+                                     "rows built in the frame the room said the reader is at the bottom")
+        }
         print("READER-STAYS-PUT arrow-jump landings=\(landings.all) moved-by-swiftui=\(landings.movedBySwiftUI) "
             + "largest-snap=\(String(format: "%.1f", landings.largestSnap)) most-built-in-a-frame=\(mostInAFrame) "
             + "voiceover-focus=\(landings.voiceOverFocus)")

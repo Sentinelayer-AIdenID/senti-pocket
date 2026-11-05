@@ -13,7 +13,7 @@ final class JumpToLatestTests: XCTestCase {
     private var window: UIWindow?
 
     override func tearDown() {
-        window?.isHidden = true
+        if let window { HostedSummary.close(window) }
         window = nil
         pump(0.4)
         super.tearDown()
@@ -37,7 +37,7 @@ final class JumpToLatestTests: XCTestCase {
                 pump(0.05)
             }
             pump(1.5)
-            let arrow = try XCTUnwrap(Self.element("pocket.room.jumpToLatest", under: try XCTUnwrap(window)),
+            let arrow = try XCTUnwrap(HostedSummary.wait(for: "pocket.room.jumpToLatest", in: try XCTUnwrap(window)),
                                       "jump \(jump): the arrow shows up the room")
             XCTAssertTrue(arrow.accessibilityActivate(), "jump \(jump): the arrow takes the tap")
             pump(3)
@@ -92,12 +92,11 @@ final class JumpToLatestTests: XCTestCase {
 
     // MARK: - Reading the screen
 
+    /// The view in a window with UI automation on (`HostedSummary`): SwiftUI builds its accessibility elements only for
+    /// an assistive technology or for UI automation, and this test finds the arrow and the messages as VoiceOver does.
+    /// Without it the arrow was never found (CI, both branches).
     private func host<Content: View>(_ view: Content) throws {
-        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
-        let window = UIWindow(windowScene: scene)
-        window.rootViewController = UIHostingController(rootView: view)
-        window.makeKeyAndVisible()
-        self.window = window
+        window = try HostedSummary.host(view)
     }
 
     /// The tallest scroll view in the window: the room's list.
