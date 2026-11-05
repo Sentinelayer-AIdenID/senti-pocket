@@ -941,6 +941,7 @@ public struct RoomChatView: View {
             // Where the follow lands is taken as a new reading, even if it looks like the last one taken: in a lazy
             // list the scroll to the end goes by the rows' estimated heights, and can stop short of an end that is
             // still below (seen in a burst of 40 at 60 a second), which would otherwise never be followed again.
+            bottomWatch.sightBeforeFollow = bottomWatch.takenSight
             bottomWatch.takenSight = nil
             RoomScrollTrace.followMade()
             guard eased else {
@@ -967,6 +968,7 @@ public struct RoomChatView: View {
         let sight = bottomWatch.see(reading)
         guard bottomWatch.isActive, sight != bottomWatch.takenSight, !bottomWatch.readingQueued else { return }
         bottomWatch.readingQueued = true
+        bottomWatch.queuedOnlyAfterFollow = bottomWatch.takenSight == nil && sight == bottomWatch.sightBeforeFollow
         RoomNextFrame.run { placeFromReading(proxy) }
     }
 
@@ -976,7 +978,9 @@ public struct RoomChatView: View {
     /// end moving away from a reader at the bottom is followed (not while the room's own eased follow is on its way).
     private func placeFromReading(_ proxy: ScrollViewProxy) {
         if bottomWatch.readingQueued { RoomScrollTrace.readingTaken() }
+        let onlyAfterFollow = bottomWatch.readingQueued && bottomWatch.queuedOnlyAfterFollow
         bottomWatch.readingQueued = false
+        bottomWatch.queuedOnlyAfterFollow = false
         guard bottomWatch.isActive, bottomWatch.readsGeometry, let reading = bottomWatch.reading else { return }
         let moving = bottomWatch.readerMoving
         bottomWatch.takenSight = bottomWatch.tracker.see(reading, readerMoving: moving)
@@ -993,6 +997,7 @@ public struct RoomChatView: View {
             RoomNextFrame.run { recheckPlace(proxy) }
         case .endMovedAway:
             guard ProcessInfo.processInfo.systemUptime >= bottomWatch.easedFollowUntil else { return }
+            if onlyAfterFollow { RoomScrollTrace.shortLandingRetaken() }
             followToBottom(proxy)
         }
     }
@@ -1073,6 +1078,10 @@ private final class RoomBottomWatch {
     /// A reading is to be taken on the next frame; what the last one taken showed.
     var readingQueued = false
     var takenSight: RoomReaderPlace.Sight?
+    /// What the last reading taken showed when a follow set it aside, and whether the reading waiting for the next
+    /// frame shows the same: it is taken only because the follow set the last one aside (a follow that stopped short).
+    var sightBeforeFollow: RoomReaderPlace.Sight?
+    var queuedOnlyAfterFollow = false
     /// A scroll to the bottom is waiting for the next turn of the run loop, or for the follow limit's second to pass.
     var followQueued = false
     var trailingFollowQueued = false

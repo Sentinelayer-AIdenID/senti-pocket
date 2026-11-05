@@ -235,37 +235,41 @@ final class RoomReaderStaysPutTests: XCTestCase {
     /// At the bottom, a follow scrolls to the end by the heights the list estimates for rows it has not drawn yet, and
     /// stops short when they are taller (in a burst at 60 a second, 102 to 436 points short; more at the largest text
     /// sizes): the reader is left a little up from the end, at a place they never chose. Where each follow lands is
-    /// taken as a new reading, so one that stopped short is followed again until the end is in view. Here, at the
-    /// largest text size, twenty long reports arrive at once under a room of short rows, up to four times, until a
-    /// first follow did stop short (at the default size it reached the end, in CI).
+    /// taken as a new reading, even when it shows what the reading before the follow showed (the end below), so one
+    /// that stopped short is followed again until the end is in view. A second follow needs no such retaking (the
+    /// arrival's own reading, taken on the next frame, makes it); a follow made from a reading makes the next reading
+    /// look the same, and that landing is seen only because it is retaken (`RoomScrollTrace.shortLandingsRetaken`).
+    /// Here, at the largest text size, forty long reports arrive at once under a room of short rows, up to four times,
+    /// until such a landing was retaken and followed.
     func test_a_follow_that_stops_short_of_the_end_is_followed_again() throws {
         try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
         let textSize = DynamicTypeSize.accessibility5
         let room = Room(Self.messages())
         let list = try host(room, textSize: textSize)
-        // Up to four batches: whether a follow stops short depends on the heights the list has measured so far, and
-        // one batch did not always make it stop short. Every batch must end at the end; one at least must have
-        // needed more than one follow.
-        var stoppedShort = false
+        // Up to four batches: whether a follow stops short depends on the heights the list has measured so far. Every
+        // batch must end at the end; one at least must have had a landing short of the end retaken.
+        var retaken = false
         var seq: Int64 = 61
-        for batch in 1...4 where !stoppedShort {
+        for batch in 1...4 where !retaken {
             let height = list.contentSize.height
             RoomScrollTrace.start()
-            room.arrive((seq..<seq + 20).map { Self.longArrival($0) })
-            seq += 20
+            room.arrive((seq..<seq + 40).map { Self.longArrival($0) })
+            seq += 40
             pump(0.1)
-            wait("batch \(batch) followed to the end of the long reports", seconds: 6) {
+            wait("batch \(batch) followed to the end of the long reports", seconds: 8) {
                 list.contentSize.height > height && Self.atBottom(list)
             }
             pump(1)
             let follows = RoomScrollTrace.followsMade
+            let shortLandings = RoomScrollTrace.shortLandingsRetaken
             print("READER-STAYS-PUT tall-arrivals \(textSize) batch=\(batch) follows=\(follows) "
+                + "short-landings-retaken=\(shortLandings) "
                 + "end-below=\(Self.bottomOffset(of: list) - list.contentOffset.y) content=\(list.contentSize.height) "
                 + "(was \(height))")
             XCTAssertTrue(Self.atBottom(list), "batch \(batch): the follow stopped short of the end and stayed there")
-            stoppedShort = follows > 1
+            retaken = shortLandings > 0
         }
-        XCTAssertTrue(stoppedShort, "no batch's first follow stopped short: this case did not test a follow stopping short")
+        XCTAssertTrue(retaken, "no follow's landing short of the end was retaken: this case did not test it")
         XCTAssertTrue(room.atBottom)
         XCTAssertEqual(room.unreadCount, 0)
     }
