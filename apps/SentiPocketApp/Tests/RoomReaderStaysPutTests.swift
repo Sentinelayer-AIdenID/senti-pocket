@@ -111,11 +111,11 @@ final class RoomReaderStaysPutTests: XCTestCase {
         input(seq, "review-agent", "An arrival, \(seq): " + String(repeating: "more words ", count: Int(seq % 5) * 6))
     }
 
-    /// A long report: many times taller than the room's rows, whose heights are what the list estimates the rows it
-    /// has not drawn yet by.
+    /// A long report, drawn whole (under `LongMessage`'s 1,000 characters and 30 lines): many times taller than the
+    /// room's rows, whose heights are what the list estimates the rows it has not drawn yet by.
     private static func longArrival(_ seq: Int64) -> RoomChatMessageInput {
-        input(seq, "review-agent", (1...24).map { "Part \($0) of report \(seq): the step reads well on a small phone, though "
-            + "the second screen still crowds its buttons." }.joined(separator: "\n\n"))
+        input(seq, "review-agent", (1...12).map { "Part \($0) of report \(seq): the second screen still crowds its "
+            + "buttons." }.joined(separator: "\n\n"))
     }
 
     /// The rows a room draws small: the orchestrator's cost lines (background, and alike but for their numbers, so
@@ -250,13 +250,18 @@ final class RoomReaderStaysPutTests: XCTestCase {
         let room = Room(Self.messages())
         let list = try host(room, textSize: textSize)
         let height = list.contentSize.height
-        room.arrive((61...68).map { Self.longArrival($0) })
+        RoomScrollTrace.start()
+        room.arrive((61...80).map { Self.longArrival($0) })
+        pump(0.1)
         wait("followed to the end of the long reports", seconds: 6) {
-            list.contentSize.height > height * 2 && Self.atBottom(list)
+            list.contentSize.height > height && Self.atBottom(list)
         }
         pump(1)
-        print("READER-STAYS-PUT tall-arrivals \(textSize) end-below=\(Self.bottomOffset(of: list) - list.contentOffset.y) "
-            + "content=\(list.contentSize.height) (was \(height))")
+        let follows = RoomScrollTrace.followsMade
+        print("READER-STAYS-PUT tall-arrivals \(textSize) follows=\(follows) "
+            + "end-below=\(Self.bottomOffset(of: list) - list.contentOffset.y) content=\(list.contentSize.height) "
+            + "(was \(height))")
+        XCTAssertGreaterThan(follows, 1, "the first follow reached the end: this case did not stop short")
         XCTAssertTrue(Self.atBottom(list), "the follow stopped short of the end and stayed there")
         XCTAssertTrue(room.atBottom)
         XCTAssertEqual(room.unreadCount, 0)
@@ -349,10 +354,17 @@ final class RoomReaderStaysPutTests: XCTestCase {
         let before = list.contentOffset.y
         scroll(list)
         // The scroll's animation lands before the room's next follow is due (the follow limit's second is up).
-        pump(0.4)
+        var highest = before
+        let scrolling = Date().addingTimeInterval(0.4)
+        while Date() < scrolling {
+            pump(0.02)
+            highest = min(highest, list.contentOffset.y)
+        }
         let scrolledTo = list.contentOffset.y
-        print("READER-STAYS-PUT \(name) scroll: \(before) -> \(scrolledTo) (end at \(Self.bottomOffset(of: list)))")
-        XCTAssertLessThan(scrolledTo, before - 100, "\(name): the list moved up")
+        print("READER-STAYS-PUT \(name) scroll: \(before) -> highest \(highest) -> \(scrolledTo) "
+            + "(end at \(Self.bottomOffset(of: list)))")
+        XCTAssertLessThan(highest, before - 300, "\(name): the list was scrolled up a page")
+        XCTAssertEqual(scrolledTo, highest, accuracy: 1, "\(name): the reader was pulled back down at once")
         arrive(14)
         pump(1.5)
         print("READER-STAYS-PUT \(name) after: \(list.contentOffset.y) unread=\(room.unreadCount)")
