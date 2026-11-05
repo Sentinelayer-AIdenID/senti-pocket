@@ -330,7 +330,9 @@ final class RoomReaderStaysPutTests: XCTestCase {
         try farJump(textSize: .large)
     }
 
-    /// The same at the largest text size, where a row can be taller than the screen.
+    /// The same at the largest text size, where a row can be taller than the screen. Put six rows above the end by the
+    /// rows' estimated heights, the list can already be at the end or past it (in CI it was 827 points past): it is then
+    /// placed there at once, not animated back up. At most one step up, the placing, and never a scroll up.
     func test_the_arrow_takes_a_reader_far_up_a_long_room_down_at_the_largest_text_size() throws {
         try farJump(textSize: .accessibility5)
     }
@@ -343,6 +345,12 @@ final class RoomReaderStaysPutTests: XCTestCase {
         XCTAssertLessThan(jump.draws, 100, "rows drawn on the way down: \(jump.draws) of 400")
         XCTAssertLessThanOrEqual(jump.built, LazyListBuildTests.mostBuiltPerStep,
                                  "rows built on the way down: \(jump.built) of the room's")
+        // After the jump's own step: down, or a single placing step up, never an animation back up.
+        let up = jump.steps.dropFirst().filter { $0 < -2 }
+        XCTAssertLessThanOrEqual(up.count, 1, "the list went back up on its way down: \(up)")
+        if textSize == .large {
+            XCTAssertGreaterThanOrEqual(jump.scrolling, 4, "the way down was not seen scrolling")
+        }
     }
 
     /// Two screens up the same room, the arrow scrolls the whole way, with messages drawn in every frame.
@@ -352,13 +360,17 @@ final class RoomReaderStaysPutTests: XCTestCase {
             return Self.bottomOffset(of: list) - visible * 2
         }
         XCTAssertEqual(jump.blankFrames, 0, "frames on the way down with no messages drawn")
+        XCTAssertGreaterThanOrEqual(jump.scrolling, 4, "the way down was not seen scrolling")
+        XCTAssertLessThanOrEqual(jump.built, LazyListBuildTests.mostBuiltPerStep,
+                                 "rows built on the way down: \(jump.built) of the room's")
     }
 
     /// Opens a room of `rows` messages, puts the reader at `from` (an offset of the list), presses the arrow, and
     /// records every frame until a moment after the reader is down at the latest. Checks what every jump down must
     /// do: the same list throughout, the last stretch seen scrolling, the end reached.
     private func arrowJump(rows: Int, textSize: DynamicTypeSize = .large,
-                           from: (UIScrollView) -> CGFloat) throws -> (blankFrames: Int, draws: Int, built: Int) {
+                           from: (UIScrollView) -> CGFloat) throws
+        -> (blankFrames: Int, draws: Int, built: Int, scrolling: Int, steps: [CGFloat]) {
         try XCTSkipUnless(Self.readsGeometry, "how far the end is comes from the scroll view's geometry (iOS 18 and later)")
         let room = Room(Self.messages(count: rows))
         let window = try HostedSummary.host(Host(room: room, textSize: textSize))
@@ -405,10 +417,9 @@ final class RoomReaderStaysPutTests: XCTestCase {
         XCTAssertGreaterThan(usual, 0, "what is drawn could be read before the tap")
         XCTAssertGreaterThan(during.count, 10, "frames were recorded on the way down")
         XCTAssertTrue(during.allSatisfy(\.sameList), "the room was built again as a new list")
-        XCTAssertGreaterThanOrEqual(scrolling, 4, "the way down was not seen scrolling")
         XCTAssertTrue(Self.list(in: window).map(Self.atBottom) ?? false, "it ended at the bottom")
         XCTAssertTrue(room.atBottom)
-        return (blankFrames, draws, built)
+        return (blankFrames, draws, built, scrolling, steps)
     }
 
     /// Records each frame the screen draws (on the display link): where the list is, how many layers with something

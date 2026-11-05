@@ -307,10 +307,12 @@ public struct RoomChatView: View {
                     // of the room, on screen or not, at every layout pass, to count them. Carter's phone froze inside
                     // that walk (11-04 and 11-05: 12 to 13.5 s in a lazy list's placement, going item by item). Wrapped,
                     // the list builds only the rows it shows. Spacing 0, as the list's own, so nothing moves.
-                    // A row's id is the loop's own (`RoomChatRow.id`), which every scroll to a row targets. No `.id`
-                    // of the same value on the row: with one, the list kept every row it made as it opened and built
-                    // them all again at each update (in CI 404 of 404 at every redraw and arrival), as master did.
-                    ForEach(state.rows) { row in
+                    // A row's id is the loop's own, which every scroll to a row targets: `RoomRowScrollId`, a type
+                    // no other view in the room has, so a scroll finds the row among the loop's ids and never looks
+                    // through the string ids of the rows' own content (file cards, a thread's replies). No `.id` of the
+                    // same value on the row: with one, the list kept every row it made as it opened and built them all
+                    // again at each update (in CI 404 of 404 at every redraw and arrival), as master did.
+                    ForEach(state.rows, id: \.scrollId) { row in
                         VStack(alignment: .leading, spacing: 0) {
                             rowView(row, proxy: proxy)
                         }
@@ -422,13 +424,13 @@ public struct RoomChatView: View {
             // arriving. A reader scrolled up is never moved.
             .onChange(of: state.rows) { _ in
                 if let heldAnchor {
-                    proxy.scrollTo(heldAnchor, anchor: .center)
+                    proxy.scrollTo(row: heldAnchor, anchor: .center)
                 } else {
                     followToBottom(proxy)
                 }
             }
             .onChange(of: state.attachmentPreviews.count) { _ in
-                if let heldAnchor { proxy.scrollTo(heldAnchor, anchor: .center) } else { followToBottom(proxy) }
+                if let heldAnchor { proxy.scrollTo(row: heldAnchor, anchor: .center) } else { followToBottom(proxy) }
             }
             .onChange(of: state.lastMessageId) { _ in
                 if !didInitialScroll {
@@ -451,10 +453,10 @@ public struct RoomChatView: View {
             .onChange(of: state.firstMessageId) { _ in
                 // Older rows were prepended: keep the row the reader was looking at in place.
                 if let heldAnchor {
-                    proxy.scrollTo(heldAnchor, anchor: .center)
+                    proxy.scrollTo(row: heldAnchor, anchor: .center)
                     anchorBeforeOlderLoad = nil
                 } else if let anchor = anchorBeforeOlderLoad {
-                    proxy.scrollTo(anchor, anchor: .top)
+                    proxy.scrollTo(row: anchor, anchor: .top)
                     anchorBeforeOlderLoad = nil
                 }
             }
@@ -473,7 +475,7 @@ public struct RoomChatView: View {
                             return
                         }
                         send(.newMessagesShown)
-                        proxy.scrollTo(RoomChatRow.unreadDivider.id, anchor: Self.unreadLineAnchor)
+                        proxy.scrollTo(row: RoomChatRow.unreadDivider.id, anchor: Self.unreadLineAnchor)
                         DispatchQueue.main.asyncAfter(deadline: .now() + Self.openLanding) { recheckPlace(proxy) }
                     }
                 } else {
@@ -638,7 +640,7 @@ public struct RoomChatView: View {
                 goToFirstUnseen(proxy)
                 return
             }
-            scrollDown(to: Self.bottomId, anchor: .bottom, proxy)
+            scrollDown(to: .bottom, anchor: .bottom, proxy)
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "arrow.down")
@@ -662,7 +664,7 @@ public struct RoomChatView: View {
     /// button goes plain and takes them on to the latest; the line stays until it has been seen.
     private func goToFirstUnseen(_ proxy: ScrollViewProxy) {
         send(.newMessagesShown)
-        scrollDown(to: RoomChatRow.unreadDivider.id, anchor: Self.unreadLineAnchor, proxy)
+        scrollDown(to: .row(RoomChatRow.unreadDivider.id), anchor: Self.unreadLineAnchor, proxy)
     }
 
     /// The jump button's way down, to the latest or to the New messages line, in the list as it is: the reader sees it
@@ -671,17 +673,25 @@ public struct RoomChatView: View {
     /// on its way, which once froze the app from up a long history: so the list is first put, at once, `jumpRows`
     /// rows above where it goes, and scrolls the rest. The rows in between are never drawn. Once it has landed it is
     /// placed again, as the rows it reached are measured by then, and the reader's place is read.
-    private func scrollDown(to target: String, anchor: UnitPoint, _ proxy: ScrollViewProxy) {
+    private func scrollDown(to target: JumpTarget, anchor: UnitPoint, _ proxy: ScrollViewProxy) {
         let tapped = ProcessInfo.processInfo.systemUptime
         let start = jumpStart(above: target)
-        if let start { proxy.scrollTo(start, anchor: .top) }
+        if let start { proxy.scrollTo(row: start, anchor: .top) }
+        let place = { target.scroll(proxy, anchor: anchor) }
         let scroll: () -> Void = {
-            withAnimation(.easeOut(duration: Self.jumpEase)) { proxy.scrollTo(target, anchor: anchor) }
+            // Put by the rows' estimated heights, a far jump to the end can already show it, or go past it (rows taller
+            // than the screen, at the largest text sizes, in CI): it is placed there, not animated back up.
+            if start != nil, target == .bottom, let reading = bottomWatch.reading, reading.endInView {
+                place()
+                RoomNextFrame.run { recheckPlace(proxy) }
+                return
+            }
+            withAnimation(.easeOut(duration: Self.jumpEase)) { place() }
             DispatchQueue.main.asyncAfter(deadline: .now() + Self.jumpEase + 0.05) {
                 // Not once the reader has taken the list again.
                 guard bottomWatch.isActive, heldAnchor == nil, bottomWatch.lastDrag < tapped, !bottomWatch.readerMoving
                 else { return }
-                proxy.scrollTo(target, anchor: anchor)
+                place()
                 RoomNextFrame.run { recheckPlace(proxy) }
             }
         }
@@ -689,12 +699,29 @@ public struct RoomChatView: View {
         if start != nil { RoomNextFrame.run(scroll) } else { scroll() }
     }
 
+    /// Where the jump button goes: the room's latest (its bottom marker), or a row (the New messages line).
+    private enum JumpTarget: Equatable {
+        case bottom
+        case row(String)
+
+        func scroll(_ proxy: ScrollViewProxy, anchor: UnitPoint) {
+            switch self {
+            case .bottom: proxy.scrollTo(RoomChatView.bottomId, anchor: anchor)
+            case .row(let rowId): proxy.scrollTo(row: rowId, anchor: anchor)
+            }
+        }
+    }
+
     /// Where a long jump down starts: the row `jumpRows` above its target, when the target is far below (from iOS 18,
     /// the end of the room more than `farScreens` screens below what is read; before, any target that far down the
     /// rows). Nil for a short way, which is scrolled whole.
-    private func jumpStart(above target: String) -> String? {
+    private func jumpStart(above target: JumpTarget) -> String? {
         let rows = state.rows
-        let index: Int? = target == Self.bottomId ? rows.count : rows.firstIndex(where: { $0.id == target })
+        let index: Int?
+        switch target {
+        case .bottom: index = rows.count
+        case .row(let rowId): index = rows.firstIndex(where: { $0.id == rowId })
+        }
         guard let index, index > Self.jumpRows else { return nil }
         if bottomWatch.readsGeometry, let reading = bottomWatch.reading, bottomWatch.visibleHeight > 0,
            reading.distanceToEnd <= bottomWatch.visibleHeight * Self.farScreens {
@@ -762,7 +789,7 @@ public struct RoomChatView: View {
         setReaderAtBottom(!opensAtLine)
         DispatchQueue.main.async {
             if opensAtLine {
-                proxy.scrollTo(RoomChatRow.unreadDivider.id, anchor: Self.unreadLineAnchor)
+                proxy.scrollTo(row: RoomChatRow.unreadDivider.id, anchor: Self.unreadLineAnchor)
             } else {
                 proxy.scrollTo(Self.bottomId, anchor: .bottom)
             }
@@ -785,7 +812,7 @@ public struct RoomChatView: View {
     private func placeLineAgain(_ proxy: ScrollViewProxy) {
         guard bottomWatch.isActive, !bottomWatch.readerScrolled, heldAnchor == nil,
               state.rows.contains(.unreadDivider) else { return }
-        proxy.scrollTo(RoomChatRow.unreadDivider.id, anchor: Self.unreadLineAnchor)
+        proxy.scrollTo(row: RoomChatRow.unreadDivider.id, anchor: Self.unreadLineAnchor)
     }
 
     /// Where the unread line sits when the room opens at it: a little below the top, under the people floating there,
@@ -870,7 +897,7 @@ public struct RoomChatView: View {
         setReaderAtBottom(false)
         heldAnchor = rowId
         DispatchQueue.main.async {
-            withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(rowId, anchor: .center) }
+            withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(row: rowId, anchor: .center) }
             highlightedRowId = rowId
             send(.focusHandled)
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
@@ -888,7 +915,7 @@ public struct RoomChatView: View {
         setReaderAtBottom(false)
         heldAnchor = target.id
         withAnimation(.easeInOut(duration: 0.25)) {
-            proxy.scrollTo(target.id, anchor: .center)
+            proxy.scrollTo(row: target.id, anchor: .center)
         }
         highlightedRowId = target.id
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
@@ -1034,7 +1061,32 @@ public struct RoomChatView: View {
 
     static let announcementSpacing: TimeInterval = 5
 
-    private static let bottomId = "room-bottom"
+    /// The bottom marker's id, of a type of its own: a scroll to it finds it without looking through the rows, whose
+    /// file cards and pending rows carry string ids (with a string here, an arrival's scroll to the bottom could build
+    /// every row of the room once to look).
+    private static let bottomId = RoomBottomMarkerId()
+}
+
+/// The type of the room's bottom marker id, which no other view in the room has.
+private struct RoomBottomMarkerId: Hashable {}
+
+/// The type of a room row's id in the room's loop, which no other view in the room has (the rows' own content, file
+/// cards, a thread's replies, pending rows, carry string ids). A scroll to a row by a string looked its id up through
+/// those, building every row of the room once to do it.
+private struct RoomRowScrollId: Hashable {
+    let rowId: String
+}
+
+private extension RoomChatRow {
+    /// This row's id in the room's loop (`RoomRowScrollId`).
+    var scrollId: RoomRowScrollId { RoomRowScrollId(rowId: id) }
+}
+
+private extension ScrollViewProxy {
+    /// Scrolls to the room's row with this id (`RoomChatRow.id`), by its id in the room's loop.
+    func scrollTo(row rowId: String, anchor: UnitPoint) {
+        scrollTo(RoomRowScrollId(rowId: rowId), anchor: anchor)
+    }
 }
 
 /// What the room keeps about its bottom marker without redrawing for it: the settled place, and whether the room is on
