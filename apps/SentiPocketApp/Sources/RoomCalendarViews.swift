@@ -568,7 +568,7 @@ struct CalendarSettingsSection: View {
                         // Subscribe with no kept link: a new link replaces any made before, so it asks first, in a
                         // sheet. The sheet hangs on this row: put on the Section, it never presented.
                         .sheet(isPresented: $center.confirmsNewLink) {
-                            CalendarNewLinkQuestion { Task { await center.confirmNewLink() } }
+                            CalendarLinkQuestion(kind: .newLink) { Task { await center.confirmNewLink() } }
                         }
                         Button(role: .destructive) {
                             confirmsReset = true
@@ -579,6 +579,10 @@ struct CalendarSettingsSection: View {
                         }
                         .disabled(center.isWorkingOnFeed)
                         .accessibilityIdentifier("settings.calendar.reset")
+                        // Reset asks first, in the same sheet, on its own row.
+                        .sheet(isPresented: $confirmsReset) {
+                            CalendarLinkQuestion(kind: .reset) { Task { await center.resetLink() } }
+                        }
                     }
                 } header: {
                     Text("Calendar")
@@ -588,12 +592,6 @@ struct CalendarSettingsSection: View {
                 }
                 // At the accessibility sizes the rows drop their icons, so "Calendar" is not broken across lines.
                 .labelStyle(CalendarRowLabelStyle(showsIcon: !typeSize.isAccessibilitySize))
-                .confirmationDialog("Reset your calendar link?", isPresented: $confirmsReset, titleVisibility: .visible) {
-                    Button("Reset link", role: .destructive) { Task { await center.resetLink() } }
-                    Button("Cancel", role: .cancel) {}
-                } message: {
-                    Text(CalendarCenter.resetWarning)
-                }
             }
         }
     }
@@ -606,35 +604,59 @@ struct CalendarSettingsSection: View {
     }
 }
 
-/// Subscribe's question when no link is kept, as a sheet: its title and message wrap at the sheet's full width and
-/// scroll, and at the accessibility sizes the sheet takes the whole height, so the message shows whole. (A confirmation
-/// dialog put them in a narrow popover that cut the message off at AX5 and broke "subscribe" in two on an SE.)
-struct CalendarNewLinkQuestion: View {
+/// A question about the calendar link, as a sheet: Subscribe's when no link is kept, and Reset's. Its title and message
+/// wrap at the sheet's full width and scroll, and at the accessibility sizes the sheet takes the whole height, so the
+/// message shows whole. (As confirmation dialogs they were narrow popovers: at AX5 the message was cut off, and on an
+/// SE the title broke "subscribe" in two.)
+struct CalendarLinkQuestion: View {
+    enum Kind {
+        /// Subscribe with no link kept: a new link replaces any made before.
+        case newLink
+        /// Reset: a new link in place of the kept one.
+        case reset
+    }
+
+    let kind: Kind
     let onConfirm: () -> Void
     @Environment(\.dismiss) private var dismiss
     @Environment(\.dynamicTypeSize) private var typeSize
 
+    /// The prefix of its accessibility identifiers: `.title`, `.message`, `.confirm`, `.cancel`.
+    static func identifier(_ kind: Kind) -> String {
+        kind == .newLink ? "settings.calendar.newLink" : "settings.calendar.resetLink"
+    }
+
+    static func title(_ kind: Kind) -> String {
+        kind == .newLink ? "Make a new subscribe link?" : "Reset your calendar link?"
+    }
+
+    static func message(_ kind: Kind) -> String {
+        kind == .newLink ? CalendarCenter.newLinkWarning : CalendarCenter.resetWarning
+    }
+
     var body: some View {
+        let id = Self.identifier(kind)
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                Text("Make a new subscribe link?")
+                Text(Self.title(kind))
                     .font(.title3.weight(.semibold))
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityAddTraits(.isHeader)
-                    .accessibilityIdentifier("settings.calendar.newLink.title")
-                Text(CalendarCenter.newLinkWarning)
+                    .accessibilityIdentifier("\(id).title")
+                Text(Self.message(kind))
                     .font(.body)
                     .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("settings.calendar.newLink.message")
-                Button {
+                    .accessibilityIdentifier("\(id).message")
+                Button(role: kind == .reset ? .destructive : nil) {
                     dismiss()
                     onConfirm()
                 } label: {
-                    Text("Make a new link")
+                    Text(kind == .reset ? "Reset link" : "Make a new link")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .accessibilityIdentifier("settings.calendar.newLink.confirm")
+                .tint(kind == .reset ? .red : .accentColor)
+                .accessibilityIdentifier("\(id).confirm")
                 Button(role: .cancel) {
                     dismiss()
                 } label: {
@@ -642,7 +664,7 @@ struct CalendarNewLinkQuestion: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
-                .accessibilityIdentifier("settings.calendar.newLink.cancel")
+                .accessibilityIdentifier("\(id).cancel")
             }
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
