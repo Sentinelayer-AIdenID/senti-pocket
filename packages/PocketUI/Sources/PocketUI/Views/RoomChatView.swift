@@ -303,16 +303,13 @@ public struct RoomChatView: View {
                     // of the room, on screen or not, at every layout pass, to count them. Carter's phone froze inside
                     // that walk (11-04 and 11-05: 12 to 13.5 s in a lazy list's placement, going item by item). Wrapped,
                     // the list builds only the rows it shows. Spacing 0, as the list's own, so nothing moves.
-                    // Each row keeps its `.id` (the loop's own id, `RoomChatRow.id`), which the scrolls to a row target.
-                    // Without it, a long press on a message at the largest text size (its menu) set the room laying
-                    // itself out again without end on the simulator (FreezePathsUITests path 4 at AX5: the main thread
-                    // 100% busy for 15 s; with it, 0.8%). It costs one pass over the rows the list made as it opened,
-                    // at the first update after the open, and none after (LazyListBuildTests).
+                    // A row's id is the loop's own (`RoomChatRow.id`), which every scroll to a row targets. No `.id`
+                    // of the same value on the row: with one, the list kept every row it made as it opened and built
+                    // them all again at each update (in CI 404 of 404 at every redraw and arrival), as master did.
                     ForEach(state.rows) { row in
                         VStack(alignment: .leading, spacing: 0) {
                             rowView(row, proxy: proxy)
                         }
-                        .id(row.id)
                     }
                     ForEach(state.pending) { pending in
                         RoomPendingRowView(
@@ -865,6 +862,68 @@ private struct StartsAtBottom: ViewModifier {
     }
 }
 
+/// What a message's menu shows above it: who wrote it, its first 8 lines, and one line for what it carries (a photo's
+/// thumbnail or a "Photo", "Video" or file name label, and how many more), in a card 320 points wide at any text size.
+/// Never the row itself: a long message, a big file card or many images make no second copy here. Read by VoiceOver as
+/// one element, the author then the text.
+struct RoomMessageMenuPreview: View {
+    let row: RoomChatMessageRow
+    let ownHandles: Set<String>
+    /// The first photo's preview bytes, when loaded.
+    var thumbnail: Data?
+
+    /// The most lines of the message the preview shows.
+    static let textLines = 8
+
+    /// What the message carries, as one line: the first item's name, and how many more.
+    static func carried(_ row: RoomChatMessageRow) -> (symbol: String, label: String)? {
+        let names = row.attachments.filter { !$0.isRemoved }.map { chip -> (String, String) in
+            switch chip.kind {
+            case .image: return ("photo", "Photo")
+            case .video: return ("video", "Video")
+            default: return ("doc", chip.filename)
+            }
+        } + row.files.map { ("doc.zipper", $0.name) }
+        guard let first = names.first else { return nil }
+        return (first.0, names.count > 1 ? "\(first.1) and \(names.count - 1) more" : first.1)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(row.authorName)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(PocketPalette.textSecondary)
+                .lineLimit(1)
+            if !row.text.isEmpty {
+                Text(ChatInlineMarkdown.attributed(row.text, ownHandles: ownHandles))
+                    .font(.subheadline)
+                    .foregroundStyle(PocketPalette.textPrimary)
+                    .lineLimit(Self.textLines)
+            }
+            if let carried = Self.carried(row) {
+                HStack(spacing: 8) {
+                    if let thumbnail, let image = RoomImageData.image(from: thumbnail) {
+                        image.resizable().scaledToFill().frame(width: 44, height: 44)
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    } else {
+                        Image(systemName: carried.symbol).foregroundStyle(PocketPalette.textSecondary)
+                    }
+                    Text(carried.label)
+                        .font(.footnote)
+                        .foregroundStyle(PocketPalette.textSecondary)
+                        .lineLimit(1)
+                }
+            } else if row.text.isEmpty {
+                Text("Message").font(.subheadline).foregroundStyle(PocketPalette.textSecondary)
+            }
+        }
+        .padding(14)
+        .frame(width: 320, alignment: .leading)
+        .background(PocketPalette.raised)
+        .accessibilityElement(children: .combine)
+    }
+}
+
 private struct RoomMessageRowView: View {
     let row: RoomChatMessageRow
     let ownHandles: Set<String>
@@ -1087,7 +1146,13 @@ private struct RoomMessageRowView: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(row.accessibilityId)
         .accessibilityAction(named: canReply ? "Reply" : "Open thread") { reply() }
-        .contextMenu { messageMenu }
+        // The menu shows a preview of its own, never the row lifted out of the list: at the largest text size a row
+        // can be taller than the screen, and lifting it set the room laying itself out again without end
+        // (FreezePathsUITests path 4 at AX5: the main thread 100% busy for 15 s; with the preview, 0.8%).
+        .contextMenu { messageMenu } preview: {
+            RoomMessageMenuPreview(row: row, ownHandles: ownHandles,
+                                   thumbnail: row.attachments.lazy.compactMap { attachmentPreviews[$0.attachmentId] }.first)
+        }
         // Simultaneous, so a single tap on a link or a button inside the message is never held back.
         .simultaneousGesture(TapGesture(count: 2).onEnded { showsOptions = true })
         .confirmationDialog("Message options", isPresented: $showsOptions, titleVisibility: .hidden) {
