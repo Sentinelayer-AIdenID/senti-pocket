@@ -432,6 +432,7 @@ final class RoomReaderStaysPutTests: XCTestCase {
                 pump(0.05)
             }
             let below = Self.bottomOffset(of: list) - list.contentOffset.y
+            XCTAssertGreaterThan(list.contentSize.height, height, "batch \(batch): the reports did not grow the room")
             print("READER-STAYS-PUT tall-arrivals arrow batch=\(batch) end-below=\(Int(below)) "
                 + "longest-stranded=\(String(format: "%.2f", longestStranded)) s at-bottom=\(room.atBottom)")
             XCTAssertLessThanOrEqual(longestStranded, Self.strandedLimit, "batch \(batch): the room said the reader "
