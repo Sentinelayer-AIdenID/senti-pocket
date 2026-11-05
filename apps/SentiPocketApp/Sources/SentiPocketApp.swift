@@ -482,11 +482,15 @@ struct AuthenticatedRootView: View {
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
         ))
         let calendarClient = services.calendar ?? CalendarOff()
+        let identity = services.identity
         _calendar = StateObject(wrappedValue: CalendarCenter(
             client: calendarClient,
             feed: calendarClient,
-            // The webcal link goes to the system (Apple Calendar's subscribe sheet) and nowhere else.
-            openURL: { UIApplication.shared.open($0) },
+            // The link is kept for the signed-in person in this phone's Keychain only (gone with the sign-in).
+            vault: CalendarLinkVault.live,
+            person: { await identity.currentAccount().map { $0.accountId ?? $0.authorId } },
+            // The webcal link goes to the system (Apple Calendar's subscribe sheet), which says whether it opened.
+            openURL: { await UIApplication.shared.open($0) },
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
         ))
         _whisperModelCoordinator = ObservedObject(wrappedValue: whisperModelCoordinator)

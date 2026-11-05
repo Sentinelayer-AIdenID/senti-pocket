@@ -203,6 +203,8 @@ struct CalendarScreen: View {
         }
     }
 
+    /// An event: what VoiceOver reads as one element (title, time, room, notes), and its link as a button of its own
+    /// after it, so the link can be reached and opened on its own.
     private func eventRow(_ event: CalendarEvent) -> some View {
         let time = CalendarEventTime.text(event, calendar: board.calendar)
         let room = board.roomTitle(event.sessionId)
@@ -212,23 +214,28 @@ struct CalendarScreen: View {
                 .frame(width: 4)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
-                Text(event.title)
-                    .font(.body.weight(.semibold))
-                    .fixedSize(horizontal: false, vertical: true)
-                Text(time)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                if let room {
-                    Text(room)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-                if let notes = event.notes, !notes.isEmpty {
-                    Text(notes)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(event.title)
+                        .font(.body.weight(.semibold))
                         .fixedSize(horizontal: false, vertical: true)
+                    Text(time)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    if let room {
+                        Text(room)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let notes = event.notes, !notes.isEmpty {
+                        Text(notes)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(CalendarEventRowLabel.text(event, time: time, room: room))
+                .accessibilityIdentifier("pocket.calendar.event.\(event.id)")
                 if let link = event.link {
                     Button {
                         openURL(link)
@@ -238,14 +245,14 @@ struct CalendarScreen: View {
                     }
                     .buttonStyle(.borderless)
                     .accessibilityLabel("Open link for \(event.title)")
+                    .accessibilityIdentifier("pocket.calendar.event.\(event.id).link")
                 }
             }
             Spacer(minLength: 0)
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color(uiColor: .secondarySystemBackground)))
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel([event.title, time, room].compactMap { $0 }.joined(separator: ", "))
+        .accessibilityElement(children: .contain)
     }
 
     private func addField(_ day: CalendarDay) -> some View {
@@ -368,6 +375,14 @@ struct CalendarDayCell: View {
         .accessibilityValue(cell.isToday ? "Today" : "")
         .accessibilityAddTraits(isSelected ? .isSelected : [])
         .accessibilityIdentifier("pocket.calendar.day.\(day.key)")
+    }
+}
+
+/// What VoiceOver reads for an event: "Team dinner, 7:00 PM, Launch planning, Table for eight."
+enum CalendarEventRowLabel {
+    static func text(_ event: CalendarEvent, time: String, room: String?) -> String {
+        let notes = event.notes?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return [event.title, time, room, notes?.isEmpty == false ? notes : nil].compactMap { $0 }.joined(separator: ", ")
     }
 }
 
@@ -545,7 +560,9 @@ struct CalendarSettingsSection: View {
                         Button(role: .destructive) {
                             confirmsReset = true
                         } label: {
+                            // The icon in the red of its title: both say what the row does.
                             Label("Reset link", systemImage: "arrow.counterclockwise")
+                                .foregroundStyle(.red)
                         }
                         .disabled(center.isWorkingOnFeed)
                         .accessibilityIdentifier("settings.calendar.reset")
@@ -564,14 +581,23 @@ struct CalendarSettingsSection: View {
                 } message: {
                     Text(CalendarCenter.resetWarning)
                 }
+                // Subscribe with no kept link: a new link replaces any made before, so it asks first.
+                .confirmationDialog("Make a new subscribe link?", isPresented: $center.confirmsNewLink,
+                                    titleVisibility: .visible) {
+                    Button("Make a new link") { Task { await center.confirmNewLink() } }
+                        .accessibilityIdentifier("settings.calendar.newLink.confirm")
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text(CalendarCenter.newLinkWarning)
+                }
             }
         }
     }
 
     private var footer: String {
         center.showsSubscribe
-            ? "Apple Calendar shows the events from your rooms and keeps them up to date. Each Subscribe makes a new "
-                + "link, and a calendar on an older one stops updating."
+            ? "Apple Calendar shows the events from your rooms and keeps them up to date. Subscribe opens your link "
+                + "again; Reset link makes a new one and stops the old."
             : "Events from your rooms, by day."
     }
 }

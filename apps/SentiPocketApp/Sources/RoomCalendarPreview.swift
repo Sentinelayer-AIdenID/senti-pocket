@@ -50,8 +50,11 @@ enum RoomCalendarPreview {
                           isOffered: ProcessInfo.processInfo.arguments.contains("-PocketCalendarInRoom"))
     }
 
+    /// No link kept yet, so Subscribe asks before it makes one; the preview opens nothing.
     @MainActor
-    private static let center = CalendarCenter(client: PreviewCalendar(), feed: PreviewCalendar(), openURL: { _ in })
+    private static let center = CalendarCenter(client: PreviewCalendar(), feed: PreviewCalendar(),
+                                               vault: PreviewLinks(), person: { "preview-person" },
+                                               openURL: { _ in false })
 
     @MainActor
     private static func board(for stage: String) -> CalendarBoard {
@@ -136,9 +139,25 @@ private struct PreviewCalendar: RoomCalendarServing, CalendarFeedServing {
     func feedAvailable() async throws -> Bool { true }
 
     func newSubscriptionLink() async throws -> CalendarSubscriptionLink {
-        guard let link = CalendarSubscriptionLink.make(apiBaseURL: URL(string: "https://api.example.com"),
-                                                       token: "preview") else { throw CalendarError.invalidData }
+        let feedURL = "https://api.example.com/api/v1/me/calendar.ics?token=preview"
+        guard let link = CalendarSubscriptionLink.make(apiBaseURL: Self.api, feedURL: feedURL) else {
+            throw CalendarError.invalidData
+        }
         return link
     }
+
+    func keptLink(_ url: URL) -> CalendarSubscriptionLink? { CalendarSubscriptionLink.kept(url, apiBaseURL: Self.api) }
+
+    private static let api = URL(string: "https://api.example.com")
+}
+
+/// The preview's kept link: in memory for the run, never the Keychain.
+private final class PreviewLinks: CalendarLinkKeeping, @unchecked Sendable {
+    private let lock = NSLock()
+    private var kept: (person: String, link: URL)?
+
+    func link(for person: String) -> URL? { lock.withLock { kept?.person == person ? kept?.link : nil } }
+    func keep(_ link: URL, for person: String) { lock.withLock { kept = (person, link) } }
+    func forgetAll() { lock.withLock { kept = nil } }
 }
 #endif

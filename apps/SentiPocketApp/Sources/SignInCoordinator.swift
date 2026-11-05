@@ -70,7 +70,7 @@ final class SignInCoordinator: ObservableObject {
              // Unconfirmed agent starts stay (MintStartLedger): only the same account sees them, and forgetting one
              // could let a second paid agent start after signing back in.
          },
-         clearProtectedLocalState: @escaping () -> Void = { OutboxStore.clear() }) {
+         clearProtectedLocalState: @escaping () -> Void = { SignInCoordinator.clearPersonalState() }) {
         self.login = login
         self.appleLogin = appleLogin
         self.isLoggedIn = isLoggedIn
@@ -83,6 +83,14 @@ final class SignInCoordinator: ObservableObject {
             // Migrate/fail closed if an older build left a confirmed intent behind after its credential disappeared.
             clearProtectedLocalState()
         }
+    }
+
+    /// What belongs to the person who was signed in and must not cross a sign-out, a refused credential (another
+    /// account may sign in next, as after an account deletion revokes the session) or a launch with no credential:
+    /// confirmed write intents, and the calendar's subscribe link kept in the Keychain.
+    nonisolated static func clearPersonalState(calendarLinks: any CalendarLinkKeeping = CalendarLinkVault.live) {
+        OutboxStore.clear()
+        calendarLinks.forgetAll()
     }
 
     /// Whether the sign-in screen offers Sign in with Apple.

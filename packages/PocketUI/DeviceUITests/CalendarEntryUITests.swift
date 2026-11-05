@@ -30,6 +30,34 @@ final class CalendarEntryUITests: XCTestCase {
         shot("calendar")
     }
 
+    /// Review P3 (#330): VoiceOver reads an event with its notes, and its link is a button of its own, reached and
+    /// read apart from the row (not folded into one combined element). The preview's November 12 has a dinner with
+    /// notes and a rehearsal with a link.
+    func test_an_event_reads_its_notes_and_its_link_is_a_button_of_its_own() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-PocketCalendarPreview", "-PocketCalendarStage", "day"]
+        app.launch()
+
+        let link = app.buttons["pocket.calendar.event.p4.link"]
+        XCTAssertTrue(link.waitForExistence(timeout: 60), "the link is its own button\n\(app.debugDescription)")
+        XCTAssertEqual(link.label, "Open link for Launch rehearsal")
+        var swipes = 0
+        while !link.isHittable, swipes < 8 {
+            app.swipeUp(velocity: .slow)
+            swipes += 1
+        }
+        XCTAssertTrue(link.isHittable, "the link can be reached on its own")
+
+        let rehearsal = app.descendants(matching: .any)["pocket.calendar.event.p4"]
+        XCTAssertTrue(rehearsal.exists)
+        XCTAssertTrue(rehearsal.label.hasPrefix("Launch rehearsal, "), rehearsal.label)
+        XCTAssertFalse(rehearsal.label.contains("Open link"), "the link is not read inside the row: \(rehearsal.label)")
+        let dinner = app.descendants(matching: .any)["pocket.calendar.event.p6"]
+        XCTAssertTrue(dinner.exists)
+        XCTAssertTrue(dinner.label.hasSuffix("Table for eight."), "the row reads its notes: \(dinner.label)")
+        shot("day-events")
+    }
+
     /// Saves a screenshot where `CAL_SHOT_DIR` points (set by the runner), for the review evidence.
     private func shot(_ name: String) {
         guard let dir = ProcessInfo.processInfo.environment["CAL_SHOT_DIR"], !dir.isEmpty else { return }

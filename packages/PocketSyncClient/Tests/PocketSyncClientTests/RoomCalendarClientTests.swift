@@ -190,7 +190,7 @@ final class RoomCalendarClientTests: XCTestCase {
         let calendar = client { _ in XCTFail("nothing should be sent"); return (500, "") }
         let day = CalendarDay(year: 2026, month: 11, day: 4)
         for request in [CalendarDraftRequest.text(day: day, text: "  \n", timeZone: "America/New_York"),
-                        .text(day: day, text: String(repeating: "a", count: 1_001), timeZone: "America/New_York"),
+                        .text(day: day, text: String(repeating: "a", count: 3_501), timeZone: "America/New_York"),
                         .text(day: day, text: "Lunch", timeZone: "Not/AZone")] {
             do {
                 _ = try await calendar.draft(inRoom: room, request)
@@ -200,6 +200,20 @@ final class RoomCalendarClientTests: XCTestCase {
             }
         }
         XCTAssertTrue(CalendarRoutesURLProtocol.requests.isEmpty)
+    }
+
+    /// Review P3 (#330): the API and the web take 3,500 characters; so does Pocket.
+    func test_a_draft_takes_text_up_to_3500_characters_as_the_api_does() async throws {
+        let text = String(repeating: "a", count: 3_500)
+        let calendar = client { request in
+            XCTAssertEqual(request.body?["text"]?.stringValue?.count, 3_500)
+            return (200, #"{"title": "Long plan", "startsAt": null, "confidence": 0.5, "assumptions": []}"#)
+        }
+        let draft = try await calendar.draft(inRoom: room, .text(day: CalendarDay(year: 2026, month: 11, day: 4),
+                                                                 text: text, timeZone: "America/New_York"))
+        XCTAssertEqual(draft.title, "Long plan")
+        XCTAssertEqual(CalendarRoutesURLProtocol.requests.count, 1, "3,500 characters are sent, not refused here")
+        XCTAssertEqual(CalendarDraftRequest.maxTextLength, 3_500)
     }
 
     // MARK: - Saving
@@ -257,6 +271,43 @@ final class RoomCalendarClientTests: XCTestCase {
             } catch {
                 XCTAssertEqual(error as? CalendarError, expected, "\(status)")
             }
+        }
+    }
+
+    /// A draft answered 429 with `body`, and the error it read as.
+    private func draftError(on429 body: String) async -> CalendarError? {
+        let calendar = client { _ in (429, body) }
+        do {
+            _ = try await calendar.draft(inRoom: room, .text(day: CalendarDay(year: 2026, month: 11, day: 6),
+                                                             text: "Lunch", timeZone: "America/New_York"))
+            XCTFail("a draft from a 429")
+            return nil
+        } catch {
+            return error as? CalendarError
+        }
+    }
+
+    /// Review P2 (#330): the API's own rate limit is "too many just now", not today's cap.
+    func test_a_429_rate_limited_is_too_many_just_now() async {
+        let error = await draftError(on429: #"{"error": {"code": "RATE_LIMITED", "message": "Slow down."}}"#)
+        XCTAssertEqual(error, .rateLimited, "RATE_LIMITED is not the daily cap")
+    }
+
+    /// Review P2 (#330): a 429 from an edge or a proxy carries no calendar code (no body, or not the API's envelope):
+    /// it must not tell the person they have used today's drafts.
+    func test_a_429_with_no_code_is_too_many_just_now() async {
+        for body in ["", #"{"detail": "Too Many Requests"}"#, "<html>429</html>"] {
+            let error = await draftError(on429: body)
+            XCTAssertEqual(error, .rateLimited, "a 429 with no code read as the daily cap: \(body.isEmpty ? "no body" : body)")
+        }
+    }
+
+    /// Review P2 (#330): only the API's calendar code on a 429 is a daily cap.
+    func test_a_429_calendar_error_is_the_daily_cap() async {
+        for body in [#"{"error": {"code": "CALENDAR_ERROR", "message": "Calendar draft daily limit exceeded"}}"#,
+                     #"{"detail": {"error": {"code": "CALENDAR_ERROR"}}}"#] {
+            let error = await draftError(on429: body)
+            XCTAssertEqual(error, .dailyLimit, "CALENDAR_ERROR on a 429 is today's cap: \(body)")
         }
     }
 
@@ -332,18 +383,27 @@ final class RoomCalendarClientTests: XCTestCase {
         }
     }
 
-    /// A 401 on the feed is the missing token refused, not a signed-out person: it reads as on, and nobody is signed
-    /// out by it.
-    func test_the_feed_is_off_only_on_a_404_and_the_probe_carries_no_token() async throws {
+    /// The feed route takes only its own token, as calendar apps send it: the probe sends no token and no bearer
+    /// (review P3, #330; the web sends none either). A 401 there is the missing token refused, not a signed-out
+    /// person: it reads as on.
+    func test_the_feed_is_off_only_on_a_404_and_the_probe_carries_no_token_and_no_credential() async throws {
         for (status, on) in [(404, false), (422, true), (403, true), (401, true)] {
             let calendar = client { request in
                 XCTAssertEqual(request.method, "GET")
                 XCTAssertEqual(request.path, "/api/v1/me/calendar.ics")
                 XCTAssertTrue(request.query.isEmpty)
+                XCTAssertNil(request.authorization, "the probe sends no Authorization header")
                 return (status, "")
             }
             let available = try await calendar.feedAvailable()
             XCTAssertEqual(available, on, "\(status)")
+        }
+        let calendar = client { _ in (503, "") }
+        do {
+            _ = try await calendar.feedAvailable()
+            XCTFail("a 503 decided the feed")
+        } catch {
+            XCTAssertEqual(error as? CalendarError, .retryable)
         }
     }
 
@@ -359,47 +419,76 @@ final class RoomCalendarClientTests: XCTestCase {
 
     // MARK: - Subscribe
 
-    func test_the_subscribe_link_is_webcal_on_the_api_host_with_the_token_encoded() async throws {
-        let feedValue = "made+up/feed=value"
+    /// The link is the server's `url` (review P3, #330), opened as webcal: the API answers
+    /// `{"token": ..., "url": "https://<api>/api/v1/me/calendar.ics?token=..."}`.
+    func test_the_subscribe_link_is_the_servers_url_as_webcal() async throws {
         let calendar = client { request in
             XCTAssertEqual(request.method, "POST")
             XCTAssertEqual(request.path, "/api/v1/me/calendar-feed-token")
             XCTAssertNil(request.body, "a new link is a POST with no body")
-            return (200, #"{"token": "\#(feedValue)", "url": "https://elsewhere.example.test/feed"}"#)
+            return (200, #"{"token": "made-up-value", "url": "https://api.example.test/api/v1/me/calendar.ics?token=made%2Bup%2Ffeed%3Dvalue"}"#)
         }
         let link = try await calendar.newSubscriptionLink()
-        XCTAssertEqual(link.url.absoluteString, "webcal://api.example.test/api/v1/me/calendar.ics?token=made%2Bup%2Ffeed%3Dvalue")
+        XCTAssertEqual(link.url.absoluteString, "webcal://api.example.test/api/v1/me/calendar.ics?token=made%2Bup%2Ffeed%3Dvalue",
+                       "the server's url, not one built from the token field")
         let parsed = URLComponents(url: link.url, resolvingAgainstBaseURL: false)
-        XCTAssertEqual(parsed?.queryItems?.first { $0.name == "token" }?.value, feedValue, "the token reads back exactly")
-        XCTAssertEqual(link.url.host, "api.example.test", "the link stays on the API host, whatever url the answer has")
+        XCTAssertEqual(parsed?.queryItems?.first { $0.name == "token" }?.value, "made+up/feed=value", "reads back exactly")
     }
 
-    func test_an_answer_without_a_token_is_no_link() async {
-        let calendar = client { _ in (200, #"{"url": "https://api.example.test/api/v1/me/calendar.ics"}"#) }
-        do {
-            _ = try await calendar.newSubscriptionLink()
-            XCTFail("a link without a token")
-        } catch {
-            XCTAssertEqual(error as? CalendarError, .invalidData)
+    /// The `url` is a server value: anything but https on the API's own host, port and feed path, with one token in
+    /// the query, is refused and no link is made.
+    func test_a_server_url_that_is_not_the_feed_on_the_api_host_is_refused() async {
+        let refused = [
+            "http://api.example.test/api/v1/me/calendar.ics?token=abc",
+            "https://elsewhere.example.test/api/v1/me/calendar.ics?token=abc",
+            "https://api.example.test.elsewhere.test/api/v1/me/calendar.ics?token=abc",
+            "https://api.example.test:8443/api/v1/me/calendar.ics?token=abc",
+            "https://user@api.example.test/api/v1/me/calendar.ics?token=abc",
+            "https://api.example.test/api/v1/me/other.ics?token=abc",
+            "https://api.example.test/api/v1/me/calendar.ics",
+            "https://api.example.test/api/v1/me/calendar.ics?token=",
+            "https://api.example.test/api/v1/me/calendar.ics?token=abc&next=https://elsewhere.example.test",
+            "https://api.example.test/api/v1/me/calendar.ics?token=abc#fragment",
+            "javascript:alert(1)",
+        ]
+        for url in refused {
+            XCTAssertNil(CalendarSubscriptionLink.make(apiBaseURL: URL(string: "https://api.example.test"), feedURL: url), url)
         }
+        XCTAssertNil(CalendarSubscriptionLink.make(apiBaseURL: URL(string: "https://api.example.test"), feedURL: nil))
+        XCTAssertNil(CalendarSubscriptionLink.make(apiBaseURL: nil,
+                                                   feedURL: "https://api.example.test/api/v1/me/calendar.ics?token=abc"))
+        XCTAssertNotNil(CalendarSubscriptionLink.make(apiBaseURL: URL(string: "https://API.example.test"),
+                                                      feedURL: "https://api.example.test/api/v1/me/calendar.ics?token=abc"))
+        for body in [#"{"token": "abc"}"#, #"{"token": "abc", "url": "https://elsewhere.example.test/feed"}"#] {
+            let calendar = client { _ in (200, body) }
+            let made = try? await calendar.newSubscriptionLink()
+            XCTAssertNil(made, body)
+        }
+    }
+
+    /// A link kept in the Keychain is checked again before it is opened: webcal, on the API host, the feed path.
+    func test_a_kept_link_is_checked_before_it_is_opened() {
+        let calendar = client { _ in XCTFail("checking a kept link asks nothing"); return (500, "") }
+        let kept = "webcal://api.example.test/api/v1/me/calendar.ics?token=abc"
+        XCTAssertEqual(calendar.keptLink(URL(string: kept)!)?.url.absoluteString, kept)
+        for other in ["webcal://elsewhere.example.test/api/v1/me/calendar.ics?token=abc",
+                      "https://api.example.test/api/v1/me/calendar.ics?token=abc",
+                      "webcal://api.example.test/api/v1/me/other.ics?token=abc"] {
+            XCTAssertNil(calendar.keptLink(URL(string: other)!), other)
+        }
+        XCTAssertTrue(CalendarRoutesURLProtocol.requests.isEmpty)
     }
 
     func test_the_link_never_describes_its_token() throws {
         let feedValue = "made-up-feed-value"
-        let link = try XCTUnwrap(CalendarSubscriptionLink.make(apiBaseURL: URL(string: "https://api.example.test"),
-                                                                token: feedValue))
+        let link = try XCTUnwrap(CalendarSubscriptionLink.make(
+            apiBaseURL: URL(string: "https://api.example.test"),
+            feedURL: "https://api.example.test/api/v1/me/calendar.ics?token=\(feedValue)"))
         var dumped = ""
         dump(link, to: &dumped)
         for text in [String(describing: link), String(reflecting: link), "\(link)", dumped] {
             XCTAssertFalse(text.contains(feedValue), text)
         }
-    }
-
-    func test_no_link_without_an_https_origin_or_with_an_odd_token() {
-        XCTAssertNil(CalendarSubscriptionLink.make(apiBaseURL: URL(string: "http://api.example.test"), token: "t"))
-        XCTAssertNil(CalendarSubscriptionLink.make(apiBaseURL: nil, token: "t"))
-        XCTAssertNil(CalendarSubscriptionLink.make(apiBaseURL: URL(string: "https://api.example.test"), token: ""))
-        XCTAssertNil(CalendarSubscriptionLink.make(apiBaseURL: URL(string: "https://api.example.test"), token: "a b"))
     }
 
     // MARK: - Days and instants
@@ -412,6 +501,32 @@ final class RoomCalendarClientTests: XCTestCase {
         kolkata.timeZone = zone("Asia/Kolkata")
         XCTAssertEqual(CalendarDay(instant, in: newYork).key, "2026-11-04")
         XCTAssertEqual(CalendarDay(instant, in: kolkata).key, "2026-11-05")
+    }
+
+    /// America/New_York around the 2026-11-01 fall-back and the 2027-03-14 spring-forward (review P3, #330): the
+    /// written offset follows the instant, and the day is New York's.
+    func test_times_keep_the_right_offset_across_the_clock_changes() {
+        let newYorkZone = zone("America/New_York")
+        var newYork = Calendar(identifier: .gregorian)
+        newYork.timeZone = newYorkZone
+        // 1:30 happens twice on 2026-11-01: first in EDT (05:30Z), then in EST (06:30Z).
+        XCTAssertEqual(CalendarInstant.format(CalendarInstant.parse("2026-11-01T05:30:00Z")!, in: newYorkZone),
+                       "2026-11-01T01:30:00-04:00")
+        XCTAssertEqual(CalendarInstant.format(CalendarInstant.parse("2026-11-01T06:30:00Z")!, in: newYorkZone),
+                       "2026-11-01T01:30:00-05:00")
+        XCTAssertEqual(CalendarInstant.parse("2026-11-01T01:30:00-05:00")!.timeIntervalSince(
+            CalendarInstant.parse("2026-11-01T01:30:00-04:00")!), 3_600, "the two 1:30s are an hour apart")
+        XCTAssertEqual(CalendarDay(CalendarInstant.parse("2026-11-01T06:30:00Z")!, in: newYork).key, "2026-11-01")
+        // 2:30 does not exist on 2027-03-14: 07:30Z is 3:30 EDT.
+        XCTAssertEqual(CalendarInstant.format(CalendarInstant.parse("2027-03-14T07:30:00Z")!, in: newYorkZone),
+                       "2027-03-14T03:30:00-04:00")
+        XCTAssertEqual(CalendarInstant.format(CalendarInstant.parse("2027-03-14T06:30:00Z")!, in: newYorkZone),
+                       "2027-03-14T01:30:00-05:00")
+        let body = CalendarEventCreate(title: "Late show", startsAt: CalendarInstant.parse("2026-11-01T05:30:00Z")!,
+                                       endsAt: CalendarInstant.parse("2026-11-01T07:00:00Z")!, link: nil, notes: nil,
+                                       timeZone: newYorkZone).body
+        XCTAssertEqual(body["startsAt"] as? String, "2026-11-01T01:30:00-04:00")
+        XCTAssertEqual(body["endsAt"] as? String, "2026-11-01T02:00:00-05:00", "the end is after the clocks went back")
     }
 
     func test_instants_need_an_offset() {

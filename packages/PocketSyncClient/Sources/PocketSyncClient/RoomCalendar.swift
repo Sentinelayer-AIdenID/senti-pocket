@@ -143,7 +143,7 @@ public enum CalendarDraftRequest: Equatable, Sendable {
     case message(sourceSequenceId: Int64)
 
     /// The most a typed description may be.
-    public static let maxTextLength = 1_000
+    public static let maxTextLength = 3_500
 
     var body: [String: Any] {
         switch self {
@@ -236,7 +236,7 @@ public struct CalendarEventCreate: Equatable, Sendable {
 }
 
 /// The link Apple Calendar subscribes to. It carries the person's feed token, so it never describes itself: the
-/// only place the token goes is the URL handed to the system to open.
+/// only places it goes are the URL handed to the system to open and the person's own Keychain item.
 public struct CalendarSubscriptionLink: Sendable, CustomStringConvertible, CustomDebugStringConvertible,
     CustomReflectable {
     /// `webcal://<api host>/api/v1/me/calendar.ics?token=…`, to open and nothing else.
@@ -246,23 +246,32 @@ public struct CalendarSubscriptionLink: Sendable, CustomStringConvertible, Custo
         self.url = url
     }
 
-    /// The webcal link for `token` under the API origin, or nil when either is not one to use.
-    public static func make(apiBaseURL: URL?, token: String) -> CalendarSubscriptionLink? {
-        guard let origin = HTTPSessionTransport.validOrigin(apiBaseURL),
-              var components = URLComponents(url: origin, resolvingAgainstBaseURL: false),
-              !token.isEmpty, token.utf8.count <= 1_024,
-              token.unicodeScalars.allSatisfy({ (0x21...0x7E).contains($0.value) }),
-              let encoded = token.addingPercentEncoding(withAllowedCharacters: unreserved)
-        else { return nil }
-        components.scheme = "webcal"
-        components.percentEncodedPath = "/" + CalendarRoutes.feed.joined(separator: "/")
-        components.percentEncodedQuery = CalendarRoutes.feedTokenQuery + "=" + encoded
-        return components.url.map(CalendarSubscriptionLink.init(url:))
+    /// The webcal link for the feed URL the server gave (`url` in the token route's answer). It is a server value, so
+    /// it is checked: https, on the API's own host and port, the feed's path, a token in the query, nothing else.
+    public static func make(apiBaseURL: URL?, feedURL: String?) -> CalendarSubscriptionLink? {
+        feed(feedURL, scheme: "https", apiBaseURL: apiBaseURL)
     }
 
-    /// RFC 3986 unreserved (the token is printable ASCII, so letters and digits are ASCII ones): everything else in
-    /// the token is percent-encoded (`+` included, which a query would read as a space).
-    private static let unreserved = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+    /// A link kept from before (the person's Keychain item), checked as when it was made, or nil.
+    public static func kept(_ url: URL, apiBaseURL: URL?) -> CalendarSubscriptionLink? {
+        feed(url.absoluteString, scheme: "webcal", apiBaseURL: apiBaseURL)
+    }
+
+    private static func feed(_ text: String?, scheme: String, apiBaseURL: URL?) -> CalendarSubscriptionLink? {
+        guard let text, text.utf8.count <= 2_048,
+              let origin = HTTPSessionTransport.validOrigin(apiBaseURL),
+              let api = URLComponents(url: origin, resolvingAgainstBaseURL: false),
+              var feed = URLComponents(string: text),
+              feed.scheme?.lowercased() == scheme,
+              let host = feed.host?.lowercased(), host == api.host?.lowercased(),
+              feed.port == api.port, feed.user == nil, feed.password == nil, feed.fragment == nil,
+              feed.percentEncodedPath == "/" + CalendarRoutes.feed.joined(separator: "/"),
+              let items = feed.queryItems, items.count == 1, items[0].name == CalendarRoutes.feedTokenQuery,
+              let token = items[0].value, !token.isEmpty
+        else { return nil }
+        feed.scheme = "webcal"
+        return feed.url.map(CalendarSubscriptionLink.init(url:))
+    }
 
     public var description: String { "CalendarSubscriptionLink(redacted)" }
     public var debugDescription: String { description }
@@ -278,9 +287,9 @@ public enum CalendarError: Error, Equatable, Sendable {
     case forbidden
     /// 400 or 422: the server refused what was sent.
     case rejected
-    /// 429 `RATE_LIMITED`: too many requests just now.
+    /// 429 `RATE_LIMITED` or with no code (an edge, a proxy): too many requests just now.
     case rateLimited
-    /// Any other 429: a daily cap (drafts, or new events per room or per person).
+    /// 429 `CALENDAR_ERROR`: a daily cap (drafts, or new events per room or per person).
     case dailyLimit
     case reauthenticationRequired
     case notConfigured
@@ -309,16 +318,20 @@ public protocol CalendarFeedServing: Sendable {
     /// Whether the feed is on: its route answers something other than 404.
     func feedAvailable() async throws -> Bool
     /// A link with a new feed token. Every call makes a new one, and a calendar subscribed to an older link stops
-    /// updating.
+    /// updating: the app keeps the link it made and asks before making another.
     func newSubscriptionLink() async throws -> CalendarSubscriptionLink
+    /// A link kept from before, checked again as a link this client makes (the feed on this API's host), or nil.
+    func keptLink(_ url: URL) -> CalendarSubscriptionLink?
 }
 
 public final class HTTPRoomCalendarClient: RoomCalendarServing, CalendarFeedServing, @unchecked Sendable {
     private let request: PersonalRequest
     private let apiBaseURL: URL?
+    private let urlSession: URLSession
 
     public init(apiBaseURL: URL?, urlSession: URLSession, tokenProvider: @escaping @Sendable () -> String?) {
         self.apiBaseURL = apiBaseURL
+        self.urlSession = urlSession
         request = PersonalRequest(apiBaseURL: apiBaseURL, urlSession: urlSession, tokenProvider: tokenProvider)
     }
 
@@ -359,18 +372,44 @@ public final class HTTPRoomCalendarClient: RoomCalendarServing, CalendarFeedServ
         return saved
     }
 
-    /// Asks the feed with no token: off answers 404, on refuses the missing token. Its 401 is that refusal, not a
-    /// signed-out person: the feed takes its token, not the bearer.
+    /// Asks the feed with no token and no credential (the route takes only its own token, as calendar apps send it):
+    /// off answers 404, on refuses the missing token (422, or a 401). No answer, or a 5xx, says neither.
     public func feedAvailable() async throws -> Bool {
-        try await probe("GET", CalendarRoutes.feed, body: nil, unauthorized: .forbidden)
+        guard let origin = HTTPSessionTransport.validOrigin(apiBaseURL) else { throw CalendarError.notConfigured }
+        let url: URL
+        do {
+            url = try HTTPSessionTransport.makeURL(baseURL: origin, path: CalendarRoutes.feed, query: [])
+        } catch {
+            throw CalendarError.notConfigured
+        }
+        var probe = URLRequest(url: url)
+        probe.httpMethod = "GET"
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await urlSession.data(for: probe)
+        } catch {
+            throw CalendarError.retryable
+        }
+        guard let status = (response as? HTTPURLResponse)?.statusCode else { throw CalendarError.retryable }
+        switch status {
+        case 404:
+            let json = data.isEmpty ? nil : try? JSONDecoder().decode(JSONValue.self, from: data)
+            return !Self.isFlagOff(json)
+        case 408, 425, 500..<600: throw CalendarError.retryable
+        default: return true
+        }
     }
 
     public func newSubscriptionLink() async throws -> CalendarSubscriptionLink {
         let answer = try await send("POST", CalendarRoutes.feedToken)
-        guard let token = answer?["token"]?.stringValue,
-              let link = CalendarSubscriptionLink.make(apiBaseURL: apiBaseURL, token: token)
+        guard let link = CalendarSubscriptionLink.make(apiBaseURL: apiBaseURL, feedURL: answer?["url"]?.stringValue)
         else { throw CalendarError.invalidData }
         return link
+    }
+
+    public func keptLink(_ url: URL) -> CalendarSubscriptionLink? {
+        CalendarSubscriptionLink.kept(url, apiBaseURL: apiBaseURL)
     }
 
     /// A 404 is the flag off (or no such route) when it carries no code or the API's generic `HTTP_ERROR` (what its
@@ -379,6 +418,11 @@ public final class HTTPRoomCalendarClient: RoomCalendarServing, CalendarFeedServ
     static func isFlagOff(_ json: JSONValue?) -> Bool {
         let code = errorCode(json)
         return code == nil || code == "HTTP_ERROR"
+    }
+
+    /// A 429 is a daily cap only with the API's calendar code.
+    static func isDailyCap(_ json: JSONValue?) -> Bool {
+        errorCode(json) == "CALENDAR_ERROR"
     }
 
     /// The error's code, at the top (`{"error": {"code": ...}}`) or under FastAPI's `detail`.
@@ -409,10 +453,9 @@ public final class HTTPRoomCalendarClient: RoomCalendarServing, CalendarFeedServ
         return events.sorted { ($0.startsAt, $0.id) < ($1.startsAt, $1.id) }
     }
 
-    private func probe(_ method: String, _ path: [String], body: [String: Any]?,
-                       unauthorized: CalendarError = .reauthenticationRequired) async throws -> Bool {
+    private func probe(_ method: String, _ path: [String], body: [String: Any]?) async throws -> Bool {
         do {
-            _ = try await send(method, path, body: body, unauthorized: unauthorized)
+            _ = try await send(method, path, body: body)
             return true
         } catch CalendarError.unavailable {
             return false
@@ -422,8 +465,8 @@ public final class HTTPRoomCalendarClient: RoomCalendarServing, CalendarFeedServ
         }
     }
 
-    private func send(_ method: String, _ path: [String], query: [URLQueryItem] = [], body: [String: Any]? = nil,
-                      unauthorized: CalendarError = .reauthenticationRequired) async throws -> JSONValue? {
+    private func send(_ method: String, _ path: [String], query: [URLQueryItem] = [],
+                      body: [String: Any]? = nil) async throws -> JSONValue? {
         let answer: PersonalRequest.Answer
         do {
             answer = try await request.send(method, path, query: query, body: body)
@@ -440,10 +483,12 @@ public final class HTTPRoomCalendarClient: RoomCalendarServing, CalendarFeedServ
         }
         switch answer.status {
         case 200..<300: return answer.json
-        case 401: throw unauthorized
+        case 401: throw CalendarError.reauthenticationRequired
         case 403: throw CalendarError.forbidden
         case 404: throw Self.isFlagOff(answer.json) ? CalendarError.unavailable : CalendarError.notFound
-        case 429: throw Self.errorCode(answer.json) == "RATE_LIMITED" ? CalendarError.rateLimited : CalendarError.dailyLimit
+        // Only the API's own calendar code is a daily cap; `RATE_LIMITED`, or no code at all (an edge or a proxy),
+        // is "too many just now".
+        case 429: throw Self.isDailyCap(answer.json) ? CalendarError.dailyLimit : CalendarError.rateLimited
         case 408, 425, 500..<600: throw CalendarError.retryable
         default: throw CalendarError.rejected
         }

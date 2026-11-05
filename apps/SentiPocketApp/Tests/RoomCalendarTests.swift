@@ -1,5 +1,6 @@
 import Foundation
 import PocketSyncClient
+import Security
 import XCTest
 @testable import SentiPocketApp
 
@@ -19,6 +20,8 @@ private final class FakeCalendar: RoomCalendarServing, CalendarFeedServing, @unc
     private var _draftRequests: [(room: String, request: CalendarDraftRequest)] = []
     private var _saved: [(room: String, event: CalendarEventCreate)] = []
     private var _reads = 0
+    private var _mints = 0
+    private var _linkFailure: CalendarError?
     let token: String
 
     init(token: String = "made-up+feed/value") {
@@ -50,6 +53,11 @@ private final class FakeCalendar: RoomCalendarServing, CalendarFeedServing, @unc
     var draftRequests: [(room: String, request: CalendarDraftRequest)] { lock.withLock { _draftRequests } }
     var saved: [(room: String, event: CalendarEventCreate)] { lock.withLock { _saved } }
     var reads: Int { lock.withLock { _reads } }
+    /// How many new links were made (each one stops the one before).
+    var mints: Int { lock.withLock { _mints } }
+    var linkFailure: CalendarError? {
+        get { lock.withLock { _linkFailure } } set { lock.withLock { _linkFailure = newValue } }
+    }
 
     func draftsAvailable(inRoom sessionId: String) async throws -> Bool { draftsOn }
 
@@ -84,10 +92,138 @@ private final class FakeCalendar: RoomCalendarServing, CalendarFeedServing, @unc
 
     func feedAvailable() async throws -> Bool { feedOn }
 
+    /// The first link carries `token`; each later one `token-2`, `token-3`...: a new link every time, as the API does.
     func newSubscriptionLink() async throws -> CalendarSubscriptionLink {
         guard feedOn else { throw CalendarError.unavailable }
-        return CalendarSubscriptionLink.make(apiBaseURL: URL(string: "https://api.example.test"), token: token)!
+        if let failure = linkFailure { throw failure }
+        let count = lock.withLock { () -> Int in
+            _mints += 1
+            return _mints
+        }
+        let value = count == 1 ? token : "\(token)-\(count)"
+        let unreserved = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        let encoded = value.addingPercentEncoding(withAllowedCharacters: unreserved)!
+        return CalendarSubscriptionLink.make(apiBaseURL: Self.api,
+                                             feedURL: "https://api.example.test/api/v1/me/calendar.ics?token=\(encoded)")!
     }
+
+    func keptLink(_ url: URL) -> CalendarSubscriptionLink? { CalendarSubscriptionLink.kept(url, apiBaseURL: Self.api) }
+
+    static let api = URL(string: "https://api.example.test")
+}
+
+/// What the system was asked to open, and whether it opened it.
+@MainActor
+private final class Opener {
+    var opened: [URL] = []
+    var opens = true
+
+    func open(_ url: URL) -> Bool {
+        opened.append(url)
+        return opens
+    }
+}
+
+/// Calendar routes that count each ask and answer as told: nothing (a 503), off (a 404) or on.
+private final class CountingProbes: RoomCalendarServing, CalendarFeedServing, @unchecked Sendable {
+    enum Answer { case unanswered, off, on }
+
+    private let lock = NSLock()
+    private var _drafts = Answer.unanswered
+    private var _feed = Answer.unanswered
+    private var _draftAsks = 0
+    private var _feedAsks = 0
+
+    var drafts: Answer { get { lock.withLock { _drafts } } set { lock.withLock { _drafts = newValue } } }
+    var feed: Answer { get { lock.withLock { _feed } } set { lock.withLock { _feed = newValue } } }
+    var draftAsks: Int { lock.withLock { _draftAsks } }
+    var feedAsks: Int { lock.withLock { _feedAsks } }
+
+    private static func reply(_ answer: Answer) throws -> Bool {
+        switch answer {
+        case .unanswered: throw CalendarError.retryable
+        case .off: return false
+        case .on: return true
+        }
+    }
+
+    func draftsAvailable(inRoom sessionId: String) async throws -> Bool {
+        lock.withLock { _draftAsks += 1 }
+        return try Self.reply(drafts)
+    }
+
+    func feedAvailable() async throws -> Bool {
+        lock.withLock { _feedAsks += 1 }
+        return try Self.reply(feed)
+    }
+
+    func events(inRoom sessionId: String) async throws -> [CalendarEvent] { [] }
+    func agenda() async throws -> [CalendarEvent] { [] }
+    func draft(inRoom sessionId: String, _ request: CalendarDraftRequest) async throws -> CalendarDraft {
+        throw CalendarError.retryable
+    }
+    func save(_ event: CalendarEventCreate, inRoom sessionId: String) async throws -> CalendarEvent {
+        throw CalendarError.retryable
+    }
+    func newSubscriptionLink() async throws -> CalendarSubscriptionLink { throw CalendarError.retryable }
+    func keptLink(_ url: URL) -> CalendarSubscriptionLink? { nil }
+}
+
+/// An in-memory Keychain with the system's rules for the calls the vault makes: class, service and account match; data
+/// or attributes come back as asked, one or all; a second item for the same account is a duplicate. It records every
+/// item added, as added.
+private final class TestKeychain: KeychainItems, @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [[String: Any]] = []
+    private var added: [[String: Any]] = []
+    private static let keys = [kSecClass as String, kSecAttrService as String, kSecAttrAccount as String]
+
+    var addedItems: [[String: Any]] { lock.withLock { added } }
+
+    private static func matches(_ item: [String: Any], _ query: [String: Any]) -> Bool {
+        keys.allSatisfy { key in
+            guard let wanted = query[key] else { return true }
+            return (item[key] as? String) == (wanted as? String)
+        }
+    }
+
+    func add(_ attributes: [String: Any]) -> OSStatus {
+        lock.withLock {
+            if items.contains(where: { Self.matches($0, attributes) }) { return errSecDuplicateItem }
+            items.append(attributes)
+            added.append(attributes)
+            return errSecSuccess
+        }
+    }
+
+    func copyMatching(_ query: [String: Any]) -> (status: OSStatus, result: CFTypeRef?) {
+        lock.withLock {
+            let found = items.filter { Self.matches($0, query) }
+            guard let first = found.first else { return (errSecItemNotFound, nil) }
+            let wantsData = query[kSecReturnData as String] as? Bool == true
+            func answer(_ item: [String: Any]) -> AnyObject {
+                wantsData ? item[kSecValueData as String] as AnyObject
+                    : item.filter { $0.key != kSecValueData as String } as NSDictionary
+            }
+            let all = (query[kSecMatchLimit as String] as? String) == (kSecMatchLimitAll as String)
+            let result: AnyObject = all ? found.map(answer) as NSArray : answer(first)
+            return (errSecSuccess, result)
+        }
+    }
+
+    func delete(_ query: [String: Any]) -> OSStatus {
+        lock.withLock {
+            let before = items.count
+            items.removeAll { Self.matches($0, query) }
+            return items.count < before ? errSecSuccess : errSecItemNotFound
+        }
+    }
+}
+
+/// A clock the tests move by hand.
+private final class TestNow {
+    var now = CalendarInstant.parse("2026-11-04T10:00:00-05:00")!
+    func advance(_ seconds: TimeInterval) { now = now.addingTimeInterval(seconds) }
 }
 
 @MainActor
@@ -107,6 +243,61 @@ final class RoomCalendarTests: XCTestCase {
         let instant = at(now)
         return CalendarBoard(scope: scope, client: fake, calendar: calendar(zone), now: { instant },
                              onUnavailable: onUnavailable)
+    }
+
+    /// System Keychain items a test made, under a service of its own, removed after it.
+    private var systemVaults: [CalendarLinkVault] = []
+
+    override func tearDown() {
+        systemVaults.forEach { $0.forgetAll() }
+        systemVaults = []
+        super.tearDown()
+    }
+
+    /// The vault as the app has it, on an in-memory Keychain.
+    private func testVault(_ keychain: TestKeychain = TestKeychain()) -> CalendarLinkVault {
+        CalendarLinkVault(service: "com.plexaura.sentipocket.tests.calendar-link.\(UUID().uuidString)", keychain: keychain)
+    }
+
+    /// The app's sign-in as it runs, its clearing pointed at `links`.
+    private func makeSignIn(clearing links: CalendarLinkVault, stored: @escaping () -> Bool,
+                            signOut: @escaping () -> Void) -> SignInCoordinator {
+        SignInCoordinator(login: {}, isLoggedIn: stored, signOut: signOut,
+                          clearProtectedLocalState: { SignInCoordinator.clearPersonalState(calendarLinks: links) })
+    }
+
+    /// Skips where the host has no Keychain: a simulator app built unsigned, as CI builds it, is refused with
+    /// errSecMissingEntitlement. The signed build runs the test.
+    private func requireSystemKeychain() throws {
+        let probe: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                    kSecAttrService as String: "com.plexaura.sentipocket.tests.keychain-probe",
+                                    kSecAttrAccount as String: UUID().uuidString,
+                                    kSecValueData as String: Data("probe".utf8),
+                                    kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
+        let status = SecItemAdd(probe as CFDictionary, nil)
+        SecItemDelete([kSecClass as String: kSecClassGenericPassword,
+                       kSecAttrService as String: "com.plexaura.sentipocket.tests.keychain-probe"] as CFDictionary)
+        if status == errSecMissingEntitlement {
+            throw XCTSkip("This host has no Keychain (a simulator app built unsigned); the signed build runs this test.")
+        }
+        XCTAssertEqual(status, errSecSuccess, "the system Keychain refused an item")
+    }
+
+    private func makeCenter(client: any RoomCalendarServing, feed: any CalendarFeedServing,
+                            vault: (any CalendarLinkKeeping)? = nil, person: String? = "person-a",
+                            opener: Opener? = nil, clock: TestNow? = nil) -> CalendarCenter {
+        let opener = opener ?? Opener()
+        return CalendarCenter(client: client, feed: feed, vault: vault ?? testVault(), person: { person },
+                              openURL: { opener.open($0) }, now: { clock?.now ?? Date() })
+    }
+
+    private func makeCenter(_ fake: FakeCalendar, vault: (any CalendarLinkKeeping)? = nil, person: String? = "person-a",
+                            opener: Opener? = nil, clock: TestNow? = nil) -> CalendarCenter {
+        makeCenter(client: fake, feed: fake, vault: vault, person: person, opener: opener, clock: clock)
+    }
+
+    private func feedLink(_ value: String) -> URL {
+        URL(string: "webcal://api.example.test/api/v1/me/calendar.ics?token=\(value)")!
     }
 
     private func lunchDraft(_ start: String, _ end: String?, confidence: Double? = 0.9,
@@ -258,7 +449,7 @@ final class RoomCalendarTests: XCTestCase {
         XCTAssertNil(CalendarCenter.probeRoom(in: []))
 
         let fake = FakeCalendar()
-        let center = CalendarCenter(client: fake, feed: fake, openURL: { _ in })
+        let center = makeCenter(fake)
         await center.refresh(probeRoom: CalendarCenter.probeRoom(in: viewerOnly))
         XCTAssertTrue(center.showsCalendar, "a viewer-only account sees the calendar once drafting is on")
         XCTAssertTrue(center.showsSubscribe)
@@ -363,7 +554,9 @@ final class RoomCalendarTests: XCTestCase {
         let fake = FakeCalendar()
         fake.draftsOn = false
         fake.feedOn = false
-        let center = CalendarCenter(client: fake, feed: fake, openURL: { _ in XCTFail("nothing to open") })
+        let clock = TestNow()
+        let opener = Opener()
+        let center = makeCenter(fake, opener: opener, clock: clock)
         XCTAssertFalse(center.showsCalendar, "hidden before the server has answered")
         XCTAssertFalse(center.showsSubscribe)
         await center.checkDrafts(probeRoom: "room-1")
@@ -374,10 +567,15 @@ final class RoomCalendarTests: XCTestCase {
         XCTAssertFalse(center.showsSubscribe, "the feed answered 404: no Subscribe row")
         await center.subscribe()
         XCTAssertNil(center.feedNotice)
+        XCTAssertFalse(center.confirmsNewLink)
 
-        // On, then off again while open: the calendar and its sheet go.
+        // On, then off again while open: the calendar and its sheet go. An "off" is asked again after ten minutes.
         fake.draftsOn = true
         fake.feedOn = true
+        clock.advance(9 * 60)
+        await center.refresh(probeRoom: "room-1")
+        XCTAssertFalse(center.showsCalendar, "an off answer is not asked again within ten minutes")
+        clock.advance(60)
         await center.refresh(probeRoom: "room-1")
         XCTAssertTrue(center.showsCalendar)
         XCTAssertTrue(center.showsSubscribe)
@@ -389,7 +587,9 @@ final class RoomCalendarTests: XCTestCase {
         XCTAssertFalse(center.showsCalendar)
         XCTAssertNil(board.form)
         await center.subscribe()
-        XCTAssertFalse(center.showsSubscribe)
+        await center.confirmNewLink()
+        XCTAssertFalse(center.showsSubscribe, "making a link answered 404: no Subscribe row")
+        XCTAssertTrue(opener.opened.isEmpty)
     }
 
     /// A 404 with a calendar code (a real not-found) is a read that failed, said in the calendar; a 404 without one
@@ -430,11 +630,13 @@ final class RoomCalendarTests: XCTestCase {
             }
         }
         let flaky = Flaky()
-        let center = CalendarCenter(client: flaky, feed: FakeCalendar(), openURL: { _ in })
+        let clock = TestNow()
+        let center = makeCenter(client: flaky, feed: FakeCalendar(), clock: clock)
         await center.checkDrafts(probeRoom: "room-1")
         XCTAssertNil(center.draftsOn)
         XCTAssertFalse(center.showsCalendar)
         flaky.fails = false
+        clock.advance(60)
         await center.checkDrafts(probeRoom: "room-1")
         XCTAssertTrue(center.showsCalendar)
     }
@@ -443,22 +645,23 @@ final class RoomCalendarTests: XCTestCase {
 
     func test_the_feed_token_shows_nowhere_but_the_opened_link() async throws {
         let fake = FakeCalendar(token: "made-up+feed/value")
-        var opened: [URL] = []
-        let center = CalendarCenter(client: fake, feed: fake, openURL: { opened.append($0) })
+        let opener = Opener()
+        let center = makeCenter(fake, opener: opener)
         await center.refresh(probeRoom: "room-1")
         await center.subscribe()
+        await center.confirmNewLink()
 
-        XCTAssertEqual(opened.count, 1)
-        let url = try XCTUnwrap(opened.first)
+        XCTAssertEqual(opener.opened.count, 1)
+        let url = try XCTUnwrap(opener.opened.first)
         XCTAssertEqual(url.scheme, "webcal")
         XCTAssertEqual(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first?.value, fake.token)
         let afterSubscribe = center.feedNotice
 
         await center.resetLink()
-        XCTAssertEqual(opened.count, 1, "a reset opens nothing")
+        XCTAssertEqual(opener.opened.count, 1, "a reset opens nothing")
         let afterReset = center.feedNotice
 
-        let shown = [afterSubscribe, afterReset, CalendarCenter.resetWarning,
+        let shown = [afterSubscribe, afterReset, CalendarCenter.resetWarning, CalendarCenter.newLinkWarning,
                      String(describing: center), String(reflecting: center)].compactMap { $0 }
         for text in shown {
             XCTAssertFalse(text.contains(fake.token), "the token showed in: \(text)")
@@ -468,7 +671,406 @@ final class RoomCalendarTests: XCTestCase {
         XCTAssertEqual(afterReset, CalendarCenter.reset)
     }
 
+    // MARK: - The subscribe link, kept for the person (review P2, #330)
+
+    /// Subscribe with a kept link opens it again and makes none, so a calendar already subscribed keeps updating. The
+    /// link outlives a relaunch (a new center, the same Keychain).
+    func test_a_second_subscribe_opens_the_kept_link_and_makes_no_new_one() async throws {
+        let fake = FakeCalendar()
+        let vault = testVault()
+        let opener = Opener()
+        let center = makeCenter(fake, vault: vault, opener: opener)
+        await center.refresh(probeRoom: "room-1")
+        await center.subscribe()
+        await center.confirmNewLink()
+        XCTAssertEqual(fake.mints, 1)
+        let first = try XCTUnwrap(opener.opened.first)
+        XCTAssertEqual(vault.link(for: "person-a"), first, "the link is kept for the person who made it")
+
+        await center.subscribe()
+        await center.subscribe()
+        XCTAssertEqual(fake.mints, 1, "a second Subscribe made a new link, which stops the subscribed calendar")
+        XCTAssertFalse(center.confirmsNewLink, "with a kept link nothing is asked")
+        XCTAssertEqual(opener.opened, [first, first, first], "each Subscribe opens the kept link")
+        XCTAssertEqual(center.feedNotice, CalendarCenter.opened)
+
+        let relaunched = makeCenter(fake, vault: vault, opener: opener)
+        await relaunched.refresh(probeRoom: "room-1")
+        await relaunched.subscribe()
+        XCTAssertEqual(fake.mints, 1, "after a relaunch the kept link opens again")
+        XCTAssertEqual(opener.opened.last, first)
+    }
+
+    /// With no kept link (a new phone, or after a sign-out) Subscribe asks first, in the review's words; only a yes
+    /// makes a link, and exactly one.
+    func test_with_no_kept_link_subscribe_asks_then_makes_one_link() async {
+        let fake = FakeCalendar()
+        let opener = Opener()
+        let center = makeCenter(fake, opener: opener)
+        await center.refresh(probeRoom: "room-1")
+        XCTAssertEqual(CalendarCenter.newLinkWarning,
+                       "This makes a new subscribe link. A calendar already using an older link stops updating.")
+
+        await center.subscribe()
+        XCTAssertTrue(center.confirmsNewLink, "no kept link: Subscribe asks before it makes one")
+        XCTAssertEqual(fake.mints, 0, "nothing is made before the person says yes")
+        XCTAssertTrue(opener.opened.isEmpty)
+        center.confirmsNewLink = false // Cancel
+        XCTAssertEqual(fake.mints, 0, "Cancel makes nothing")
+
+        await center.subscribe()
+        XCTAssertTrue(center.confirmsNewLink)
+        await center.confirmNewLink()
+        XCTAssertFalse(center.confirmsNewLink)
+        XCTAssertEqual(fake.mints, 1, "one yes, one link")
+        XCTAssertEqual(opener.opened.count, 1)
+        XCTAssertEqual(center.feedNotice, CalendarCenter.opened)
+    }
+
+    /// Reset (which asks first, in the view) replaces the kept link; Subscribe then opens the new one without making a
+    /// third.
+    func test_reset_replaces_the_kept_link() async throws {
+        let fake = FakeCalendar()
+        let vault = testVault()
+        let opener = Opener()
+        let center = makeCenter(fake, vault: vault, opener: opener)
+        await center.refresh(probeRoom: "room-1")
+        await center.subscribe()
+        await center.confirmNewLink()
+        let first = try XCTUnwrap(vault.link(for: "person-a"))
+
+        await center.resetLink()
+        XCTAssertEqual(fake.mints, 2)
+        let second = try XCTUnwrap(vault.link(for: "person-a"))
+        XCTAssertNotEqual(second, first, "Reset keeps the new link in place of the old")
+        XCTAssertEqual(vault.accounts(), ["person-a"], "one link kept, not two")
+        XCTAssertEqual(opener.opened, [first], "a reset opens nothing")
+        XCTAssertEqual(center.feedNotice, CalendarCenter.reset)
+
+        await center.subscribe()
+        XCTAssertEqual(fake.mints, 2, "Subscribe after a reset opens the new link without making another")
+        XCTAssertEqual(opener.opened.last, second)
+    }
+
+    /// The link does not cross a sign-out: the sign-in's clearing drops it.
+    func test_signing_out_forgets_the_kept_link() async {
+        let vault = testVault()
+        vault.keep(feedLink("made-up-one"), for: "person-a")
+        var stored = true
+        let signIn = makeSignIn(clearing: vault, stored: { stored }, signOut: { stored = false })
+        XCTAssertEqual(vault.accounts(), ["person-a"], "a launch with someone signed in keeps their link")
+
+        await signIn.handle(.signOut)?.value
+        XCTAssertEqual(signIn.phase, .signedOut)
+        XCTAssertTrue(vault.accounts().isEmpty, "the kept link outlived the sign-out")
+    }
+
+    /// Another person signing in on this phone never gets the last person's link: a link is read only for the person it
+    /// was kept for, and another person's is dropped. A launch with no one signed in (anyone may sign in next) drops it.
+    func test_an_account_switch_never_opens_the_last_persons_link() async {
+        let fake = FakeCalendar()
+        let vault = testVault()
+        vault.keep(feedLink("made-up-one"), for: "person-a")
+        XCTAssertEqual(vault.accounts(), ["person-a"])
+        let opener = Opener()
+        let center = makeCenter(fake, vault: vault, person: "person-b", opener: opener)
+        await center.refresh(probeRoom: "room-1")
+        await center.subscribe()
+        XCTAssertTrue(opener.opened.isEmpty, "person B opened person A's link")
+        XCTAssertTrue(center.confirmsNewLink, "person B has no link yet: Subscribe asks")
+        XCTAssertTrue(vault.accounts().isEmpty, "person A's link is dropped, not kept beside B's")
+        await center.confirmNewLink()
+        XCTAssertEqual(vault.accounts(), ["person-b"])
+
+        let launched = testVault()
+        launched.keep(feedLink("made-up-two"), for: "person-a")
+        XCTAssertEqual(launched.accounts(), ["person-a"])
+        _ = makeSignIn(clearing: launched, stored: { false }, signOut: {})
+        XCTAssertTrue(launched.accounts().isEmpty, "a launch with no one signed in kept the last person's link")
+    }
+
+    /// Account deletion (#306): the server's yes ends the account's sessions, then the app signs out. Ending this
+    /// phone's call ring with the old bearer then gets a 401; the link goes all the same, as it does on any later 401.
+    func test_account_deletion_forgets_the_kept_link() async {
+        let vault = testVault()
+        vault.keep(feedLink("made-up-one"), for: "person-a")
+        XCTAssertEqual(vault.accounts(), ["person-a"])
+        var stored = true
+        let signIn = makeSignIn(clearing: vault, stored: { stored }, signOut: { stored = false })
+        signIn.onWillSignOut = {
+            signIn.invalidateAuthentication()
+            throw DeviceRingRegistrationError.reauthenticationRequired
+        }
+        await signIn.handle(.signOut)?.value
+        XCTAssertTrue(vault.accounts().isEmpty, "the deleted account's link outlived its sign-out")
+
+        vault.keep(feedLink("made-up-two"), for: "person-a")
+        XCTAssertEqual(vault.accounts(), ["person-a"])
+        stored = true
+        let next = makeSignIn(clearing: vault, stored: { stored }, signOut: { stored = false })
+        next.invalidateAuthentication(expectedEpoch: next.authenticationEpoch)
+        XCTAssertEqual(next.phase, .reauthenticationRequired)
+        XCTAssertTrue(vault.accounts().isEmpty, "a refused credential (a deleted account's) kept the link")
+    }
+
+    /// The link is added as a Keychain item readable only while the phone is unlocked and never leaving it (no backup,
+    /// no other device, never synced): kSecAttrAccessibleWhenUnlockedThisDeviceOnly.
+    func test_the_kept_link_is_a_this_device_only_keychain_item() async {
+        let fake = FakeCalendar()
+        let keychain = TestKeychain()
+        let vault = testVault(keychain)
+        let center = makeCenter(fake, vault: vault)
+        await center.refresh(probeRoom: "room-1")
+        await center.subscribe()
+        await center.confirmNewLink()
+        XCTAssertNotNil(vault.link(for: "person-a"))
+        XCTAssertEqual(keychain.addedItems.count, 1)
+        let item = keychain.addedItems.first ?? [:]
+        XCTAssertEqual(item[kSecAttrAccessible as String] as? String, kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String)
+        XCTAssertNil(item[kSecAttrSynchronizable as String], "never synced to another device")
+        XCTAssertEqual(item[kSecClass as String] as? String, kSecClassGenericPassword as String)
+        XCTAssertEqual(vault.accessibility(for: "person-a"), kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String)
+    }
+
+    /// In the system Keychain itself (where the host has one): the item reads back as this-device-only, and the app's
+    /// own sign-in clearing, as the app runs it, drops the live item on sign-out and on a refused credential.
+    func test_in_the_system_keychain_the_link_is_this_device_only_and_goes_with_the_sign_in() async throws {
+        try requireSystemKeychain()
+        let vault = CalendarLinkVault(service: "com.plexaura.sentipocket.tests.calendar-link.\(UUID().uuidString)")
+        systemVaults.append(vault)
+        vault.keep(feedLink("made-up-one"), for: "person-a")
+        XCTAssertEqual(vault.link(for: "person-a"), feedLink("made-up-one"))
+        XCTAssertEqual(vault.accessibility(for: "person-a"), kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String,
+                       "the system Keychain reports another accessibility class")
+
+        let live = CalendarLinkVault.live
+        live.forgetAll()
+        defer { live.forgetAll() }
+        live.keep(feedLink("made-up-two"), for: "person-a")
+        XCTAssertEqual(live.accounts(), ["person-a"])
+        var stored = true
+        let signIn = SignInCoordinator(login: {}, isLoggedIn: { stored }, signOut: { stored = false })
+        await signIn.handle(.signOut)?.value
+        XCTAssertTrue(live.accounts().isEmpty, "the app's sign-out left the link in the Keychain")
+
+        live.keep(feedLink("made-up-three"), for: "person-a")
+        stored = true
+        let next = SignInCoordinator(login: {}, isLoggedIn: { stored }, signOut: { stored = false })
+        next.invalidateAuthentication(expectedEpoch: next.authenticationEpoch)
+        XCTAssertTrue(live.accounts().isEmpty, "the app's refused-credential path left the link in the Keychain")
+    }
+
+    /// The link is never written outside the Keychain: not in UserDefaults, not in any file of the app's container, not
+    /// in what the rows say. The file search finds a file planted with the same text first, so it can fail.
+    func test_the_kept_link_is_written_nowhere_but_the_keychain() async throws {
+        let marker = "kept-only-in-the-keychain-\(Int.random(in: 100_000...999_999))"
+        let needle = Data(marker.utf8)
+        func filesHolding() -> [String] {
+            let home = URL(fileURLWithPath: NSHomeDirectory())
+            let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey]
+            var found: [String] = []
+            let walk = FileManager.default.enumerator(at: home, includingPropertiesForKeys: keys)
+            while let file = walk?.nextObject() as? URL {
+                let values = try? file.resourceValues(forKeys: Set(keys))
+                guard values?.isRegularFile == true, (values?.fileSize ?? 0) <= 8_000_000,
+                      let data = try? Data(contentsOf: file), data.range(of: needle) != nil else { continue }
+                found.append(file.lastPathComponent)
+            }
+            return found
+        }
+        let planted = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("calendar-link-control.txt")
+        try needle.write(to: planted)
+        XCTAssertEqual(filesHolding(), ["calendar-link-control.txt"], "the search finds the planted file")
+        try FileManager.default.removeItem(at: planted)
+
+        let fake = FakeCalendar(token: marker)
+        let vault = testVault()
+        let center = makeCenter(fake, vault: vault)
+        await center.refresh(probeRoom: "room-1")
+        await center.subscribe()
+        await center.confirmNewLink()
+        await center.subscribe()
+        XCTAssertEqual(vault.link(for: "person-a")?.absoluteString.contains(marker), true, "the Keychain has it")
+        UserDefaults.standard.synchronize()
+
+        XCTAssertFalse(String(describing: UserDefaults.standard.dictionaryRepresentation()).contains(marker),
+                       "the link is in UserDefaults")
+        XCTAssertEqual(filesHolding(), [], "the link is in a file")
+        for text in [center.feedNotice, String(describing: center), String(reflecting: center)].compactMap({ $0 }) {
+            XCTAssertFalse(text.contains(marker), "the link shows in: \(text)")
+        }
+    }
+
+    /// Without knowing who is signed in, no link is opened, made or kept.
+    func test_nothing_is_opened_or_made_without_knowing_who_is_signed_in() async {
+        let fake = FakeCalendar()
+        let vault = testVault()
+        vault.keep(feedLink("made-up-one"), for: "person-a")
+        let opener = Opener()
+        let center = makeCenter(fake, vault: vault, person: nil, opener: opener)
+        await center.refresh(probeRoom: "room-1")
+        await center.subscribe()
+        XCTAssertTrue(opener.opened.isEmpty)
+        XCTAssertFalse(center.confirmsNewLink)
+        XCTAssertEqual(center.feedNotice, CalendarCenter.noPerson)
+        await center.resetLink()
+        XCTAssertEqual(fake.mints, 0)
+    }
+
+    /// Review P3 (#330): a refused link (403) says the account can't, as the app's other refusals do ("This account
+    /// can't make rooms right now."), not "check your connection".
+    func test_a_refused_link_says_the_account_cannot_not_the_connection() async {
+        let fake = FakeCalendar()
+        fake.linkFailure = .forbidden
+        let opener = Opener()
+        let center = makeCenter(fake, opener: opener)
+        await center.refresh(probeRoom: "room-1")
+        await center.subscribe()
+        await center.confirmNewLink()
+        XCTAssertEqual(center.feedNotice, "This account can't make a calendar link right now.")
+        XCTAssertEqual(center.feedNotice?.localizedCaseInsensitiveContains("connection"), false)
+        XCTAssertTrue(opener.opened.isEmpty)
+        await center.resetLink()
+        XCTAssertEqual(center.feedNotice, "This account can't make a calendar link right now.")
+    }
+
+    /// Review P3 (#330): "Apple Calendar opened" only when the system says it opened the link.
+    func test_apple_calendar_opened_is_said_only_when_the_link_opened() async {
+        let fake = FakeCalendar()
+        let opener = Opener()
+        opener.opens = false
+        let center = makeCenter(fake, opener: opener)
+        await center.refresh(probeRoom: "room-1")
+        await center.subscribe()
+        await center.confirmNewLink()
+        XCTAssertEqual(opener.opened.count, 1, "the system was asked")
+        XCTAssertEqual(center.feedNotice, CalendarCenter.notOpened, "said opened when the system did not open it")
+        opener.opens = true
+        await center.subscribe()
+        XCTAssertEqual(center.feedNotice, CalendarCenter.opened)
+        XCTAssertEqual(fake.mints, 1, "the link made when it did not open is kept and opened again")
+    }
+
+    // MARK: - Asking the server again (review P3, #330)
+
+    /// While the routes answer 503 (or nothing), a room switch or a Settings open does not ask again at once: the next
+    /// ask waits 1, 2, 4, 8, then at most 10 minutes. "On" is final for the sign-in. Any answer starts the waits over
+    /// (an "off" is asked again after 10 minutes). The clock is the test's, not sleeps.
+    func test_unanswered_probes_back_off_from_one_to_ten_minutes() async {
+        let probes = CountingProbes()
+        let clock = TestNow()
+        let center = makeCenter(client: probes, feed: probes, clock: clock)
+        await center.checkDrafts(probeRoom: "room-1")
+        XCTAssertEqual(probes.draftAsks, 1)
+        var asks = 1
+        for wait in [60, 120, 240, 480, 600, 600] {
+            clock.advance(TimeInterval(wait - 1))
+            await center.checkDrafts(probeRoom: "room-1") // a room switch
+            await center.refresh(probeRoom: "room-1") // Settings opens
+            XCTAssertEqual(probes.draftAsks, asks, "asked again before \(wait) s")
+            clock.advance(1)
+            await center.checkDrafts(probeRoom: "room-1")
+            asks += 1
+            XCTAssertEqual(probes.draftAsks, asks, "not asked again at \(wait) s")
+        }
+        probes.drafts = .on
+        clock.advance(600)
+        await center.checkDrafts(probeRoom: "room-1")
+        XCTAssertTrue(center.showsCalendar)
+        clock.advance(3_600)
+        await center.checkDrafts(probeRoom: "room-1")
+        await center.refresh(probeRoom: "room-1")
+        XCTAssertEqual(probes.draftAsks, asks + 1, "on is not asked again")
+
+        // The feed: two misses (1, then 2 minutes), an "off" (10 minutes), then a miss waits 1 minute again.
+        let feedProbes = CountingProbes()
+        let feedClock = TestNow()
+        let other = makeCenter(client: feedProbes, feed: feedProbes, clock: feedClock)
+        await other.refresh(probeRoom: nil)
+        feedClock.advance(60)
+        await other.refresh(probeRoom: nil)
+        XCTAssertEqual(feedProbes.feedAsks, 2)
+        feedProbes.feed = .off
+        feedClock.advance(120)
+        await other.refresh(probeRoom: nil)
+        XCTAssertEqual(feedProbes.feedAsks, 3)
+        XCTAssertEqual(other.feedOn, false)
+        feedProbes.feed = .unanswered
+        feedClock.advance(599)
+        await other.refresh(probeRoom: nil)
+        XCTAssertEqual(feedProbes.feedAsks, 3, "an off answer is asked again only after ten minutes")
+        feedClock.advance(1)
+        await other.refresh(probeRoom: nil)
+        XCTAssertEqual(feedProbes.feedAsks, 4)
+        feedClock.advance(60)
+        await other.refresh(probeRoom: nil)
+        XCTAssertEqual(feedProbes.feedAsks, 5, "after an answer the waits start over at one minute")
+        XCTAssertEqual(feedProbes.draftAsks, 0, "no room, no drafts ask")
+    }
+
+    // MARK: - Across the clock changes (review P3, #330)
+
+    /// America/New_York. On 2026-11-01 1:30 happens twice: an event from the first (EDT) to the second (EST) is an hour
+    /// long, and keeps both offsets to the save. On 2027-03-14 2:30 never happens: 1:30 EST to 3:30 EDT is an hour. A
+    /// draft with no time starts at 9 in that day's own offset, and events read on their New York day and time.
+    func test_drafts_and_events_keep_the_right_offset_across_the_clock_changes() async throws {
+        func plain(_ text: String) -> String {
+            text.replacingOccurrences(of: "\u{202F}", with: " ").replacingOccurrences(of: "\u{2009}", with: " ")
+        }
+        let cases = [
+            (now: "2026-11-01T00:30:00-04:00", day: CalendarDay(year: 2026, month: 11, day: 1),
+             start: "2026-11-01T01:30:00-04:00", end: "2026-11-01T01:30:00-05:00", nine: "2026-11-01T09:00:00-05:00",
+             event: ("2026-11-01T06:30:00Z", "2026-11-01T07:30:00Z", "1:30 – 2:30 AM")),
+            (now: "2027-03-14T00:30:00-05:00", day: CalendarDay(year: 2027, month: 3, day: 14),
+             start: "2027-03-14T01:30:00-05:00", end: "2027-03-14T03:30:00-04:00", nine: "2027-03-14T09:00:00-04:00",
+             event: ("2027-03-14T06:30:00Z", "2027-03-14T07:30:00Z", "1:30 – 3:30 AM")),
+        ]
+        for edge in cases {
+            let fake = FakeCalendar()
+            fake.events = [CalendarEvent(id: "e", sessionId: "room-1", title: "Late show", startsAt: at(edge.event.0),
+                                         endsAt: at(edge.event.1))]
+            fake.draftAnswer = .success(lunchDraft(edge.start, edge.end))
+            let board = makeBoard(fake, now: edge.now)
+            await board.loadIfNeeded()
+            XCTAssertEqual(board.selected, edge.day)
+            let shown = try XCTUnwrap(board.events(on: edge.day).first, "the event reads on its New York day")
+            XCTAssertEqual(plain(CalendarEventTime.text(shown, calendar: board.calendar)), edge.event.2)
+
+            board.addText = "Late show"
+            await board.draft()
+            XCTAssertEqual(fake.draftRequests.last?.request,
+                           .text(day: edge.day, text: "Late show", timeZone: "America/New_York"))
+            let form = try XCTUnwrap(board.form)
+            XCTAssertEqual(form.endsAt.timeIntervalSince(form.startsAt), 3_600, "\(edge.day.key): an hour")
+            await board.save()
+            let body = try XCTUnwrap(fake.saved.last?.event.body)
+            XCTAssertEqual(body["startsAt"] as? String, edge.start, edge.day.key)
+            XCTAssertEqual(body["endsAt"] as? String, edge.end, edge.day.key)
+
+            fake.draftAnswer = .success(CalendarDraft(title: "Breakfast", startsAt: nil, endsAt: nil, link: nil,
+                                                      notes: nil, confidence: 0.4, assumptions: []))
+            board.select(edge.day)
+            board.addText = "Breakfast"
+            await board.draft()
+            let untimed = try XCTUnwrap(board.form)
+            XCTAssertEqual(CalendarInstant.format(untimed.startsAt, in: board.calendar.timeZone), edge.nine,
+                           "a draft with no time starts at 9 on that day")
+        }
+    }
+
     // MARK: - The month and VoiceOver
+
+    /// Review P3 (#330): VoiceOver reads an event with its notes. Its link is a button of its own after it (the device
+    /// test `test_an_event_reads_its_notes_and_its_link_is_a_button_of_its_own` reaches it on its own).
+    func test_voiceover_reads_an_event_with_its_notes() {
+        let dinner = CalendarEvent(id: "e1", sessionId: "room-1", title: "Team dinner", startsAt: at("2026-11-13T00:00:00Z"),
+                                   notes: "  Table for eight.\n")
+        XCTAssertEqual(CalendarEventRowLabel.text(dinner, time: "7:00 PM", room: "Launch planning"),
+                       "Team dinner, 7:00 PM, Launch planning, Table for eight.")
+        let call = CalendarEvent(id: "e2", sessionId: "room-1", title: "Call", startsAt: at("2026-11-13T00:00:00Z"),
+                                 notes: " ")
+        XCTAssertEqual(CalendarEventRowLabel.text(call, time: "7:00 PM", room: nil), "Call, 7:00 PM")
+    }
 
     func test_voiceover_reads_each_day_with_its_events() {
         let zone = calendar("America/New_York")

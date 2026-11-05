@@ -6,6 +6,8 @@ import SwiftUI
 // edit it and save it; and subscribe to it from Apple Calendar. The server half is behind CALENDAR_DRAFTS_ENABLED and
 // CALENDAR_FEED_ENABLED: until a flag answers something other than 404 nothing of what it does shows, and a 404 later
 // hides it again. The calendar reads when it opens and never on a timer; nothing saves without the person tapping Save.
+// The subscribe link is kept for the signed-in person in the Keychain (`CalendarLinkVault`) and opened again, never
+// made again without asking.
 
 /// Whether the calendar is on, and the Apple Calendar link. One per signed-in app.
 @MainActor
@@ -14,22 +16,38 @@ final class CalendarCenter: ObservableObject {
     @Published private(set) var draftsOn: Bool?
     /// The subscribe link: nil until the server has answered, false where the flag is off.
     @Published private(set) var feedOn: Bool?
-    /// What the subscribe rows last did, in words. Never the link: the link only ever goes to the system to open.
+    /// What the subscribe rows last did, in words. Never the link: the link goes only to the system to open and to the
+    /// person's own Keychain item.
     @Published private(set) var feedNotice: String?
     @Published private(set) var isWorkingOnFeed = false
+    /// Subscribe found no kept link: making one replaces any link made before (another phone, before a sign-out), so
+    /// it asks first, as Reset does.
+    @Published var confirmsNewLink = false
 
     let client: any RoomCalendarServing
     private let feed: any CalendarFeedServing
-    private let openURL: @MainActor (URL) -> Void
+    private let vault: any CalendarLinkKeeping
+    /// Who is signed in (the account id): the kept link is theirs alone.
+    private let person: @MainActor () async -> String?
+    /// Opens the link in the system; true only if it opened.
+    private let openURL: @MainActor (URL) async -> Bool
+    private let now: () -> Date
     private let onReauthenticationRequired: @MainActor () -> Void
     private var checkingDrafts = false
     private var checkingFeed = false
+    private(set) var draftsSchedule = CalendarProbeSchedule()
+    private(set) var feedSchedule = CalendarProbeSchedule()
+    private var personKey: String?
 
-    init(client: any RoomCalendarServing, feed: any CalendarFeedServing, openURL: @escaping @MainActor (URL) -> Void,
-         onReauthenticationRequired: @escaping @MainActor () -> Void = {}) {
+    init(client: any RoomCalendarServing, feed: any CalendarFeedServing, vault: any CalendarLinkKeeping,
+         person: @escaping @MainActor () async -> String?, openURL: @escaping @MainActor (URL) async -> Bool,
+         now: @escaping () -> Date = { Date() }, onReauthenticationRequired: @escaping @MainActor () -> Void = {}) {
         self.client = client
         self.feed = feed
+        self.vault = vault
+        self.person = person
         self.openURL = openURL
+        self.now = now
         self.onReauthenticationRequired = onReauthenticationRequired
     }
 
@@ -49,24 +67,30 @@ final class CalendarCenter: ObservableObject {
         return role.isEmpty || ["owner", "admin", "contributor"].contains(role)
     }
 
-    /// Asks once whether drafting is on, with a room the person is in (the route is per room). An answer that says
-    /// neither keeps the calendar hidden; the next open asks again.
+    /// Asks whether drafting is on, with a room the person is in (the route is per room), unless the server has
+    /// answered or was asked too recently (see `CalendarProbeSchedule`).
     func checkDrafts(probeRoom: String?) async {
-        guard draftsOn == nil, !checkingDrafts, let probeRoom else { return }
+        guard draftsOn == nil, !checkingDrafts, let probeRoom, draftsSchedule.allows(now()) else { return }
         await probeDrafts(probeRoom)
     }
 
-    /// Settings asks again each time it opens, so a flag turned on shows without a new sign-in.
+    /// Settings asks again when it opens, so a flag turned on shows without a new sign-in; the schedule spaces the
+    /// asks out while the answer is "off" or no answer comes.
     func refresh(probeRoom: String?) async {
-        if draftsOn != true, !checkingDrafts, let probeRoom { await probeDrafts(probeRoom) }
-        guard feedOn != true, !checkingFeed else { return }
+        if draftsOn != true, !checkingDrafts, let probeRoom, draftsSchedule.allows(now()) {
+            await probeDrafts(probeRoom)
+        }
+        guard feedOn != true, !checkingFeed, feedSchedule.allows(now()) else { return }
         checkingFeed = true
         defer { checkingFeed = false }
         do {
-            feedOn = try await feed.feedAvailable()
+            let on = try await feed.feedAvailable()
+            feedOn = on
+            feedSchedule.answered(on: on, at: now())
         } catch CalendarError.reauthenticationRequired {
             onReauthenticationRequired()
         } catch {
+            feedSchedule.unanswered(at: now())
         }
     }
 
@@ -74,54 +98,95 @@ final class CalendarCenter: ObservableObject {
         checkingDrafts = true
         defer { checkingDrafts = false }
         do {
-            draftsOn = try await client.draftsAvailable(inRoom: room)
+            let on = try await client.draftsAvailable(inRoom: room)
+            draftsOn = on
+            draftsSchedule.answered(on: on, at: now())
         } catch CalendarError.reauthenticationRequired {
             onReauthenticationRequired()
         } catch {
+            draftsSchedule.unanswered(at: now())
         }
     }
 
     /// A calendar route answered 404: the flag went off. Every calendar entry hides.
     func calendarWentAway() {
         draftsOn = false
+        draftsSchedule.answered(on: false, at: now())
     }
 
-    /// Opens Apple Calendar's subscribe sheet on a new link to your feed. The link is handed to the system and kept
-    /// nowhere.
+    /// Opens Apple Calendar's subscribe sheet on the link kept for this person, without making a new one. With no
+    /// kept link it asks first (`confirmsNewLink`): a new link stops any older one.
     func subscribe() async {
         guard showsSubscribe, !isWorkingOnFeed else { return }
         isWorkingOnFeed = true
         feedNotice = nil
         defer { isWorkingOnFeed = false }
+        guard let key = await signedInPerson() else {
+            feedNotice = Self.noPerson
+            return
+        }
+        if let kept = vault.link(for: key).flatMap({ feed.keptLink($0) }) {
+            await open(kept.url)
+        } else {
+            confirmsNewLink = true
+        }
+    }
+
+    /// The person confirmed: a new link is made, kept for them, and opened.
+    func confirmNewLink() async {
+        confirmsNewLink = false
+        await makeLink(opening: true)
+    }
+
+    /// Reset, once confirmed: a new link replaces the kept one. The old one stops working, so a calendar subscribed to
+    /// it stops updating.
+    func resetLink() async {
+        await makeLink(opening: false)
+    }
+
+    private func makeLink(opening: Bool) async {
+        guard showsSubscribe, !isWorkingOnFeed else { return }
+        isWorkingOnFeed = true
+        feedNotice = nil
+        defer { isWorkingOnFeed = false }
+        guard let key = await signedInPerson() else {
+            feedNotice = Self.noPerson
+            return
+        }
         do {
             let link = try await feed.newSubscriptionLink()
-            openURL(link.url)
-            feedNotice = Self.opened
+            vault.keep(link.url, for: key)
+            if opening {
+                await open(link.url)
+            } else {
+                feedNotice = Self.reset
+            }
         } catch {
             handleFeed(error)
         }
     }
 
-    /// Makes a new link. The old one stops working, so a calendar subscribed to it stops updating.
-    func resetLink() async {
-        guard showsSubscribe, !isWorkingOnFeed else { return }
-        isWorkingOnFeed = true
-        feedNotice = nil
-        defer { isWorkingOnFeed = false }
-        do {
-            _ = try await feed.newSubscriptionLink()
-            feedNotice = Self.reset
-        } catch {
-            handleFeed(error)
-        }
+    /// Says Apple Calendar opened only if the system opened the link.
+    private func open(_ url: URL) async {
+        feedNotice = await openURL(url) ? Self.opened : Self.notOpened
+    }
+
+    /// Who is signed in, asked once per sign-in: the kept link is theirs alone.
+    private func signedInPerson() async -> String? {
+        if let personKey { return personKey }
+        personKey = await person()
+        return personKey
     }
 
     private func handleFeed(_ error: Error) {
         switch error as? CalendarError {
         case .unavailable?:
             feedOn = false
+            feedSchedule.answered(on: false, at: now())
         case .reauthenticationRequired?:
             onReauthenticationRequired()
+        case .forbidden?:
+            feedNotice = "This account can't make a calendar link right now."
         case .rateLimited?, .dailyLimit?:
             feedNotice = "Too many tries just now. Try again later."
         default:
@@ -129,11 +194,42 @@ final class CalendarCenter: ObservableObject {
         }
     }
 
-    static let opened = "Apple Calendar opened. Choose Subscribe there to add your Senti events. "
-        + "A calendar that used an older link stops updating."
+    static let opened = "Apple Calendar opened. Choose Subscribe there to add your Senti events."
+    static let notOpened = "Couldn't open Apple Calendar on this phone."
     static let reset = "Link reset. The old link no longer updates. Tap Subscribe to add the new one."
+    static let noPerson = "Couldn't check who's signed in. Check your connection and try again."
+    static let newLinkWarning = "This makes a new subscribe link. "
+        + "A calendar already using an older link stops updating."
     static let resetWarning = "Apple Calendar stops updating from the old link, on every device that subscribed to it. "
         + "You can subscribe again with the new one."
+}
+
+/// When to ask a flag again. An answer of "on" is final for the sign-in (a later 404 turns it off); "off" is asked
+/// again after 10 minutes; no answer (the edge's 503, no network) after 1 minute, doubling each time up to 10, and
+/// back to 1 after any answer. As the web asks, so a room switch or a Settings open while the paths answer 503 does
+/// not ask again.
+struct CalendarProbeSchedule: Equatable {
+    static let first: TimeInterval = 60
+    static let longest: TimeInterval = 600
+
+    private(set) var next: Date?
+    private(set) var misses = 0
+
+    func allows(_ now: Date) -> Bool {
+        guard let next else { return true }
+        return now >= next
+    }
+
+    mutating func answered(on: Bool, at now: Date) {
+        misses = 0
+        next = on ? nil : now.addingTimeInterval(Self.longest)
+    }
+
+    mutating func unanswered(at now: Date) {
+        misses += 1
+        let wait = min(Self.first * pow(2, Double(misses - 1)), Self.longest)
+        next = now.addingTimeInterval(wait)
+    }
 }
 
 /// The calendar's network session: the app's personal-call settings (no cache, no cookies, the bearer per request),
@@ -159,6 +255,7 @@ struct CalendarOff: RoomCalendarServing, CalendarFeedServing {
     }
     func feedAvailable() async throws -> Bool { false }
     func newSubscriptionLink() async throws -> CalendarSubscriptionLink { throw CalendarError.unavailable }
+    func keptLink(_ url: URL) -> CalendarSubscriptionLink? { nil }
 }
 
 /// A room the person can add events to, for the calendar opened from Settings.
