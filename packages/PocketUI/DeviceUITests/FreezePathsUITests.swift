@@ -59,7 +59,14 @@ final class FreezePathsUITests: XCTestCase {
         pause(3)
         Self.post(Self.openDrawer)
         let row = app.descendants(matching: .any)["pocket.drawer.room.room-long"]
-        XCTAssertTrue(row.waitForExistence(timeout: 30), "the room is in the side panel")
+        // The panel's rooms are a lazy list: a room below the fold (at the largest text sizes, every room is) is made
+        // only once it is scrolled to, as a reader scrolls the panel to find it.
+        let drawer = app.descendants(matching: .any)["pocket.drawer"]
+        XCTAssertTrue(drawer.waitForExistence(timeout: 30), "the side panel opened")
+        for _ in 0..<12 where !row.exists {
+            drawer.swipeUp(velocity: .slow)
+        }
+        XCTAssertTrue(row.waitForExistence(timeout: 10), "the room is in the side panel")
         row.tap()
         pause(2)
         idle(app, "path3")
@@ -68,13 +75,25 @@ final class FreezePathsUITests: XCTestCase {
     /// Up a long room until about 300 rows are loaded (each page loads as its top comes into view), Jump to latest (the
     /// room keeps its newest 60 rows), a message sent, then a reply to the newest message sent from its menu.
     func test_path4_reply_in_a_long_room_after_a_jump_down_trim() throws {
-        let app = launch(room: "long")
+        replyAfterJumpDown(launch(room: "long"), upTo: 705, path: "path4")
+    }
+
+    /// Path 4 at the largest text size (AX5), where the rows are a screen tall: up the room to its 900th message (about
+    /// 100 rows), the jump down, a send, and the long press that opens a message's menu for the reply. Without each
+    /// row's `.id`, that press set the room laying itself out without end here.
+    func test_path4_at_the_largest_text_size() throws {
+        let app = launch(room: "long", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL")
+        replyAfterJumpDown(app, upTo: 900, path: "path4-ax5")
+    }
+
+    private func replyAfterJumpDown(_ app: XCUIApplication, upTo sequence: Int, path: String) {
         let screen = app.descendants(matching: .any)["pocket.room.screen"]
+        let far = app.descendants(matching: .any)["pocket.room.message.\(sequence)"]
         for _ in 0..<60 {
-            if app.descendants(matching: .any)["pocket.room.message.705"].exists { break }
+            if far.exists { break }
             screen.swipeDown(velocity: .fast)
         }
-        XCTAssertTrue(app.descendants(matching: .any)["pocket.room.message.705"].exists, "about 300 rows loaded")
+        XCTAssertTrue(far.exists, "up the room to message \(sequence)")
         let jump = app.descendants(matching: .any)["pocket.room.jumpToLatest"]
         XCTAssertTrue(jump.waitForExistence(timeout: 10), "the arrow shows up the room")
         jump.tap()
@@ -88,7 +107,7 @@ final class FreezePathsUITests: XCTestCase {
         XCTAssertTrue(reply.waitForExistence(timeout: 10), "the message's menu offers Reply")
         reply.tap()
         send(app, "A short reply now")
-        idle(app, "path4", seconds: 25)
+        idle(app, path, seconds: 25)
     }
 
     // MARK: - Helpers
@@ -115,9 +134,9 @@ final class FreezePathsUITests: XCTestCase {
         XCTAssertLessThan(read, 1, "\(path): the screen answers within a second after the quiet spell")
     }
 
-    private func launch(room: String) -> XCUIApplication {
+    private func launch(room: String, _ extra: String...) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments = ["-PocketRootPreview", "-PocketRootRoom", room, "-LogForEachSlowPath", "YES"]
+        app.launchArguments = ["-PocketRootPreview", "-PocketRootRoom", room, "-LogForEachSlowPath", "YES"] + extra
         app.launch()
         XCTAssertTrue(app.descendants(matching: .any)["pocket.room.screen"].waitForExistence(timeout: 90), "the room opened")
         pause(5)
