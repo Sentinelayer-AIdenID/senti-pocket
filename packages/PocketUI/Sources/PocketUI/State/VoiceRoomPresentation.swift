@@ -123,6 +123,36 @@ public struct VoiceCallTimings: Equatable, Sendable {
     }
 }
 
+/// Who is answering your latest turn, as the server assigned it (`turn_assigned`) before any of the answer's sound.
+public struct VoiceRoomAnswering: Equatable, Sendable {
+    public let turnId: String
+    /// The agent's id, which its avatar is drawn from.
+    public let agentId: String
+    /// The name the call shows: "<name> is answering".
+    public let name: String
+    /// The answer's sound has started (`turn_started`) and not ended.
+    public var isSpeaking: Bool
+
+    public init(turnId: String, agentId: String, name: String, isSpeaking: Bool = false) {
+        self.turnId = turnId
+        self.agentId = agentId
+        self.name = name
+        self.isSpeaking = isSpeaking
+    }
+}
+
+/// The agent whose face the call shows, and whether its mouth moves with its voice now.
+public struct VoiceRoomFace: Equatable, Sendable {
+    /// The agent's id: its avatar is the room's avatar for it.
+    public let id: String
+    public let talks: Bool
+
+    public init(id: String, talks: Bool) {
+        self.id = id
+        self.talks = talks
+    }
+}
+
 /// A voice conversation in a room, as the panel shows it.
 public struct VoiceRoomState: Equatable, Sendable {
     public enum Phase: Equatable, Sendable {
@@ -163,6 +193,13 @@ public struct VoiceRoomState: Equatable, Sendable {
     public var isMuted = false
     /// The call is also on the phone's own call screen (an agent's call you answered), whose Mute is this one.
     public var hasCallScreen = false
+    /// The call plays through the phone's loudspeaker, not the earpiece (or a headset). It stays as chosen for the call.
+    public var isSpeakerOn = true
+    /// Who is answering your latest turn, from the server's assignment until the answer ends.
+    public var answering: VoiceRoomAnswering?
+
+    /// The voice line's answers are named "<agent> (voice)": the agent's own fast voice, not its own words.
+    public static let voiceLineSuffix = " (voice)"
 
     public init(
         phase: Phase = .ready,
@@ -220,6 +257,23 @@ public struct VoiceRoomState: Equatable, Sendable {
 
     /// The Talk button takes a turn: never while muted, or once the call is ending.
     public var canTalk: Bool { !isMuted && phase != .ending && phase != .ended }
+
+    /// What VoiceOver says of the Speaker button: "On" through the loudspeaker, "Off" through the earpiece.
+    public var speakerValue: String { isSpeakerOn ? "On" : "Off" }
+
+    /// What the line under the avatar says of who is answering, until that answer ends.
+    public var answeringLine: String? { answering.map { "\($0.name) is answering" } }
+
+    /// The face the call shows: the agent answering your turn, else the agent whose answer is being read aloud (its
+    /// voice line's too). Its mouth moves from the answer's first sound to its end. Nil while nobody answers.
+    public var face: VoiceRoomFace? {
+        if let answering {
+            return VoiceRoomFace(id: answering.agentId, talks: answering.isSpeaking || speaker != nil)
+        }
+        guard let speaker else { return nil }
+        let id = speaker.hasSuffix(Self.voiceLineSuffix) ? String(speaker.dropLast(Self.voiceLineSuffix.count)) : speaker
+        return VoiceRoomFace(id: id, talks: true)
+    }
 }
 
 public enum VoiceRoomIntent: Equatable, Sendable {
@@ -234,6 +288,8 @@ public enum VoiceRoomIntent: Equatable, Sendable {
     /// The panel's Mute (or Unmute): the microphone stops listening. In a call on the phone's call screen, the call
     /// screen is asked, so both show the same.
     case setMuted(Bool)
+    /// The panel's Speaker: the loudspeaker (true) or the earpiece, for the rest of the call.
+    case setSpeaker(Bool)
     case hangUp
 }
 

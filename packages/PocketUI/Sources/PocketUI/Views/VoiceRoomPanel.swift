@@ -47,6 +47,11 @@ public struct VoiceRoomPanel: View {
         .padding(.top, 20)
         .padding(.bottom, 22)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay(alignment: .topLeading) {
+            speakerButton
+                .padding(.top, 16)
+                .padding(.leading, 18)
+        }
         .overlay(alignment: .topTrailing) {
             if state.canAdd {
                 addButton
@@ -67,6 +72,24 @@ public struct VoiceRoomPanel: View {
                  ? "No other agent here can answer right now."
                  : "They're asked to join with a hello. With more than one agent, the first to answer each turn has the floor.")
         }
+    }
+
+    /// The loudspeaker or the earpiece, as on the phone's own call screen (Carter, 11-05: a call picked up on the speaker
+    /// by accident had no way back). Filled while on; VoiceOver reads it as "Speaker, On" or "Speaker, Off".
+    private var speakerButton: some View {
+        Button { send(.setSpeaker(!state.isSpeakerOn)) } label: {
+            Image(systemName: state.isSpeakerOn ? "speaker.wave.2.fill" : "speaker.fill")
+                .font(.title3)
+                .frame(width: 44, height: 44)
+                .background(state.isSpeakerOn ? PocketPalette.textPrimary : PocketPalette.inset, in: Circle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(state.isSpeakerOn ? PocketPalette.canvas : PocketPalette.textPrimary)
+        .disabled(state.phase == .ending || state.phase == .ended)
+        .accessibilityLabel("Speaker")
+        .accessibilityValue(state.speakerValue)
+        .accessibilityHint(state.isSpeakerOn ? "Plays the call through the earpiece" : "Plays the call through the speaker")
+        .accessibilityIdentifier("pocket.voice.speaker")
     }
 
     /// Brings someone else into the call: whoever can answer now and isn't in it already.
@@ -100,14 +123,14 @@ public struct VoiceRoomPanel: View {
 
     private var header: some View {
         VStack(spacing: 4) {
-            // Several names shrink a little, then end in "…", and never run under the Add button.
+            // Several names shrink a little, then end in "…", and never run under the Speaker or Add button.
             Text(state.title)
                 .font(.title2.weight(.semibold))
                 .foregroundStyle(PocketPalette.textPrimary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.75)
                 .truncationMode(.tail)
-                .padding(.horizontal, state.canAdd ? 52 : 0)
+                .padding(.horizontal, 52)
             if state.isRinging {
                 Text("Ringing…")
                     .font(.subheadline)
@@ -124,8 +147,22 @@ public struct VoiceRoomPanel: View {
         }
     }
 
-    /// The agent's logo on a large coin; while it rings, rings spread out from it.
+    /// The agent's logo on a large coin; while it rings, rings spread out from it. While an agent answers, its face
+    /// instead: the room's avatar for it, whose mouth moves with its voice.
     private var partner: some View {
+        ZStack {
+            if let face = state.face {
+                VoiceCallFace(face: face, meter: meter, reduceMotion: reduceMotion)
+                    .equatable()
+            } else {
+                coin
+            }
+        }
+        .frame(height: 220)
+        .accessibilityHidden(true)
+    }
+
+    private var coin: some View {
         ZStack {
             if state.isRinging && !reduceMotion {
                 ForEach(0..<2, id: \.self) { index in
@@ -148,8 +185,6 @@ public struct VoiceRoomPanel: View {
                 .foregroundStyle(partnerTint)
                 .frame(width: 70, height: 70)
         }
-        .frame(height: 220)
-        .accessibilityHidden(true)
     }
 
     @ViewBuilder
@@ -171,7 +206,13 @@ public struct VoiceRoomPanel: View {
     private var nowLine: some View {
         VStack(spacing: 8) {
             HStack(spacing: 8) {
-                if let speaker = state.speaker {
+                if let answering = state.answeringLine {
+                    // Who the server gave the turn to, before any of the answer is heard (Carter, 11-05).
+                    Text(answering)
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(PocketPalette.textPrimary)
+                        .accessibilityIdentifier("pocket.voice.answering")
+                } else if let speaker = state.speaker {
                     Text("\(speaker) is speaking")
                         .font(.footnote.weight(.semibold))
                         .foregroundStyle(PocketPalette.textPrimary)

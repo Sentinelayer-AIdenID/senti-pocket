@@ -56,6 +56,65 @@ protocol VoiceRoomCallScreen: AnyObject {
 protocol VoiceRoomAudioSession: AnyObject {
     func activate() throws
     func deactivate()
+    /// Whether the call plays through the phone's loudspeaker now (not the earpiece, a headset or a car).
+    var isSpeakerOn: Bool { get }
+    /// The loudspeaker (true) or the earpiece, for the rest of the call.
+    func setSpeaker(_ on: Bool) throws
+    /// Runs `changed` each time the call's sound moves (a headset plugged in or out, the speaker chosen), until
+    /// `deactivate`.
+    func watchRoute(_ changed: @escaping @MainActor () -> Void)
+}
+
+/// The loudspeaker or the earpiece for a voice room (Carter, 11-05: a call picked up on the speaker by accident had no
+/// way back). The choice is the category's own default route, not a one-off override, so it holds for the whole call:
+/// through every turn's listening and every route change that is not a new headset.
+final class VoiceRoomSpeakerRoute {
+    private let mode: AVAudioSession.Mode
+    private let options: AVAudioSession.CategoryOptions
+    /// The loudspeaker is chosen (calls start on it, as they always have).
+    private(set) var speaker = true
+    private var watch: NSObjectProtocol?
+
+    init(mode: AVAudioSession.Mode, options: AVAudioSession.CategoryOptions) {
+        self.mode = mode
+        self.options = options
+    }
+
+    /// The call's category options: the base options, with the loudspeaker as the default route or without it.
+    static func options(speaker: Bool, base: AVAudioSession.CategoryOptions) -> AVAudioSession.CategoryOptions {
+        speaker ? base.union(.defaultToSpeaker) : base.subtracting(.defaultToSpeaker)
+    }
+
+    /// Sets the call's category, on the route chosen.
+    func applyCategory() throws {
+        try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: mode,
+                                                        options: Self.options(speaker: speaker, base: options))
+    }
+
+    /// Chooses the loudspeaker or the earpiece now, and for the rest of the call.
+    func setSpeaker(_ on: Bool) throws {
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playAndRecord, mode: mode, options: Self.options(speaker: on, base: options))
+        try session.overrideOutputAudioPort(on ? .speaker : .none)
+        speaker = on
+    }
+
+    var isSpeakerOn: Bool {
+        AVAudioSession.sharedInstance().currentRoute.outputs.contains { $0.portType == .builtInSpeaker }
+    }
+
+    func watch(_ changed: @escaping @MainActor () -> Void) {
+        stopWatching()
+        watch = NotificationCenter.default.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil,
+                                                       queue: .main) { _ in
+            MainActor.assumeIsolated { changed() }
+        }
+    }
+
+    func stopWatching() {
+        if let watch { NotificationCenter.default.removeObserver(watch) }
+        watch = nil
+    }
 }
 
 enum VoiceRoomAudioError: LocalizedError, Equatable {
@@ -137,27 +196,44 @@ final class RingbackTone: VoiceRoomRinging {
 }
 
 final class PhoneVoiceRoomAudioSession: VoiceRoomAudioSession {
+    private let route = VoiceRoomSpeakerRoute(mode: .default, options: [.allowBluetooth, .allowBluetoothA2DP, .duckOthers])
+
     func activate() throws {
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP, .duckOthers])
-        try session.setActive(true)
+        try route.applyCategory()
+        try AVAudioSession.sharedInstance().setActive(true)
     }
 
     func deactivate() {
+        route.stopWatching()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
+
+    var isSpeakerOn: Bool { route.isSpeakerOn }
+
+    func setSpeaker(_ on: Bool) throws { try route.setSpeaker(on) }
+
+    func watchRoute(_ changed: @escaping @MainActor () -> Void) { route.watch(changed) }
 }
 
 /// An answered agent's call: CallKit owns the audio session (it activates it after the answer and ends it with the
 /// call), so the voice room only sets how it sounds, as a call does (the dial's category, with echo cancellation).
 /// This is what lets the call talk with the phone locked.
 final class CallKitVoiceRoomAudioSession: VoiceRoomAudioSession {
+    private let route = VoiceRoomSpeakerRoute(mode: .voiceChat, options: [.allowBluetooth])
+
     func activate() throws {
-        try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .voiceChat,
-                                                        options: [.defaultToSpeaker, .allowBluetooth])
+        try route.applyCategory()
     }
 
-    func deactivate() {}
+    func deactivate() {
+        route.stopWatching()
+    }
+
+    var isSpeakerOn: Bool { route.isSpeakerOn }
+
+    func setSpeaker(_ on: Bool) throws { try route.setSpeaker(on) }
+
+    func watchRoute(_ changed: @escaping @MainActor () -> Void) { route.watch(changed) }
 }
 
 /// Apple's on-device recognizer, as in push-to-talk, but it leaves the audio session to the voice room and reports

@@ -214,6 +214,9 @@ final class VoiceRoomCoordinator: ObservableObject {
             state.notice = "The phone's audio is busy (a call or another app). End it and try again."
             return
         }
+        // The Speaker button shows where the call plays, and follows it when it moves (a headset, a car).
+        state.isSpeakerOn = audio.isSpeakerOn
+        audio.watchRoute { [weak self] in self?.routeChanged() }
         let ring = VoiceCallMarkers.start(caller: you, agents: invited, meeting: state.sharesFloor)
         let clientId = "voice-start-" + callId
         let previous = Self.closing[sessionId]
@@ -307,6 +310,8 @@ final class VoiceRoomCoordinator: ObservableObject {
             add(agent)
         case .setMuted(let on):
             askToMute(on)
+        case .setSpeaker(let on):
+            setSpeaker(on)
         case .hangUp:
             Task { await hangUp() }
         }
@@ -365,6 +370,26 @@ final class VoiceRoomCoordinator: ObservableObject {
             // The call screen could not (its call is already going away): the tap still does what it says here.
             if !done { self?.setMuted(on) }
         }
+    }
+
+    /// The panel's Speaker (Carter, 11-05): the loudspeaker or the earpiece, chosen for the rest of the call. Listening,
+    /// answers and turns never change it back.
+    private func setSpeaker(_ on: Bool) {
+        guard state.phase != .ending, state.phase != .ended else { return }
+        do {
+            try audio.setSpeaker(on)
+            state.isSpeakerOn = on
+        } catch {
+            state.isSpeakerOn = audio.isSpeakerOn
+            state.notice = on ? "The speaker could not be turned on." : "The call could not move to the earpiece."
+        }
+    }
+
+    /// The call's sound moved (a headset plugged in or out, the speaker chosen): the Speaker button shows where it plays.
+    private func routeChanged() {
+        guard state.phase != .ending, state.phase != .ended else { return }
+        let on = audio.isSpeakerOn
+        if state.isSpeakerOn != on { state.isSpeakerOn = on }
     }
 
     /// Muted or unmuted on the phone's own call screen, or by the panel's Mute through it (warden, #281).
@@ -851,7 +876,7 @@ final class VoiceRoomCoordinator: ObservableObject {
 
     // MARK: - The voice line
 
-    static let voiceSuffix = " (voice)"
+    static let voiceSuffix = VoiceRoomState.voiceLineSuffix
 
     /// Whose voice says a turn: the voice line's turns are said in their agent's voice.
     static func voiceOf(_ speaker: String) -> String {
@@ -880,14 +905,29 @@ final class VoiceRoomCoordinator: ObservableObject {
                                          ringCallId: ringCallId,
                                          history: Array(history))
         voiceLineAsk = Task { [weak self] in
+            // The server's turn this answer was assigned to, if it said: its "is answering" ends with the answer.
+            var assigned: String?
+            defer {
+                if let assigned, !Task.isCancelled { self?.answerEnded(turnId: assigned) }
+            }
             do {
                 var said = 0
                 for try await event in stream {
                     guard let self, !Task.isCancelled else { return }
-                    if case .sentence(let sentence) = event {
+                    switch event {
+                    case .sentence(let sentence):
                         said += 1
                         if said == 1 { self.owe(turn, as: agent) }
                         self.takeVoiceLine(sentence, answerId: answerId, as: speaker)
+                    case .turnAssigned(let assignment):
+                        assigned = assignment.turnId
+                        self.turnAssigned(assignment)
+                    case .turnStarted(let turnId):
+                        self.turnStarted(turnId)
+                    case .turnEnded(let turnId):
+                        self.answerEnded(turnId: turnId)
+                    case .done:
+                        break
                     }
                 }
                 // An answer that ended without a single sentence said nothing: the agent's posts are read instead.
@@ -914,6 +954,29 @@ final class VoiceRoomCoordinator: ObservableObject {
                 self?.lineDidNotAnswer(turn)
             }
         }
+    }
+
+    /// The server gave your turn to an agent (`turn_assigned`), before any of its answer is heard: the call shows who is
+    /// answering, so you know who is about to speak (Carter, 11-05).
+    private func turnAssigned(_ assignment: VoiceTurnAssignment) {
+        guard state.phase != .ending, state.phase != .ended else { return }
+        state.answering = VoiceRoomAnswering(turnId: assignment.turnId, agentId: assignment.agentId,
+                                             name: assignment.displayName)
+    }
+
+    /// The assigned answer's sound started (`turn_started`): its face talks. A start for another turn is not this one's.
+    private func turnStarted(_ turnId: String?) {
+        guard var answering = state.answering, !answering.isSpeaking,
+              turnId == nil || turnId == answering.turnId else { return }
+        answering.isSpeaking = true
+        state.answering = answering
+    }
+
+    /// The assigned answer ended (`turn_ended`, or its stream did): nobody is answering any more. An end for another
+    /// turn leaves the current one.
+    private func answerEnded(turnId: String?) {
+        guard let answering = state.answering, turnId == nil || turnId == answering.turnId else { return }
+        state.answering = nil
     }
 
     /// The voice line started answering `turn` as `agent`. On a call with several agents the agent's own post for that
@@ -976,6 +1039,8 @@ final class VoiceRoomCoordinator: ObservableObject {
         voiceLineAsk = nil
         queue.removeAll { $0.id.hasPrefix("line:") }
         state.waiting = queue.count
+        // Nobody is answering a turn that is gone.
+        state.answering = nil
     }
 
     private func takeVoiceLine(_ sentence: String, answerId: String, as speaker: String) {

@@ -8,6 +8,8 @@ import UIKit
 final class VoiceCallWindow {
     static let shared = VoiceCallWindow()
     private var window: UIWindow?
+    /// The window that had the keys before the call (the room's), given them back when the call ends.
+    private weak var keyBefore: UIWindow?
 
     /// Whether a call is on screen: banners stay quiet under it, so a tap can't take the room away mid-call.
     var isShowing: Bool { window != nil }
@@ -27,7 +29,12 @@ final class VoiceCallWindow {
             ?? .unspecified
         let host = UIHostingController(rootView: content)
         made.rootViewController = host
-        made.isHidden = false
+        // The call has no box to type in. A box being written in under it (the room's) lets its keyboard go, and the
+        // call's window takes the keys, so nothing it covers brings a keyboard back over the call (Carter, 11-05: a
+        // keyboard came up during a call with no box, and could not be put away).
+        keyBefore = scene.windows.first { $0.isKeyWindow }
+        for other in scene.windows { other.endEditing(true) }
+        made.makeKeyAndVisible()
         window = made
         // It slides up. The view moves, not the window: a window's own transform is not reliably drawn.
         let below = CGAffineTransform(translationX: 0, y: made.bounds.height)
@@ -43,6 +50,9 @@ final class VoiceCallWindow {
     func hide() {
         guard let window else { return }
         self.window = nil
+        // The room has the keys again, so a tap in its box writes there as before.
+        if let keyBefore, !keyBefore.isHidden, keyBefore.windowScene != nil { keyBefore.makeKey() }
+        keyBefore = nil
         let view = window.rootViewController?.view
         UIView.animate(withDuration: 0.25, animations: {
             view?.transform = CGAffineTransform(translationX: 0, y: window.bounds.height)

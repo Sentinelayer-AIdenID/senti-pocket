@@ -157,6 +157,8 @@ final class RoomCallDesk: ObservableObject {
 
     /// An answered call waiting for its room's voice room to take it.
     @Published private(set) var waiting: Call?
+    /// The room on screen, and how it takes an answered call for its voice room.
+    private var roomOnScreen: RoomOnScreen?
     /// The last call the phone's own call screen hung up: its voice room ends too.
     @Published private(set) var hungUp: UUID?
     /// The calls muted on the phone's own call screen: their voice rooms do not listen.
@@ -200,6 +202,42 @@ final class RoomCallDesk: ObservableObject {
 
     func owns(_ uuid: UUID) -> Bool { calls[uuid] != nil }
 
+    /// The room on screen, which takes its own answered call when the call is ready.
+    private struct RoomOnScreen {
+        let token: UUID
+        let sessionId: String
+        /// Whether its voice room is free for a call now.
+        let canTake: @MainActor () -> Bool
+        let take: @MainActor (Call) -> Void
+    }
+
+    /// A room came on screen. Its answered call is handed to it by the desk the moment the call is ready, and at once
+    /// if one already is. The room used to watch `waiting` and read the desk as it was being published: it saw the
+    /// call a moment before its last change, so a call answered while its room was already on screen never started,
+    /// and ended unheard a minute later (Carter, 11-05: two calls rang, he answered one, and saw only a decline).
+    /// Returns the token for `roomLeft`.
+    @discardableResult
+    func roomShowing(_ sessionId: String, canTake: @escaping @MainActor () -> Bool,
+                     take: @escaping @MainActor (Call) -> Void) -> UUID {
+        let token = UUID()
+        roomOnScreen = RoomOnScreen(token: token, sessionId: sessionId, canTake: canTake, take: take)
+        handOffWaiting()
+        return token
+    }
+
+    /// That room left the screen. A newer room already showing keeps its place.
+    func roomLeft(_ token: UUID) {
+        if roomOnScreen?.token == token { roomOnScreen = nil }
+    }
+
+    /// Hands the waiting call to the room on screen once it is the room's and ready (`takeWaiting`), and the room's
+    /// voice room is free. Run after every change that can make the call ready, never while one is being published.
+    func handOffWaiting() {
+        guard let room = roomOnScreen, waiting?.doorbell.sessionId == room.sessionId, room.canTake(),
+              let call = takeWaiting(for: room.sessionId) else { return }
+        room.take(call)
+    }
+
     /// CallKit showed the ring. The same call delivered again ends its second ring at once.
     func received(_ doorbell: RoomCallDoorbell, uuid: UUID) {
         LaunchUrgency.shared.raise()
@@ -224,6 +262,7 @@ final class RoomCallDesk: ObservableObject {
             self.calls[uuid] = call
             if self.waiting?.uuid == uuid { self.waiting = call }
             self.sendAnswer(uuid)
+            self.handOffWaiting()
             let expiry = details.ringExpiresAt.map { $0.timeIntervalSince(self.now()) } ?? self.ringFor
             await self.sleep(expiry)
             if let call = self.calls[uuid], !call.answered, !call.finished {
@@ -259,6 +298,7 @@ final class RoomCallDesk: ObservableObject {
         calls[uuid] = call
         waiting = call
         sendAnswer(uuid)
+        handOffWaiting()
         let wait = takeWithin
         Task { [weak self] in
             await self?.sleep(wait)
@@ -299,6 +339,7 @@ final class RoomCallDesk: ObservableObject {
             self.calls[uuid] = call
             if self.waiting?.uuid == uuid { self.waiting = call }
             self.openRoom(doorbell.sessionId)
+            self.handOffWaiting()
         }
     }
 
@@ -344,6 +385,7 @@ final class RoomCallDesk: ObservableObject {
         call.audioReady = true
         calls[uuid] = call
         if waiting?.uuid == uuid { waiting = call }
+        handOffWaiting()
     }
 
     /// Whether the call is still going (not ended, declined or missed).
