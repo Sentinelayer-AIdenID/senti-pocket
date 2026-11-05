@@ -79,6 +79,51 @@ final class LazyListBuildTests: XCTestCase {
         }, "the folded part keeps its row")
     }
 
+    // MARK: - A scroll to a row finds it by the loop's own id
+
+    /// The rows carry no `.id` of their own: every scroll to a row (a focused message, a held row, the place kept as
+    /// older rows load) finds it by the loop's id, `RoomChatRow.id`. Opened at a message far up a room of 400, the room
+    /// is there, far from its bottom (where it would be had the scroll found nothing), and it stays there while
+    /// messages arrive below (the held row, scrolled to again at every change of the rows).
+    func test_a_room_opened_at_a_message_far_up_goes_there_and_holds_it_while_messages_arrive() throws {
+        let room = Room(Self.room(rows: 400, focus: 60))
+        try host(RoomHost(room: room))
+        XCTAssertTrue(quiet { [RenderTrace.builtCount(.roomRow), RenderTrace.snapshot().draws] })
+        let scroll = try XCTUnwrap(window.flatMap { Self.list(in: $0) }, "the room's list")
+        let away = Self.bottomOffset(of: scroll) - scroll.contentOffset.y
+        print("LAZYLIST focused message: \(Int(away)) pt above the bottom of \(Int(scroll.contentSize.height))")
+        XCTAssertGreaterThan(away, 3 * scroll.bounds.height, "at the message, far up the room")
+        XCTAssertTrue(room.intents.contains(.focusHandled), "the room was told the message is in view")
+        let held = scroll.contentOffset.y
+        room.state = Self.room(rows: 402, focus: 60)
+        XCTAssertTrue(quiet { [RenderTrace.builtCount(.roomRow), RenderTrace.snapshot().draws] })
+        let moved = abs(scroll.contentOffset.y - held)
+        print("LAZYLIST held message: moved \(Int(moved)) pt as two messages arrived")
+        XCTAssertLessThan(moved, scroll.bounds.height / 2, "the held message stays in view as messages arrive below")
+    }
+
+    /// Scrolled to the top, the room asks for older messages; when they load above, the row that was at the top is
+    /// scrolled back to the top (by its loop id), so the reader's place does not jump to the oldest loaded message.
+    func test_older_messages_loading_above_keep_the_reader_at_the_row_they_were_reading() throws {
+        let room = Room(Self.room(rows: 200, first: 201, canLoadOlder: true))
+        try host(RoomHost(room: room))
+        XCTAssertTrue(quiet { [RenderTrace.builtCount(.roomRow), RenderTrace.snapshot().draws] })
+        let scroll = try XCTUnwrap(window.flatMap { Self.list(in: $0) }, "the room's list")
+        // Up to the top, a screen at a time, as a reader does, until the room asks for older messages.
+        let deadline = Date().addingTimeInterval(15)
+        while !room.intents.contains(.loadOlder), Date() < deadline {
+            scroll.setContentOffset(CGPoint(x: 0, y: max(0, scroll.contentOffset.y - scroll.bounds.height)),
+                                    animated: false)
+            pump(0.1)
+        }
+        XCTAssertTrue(room.intents.contains(.loadOlder), "at the top the room asks for older messages")
+        room.state = Self.room(rows: 400, first: 1)
+        XCTAssertTrue(quiet { [RenderTrace.builtCount(.roomRow), RenderTrace.snapshot().draws] })
+        print("LAZYLIST older loaded: \(Int(scroll.contentOffset.y)) pt from the top")
+        XCTAssertGreaterThan(scroll.contentOffset.y, 3 * scroll.bounds.height,
+                             "the row read before is still at the top, with the older messages above it")
+    }
+
     // MARK: - The side panel
 
     func test_the_side_panel_builds_only_the_rooms_it_shows_as_it_opens_and_as_its_rooms_change() throws {
@@ -164,6 +209,11 @@ final class LazyListBuildTests: XCTestCase {
         return height
     }
 
+    /// The content offset at which the list shows its last row.
+    private static func bottomOffset(of scroll: UIScrollView) -> CGFloat {
+        scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom
+    }
+
     /// The tallest scroll view in the window: the room's list.
     private static func list(in view: UIView) -> UIScrollView? {
         var found = view as? UIScrollView
@@ -182,13 +232,15 @@ final class LazyListBuildTests: XCTestCase {
 
     private final class Room: ObservableObject {
         @Published var state: RoomChatPresentationState
+        /// What the room asked of its coordinator.
+        var intents: [RoomChatIntent] = []
         init(_ state: RoomChatPresentationState) { self.state = state }
     }
 
     private struct RoomHost: View {
         @ObservedObject var room: Room
         var body: some View {
-            NavigationStack { RoomChatView(state: room.state) { _ in } }
+            NavigationStack { RoomChatView(state: room.state) { room.intents.append($0) } }
         }
     }
 
@@ -215,14 +267,15 @@ final class LazyListBuildTests: XCTestCase {
 
     /// A room of `rows` messages over three days: agents and a person taking turns, some long, every tenth a file
     /// posted as three base64 parts (two fold away, the newest carries the file's card). Made-up words only.
-    static func room(rows: Int, id: String = "room") -> RoomChatPresentationState {
+    static func room(rows: Int, id: String = "room", first: Int = 1, focus: Int64? = nil,
+                     canLoadOlder: Bool = false) -> RoomChatPresentationState {
         let start = Date(timeIntervalSince1970: 1_793_000_000)
         var files: [Int64: [RoomChatFileCard]] = [:]
         var parts: [String: Int64] = [:]
         var messages: [RoomChatMessageInput] = []
         let stamp = ISO8601DateFormatter()
         let agents = ["review-agent", "build-agent", "plan-agent"]
-        for index in 1...rows {
+        for index in first...(first + rows - 1) {
             let seq = Int64(index)
             let author = index % 7 == 0 ? "human-alex" : agents[index % 3]
             let date = start.addingTimeInterval(Double(index) * 650)
@@ -246,8 +299,9 @@ final class LazyListBuildTests: XCTestCase {
                                                  timestamp: stamp.string(from: date), date: date))
         }
         return RoomChatPresentationState(sessionId: id, title: "Room", messages: messages, ownAuthorIds: ["human-alex"],
-                                         connection: .live, composer: RoomComposerState(canPost: true, disabledReason: nil),
-                                         canReact: true, files: files, fileParts: parts)
+                                         canLoadOlder: canLoadOlder, connection: .live,
+                                         composer: RoomComposerState(canPost: true, disabledReason: nil),
+                                         canReact: true, focusSequenceId: focus, files: files, fileParts: parts)
     }
 
     /// A short room with a file posted in two parts at the top level: the newest part carries the card, the first folds
