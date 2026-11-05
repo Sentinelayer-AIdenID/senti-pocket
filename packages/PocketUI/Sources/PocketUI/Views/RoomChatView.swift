@@ -303,13 +303,16 @@ public struct RoomChatView: View {
                     // of the room, on screen or not, at every layout pass, to count them. Carter's phone froze inside
                     // that walk (11-04 and 11-05: 12 to 13.5 s in a lazy list's placement, going item by item). Wrapped,
                     // the list builds only the rows it shows. Spacing 0, as the list's own, so nothing moves.
-                    // Each row's id is the loop's own (`RoomChatRow.id`), which the scrolls to a row find; an `.id` of
-                    // the same value on every row made the list build every row again at the first update after it
-                    // opened (LazyListBuildTests: 404 of 404 rows, against 8 without it).
+                    // Each row keeps its `.id` (the loop's own id, `RoomChatRow.id`), which the scrolls to a row target.
+                    // Without it, a long press on a message at the largest text size (its menu) set the room laying
+                    // itself out again without end on the simulator (FreezePathsUITests path 4 at AX5: the main thread
+                    // 100% busy for 15 s; with it, 0.8%). It costs one pass over the rows the list made as it opened,
+                    // at the first update after the open, and none after (LazyListBuildTests).
                     ForEach(state.rows) { row in
                         VStack(alignment: .leading, spacing: 0) {
                             rowView(row, proxy: proxy)
                         }
+                        .id(row.id)
                     }
                     ForEach(state.pending) { pending in
                         RoomPendingRowView(
