@@ -80,8 +80,10 @@ public struct VoiceRoomPanel: View {
         Button { send(.setSpeaker(!state.isSpeakerOn)) } label: {
             Image(systemName: state.isSpeakerOn ? "speaker.wave.2.fill" : "speaker.fill")
                 .font(.title3)
+                .voiceLayoutProbe("speaker.glyph")
                 .frame(width: 44, height: 44)
                 .background(state.isSpeakerOn ? PocketPalette.textPrimary : PocketPalette.inset, in: Circle())
+                .voiceLayoutProbe("speaker.circle")
         }
         .buttonStyle(.plain)
         .foregroundStyle(state.isSpeakerOn ? PocketPalette.canvas : PocketPalette.textPrimary)
@@ -101,8 +103,10 @@ public struct VoiceRoomPanel: View {
         } label: {
             Image(systemName: "person.badge.plus")
                 .font(.title3)
+                .voiceLayoutProbe("add.glyph")
                 .frame(width: 44, height: 44)
                 .background(PocketPalette.inset, in: Circle())
+                .voiceLayoutProbe("add.circle")
         }
         .buttonStyle(.plain)
         .foregroundStyle(PocketPalette.textPrimary)
@@ -145,6 +149,7 @@ public struct VoiceRoomPanel: View {
                 .accessibilityLabel("Call time")
             }
         }
+        .voiceLayoutProbe("header")
     }
 
     /// The agent's logo on a large coin; while it rings, rings spread out from it. While an agent answers, its face
@@ -211,6 +216,7 @@ public struct VoiceRoomPanel: View {
                     Text(answering)
                         .font(.footnote.weight(.semibold))
                         .foregroundStyle(PocketPalette.textPrimary)
+                        .voiceLayoutProbe("answering")
                         .accessibilityIdentifier("pocket.voice.answering")
                 } else if let speaker = state.speaker {
                     Text("\(speaker) is speaking")
@@ -238,6 +244,7 @@ public struct VoiceRoomPanel: View {
                 .minimumScaleFactor(0.8)
                 .frame(maxWidth: .infinity)
                 .animation(.easeOut(duration: 0.15), value: lineText)
+                .voiceLayoutProbe("caption")
                 .accessibilityIdentifier("pocket.voice.caption")
             if let notice = state.notice {
                 Text(notice)
@@ -257,8 +264,10 @@ public struct VoiceRoomPanel: View {
                 Button { send(.skip) } label: {
                     Image(systemName: "forward.end.fill")
                         .font(.title3)
+                        .voiceLayoutProbe("skip.glyph")
                         .frame(width: 48, height: 48)
                         .background(PocketPalette.inset, in: Circle())
+                        .voiceLayoutProbe("skip.circle")
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(state.speaker == nil ? PocketPalette.textSecondary.opacity(0.5) : PocketPalette.textPrimary)
@@ -282,8 +291,10 @@ public struct VoiceRoomPanel: View {
                     Image(systemName: "phone.down.fill")
                         .font(.title3)
                         .foregroundStyle(.white)
+                        .voiceLayoutProbe("end.glyph")
                         .frame(width: 52, height: 52)
                         .background(PocketPalette.danger, in: Circle())
+                        .voiceLayoutProbe("end.circle")
                 }
                 .buttonStyle(.plain)
                 .disabled(state.phase == .ending || state.phase == .ended)
@@ -291,6 +302,7 @@ public struct VoiceRoomPanel: View {
                 .accessibilityIdentifier("pocket.voice.end")
             }
         }
+        .voiceLayoutProbe("controls")
     }
 
     /// Mute, on the panel of every call. As on the phone's own
@@ -300,8 +312,10 @@ public struct VoiceRoomPanel: View {
         Button { send(.setMuted(!state.isMuted)) } label: {
             Image(systemName: "mic.slash")
                 .font(.title3.weight(.semibold))
+                .voiceLayoutProbe("mute.glyph")
                 .frame(width: 48, height: 48)
                 .background(state.isMuted ? PocketPalette.textPrimary : PocketPalette.inset, in: Circle())
+                .voiceLayoutProbe("mute.circle")
         }
         .buttonStyle(.plain)
         .foregroundStyle(state.isMuted ? PocketPalette.canvas : PocketPalette.textPrimary)
@@ -389,6 +403,38 @@ public struct VoiceRoomPanel: View {
     static func elapsed(from start: Date, to now: Date) -> String {
         let seconds = max(0, Int(now.timeIntervalSince(start)))
         return String(format: "%d:%02d", seconds / 60, seconds % 60)
+    }
+}
+
+#if DEBUG
+/// DEBUG builds: where the call screen laid out its parts (each round button's glyph and circle, who is answering, the
+/// caption, the header and the controls), in the window's space, for its layout tests. Release builds have none of it.
+public enum VoiceRoomPanelLayout {
+    public private(set) static var frames: [String: CGRect] = [:]
+
+    public static func reset() {
+        frames = [:]
+    }
+
+    static func record(_ part: String, _ frame: CGRect) {
+        frames[part] = frame
+    }
+}
+#endif
+
+private extension View {
+    /// Records this part's frame in DEBUG builds; nothing in Release.
+    @ViewBuilder
+    func voiceLayoutProbe(_ part: String) -> some View {
+        #if DEBUG
+        background(GeometryReader { proxy in
+            Color.clear
+                .onAppear { VoiceRoomPanelLayout.record(part, proxy.frame(in: .global)) }
+                .onChange(of: proxy.frame(in: .global)) { VoiceRoomPanelLayout.record(part, $0) }
+        })
+        #else
+        self
+        #endif
     }
 }
 #endif
