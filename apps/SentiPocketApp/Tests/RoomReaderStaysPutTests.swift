@@ -95,8 +95,8 @@ final class RoomReaderStaysPutTests: XCTestCase {
     }
 
     /// Several screens of messages of every length.
-    private static func messages() -> [RoomChatMessageInput] {
-        (1...60).map { index -> RoomChatMessageInput in
+    private static func messages(count: Int = 60) -> [RoomChatMessageInput] {
+        (1...count).map { index -> RoomChatMessageInput in
             let seq = Int64(index)
             switch index % 4 {
             case 0: return input(seq, "human-reader", "A note from the phone, \(index).")
@@ -311,29 +311,18 @@ final class RoomReaderStaysPutTests: XCTestCase {
 
     // MARK: - Scrolling up without touching the list, while messages arrive
 
-    /// VoiceOver's three-finger scroll moves the list a page with an animation, not by touch. While messages arrive
-    /// faster than the room follows them, the end is pushed below, and a list moving up then was taken for the room
-    /// settling its rows: the reader was pulled back down. The scroll is the reader's: they leave the bottom, and what
-    /// arrives after it moves nothing.
-    func test_voiceover_scrolling_up_while_messages_arrive_leaves_the_bottom() throws {
-        try scrollsUpWhileMessagesArrive("voiceover") { list in
-            // The page above, toward older messages (in CI `.down` went toward the end, or nowhere at the end).
-            _ = list.accessibilityScroll(.up)
-        }
-    }
-
-    /// A tap on the status bar, and a keyboard's arrows or Page Up, scroll the list with an animation too, not by touch.
-    func test_an_animated_scroll_up_not_by_touch_while_messages_arrive_leaves_the_bottom() throws {
-        try scrollsUpWhileMessagesArrive("animated") { list in
-            list.setContentOffset(CGPoint(x: 0, y: list.contentOffset.y - list.bounds.height * 0.8), animated: true)
-        }
-    }
-
-    private func scrollsUpWhileMessagesArrive(_ name: String, scroll: (UIScrollView) -> Void) throws {
+    /// VoiceOver's three-finger scroll, a tap on the status bar and a keyboard's Page Up all move the list with UIKit's
+    /// own animated scroll, not by touch: about a page, with no drag. While messages arrive faster than the room
+    /// follows them, the end is pushed below, and a list moving up then was taken for the room settling its rows: the
+    /// reader was pulled back down. The scroll is the reader's: they leave the bottom, and what arrives after it moves
+    /// nothing. (VoiceOver's own `accessibilityScroll` moved the list neither way in a hosted test, in CI.)
+    func test_a_page_up_not_by_touch_while_messages_arrive_leaves_the_bottom() throws {
         try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
-        let room = Room(Self.messages())
+        let name = "page-up"
+        // A short room, so each arrival is quick to lay out and they outrun the room's follows on a slow machine too.
+        let room = Room(Self.messages(count: 30))
         let list = try host(room)
-        var seq: Int64 = 61
+        var seq: Int64 = 31
         func arrive(_ count: Int, every interval: TimeInterval) {
             for _ in 0..<count {
                 room.arrive([Self.arrival(seq)])
@@ -345,16 +334,21 @@ final class RoomReaderStaysPutTests: XCTestCase {
         // is below and stays below once a follow already asked for has had time to run: the room's follows for this
         // second are spent, and the next comes when it is up.
         var pushed = false
+        var arrivals = 0
+        let arriving = Date()
         for _ in 0..<150 where !pushed {
+            arrivals += 1
             arrive(1, every: 0.004)
             if !Self.atBottom(list) {
                 pump(0.03)
                 pushed = !Self.atBottom(list)
             }
         }
+        print("READER-STAYS-PUT \(name) pushed=\(pushed) after \(arrivals) arrivals in "
+            + "\(String(format: "%.2f", Date().timeIntervalSince(arriving))) s")
         XCTAssertTrue(pushed, "the end is below when the reader scrolls (the arrivals pushed it)")
         let before = list.contentOffset.y
-        scroll(list)
+        list.setContentOffset(CGPoint(x: 0, y: before - list.bounds.height * 0.8), animated: true)
         // The scroll's animation lands before the room's next follow is due (the follow limit's second is up).
         var highest = before
         let scrolling = Date().addingTimeInterval(0.4)
