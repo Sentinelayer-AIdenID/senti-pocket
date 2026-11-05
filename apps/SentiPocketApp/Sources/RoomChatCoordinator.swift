@@ -406,20 +406,8 @@ final class RoomChatCoordinator: ObservableObject {
             loadNewer()
         case .jumpToLatest:
             jumpToLatest()
-        case .keepLatestForJumpDown:
-            if historyTooLongToJumpDown {
-                readerAtBottom = false
-                keepLatestForTheJumpDown()
-                publish()
-            }
         case .newMessagesShown:
             if unread.countShown() { publish() }
-        case .keepFromNewMessagesLine:
-            if historyTooLongToJumpDown {
-                readerAtBottom = false
-                keepFromTheNewMessagesLine()
-                publish()
-            }
         case .readerAtBottom(let atBottom):
             // Only a change is news: the same place told again never publishes, so it can never loop the room. The
             // line the room opened at stays, so coming back to the bottom publishes only when arrivals were unread.
@@ -1451,43 +1439,6 @@ final class RoomChatCoordinator: ObservableObject {
         return clientId
     }
 
-    /// Rows kept when the reader goes back down from up the history: the most a jump to the bottom crosses.
-    static let rowsKeptForTheJumpDown = 60
-
-    /// The live room holds more rows than a jump to the bottom should cross.
-    private var historyTooLongToJumpDown: Bool {
-        !timeline.hasMoreNewer && timeline.messages.count > Self.rowsKeptForTheJumpDown
-    }
-
-    /// Going to the bottom of a long loaded history made iOS measure every row in between on the main thread: Carter's
-    /// freezes on 10-30 (07:39, 08:06, 13:43) all came after loading older messages and then sending (a send took the
-    /// reader down then; it no longer moves them), and the freeze recorder caught the last one "right after sendMessage
-    /// (497 rows)", stuck 16.9 s. Before Jump to latest goes down, only the newest rows are kept; older ones load again
-    /// when the reader scrolls up.
-    private func keepLatestForTheJumpDown() {
-        guard !readerAtBottom, historyTooLongToJumpDown else { return }
-        let oldest = timeline.oldestSequence
-        if timeline.keepNewest(Self.rowsKeptForTheJumpDown) {
-            noteOldestTrimmed(was: oldest)
-            CrashReporter.shared.note("kept the newest \(Self.rowsKeptForTheJumpDown) rows before jumping down")
-        }
-    }
-
-    /// Going to the first new message from up a long history: the rows from a few above that line on are kept (the
-    /// same reason as `keepLatestForTheJumpDown`), at least as many as the jump down keeps.
-    private func keepFromTheNewMessagesLine() {
-        guard !readerAtBottom, historyTooLongToJumpDown, let line = unread.dividerSequence else { return }
-        let fromLine = timeline.messages.count - (timeline.messages.firstIndex { $0.sequenceId >= line } ?? 0)
-        let oldest = timeline.oldestSequence
-        if timeline.keepNewest(max(Self.rowsKeptForTheJumpDown, fromLine + Self.rowsKeptAboveTheLine)) {
-            noteOldestTrimmed(was: oldest)
-            CrashReporter.shared.note("kept the rows from the new messages line before going to it")
-        }
-    }
-
-    /// Rows kept above the New messages line when the room goes to it from up a long history.
-    static let rowsKeptAboveTheLine = 5
-
     /// Posts (or re-posts, with the same client id) one pending message.
     private func deliver(_ clientId: String) {
         guard let sender, let item = pending.first(where: { $0.clientId == clientId }) else { return }
@@ -1741,9 +1692,9 @@ final class RoomChatCoordinator: ObservableObject {
                     beforeSequence: before,
                     limit: Self.pageSize
                 )
-                // If the oldest rows were let go meanwhile (a send or Jump from up the history), this page no longer
+                // If the oldest rows were let go meanwhile (newer rows over the room's capacity), this page no longer
                 // meets the rows kept and would leave a silent gap above them: it is dropped, and the next scroll up
-                // asks again from the oldest row kept (warden, #253).
+                // asks again from the oldest row kept (#253).
                 if !self.failureIsTerminal, self.timeline.oldestSequence == oldestAtRequest {
                     self.apply(page, older: true)
                 }
@@ -2387,7 +2338,6 @@ final class RoomChatCoordinator: ObservableObject {
             isLoadingOlder: isLoadingOlder || isLoadingWindow,
             canLoadNewer: hasLoadedInitial && timeline.hasMoreNewer,
             isLoadingNewer: isLoadingNewer,
-            jumpDownKeepsLatest: hasLoadedInitial && historyTooLongToJumpDown,
             connection: connection,
             composingAgents: composing
                 .filter { $0.value > now().addingTimeInterval(-Self.composingLifetime) }

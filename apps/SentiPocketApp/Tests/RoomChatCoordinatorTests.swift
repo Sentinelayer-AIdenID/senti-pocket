@@ -362,25 +362,6 @@ final class RoomChatCoordinatorTests: XCTestCase {
         coordinator.pause()
     }
 
-    /// Carter's freezes on 10-30: going to the bottom of a long loaded history measured every row in between. The
-    /// room keeps only its newest rows before the jump; older ones load again on demand.
-    func test_a_long_history_keeps_only_its_newest_rows_before_the_jump_down() async {
-        let transport = ScriptedRoomTransport(before: [.success(page(Array(1...130), hasMore: true))])
-        let coordinator = makeCoordinator(transport)
-        coordinator.resume()
-        await waitUntil("loaded") { messageSequences(coordinator).count == 130 }
-        XCTAssertTrue(coordinator.state.jumpDownKeepsLatest, "Jump to latest keeps the newest rows first")
-
-        coordinator.send(.keepLatestForJumpDown)
-        XCTAssertEqual(messageSequences(coordinator), Array(71...130), "the newest 60 stay")
-        XCTAssertTrue(coordinator.state.canLoadOlder, "and the rest can load again")
-        XCTAssertFalse(coordinator.state.jumpDownKeepsLatest, "the jump is now short enough to animate")
-
-        coordinator.send(.keepLatestForJumpDown)
-        XCTAssertEqual(messageSequences(coordinator).count, 60, "a short history is left alone")
-        coordinator.pause()
-    }
-
     /// Sending from up a long history never moves the reader (Carter, #61581): the rows they are reading stay loaded
     /// (the send used to keep only the newest 60, for a jump down that no longer happens: Carter's 10-30 freezes came
     /// from that jump), they stay away from the bottom, and arrivals after it are still counted for the arrow.
@@ -504,23 +485,6 @@ final class RoomChatCoordinatorTests: XCTestCase {
         coordinator.pause()
     }
 
-    /// Going to the first new message from up a long history keeps the rows from a few above the line on (as the jump
-    /// down keeps the newest), so the list opens again at the line rather than scrolling a long way.
-    func test_going_to_the_new_messages_from_up_a_long_history_keeps_the_rows_from_the_line() async {
-        let transport = ScriptedRoomTransport(before: [.success(page(Array(1...130), hasMore: true))])
-        let coordinator = makeCoordinator(transport)
-        coordinator.resume()
-        await waitUntil("loaded") { messageSequences(coordinator).count == 130 }
-        coordinator.send(.readerAtBottom(false))
-        for seq in Int64(131)...200 { coordinator.handle(.message(message(seq))) }
-
-        coordinator.send(.keepFromNewMessagesLine)
-        XCTAssertEqual(messageSequences(coordinator), Array(126...200), "the 70 new ones and 5 above the line")
-        XCTAssertTrue(coordinator.state.rows.contains(.unreadDivider))
-        XCTAssertTrue(coordinator.state.canLoadOlder, "and the rest can load again")
-        coordinator.pause()
-    }
-
     /// Lets the room's short waits (the read dwell) run.
     private func settle() async {
         for _ in 0..<20 { await Task.yield() }
@@ -554,32 +518,34 @@ final class RoomChatCoordinatorTests: XCTestCase {
         coordinator.pause()
     }
 
-    /// Warden, #253: an older page in flight when the rows are trimmed must not land above the rows kept.
-    func test_an_older_page_requested_before_a_trim_is_dropped_and_asked_again_from_the_rows_kept() async {
+    /// #253: an older page in flight when the oldest rows are let go (newer rows over the room's capacity) must not land
+    /// above the rows kept.
+    func test_an_older_page_requested_before_the_oldest_rows_go_is_dropped_and_asked_again_from_the_rows_kept() async {
+        let capacity = Int64(RoomTimeline().capacity)
+        let newest = 1_000 + capacity
         let transport = ScriptedRoomTransport(before: [
-            .success(page(Array(101...230), hasMore: true)),
-            .success(page(Array(21...100), hasMore: true)),
-            .success(page(Array(111...170), hasMore: true))
+            .success(page(Array(1_001...newest), hasMore: true)),
+            .success(page(Array(901...1_000), hasMore: true)),
+            .success(page(Array(902...1_001), hasMore: true))
         ])
         let coordinator = makeCoordinator(transport)
         coordinator.resume()
-        await waitUntil("loaded") { messageSequences(coordinator).count == 130 }
+        await waitUntil("loaded") { messageSequences(coordinator).count == Int(capacity) }
 
         transport.hold(beforeCall: 1)
         coordinator.send(.loadOlder)
         await waitUntil("older page in flight") { transport.isHoldingPage }
-        coordinator.send(.keepLatestForJumpDown)
-        XCTAssertEqual(messageSequences(coordinator), Array(171...230))
+        coordinator.handle(.message(message(newest + 1)))
+        XCTAssertEqual(messageSequences(coordinator).first, 1_002, "over the capacity, the oldest row went")
 
         transport.releaseHeldPage()
         await waitUntil("late page answered") { !coordinator.state.isLoadingOlder }
-        XCTAssertEqual(messageSequences(coordinator), Array(171...230), "the late page is dropped: no gap above the rows kept")
+        XCTAssertEqual(messageSequences(coordinator).first, 1_002, "the late page is dropped: no gap above the rows kept")
         XCTAssertTrue(coordinator.state.canLoadOlder)
 
         coordinator.send(.loadOlder)
         await waitUntil("asked again") { transport.snapshot().before.count == 3 && !coordinator.state.isLoadingOlder }
-        XCTAssertEqual(transport.snapshot().before.last, 171, "from the oldest row kept")
-        XCTAssertEqual(messageSequences(coordinator), Array(111...230), "and history is whole again")
+        XCTAssertEqual(transport.snapshot().before.last, 1_002, "from the oldest row kept")
         coordinator.pause()
     }
 

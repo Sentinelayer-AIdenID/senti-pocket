@@ -546,9 +546,6 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     /// down, and "Jump to latest" returns to the live room.
     public let canLoadNewer: Bool
     public let isLoadingNewer: Bool
-    /// The live room holds more rows than a jump to the bottom should cross: Jump to latest keeps only the newest
-    /// rows first, then goes down at once (a long jump froze the app on 10-30).
-    public let jumpDownKeepsLatest: Bool
     public let unreadCount: Int
     public let connection: RoomConnectionState
     /// Agent ids currently preparing a reply (from the stream's `agent_composing` controls).
@@ -619,7 +616,6 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         isLoadingOlder: Bool = false,
         canLoadNewer: Bool = false,
         isLoadingNewer: Bool = false,
-        jumpDownKeepsLatest: Bool = false,
         connection: RoomConnectionState = .connecting,
         composingAgents: [String] = [],
         failure: SessionLoadFailure? = nil,
@@ -662,7 +658,6 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         self.isLoadingOlder = isLoadingOlder
         self.canLoadNewer = canLoadNewer
         self.isLoadingNewer = isLoadingNewer
-        self.jumpDownKeepsLatest = jumpDownKeepsLatest
         self.unreadCount = max(unreadCount, 0)
         self.connection = connection
         self.composingAgents = composingAgents
@@ -1520,13 +1515,8 @@ public enum RoomChatIntent: Equatable, Sendable {
     case renameRoom(title: String)
     /// Open the invite sheet (a share link, or an invite by email or username).
     case openInvite
-    /// The reader is about to jump to the bottom of a long loaded history: keep only the newest rows first.
-    case keepLatestForJumpDown
     /// The jump button took the reader to the first new message: the count is taken, the line stays.
     case newMessagesShown
-    /// The reader is about to go to the first new message from up a long loaded history: keep the rows from just above
-    /// that line on, as for the jump down.
-    case keepFromNewMessagesLine
 }
 
 /// A room's name as the API takes it (`SessionTitlePayload`, `_normalize_session_title`): control characters out,

@@ -24,11 +24,6 @@ public struct RoomChatView: View {
     /// to take it (see `RoomBottomSettle`). A reference, so keeping it never redraws the room.
     @State private var bottomWatch = RoomBottomWatch()
     @State private var didInitialScroll = false
-    /// A new list each time the room is put back at its newest rows (see `reopenAtLatest()`).
-    @State private var listEpoch = 0
-    /// A new list starts at its top, where "Load earlier messages" shows: until its first scroll down has landed, that
-    /// is not the reader asking for older history.
-    @State private var holdsOlderLoads = false
     @State private var anchorBeforeOlderLoad: String?
     /// A message the reader was taken to (a link, notification, search result or pin). It stays in place through
     /// pages loading above or below it and messages arriving, until the reader scrolls.
@@ -47,8 +42,6 @@ public struct RoomChatView: View {
     @State private var scrollsToLatestWhenLoaded = false
     /// ... or to the New messages line, when the jump button had messages waiting.
     @State private var scrollsToLineWhenLoaded = false
-    /// The next new list opens at the New messages line, not at the latest (`goToFirstUnseen`).
-    @State private var reopensAtLine = false
     @State private var highlightedRowId: String?
     /// Background lines opened in place.
     @State private var expandedQuiet: Set<String> = []
@@ -357,6 +350,7 @@ public struct RoomChatView: View {
             // The reader scrolling lets go of a message they were taken to, and of the unread line being placed.
             .simultaneousGesture(DragGesture(minimumDistance: 8).onChanged { _ in
                 bottomWatch.readerScrolled = true
+                bottomWatch.lastDrag = ProcessInfo.processInfo.systemUptime
                 if heldAnchor != nil { heldAnchor = nil }
             }.onEnded { _ in
                 // Let go with the end in view and nothing moving: no new reading would say the reader is at the bottom.
@@ -475,24 +469,9 @@ public struct RoomChatView: View {
             // it there). Only where it starts: rows arriving or loading later move nothing.
             .modifier(StartsAtBottom())
             // Where the reader is, from the scroll view's own geometry (iOS 18 and later).
-            .modifier(RoomScrollReading { readingSeen($0, proxy: proxy) })
+            .modifier(RoomScrollReading { readingSeen($0, visibleHeight: $1, proxy: proxy) })
             .modifier(RoomReaderScrolling { bottomWatch.scrolling = $0 })
-            // The whole list, its handlers with it, so a new one opens as the room does.
-            .id(listEpoch)
         }
-    }
-
-    /// Puts the room back at its newest rows as a new list, the way a room opens (which has never frozen), rather than
-    /// scrolling down to them or trimming the rows under the reader: the jump button's way down from up a long history.
-    /// Carter's 10-30 freezes all began with the room moving a long way at a send; the last (14:53) came right after the
-    /// trim to the newest rows, with the scroll still to come. A send no longer moves the room at all.
-    private func reopenAtLatest(atLine: Bool = false) {
-        reopensAtLine = atLine
-        heldAnchor = nil
-        anchorBeforeOlderLoad = nil
-        didInitialScroll = false
-        holdsOlderLoads = true
-        listEpoch += 1
     }
 
     @ViewBuilder
@@ -506,7 +485,7 @@ public struct RoomChatView: View {
                 .font(.footnote.weight(.semibold))
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 12)
-                .onAppear { if didInitialScroll, !holdsOlderLoads { loadOlder() } }
+                .onAppear { if didInitialScroll { loadOlder() } }
                 .accessibilityIdentifier("pocket.room.loadOlder")
         } else {
             Text("Start of the room")
@@ -642,18 +621,7 @@ public struct RoomChatView: View {
                 goToFirstUnseen(proxy)
                 return
             }
-            // From up a long history, measuring every row on the way down froze the app (10-30): the room keeps
-            // only its newest rows, then the jump is at once.
-            if state.jumpDownKeepsLatest {
-                send(.keepLatestForJumpDown)
-                reopenAtLatest()
-                return
-            }
-            roomScroll(.easeOut(duration: 0.25), lasting: 0.25) {
-                proxy.scrollTo(Self.bottomId, anchor: .bottom)
-            }
-            // Landed with the end in view: the reading says so even if the last frame of the scroll did not.
-            DispatchQueue.main.asyncAfter(deadline: .now() + Self.openLanding) { recheckPlace(proxy) }
+            scrollDown(to: Self.bottomId, anchor: .bottom, proxy)
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "arrow.down")
@@ -674,20 +642,55 @@ public struct RoomChatView: View {
 
     /// With messages waiting, the jump button takes the reader to the first of them, read from its top under the New
     /// messages line, as the web room's does (Carter, #61581: never skip what arrived). The count is taken, so the
-    /// button goes plain and takes them on to the latest; the line stays until it has been seen. From up a long history
-    /// the list opens again at the line (as a room opens at its unread line), instead of scrolling a long way down.
+    /// button goes plain and takes them on to the latest; the line stays until it has been seen.
     private func goToFirstUnseen(_ proxy: ScrollViewProxy) {
         send(.newMessagesShown)
-        if state.jumpDownKeepsLatest {
-            send(.keepFromNewMessagesLine)
-            reopenAtLatest(atLine: true)
-            return
-        }
-        roomScroll(.easeOut(duration: 0.25), lasting: 0.25) {
-            proxy.scrollTo(RoomChatRow.unreadDivider.id, anchor: Self.unreadLineAnchor)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.openLanding) { recheckPlace(proxy) }
+        scrollDown(to: RoomChatRow.unreadDivider.id, anchor: Self.unreadLineAnchor, proxy)
     }
+
+    /// The jump button's way down, to the latest or to the New messages line, in the list as it is: the reader sees it
+    /// scroll there (Carter: from up a long room the arrow went dark, glitched and then showed the bottom, when the
+    /// room was built again as a new list at its newest rows). A long way down, an animated scroll draws every row
+    /// on its way, which once froze the app from up a long history: so the list is first put, at once, `jumpRows`
+    /// rows above where it goes, and scrolls the rest. The rows in between are never drawn. Once it has landed it is
+    /// placed again, as the rows it reached are measured by then, and the reader's place is read.
+    private func scrollDown(to target: String, anchor: UnitPoint, _ proxy: ScrollViewProxy) {
+        let tapped = ProcessInfo.processInfo.systemUptime
+        let start = jumpStart(above: target)
+        if let start { proxy.scrollTo(start, anchor: .top) }
+        let scroll: () -> Void = {
+            roomScroll(.easeOut(duration: Self.jumpEase), lasting: Self.jumpEase) { proxy.scrollTo(target, anchor: anchor) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.jumpEase + 0.05) {
+                // Not once the reader has taken the list again.
+                guard bottomWatch.isActive, heldAnchor == nil, bottomWatch.lastDrag < tapped, !bottomWatch.readerMoving
+                else { return }
+                proxy.scrollTo(target, anchor: anchor)
+                RoomNextFrame.run { recheckPlace(proxy) }
+            }
+        }
+        // The animated scroll starts from where the list was put, once that has been drawn.
+        if start != nil { RoomNextFrame.run(scroll) } else { scroll() }
+    }
+
+    /// Where a long jump down starts: the row `jumpRows` above its target, when the target is far below (from iOS 18,
+    /// the end of the room more than `farScreens` screens below what is read; before, any target that far down the
+    /// rows). Nil for a short way, which is scrolled whole.
+    private func jumpStart(above target: String) -> String? {
+        let rows = state.rows
+        let index: Int? = target == Self.bottomId ? rows.count : rows.firstIndex(where: { $0.id == target })
+        guard let index, index > Self.jumpRows else { return nil }
+        if bottomWatch.readsGeometry, let reading = bottomWatch.reading, bottomWatch.visibleHeight > 0,
+           reading.distanceToEnd <= bottomWatch.visibleHeight * Self.farScreens {
+            return nil
+        }
+        return rows[index - Self.jumpRows].id
+    }
+
+    /// A long jump down scrolls this many rows of the way; one this many screens or less is scrolled whole.
+    static let jumpRows = 6
+    static let farScreens: CGFloat = 3
+    /// How long the jump button's scroll lasts.
+    static let jumpEase: TimeInterval = 0.3
 
     /// From a window further back, the live room's newest page loads, then the room goes to its newest message (or
     /// the New messages line, `scrollsToLineWhenLoaded`): the jump button, and "Sent · ↓ latest".
@@ -733,9 +736,7 @@ public struct RoomChatView: View {
     private func scrollToInitialPosition(_ proxy: ScrollViewProxy) {
         guard !didInitialScroll, !state.isEmpty else { return }
         // A room opened at a message (a link or notification) is positioned by `focus(onRow:proxy:)` instead.
-        let position = reopensAtLine && state.rows.contains(.unreadDivider)
-            ? RoomOpenPosition.unreadLine : state.openPosition(reopening: listEpoch > 0)
-        reopensAtLine = false
+        let position = state.openPosition(reopening: false)
         guard position == .latest || position == .unreadLine else { return }
         didInitialScroll = true
         // Say where the reader is now: the bottom marker may never render when the first scroll lands elsewhere,
@@ -748,8 +749,6 @@ public struct RoomChatView: View {
             } else {
                 proxy.scrollTo(Self.bottomId, anchor: .bottom)
             }
-            // The list has left its top: from now on the header showing means the reader scrolled up to it.
-            DispatchQueue.main.async { holdsOlderLoads = false }
             if opensAtLine {
                 DispatchQueue.main.asyncAfter(deadline: .now() + Self.openLanding) {
                     placeLineAgain(proxy)
@@ -948,7 +947,8 @@ public struct RoomChatView: View {
     /// coming back in a millisecond. So the reading is only kept, and when what it shows differs from the last one
     /// taken, it is taken on the next frame the screen draws, once, however many came before; a follow it makes lands
     /// in a frame of its own.
-    private func readingSeen(_ reading: RoomReaderPlace.Reading, proxy: ScrollViewProxy) {
+    private func readingSeen(_ reading: RoomReaderPlace.Reading, visibleHeight: CGFloat, proxy: ScrollViewProxy) {
+        bottomWatch.visibleHeight = visibleHeight
         let sight = bottomWatch.see(reading)
         guard bottomWatch.isActive, sight != bottomWatch.takenSight, !bottomWatch.readingQueued else { return }
         bottomWatch.readingQueued = true
@@ -1033,8 +1033,9 @@ public struct RoomChatView: View {
 private final class RoomBottomWatch {
     var settle = RoomBottomSettle()
     var isActive = true
-    /// The reader has dragged the list since it opened.
+    /// The reader has dragged the list since it opened; when they last did.
     var readerScrolled = false
+    var lastDrag: TimeInterval = 0
     /// From iOS 18 the scroll view's geometry says where the reader is (`RoomReaderPlace`); before, the bottom marker.
     let readsGeometry: Bool = {
         if #available(iOS 18.0, macOS 15.0, *) { return true }
@@ -1046,6 +1047,8 @@ private final class RoomBottomWatch {
     var atBottom: Bool { tracker.atBottom }
     /// The scroll view's last reading (iOS 18 and later), recorded while the list is laid out.
     var reading: RoomReaderPlace.Reading?
+    /// The height of what can be read, at the last reading.
+    var visibleHeight: CGFloat = 0
 
     /// A reading, while the list is laid out: kept, and what it is (`RoomReaderPlace.Tracker.see`). Nothing here
     /// changes what SwiftUI shows.
@@ -1143,7 +1146,8 @@ private struct OpenThreadSummary: Identifiable {
 /// `contentInsets.top` below it. Each reading goes to `seen` as the list is laid out; the value SwiftUI watches never
 /// changes, so its callback never runs (`RoomChatView.readingSeen` says why).
 private struct RoomScrollReading: ViewModifier {
-    let seen: (RoomReaderPlace.Reading) -> Void
+    /// A reading, and the height of what can be read.
+    let seen: (RoomReaderPlace.Reading, CGFloat) -> Void
 
     func body(content: Content) -> some View {
         if #available(iOS 18.0, macOS 15.0, *) {
@@ -1153,7 +1157,7 @@ private struct RoomScrollReading: ViewModifier {
                         distanceToEnd: geometry.contentSize.height
                             - (geometry.contentOffset.y + geometry.contentInsets.top + geometry.containerSize.height),
                         offset: geometry.contentOffset.y
-                    ))
+                    ), geometry.containerSize.height)
                 }
                 return true
             } action: { _, _ in }
