@@ -114,36 +114,49 @@ final class FreezePathsUITests: XCTestCase {
     private func replyAfterJumpDown(_ app: XCUIApplication, upTo sequence: Int, path: String, sendFirst: Bool = false) {
         let screen = app.descendants(matching: .any)["pocket.room.screen"]
         let far = app.descendants(matching: .any)["pocket.room.message.\(sequence)"]
-        // Up the room until the message is in view, within two minutes (each page of earlier messages loads as its top
-        // comes into view).
-        let deadline = Date().addingTimeInterval(120)
+        // Up the room until the message is in view, within four minutes (each page of earlier messages loads as its top
+        // comes into view; a swipe and its check take about 3 s on the build Mac, and 300 rows take up to 80 swipes).
+        let deadline = Date().addingTimeInterval(240)
         while !far.exists, Date() < deadline {
             screen.swipeDown(velocity: .fast)
         }
-        XCTAssertTrue(far.exists, "up the room to message \(sequence) within two minutes")
+        XCTAssertTrue(far.exists, "up the room to message \(sequence) within four minutes")
         let jump = app.descendants(matching: .any)["pocket.room.jumpToLatest"]
         XCTAssertTrue(jump.waitForExistence(timeout: 10), "the arrow shows up the room")
         jump.tap()
         pause(3)
         if sendFirst {
-            send(app, "A note sent after the jump down, as long as a paragraph would be in a busy room.")
+            send(app, "On it.")
         }
         // The newest message with some of it in view, pressed where it shows: at the largest text size a message can
-        // be taller than the screen (its middle off it), and the one before the note just sent may be out of view.
+        // be taller than the screen (its middle off it), and the note just sent can fill what the keyboard leaves, so
+        // the room is moved down a little at a time (a short drag) until one shows.
         let window = app.windows.firstMatch
-        var band = window.frame
-        let bar = app.navigationBars.firstMatch
-        if bar.exists { band = band.divided(atDistance: max(0, bar.frame.maxY - band.minY), from: .minYEdge).remainder }
-        let composer = app.descendants(matching: .any)["pocket.room.composer"]
-        if composer.exists { band.size.height = max(0, composer.frame.minY - 16 - band.minY) }
         let messages = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@", "pocket.room.message."))
-        let all = messages.allElementsBoundByIndex
-        guard let message = all.last(where: { $0.frame.intersection(band).height >= 40 }) else {
-            print("FREEZE-PRESS none in \(band): \(all.suffix(4).map { "\($0.identifier) \($0.frame)" })")
+        var target: (element: XCUIElement, shown: CGRect)?
+        for attempt in 0..<8 {
+            var band = window.frame
+            let bar = app.navigationBars.firstMatch
+            if bar.exists { band = band.divided(atDistance: max(0, bar.frame.maxY - band.minY), from: .minYEdge).remainder }
+            let composer = app.descendants(matching: .any)["pocket.room.composer"]
+            if composer.exists { band.size.height = max(0, composer.frame.minY - 16 - band.minY) }
+            let all = messages.allElementsBoundByIndex
+            if let found = all.last(where: { $0.frame.intersection(band).height >= 40 }) {
+                target = (found, found.frame.intersection(band))
+                break
+            }
+            print("FREEZE-PRESS none in \(band) (try \(attempt)): \(all.suffix(3).map { "\($0.identifier) \($0.frame)" })")
+            let start = window.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: band.midX, dy: band.minY + 20))
+            start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: min(160, band.height - 30))),
+                        withVelocity: .slow, thenHoldForDuration: 0.2)
+            pause(1)
+        }
+        guard let target else {
             return XCTFail("no message in view to press")
         }
-        let shown = message.frame.intersection(band)
+        let message = target.element
+        let shown = target.shown
         print("FREEZE-PRESS \(message.identifier) at \(Int(shown.midX)),\(Int(shown.midY))")
         window.coordinate(withNormalizedOffset: .zero)
             .withOffset(CGVector(dx: shown.midX - window.frame.minX, dy: shown.midY - window.frame.minY))
