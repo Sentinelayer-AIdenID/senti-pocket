@@ -274,7 +274,9 @@ final class RoomReaderStaysPutTests: XCTestCase {
             var outOfViewSince: Date?
             var longestStranded: TimeInterval = 0
             pump(0.1)
-            while Date() < end, !(list.contentSize.height > height && Self.atBottom(list)) {
+            // Sampled until the end is reached (at most 8 s), then one second more: a strand that starts late is caught.
+            var settledUntil: Date?
+            while Date() < end {
                 let below = Self.bottomOffset(of: list) - list.contentOffset.y
                 if below > RoomReaderPlace.atBottomDistance {
                     let since = outOfViewSince ?? Date()
@@ -287,13 +289,17 @@ final class RoomReaderStaysPutTests: XCTestCase {
                 timeline.append("\(Int(list.contentOffset.y))/\(Int(below))/\(Int(list.contentSize.height))/"
                     + "f\(RoomScrollTrace.followsMade)r\(RoomScrollTrace.shortLandingsRetaken)t\(snap.taken)"
                     + "\(room.atBottom ? "B" : "")")
+                if settledUntil == nil, list.contentSize.height > height, Self.atBottom(list) {
+                    settledUntil = Date().addingTimeInterval(1)
+                }
+                if let settledUntil, Date() >= settledUntil { break }
                 pump(0.05)
             }
             print("READER-STAYS-PUT tall-arrivals timeline batch=\(batch) longest-stranded="
                 + "\(String(format: "%.2f", longestStranded)) s " + timeline.joined(separator: " "))
             XCTAssertLessThanOrEqual(longestStranded, Self.strandedLimit, "batch \(batch): the room said the reader "
                 + "is at the bottom with the end out of view for \(String(format: "%.2f", longestStranded)) s")
-            pump(1)
+            XCTAssertGreaterThan(list.contentSize.height, height, "batch \(batch): the reports did not grow the room")
             let follows = RoomScrollTrace.followsMade
             let shortLandings = RoomScrollTrace.shortLandingsRetaken
             print("READER-STAYS-PUT tall-arrivals \(textSize) batch=\(batch) follows=\(follows) "
@@ -302,6 +308,7 @@ final class RoomReaderStaysPutTests: XCTestCase {
                 + "(was \(height))")
             XCTAssertTrue(Self.atBottom(list) || !room.atBottom,
                           "batch \(batch): short of the end, and the room says the reader is at the bottom")
+            if room.atBottom { XCTAssertEqual(room.unreadCount, 0, "batch \(batch): at the bottom with messages unread") }
             retaken = shortLandings > 0
         }
         XCTAssertTrue(retaken, "no follow's landing short of the end was retaken: this case did not test it")
@@ -359,6 +366,7 @@ final class RoomReaderStaysPutTests: XCTestCase {
                 pump(0.05)
             }
             let below = Self.bottomOffset(of: list) - list.contentOffset.y
+            XCTAssertGreaterThan(list.contentSize.height, height, "batch \(batch): the reports did not grow the room")
             print("READER-STAYS-PUT tall-arrivals arrow batch=\(batch) end-below=\(Int(below)) "
                 + "longest-stranded=\(String(format: "%.2f", longestStranded)) s at-bottom=\(room.atBottom)")
             XCTAssertLessThanOrEqual(longestStranded, Self.strandedLimit, "batch \(batch): the room said the reader "
