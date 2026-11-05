@@ -88,13 +88,17 @@ private final class ScriptedFetcher: AttachmentFileFetching, @unchecked Sendable
 
 @MainActor
 final class RoomAttachmentsCoordinatorTests: XCTestCase {
-    private func waitUntil(_ description: String, _ condition: () -> Bool) async {
-        for _ in 0..<500 {
+    /// Waits on the condition itself, up to a wall-clock deadline. A fixed number of polls gave up after
+    /// 1-4 s on a loaded CI runner while the work was still on its way.
+    private func waitUntil(_ description: String, within seconds: Double = 15, _ condition: () -> Bool) async {
+        let deadline = ContinuousClock.now + .milliseconds(Int(seconds * 1000))
+        while ContinuousClock.now < deadline {
             if condition() { return }
             await Task.yield()
             try? await Task.sleep(nanoseconds: 2_000_000)
         }
-        XCTFail("timed out waiting for: \(description)")
+        if condition() { return }
+        XCTFail("timed out after \(seconds) s waiting for: \(description)")
     }
 
     private static func png(width: Int, height: Int) -> Data {
