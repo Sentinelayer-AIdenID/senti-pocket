@@ -605,6 +605,11 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     /// A short summary of a thread, by its parent's sequence, shown on the room's row for it before it is opened
     /// (Carter, #55474: "I wish I had the summarized here at top level before I even open the thread").
     public let threadSummaries: [Int64: SummaryReading]
+    /// The agent this chat was made for (`RoomAgentChat`), lowercased: what it says shows in full. Nil in other rooms.
+    public let roomAgent: String?
+    /// A box still running is in the room: it hears only what @-names it or answers it in its thread, so the composer
+    /// says so (`RoomComposerPlaceholder`).
+    public let hasRunningBox: Bool
 
     /// Same-author rows closer together than this share one header.
     public static let groupingWindow: TimeInterval = 5 * 60
@@ -659,6 +664,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         files: [Int64: [RoomChatFileCard]] = [:],
         fileParts: [String: Int64] = [:],
         draftKey: String? = nil,
+        runningBoxes: Set<String> = [],
+        endedBoxNames: Set<String> = [],
         calendar: Calendar = .current
     ) {
         // Emoji reactions show only in a build that turns them on (`RoomEmojiReactions`), and never on a reply shown
@@ -703,6 +710,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         guard failure?.suppressesProtectedContent != true else {
             self.rows = []
             self.thread = nil
+            self.roomAgent = nil
+            self.hasRunningBox = false
             return
         }
 
@@ -714,13 +723,20 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         // A box's thread starts collapsed (warden, at Carter's #54962): its launch line is one line with the box's name
         // and status, and what is said in the thread stays there, unless it is said to you.
         let launches = RoomBoxThread.launches(in: messages)
+        let endedBoxes = RoomBoxThread.endedBoxes(in: messages)
+        // The mint's boxes for this room (running, or ended) come from the app; launch lines and final costs from the room.
+        let boxes = RoomAgentChat.Boxes(launches: launches.values.map(\.name), running: runningBoxes, ended: endedBoxNames,
+                                        finished: endedBoxes)
+        let roomAgent = RoomAgentChat.agent(boxes: boxes.all,
+                                            agents: RoomAgentChat.agents(in: messages, replies: replies, presence: presence))
+        self.roomAgent = roomAgent
+        self.hasRunningBox = !boxes.running.isEmpty
         var boxReplies: [Int64: [RoomChatMessageInput]] = [:]
         let roomReplies = replies.filter { reply in
             guard launches[reply.sequenceId] != nil else { return true }
             boxReplies[reply.sequenceId, default: []].append(reply)
             return ChatReferences.mentionHandles(in: reply.text).contains(where: ownHandles.contains)
         }
-        let endedBoxes = RoomBoxThread.endedBoxes(in: messages)
         // A voice room's turns fold into one card on the message that started it.
         let folded = VoiceCallCard.fold(Self.interleave(
             messages: messages.sorted { $0.sequenceId < $1.sequenceId },
@@ -746,6 +762,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 + replies.filter { ownIds.contains($0.authorId.lowercased()) }.map(\.sequenceId)
         )
         for input in ordered {
+            // The chat's own agent: everything it says is said to you, in full, without the relay's signature line.
+            let byRoomAgent = roomAgent != nil && input.kind == .message && input.authorId.lowercased() == roomAgent
             if let date = input.date {
                 let day = calendar.dateComponents([.year, .month, .day], from: date)
                 if day != lastDay {
@@ -781,7 +799,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 authorName: input.authorName,
                 isHuman: input.isHuman,
                 isOwn: ownAuthorIds.contains(input.authorId.lowercased()),
-                text: input.text,
+                text: byRoomAgent ? RoomBoxThread.unsigned(input.text) : input.text,
                 date: input.date,
                 replyToSequenceId: input.replyToSequenceId,
                 isEdited: input.isEdited,
@@ -800,7 +818,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 checkpointSummary: input.checkpointSummary,
                 // A box's launch line is its own collapsed line, never background.
                 isQuiet: folded.cards[input.id] == nil && (input.isInlineReply || launches[input.sequenceId] == nil)
-                    && RoomChatQuiet.isQuiet(
+                    && !byRoomAgent && RoomChatQuiet.isQuiet(
                         input,
                         ownHandles: ownHandles,
                         inYourThread: yourThreads.contains(input.isInlineReply ? input.sequenceId : (input.replyToSequenceId ?? -1))
@@ -1236,6 +1254,49 @@ public enum RoomChatQuiet {
         cache.countLimit = 2_000
         return cache
     }()
+}
+
+/// The agent a chat was made for (Carter, #61679): a room whose only agent is one box, as a New agent's new chat is.
+/// What it says there is said to you, so it shows in full, never as background. The room's own voices (Senti, the
+/// orchestrator's costs and launches, the ticket keeper) are not agents here, and stay as they are.
+enum RoomAgentChat {
+    /// The room's boxes, by lowercased name: from its launch lines and from the mint, running or ended.
+    struct Boxes {
+        /// Every box the room has had.
+        let all: Set<String>
+        /// The boxes still running: the mint's running boxes, and launch lines whose box has not ended.
+        let running: Set<String>
+
+        init(launches: [String], running: Set<String>, ended: Set<String>, finished: Set<String>) {
+            let launched = Set(launches.map { $0.lowercased() })
+            let mintRunning = Set(running.map { $0.lowercased() })
+            let gone = Set(ended.map { $0.lowercased() }).union(finished.map { $0.lowercased() }).subtracting(mintRunning)
+            all = launched.union(mintRunning).union(ended.map { $0.lowercased() })
+            self.running = mintRunning.union(launched.subtracting(gone))
+        }
+    }
+
+    /// The box's id when the room's one agent is that box; nil in a room with no box, with two, or with any other agent.
+    static func agent(boxes: Set<String>, agents: Set<String>) -> String? {
+        guard boxes.count == 1, let box = boxes.first, agents.isSubset(of: boxes) else { return nil }
+        return box
+    }
+
+    /// Every agent the room shows, lowercased: who posted, answered or joined, and who is here now.
+    static func agents(in messages: [RoomChatMessageInput], replies: [RoomChatMessageInput],
+                       presence: RoomChatPresence?) -> Set<String> {
+        var ids = Set<String>()
+        func note(_ id: String) {
+            let key = id.lowercased()
+            if !key.isEmpty, !RoomChatQuiet.isRoomVoice(key) { ids.insert(key) }
+        }
+        for input in messages where !input.isHuman && (input.kind == .message || input.kind == .memberJoined) {
+            note(input.authorId)
+        }
+        for reply in replies where !reply.isHuman { note(reply.authorId) }
+        for person in presence?.people ?? [] where !person.isHuman { note(person.id) }
+        return ids
+    }
 }
 
 /// A box's thread, collapsed (warden, at Carter's #54962). The respawn orchestrator's launch line ("🚀 Minted <name> …

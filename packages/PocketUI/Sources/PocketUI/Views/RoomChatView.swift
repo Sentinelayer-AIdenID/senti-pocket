@@ -112,6 +112,7 @@ public struct RoomChatView: View {
                 mentionCandidates: state.mentionCandidates,
                 restored: restoredDraft,
                 actions: composerActions,
+                hasRunningBox: state.hasRunningBox,
                 replying: replyTarget,
                 onCancelReply: { replyTarget = nil },
                 onIntent: send,
@@ -383,6 +384,11 @@ public struct RoomChatView: View {
                     jumpToLatestButton(proxy: proxy)
                 }
             }
+            // The list starts below who is here, so the ring never covers the first message (Carter, #61679); rows
+            // scrolled up pass under it. Always the same height, so the ring coming or changing shape moves nothing.
+            .safeAreaInset(edge: .top, spacing: 0) {
+                Color.clear.frame(height: RoomPeopleAvatars.reservedHeight)
+            }
             // Who is here floats at the top center, under the top bar and the pins, over the messages (Carter, #55354,
             // #55424).
             .overlay(alignment: .top) {
@@ -396,7 +402,7 @@ public struct RoomChatView: View {
                                       isPaused: showsPresence) {
                         showsPresence = true
                     }
-                        .padding(.top, 4)
+                        .padding(.top, RoomPeopleAvatars.topGap)
                 }
             }
             .safeAreaInset(edge: .top, spacing: 0) {
@@ -2837,11 +2843,26 @@ public struct RoomComposerActions: Equatable, Sendable {
     }
 }
 
+/// What the room's composer says before you type. A box hears only what @-names it or answers it in its thread (Carter,
+/// #61679, keeping that rule), so where a running box is in the room the composer says how to reach it; a room of
+/// people keeps "Message".
+enum RoomComposerPlaceholder {
+    static let reachAgents = "@name to reach an agent"
+
+    static func text(ticketMode: Bool, replying: Bool, hasRunningBox: Bool) -> String {
+        if ticketMode { return "Describe the ticket" }
+        if replying { return "Reply" }
+        return hasRunningBox ? reachAgents : "Message"
+    }
+}
+
 private struct RoomComposerBar: View {
     let composer: RoomComposerState
     var mentionCandidates: [MentionCandidate] = []
     var restored: RoomComposerRestore?
     var actions = RoomComposerActions()
+    /// A box still running is in the room: the placeholder says how to reach it.
+    var hasRunningBox = false
     /// The message this box answers, in its thread; nil writes to the room.
     var replying: RoomChatMessageRow?
     var onCancelReply: () -> Void = {}
@@ -3119,7 +3140,8 @@ private struct RoomComposerBar: View {
                 RoomComposerPlusButton(board: ticketMode ? nil : media, more: plusActions,
                                        identifier: "pocket.room.composer.plus")
                     .padding(.bottom, 1)
-                ComposerTextField(placeholder: ticketMode ? "Describe the ticket" : (replying == nil ? "Message" : "Reply"),
+                ComposerTextField(placeholder: RoomComposerPlaceholder.text(ticketMode: ticketMode, replying: replying != nil,
+                                                                            hasRunningBox: hasRunningBox),
                                   text: $draft, isFocused: $isEditing, identifier: "pocket.room.composer")
                     .onChange(of: draft) { new in
                         writtenBack.changed(from: lastDraft, to: new, sent: justSent)

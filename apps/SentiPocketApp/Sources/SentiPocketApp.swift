@@ -120,6 +120,8 @@ struct SentiPocketApp: App {
         #if DEBUG
         if RootPreview.isRequested {
             RootPreview.rootView(whisperModel: whisperModel, incomingLinks: incomingLinks)
+        } else if AgentChatPreview.isRequested {
+            AgentChatPreview.rootView
         } else if RoomPreview.isRequested {
             RoomPreview.rootView
         } else {
