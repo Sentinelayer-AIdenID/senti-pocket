@@ -370,6 +370,8 @@ public struct RoomChatReplyRow: Equatable, Identifiable, Sendable {
     public let reactions: RoomChatReactions?
     /// This reply is a part of a file posted as base64 (the thread's root sequence): folded behind the file's card.
     public var filePartOf: Int64?
+    /// Its photos and files, shown as a message's are.
+    public let attachments: [RoomAttachmentChip]
 
     public init(
         id: String,
@@ -382,7 +384,8 @@ public struct RoomChatReplyRow: Equatable, Identifiable, Sendable {
         views: RoomChatViews? = nil,
         authorHandle: String = "",
         parentReplyId: String? = nil,
-        reactions: RoomChatReactions? = nil
+        reactions: RoomChatReactions? = nil,
+        attachments: [RoomAttachmentChip] = []
     ) {
         self.id = id
         self.authorName = authorName
@@ -395,6 +398,7 @@ public struct RoomChatReplyRow: Equatable, Identifiable, Sendable {
         self.authorHandle = authorHandle.isEmpty ? authorName : authorHandle
         self.parentReplyId = parentReplyId
         self.reactions = reactions
+        self.attachments = attachments
     }
 
     /// The deepest indent a thread shows; deeper replies sit at this depth, under their parent.
@@ -439,6 +443,8 @@ public struct RoomChatThreadState: Equatable, Sendable {
     public let canReply: Bool
     /// The longest reply the API accepts, in characters; nil when there is no known limit.
     public let maximumReplyLength: Int?
+    /// The reply the thread was opened at (a reply notification): brought into view and marked.
+    public let focusReplyId: String?
 
     public init(
         parent: RoomChatMessageRow,
@@ -447,7 +453,8 @@ public struct RoomChatThreadState: Equatable, Sendable {
         isLoading: Bool = false,
         failureText: String? = nil,
         canReply: Bool = false,
-        maximumReplyLength: Int? = nil
+        maximumReplyLength: Int? = nil,
+        focusReplyId: String? = nil
     ) {
         self.parent = parent
         self.replies = replies
@@ -456,6 +463,7 @@ public struct RoomChatThreadState: Equatable, Sendable {
         self.failureText = failureText
         self.canReply = canReply
         self.maximumReplyLength = maximumReplyLength
+        self.focusReplyId = focusReplyId
     }
 
     /// Why this reply cannot be sent as it is, or nil. A reply over the limit stays in the reply box.
@@ -473,6 +481,8 @@ public struct RoomChatThreadInput: Equatable, Sendable {
     public let failureText: String?
     public let canReply: Bool
     public let maximumReplyLength: Int?
+    /// The reply the thread was opened at, if any.
+    public let focusReplyId: String?
 
     public init(
         sequenceId: Int64,
@@ -481,7 +491,8 @@ public struct RoomChatThreadInput: Equatable, Sendable {
         isLoading: Bool = false,
         failureText: String? = nil,
         canReply: Bool = false,
-        maximumReplyLength: Int? = nil
+        maximumReplyLength: Int? = nil,
+        focusReplyId: String? = nil
     ) {
         self.sequenceId = sequenceId
         self.replies = replies
@@ -490,6 +501,7 @@ public struct RoomChatThreadInput: Equatable, Sendable {
         self.failureText = failureText
         self.canReply = canReply
         self.maximumReplyLength = maximumReplyLength
+        self.focusReplyId = focusReplyId
     }
 }
 
@@ -841,7 +853,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 isLoading: threadInput.isLoading,
                 failureText: threadInput.failureText,
                 canReply: threadInput.canReply,
-                maximumReplyLength: threadInput.maximumReplyLength
+                maximumReplyLength: threadInput.maximumReplyLength,
+                focusReplyId: threadInput.focusReplyId
             )
         } else {
             self.thread = nil
@@ -1686,7 +1699,8 @@ public enum RoomComposerDraft {
         if kept == gone || gone.contains(kept) { defaults.removeObject(forKey: key) }
     }
 
-    /// Every room's saved text, on sign-out: the next person on the phone does not see it.
+    /// Every room's saved text, on sign-out: the next person on the phone does not see it. Thread replies' saved text
+    /// (`RoomReplyDrafts`) sits under the same prefix and goes with it.
     public static func forgetAllSaved(in defaults: UserDefaults = .standard) {
         for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(savedKeyPrefix) {
             defaults.removeObject(forKey: key)
@@ -1815,5 +1829,172 @@ public enum RoomLinkPolicy {
         }
         guard raw.hasPrefix("/"), !raw.hasPrefix("//"), !raw.hasPrefix("/\\") else { return nil }
         return webOrigin.flatMap { URL(string: raw, relativeTo: $0)?.absoluteURL }
+    }
+}
+
+/// A thread's unsent reply, kept on the phone as the room's own box keeps its text (`RoomComposerDraft`): under the
+/// room's key for this account, per thread, and per reply when it answers one. Written once typing pauses
+/// (`RoomDraftDebouncer`), restored when the thread opens (a new room screen, a relaunch), and let go only once the server
+/// has the reply (`forgetSent`), never on a failed send (Carter lost a half-written reply on the web when new replies
+/// folded in, #61872). An account keeps at most `limit` of them across its rooms (the one written longest ago goes
+/// first), and one not written for `lifetime` is gone.
+public struct RoomReplyDrafts {
+    /// The room's own saved-text key (`RoomComposerDraft.savedKey(sessionId:account:)`).
+    public let base: String
+    private let defaults: UserDefaults
+    private let now: () -> Date
+
+    /// The most reply drafts one account keeps on the phone.
+    public static let limit = 50
+    /// How long a reply draft is kept after it was last written: 14 days.
+    public static let lifetime: TimeInterval = 14 * 24 * 60 * 60
+
+    public init(base: String, defaults: UserDefaults = .standard, now: @escaping () -> Date = Date.init) {
+        self.base = base
+        self.defaults = defaults
+        self.now = now
+    }
+
+    /// The reply a thread's box answers when it sends: the one chosen, else the one restored text answered, whose row
+    /// may not have loaded yet (so an early send still answers it, never the message instead); nil answers the message.
+    public static func answering(chosen: String?, restoring: String?) -> String? {
+        chosen ?? restoring
+    }
+
+    /// Where the reply to `thread` (or to its reply `reply`) is kept.
+    public func key(thread: Int64, reply: String?) -> String {
+        base + "|thread." + String(thread) + (reply.map { "|reply." + $0 } ?? "")
+    }
+
+    /// Which reply the thread's saved text answers, when it answers one.
+    private func answeringKey(thread: Int64) -> String { base + "|thread." + String(thread) + "|answering" }
+
+    /// Every reply draft the account keeps, in any room, with when it was last written (seconds since 1970). `base` is
+    /// `pocket.draft.<account>|<room>`: the account is what comes before the room.
+    private var indexKey: String {
+        let prefix = RoomComposerDraft.savedKeyPrefix
+        let rest = base.hasPrefix(prefix) ? String(base.dropFirst(prefix.count)) : base
+        let account = rest.range(of: "|", options: .backwards).map { String(rest[..<$0.lowerBound]) } ?? rest
+        return "pocket.replyDrafts." + account
+    }
+
+    private var index: [String: Double] {
+        get { defaults.dictionary(forKey: indexKey) as? [String: Double] ?? [:] }
+        nonmutating set {
+            if newValue.isEmpty { defaults.removeObject(forKey: indexKey) } else { defaults.set(newValue, forKey: indexKey) }
+        }
+    }
+
+    /// Keeps what is in the thread's reply box. The box answers one thing at a time, so the text moves with it: saved
+    /// under the reply it answers now, and gone from where it was before. An empty box keeps nothing.
+    public func save(_ text: String, thread: Int64, reply: String?) {
+        let previous = defaults.string(forKey: answeringKey(thread: thread))
+        if previous != reply { drop(key(thread: thread, reply: previous)) }
+        let current = key(thread: thread, reply: reply)
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            drop(current)
+            defaults.removeObject(forKey: answeringKey(thread: thread))
+        } else {
+            defaults.set(text, forKey: current)
+            if let reply {
+                defaults.set(reply, forKey: answeringKey(thread: thread))
+            } else {
+                defaults.removeObject(forKey: answeringKey(thread: thread))
+            }
+            written(current)
+        }
+    }
+
+    /// What the thread's box held when it was last written, and the reply it answered; nil when nothing was kept, or
+    /// what was kept is older than `lifetime`.
+    public func restore(thread: Int64) -> (text: String, reply: String?)? {
+        let reply = defaults.string(forKey: answeringKey(thread: thread))
+        let current = key(thread: thread, reply: reply)
+        if let written = index[current], now().timeIntervalSince1970 - written > Self.lifetime {
+            drop(current)
+            return nil
+        }
+        guard let text = defaults.string(forKey: current),
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return (text, reply)
+    }
+
+    /// The server has the reply: its saved text goes, unless newer text was saved since (`RoomComposerDraft.forgetSaved`).
+    public func forgetSent(_ sent: String, thread: Int64, reply: String?) {
+        let current = key(thread: thread, reply: reply)
+        RoomComposerDraft.forgetSaved(key: current, sent: sent, in: defaults)
+        guard defaults.string(forKey: current) == nil else { return }
+        index[current] = nil
+        if reply != nil, defaults.string(forKey: answeringKey(thread: thread)) == reply {
+            defaults.removeObject(forKey: answeringKey(thread: thread))
+        }
+    }
+
+    /// Notes `key` as written now, then lets go of what is past `lifetime` and, past `limit`, the ones written longest
+    /// ago.
+    private func written(_ key: String) {
+        let at = now().timeIntervalSince1970
+        var kept = index
+        kept[key] = at
+        let expired = kept.filter { at - $0.value > Self.lifetime }.map(\.key)
+        for gone in expired { kept[gone] = nil }
+        let overflow = kept.count > Self.limit
+            ? kept.sorted { $0.value == $1.value ? $0.key < $1.key : $0.value < $1.value }
+                .prefix(kept.count - Self.limit).map(\.key)
+            : []
+        for gone in overflow { kept[gone] = nil }
+        index = kept
+        for gone in expired + overflow { remove(gone) }
+    }
+
+    /// Takes one draft off the phone and out of the account's list.
+    private func drop(_ key: String) {
+        remove(key)
+        var kept = index
+        guard kept[key] != nil else { return }
+        kept[key] = nil
+        index = kept
+    }
+
+    /// A draft's text, and its thread's note of the reply it answered when that note is about it.
+    private func remove(_ key: String) {
+        defaults.removeObject(forKey: key)
+        guard let marker = key.range(of: "|reply.", options: .backwards) else { return }
+        let answering = String(key[..<marker.lowerBound]) + "|answering"
+        if defaults.string(forKey: answering) == String(key[marker.upperBound...]) {
+            defaults.removeObject(forKey: answering)
+        }
+    }
+}
+
+/// Writes a moment after the last change instead of on every keystroke: `schedule` replaces what is waiting, and
+/// `flush` writes it at once (the thread closing, a reply being sent). Used on the main thread.
+public final class RoomDraftDebouncer {
+    /// How long typing pauses before the text is written.
+    public static let delay: TimeInterval = 0.3
+    private let delay: TimeInterval
+    private var pending: (() -> Void)?
+    private var work: DispatchWorkItem?
+
+    public init(delay: TimeInterval = RoomDraftDebouncer.delay) {
+        self.delay = delay
+    }
+
+    /// `write` runs once typing has paused for `delay`, unless another write replaces it first.
+    public func schedule(_ write: @escaping () -> Void) {
+        work?.cancel()
+        pending = write
+        let item = DispatchWorkItem { [weak self] in self?.flush() }
+        work = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+
+    /// Writes what is waiting now, if anything is.
+    public func flush() {
+        work?.cancel()
+        work = nil
+        let write = pending
+        pending = nil
+        write?()
     }
 }

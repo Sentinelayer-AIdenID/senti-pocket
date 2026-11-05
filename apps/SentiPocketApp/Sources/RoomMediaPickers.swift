@@ -9,6 +9,9 @@ import UniformTypeIdentifiers
 /// room's media coordinator, each file copied into its own outbox folder. Pasting reads the clipboard's images at once.
 struct RoomMediaPickerHost: View {
     @ObservedObject var requests: RoomMediaPickerRequests
+    /// This host presents: the room's, or a sheet's over the room (a thread). Only one is active at a time, so a
+    /// request opens one picker, and a paste is read once.
+    var isActive = true
     /// How many more files the next message can carry.
     let remaining: () -> Int
     let onPicked: ([RoomMediaSource]) -> Void
@@ -16,14 +19,14 @@ struct RoomMediaPickerHost: View {
 
     private var sheet: Binding<RoomAttachSource?> {
         Binding(
-            get: { requests.source == .photos || requests.source == .files ? requests.source : nil },
+            get: { isActive && (requests.source == .photos || requests.source == .files) ? requests.source : nil },
             set: { if $0 == nil, requests.source == .photos || requests.source == .files { requests.source = nil } }
         )
     }
 
     private var camera: Binding<Bool> {
         Binding(
-            get: { requests.source == .camera },
+            get: { isActive && requests.source == .camera },
             set: { if !$0, requests.source == .camera { requests.source = nil } }
         )
     }
@@ -46,7 +49,7 @@ struct RoomMediaPickerHost: View {
                     .ignoresSafeArea()
             }
             .onChange(of: requests.source) { source in
-                guard source == .paste else { return }
+                guard isActive, source == .paste else { return }
                 requests.source = nil
                 Task { @MainActor in
                     let pasted = await RoomMediaImport.pastedImages(limit: remaining())

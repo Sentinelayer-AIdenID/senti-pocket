@@ -96,4 +96,11 @@ final class DirectAndFolderWireTests: XCTestCase {
         XCTAssertEqual(RoomFolderName.validate("del\u{007F}"), .failure(.controlCharacters))
         XCTAssertEqual(RoomFolderName.validate("c1\u{0085}x"), .failure(.controlCharacters))
     }
+
+    /// The API also refuses the line and paragraph separators (U+2028, U+2029) inside a name, as its database does.
+    func test_a_name_with_a_line_or_paragraph_separator_inside_is_refused() {
+        XCTAssertEqual(RoomFolderName.validate("a\u{2028}b"), .failure(.controlCharacters))
+        XCTAssertEqual(RoomFolderName.validate("a\u{2029}b"), .failure(.controlCharacters))
+        XCTAssertEqual(RoomFolderName.maximumDepth, 3)
+    }
 }

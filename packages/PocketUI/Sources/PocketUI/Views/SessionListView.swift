@@ -31,7 +31,8 @@ public struct SessionListView: View {
     }
 
     private var sessionList: some View {
-        List {
+        let yours = Set(folders?.map(\.id) ?? [])
+        return List {
             Section {
                 SessionProvenanceBanner(provenance: state.provenance)
             }
@@ -51,8 +52,9 @@ public struct SessionListView: View {
                     }
                     .buttonStyle(.plain)
                     // A room's long press files it in a folder; a direct message lives under its room, in none.
-                    .modifier(RoomFolderContextMenu(roomId: row.sessionId, folderId: row.folderId,
-                                                    folders: row.isDirect ? nil : folders, send: onFolder))
+                    .modifier(RoomFolderContextMenu(roomId: row.sessionId,
+                                                    filedIn: row.folderId.flatMap { yours.contains($0) ? $0 : nil },
+                                                    send: row.isDirect ? nil : onFolder))
                     .accessibilityIdentifier("pocket.sessions.row.\(row.sessionId)")
                     .accessibilityHint("Opens this session")
                     .listRowBackground(PocketPalette.raised)

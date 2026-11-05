@@ -178,23 +178,35 @@ final class LazyListBuildTests: XCTestCase {
     // MARK: - The side panel
 
     func test_the_side_panel_builds_only_the_rooms_it_shows_as_it_opens_and_as_its_rooms_change() throws {
-        let panel = Panel(rooms: Self.panelRooms(), folders: Self.folders)
-        try host(PanelHost(panel: panel))
-        let lines = panel.rooms.count
-        XCTAssertEqual(lines, 300, "the panel lists 240 rooms and 60 direct messages")
+        let rooms = Self.panelRooms()
+        XCTAssertEqual(rooms.count, 300, "the panel lists 240 rooms and 60 direct messages")
+        let placement = SidePanelPlacement(rooms: rooms, folders: Self.folders)
+        XCTAssertEqual(RoomFolderTree.build(Self.folders).nodes.map(\.depth).max(), 3, "folders three levels deep")
+        try host(PanelHost(placement: placement))
+        let lines = placement.shown.rows.count
 
         step("open", rows: lines, list: .sidePanel) {}
         // The panel's poll lands: a room further down had a message and moves to the top, unread counts change.
-        step("its rooms change", rows: lines, list: .sidePanel) { panel.rooms = Self.panelRooms(moved: 150, unread: 3) }
+        step("its rooms change", rows: lines, list: .sidePanel) {
+            place(placement, Self.panelRooms(moved: 150, unread: 3))
+        }
         // Down the panel, looking for a room: the rooms above are not on screen.
         step("scrolled down the panel", rows: lines, list: .sidePanel) { scrollToEnd() }
         step("its rooms change down the panel", rows: lines, list: .sidePanel) {
-            panel.rooms = Self.panelRooms(moved: 90, unread: 7)
+            place(placement, Self.panelRooms(moved: 90, unread: 7))
         }
-        step("drawn again, nothing changed", rows: lines, list: .sidePanel) { panel.objectWillChange.send() }
-        step("a folder folds", rows: lines, list: .sidePanel) {
-            UserDefaults.standard.set("folder-2", forKey: "pocket.drawer.foldedFolders")
-        }
+        step("drawn again, nothing changed", rows: lines, list: .sidePanel) { placement.objectWillChange.send() }
+        // A folder with a folder inside it folds: both go, with their rooms.
+        step("a folder folds", rows: lines, list: .sidePanel) { placement.toggleFolded("folder-2") }
+    }
+
+    /// The panel's new rooms, placed (off the main thread, as the app places them) before the step is measured.
+    private func place(_ placement: SidePanelPlacement, _ rooms: [PocketSidePanel.Room]) {
+        let builds = placement.builds
+        placement.update(rooms: rooms, folders: Self.folders)
+        let end = Date().addingTimeInterval(10)
+        while placement.builds == builds, Date() < end { pump(0.02) }
+        XCTAssertGreaterThan(placement.builds, builds, "the new rooms were placed")
     }
 
     // MARK: - Measuring
@@ -319,22 +331,13 @@ final class LazyListBuildTests: XCTestCase {
         }
     }
 
-    private final class Panel: ObservableObject {
-        @Published var rooms: [PocketSidePanel.Room]
-        let folders: [RoomFolderItem]
-        init(rooms: [PocketSidePanel.Room], folders: [RoomFolderItem]) {
-            self.rooms = rooms
-            self.folders = folders
-        }
-    }
-
     private struct PanelHost: View {
-        @ObservedObject var panel: Panel
+        let placement: SidePanelPlacement
         var body: some View {
-            PocketSidePanel(rooms: panel.rooms, currentRoomId: "room-001", unreadNotifications: 3, waitingOnYou: 2,
+            PocketSidePanel(placement: placement, currentRoomId: "room-001", unreadNotifications: 3, waitingOnYou: 2,
                             accountName: "Alex", theme: .constant(.system), onSelectRoom: { _ in }, onAllRooms: {},
                             onNotifications: {}, onCalls: {}, onActivity: {}, onSettings: {}, onNewRoom: {},
-                            folders: panel.folders, onFolder: { _ in })
+                            onFolder: { _ in })
                 .frame(width: 286)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -402,7 +405,16 @@ final class LazyListBuildTests: XCTestCase {
                                          files: [99: [card]], fileParts: parts)
     }
 
-    static let folders = (0..<5).map { RoomFolderItem(id: "folder-\($0)", name: "Folder \($0)", position: $0) }
+    /// Five folders, each with a folder inside it, and in the first three a third level.
+    static let folders: [RoomFolderItem] = (0..<5).flatMap { top -> [RoomFolderItem] in
+        var tree = [RoomFolderItem(id: "folder-\(top)", name: "Folder \(top)", position: top),
+                    RoomFolderItem(id: "folder-\(top)-in", name: "Inside \(top)", parentId: "folder-\(top)", position: 0)]
+        if top < 3 {
+            tree.append(RoomFolderItem(id: "folder-\(top)-in-in", name: "Deeper \(top)", parentId: "folder-\(top)-in",
+                                       position: 0))
+        }
+        return tree
+    }
 
     /// 240 rooms, a third of them in five folders, and 60 direct messages, two in three under the room they were opened
     /// from; most recent first. `moved` is put first, as a room that just had a message; every `unread`th has unread.
@@ -415,7 +427,9 @@ final class LazyListBuildTests: XCTestCase {
             let ago = Double(index) * 600
             let unreadCount: Int = index % unread == 0 ? index % 9 : 0
             let activity = RoomListActivity(humansOnline: index % 2, agentsOnline: index % 4, unread: unreadCount)
-            let folder: String? = index % 3 == 1 ? "folder-\(index % 5)" : nil
+            // A third of the rooms in folders, at each of the three levels.
+            let levels = ["folder-\(index % 5)", "folder-\(index % 5)-in", "folder-\((index / 9) % 3)-in-in"]
+            let folder: String? = index % 3 == 1 ? levels[(index / 3) % 3] : nil
             rooms.append(PocketSidePanel.Room(id: id, title: "Room \(index)", subtitle: subtitle,
                                               lastActivity: start.addingTimeInterval(-ago), activity: activity,
                                               folderId: folder))
