@@ -334,6 +334,11 @@ public struct RoomChatView: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.bottom, 8)
+                .background(RoomScrollViewFinder { found in
+                    #if os(iOS)
+                    bottomWatch.scrollView = found as? UIScrollView
+                    #endif
+                })
             }
             // Dragging the messages lowers the keyboard with the finger, as in Messages.
             .scrollDismissesKeyboard(.interactively)
@@ -657,6 +662,7 @@ public struct RoomChatView: View {
     private func scrollDown(to target: String, anchor: UnitPoint, _ proxy: ScrollViewProxy) {
         let tapped = ProcessInfo.processInfo.systemUptime
         let start = jumpStart(above: target)
+        let uncover = start == nil ? nil : coverFarJump()
         if let start { proxy.scrollTo(start, anchor: .top) }
         let scroll: () -> Void = {
             withAnimation(.easeOut(duration: Self.jumpEase)) { proxy.scrollTo(target, anchor: anchor) }
@@ -669,7 +675,38 @@ public struct RoomChatView: View {
             }
         }
         // The animated scroll starts from where the list was put, once that has been drawn.
-        if start != nil { RoomNextFrame.run(scroll) } else { scroll() }
+        if start != nil {
+            RoomNextFrame.run {
+                scroll()
+                RoomNextFrame.run { uncover?() }
+            }
+        } else {
+            scroll()
+        }
+    }
+
+    /// What covers a far jump, by its UIKit identifier (the hosted frame test looks for it).
+    public static let jumpCoverId = "pocket.room.jumpCover"
+
+    /// Put far down at once, the list shows no rows for a frame, until the rows at its new place are drawn (measured
+    /// frame by frame in the hosted test: 0 layers drawn where the reader reads, then 29). The screen as it was covers
+    /// the list until then, and fades as the list scrolls the rest of the way. A snapshot of what is already on screen:
+    /// nothing is laid out or drawn again for it.
+    private func coverFarJump() -> (() -> Void)? {
+        #if os(iOS)
+        guard let scrollView = bottomWatch.scrollView, let host = scrollView.superview,
+              let cover = scrollView.snapshotView(afterScreenUpdates: false) else { return nil }
+        cover.frame = scrollView.frame
+        cover.isUserInteractionEnabled = false
+        cover.accessibilityElementsHidden = true
+        cover.accessibilityIdentifier = RoomChatView.jumpCoverId
+        host.insertSubview(cover, aboveSubview: scrollView)
+        return {
+            UIView.animate(withDuration: 0.15, animations: { cover.alpha = 0 }, completion: { _ in cover.removeFromSuperview() })
+        }
+        #else
+        return nil
+        #endif
     }
 
     /// Where a long jump down starts: the row `jumpRows` above its target, when the target is far below (from iOS 18,
@@ -1041,6 +1078,10 @@ private final class RoomBottomWatch {
     var reading: RoomReaderPlace.Reading?
     /// The height of what can be read, at the last reading.
     var visibleHeight: CGFloat = 0
+    #if os(iOS)
+    /// The list's scroll view, for covering a far jump (`RoomChatView.coverFarJump`).
+    weak var scrollView: UIScrollView?
+    #endif
 
     /// A reading, while the list is laid out: kept, and what it is (`RoomReaderPlace.Tracker.see`). Nothing here
     /// changes what SwiftUI shows.
@@ -1077,6 +1118,47 @@ private final class RoomBottomWatch {
     func nextFollow(at now: TimeInterval) -> TimeInterval {
         max(0, (follows.first ?? now) + 1 - now)
     }
+}
+
+/// Finds the list's UIKit scroll view from inside its content, once it is on screen.
+private struct RoomScrollViewFinder: View {
+    let found: (AnyObject) -> Void
+
+    var body: some View {
+        #if os(iOS)
+        Probe(found: found).allowsHitTesting(false).accessibilityHidden(true)
+        #else
+        Color.clear
+        #endif
+    }
+
+    #if os(iOS)
+    private struct Probe: UIViewRepresentable {
+        let found: (AnyObject) -> Void
+
+        func makeUIView(context: Context) -> ProbeView { ProbeView(found: found) }
+        func updateUIView(_ view: ProbeView, context: Context) {}
+
+        final class ProbeView: UIView {
+            let found: (AnyObject) -> Void
+
+            init(found: @escaping (AnyObject) -> Void) {
+                self.found = found
+                super.init(frame: .zero)
+                isUserInteractionEnabled = false
+            }
+
+            required init?(coder: NSCoder) { nil }
+
+            override func didMoveToWindow() {
+                super.didMoveToWindow()
+                var view = superview
+                while let current = view, !(current is UIScrollView) { view = current.superview }
+                if let view { found(view) }
+            }
+        }
+    }
+    #endif
 }
 
 /// Runs work when the screen next draws a frame (a turn of the run loop can come several times within one frame).
