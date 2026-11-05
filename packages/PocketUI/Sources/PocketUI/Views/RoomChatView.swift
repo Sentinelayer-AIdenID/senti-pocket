@@ -1058,13 +1058,15 @@ public struct RoomChatView: View {
             RoomScrollTrace.followMade()
             // An arrival is followed with the room's own scroll to its end (`animateToEnd`); anything arriving on its
             // way is followed by it. Placed where it cannot be animated.
-            guard eased, animateToEnd(proxy) else {
+            guard eased, !RoomScrollTrace.followMovesNothing, animateToEnd(proxy) else {
                 // Placed by UIKit where the list is known, then SwiftUI's scroll to the marker finds it there: a
                 // SwiftUI scroll that moved the list after UIKit's built every row of the room (117 in a frame of a
                 // burst, in CI).
                 let before = bottomWatch.reading
-                bottomWatch.placeListAtEnd()
-                proxy.scrollTo(Self.bottomId, anchor: .bottom)
+                if !RoomScrollTrace.followMovesNothing {
+                    bottomWatch.placeListAtEnd()
+                    proxy.scrollTo(Self.bottomId, anchor: .bottom)
+                }
                 // A follow that moved nothing gives no new reading, and nothing would follow again: where it landed
                 // is read two frames on, whatever it shows (`followLanded`).
                 RoomNextFrame.run { RoomNextFrame.run { followLanded(from: before, proxy) } }
@@ -1088,10 +1090,19 @@ public struct RoomChatView: View {
         }
         if !bottomWatch.stallRetried, let last = state.rows.last {
             bottomWatch.stallRetried = true
-            proxy.scrollTo(row: last.id, anchor: .bottom)
+            RoomScrollTrace.stallRetried()
+            // The retry is the room's own scroll: where it lands is judged from there, not from how far down the list
+            // had been (by the bottom's 120-point rule, a retry that landed 754 pt up was taken for the reader leaving).
+            bottomWatch.tracker.set(atBottom: true)
+            switch RoomScrollTrace.injectedRetry {
+            case .none: proxy.scrollTo(row: last.id, anchor: .bottom)
+            case .movesNothing: break
+            case .landsAbove: proxy.scrollTo(row: state.rows[max(0, state.rows.count - 10)].id, anchor: .bottom)
+            }
             RoomNextFrame.run { RoomNextFrame.run { followLanded(from: now, proxy) } }
             return
         }
+        RoomScrollTrace.followGaveUp()
         setReaderAtBottom(false)
     }
 
