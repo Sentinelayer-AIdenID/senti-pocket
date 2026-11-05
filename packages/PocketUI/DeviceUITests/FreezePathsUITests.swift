@@ -82,13 +82,13 @@ final class FreezePathsUITests: XCTestCase {
     }
 
     /// Up a long room until about 300 rows are loaded (each page loads as its top comes into view), Jump to latest (the
-    /// room keeps its newest 60 rows), a message sent, then a reply to the newest message sent from its menu.
+    /// room keeps its newest 60 rows), then a reply to the newest message in view, from its menu, sent.
     func test_path4_reply_in_a_long_room_after_a_jump_down_trim() throws {
         replyAfterJumpDown(launch(room: "long"), upTo: 705, path: "path4")
     }
 
     /// Path 4 at the largest text size (AX5), where a row can be taller than the screen: up the room to its 975th
-    /// message, the jump down, a send, and the long press that opens a message's menu for the reply. Without each row's
+    /// message, the jump down, and the long press that opens a message's menu for the reply. Without each row's
     /// `.id`, that press set the room laying itself out without end here.
     func test_path4_at_the_largest_text_size() throws {
         let app = launch(room: "long", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL")
@@ -107,15 +107,26 @@ final class FreezePathsUITests: XCTestCase {
         XCTAssertTrue(jump.waitForExistence(timeout: 10), "the arrow shows up the room")
         jump.tap()
         pause(3)
-        send(app, "A note sent after the jump down, as long as a paragraph would be in a busy room.")
-        // The newest message in view: at the largest text size a message can be taller than the screen, and the one
-        // before the note just sent may be out of view.
+        // The newest message with some of it in view, pressed where it shows: at the largest text size a message can
+        // be taller than the screen (its middle off it), and the one before the note just sent may be out of view.
+        let window = app.windows.firstMatch
+        var band = window.frame
+        let bar = app.navigationBars.firstMatch
+        if bar.exists { band = band.divided(atDistance: max(0, bar.frame.maxY - band.minY), from: .minYEdge).remainder }
+        let composer = app.descendants(matching: .any)["pocket.room.composer"]
+        if composer.exists { band.size.height = max(0, composer.frame.minY - 16 - band.minY) }
         let messages = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@", "pocket.room.message."))
-        guard let message = messages.allElementsBoundByIndex.last(where: { $0.isHittable }) else {
+        let all = messages.allElementsBoundByIndex
+        guard let message = all.last(where: { $0.frame.intersection(band).height >= 40 }) else {
+            print("FREEZE-PRESS none in \(band): \(all.suffix(4).map { "\($0.identifier) \($0.frame)" })")
             return XCTFail("no message in view to press")
         }
-        message.press(forDuration: 1.2)
+        let shown = message.frame.intersection(band)
+        print("FREEZE-PRESS \(message.identifier) at \(Int(shown.midX)),\(Int(shown.midY))")
+        window.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: shown.midX - window.frame.minX, dy: shown.midY - window.frame.minY))
+            .press(forDuration: 1.2)
         // The menu's Reply: the one that can be tapped (a row's own reply button under the menu cannot).
         let replies = app.buttons.matching(NSPredicate(format: "label == %@", "Reply"))
         XCTAssertTrue(replies.firstMatch.waitForExistence(timeout: 10), "the message's menu offers Reply")
