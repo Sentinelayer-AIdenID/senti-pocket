@@ -131,9 +131,10 @@ final class LazyListBuildTests: XCTestCase {
     // MARK: - A scroll to a row finds it by the loop's own id
 
     /// The rows carry no `.id` of their own: every scroll to a row (a focused message, a held row, the place kept as
-    /// older rows load) finds it by the loop's id, `RoomChatRow.id` in a type of its own (`RoomRowScrollId`). Opened at a message far up a room of 400, the room
-    /// is there, far from its bottom (where it would be had the scroll found nothing), and it stays there while
-    /// messages arrive below (the held row, scrolled to again at every change of the rows).
+    /// older rows load) finds it by the loop's id, `RoomChatRow.id` in a type of its own (`RoomRowScrollId`). Opened at
+    /// a message far up a room of 400, the room is there, far from its bottom (where it would be had the scroll found
+    /// nothing), and it stays there while messages arrive below (the held row, scrolled to again at every change of the
+    /// rows).
     func test_a_room_opened_at_a_message_far_up_goes_there_and_holds_it_while_messages_arrive() throws {
         let room = Room(Self.room(rows: 400, focus: 60))
         try host(RoomHost(room: room))
@@ -144,15 +145,33 @@ final class LazyListBuildTests: XCTestCase {
         XCTAssertGreaterThan(away, 3 * scroll.bounds.height, "at the message, far up the room")
         XCTAssertTrue(room.intents.contains(.focusHandled), "the room was told the message is in view")
         let held = scroll.contentOffset.y
-        // The held row is scrolled to again as the rows change, by its id in the room's loop: the rows on screen are
-        // built, not every row of the room to look the id up.
-        step("two arrivals with a message held far up", rows: 402, list: .roomRow) {
-            room.state = Self.room(rows: 402, focus: 60)
+        // The first update after the open, nothing changed, the room settled: measured on its own with the main
+        // test's ceiling for the first update after an open (`passesAtMost` passes over the rows), so that what the
+        // first arrival builds is the arrival's. The held message stays where it is.
+        step("the first update after the open, a message held far up", rows: 400, list: .roomRow,
+             most: Self.passesAtMost * 400) {
+            room.objectWillChange.send()
         }
-        let moved = abs(scroll.contentOffset.y - held)
-        print("LAZYLIST held message: moved \(Int(moved)) pt as two messages arrived")
-        XCTAssertLessThan(moved, scroll.bounds.height / 2, "the held message stays in view as messages arrive below")
+        let settled = abs(scroll.contentOffset.y - held)
+        print("LAZYLIST held message: moved \(Int(settled)) pt at the first update after the open")
+        XCTAssertLessThan(settled, scroll.bounds.height / 2, "the held message stays in view at the first update")
+        // The held row is scrolled to again as the rows change, by its id in the room's loop: the rows on screen are
+        // built, not every row of the room to look the id up. Ten rounds of two arrivals: at master the held message
+        // once moved 1,264 points in the one round this test made (run 42105631345), and passed in other runs.
+        for round in 1...Self.heldRounds {
+            let rows = 400 + 2 * round
+            step("two arrivals with a message held far up, round \(round)", rows: rows, list: .roomRow) {
+                room.state = Self.room(rows: rows, focus: 60)
+            }
+            let moved = abs(scroll.contentOffset.y - held)
+            print("LAZYLIST held message: moved \(Int(moved)) pt as two messages arrived (round \(round))")
+            XCTAssertLessThan(moved, scroll.bounds.height / 2,
+                              "round \(round): the held message stays in view as messages arrive below")
+        }
     }
+
+    /// Rounds of two arrivals with a message held far up.
+    static let heldRounds = 10
 
     /// Scrolled to the top, the room asks for older messages; when they load above, the row that was at the top is
     /// scrolled back to the top (by its loop id), so the reader's place does not jump to the oldest loaded message.
