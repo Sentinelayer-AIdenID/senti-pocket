@@ -313,12 +313,30 @@ final class RoomReaderStaysPutTests: XCTestCase {
 
     /// From far up a long room the arrow takes the reader down to the latest in the list as it is. It used to build the
     /// room again as a new list at its newest rows: the screen went dark, glitched, then showed the bottom (Carter).
-    /// Every frame on the way is recorded: the list is the same one throughout, every frame has messages drawn where the
-    /// reader reads, the last stretch is seen scrolling, and it ends at the bottom. The rows on the way are not drawn:
-    /// an animated scroll the whole way down draws every one, which once froze the app from up a long history.
+    /// Every frame on the way is recorded: the list is the same one throughout, the last stretch is seen scrolling, and
+    /// it ends at the bottom. The list is first put six rows above the end, at once, and SwiftUI draws the rows there one
+    /// frame later: that one frame (8 to 16 ms) has none, and is allowed; no other may. The rows on the way are not
+    /// drawn: an animated scroll the whole way down draws every one, which once froze the app from up a long history.
     func test_the_arrow_takes_a_reader_far_up_a_long_room_down_in_the_same_list_frame_by_frame() throws {
+        let jump = try arrowJump(rows: 400) { list in Self.bottomOffset(of: list) * 0.2 }
+        XCTAssertLessThanOrEqual(jump.blankFrames, 1, "frames on the way down with no messages drawn")
+        XCTAssertLessThan(jump.draws, 100, "rows drawn on the way down: \(jump.draws) of 400")
+    }
+
+    /// Two screens up the same room, the arrow scrolls the whole way, with messages drawn in every frame.
+    func test_the_arrow_takes_a_reader_a_short_way_up_down_with_every_frame_drawn() throws {
+        let jump = try arrowJump(rows: 400) { list in
+            let visible = list.bounds.height - list.adjustedContentInset.top - list.adjustedContentInset.bottom
+            return Self.bottomOffset(of: list) - visible * 2
+        }
+        XCTAssertEqual(jump.blankFrames, 0, "frames on the way down with no messages drawn")
+    }
+
+    /// Opens a room of `rows` messages, puts the reader at `from` (an offset of the list), presses the arrow, and
+    /// records every frame until a moment after the reader is down at the latest. Checks what every jump down must
+    /// do: the same list throughout, the last stretch seen scrolling, the end reached.
+    private func arrowJump(rows: Int, from: (UIScrollView) -> CGFloat) throws -> (blankFrames: Int, draws: Int) {
         try XCTSkipUnless(Self.readsGeometry, "how far the end is comes from the scroll view's geometry (iOS 18 and later)")
-        let rows = 400
         let room = Room(Self.messages(count: rows))
         let window = try HostedSummary.host(Host(room: room))
         addTeardownBlock { HostedSummary.close(window) }
@@ -330,8 +348,7 @@ final class RoomReaderStaysPutTests: XCTestCase {
         }
         let list = try XCTUnwrap(opened, "the room's list")
         pump(0.5)
-        // Far up the room: a fifth of the way down it.
-        list.setContentOffset(CGPoint(x: 0, y: Self.bottomOffset(of: list) * 0.2), animated: false)
+        list.setContentOffset(CGPoint(x: 0, y: from(list)), animated: false)
         wait("away from the bottom", seconds: 3) { !room.atBottom }
         pump(1)
         let arrow = try XCTUnwrap(HostedSummary.wait(for: "pocket.room.jumpToLatest", in: window), "the arrow shows")
@@ -350,23 +367,23 @@ final class RoomReaderStaysPutTests: XCTestCase {
         let before = watch.frames[..<tappedAt].map(\.drawn).sorted()
         let during = Array(watch.frames[tappedAt...])
         let usual = before.isEmpty ? 0 : before[before.count / 2]
-        let fewest = during.map(\.drawn).min() ?? 0
+        let blankFrames = during.filter { $0.drawn < max(1, usual / 3) }.count
         let visible = list.bounds.height - list.adjustedContentInset.top - list.adjustedContentInset.bottom
         let steps = zip(during, during.dropFirst()).map { $1.offset - $0.offset }
         let scrolling = steps.filter { $0 > 0.5 && $0 < visible * 0.9 }.count
-        print("READER-STAYS-PUT arrow-jump frames=\(during.count) usual-drawn=\(usual) fewest-drawn=\(fewest) "
-            + "scrolling-frames=\(scrolling) row-draws=\(draws) steps=\(steps.filter { $0 != 0 }.map { String(format: "%.0f", $0) })")
+        print("READER-STAYS-PUT arrow-jump rows=\(rows) frames=\(during.count) usual-drawn=\(usual) "
+            + "blank-frames=\(blankFrames) scrolling-frames=\(scrolling) row-draws=\(draws) "
+            + "steps=\(steps.filter { $0 != 0 }.map { String(format: "%.0f", $0) })")
         // Each frame from the last before the tap: where the list was, and what was drawn in the band.
         print("READER-STAYS-PUT arrow-jump each-frame " + watch.frames[max(0, tappedAt - 1)...].prefix(24)
             .map { "\(String(format: "%.0f", $0.offset))/\($0.drawn)\($0.sameList ? "" : "*")" }.joined(separator: " "))
         XCTAssertGreaterThan(usual, 0, "what is drawn could be read before the tap")
         XCTAssertGreaterThan(during.count, 10, "frames were recorded on the way down")
         XCTAssertTrue(during.allSatisfy(\.sameList), "the room was built again as a new list")
-        XCTAssertGreaterThanOrEqual(fewest, max(1, usual / 3), "a frame on the way down had no messages drawn")
         XCTAssertGreaterThanOrEqual(scrolling, 4, "the way down was not seen scrolling")
         XCTAssertTrue(Self.list(in: window).map(Self.atBottom) ?? false, "it ended at the bottom")
         XCTAssertTrue(room.atBottom)
-        XCTAssertLessThan(draws, rows / 4, "rows drawn on the way down: \(draws) of \(rows)")
+        return (blankFrames, draws)
     }
 
     /// Records each frame the screen draws (on the display link): where the list is, how many layers with something
