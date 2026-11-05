@@ -35,6 +35,8 @@ public struct RoomChatView: View {
     /// A message the reader was taken to (a link, notification, search result or pin). It stays in place through
     /// pages loading above or below it and messages arriving, until the reader scrolls.
     @State private var heldAnchor: String?
+    /// The list's own scroll view, for one check after Jump to latest rebuilds the list (`endAtContentAfterReopen`).
+    @State private var listScroll = RoomListScrollView()
     /// A checkpoint opened from its row: read it, listen to it.
     @State private var openCheckpoint: RoomChatMessageRow?
     /// A thread summary opened whole, and what reads it aloud.
@@ -349,6 +351,8 @@ public struct RoomChatView: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.bottom, 8)
+                // Inside the list's content, so the scroll view it finds going up is this list's own.
+                .background(RoomListScrollView.Finder(found: listScroll))
             }
             // Dragging the messages lowers the keyboard with the finger, as in Messages.
             .scrollDismissesKeyboard(.interactively)
@@ -716,8 +720,31 @@ public struct RoomChatView: View {
             if opensAtLine {
                 DispatchQueue.main.asyncAfter(deadline: .now() + Self.openLanding) { placeLineAgain(proxy) }
             }
+            if listEpoch > 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.reopenLanding) { endAtContentAfterReopen() }
+            }
         }
     }
+
+    /// After Jump to latest keeps the newest rows and makes the list again (`reopenAtLatest`), the new list's height
+    /// swings as its rows are measured (2,591 to 19,110 to 17,041 pt within 70 ms on the simulator), and for a moment its
+    /// place was past the end of the shorter content. Left there, no row is in view and none is built: the likely cause
+    /// of the empty room under its title after the jump (Carter's TestFlight build, 11-05). Once, after the list has
+    /// settled: a place past the end goes to the end, without animation. A reader who has started scrolling is left alone.
+    private func endAtContentAfterReopen() {
+        #if os(iOS)
+        guard let scroll = listScroll.scrollView, scroll.window != nil,
+              !scroll.isTracking, !scroll.isDragging, !scroll.isDecelerating else { return }
+        scroll.layoutIfNeeded()
+        let end = max(-scroll.adjustedContentInset.top,
+                      scroll.contentSize.height + scroll.adjustedContentInset.bottom - scroll.bounds.height)
+        guard scroll.contentOffset.y > end + 1 else { return }
+        scroll.setContentOffset(CGPoint(x: scroll.contentOffset.x, y: end), animated: false)
+        #endif
+    }
+
+    /// How long after a rebuilt list's first scroll its place is checked against its content (`endAtContentAfterReopen`).
+    private static let reopenLanding: TimeInterval = 0.35
 
     /// Rows are measured only as they come into view, so the first scroll places the line from estimated heights, and
     /// in a room of rows of very different heights (review packets, a long contract) those estimates move as soon as
@@ -847,6 +874,49 @@ public struct RoomChatView: View {
     }
 
     private static let bottomId = "room-bottom"
+}
+
+/// The room list's own scroll view, kept without redrawing the room: found by a view inside the list's content going
+/// up to the first scroll view around it, so never another scroll view on the screen. A new list (Jump to latest makes
+/// one) puts its own here as it comes on screen.
+private final class RoomListScrollView {
+    #if os(iOS)
+    weak var scrollView: UIScrollView?
+
+    struct Finder: UIViewRepresentable {
+        let found: RoomListScrollView
+
+        func makeUIView(context: Context) -> FinderView {
+            let view = FinderView()
+            view.found = found
+            view.isUserInteractionEnabled = false
+            view.isAccessibilityElement = false
+            view.accessibilityElementsHidden = true
+            return view
+        }
+
+        func updateUIView(_ view: FinderView, context: Context) {
+            view.found = found
+        }
+    }
+
+    final class FinderView: UIView {
+        weak var found: RoomListScrollView?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard window != nil else { return }
+            var view = superview
+            while let current = view, !(current is UIScrollView) { view = current.superview }
+            if let scroll = view as? UIScrollView { found?.scrollView = scroll }
+        }
+    }
+    #else
+    struct Finder: View {
+        let found: RoomListScrollView
+        var body: some View { Color.clear }
+    }
+    #endif
 }
 
 /// What the room keeps about its bottom marker without redrawing for it: the settled place, and whether the room is on
