@@ -235,18 +235,12 @@ final class RoomReaderStaysPutTests: XCTestCase {
     /// At the bottom, a follow scrolls to the end by the heights the list estimates for rows it has not drawn yet, and
     /// stops short when they are taller (in a burst at 60 a second, 102 to 436 points short; more at the largest text
     /// sizes): the reader is left a little up from the end, at a place they never chose. Where each follow lands is
-    /// taken as a new reading, so one that stopped short is followed again until the end is in view. Here eight long
-    /// reports arrive at once under a room of short rows.
+    /// taken as a new reading, so one that stopped short is followed again until the end is in view. Here, at the
+    /// largest text size, twenty long reports arrive at once under a room of short rows; the test checks that the first
+    /// follow did stop short (at the default size it reached the end, in CI).
     func test_a_follow_that_stops_short_of_the_end_is_followed_again() throws {
-        try followsTallArrivalsToTheEnd(textSize: .large)
-    }
-
-    func test_a_follow_that_stops_short_of_the_end_is_followed_again_at_the_largest_text_size() throws {
-        try followsTallArrivalsToTheEnd(textSize: .accessibility5)
-    }
-
-    private func followsTallArrivalsToTheEnd(textSize: DynamicTypeSize) throws {
         try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
+        let textSize = DynamicTypeSize.accessibility5
         let room = Room(Self.messages())
         let list = try host(room, textSize: textSize)
         let height = list.contentSize.height
@@ -340,16 +334,17 @@ final class RoomReaderStaysPutTests: XCTestCase {
         let room = Room(Self.messages())
         let list = try host(room)
         var seq: Int64 = 61
-        func arrive(_ count: Int) {
+        func arrive(_ count: Int, every interval: TimeInterval) {
             for _ in 0..<count {
                 room.arrive([Self.arrival(seq)])
                 seq += 1
-                pump(1.0 / 60.0)
+                pump(interval)
             }
         }
-        // More than the room follows in a second (`RoomBottomWatch.followLimit`): the end stays below until the second
-        // is up.
-        arrive(26)
+        // Far more than the room follows in a second (`RoomBottomWatch.followLimit`), at once: the end stays below until
+        // the second is up. Then a moment for a follow already asked for to have been made.
+        arrive(40, every: 0.004)
+        pump(0.05)
         XCTAssertFalse(Self.atBottom(list), "the end is below when the reader scrolls (the arrivals pushed it)")
         let before = list.contentOffset.y
         scroll(list)
@@ -365,7 +360,7 @@ final class RoomReaderStaysPutTests: XCTestCase {
             + "(end at \(Self.bottomOffset(of: list)))")
         XCTAssertLessThan(highest, before - 300, "\(name): the list was scrolled up a page")
         XCTAssertEqual(scrolledTo, highest, accuracy: 1, "\(name): the reader was pulled back down at once")
-        arrive(14)
+        arrive(14, every: 1.0 / 60.0)
         pump(1.5)
         print("READER-STAYS-PUT \(name) after: \(list.contentOffset.y) unread=\(room.unreadCount)")
         XCTAssertEqual(list.contentOffset.y, scrolledTo, accuracy: 1, "\(name): the reader was pulled back down")
