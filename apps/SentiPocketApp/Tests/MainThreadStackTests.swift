@@ -46,7 +46,9 @@ final class MainThreadStackTests: XCTestCase {
         watch.start()
         // Held until the stall on disk has its frames (the watch writes the stall first, then reads the stack), not
         // for a fixed time: a slow machine only takes longer (CI once let go at 3 s, before the frames were written).
-        holdTheMainThread(untilFramesIn: url, seconds: 30)
+        // Another thread reads the file and says when; the main thread only waits on that, so the stack the watch
+        // reads is this test's hold, not the middle of a file read or a decode (CI once ran out its 30 s there).
+        holdTheMainThread(untilFramesIn: url, seconds: 60)
         let data = try Data(contentsOf: url)
         let stall = try JSONDecoder().decode(MainThreadWatch.Stall.self, from: data)
         let ownImage = Bundle(for: Self.self).executablePath.map { ($0 as NSString).lastPathComponent } ?? "SentiPocketAppTests"
@@ -66,19 +68,23 @@ final class MainThreadStackTests: XCTestCase {
         while read.wait(timeout: .now()) == .timedOut, Date() < end {}
     }
 
-    /// Busy on the main thread until the stall written at `url` names frames (`seconds` at most).
+    /// Busy on the main thread until the stall written at `url` names frames (`seconds` at most): another thread reads
+    /// the file, and the main thread does nothing but wait for its word.
     @inline(never)
     private func holdTheMainThread(untilFramesIn url: URL, seconds: TimeInterval) {
-        let end = Date().addingTimeInterval(seconds)
-        var nextLook = Date()
-        while Date() < end {
-            guard Date() >= nextLook else { continue }
-            nextLook = Date().addingTimeInterval(0.1)
-            if let data = try? Data(contentsOf: url),
-               let stall = try? JSONDecoder().decode(MainThreadWatch.Stall.self, from: data),
-               stall.frames?.isEmpty == false {
-                return
+        let named = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let end = Date().addingTimeInterval(seconds)
+            while Date() < end {
+                if let data = try? Data(contentsOf: url),
+                   let stall = try? JSONDecoder().decode(MainThreadWatch.Stall.self, from: data),
+                   stall.frames?.isEmpty == false {
+                    break
+                }
+                Thread.sleep(forTimeInterval: 0.05)
             }
+            named.signal()
         }
+        holdTheMainThread(until: named, seconds: seconds)
     }
 }
