@@ -13,10 +13,14 @@ public struct RoomReply: Equatable, Identifiable, Sendable {
     public let targetActionId: String?
     public let authorId: String
     public let isHuman: Bool
+    /// What it says; empty for a reply that is only photos or files.
     public let text: String
     public let createdAt: String
     public let revision: Int64
     public let isEdited: Bool
+    /// Its photos and files, in the shape a message's take (sentinelayer-api #1135). An API that stores none, and a
+    /// reply from before it, carries none.
+    public let attachments: [RoomAttachment]
 
     public init(
         id: String,
@@ -26,7 +30,8 @@ public struct RoomReply: Equatable, Identifiable, Sendable {
         text: String,
         createdAt: String,
         revision: Int64 = 1,
-        isEdited: Bool = false
+        isEdited: Bool = false,
+        attachments: [RoomAttachment] = []
     ) {
         self.id = id
         self.targetSequenceId = targetSequenceId
@@ -37,16 +42,21 @@ public struct RoomReply: Equatable, Identifiable, Sendable {
         self.createdAt = createdAt
         self.revision = revision
         self.isEdited = isEdited
+        self.attachments = attachments
     }
 
+    /// A reply action, or nil. It says something, or carries a photo or file; a reply with neither is not shown.
     public init?(json: JSONValue) {
         guard json["actionType"]?.stringValue == "reply",
               let id = json["id"]?.stringValue, !id.isEmpty,
-              let target = json["targetSequenceId"]?.intValue, target > 0,
-              let note = json["note"]?.stringValue,
-              !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+              let target = json["targetSequenceId"]?.intValue, target > 0 else {
             return nil
         }
+        let raw = json["note"]?.stringValue ?? ""
+        let note = raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : raw
+        // Absent (an API without reply attachments, or an older row) is none.
+        let attachments = RoomAttachment.list(from: json)
+        guard !note.isEmpty || !attachments.isEmpty else { return nil }
         let author = json["actorId"]?.stringValue ?? ""
         self.init(
             id: id,
@@ -56,8 +66,26 @@ public struct RoomReply: Equatable, Identifiable, Sendable {
             text: note,
             createdAt: json["createdAt"]?.stringValue ?? "",
             revision: json["messageRevision"]?.intValue ?? 1,
-            isEdited: json["editedAt"]?.stringValue.map { !$0.isEmpty } ?? false
+            isEdited: json["editedAt"]?.stringValue.map { !$0.isEmpty } ?? false,
+            attachments: attachments
         )
+    }
+}
+
+/// Whether the API takes photos and files on a reply (sentinelayer-api #1135), as its reads show: that API writes an
+/// `attachments` list on every action it returns (empty when there are none), and an older one writes none.
+public enum RoomReplyAttachmentSupport: Equatable, Sendable {
+    /// Nothing read yet says.
+    case unknown
+    case supported
+    case unsupported
+
+    /// What a page of action rows says: any row with an `attachments` list is the API that takes them; rows with none
+    /// are an older API; no rows say nothing.
+    static func reading(_ rows: [JSONValue]) -> RoomReplyAttachmentSupport {
+        let objects = rows.filter { $0.objectValue != nil }
+        guard !objects.isEmpty else { return .unknown }
+        return objects.contains { $0["attachments"]?.arrayValue != nil } ? .supported : .unsupported
     }
 }
 
@@ -256,6 +284,8 @@ public struct RoomActionsPage: Decodable, Equatable, Sendable {
     public let pinned: [RoomPinnedMessage]
     /// How many messages the room can pin at once (the API's limit).
     public let pinLimit: Int
+    /// Whether this API takes photos and files on a reply, as its rows show.
+    public let replyAttachments: RoomReplyAttachmentSupport
 
     public init(
         byTarget: [Int64: RoomReactionSummary] = [:],
@@ -263,7 +293,8 @@ public struct RoomActionsPage: Decodable, Equatable, Sendable {
         workingOn: [RoomWorkingOn] = [],
         workingOnStaleAfter: TimeInterval = 900,
         pinned: [RoomPinnedMessage] = [],
-        pinLimit: Int = 10
+        pinLimit: Int = 10,
+        replyAttachments: RoomReplyAttachmentSupport = .unknown
     ) {
         self.byTarget = byTarget
         self.replies = replies
@@ -271,6 +302,7 @@ public struct RoomActionsPage: Decodable, Equatable, Sendable {
         self.workingOnStaleAfter = workingOnStaleAfter
         self.pinned = pinned
         self.pinLimit = pinLimit
+        self.replyAttachments = replyAttachments
     }
 
     enum CodingKeys: String, CodingKey { case actions, projection }
@@ -300,6 +332,7 @@ public struct RoomActionsPage: Decodable, Equatable, Sendable {
         self.replies = latest.values.sorted {
             ($0.createdAt, $0.id) < ($1.createdAt, $1.id)
         }
+        self.replyAttachments = RoomReplyAttachmentSupport.reading(actions)
     }
 }
 
