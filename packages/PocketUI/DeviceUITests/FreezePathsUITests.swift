@@ -63,8 +63,17 @@ final class FreezePathsUITests: XCTestCase {
         // only once it is scrolled to, as a reader scrolls the panel to find it.
         let drawer = app.descendants(matching: .any)["pocket.drawer"]
         XCTAssertTrue(drawer.waitForExistence(timeout: 30), "the side panel opened")
-        for _ in 0..<12 where !row.exists {
-            drawer.swipeUp(velocity: .slow)
+        let list = drawer.scrollViews.firstMatch
+        for _ in 0..<12 where !row.isHittable && list.exists {
+            list.swipeUp(velocity: .slow)
+        }
+        if !row.isHittable {
+            // At the largest text sizes the panel's own lines leave its room list little room: search for the room,
+            // as a reader does.
+            let search = app.descendants(matching: .any)["pocket.drawer.search"]
+            XCTAssertTrue(search.waitForExistence(timeout: 10), "the panel's search")
+            search.tap()
+            search.typeText("Long room")
         }
         XCTAssertTrue(row.waitForExistence(timeout: 10), "the room is in the side panel")
         row.tap()
@@ -99,12 +108,20 @@ final class FreezePathsUITests: XCTestCase {
         jump.tap()
         pause(3)
         send(app, "A note sent after the jump down, as long as a paragraph would be in a busy room.")
-        let newest = app.descendants(matching: .any)["pocket.room.message.1000"]
-        XCTAssertTrue(newest.waitForExistence(timeout: 30), "the newest message is in view")
-        newest.press(forDuration: 1.2)
-        // The menu's Reply: the first of the buttons so named (the rows' own reply links come after it).
-        let reply = app.buttons.matching(identifier: "Reply").firstMatch
-        XCTAssertTrue(reply.waitForExistence(timeout: 10), "the message's menu offers Reply")
+        // The newest message in view: at the largest text size a message can be taller than the screen, and the one
+        // before the note just sent may be out of view.
+        let messages = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "pocket.room.message."))
+        guard let message = messages.allElementsBoundByIndex.last(where: { $0.isHittable }) else {
+            return XCTFail("no message in view to press")
+        }
+        message.press(forDuration: 1.2)
+        // The menu's Reply: the one that can be tapped (a row's own reply button under the menu cannot).
+        let replies = app.buttons.matching(NSPredicate(format: "label == %@", "Reply"))
+        XCTAssertTrue(replies.firstMatch.waitForExistence(timeout: 10), "the message's menu offers Reply")
+        guard let reply = replies.allElementsBoundByIndex.first(where: { $0.isHittable }) else {
+            return XCTFail("no Reply in the menu to tap")
+        }
         reply.tap()
         send(app, "A short reply now")
         idle(app, path, seconds: 25)
