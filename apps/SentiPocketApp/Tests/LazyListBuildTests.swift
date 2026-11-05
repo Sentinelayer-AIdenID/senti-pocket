@@ -54,15 +54,32 @@ final class LazyListBuildTests: XCTestCase {
         step("the first update after the open", rows: rows, list: .roomRow, most: ceiling) {
             room.objectWillChange.send()
         }
-        // Every later update builds what is on screen, and the rows an arrival's scroll to the bottom passes on its way
-        // there (8 to 21 measured on the build Mac; once 139 in CI, where the list had drifted from its bottom): never
-        // every row of the room, which master built at every update (404 to 407 of 404).
-        let update = Self.lessThanAPass(rows)
+        // At its bottom, every later update builds what is on screen. Each is measured with the room resting at its
+        // bottom (`settleAtBottom`): in one CI run the list had drifted up from it, and the arrival's animated scroll
+        // back made the rows it passed (139 of 404), which the next step measures on purpose.
+        settleAtBottom()
         // The room drawn again with nothing changed: its screen's body runs again at every draw of the root.
-        step("drawn again, nothing changed", rows: rows, list: .roomRow, most: update) { room.objectWillChange.send() }
+        step("drawn again, nothing changed", rows: rows, list: .roomRow) { room.objectWillChange.send() }
         // A message arrives, and another.
-        step("an arrival", rows: rows, list: .roomRow, most: update) { room.state = Self.room(rows: 401) }
-        step("another arrival", rows: rows, list: .roomRow, most: update) { room.state = Self.room(rows: 402) }
+        settleAtBottom()
+        step("an arrival", rows: rows, list: .roomRow) { room.state = Self.room(rows: 401) }
+        settleAtBottom()
+        step("another arrival", rows: rows, list: .roomRow) { room.state = Self.room(rows: 402) }
+        // An arrival while the list has drifted three screens up from its bottom and the reader still counts as there
+        // (the marker's report has not landed): the room follows with a 0.2-s animated scroll back to its bottom, and
+        // every frame of it makes the rows then on screen (169 of 404 built here, 139 in CI): never every row of the
+        // room, which master built (408). Held to half the room's rows, and it must end at the bottom (within a quarter
+        // of a screen: rows measured on the way can grow the list under the scroll's last frame).
+        settleAtBottom()
+        if let scroll = window.flatMap({ Self.list(in: $0) }) {
+            scroll.setContentOffset(CGPoint(x: 0, y: max(0, Self.bottomOffset(of: scroll) - 3 * scroll.bounds.height)),
+                                   animated: false)
+            step("an arrival three screens up (followed)", rows: rows, list: .roomRow, most: rows / 2) {
+                room.state = Self.room(rows: 403)
+            }
+            XCTAssertLessThan(abs(scroll.contentOffset.y - Self.bottomOffset(of: scroll)), scroll.bounds.height / 4,
+                              "the room followed the arrival back to its bottom")
+        }
         // Another room put on screen in its place, as a room picked from the side panel (the 08:06 freeze): an open
         // again, with the same ceiling. The swap goes over the rows of the room it leaves as well (1,209 measured at
         // master: 3 passes over 403). After it, updates build what is on screen (8 to 10 measured; master 303 to 305).
@@ -74,11 +91,12 @@ final class LazyListBuildTests: XCTestCase {
              most: Self.passesAtMost * max(rows, other)) {
             room.objectWillChange.send()
         }
-        step("drawn again, nothing changed, in the other room", rows: other, list: .roomRow,
-             most: Self.lessThanAPass(other)) {
+        settleAtBottom()
+        step("drawn again, nothing changed, in the other room", rows: other, list: .roomRow) {
             room.objectWillChange.send()
         }
-        step("an arrival in the other room", rows: other, list: .roomRow, most: Self.lessThanAPass(other)) {
+        settleAtBottom()
+        step("an arrival in the other room", rows: other, list: .roomRow) {
             room.state = Self.room(rows: other + 1, id: "other")
         }
     }
@@ -87,9 +105,6 @@ final class LazyListBuildTests: XCTestCase {
     /// make: the most measured was 3 (1,212 rows built in a room of 404).
     static let passesAtMost = 4
 
-    /// The most rows an update of a room of `rows` may build: two thirds of them. A list that walks every row at each
-    /// update builds all of them or more.
-    static func lessThanAPass(_ rows: Int) -> Int { rows * 2 / 3 }
 
     /// A message that is a part of a file posted as base64 folds behind the file's card and shows nothing. It keeps its
     /// row and its id, and takes no height and no space between rows: the room with it is exactly as tall as the room
@@ -177,6 +192,28 @@ final class LazyListBuildTests: XCTestCase {
     }
 
     // MARK: - Measuring
+
+    /// Waits until the room's list rests at its bottom: its last row in view, nothing scrolling, and its size and place
+    /// unchanged for half a second (at most 10 s). A list that drifted up from its bottom (its rows above measured
+    /// taller than estimated) is put back there first, as the reader at the bottom sees it.
+    private func settleAtBottom(file: StaticString = #filePath, line: UInt = #line) {
+        guard let scroll = window.flatMap({ Self.list(in: $0) }) else { return XCTFail("no list in the window") }
+        let end = Date().addingTimeInterval(10)
+        var steady = 0
+        var last = (scroll.contentSize.height, scroll.contentOffset.y)
+        while Date() < end, steady < 5 {
+            if abs(scroll.contentOffset.y - Self.bottomOffset(of: scroll)) > 1, !scroll.isDragging, !scroll.isDecelerating {
+                scroll.setContentOffset(CGPoint(x: 0, y: Self.bottomOffset(of: scroll)), animated: false)
+            }
+            pump(0.1)
+            let now = (scroll.contentSize.height, scroll.contentOffset.y)
+            let atBottom = abs(scroll.contentOffset.y - Self.bottomOffset(of: scroll)) <= 1
+            steady = atBottom && now == last && !scroll.isDecelerating ? steady + 1 : 0
+            last = now
+        }
+        XCTAssertGreaterThanOrEqual(steady, 5, "the room rests at its bottom before an update is measured",
+                                    file: file, line: line)
+    }
 
     /// Scrolls the window's list to its end, as a reader does looking for a room far down.
     private func scrollToEnd() {
