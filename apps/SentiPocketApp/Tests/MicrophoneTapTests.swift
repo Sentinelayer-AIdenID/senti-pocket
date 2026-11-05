@@ -97,6 +97,42 @@ final class MicrophoneTapTests: XCTestCase {
         XCTAssertFalse(engine.isRunning)
     }
 
+    /// A route that keeps changing (a headset that keeps dropping) never keeps restarting the microphone: three changes
+    /// in one turn set it up again, a fourth does not, and the call's record says why, once. The next turn starts afresh.
+    func test_a_turn_sets_the_microphone_up_again_at_most_three_times() throws {
+        let engine = FakeEngine()
+        var logged: [String] = []
+        let microphone = MicrophoneTap(engine: engine, log: { logged.append($0) })
+        let heard = Heard()
+        let formats = [48_000.0, 16_000.0].map { AVAudioFormat(standardFormatWithSampleRate: $0, channels: 1)! }
+        try microphone.start { _ in heard.add() }
+        for change in 0..<MicrophoneTap.setUpsPerTurn {
+            engine.reconfigure(to: formats[change % 2])
+            pump(0.05)
+            XCTAssertTrue(engine.isRunning, "change \(change + 1): listening starts again")
+        }
+        XCTAssertEqual(engine.starts, 1 + MicrophoneTap.setUpsPerTurn)
+        XCTAssertTrue(logged.isEmpty)
+
+        engine.reconfigure(to: formats[1])
+        pump(0.05)
+        XCTAssertFalse(engine.isRunning, "a fourth change in one turn does not start it again: it can never loop")
+        XCTAssertEqual(engine.starts, 1 + MicrophoneTap.setUpsPerTurn)
+        XCTAssertEqual(logged.count, 1, "the record says why")
+        XCTAssertTrue(logged.first?.contains("more than 3 times in one turn") == true, "\(logged)")
+        NotificationCenter.default.post(name: AVAudioSession.routeChangeNotification, object: nil)
+        engine.reconfigure(to: formats[0])
+        pump(0.05)
+        XCTAssertEqual(engine.starts, 1 + MicrophoneTap.setUpsPerTurn, "nor any change after it")
+        XCTAssertEqual(logged.count, 1, "said once")
+
+        try microphone.start { _ in heard.add() }
+        engine.reconfigure(to: formats[1])
+        pump(0.05)
+        XCTAssertTrue(engine.isRunning, "the next turn may set it up again")
+        microphone.stop()
+    }
+
     private func pump(_ seconds: TimeInterval) {
         let end = Date().addingTimeInterval(seconds)
         while Date() < end { RunLoop.main.run(until: min(end, Date().addingTimeInterval(0.02))) }

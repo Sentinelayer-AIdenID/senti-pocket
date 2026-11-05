@@ -283,9 +283,18 @@ final class MicrophoneTap {
     private var watches: [NSObjectProtocol] = []
     /// How many times the engine was started again after a change.
     private(set) var restarts = 0
+    /// The most changes a turn's microphone is set up again for. A route that keeps changing (a headset that keeps
+    /// dropping) must never keep restarting it: after that the turn ends with what was heard, and the call's record
+    /// says why.
+    static let setUpsPerTurn = 3
+    private var setUpsThisTurn = 0
+    private var gaveUp = false
+    private let log: (String) -> Void
 
-    init(engine: any VoiceInputEngine) {
+    init(engine: any VoiceInputEngine,
+         log: @escaping (String) -> Void = { step in Task { @MainActor in CrashReporter.shared.note(step) } }) {
         self.engine = engine
+        self.log = log
     }
 
     /// Whether the microphone gives usable audio now.
@@ -294,6 +303,8 @@ final class MicrophoneTap {
     /// Feeds the microphone's audio to `onBuffer` until `stop()`, across changes to the phone's audio setup.
     func start(_ onBuffer: @escaping @Sendable (AVAudioPCMBuffer) -> Void) throws {
         stop()
+        setUpsThisTurn = 0
+        gaveUp = false
         let format = engine.inputFormat
         guard Self.usable(format) else { throw VoiceRoomAudioError.invalidAudioFormat }
         self.onBuffer = onBuffer
@@ -334,6 +345,14 @@ final class MicrophoneTap {
     /// Without usable audio or a start, listening stays stopped, as before, and the turn ends with what was heard.
     func setUpAgain() {
         guard onBuffer != nil else { return }
+        guard setUpsThisTurn < Self.setUpsPerTurn else {
+            if !gaveUp {
+                gaveUp = true
+                log("microphone not started again: the audio changed more than \(Self.setUpsPerTurn) times in one turn")
+            }
+            return
+        }
+        setUpsThisTurn += 1
         if engine.isRunning { engine.stop() }
         if tapped {
             engine.removeInputTap()
