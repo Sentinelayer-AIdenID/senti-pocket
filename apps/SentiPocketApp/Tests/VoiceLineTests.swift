@@ -267,6 +267,7 @@ private final class ManualClock: @unchecked Sendable {
 private final class LineListener: VoiceListening {
     var partial: (@MainActor (String) -> Void)?
     var said = ""
+    var onMicrophoneLost: (@MainActor () -> Void)?
     func start(partial: @escaping @MainActor (String) -> Void) async throws { said = ""; self.partial = partial }
     func say(_ text: String) { said = text; partial?(text) }
     func stop() async -> String { partial = nil; return said }

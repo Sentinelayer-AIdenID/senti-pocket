@@ -12,6 +12,9 @@ protocol VoiceListening: AnyObject {
     /// Stops listening and returns what was said ("" when nothing was).
     func stop() async -> String
     func cancel()
+    /// Runs once when the microphone gives up on the turn being heard (the phone's sound kept changing, or could not be
+    /// set up again): nothing more will be heard in this turn.
+    var onMicrophoneLost: (@MainActor () -> Void)? { get set }
 }
 
 /// Saying an agent's answer in a voice room, in that agent's own voice.
@@ -382,6 +385,7 @@ final class MicrophoneTap {
 final class OnDeviceVoiceListener: VoiceListening {
     /// How loud the microphone is, 0 to 1, about fifty times a second while listening (for the call's waveform).
     var onLevel: (@MainActor @Sendable (Double) -> Void)?
+    var onMicrophoneLost: (@MainActor () -> Void)?
     /// The microphone, which keeps a turn going when the Speaker button or a headset changes the audio setup.
     private let microphone = MicrophoneTap(engine: AVAudioEngine())
     private var request: SFSpeechAudioBufferRecognitionRequest?

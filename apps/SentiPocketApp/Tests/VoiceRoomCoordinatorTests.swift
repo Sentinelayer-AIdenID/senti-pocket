@@ -32,6 +32,13 @@ private final class FakeListener: VoiceListening {
         cancels += 1
         partial = nil
     }
+
+    var onMicrophoneLost: (@MainActor () -> Void)?
+
+    /// The microphone gives up on the turn being heard.
+    func loseMicrophone() {
+        onMicrophoneLost?()
+    }
 }
 
 @MainActor
@@ -520,6 +527,59 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         let earpiece = VoiceRoomSpeakerRoute.options(speaker: false, base: base.union(.defaultToSpeaker))
         XCTAssertFalse(earpiece.contains(.defaultToSpeaker), "the earpiece is the call's default route")
         XCTAssertTrue(earpiece.isSuperset(of: base))
+    }
+
+    /// The microphone gave up on a hands-free turn before any word was heard (the phone's sound kept changing): the turn
+    /// ends at once instead of after the longest turn (50 s), the screen says why in plain words, listening does not
+    /// start again by itself, and the next turn starts as usual. The clock never moves here, so only an end that does
+    /// not wait can pass.
+    func test_when_the_microphone_gives_up_before_any_word_the_turn_ends_at_once() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), poster = FakePoster()
+        let room = room(with: ["build-agent"], listener: listener, speaker: speaker, audio: audio, poster: poster)
+        room.begin(rings: false)
+        await until("listening") { listener.partial != nil }
+        XCTAssertTrue(room.state.isListening)
+
+        listener.loseMicrophone()
+        await until("the turn ended at once") { room.state.phase == .ready }
+        XCTAssertEqual(room.state.notice,
+                       "The microphone stopped because the phone's sound kept changing. Tap Talk to go on.",
+                       "the screen says why")
+        XCTAssertTrue(poster.turns.isEmpty, "no words were heard: nothing is posted")
+        listener.loseMicrophone()
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertFalse(room.state.isListening, "listening does not start again by itself")
+        XCTAssertEqual(listener.starts, 1)
+
+        room.send(.toggleTalk)
+        await until("the next turn listens") { listener.starts == 2 && listener.partial != nil }
+        XCTAssertTrue(room.state.isListening)
+        XCTAssertNil(room.state.notice, "the next turn starts as usual")
+        listener.say("Is build 320 up")
+        room.send(.toggleTalk)
+        await until("posted") { poster.turns.count == 1 }
+        XCTAssertEqual(poster.turns, ["@build-agent Is build 320 up"])
+        await room.hangUp()
+    }
+
+    /// Words were heard before the microphone gave up: they are sent at once, and listening waits for you rather than
+    /// opening the moment after the turn.
+    func test_when_the_microphone_gives_up_after_words_they_are_sent_at_once() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), poster = FakePoster()
+        let room = room(with: ["build-agent"], listener: listener, speaker: speaker, audio: audio, poster: poster)
+        room.begin(rings: false)
+        await until("listening") { listener.partial != nil }
+        listener.say("Ship the retry fix")
+
+        listener.loseMicrophone()
+        await until("posted at once") { poster.turns.count == 1 }
+        XCTAssertEqual(poster.turns, ["@build-agent Ship the retry fix"])
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertFalse(room.state.isListening, "no listening right after the turn: the microphone has stopped")
+        XCTAssertEqual(listener.starts, 1)
+        XCTAssertEqual(room.state.notice,
+                       "The microphone stopped because the phone's sound kept changing. Tap Talk to go on.")
+        await room.hangUp()
     }
 
     func test_answers_wait_while_you_talk_and_hands_free_listening_comes_back_after_them() async {
