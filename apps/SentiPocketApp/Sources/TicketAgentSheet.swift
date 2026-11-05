@@ -325,7 +325,7 @@ final class AgentStartModel: ObservableObject {
         let chat = place == .newChat && offersNewChat
             ? keptChat ?? MintStartLedger.NewChat(
                 sessionId: UUID().uuidString.lowercased(),
-                title: NewAgentChat.title(agentName: name, job: jobText),
+                title: NewAgentChat.title(agentName: name, job: jobText) ?? NewAgentChat.untitled,
                 createKey: "create-" + UUID().uuidString.lowercased(),
                 made: false
             )
@@ -431,7 +431,7 @@ final class AgentStartModel: ObservableObject {
             forgetPending()
             if ticket == nil { ledger.forgetChat(account: account, sessionId: sessionId) }
             keptChat = nil
-            startedChat = target
+            startedChat = await named(target, for: started)
             phase = .started(started)
             onStarted(started)
         } catch MintError.notConfirmed {
@@ -441,6 +441,15 @@ final class AgentStartModel: ObservableObject {
             notThrough(target == nil || again ? message : message + " The new chat is made; starting again uses it.",
                        again: again)
         }
+    }
+
+    /// A new chat made before the mint named its agent (`NewAgentChat.untitled`) takes the agent's name now. Best effort:
+    /// a rename that does not go through leaves the chat as it is, and the agent started either way.
+    private func named(_ chat: MintStartLedger.NewChat?, for started: MintUpResponse) async -> MintStartLedger.NewChat? {
+        guard let chat, chat.title == NewAgentChat.untitled, let chats,
+              let name = NewAgentChat.title(agentName: started.agentName, job: "") else { return chat }
+        guard (try? await chats.nameAgentChat(sessionId: chat.sessionId, title: name)) != nil else { return chat }
+        return MintStartLedger.NewChat(sessionId: chat.sessionId, title: name, createKey: chat.createKey, made: chat.made)
     }
 
     /// A send that did not go through. The first send of a start refused (by the mint, or before it: its chat not made or

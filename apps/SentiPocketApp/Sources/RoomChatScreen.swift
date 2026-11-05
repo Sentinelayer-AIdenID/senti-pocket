@@ -1038,6 +1038,10 @@ struct RoomChatScreen: View {
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             offerCrashReports()
         }
+        // The mint's boxes for this room, as the Flight record reads them: the chat's own agent and the composer's hint.
+        .onChange(of: [Set(flight.state.boxes.map(\.name)), flight.state.endedBoxNames]) { boxes in
+            coordinator.setBoxes(running: boxes[0], ended: boxes[1])
+        }
         .modifier(RoomCoverWatch(coversItself: coversItself, coordinator: coordinator, flight: flight))
         .onChange(of: crashes.unhandled.count) { _ in offerCrashReports() }
         .onChange(of: coordinator.state.composer.canPost) { _ in offerCrashReports() }
