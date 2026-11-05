@@ -945,7 +945,11 @@ public struct RoomChatView: View {
             bottomWatch.takenSight = nil
             RoomScrollTrace.followMade()
             guard eased else {
+                let before = bottomWatch.reading
                 proxy.scrollTo(Self.bottomId, anchor: .bottom)
+                // A follow that moved nothing gives no new reading, and nothing would follow again: where it landed
+                // is read two frames on, whatever it shows (`followLanded`).
+                RoomNextFrame.run { RoomNextFrame.run { followLanded(from: before, proxy) } }
                 return
             }
             bottomWatch.easedFollowUntil = ProcessInfo.processInfo.systemUptime + Self.followEase
@@ -957,6 +961,28 @@ public struct RoomChatView: View {
 
     /// How long an arrival's follow eases.
     static let followEase: TimeInterval = 0.2
+
+    /// Where a placed follow landed, two frames on (`scrollToBottomSoon`). One that moved nothing while the end is still
+    /// out of view gives the room no new reading, and it would never follow again, saying the reader is at the bottom
+    /// with the end far below (at the largest text size, tall reports arriving at once: 5,597 pt in CI, for 7.6 s).
+    /// Once a chain, such a follow is tried again by the last row's id; if that moves nothing too, the reader is no
+    /// longer taken to be at the bottom, and the arrow shows. Otherwise the reader's place is read as usual.
+    private func followLanded(from before: RoomReaderPlace.Reading?, _ proxy: ScrollViewProxy) {
+        guard bottomWatch.isActive, bottomWatch.readsGeometry, let now = bottomWatch.reading else { return }
+        if now.endInView { bottomWatch.stallRetried = false }
+        let movedNothing = before.map { abs($0.offset - now.offset) < 0.5 } ?? false
+        guard movedNothing, !now.endInView, followsBottom else {
+            recheckPlace(proxy)
+            return
+        }
+        if !bottomWatch.stallRetried, let last = state.rows.last {
+            bottomWatch.stallRetried = true
+            proxy.scrollTo(last.id, anchor: .bottom)
+            RoomNextFrame.run { RoomNextFrame.run { followLanded(from: now, proxy) } }
+            return
+        }
+        setReaderAtBottom(false)
+    }
 
     /// A reading of the scroll view, while the list is laid out (iOS 18 and later). Acting on it here (a follow, the
     /// reader's place) would change the list again in the same frame, and SwiftUI warns ("tried to update multiple
@@ -1082,6 +1108,8 @@ private final class RoomBottomWatch {
     /// frame shows the same: it is taken only because the follow set the last one aside (a follow that stopped short).
     var sightBeforeFollow: RoomReaderPlace.Sight?
     var queuedOnlyAfterFollow = false
+    /// This follow chain already tried a follow that moved nothing again (`followLanded`).
+    var stallRetried = false
     /// A scroll to the bottom is waiting for the next turn of the run loop, or for the follow limit's second to pass.
     var followQueued = false
     var trailingFollowQueued = false
