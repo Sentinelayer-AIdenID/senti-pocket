@@ -28,7 +28,8 @@ struct PersonalRequest {
     let urlSession: URLSession
     let tokenProvider: @Sendable () -> String?
 
-    func send(_ method: String, _ path: [String], body: [String: Any]? = nil) async throws -> Answer {
+    func send(_ method: String, _ path: [String], body: [String: Any]? = nil,
+              headers: [String: String] = [:]) async throws -> Answer {
         guard let origin = HTTPSessionTransport.validOrigin(apiBaseURL) else { throw Failure.notConfigured }
         guard let token = tokenProvider(), !token.isEmpty else { throw Failure.notLoggedIn }
         guard token.utf8.count <= 8_192, token.unicodeScalars.allSatisfy({ (0x21...0x7E).contains($0.value) }) else {
@@ -42,6 +43,8 @@ struct PersonalRequest {
         }
         var request = URLRequest(url: url)
         request.httpMethod = method
+        // Extra headers first, so they can never replace the ones every call carries.
+        for (field, value) in headers { request.setValue(value, forHTTPHeaderField: field) }
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         if let body {

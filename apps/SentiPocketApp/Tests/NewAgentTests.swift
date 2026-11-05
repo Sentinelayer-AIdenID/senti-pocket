@@ -110,6 +110,22 @@ private final class FakeChats: AgentChatCreating, @unchecked Sendable {
 
     var tries: [Try] { lock.withLock { attempts } }
     var rooms: Set<String> { lock.withLock { made } }
+
+    /// Renames asked for, in order, and whether they are refused.
+    private var renames: [Try] = []
+    private var refuses = false
+
+    func refuseRenames() { lock.withLock { refuses = true } }
+
+    func nameAgentChat(sessionId: String, title: String) async throws {
+        let refused = lock.withLock { () -> Bool in
+            renames.append(Try(sessionId: sessionId, title: title, key: ""))
+            return refuses
+        }
+        if refused { throw RoomSendError.notAllowed }
+    }
+
+    var named: [Try] { lock.withLock { renames } }
 }
 
 /// Carter: "I don't think I see a new agent button on mobile, put that." The room's New agent, as on the web: a start in
@@ -482,17 +498,75 @@ final class NewAgentTests: XCTestCase {
         XCTAssertEqual(mint.sent, [old])
     }
 
-    func test_the_new_chat_is_titled_for_the_agent_as_on_the_web() {
+    /// Carter, #61655: a chat made for an agent is never called "New agent". It is the agent's name and its job, the job
+    /// alone while the mint has the name to make, or the name alone.
+    func test_the_new_chat_is_titled_for_the_agent_never_new_agent() throws {
         XCTAssertEqual(NewAgentChat.title(agentName: "reviewer", job: "Fix\nthe   paste\tbug"), "reviewer · Fix the paste bug")
-        XCTAssertEqual(NewAgentChat.title(agentName: "", job: ""), "New agent")
-        XCTAssertEqual(NewAgentChat.title(agentName: "  ", job: "Do it"), "New agent · Do it")
+        XCTAssertEqual(NewAgentChat.title(agentName: "  ", job: "Do it"), "Do it", "no name: the job alone")
+        XCTAssertEqual(NewAgentChat.title(agentName: "", job: "Fix the build and report"), "Fix the build and report")
         XCTAssertEqual(NewAgentChat.title(agentName: "rev\u{7}iewer", job: ""), "rev iewer", "control characters out")
         XCTAssertEqual(NewAgentChat.title(agentName: "r", job: String(repeating: "a", count: 100)),
                        "r · " + String(repeating: "a", count: 60), "the job's first 60 characters")
-        XCTAssertEqual(NewAgentChat.title(agentName: String(repeating: "n", count: 90), job: "x").count, 80, "the room-title cap")
-        XCTAssertEqual(NewAgentChat.title(agentName: "- bullet", job: "Do it"), "New agent · Do it",
+        XCTAssertEqual(NewAgentChat.title(agentName: "", job: String(repeating: "a", count: 100)),
+                       String(repeating: "a", count: 60), "the job's first 60 characters alone")
+        XCTAssertEqual(NewAgentChat.title(agentName: String(repeating: "n", count: 90), job: "x")?.count, 80, "the room-title cap")
+        XCTAssertEqual(NewAgentChat.title(agentName: "- bullet", job: "Do it"), "Do it",
                        "a name the API would refuse as a title is left out")
-        XCTAssertNotNil(RoomTitle.cleaned(NewAgentChat.title(agentName: "reviewer", job: String(repeating: "é ", count: 50))))
+        XCTAssertEqual(NewAgentChat.title(agentName: "", job: "- fix the build\n- report"), "fix the build - report",
+                       "a job written as a list loses the marks a title may not start with")
+        XCTAssertEqual(NewAgentChat.title(agentName: "build-agent", job: "## Fix"), "build-agent · Fix")
+        XCTAssertNil(NewAgentChat.title(agentName: "", job: ""), "neither: the mint names the chat")
+        XCTAssertNil(NewAgentChat.title(agentName: " ", job: "\u{1}\u{2} #"), "neither, once marks and control characters go")
+        XCTAssertNotNil(RoomTitle.cleaned(try XCTUnwrap(
+            NewAgentChat.title(agentName: "reviewer", job: String(repeating: "é ", count: 50)))))
+        for (name, job) in [("", "Do it"), ("reviewer", ""), ("- x", "y"), ("", "> quoted job")] {
+            XCTAssertFalse(NewAgentChat.title(agentName: name, job: job)?.contains("New agent") ?? false, "\(name) / \(job)")
+        }
+        XCTAssertFalse(NewAgentChat.untitled.contains("New agent"))
+    }
+
+    /// No name and no words for a title: the chat is made as `untitled`, then takes the name the mint gave its agent, and
+    /// Pocket opens it under that name. A rename that does not go through leaves the agent started and the chat as made.
+    func test_a_chat_with_neither_name_nor_job_words_takes_the_agents_name_from_the_mint() async throws {
+        let ledger = temporaryLedger()
+        defer { remove(ledger) }
+        let mint = ScriptedMint(models: models)
+        let chats = FakeChats()
+        let model = newAgent(mint, chats: chats, ledger: ledger)
+        await model.load()
+        model.job = "#"
+        model.place = .newChat
+        await model.start()
+
+        guard case .started = model.phase else { return XCTFail("not started: \(model.phase)") }
+        let chat = try XCTUnwrap(chats.tries.first)
+        XCTAssertEqual(chat.title, NewAgentChat.untitled, "made before the mint names the agent")
+        XCTAssertEqual(chats.named, [FakeChats.Try(sessionId: chat.sessionId, title: "mint-auto", key: "")],
+                       "renamed to the name the mint gave")
+        XCTAssertEqual(model.startedChat?.title, "mint-auto")
+        XCTAssertEqual(NewAgentSheet.chatToOpen(model.phase, startedChat: model.startedChat)?.title, "mint-auto")
+
+        // A named start's chat is never renamed.
+        let named = newAgent(ScriptedMint(models: models), chats: chats, ledger: ledger)
+        await named.load()
+        named.agentName = "build-agent"
+        named.job = "Fix it."
+        named.place = .newChat
+        await named.start()
+        XCTAssertEqual(chats.named.count, 1)
+        XCTAssertEqual(named.startedChat?.title, "build-agent · Fix it.")
+
+        // Refused: the agent started all the same, in the chat as it was made.
+        let refusedChats = FakeChats()
+        refusedChats.refuseRenames()
+        let refused = newAgent(ScriptedMint(models: models), chats: refusedChats, ledger: ledger)
+        await refused.load()
+        refused.job = "*"
+        refused.place = .newChat
+        await refused.start()
+        guard case .started = refused.phase else { return XCTFail("not started: \(refused.phase)") }
+        XCTAssertEqual(refusedChats.named.count, 1)
+        XCTAssertEqual(refused.startedChat?.title, NewAgentChat.untitled)
     }
 
     /// #303 review: a check again that the mint refuses (sign-in, capacity, a refusal, not admitted) may follow a first
