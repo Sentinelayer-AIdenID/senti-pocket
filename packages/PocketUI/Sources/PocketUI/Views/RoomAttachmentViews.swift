@@ -64,13 +64,15 @@ struct RoomAttachmentsView: View {
         }
     }
 
-    /// A photo's thumbnail, cropped to a square; until its preview arrives, a placeholder of the same size.
+    /// A photo's thumbnail, its middle square; until its preview arrives, a placeholder of the same size. The photo is
+    /// cropped before it is drawn, so nothing spills past the square: scaled to fill instead, a wide photo reached into
+    /// its neighbours' tap and VoiceOver areas.
     private func thumbnail(_ chip: RoomAttachmentChip, side: CGFloat) -> some View {
         ZStack {
-            if let data = previews[chip.attachmentId], let image = RoomImageData.image(from: data) {
+            if let data = previews[chip.attachmentId], let image = RoomImageData.square(from: data) {
                 image
                     .resizable()
-                    .scaledToFill()
+                    .scaledToFit()
             } else {
                 PocketPalette.inset
                 Image(systemName: "photo")
@@ -80,6 +82,7 @@ struct RoomAttachmentsView: View {
         }
         .frame(width: side, height: side)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(alignment: .bottomTrailing) {
             if chip.processingStatus == "dead_letter" {
                 Image(systemName: "exclamationmark.triangle.fill")

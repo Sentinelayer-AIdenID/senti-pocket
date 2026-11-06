@@ -17,6 +17,19 @@ enum RoomImageData {
         return nil
         #endif
     }
+
+    /// The middle square of a picture, for a thumbnail that must not spill past its square.
+    static func square(from data: Data) -> Image? {
+        #if canImport(UIKit)
+        guard let picture = UIImage(data: data), let cg = picture.cgImage else { return image(from: data) }
+        let edge = min(cg.width, cg.height)
+        let crop = CGRect(x: (cg.width - edge) / 2, y: (cg.height - edge) / 2, width: edge, height: edge)
+        guard let square = cg.cropping(to: crop) else { return image(from: data) }
+        return Image(uiImage: UIImage(cgImage: square, scale: picture.scale, orientation: picture.imageOrientation))
+        #else
+        return image(from: data)
+        #endif
+    }
 }
 
 /// Where to attach from: photos and videos, the camera, files, or an image you copied. Opens from the composer's
