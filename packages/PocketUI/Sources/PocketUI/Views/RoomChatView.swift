@@ -330,99 +330,12 @@ public struct RoomChatView: View {
 
     private var timeline: some View {
         ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    olderHistoryHeader
-                    // One view per row, always. Unwrapped, a row made none (a folded file part), one, two (a turn break
-                    // and its message) or more (file cards), and a lazy list that cannot tell how many builds every row
-                    // of the room, on screen or not, at every layout pass, to count them. Carter's phone froze inside
-                    // that walk (11-04 and 11-05: 12 to 13.5 s in a lazy list's placement, going item by item). Wrapped,
-                    // the list builds only the rows it shows. Spacing 0, as the list's own, so nothing moves.
-                    // A row's id is the loop's own (`RoomChatRow.id`), which every scroll to a row targets. No `.id`
-                    // of the same value on the row: with one, the list kept every row it made as it opened and built
-                    // them all again at each update (in CI 404 of 404 at every redraw and arrival), as master did.
-                    ForEach(state.rows) { row in
-                        VStack(alignment: .leading, spacing: 0) {
-                            rowView(row, proxy: proxy)
-                        }
-                    }
-                    ForEach(state.pending) { pending in
-                        RoomPendingRowView(
-                            row: pending,
-                            recovery: RoomPendingRecovery(canPost: state.composer.canPost),
-                            onRetry: { send(.retrySend(clientId: pending.clientId)) },
-                            onDiscard: { send(.discardSend(clientId: pending.clientId)) },
-                            onEdit: {
-                                restoredDraft = RoomComposerRestore(text: pending.text)
-                                send(.discardSend(clientId: pending.clientId))
-                            }
-                        )
-                        .id("pending:\(pending.clientId)")
-                    }
-                    if let media {
-                        RoomMediaOutgoingList(board: media)
-                    }
-                    newerHistoryFooter
-                    if !state.composingAgents.isEmpty, !state.canLoadNewer {
-                        RoomComposingLine(agents: state.composingAgents)
-                    }
-                    Color.clear
-                        .frame(height: 1)
-                        .id(Self.bottomId)
-                        // The bottom of a window further back is not the live room's bottom. The marker only reports:
-                        // the reader's place changes after layout (`markerSeen`).
-                        .onAppear { if !state.canLoadNewer, heldAnchor == nil { markerSeen(true) } }
-                        .onDisappear { markerSeen(false) }
-                }
-                .padding(.horizontal, 12)
-                .padding(.bottom, 8)
-            }
-            // Dragging the messages lowers the keyboard with the finger, as in Messages.
-            .scrollDismissesKeyboard(.interactively)
-            // Sending photos or files brings you to the bottom, where the message appears, like a typed one. Told by the
-            // board, not watched: an upload never redraws the room.
-            .onAppear {
-                media?.onNewOutgoing = {
-                    if readerAtBottom {
-                        heldAnchor = nil
-                        DispatchQueue.main.async { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
-                    } else {
-                        reopenAtLatest()
-                    }
-                }
-            }
-            // The reader scrolling lets go of a message they were taken to, and of the unread line being placed.
-            .simultaneousGesture(DragGesture(minimumDistance: 8).onChanged { _ in
-                bottomWatch.readerScrolled = true
-                if heldAnchor != nil { heldAnchor = nil }
-            })
-            .overlay(alignment: .bottomTrailing) {
-                if !readerAtBottom || state.canLoadNewer {
-                    jumpToLatestButton(proxy: proxy)
-                }
-            }
-            // The list starts below who is here, so the ring never covers the first message (Carter, #61679); rows
-            // scrolled up pass under it. Always the same height, so the ring coming or changing shape moves nothing.
-            .safeAreaInset(edge: .top, spacing: 0) {
-                Color.clear.frame(height: RoomPeopleAvatars.reservedHeight)
-            }
-            // Who is here floats at the top center, under the top bar and the pins, over the messages (Carter, #55354,
-            // #55424).
-            .overlay(alignment: .top) {
-                if let presence = state.presence {
-                    RoomPeopleAvatars(presence: presence, models: roster.modelsById,
-                                      signals: state.agentSignals(now: Date()),
-                                      working: state.agentsWorking(now: Date()),
-                                      boxes: roster.members.filter { $0.kind == .box && $0.status != .ended }.map(\.name),
-                                      activeCount: roster.members.isEmpty ? nil : roster.activeCount,
-                                      activeKeys: roster.members.isEmpty ? nil : roster.activeKeys,
-                                      isPaused: showsPresence) {
-                        showsPresence = true
-                    }
-                        .padding(.top, RoomPeopleAvatars.topGap)
-                }
-            }
-            .safeAreaInset(edge: .top, spacing: 0) {
+            // The pinned strip sits above the list, never in its top safe-area inset. An inset's height is part of the
+            // list's content inset, and the strip, laid out again at every pass of the list's bounce at its top, kept
+            // moving that inset, so the list laid itself out without end: the main thread busy for good after two
+            // drags up a room with pins (ticket 575678a1; master and build 04 alike). Messages now stop below the strip
+            // instead of sliding under it.
+            VStack(spacing: 0) {
                 if !state.pinned.isEmpty {
                     RoomPinnedStrip(
                         pinned: state.pinned,
@@ -434,45 +347,66 @@ public struct RoomChatView: View {
                         onUnpin: { send(.setPinned(sequenceId: $0, isPinned: false)) }
                     )
                 }
+                messageList(proxy)
             }
-            .onAppear {
-                scrollToInitialPosition(proxy)
-                focus(onRow: focusRowId, proxy: proxy)
-            }
-            // The new value carries what the action needs: an `onChange(of:perform:)` action can still see the
-            // view's previous `state`, where a focus set while the room is open is not there yet.
-            .onChange(of: focusRowId) { rowId in focus(onRow: rowId, proxy: proxy) }
-            .onChange(of: state.focusFallbackCount) { _ in
-                heldAnchor = nil
-                showLatest(proxy)
-            }
-            // A message the reader was taken to stays put while rows change around it. Otherwise, at the bottom,
-            // stay at the bottom when rows above change size: an image preview loading, reactions or a reply count
-            // arriving. A reader scrolled up is never moved.
-            .onChange(of: state.rows) { _ in
-                if let heldAnchor {
-                    proxy.scrollTo(heldAnchor, anchor: .center)
-                } else {
-                    keepAtBottomIfThere(proxy)
-                }
-            }
-            .onChange(of: state.attachmentPreviews.count) { _ in
-                if let heldAnchor { proxy.scrollTo(heldAnchor, anchor: .center) } else { keepAtBottomIfThere(proxy) }
-            }
-            .onChange(of: state.lastMessageId) { _ in
-                if !didInitialScroll {
-                    scrollToInitialPosition(proxy)
-                } else if readerAtBottom, heldAnchor == nil {
-                    withAnimation(.easeOut(duration: 0.2)) {
-                        proxy.scrollTo(Self.bottomId, anchor: .bottom)
+        }
+    }
+
+    /// The messages, with who is here over their top and Jump to latest at their bottom.
+    private func messageList(_ proxy: ScrollViewProxy) -> some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                olderHistoryHeader
+                // One view per row, always. Unwrapped, a row made none (a folded file part), one, two (a turn break
+                // and its message) or more (file cards), and a lazy list that cannot tell how many builds every row
+                // of the room, on screen or not, at every layout pass, to count them. Carter's phone froze inside
+                // that walk (11-04 and 11-05: 12 to 13.5 s in a lazy list's placement, going item by item). Wrapped,
+                // the list builds only the rows it shows. Spacing 0, as the list's own, so nothing moves.
+                // A row's id is the loop's own (`RoomChatRow.id`), which every scroll to a row targets. No `.id`
+                // of the same value on the row: with one, the list kept every row it made as it opened and built
+                // them all again at each update (in CI 404 of 404 at every redraw and arrival), as master did.
+                ForEach(state.rows) { row in
+                    VStack(alignment: .leading, spacing: 0) {
+                        rowView(row, proxy: proxy)
                     }
                 }
+                ForEach(state.pending) { pending in
+                    RoomPendingRowView(
+                        row: pending,
+                        recovery: RoomPendingRecovery(canPost: state.composer.canPost),
+                        onRetry: { send(.retrySend(clientId: pending.clientId)) },
+                        onDiscard: { send(.discardSend(clientId: pending.clientId)) },
+                        onEdit: {
+                            restoredDraft = RoomComposerRestore(text: pending.text)
+                            send(.discardSend(clientId: pending.clientId))
+                        }
+                    )
+                    .id("pending:\(pending.clientId)")
+                }
+                if let media {
+                    RoomMediaOutgoingList(board: media)
+                }
+                newerHistoryFooter
+                if !state.composingAgents.isEmpty, !state.canLoadNewer {
+                    RoomComposingLine(agents: state.composingAgents)
+                }
+                Color.clear
+                    .frame(height: 1)
+                    .id(Self.bottomId)
+                    // The bottom of a window further back is not the live room's bottom. The marker only reports:
+                    // the reader's place changes after layout (`markerSeen`).
+                    .onAppear { if !state.canLoadNewer, heldAnchor == nil { markerSeen(true) } }
+                    .onDisappear { markerSeen(false) }
             }
-            .onChange(of: state.pending.count) { count in
-                // Sending always brings you to the bottom, where your message appears. At the bottom, a short scroll
-                // on the next turn of the run loop. From up the history, the room is put back at its newest rows as a
-                // new list, the way it opens, instead of scrolling or trimming under the reader.
-                guard count > 0 else { return }
+            .padding(.horizontal, 12)
+            .padding(.bottom, 8)
+        }
+        // Dragging the messages lowers the keyboard with the finger, as in Messages.
+        .scrollDismissesKeyboard(.interactively)
+        // Sending photos or files brings you to the bottom, where the message appears, like a typed one. Told by the
+        // board, not watched: an upload never redraws the room.
+        .onAppear {
+            media?.onNewOutgoing = {
                 if readerAtBottom {
                     heldAnchor = nil
                     DispatchQueue.main.async { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
@@ -480,29 +414,105 @@ public struct RoomChatView: View {
                     reopenAtLatest()
                 }
             }
-            .onChange(of: state.firstMessageId) { _ in
-                // Older rows were prepended: keep the row the reader was looking at in place.
-                if let heldAnchor {
-                    proxy.scrollTo(heldAnchor, anchor: .center)
-                    anchorBeforeOlderLoad = nil
-                } else if let anchor = anchorBeforeOlderLoad {
-                    proxy.scrollTo(anchor, anchor: .top)
-                    anchorBeforeOlderLoad = nil
+        }
+        // The reader scrolling lets go of a message they were taken to, and of the unread line being placed.
+        .simultaneousGesture(DragGesture(minimumDistance: 8).onChanged { _ in
+            bottomWatch.readerScrolled = true
+            if heldAnchor != nil { heldAnchor = nil }
+        })
+        .overlay(alignment: .bottomTrailing) {
+            if !readerAtBottom || state.canLoadNewer {
+                jumpToLatestButton(proxy: proxy)
+            }
+        }
+        // The list starts below who is here, so the ring never covers the first message (Carter, #61679); rows
+        // scrolled up pass under it. Always the same height, so the ring coming or changing shape moves nothing.
+        .safeAreaInset(edge: .top, spacing: 0) {
+            Color.clear.frame(height: RoomPeopleAvatars.reservedHeight)
+        }
+        // Who is here floats at the top center, under the top bar and the pins, over the messages (Carter, #55354,
+        // #55424).
+        .overlay(alignment: .top) {
+            if let presence = state.presence {
+                RoomPeopleAvatars(presence: presence, models: roster.modelsById,
+                                  signals: state.agentSignals(now: Date()),
+                                  working: state.agentsWorking(now: Date()),
+                                  boxes: roster.members.filter { $0.kind == .box && $0.status != .ended }.map(\.name),
+                                  activeCount: roster.members.isEmpty ? nil : roster.activeCount,
+                                  activeKeys: roster.members.isEmpty ? nil : roster.activeKeys,
+                                  isPaused: showsPresence) {
+                    showsPresence = true
+                }
+                    .padding(.top, RoomPeopleAvatars.topGap)
+            }
+        }
+        .onAppear {
+            scrollToInitialPosition(proxy)
+            focus(onRow: focusRowId, proxy: proxy)
+        }
+        // The new value carries what the action needs: an `onChange(of:perform:)` action can still see the
+        // view's previous `state`, where a focus set while the room is open is not there yet.
+        .onChange(of: focusRowId) { rowId in focus(onRow: rowId, proxy: proxy) }
+        .onChange(of: state.focusFallbackCount) { _ in
+            heldAnchor = nil
+            showLatest(proxy)
+        }
+        // A message the reader was taken to stays put while rows change around it. Otherwise, at the bottom,
+        // stay at the bottom when rows above change size: an image preview loading, reactions or a reply count
+        // arriving. A reader scrolled up is never moved.
+        .onChange(of: state.rows) { _ in
+            if let heldAnchor {
+                proxy.scrollTo(heldAnchor, anchor: .center)
+            } else {
+                keepAtBottomIfThere(proxy)
+            }
+        }
+        .onChange(of: state.attachmentPreviews.count) { _ in
+            if let heldAnchor { proxy.scrollTo(heldAnchor, anchor: .center) } else { keepAtBottomIfThere(proxy) }
+        }
+        .onChange(of: state.lastMessageId) { _ in
+            if !didInitialScroll {
+                scrollToInitialPosition(proxy)
+            } else if readerAtBottom, heldAnchor == nil {
+                withAnimation(.easeOut(duration: 0.2)) {
+                    proxy.scrollTo(Self.bottomId, anchor: .bottom)
                 }
             }
-            .onChange(of: state.canLoadNewer) { canLoadNewer in
-                // Back in the live room after "Jump to latest": go to its newest message.
-                guard !canLoadNewer, scrollsToLatestWhenLoaded else { return }
-                scrollsToLatestWhenLoaded = false
-                setReaderAtBottom(true)
-                DispatchQueue.main.async { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
-            }
-            // A list starts at its newest rows, not at its top (iOS 18 and later; before that, the first scroll takes
-            // it there). Only where it starts: rows arriving or loading later move nothing.
-            .modifier(StartsAtBottom())
-            // The whole list, its handlers with it, so a new one opens as the room does.
-            .id(listEpoch)
         }
+        .onChange(of: state.pending.count) { count in
+            // Sending always brings you to the bottom, where your message appears. At the bottom, a short scroll
+            // on the next turn of the run loop. From up the history, the room is put back at its newest rows as a
+            // new list, the way it opens, instead of scrolling or trimming under the reader.
+            guard count > 0 else { return }
+            if readerAtBottom {
+                heldAnchor = nil
+                DispatchQueue.main.async { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
+            } else {
+                reopenAtLatest()
+            }
+        }
+        .onChange(of: state.firstMessageId) { _ in
+            // Older rows were prepended: keep the row the reader was looking at in place.
+            if let heldAnchor {
+                proxy.scrollTo(heldAnchor, anchor: .center)
+                anchorBeforeOlderLoad = nil
+            } else if let anchor = anchorBeforeOlderLoad {
+                proxy.scrollTo(anchor, anchor: .top)
+                anchorBeforeOlderLoad = nil
+            }
+        }
+        .onChange(of: state.canLoadNewer) { canLoadNewer in
+            // Back in the live room after "Jump to latest": go to its newest message.
+            guard !canLoadNewer, scrollsToLatestWhenLoaded else { return }
+            scrollsToLatestWhenLoaded = false
+            setReaderAtBottom(true)
+            DispatchQueue.main.async { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
+        }
+        // A list starts at its newest rows, not at its top (iOS 18 and later; before that, the first scroll takes
+        // it there). Only where it starts: rows arriving or loading later move nothing.
+        .modifier(StartsAtBottom())
+        // The whole list, its handlers with it, so a new one opens as the room does.
+        .id(listEpoch)
     }
 
     /// Puts the room back at its newest rows as a new list, the way a room opens (which has never frozen), rather than
