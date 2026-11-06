@@ -517,6 +517,12 @@ struct AuthenticatedRootView: View {
             person: { await identity.currentAccount().map { $0.accountId ?? $0.authorId } },
             // The webcal link goes to the system (Apple Calendar's subscribe sheet), which says whether it opened.
             openURL: { await UIApplication.shared.open($0) },
+            // The phone's own calendar (connect my calendar): its switch and picks are the signed-in account's.
+            // One EventKit store for the app: this runs on every pass of the App's body.
+            phone: PhoneCalendarCenter.live(
+                client: (services.calendar as? any DeviceCalendarServing) ?? CalendarOff(),
+                person: { await identity.currentAccount().map { $0.accountId ?? $0.authorId } }
+            ),
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
         ))
         _whisperModelCoordinator = ObservedObject(wrappedValue: whisperModelCoordinator)
@@ -751,9 +757,12 @@ struct AuthenticatedRootView: View {
                 open(link)
             }, onDone: { presentsWaiting = false })
         }
+        // The phone's calendar: its flag, a forget that did not go, and a send when sharing, each time the app opens.
+        .task { await calendar.phone?.appOpened() }
         .onChange(of: rootScenePhase) { phase in
             if phase == .active { notifications.startPolling() } else { notifications.stopPolling() }
             if phase == .active { waiting.startPolling() } else { waiting.stopPolling() }
+            if phase == .active { Task { await calendar.phone?.appOpened() } }
         }
         .onChange(of: incomingLinks.revision) { _ in openPendingLinkIfReady() }
         .onChange(of: roomListSettled) { _ in openPendingLinkIfReady() }

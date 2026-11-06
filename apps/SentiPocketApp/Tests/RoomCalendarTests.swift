@@ -567,9 +567,9 @@ final class RoomCalendarTests: XCTestCase {
         XCTAssertEqual(center.feedOn, false)
         XCTAssertFalse(center.showsCalendar, "the drafts route answered 404: no Calendar anywhere")
         XCTAssertFalse(center.showsSubscribe, "the feed answered 404: no Subscribe row")
-        await center.subscribe()
+        let asks = await center.subscribe()
         XCTAssertNil(center.feedNotice)
-        XCTAssertFalse(center.confirmsNewLink)
+        XCTAssertFalse(asks)
 
         // On, then off again while open: the calendar and its sheet go. An "off" is asked again after ten minutes.
         fake.draftsOn = true
@@ -689,10 +689,10 @@ final class RoomCalendarTests: XCTestCase {
         let first = try XCTUnwrap(opener.opened.first)
         XCTAssertEqual(vault.link(for: "person-a"), first, "the link is kept for the person who made it")
 
-        await center.subscribe()
-        await center.subscribe()
+        let firstAsks = await center.subscribe()
+        let secondAsks = await center.subscribe()
         XCTAssertEqual(fake.mints, 1, "a second Subscribe made a new link, which stops the subscribed calendar")
-        XCTAssertFalse(center.confirmsNewLink, "with a kept link nothing is asked")
+        XCTAssertFalse(firstAsks || secondAsks, "with a kept link nothing is asked")
         XCTAssertEqual(opener.opened, [first, first, first], "each Subscribe opens the kept link")
         XCTAssertEqual(center.feedNotice, CalendarCenter.opened)
 
@@ -713,17 +713,16 @@ final class RoomCalendarTests: XCTestCase {
         XCTAssertEqual(CalendarCenter.newLinkWarning,
                        "This makes a new subscribe link. A calendar already using an older link stops updating.")
 
-        await center.subscribe()
-        XCTAssertTrue(center.confirmsNewLink, "no kept link: Subscribe asks before it makes one")
+        let asks = await center.subscribe()
+        XCTAssertTrue(asks, "no kept link: Subscribe asks before it makes one")
         XCTAssertEqual(fake.mints, 0, "nothing is made before the person says yes")
         XCTAssertTrue(opener.opened.isEmpty)
-        center.confirmsNewLink = false // Cancel
+        // Cancel: the question goes, and nothing is made.
         XCTAssertEqual(fake.mints, 0, "Cancel makes nothing")
 
-        await center.subscribe()
-        XCTAssertTrue(center.confirmsNewLink)
+        let asksAgain = await center.subscribe()
+        XCTAssertTrue(asksAgain)
         await center.confirmNewLink()
-        XCTAssertFalse(center.confirmsNewLink)
         XCTAssertEqual(fake.mints, 1, "one yes, one link")
         XCTAssertEqual(opener.opened.count, 1)
         XCTAssertEqual(center.feedNotice, CalendarCenter.opened)
@@ -777,9 +776,9 @@ final class RoomCalendarTests: XCTestCase {
         let opener = Opener()
         let center = makeCenter(fake, vault: vault, person: "person-b", opener: opener)
         await center.refresh(probeRoom: "room-1")
-        await center.subscribe()
+        let asks = await center.subscribe()
         XCTAssertTrue(opener.opened.isEmpty, "person B opened person A's link")
-        XCTAssertTrue(center.confirmsNewLink, "person B has no link yet: Subscribe asks")
+        XCTAssertTrue(asks, "person B has no link yet: Subscribe asks")
         XCTAssertTrue(vault.accounts().isEmpty, "person A's link is dropped, not kept beside B's")
         await center.confirmNewLink()
         XCTAssertEqual(vault.accounts(), ["person-b"])
@@ -911,9 +910,9 @@ final class RoomCalendarTests: XCTestCase {
         let opener = Opener()
         let center = makeCenter(fake, vault: vault, person: nil, opener: opener)
         await center.refresh(probeRoom: "room-1")
-        await center.subscribe()
+        let asks = await center.subscribe()
         XCTAssertTrue(opener.opened.isEmpty)
-        XCTAssertFalse(center.confirmsNewLink)
+        XCTAssertFalse(asks)
         XCTAssertEqual(center.feedNotice, CalendarCenter.noPerson)
         await center.resetLink()
         XCTAssertEqual(fake.mints, 0)

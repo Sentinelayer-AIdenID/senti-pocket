@@ -81,7 +81,7 @@ struct CalendarSheet: View {
 
     var body: some View {
         NavigationStack {
-            CalendarScreen(board: board)
+            CalendarScreen(board: board, calendar: center)
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Done") { dismiss() }
@@ -94,11 +94,17 @@ struct CalendarSheet: View {
 /// The month, the day picked, its events, and the Add field.
 struct CalendarScreen: View {
     @ObservedObject var board: CalendarBoard
+    /// The calendar center: "Your calendars" over the month in every calendar (Connect, the agents switch, Sync to my
+    /// other calendars), and the phone's events in Pocket's own (from Settings) only.
+    var calendar: CalendarCenter?
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 monthHeader
+                if let calendar, let phone = calendar.phone {
+                    PhoneCalendarCard(phone: phone, center: calendar, showsEventsHere: board.showsPhoneEvents)
+                }
                 CalendarMonthGridView(grid: board.grid, selected: board.selected) { board.select($0) }
                     // A sideways swipe moves a month; scrolling up and down still scrolls.
                     .simultaneousGesture(DragGesture(minimumDistance: 30).onEnded { value in
@@ -177,6 +183,7 @@ struct CalendarScreen: View {
 
     private func dayDetail(_ day: CalendarDay) -> some View {
         let events = board.events(on: day)
+        let phoneEvents = board.phoneItems(on: day)
         let labels = CalendarDayLabel(calendar: board.calendar)
         return VStack(alignment: .leading, spacing: 12) {
             Text(labels.day(day))
@@ -185,7 +192,7 @@ struct CalendarScreen: View {
             if board.load == .loading {
                 ProgressView()
                     .accessibilityLabel("Reading the calendar")
-            } else if events.isEmpty, board.load == .loaded {
+            } else if events.isEmpty, phoneEvents.isEmpty, board.load == .loaded {
                 Text("Nothing on this day.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -193,6 +200,10 @@ struct CalendarScreen: View {
             ForEach(events) { event in
                 CalendarEventRow(event: event, time: CalendarEventTime.text(event, calendar: board.calendar),
                                  room: board.roomTitle(event.sessionId))
+            }
+            // The phone's own events, after the rooms': read-only, marked as from the phone.
+            ForEach(phoneEvents) { item in
+                PhoneEventRow(item: item, time: PhoneEventRow.time(item, calendar: board.calendar))
             }
             if board.canAdd {
                 if board.isPast(day) {
@@ -558,18 +569,8 @@ struct CalendarSettingsSection: View {
                         .accessibilityIdentifier("settings.calendar.open")
                     }
                     if center.showsSubscribe {
-                        Button {
-                            Task { await center.subscribe() }
-                        } label: {
-                            Label("Subscribe in Apple Calendar", systemImage: "calendar.badge.plus")
-                        }
-                        .disabled(center.isWorkingOnFeed)
-                        .accessibilityIdentifier("settings.calendar.subscribe")
-                        // Subscribe with no kept link: a new link replaces any made before, so it asks first, in a
-                        // sheet. The sheet hangs on this row: put on the Section, it never presented.
-                        .sheet(isPresented: $center.confirmsNewLink) {
-                            CalendarLinkQuestion(kind: .newLink) { Task { await center.confirmNewLink() } }
-                        }
+                        CalendarSubscribeButton(center: center, title: "Subscribe in Apple Calendar",
+                                                identifier: "settings.calendar.subscribe")
                         Button(role: .destructive) {
                             confirmsReset = true
                         } label: {
@@ -593,6 +594,9 @@ struct CalendarSettingsSection: View {
                 // At the accessibility sizes the rows drop their icons, so "Calendar" is not broken across lines.
                 .labelStyle(CalendarRowLabelStyle(showsIcon: !typeSize.isAccessibilitySize))
             }
+            if let phone = center.phone {
+                PhoneCalendarSettingsSection(phone: phone)
+            }
         }
     }
 
@@ -601,6 +605,30 @@ struct CalendarSettingsSection: View {
             ? "Apple Calendar shows the events from your rooms and keeps them up to date. Subscribe opens your link "
                 + "again; Reset link makes a new one and stops the old."
             : "Events from your rooms, by day."
+    }
+}
+
+/// Subscribe, wherever it is offered (Settings, and the calendar screen's "Your calendars"): one presenter. It opens
+/// the kept link; with none kept it asks first, in its own sheet, since a new link replaces any made before. The
+/// question is this button's own: only the button that was tapped asks, never two sheets at once.
+struct CalendarSubscribeButton: View {
+    @ObservedObject var center: CalendarCenter
+    let title: String
+    let identifier: String
+    @State private var asks = false
+
+    var body: some View {
+        Button {
+            Task { asks = await center.subscribe() }
+        } label: {
+            Label(title, systemImage: "calendar.badge.plus")
+        }
+        .disabled(center.isWorkingOnFeed)
+        .accessibilityIdentifier(identifier)
+        // The sheet hangs on the button itself: put on Settings' Section, it never presented.
+        .sheet(isPresented: $asks) {
+            CalendarLinkQuestion(kind: .newLink) { Task { await center.confirmNewLink() } }
+        }
     }
 }
 
@@ -700,11 +728,12 @@ struct CalendarAgendaScreen: View {
             scope: .agenda(rooms: rooms),
             client: center.client,
             onUnavailable: { center.calendarWentAway() },
-            onReauthenticationRequired: onReauthenticationRequired
+            onReauthenticationRequired: onReauthenticationRequired,
+            phone: center.phone
         ))
     }
 
     var body: some View {
-        CalendarScreen(board: board)
+        CalendarScreen(board: board, calendar: center)
     }
 }

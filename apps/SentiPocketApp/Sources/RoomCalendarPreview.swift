@@ -37,6 +37,8 @@ enum RoomCalendarPreview {
     private static var stageView: some View {
         if stage == "subscribe" {
             PreviewSettings()
+        } else if stage == "connect" {
+            ConnectPreview()
         } else {
             CalendarSheet(center: center, board: board(for: stage))
         }
@@ -72,6 +74,60 @@ enum RoomCalendarPreview {
             break
         }
         return board
+    }
+
+    /// `-PocketCalendarStage connect`: Pocket's own calendar on the simulator's real calendar, through the app's one
+    /// EventKit store and the real device-events client. Its requests go to a stand-in server inside the app
+    /// (`DeviceCalendarRecorder`), which answers as the API does and writes each request to `CAL_CAPTURE_FILE`.
+    /// `-PocketCalendarSeedEvent` first adds a made-up event with notes and a link; "Edit the made-up event" renames
+    /// it. The switch and the picks start afresh with `-PocketCalendarFresh`, and are kept from the launch before
+    /// without it.
+    private struct ConnectPreview: View {
+        @MainActor static let phone: PhoneCalendarCenter = {
+            let defaults = UserDefaults(suiteName: "phone-calendar-preview") ?? .standard
+            if ProcessInfo.processInfo.arguments.contains("-PocketCalendarFresh") {
+                defaults.removePersistentDomain(forName: "phone-calendar-preview")
+            }
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [DeviceCalendarRecorder.self]
+            let client = HTTPRoomCalendarClient(apiBaseURL: URL(string: "https://api.preview.invalid"),
+                                                urlSession: URLSession(configuration: configuration),
+                                                tokenProvider: { "preview-person-token" })
+            return PhoneCalendarCenter(store: EventKitPhoneCalendar.shared, client: client, defaults: defaults,
+                                       person: { "preview-person" })
+        }()
+        @MainActor static let center = CalendarCenter(client: PreviewCalendar(), feed: PreviewCalendar(),
+                                                      vault: PreviewLinks(), person: { "preview-person" },
+                                                      openURL: { _ in false }, phone: phone)
+
+        @State private var seedCalendar = "none"
+
+        var body: some View {
+            NavigationStack {
+                CalendarAgendaScreen(center: Self.center, rooms: [], onReauthenticationRequired: {})
+            }
+            .safeAreaInset(edge: .bottom) {
+                HStack {
+                    Button("Edit the made-up event") { EventKitPhoneCalendar.shared.renameSeedForPreview() }
+                        .accessibilityIdentifier("pocket.debug.editSeed")
+                    Spacer()
+                    Text("EventKit stores: \(EventKitPhoneCalendar.made)")
+                        .accessibilityIdentifier("pocket.debug.stores")
+                    Text(seedCalendar)
+                        .accessibilityIdentifier("pocket.debug.seedCalendar")
+                }
+                .font(.caption)
+                .padding(8)
+                .background(.bar)
+            }
+            .task {
+                if ProcessInfo.processInfo.arguments.contains("-PocketCalendarSeedEvent") {
+                    EventKitPhoneCalendar.shared.seedForPreview(now: Date())
+                    seedCalendar = EventKitPhoneCalendar.shared.seedCalendarId ?? "none"
+                }
+                await Self.phone.appOpened()
+            }
+        }
     }
 
     /// The real Settings screen with the calendar rows on.

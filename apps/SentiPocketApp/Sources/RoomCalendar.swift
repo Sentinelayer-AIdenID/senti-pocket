@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import PocketSyncClient
 import SwiftUI
@@ -20,11 +21,10 @@ final class CalendarCenter: ObservableObject {
     /// person's own Keychain item.
     @Published private(set) var feedNotice: String?
     @Published private(set) var isWorkingOnFeed = false
-    /// Subscribe found no kept link: making one replaces any link made before (another phone, before a sign-out), so
-    /// it asks first, as Reset does.
-    @Published var confirmsNewLink = false
 
     let client: any RoomCalendarServing
+    /// The phone's own calendar in Pocket's (connect my calendar); nil where the app has none to offer.
+    let phone: PhoneCalendarCenter?
     private let feed: any CalendarFeedServing
     private let vault: any CalendarLinkKeeping
     /// Who is signed in (the account id): the kept link is theirs alone.
@@ -41,8 +41,10 @@ final class CalendarCenter: ObservableObject {
 
     init(client: any RoomCalendarServing, feed: any CalendarFeedServing, vault: any CalendarLinkKeeping,
          person: @escaping @MainActor () async -> String?, openURL: @escaping @MainActor (URL) async -> Bool,
-         now: @escaping () -> Date = { Date() }, onReauthenticationRequired: @escaping @MainActor () -> Void = {}) {
+         phone: PhoneCalendarCenter? = nil, now: @escaping () -> Date = { Date() },
+         onReauthenticationRequired: @escaping @MainActor () -> Void = {}) {
         self.client = client
+        self.phone = phone
         self.feed = feed
         self.vault = vault
         self.person = person
@@ -114,27 +116,28 @@ final class CalendarCenter: ObservableObject {
         draftsSchedule.answered(on: false, at: now())
     }
 
-    /// Opens Apple Calendar's subscribe sheet on the link kept for this person, without making a new one. With no
-    /// kept link it asks first (`confirmsNewLink`): a new link stops any older one.
-    func subscribe() async {
-        guard showsSubscribe, !isWorkingOnFeed else { return }
+    /// Opens Apple Calendar's subscribe sheet on the link kept for this person, without making a new one. True when
+    /// no link is kept: making one replaces any link made before (another phone, before a sign-out), so the button
+    /// that was tapped asks first (`CalendarSubscribeButton`), as Reset does, and `confirmNewLink()` makes it.
+    @discardableResult
+    func subscribe() async -> Bool {
+        guard showsSubscribe, !isWorkingOnFeed else { return false }
         isWorkingOnFeed = true
         feedNotice = nil
         defer { isWorkingOnFeed = false }
         guard let key = await signedInPerson() else {
             feedNotice = Self.noPerson
-            return
+            return false
         }
         if let kept = vault.link(for: key).flatMap({ feed.keptLink($0) }) {
             await open(kept.url)
-        } else {
-            confirmsNewLink = true
+            return false
         }
+        return true
     }
 
     /// The person confirmed: a new link is made, kept for them, and opened.
     func confirmNewLink() async {
-        confirmsNewLink = false
         await makeLink(opening: true)
     }
 
@@ -312,12 +315,18 @@ final class CalendarBoard: ObservableObject {
     private let onReauthenticationRequired: @MainActor () -> Void
     private var allEvents: [CalendarEvent] = []
     private var eventsByDay: [CalendarDay: [CalendarEvent]] = [:]
+    /// Pocket's own calendar shows the phone's events too, read-only (connect my calendar); a room's never does.
+    private let phone: PhoneCalendarCenter?
+    /// The phone's events in the month on screen, by the day they start, soonest first.
+    @Published private(set) var phoneByDay: [CalendarDay: [PhoneCalendarItem]] = [:]
+    private var phoneWatch: AnyCancellable?
 
     init(scope: CalendarScope, client: any RoomCalendarServing, calendar: Calendar = CalendarBoard.personsCalendar(),
          now: @escaping () -> Date = { Date() }, onUnavailable: @escaping @MainActor () -> Void = {},
-         onReauthenticationRequired: @escaping @MainActor () -> Void = {}) {
+         onReauthenticationRequired: @escaping @MainActor () -> Void = {}, phone: PhoneCalendarCenter? = nil) {
         self.scope = scope
         self.client = client
+        self.phone = phone
         self.calendar = calendar
         self.now = now
         self.onUnavailable = onUnavailable
@@ -329,6 +338,14 @@ final class CalendarBoard: ObservableObject {
         grid = CalendarMonthGrid(month: first, eventsByDay: [:], today: today, calendar: calendar)
         gridBuilds = 1
         if case .agenda(let rooms) = scope { addRoomId = rooms.first?.id }
+        // The phone's events are read for the month on screen, and again whenever the phone's part changes (its
+        // calendar changed, it was connected, the flag answered).
+        if let phone {
+            layOutPhone()
+            phoneWatch = phone.objectWillChange.sink { [weak self] _ in
+                Task { @MainActor in await self?.readPhone() }
+            }
+        }
     }
 
     /// The Gregorian calendar in the person's zone and language, whatever calendar the phone shows: the API's days
@@ -357,6 +374,20 @@ final class CalendarBoard: ObservableObject {
 
     func events(on day: CalendarDay) -> [CalendarEvent] {
         eventsByDay[day] ?? []
+    }
+
+    /// Pocket's own calendar shows the phone's events; a room's never does.
+    var showsPhoneEvents: Bool { phone != nil }
+
+    /// The phone's own events that day, read-only.
+    func phoneItems(on day: CalendarDay) -> [PhoneCalendarItem] {
+        phoneByDay[day] ?? []
+    }
+
+    /// Reads the phone's events for the month on screen, off the main thread, and lays the month out again when they
+    /// come.
+    func layOutPhone() {
+        Task { await readPhone() }
     }
 
     /// A day before today takes no new event.
@@ -401,7 +432,9 @@ final class CalendarBoard: ObservableObject {
         month = CalendarDay(year: next.year, month: next.month, day: 1)
         let today = CalendarDay(now(), in: calendar)
         selected = (today.year, today.month) == (month.year, month.month) ? today : nil
+        phoneByDay = [:]
         buildGrid()
+        layOutPhone()
     }
 
     func select(_ day: CalendarDay) {
@@ -468,7 +501,9 @@ final class CalendarBoard: ObservableObject {
             let day = CalendarDay(saved.startsAt, in: calendar)
             if (day.year, day.month) != (month.year, month.month) {
                 month = CalendarDay(year: day.year, month: day.month, day: 1)
+                phoneByDay = [:]
                 buildGrid()
+                layOutPhone()
             }
             selected = day
         } catch CalendarError.unavailable {
@@ -514,9 +549,21 @@ final class CalendarBoard: ObservableObject {
         buildGrid()
     }
 
+    /// The phone's events for the month on screen, by day, and the month laid out with them. Events read for a month
+    /// that is no longer on screen are dropped.
+    func readPhone() async {
+        guard let phone, let start = month.start(in: calendar),
+              let end = calendar.date(byAdding: .month, value: 1, to: start) else { return }
+        let asked = month
+        let items = await phone.items(from: start, to: end).sorted { ($0.start, $0.id) < ($1.start, $1.id) }
+        guard asked == month else { return }
+        phoneByDay = Dictionary(grouping: items) { CalendarDay($0.start, in: calendar) }
+        buildGrid()
+    }
+
     private func buildGrid() {
-        grid = CalendarMonthGrid(month: month, eventsByDay: eventsByDay, today: CalendarDay(now(), in: calendar),
-                                 calendar: calendar)
+        grid = CalendarMonthGrid(month: month, eventsByDay: eventsByDay, phoneCounts: phoneByDay.mapValues(\.count),
+                                 today: CalendarDay(now(), in: calendar), calendar: calendar)
         gridBuilds += 1
     }
 }
@@ -541,7 +588,9 @@ struct CalendarMonthGrid: Equatable {
     let weekdays: [String]
     let cells: [Cell]
 
-    init(month: CalendarDay, eventsByDay: [CalendarDay: [CalendarEvent]], today: CalendarDay, calendar: Calendar) {
+    /// `phoneCounts`: the phone's own events by day, counted with the rooms' (Pocket's own calendar).
+    init(month: CalendarDay, eventsByDay: [CalendarDay: [CalendarEvent]], phoneCounts: [CalendarDay: Int] = [:],
+         today: CalendarDay, calendar: Calendar) {
         self.month = month
         let titleFormatter = DateFormatter()
         titleFormatter.calendar = calendar
@@ -559,7 +608,7 @@ struct CalendarMonthGrid: Equatable {
         var cells = (0..<leading).map { Cell(id: $0, day: nil, eventCount: 0, isToday: false, accessibilityLabel: "") }
         for number in 1...length {
             let day = CalendarDay(year: month.year, month: month.month, day: number)
-            let count = eventsByDay[day]?.count ?? 0
+            let count = (eventsByDay[day]?.count ?? 0) + (phoneCounts[day] ?? 0)
             cells.append(Cell(id: leading + number - 1, day: day, eventCount: count, isToday: day == today,
                               accessibilityLabel: labels.text(for: day, eventCount: count)))
         }
