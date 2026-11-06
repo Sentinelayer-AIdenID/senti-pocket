@@ -21,7 +21,7 @@ final class SessionCheckpointPresentationTests: XCTestCase {
         XCTAssertEqual(state.rows.first?.sequenceLabel, "Events #10–#20")
         XCTAssertEqual(
             state.rows.first?.trustNotice,
-            "Available through your room membership. Not a signed Pocket briefing."
+            "You see this because you're in this chat. It isn't a signed briefing."
         )
     }
 

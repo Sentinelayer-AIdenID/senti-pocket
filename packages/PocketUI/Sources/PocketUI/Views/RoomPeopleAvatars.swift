@@ -346,6 +346,10 @@ struct RoomOnlineCountPill: View {
                 .monospacedDigit()
                 .foregroundStyle(PocketPalette.textPrimary)
                 .contentTransition(.numericText())
+                // The capsule is 22 points tall and the room keeps only the ring's height clear above its first line:
+                // at the largest text sizes the digits stay inside the capsule rather than spill over "Start of the
+                // room" (Carter's IMG_7606). VoiceOver reads the count from the label.
+                .dynamicTypeSize(...DynamicTypeSize.xLarge)
         }
         .padding(.horizontal, 8)
         .frame(height: 22)

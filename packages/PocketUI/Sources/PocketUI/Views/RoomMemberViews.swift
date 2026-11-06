@@ -117,12 +117,12 @@ public struct RoomMemberSheetView: View {
             }
             if let onOpenFlight {
                 Button(action: onOpenFlight) {
-                    Label("Flight record", systemImage: "airplane")
+                    Label("Room info", systemImage: "info.circle")
                         .font(.subheadline.weight(.semibold))
                 }
                 .buttonStyle(.borderless)
                 .padding(.top, 2)
-                .accessibilityHint("Opens the room's Flight record")
+                .accessibilityHint("Opens the room's info, with this box's steps")
                 .accessibilityIdentifier("pocket.member.flight")
             }
         }

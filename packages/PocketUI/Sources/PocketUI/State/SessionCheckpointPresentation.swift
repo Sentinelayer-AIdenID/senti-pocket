@@ -112,7 +112,7 @@ public struct SessionCheckpointRowPresentation: Equatable, Identifiable, Sendabl
 
     /// Deliberately neutral copy: membership permits reading, but does not prove a signed Pocket briefing.
     public var trustNotice: String {
-        "Available through your room membership. Not a signed Pocket briefing."
+        "You see this because you're in this chat. It isn't a signed briefing."
     }
 
     public var sequenceLabel: String {
