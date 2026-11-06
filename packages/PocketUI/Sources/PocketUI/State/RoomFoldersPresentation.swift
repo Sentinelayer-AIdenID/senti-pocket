@@ -472,7 +472,7 @@ public struct SidePanelLayout: Equatable, Sendable {
             }
         }
         if !folders.isEmpty, !rooms.isEmpty {
-            rows.append(.label(id: "unfiled", title: "Your rooms"))
+            rows.append(.label(id: "unfiled", title: "Your chats"))
         }
         for entry in rooms {
             rows.append(.room(entry.room, depth: 0))

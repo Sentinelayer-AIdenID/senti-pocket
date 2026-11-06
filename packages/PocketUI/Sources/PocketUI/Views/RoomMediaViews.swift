@@ -222,21 +222,37 @@ struct RoomMediaThumb: View {
     var side: CGFloat = 64
     var onRemove: (() -> Void)?
     var onRetry: (() -> Void)?
+    /// In the composer's tray: a tap opens the file full screen, before it is sent.
+    var onOpen: (() -> Void)?
 
     var body: some View {
         ZStack {
-            picture
+            if let onOpen {
+                Button(action: onOpen) {
+                    picture
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Open \(item.filename)")
+                .accessibilityHint("Shows it full screen before you send it")
+                .accessibilityIdentifier("pocket.room.media.item.open")
+            } else {
+                picture
+            }
+            // The ring and the play mark sit over the picture: a tap goes through them to Open.
             switch item.phase {
             case .preparing:
                 RoomMediaRing(progress: item.progress, isPreparing: true, diameter: side > 70 ? 36 : 28)
+                    .allowsHitTesting(false)
             case .uploading:
                 RoomMediaRing(progress: item.progress, isPreparing: false, diameter: side > 70 ? 36 : 28)
+                    .allowsHitTesting(false)
             case .uploaded:
                 if item.kind == .video {
                     Image(systemName: "play.circle.fill")
                         .font(.system(size: side > 70 ? 30 : 22))
                         .foregroundStyle(Color.white, Color.black.opacity(0.45))
                         .accessibilityHidden(true)
+                        .allowsHitTesting(false)
                 }
             case .ready:
                 EmptyView()
@@ -346,7 +362,8 @@ struct RoomMediaTray: View {
                                 item: item,
                                 side: 64,
                                 onRemove: { board.perform(.remove(itemId: item.id)) },
-                                onRetry: { board.perform(.retryItem(itemId: item.id)) }
+                                onRetry: { board.perform(.retryItem(itemId: item.id)) },
+                                onOpen: { board.open(item.id) }
                             )
                         }
                     }
@@ -360,6 +377,11 @@ struct RoomMediaTray: View {
                 .accessibilityIdentifier("pocket.room.media.tray")
             }
         }
+        #if os(iOS)
+        .fullScreenCover(item: Binding(get: { board.opened }, set: { if $0 == nil { board.closeOpened() } })) { item in
+            RoomComposerFileView(item: item, onRemove: { board.removeOpened() }, onClose: { board.closeOpened() })
+        }
+        #endif
     }
 }
 

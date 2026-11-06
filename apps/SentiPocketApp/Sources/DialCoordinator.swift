@@ -20,6 +20,9 @@ import PocketCall
 final class DialCoordinator: ObservableObject {
     /// Hydrate a received state into a renderable ring (atlas's DialHydrationClient.hydrate). Throws on refuse/absent.
     private let hydrate: (DialReceiveState) async throws -> RenderableRing
+    /// This account's OK to share with AI (App Store guideline 5.1.2(i)), asked first if it hasn't said it: the dial
+    /// hears what you say, answers it with AI and posts your reply. False ends the call with nothing heard or posted.
+    private let mayShareWithAI: @MainActor () async -> Bool
     /// Drive the governed dial flow for a hydrated ring → outcome (constructs LiveDialVoice+PhoneWriteAdapter+
     /// DialOrchestrator and runs it). Injected so the coordinator's orchestration is testable in isolation.
     private let runDial: (RenderableRing, UUID) async -> DialOutcome
@@ -36,9 +39,11 @@ final class DialCoordinator: ObservableObject {
     private var pending: [UUID: PendingDial] = [:]
 
     init(hydrate: @escaping (DialReceiveState) async throws -> RenderableRing,
+         mayShareWithAI: @escaping @MainActor () async -> Bool,
          runDial: @escaping (RenderableRing, UUID) async -> DialOutcome,
          endCall: @escaping (UUID) -> Void) {
         self.hydrate = hydrate
+        self.mayShareWithAI = mayShareWithAI
         self.runDial = runDial
         self.endCall = endCall
     }
@@ -82,6 +87,13 @@ final class DialCoordinator: ObservableObject {
         }
         guard !Task.isCancelled else {
             return .declined("call ended during hydration")
+        }
+        // Asked as everywhere else in the app; Not now, or hanging up first, runs nothing.
+        guard await mayShareWithAI() else {
+            return .declined("not shared with AI: this account hasn't said OK")
+        }
+        guard !Task.isCancelled else {
+            return .declined("call ended before the dial began")
         }
         return await runDial(ring, callUUID)
     }

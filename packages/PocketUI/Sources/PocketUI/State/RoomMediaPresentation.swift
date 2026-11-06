@@ -102,9 +102,12 @@ public struct RoomMediaItemRow: Identifiable, Equatable {
     public var thumbnail: Data?
     public var phase: Phase
     public let progress: RoomMediaProgress
+    /// The file on the phone, to open before it is sent: as it will be sent once prepared (location removed), the
+    /// picked copy until then. Nil where there is none to open.
+    public var localFile: URL?
 
     public init(id: String, filename: String, kind: Kind, sizeBytes: Int64? = nil, thumbnail: Data? = nil,
-                phase: Phase = .preparing, progress: RoomMediaProgress) {
+                phase: Phase = .preparing, progress: RoomMediaProgress, localFile: URL? = nil) {
         self.id = id
         self.filename = filename
         self.kind = kind
@@ -112,11 +115,13 @@ public struct RoomMediaItemRow: Identifiable, Equatable {
         self.thumbnail = thumbnail
         self.phase = phase
         self.progress = progress
+        self.localFile = localFile
     }
 
     public static func == (lhs: RoomMediaItemRow, rhs: RoomMediaItemRow) -> Bool {
         lhs.id == rhs.id && lhs.filename == rhs.filename && lhs.kind == rhs.kind && lhs.sizeBytes == rhs.sizeBytes
             && lhs.thumbnail == rhs.thumbnail && lhs.phase == rhs.phase && lhs.progress === rhs.progress
+            && lhs.localFile == rhs.localFile
     }
 
     public var kindLabel: String {
@@ -274,6 +279,9 @@ public enum RoomMediaIntent: Equatable, Sendable {
 @MainActor
 public final class RoomMediaBoard: ObservableObject {
     @Published public private(set) var tray: [RoomMediaItemRow] = []
+    /// The file in the tray open full screen, before it is sent (Carter, ticket 77fcdd2b: "When I click on a pic I
+    /// attach before I send it I wanna be able to open it and inspect it"); nil when none is.
+    @Published public private(set) var opened: RoomMediaItemRow?
     @Published public private(set) var outgoing: [RoomMediaOutgoingRow] = []
     /// Why something picked was not added (too large, a type the room does not take), said once.
     @Published public private(set) var notice: String?
@@ -302,6 +310,28 @@ public final class RoomMediaBoard: ObservableObject {
 
     public func setTray(_ rows: [RoomMediaItemRow]) {
         if rows != tray { tray = rows }
+        // The open file follows its row (its upload goes on); once it has left the tray, it closes.
+        if let opened {
+            let now = rows.first { $0.id == opened.id }
+            if now != opened { self.opened = now }
+        }
+    }
+
+    /// Opens a file in the tray full screen. Nothing else changes: the words typed and the other files stay.
+    public func open(_ itemId: String) {
+        opened = tray.first { $0.id == itemId }
+    }
+
+    public func closeOpened() {
+        if opened != nil { opened = nil }
+    }
+
+    /// Remove, in the open file's view: takes that one file out of the tray (the others and the words typed stay), and
+    /// closes the view.
+    public func removeOpened() {
+        guard let item = opened else { return }
+        opened = nil
+        perform(.remove(itemId: item.id))
     }
 
     public func setOutgoing(_ rows: [RoomMediaOutgoingRow]) {

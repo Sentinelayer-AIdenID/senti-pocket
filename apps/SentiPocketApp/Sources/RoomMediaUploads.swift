@@ -314,6 +314,8 @@ final class RoomMediaUploadCoordinator: ObservableObject {
     static let echoGrace: TimeInterval = 20
     /// What a file or message restored after the app was closed says until it is retried.
     static let interruptedReason = "Not sent: Pocket closed before it finished. Retry to send it."
+    /// What a message with files says when it waits for this account's OK to share with AI.
+    static let consentReason = "Not sent: Pocket needs your OK to share it with AI first. Retry to be asked."
 
     @MainActor
     private final class Item {
@@ -422,6 +424,12 @@ final class RoomMediaUploadCoordinator: ObservableObject {
     private var outgoing: [Outgoing] = []
     private var keepAliveToken: Int?
     private var keepAliveGeneration = 0
+    /// This account's OK to share what it writes in rooms with AI (App Store guideline 5.1.2(i)). A message with files
+    /// reaches the room, and its AI agents, only once it is given: its first send, every retry and a message restored
+    /// after the app closed alike. Nil (previews, tests of uploading alone) asks nothing.
+    private(set) var aiConsent: AIConsent?
+    /// Asks the room's AI question on its screen; what was asked for runs after OK.
+    var askAIConsent: (@MainActor (AIConsentHeld) -> Void)?
 
     init(
         sessionId: String,
@@ -436,10 +444,12 @@ final class RoomMediaUploadCoordinator: ObservableObject {
         },
         makeId: @escaping () -> String = RoomMediaUploadCoordinator.newClientAttachmentId,
         discard: @escaping (RoomMediaSource) -> Void = { RoomMediaFiles.discard($0) },
-        outboxRoot: URL = RoomMediaFiles.outbox
+        outboxRoot: URL = RoomMediaFiles.outbox,
+        aiConsent: AIConsent? = nil
     ) {
         self.sessionId = sessionId
         self.account = account
+        self.aiConsent = aiConsent
         self.uploader = uploader
         self.preparer = preparer
         self.keepAlive = keepAlive
@@ -495,6 +505,13 @@ final class RoomMediaUploadCoordinator: ObservableObject {
         self.uploader = uploader
     }
 
+    /// The signed-in account's consent, as the room on screen has it.
+    func updateConsent(_ consent: AIConsent?) {
+        aiConsent = consent
+    }
+
+    private var mayShareWithAI: Bool { aiConsent?.isGiven ?? true }
+
     /// One coordinator per account and room for as long as the app runs: leaving the room never drops a message on
     /// its way, and coming back shows it still uploading. Its uploader follows the room's current posting rights.
     /// Another account signing in gets its own coordinator: it never sees, retries or posts the last one's files
@@ -502,10 +519,12 @@ final class RoomMediaUploadCoordinator: ObservableObject {
     private static var rooms: [String: RoomMediaUploadCoordinator] = [:]
 
     static func forRoom(_ sessionId: String, account: String? = nil, uploader: (any RoomMediaUploading)?,
+                        aiConsent: AIConsent? = nil,
                         make: () -> RoomMediaUploadCoordinator) -> RoomMediaUploadCoordinator {
         let key = "\(account ?? "")|\(sessionId)"
         if let existing = rooms[key] {
             existing.updateUploader(uploader)
+            existing.updateConsent(aiConsent)
             return existing
         }
         let created = make()
@@ -950,6 +969,12 @@ final class RoomMediaUploadCoordinator: ObservableObject {
             let message = outgoing[index]
             // Only a message still uploading moves on: one posting, sent or stopped waits for its outcome or a retry.
             guard message.status == .uploading else { continue }
+            // Without this account's OK nothing of it reaches the room (a Markdown file is published as it completes):
+            // it stops here, and Retry asks.
+            guard mayShareWithAI else {
+                outgoing[index].status = .failed(reason: Self.consentReason, canRetry: true)
+                continue
+            }
             let parts = message.itemIds.compactMap { items[$0] }
             if let failed = parts.first(where: { $0.isFailed }), case .failed(let reason, _) = failed.phase {
                 outgoing[index].status = .failed(reason: reason, canRetry: parts.allSatisfy { !$0.isFailed || $0.canRetry })
@@ -1122,6 +1147,11 @@ final class RoomMediaUploadCoordinator: ObservableObject {
     /// then the message with its same client id.
     private func retry(_ clientId: String) {
         guard let index = outgoing.firstIndex(where: { $0.clientId == clientId }), outgoing[index].canRetry else { return }
+        // Asked first, as a text is: OK retries it, Not now leaves it as it is.
+        guard mayShareWithAI else {
+            askAIConsent?(AIConsentHeld { [weak self] in self?.retry(clientId) })
+            return
+        }
         outgoing[index].status = .uploading
         for id in outgoing[index].itemIds {
             if let item = items[id], case .failed(_, true) = item.phase { start(item) }
@@ -1352,8 +1382,10 @@ final class RoomMediaUploadCoordinator: ObservableObject {
     }
 
     private static func row(_ item: Item) -> RoomMediaItemRow {
+        // The file to open before it is sent: as it will go once prepared (location removed), the picked copy until then.
         RoomMediaItemRow(id: item.id, filename: item.filename, kind: item.kind, sizeBytes: item.sizeBytes,
-                         thumbnail: item.thumbnail, phase: item.phase, progress: item.progress)
+                         thumbnail: item.thumbnail, phase: item.phase, progress: item.progress,
+                         localFile: item.prepared?.file ?? item.source.file)
     }
 
     /// While anything uploads or posts, the app asks for time to finish in the background. A grant iOS ended at its

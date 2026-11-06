@@ -25,7 +25,7 @@ public struct SessionListView: View {
                 sessionList
             }
         }
-        .navigationTitle("Sessions")
+        .navigationTitle(ChatListWords.title)
         .accessibilityIdentifier("pocket.sessions.screen")
         .pocketCanvas()
     }
@@ -45,7 +45,7 @@ public struct SessionListView: View {
                 .listRowBackground(PocketPalette.raised)
             }
 
-            Section("Your sessions") {
+            Section(ChatListWords.section) {
                 ForEach(state.rows) { row in
                     Button { send(.selectSession(sessionId: row.sessionId)) } label: {
                         SessionRow(row: row)
@@ -56,14 +56,14 @@ public struct SessionListView: View {
                                                     filedIn: row.folderId.flatMap { yours.contains($0) ? $0 : nil },
                                                     send: row.isDirect ? nil : onFolder))
                     .accessibilityIdentifier("pocket.sessions.row.\(row.sessionId)")
-                    .accessibilityHint("Opens this session")
+                    .accessibilityHint(ChatListWords.rowHint)
                     .listRowBackground(PocketPalette.raised)
                 }
             }
 
             if state.hasMore {
                 Section {
-                    Button("Load more sessions") { send(.loadMoreSessions) }
+                    Button(ChatListWords.loadMore) { send(.loadMoreSessions) }
                         .frame(maxWidth: .infinity, alignment: .center)
                         .accessibilityIdentifier("pocket.sessions.load-more")
                 }
@@ -74,7 +74,7 @@ public struct SessionListView: View {
         .refreshable { send(.refreshSessions) }
         .overlay {
             if state.isRefreshing {
-                ProgressView("Refreshing sessions")
+                ProgressView(ChatListWords.loading)
                     .padding()
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
                     .accessibilityIdentifier("pocket.sessions.refreshing")
@@ -92,18 +92,18 @@ public struct SessionListView: View {
                     .foregroundStyle(state.failure == nil ? PocketPalette.accent : PocketPalette.warning)
                     .accessibilityHidden(true)
 
-                Text(state.isRefreshing ? "Loading sessions" : (state.failure?.title ?? emptyTitle))
+                Text(state.isRefreshing ? ChatListWords.loading : (state.failure?.title ?? ChatListWords.emptyTitle(state.provenance)))
                     .font(.title2.bold())
                 Text(state.isRefreshing
-                    ? "Fetching the sessions authorized for this account."
-                    : (state.failure?.detail ?? emptyDetail))
+                    ? ChatListWords.loadingDetail
+                    : (state.failure?.detail ?? ChatListWords.emptyDetail(state.provenance)))
                     .foregroundStyle(PocketPalette.textSecondary)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
 
                 if state.isRefreshing {
                     ProgressView()
-                        .accessibilityLabel("Loading sessions")
+                        .accessibilityLabel(ChatListWords.loading)
                         .accessibilityIdentifier("pocket.sessions.refreshing")
                 } else {
                     Button("Try again") { send(.refreshSessions) }
@@ -118,23 +118,6 @@ public struct SessionListView: View {
         }
     }
 
-    private var emptyTitle: String {
-        switch state.provenance {
-        case .network: return "No sessions yet"
-        case .cache: return "No cached sessions"
-        case .fixture: return "No preview sessions"
-        case .unavailable: return "Sessions unavailable"
-        }
-    }
-
-    private var emptyDetail: String {
-        switch state.provenance {
-        case .network: return "Sessions you create or join will appear here."
-        case .cache: return "Reconnect to refresh your authorized sessions."
-        case .fixture: return "This build has no live session data."
-        case .unavailable: return "Sign in and connect to Senti to load your sessions."
-        }
-    }
 
     private func failureRow(_ failure: SessionLoadFailure) -> some View {
         Label {
@@ -285,14 +268,14 @@ struct SessionProvenanceBanner: View {
     private var message: String {
         switch provenance {
         case .network(let lastUpdated):
-            return "Live session data · updated \(lastUpdated.formatted(.relative(presentation: .named)))"
+            return ChatListWords.upToDate(updated: lastUpdated.formatted(.relative(presentation: .named)))
         case .cache(let cachedAt, let authenticationExpired):
-            let suffix = authenticationExpired ? " · sign in again to refresh" : ""
-            return "Last synced copy · cached \(cachedAt.formatted(.relative(presentation: .named)))\(suffix)"
+            return ChatListWords.savedCopy(from: cachedAt.formatted(.relative(presentation: .named)),
+                                           signInAgain: authenticationExpired)
         case .fixture:
             return "Preview data · not live"
         case .unavailable:
-            return "No authorized session source"
+            return ChatListWords.notConnected
         }
     }
 
@@ -311,6 +294,45 @@ struct SessionProvenanceBanner: View {
         case .cache: return PocketPalette.warning
         case .fixture, .unavailable: return PocketPalette.textSecondary
         }
+    }
+}
+
+/// The words of the chat list, once "Sessions": the first screen a new person meets says chats (Carter, 2026-11-06).
+enum ChatListWords {
+    static let title = "Chats"
+    static let section = "Your chats"
+    static let rowHint = "Opens this chat"
+    static let loadMore = "Load more chats"
+    static let loading = "Loading chats"
+    static let loadingDetail = "Getting your chats."
+    static let notConnected = "Not connected"
+
+    static func emptyTitle(_ provenance: SessionPresentationProvenance) -> String {
+        switch provenance {
+        case .network: return "No chats yet"
+        case .cache: return "No saved chats"
+        case .fixture: return "No preview chats"
+        case .unavailable: return "Chats unavailable"
+        }
+    }
+
+    static func emptyDetail(_ provenance: SessionPresentationProvenance) -> String {
+        switch provenance {
+        case .network: return "Chats you start or join show up here."
+        case .cache: return "Reconnect to see your latest chats."
+        case .fixture: return "This build has no live chats."
+        case .unavailable: return "Sign in and connect to Senti to see your chats."
+        }
+    }
+
+    /// The banner over a list read just now: "Up to date · updated now".
+    static func upToDate(updated: String) -> String {
+        "Up to date · updated \(updated)"
+    }
+
+    /// The banner over the copy kept on the phone: "Saved copy · from 5 minutes ago".
+    static func savedCopy(from: String, signInAgain: Bool) -> String {
+        "Saved copy · from \(from)" + (signInAgain ? " · sign in again to refresh" : "")
     }
 }
 #endif

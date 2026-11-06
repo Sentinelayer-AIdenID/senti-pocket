@@ -431,7 +431,8 @@ enum HostedSummary {
     /// the accessibility runtime loads, so the first hosted test shows a throwaway window first, until its text reads.
     private static var warmedUp = false
 
-    static func host<Content: View>(_ content: Content) throws -> UIWindow {
+    /// `height` makes the window taller than a phone, so a long list draws every row (a row never drawn reads as absent).
+    static func host<Content: View>(_ content: Content, height: CGFloat = 667) throws -> UIWindow {
         let setAutomation = try XCTUnwrap(Self.setAutomation, "UI automation could not be turned on")
         setAutomation(true)
         if !warmedUp {
@@ -441,13 +442,13 @@ enum HostedSummary {
             warmUp.isHidden = true
             pump(0.2)
         }
-        return try window(for: content)
+        return try window(for: content, height: height)
     }
 
-    private static func window<Content: View>(for content: Content) throws -> UIWindow {
+    private static func window<Content: View>(for content: Content, height: CGFloat = 667) throws -> UIWindow {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let window = UIWindow(windowScene: scene)
-        window.frame = CGRect(x: 0, y: 0, width: 375, height: 667)
+        window.frame = CGRect(x: 0, y: 0, width: 375, height: height)
         window.windowLevel = .normal + 5
         window.rootViewController = UIHostingController(rootView: content)
         window.makeKeyAndVisible()
