@@ -449,13 +449,14 @@ final class ChatMarkdownQuoteDepthLayoutTests: XCTestCase {
         return Array(repeating: line, count: count).joined(separator: "\n")
     }
 
-    /// The most counted layout calls a line may take, each pass, four quotes deep. Measured at about 15 (200 lines four
-    /// deep took 3,045 calls); the bar beside the blocks in a stack took about 2,400 (50 lines, 122,042).
-    private static let mostCallsPerLine = 20
+    /// The most counted layout calls a line may take, each pass, four quotes deep, in the longest message. Measured at
+    /// 8.01 (2,666 lines, 21,356 calls a pass, run 42161370943); 10 leaves a quarter over that. The bar beside the blocks
+    /// in a stack took about 2,400 a line (50 lines four deep, 122,042).
+    private static let mostCallsPerLine = 10
 
     /// A message as long as the parser reads, all of it short paragraphs four quotes deep, takes at most
     /// `mostCallsPerLine` counted calls a line, fresh and again: a fixed cost per line, however long the message.
-    func test_the_longest_message_four_deep_takes_at_most_twenty_calls_a_line() {
+    func test_the_longest_message_four_deep_takes_at_most_ten_calls_a_line() {
         let text = Self.filled(">>>> x\n>>>>")
         XCTAssertLessThanOrEqual(text.count, ChatMarkdown.maximumParsedCharacters, "the parser reads all of it")
         let lines = text.components(separatedBy: "\n").filter { $0 == ">>>> x" }.count
