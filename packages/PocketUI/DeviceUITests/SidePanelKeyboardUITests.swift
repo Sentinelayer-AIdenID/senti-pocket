@@ -25,14 +25,23 @@ final class SidePanelKeyboardUITests: XCTestCase {
         composer.typeText(draft)
         XCTAssertEqual(composer.value as? String, draft, "the draft is in the composer")
 
-        app.buttons.matching(identifier: "pocket.drawer.open").firstMatch.tap()
+        // Whether the panel is open is the dimmed room's "Close the side panel", there only while it is: the closed
+        // panel stays in the view tree, faded out under the room, so its own element is no sign of it.
         let panel = app.descendants(matching: .any).matching(identifier: "pocket.drawer").firstMatch
-        XCTAssertTrue(panel.waitForExistence(timeout: 10), "the side panel opened")
+        let closer = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Close the side panel")).firstMatch
+        app.buttons.matching(identifier: "pocket.drawer.open").firstMatch.tap()
+        XCTAssertTrue(closer.waitForExistence(timeout: 10), "the side panel opened")
         XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 2), "the keyboard went as the panel opened")
 
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                              CFNotificationName(Self.closeDrawer as CFString), nil, nil, true)
-        XCTAssertTrue(panel.waitForNonExistence(timeout: 10), "the side panel closed")
+        XCTAssertTrue(closer.waitForNonExistence(timeout: 10), "the side panel closed: its Close the side panel is gone")
+        XCTAssertFalse(panel.exists && panel.isHittable, "the closed side panel cannot be touched")
+        let buttons = panel.exists ? Array(panel.buttons.allElementsBoundByIndex.prefix(40)) : []
+        print("SIDE-PANEL closed: in the accessibility tree \(panel.exists), hittable \(panel.exists && panel.isHittable); "
+              + "\(buttons.count) of its buttons in the tree (40 at most looked at), "
+              + "\(buttons.filter(\.isHittable).count) of them hittable")
         XCTAssertEqual(composer.value as? String, draft, "the draft survived the panel")
         XCTAssertFalse(app.keyboards.firstMatch.exists, "nothing raised the keyboard again")
     }
