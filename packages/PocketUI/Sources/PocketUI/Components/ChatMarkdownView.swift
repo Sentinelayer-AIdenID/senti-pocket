@@ -143,15 +143,14 @@ private struct ChatMarkdownBlocksView: View {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(PocketPalette.separator.opacity(0.6), lineWidth: 0.5)
             )
-        case .deeperQuote(let levels, let text):
-            // From a quote deeper than the deepest shown: one arrow (and how much deeper), then its words.
-            HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text(ChatMarkdown.deeperQuoteMark(levels: levels))
-                    .font(.caption)
-                    .foregroundStyle(PocketPalette.textSecondary)
-                    .accessibilityLabel(ChatMarkdown.deeperQuoteLabel(levels: levels))
-                inline(text)
-            }
+        case .deeperQuote(let levels, let inner):
+            // Lines from a quote deeper than the deepest shown: one small header on a line of its own saying how much
+            // deeper, then their blocks as any quote's, the full width of the quote.
+            Text(ChatMarkdown.deeperQuoteHeader(levels: levels))
+                .font(.caption)
+                .foregroundStyle(PocketPalette.textSecondary)
+                .accessibilityLabel(ChatMarkdown.deeperQuoteLabel(levels: levels))
+            ChatMarkdownBlocksView(blocks: inner, ownHandles: ownHandles)
         case .rule:
             Divider().padding(.vertical, 4)
         case .table(let table):

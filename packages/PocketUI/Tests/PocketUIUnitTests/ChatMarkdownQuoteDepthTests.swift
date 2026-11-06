@@ -3,9 +3,9 @@ import XCTest
 @testable import PocketUI
 
 /// Block quotes nest at most four deep (`ChatMarkdown.maximumQuoteDepth`): each level is a stack inside a stack on
-/// screen, and a message of 50 ">" could stop any phone that showed it. Deeper lines go in the fourth quote, each led by
-/// one "↳" and, past one level deeper, how much deeper ("↳ (8 levels deeper)"); VoiceOver says "quoted 8 levels
-/// deeper"; every word still shows.
+/// screen, and a message of 50 ">" could stop any phone that showed it. Deeper lines go in the fourth quote, in a run for
+/// each stretch of lines equally deep, under one header ("↳ 2 levels deeper"; VoiceOver says "quoted 2 levels deeper"),
+/// each run parsed as blocks, so lists stay lists, code stays code, and every word still shows.
 final class ChatMarkdownQuoteDepthTests: XCTestCase {
     /// `levels` block quotes, each inside the one before, each with its own line: "level-1-end" … "level-N-end". The
     /// marks are written ">>>" (as Markdown allows) so 200 levels stay inside what the parser reads
@@ -22,14 +22,35 @@ final class ChatMarkdownQuoteDepthTests: XCTestCase {
         }.max() ?? 0
     }
 
-    /// Every line's text in `blocks`, quotes included, in order, with how many levels deeper than four it was.
-    static func lines(_ blocks: [ChatMarkdownBlock]) -> [(text: String, deeper: Int)] {
+    /// Every paragraph's text in `blocks`, quotes included, in order, with how many levels deeper than four it was.
+    static func lines(_ blocks: [ChatMarkdownBlock], deeper: Int = 0) -> [(text: String, deeper: Int)] {
         blocks.flatMap { block -> [(text: String, deeper: Int)] in
             switch block {
-            case .paragraph(let text): return [(text, 0)]
-            case .deeperQuote(let levels, let text): return [(text, levels)]
+            case .paragraph(let text): return [(text, deeper)]
+            case .deeperQuote(let levels, let inner): return lines(inner, deeper: levels)
             case .quote(let inner): return lines(inner)
             default: return []
+            }
+        }
+    }
+
+    /// The runs from deeper quotes in `blocks`, quotes included, in order: how much deeper each is, and its blocks.
+    static func runs(_ blocks: [ChatMarkdownBlock]) -> [(levels: Int, blocks: [ChatMarkdownBlock])] {
+        blocks.flatMap { block -> [(levels: Int, blocks: [ChatMarkdownBlock])] in
+            switch block {
+            case .deeperQuote(let levels, let inner): return [(levels, inner)] + runs(inner)
+            case .quote(let inner): return runs(inner)
+            default: return []
+            }
+        }
+    }
+
+    /// Whether any block in `blocks` is a quote or a run (a run's blocks never hold either).
+    static func holdsQuote(_ blocks: [ChatMarkdownBlock]) -> Bool {
+        blocks.contains { block in
+            switch block {
+            case .quote, .deeperQuote: return true
+            default: return false
             }
         }
     }
@@ -46,8 +67,8 @@ final class ChatMarkdownQuoteDepthTests: XCTestCase {
     func test_a_quote_deeper_than_four_goes_in_the_fourth_with_how_many_levels_deeper() {
         XCTAssertEqual(ChatMarkdown.parse(Self.nested(6)), [
             .quote([.paragraph("level-1-end"), .quote([.paragraph("level-2-end"), .quote([.paragraph("level-3-end"),
-                .quote([.paragraph("level-4-end"), .deeperQuote(levels: 1, text: "level-5-end"),
-                        .deeperQuote(levels: 2, text: "level-6-end")])])])])
+                .quote([.paragraph("level-4-end"), .deeperQuote(levels: 1, blocks: [.paragraph("level-5-end")]),
+                        .deeperQuote(levels: 2, blocks: [.paragraph("level-6-end")])])])])])
         ])
     }
 
@@ -55,15 +76,58 @@ final class ChatMarkdownQuoteDepthTests: XCTestCase {
     /// one after it.
     func test_a_deeper_line_counts_its_marks_however_they_are_spaced() {
         XCTAssertEqual(ChatMarkdown.parse("> > > > Four deep.\n> > > > >   >  x\n> > > > >>>y"), [
-            .quote([.quote([.quote([.quote([.paragraph("Four deep."), .deeperQuote(levels: 2, text: "x"),
-                                            .deeperQuote(levels: 3, text: "y")])])])])
+            .quote([.quote([.quote([.quote([.paragraph("Four deep."), .deeperQuote(levels: 2, blocks: [.paragraph("x")]),
+                                            .deeperQuote(levels: 3, blocks: [.paragraph("y")])])])])])
         ])
     }
 
-    func test_a_deeper_line_shows_one_arrow_and_how_much_deeper_and_says_it_in_words() {
-        XCTAssertEqual(ChatMarkdown.deeperQuoteMark(levels: 1), "↳")
-        XCTAssertEqual(ChatMarkdown.deeperQuoteMark(levels: 8), "↳ (8 levels deeper)")
-        XCTAssertEqual(ChatMarkdown.deeperQuoteMark(levels: 196), "↳ (196 levels deeper)")
+    /// A point and a point under it, as a reply quoting a reply lists them.
+    private static let points = ChatMarkdownBlock.list(ordered: false, start: 1, items: [
+        ChatMarkdownListItem(depth: 0, text: "a point it made"),
+        ChatMarkdownListItem(depth: 1, text: "and a point under that one")
+    ])
+
+    func test_lists_past_the_cap_keep_their_bullets_and_nesting() {
+        let text = [
+            "> > > > Four deep.",
+            "> > > > > Five deep.", "> > > > >",
+            "> > > > > - a point it made", "> > > > >   - and a point under that one",
+            "> > > > > > Six deep.", "> > > > > > - a point it made", "> > > > > >   - and a point under that one"
+        ].joined(separator: "\n")
+        XCTAssertEqual(ChatMarkdown.parse(text), [.quote([.quote([.quote([.quote([
+            .paragraph("Four deep."),
+            .deeperQuote(levels: 1, blocks: [.paragraph("Five deep."), Self.points]),
+            .deeperQuote(levels: 2, blocks: [.paragraph("Six deep."), Self.points])
+        ])])])])])
+    }
+
+    /// One header for each stretch of lines equally deep, however many lines and blocks it holds; a stretch at another
+    /// depth starts a run of its own, and so does a return to an earlier depth.
+    func test_each_run_of_equally_deep_lines_has_exactly_one_header() {
+        let text = [
+            "> > > > Four deep.",
+            "> > > > > One deeper, a paragraph", "> > > > > on two lines.", "> > > > >", "> > > > > - a point",
+            "> > > > >   - under it", "> > > > >", "> > > > > Another paragraph.",
+            "> > > > > > Two deeper.",
+            "> > > > > Back to one deeper.",
+            "> > > > > > > Three deeper,", "> > > > > > > on two lines."
+        ].joined(separator: "\n")
+        let runs = Self.runs(ChatMarkdown.parse(text))
+        XCTAssertEqual(runs.map(\.levels), [1, 2, 1, 3], "one header for each run")
+        XCTAssertEqual(runs.first?.blocks, [
+            .paragraph("One deeper, a paragraph on two lines."),
+            .list(ordered: false, start: 1, items: [ChatMarkdownListItem(depth: 0, text: "a point"),
+                                                    ChatMarkdownListItem(depth: 1, text: "under it")]),
+            .paragraph("Another paragraph.")
+        ])
+        XCTAssertEqual(runs.last?.blocks, [.paragraph("Three deeper, on two lines.")])
+        XCTAssertFalse(runs.contains { Self.holdsQuote($0.blocks) }, "a run's blocks never hold a quote")
+    }
+
+    func test_a_run_has_a_header_saying_how_much_deeper_and_says_it_in_words() {
+        XCTAssertEqual(ChatMarkdown.deeperQuoteHeader(levels: 1), "↳ 1 level deeper")
+        XCTAssertEqual(ChatMarkdown.deeperQuoteHeader(levels: 2), "↳ 2 levels deeper")
+        XCTAssertEqual(ChatMarkdown.deeperQuoteHeader(levels: 196), "↳ 196 levels deeper")
         XCTAssertEqual(ChatMarkdown.deeperQuoteLabel(levels: 1), "quoted 1 level deeper")
         XCTAssertEqual(ChatMarkdown.deeperQuoteLabel(levels: 8), "quoted 8 levels deeper")
     }
@@ -81,13 +145,11 @@ final class ChatMarkdownQuoteDepthTests: XCTestCase {
                 XCTAssertEqual(line.text, "level-\(level)-end", "level \(level)'s words are kept")
                 XCTAssertEqual(line.deeper, max(0, level - ChatMarkdown.maximumQuoteDepth),
                                "level \(level): how many levels deeper than four")
-                guard line.deeper > 0 else { continue }
-                let mark = ChatMarkdown.deeperQuoteMark(levels: line.deeper)
-                XCTAssertEqual(mark.filter { $0 == "↳" }.count, 1, "level \(level): one arrow")
-                if line.deeper > 1 {
-                    XCTAssertTrue(mark.contains("(\(line.deeper) levels deeper)"), "level \(level): how much deeper")
-                }
             }
+            let runs = Self.runs(blocks)
+            XCTAssertEqual(runs.map(\.levels), Array(1...(levels - ChatMarkdown.maximumQuoteDepth)),
+                           "\(levels) levels: each level past four, a run of one line under its own header")
+            XCTAssertFalse(runs.contains { Self.holdsQuote($0.blocks) }, "a run's blocks never hold a quote")
         }
     }
 
@@ -105,7 +167,7 @@ final class ChatMarkdownQuoteDepthTests: XCTestCase {
         blocks.flatMap { block -> [String] in
             switch block {
             case .code(_, let text): return [text]
-            case .quote(let inner): return code(inner)
+            case .quote(let inner), .deeperQuote(_, let inner): return code(inner)
             default: return []
             }
         }
@@ -128,7 +190,7 @@ final class ChatMarkdownQuoteDepthTests: XCTestCase {
                        "each line of the code exactly as written, its indent included")
     }
 
-    /// Six deep, past the cap: the code is still one code block, in the fourth quote, marked two levels deeper, its
+    /// Six deep, past the cap: the code is still one code block, in the fourth quote, in a run two levels deeper, its
     /// lines exactly as written after their quote's marks (the ">>>>>>> feature" line keeps its own ">").
     func test_code_in_a_quote_six_deep_stays_a_code_block_exactly_as_written() {
         let text = (["> > > > Four deep."] + Self.fenced(Self.conflict, prefix: String(repeating: "> ", count: 6)))
@@ -137,8 +199,24 @@ final class ChatMarkdownQuoteDepthTests: XCTestCase {
         XCTAssertEqual(Self.depth(blocks), ChatMarkdown.maximumQuoteDepth)
         XCTAssertEqual(Self.code(blocks), [Self.conflict.joined(separator: "\n")])
         XCTAssertEqual(blocks, [.quote([.quote([.quote([.quote([
-            .paragraph("Four deep."), .deeperQuote(levels: 2, text: ""),
-            .code(language: "diff", text: Self.conflict.joined(separator: "\n"))
+            .paragraph("Four deep."),
+            .deeperQuote(levels: 2, blocks: [.code(language: "diff", text: Self.conflict.joined(separator: "\n"))])
+        ])])])])])
+    }
+
+    /// Past the cap, a fence in a run with other lines: the lines before and after it stay in the run, and the code is
+    /// one block, exactly as written, though its last line has more ">" than the run has marks.
+    func test_code_in_a_run_with_other_lines_stays_one_code_block_exactly_as_written() {
+        let prefix = String(repeating: "> ", count: 5)
+        let text = (["> > > > Four deep.", prefix + "The merge went wrong:"] + Self.fenced(Self.conflict, prefix: prefix)
+            + [prefix + "Which side do we keep?"]).joined(separator: "\n")
+        XCTAssertEqual(ChatMarkdown.parse(text), [.quote([.quote([.quote([.quote([
+            .paragraph("Four deep."),
+            .deeperQuote(levels: 1, blocks: [
+                .paragraph("The merge went wrong:"),
+                .code(language: "diff", text: Self.conflict.joined(separator: "\n")),
+                .paragraph("Which side do we keep?")
+            ])
         ])])])])])
     }
 }
@@ -179,8 +257,36 @@ final class ChatMarkdownQuoteDepthLayoutTests: XCTestCase {
         }
     }
 
-    /// Parsed blocks drawn the way `ChatMarkdownView` draws them (a quote in the app's own `ChatQuoteFrame`), a counter on
-    /// each quote's blocks and on each paragraph.
+    /// The same count for the header over each run from a deeper quote, kept apart so what the headers cost shows.
+    private struct HeaderCountingLayout: Layout {
+        nonisolated(unsafe) static var calls = 0
+
+        func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+            Self.calls += 1
+            return subviews.first?.sizeThatFits(proposal) ?? .zero
+        }
+
+        func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+            Self.calls += 1
+            subviews.first?.place(at: bounds.origin, proposal: proposal)
+        }
+
+        func explicitAlignment(of guide: HorizontalAlignment, in bounds: CGRect, proposal: ProposedViewSize,
+                               subviews: Subviews, cache: inout ()) -> CGFloat? {
+            Self.calls += 1
+            return subviews.first?.dimensions(in: proposal)[explicit: guide].map { $0 + bounds.minX }
+        }
+
+        func explicitAlignment(of guide: VerticalAlignment, in bounds: CGRect, proposal: ProposedViewSize,
+                               subviews: Subviews, cache: inout ()) -> CGFloat? {
+            Self.calls += 1
+            return subviews.first?.dimensions(in: proposal)[explicit: guide].map { $0 + bounds.minY }
+        }
+    }
+
+    /// Parsed blocks drawn the way `ChatMarkdownView` draws them (a quote in the app's own `ChatQuoteFrame`, a run from a
+    /// deeper quote as its header and then its blocks), a counter on each quote's blocks, on each paragraph (in a run
+    /// too), and, apart, on each run's header.
     private struct CountedBlocks: View {
         let blocks: [ChatMarkdownBlock]
 
@@ -190,11 +296,9 @@ final class ChatMarkdownQuoteDepthLayoutTests: XCTestCase {
                     switch block {
                     case .quote(let inner):
                         ChatQuoteFrame { CountingLayout { CountedBlocks(blocks: inner) } }
-                    case .deeperQuote(let levels, let text):
-                        HStack(alignment: .firstTextBaseline, spacing: 4) {
-                            Text(ChatMarkdown.deeperQuoteMark(levels: levels)).font(.caption)
-                            Text(text)
-                        }
+                    case .deeperQuote(let levels, let inner):
+                        HeaderCountingLayout { Text(ChatMarkdown.deeperQuoteHeader(levels: levels)).font(.caption) }
+                        CountedBlocks(blocks: inner)
                     case .list(_, _, let items):
                         VStack(alignment: .leading, spacing: 3) {
                             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
@@ -225,18 +329,20 @@ final class ChatMarkdownQuoteDepthLayoutTests: XCTestCase {
         }.joined(separator: "\n") + "\nAnd the answer to all of it."
     }
 
-    /// The counted layout calls of `text` laid out fresh at 390 pt, then again at 360 (as a size change makes it).
-    private func work(_ text: String) -> (fresh: Int, again: Int) {
+    /// The counted layout calls of `text` laid out fresh at 390 pt, then again at 360 (as a size change makes it), and,
+    /// apart, the calls to the headers of its runs from deeper quotes, fresh and again together.
+    private func work(_ text: String) -> (fresh: Int, again: Int, headers: Int) {
         let view = CountedBlocks(blocks: ChatMarkdown.parse(text)).frame(maxWidth: .infinity, alignment: .topLeading)
         let host = NSHostingView(rootView: view)
         host.frame = NSRect(x: 0, y: 0, width: 390, height: 4_000)
         CountingLayout.calls = 0
+        HeaderCountingLayout.calls = 0
         host.layoutSubtreeIfNeeded()
         let fresh = CountingLayout.calls
         host.frame = NSRect(x: 0, y: 0, width: 360, height: 4_000)
         CountingLayout.calls = 0
         host.layoutSubtreeIfNeeded()
-        return (fresh, CountingLayout.calls)
+        return (fresh, CountingLayout.calls, HeaderCountingLayout.calls)
     }
 
     /// The real view's fresh layout, in ms, for the record only.
@@ -250,14 +356,15 @@ final class ChatMarkdownQuoteDepthLayoutTests: XCTestCase {
 
     /// Capped at four, a quote seven deep makes at most twice the layout work of one four deep, fresh and again.
     func test_a_seven_deep_quote_makes_about_the_work_of_four_deep() {
-        var counted: [Int: (fresh: Int, again: Int)] = [:]
+        var counted: [Int: (fresh: Int, again: Int, headers: Int)] = [:]
         for depth in [1, 2, 3, 4, 7] {
             counted[depth] = work(Self.quotedReplies(depth))
             print("QUOTEDEPTH counted depth \(depth): fresh \(counted[depth]?.fresh ?? 0) calls, again "
-                + "\(counted[depth]?.again ?? 0) calls; real view \(realMilliseconds(Self.quotedReplies(depth))) ms")
+                + "\(counted[depth]?.again ?? 0) calls, headers \(counted[depth]?.headers ?? 0) calls; real view "
+                + "\(realMilliseconds(Self.quotedReplies(depth))) ms")
         }
-        let four = counted[4] ?? (0, 0)
-        let seven = counted[7] ?? (0, 0)
+        let four = counted[4] ?? (0, 0, 0)
+        let seven = counted[7] ?? (0, 0, 0)
         XCTAssertGreaterThan(four.fresh, 0, "the counter sees the quote levels")
         XCTAssertLessThanOrEqual(seven.fresh, four.fresh * 2, "7 deep, laid out fresh, makes at most twice 4 deep's work")
         XCTAssertLessThanOrEqual(seven.again, max(four.again, 1) * 2,
@@ -292,8 +399,8 @@ final class ChatMarkdownQuoteDepthLayoutTests: XCTestCase {
     }
 
     /// For the record (printed, not bounded: time varies by runner): the real view laid out fresh at 200 levels, and
-    /// at the most text the parser reads, all of it four quotes deep, once as short paragraphs and once as lines from
-    /// deeper quotes (each its own line in the fourth quote).
+    /// at the most text the parser reads, all of it four quotes deep, once as short paragraphs and once as lines from a
+    /// quote four levels deeper (one run in the fourth quote).
     func test_print_the_real_view_at_two_hundred_levels_and_at_the_most_the_parser_reads() {
         func filled(_ line: String) -> String {
             let count = (ChatMarkdown.maximumParsedCharacters - 1) / (line.count + 1)
@@ -309,19 +416,31 @@ final class ChatMarkdownQuoteDepthLayoutTests: XCTestCase {
     }
 
     /// 50 and 200 levels make at most twice the layout work of four levels: every line past the fourth sits in the
-    /// fourth quote, and no level is added for it.
+    /// fourth quote, in a run under one header, and no quote level is added for it.
     func test_fifty_and_two_hundred_levels_make_about_the_work_of_four() {
         let four = work(ChatMarkdownQuoteDepthTests.nested(4))
         XCTAssertGreaterThan(four.fresh, 0, "the counter sees the quote levels")
         for levels in [50, 200] {
             let counted = work(ChatMarkdownQuoteDepthTests.nested(levels))
-            print("QUOTEDEPTH counted \(levels) levels: fresh \(counted.fresh) calls, again \(counted.again) calls "
-                + "(4 levels: \(four.fresh), \(four.again)); real view "
+            print("QUOTEDEPTH counted \(levels) levels: fresh \(counted.fresh) calls, again \(counted.again) calls, "
+                + "headers \(counted.headers) calls (4 levels: \(four.fresh), \(four.again)); real view "
                 + "\(realMilliseconds(ChatMarkdownQuoteDepthTests.nested(levels))) ms")
             XCTAssertLessThanOrEqual(counted.fresh, four.fresh * 2, "\(levels) levels make at most twice 4 levels' work")
             XCTAssertLessThanOrEqual(counted.again, max(four.again, 1) * 2,
                                      "\(levels) levels, laid out again, make at most twice 4 levels' work")
         }
+    }
+
+    /// Past the cap, the work grows with the lines and no faster: 200 levels (196 runs past four, each a line under
+    /// its header) make about four times the work of 50 (46 runs), headers included.
+    func test_runs_past_the_cap_cost_about_what_their_lines_cost() {
+        let fifty = work(ChatMarkdownQuoteDepthTests.nested(50))
+        let twoHundred = work(ChatMarkdownQuoteDepthTests.nested(200))
+        print("QUOTEDEPTH counted runs: 50 levels fresh \(fifty.fresh), again \(fifty.again), headers \(fifty.headers); "
+            + "200 levels fresh \(twoHundred.fresh), again \(twoHundred.again), headers \(twoHundred.headers)")
+        XCTAssertGreaterThan(fifty.headers, 0, "the counter sees the headers")
+        let all = { (counted: (fresh: Int, again: Int, headers: Int)) in counted.fresh + counted.again + counted.headers }
+        XCTAssertLessThanOrEqual(all(twoHundred), all(fifty) * 9 / 2, "four times the levels make about four times the work")
     }
 }
 #endif
