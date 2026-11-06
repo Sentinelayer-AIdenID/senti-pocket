@@ -29,28 +29,44 @@ struct RoomAttachmentsView: View {
         .padding(.top, 4)
     }
 
-    /// Photos side by side: as they are when they fit, in a sideways scroll when they do not. Each opens as one alone
-    /// does. The strip's own horizontal scroll view sits inside the message's one row.
+    /// A strip of this many photos or fewer shows them as they are when they fit, and scrolls when they do not. A longer
+    /// one always scrolls: measuring whether they fit would build every photo it holds.
+    static let measuredStripLimit = 4
+
+    /// Photos side by side: as they are when a few fit, in a sideways scroll otherwise. Each opens as one alone does.
+    /// The strip's own horizontal scroll view sits inside the message's one row.
     private func strip(_ photos: [RoomAttachmentChip]) -> some View {
         let side = min(thumbnailSide, 200)
-        return ViewThatFits(in: .horizontal) {
-            HStack(spacing: 8) {
-                stripPhotos(photos, side: side)
-            }
-            ScrollView(.horizontal, showsIndicators: true) {
-                LazyHStack(spacing: 8) {
-                    stripPhotos(photos, side: side)
+        return Group {
+            if photos.count <= Self.measuredStripLimit {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        stripPhotos(photos, side: side)
+                    }
+                    scrollingStrip(photos, side: side)
                 }
-                .padding(.bottom, 8)
+            } else {
+                scrollingStrip(photos, side: side)
             }
-            .frame(height: side + 8)
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("pocket.room.attachment.strip")
     }
 
+    /// The strip in a sideways scroll, on a lazy stack: only the photos in sight are built.
+    private func scrollingStrip(_ photos: [RoomAttachmentChip], side: CGFloat) -> some View {
+        ScrollView(.horizontal, showsIndicators: true) {
+            LazyHStack(spacing: 8) {
+                stripPhotos(photos, side: side)
+            }
+            .padding(.bottom, 8)
+        }
+        .frame(height: side + 8)
+    }
+
     private func stripPhotos(_ photos: [RoomAttachmentChip], side: CGFloat) -> some View {
         ForEach(Array(photos.enumerated()), id: \.element.id) { index, chip in
+            let _ = RenderTrace.builtStripPhoto(index)
             Button {
                 send(.openAttachment(attachmentId: chip.attachmentId))
             } label: {

@@ -21,6 +21,7 @@ public enum RenderTrace {
     private static var last: Int64 = 0
     private static var builtRoomRows = 0
     private static var builtSidePanel = 0
+    private static var furthestStrip = -1
 
     /// One row drawn (its body evaluated).
     public static func row(_ sequenceId: Int64) {
@@ -44,6 +45,28 @@ public enum RenderTrace {
         case .roomRow: builtRoomRows &+= 1
         case .sidePanel: builtSidePanel &+= 1
         }
+        lock.unlock()
+    }
+
+    /// Photo `index` (from 0) of a room's strip of photos built: a strip builds the photos in sight, and one that builds
+    /// every photo it holds, to show or to measure them, reaches its last.
+    public static func builtStripPhoto(_ index: Int) {
+        lock.lock()
+        furthestStrip = max(furthestStrip, index)
+        lock.unlock()
+    }
+
+    /// The furthest strip photo built since `resetStripPhotos()` (from 0), or -1 when none was; safe from any thread.
+    public static func furthestStripPhoto() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return furthestStrip
+    }
+
+    /// Starts `furthestStripPhoto()` again from none.
+    public static func resetStripPhotos() {
+        lock.lock()
+        furthestStrip = -1
         lock.unlock()
     }
 
