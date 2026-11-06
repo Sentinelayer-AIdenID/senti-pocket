@@ -164,4 +164,38 @@ final class DirectMessagesPresentationTests: XCTestCase {
         XCTAssertEqual(rows[1].originRoomId, "room-1")
         XCTAssertNil(rows[1].folderId, "a direct message lives under its room, never in a folder of its own")
     }
+
+    /// Ticket ab3c079b: with the server's count, the card lists the newest few rooms you share, says how many in all,
+    /// and offers See all; without one it lists what it knows, as before.
+    func test_the_cards_rooms_you_share_with_and_without_the_servers_count() {
+        let who = RoomProfileTarget(senderId: "review-agent", name: "review-agent", isAgent: true)
+        let here = RoomProfileCardState(target: who, sharedRooms: ["Design review"], canMessage: false)
+        XCTAssertEqual(here.sharedRoomsHeader, "Room you share")
+        XCTAssertEqual(here.sharedRoomLines, ["Design review"])
+        XCTAssertFalse(here.canSeeAllRooms)
+
+        let twelve = here.with(sharedRooms: ["Room 12", "Room 11", "Room 10", "Room 9"], total: 12)
+        XCTAssertEqual(twelve.sharedRoomsHeader, "Rooms you share · 12")
+        XCTAssertEqual(twelve.sharedRoomLines, ["Room 12", "Room 11", "Room 10", "Room 9"], "the newest few, no 'and more'")
+        XCTAssertTrue(twelve.canSeeAllRooms)
+
+        let three = here.with(sharedRooms: ["A", "B", ""], total: 3)
+        XCTAssertEqual(three.sharedRoomsHeader, "Rooms you share · 3")
+        XCTAssertEqual(three.sharedRoomLines, ["A", "B", "Untitled room"])
+        XCTAssertFalse(three.canSeeAllRooms, "all of them are on the card")
+
+        let one = here.with(sharedRooms: ["Design review"], total: 1)
+        XCTAssertEqual(one.sharedRoomsHeader, "Room you share", "one room needs no count")
+        XCTAssertFalse(one.canSeeAllRooms)
+
+        let known = here.with(sharedRooms: ["A", "B", "C", "D", "E", "F"], total: nil)
+        XCTAssertEqual(known.sharedRoomsHeader, "Rooms you share")
+        XCTAssertEqual(known.sharedRoomLines, ["A", "B", "C", "D", "and 2 more"], "no count: as before")
+        XCTAssertFalse(known.canSeeAllRooms)
+
+        XCTAssertEqual(RoomSharedRoomsState(name: "review-agent").title, "Rooms you share with review-agent")
+        XCTAssertEqual(RoomSharedRoomsState(name: "review-agent", total: 12).title,
+                       "Rooms you share with review-agent · 12")
+        XCTAssertEqual(RoomSharedRoomsState.Row(id: "r", title: "", lastActive: nil).title, "Untitled room")
+    }
 }

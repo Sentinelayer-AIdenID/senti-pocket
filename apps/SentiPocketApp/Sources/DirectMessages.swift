@@ -194,12 +194,25 @@ final class RoomProfileModel: ObservableObject {
                                      canBlock: canBlock)
     }
 
+    /// The rooms you share with them, from the server (`GET /me/shared-rooms`): the newest few by name, newest first,
+    /// and how many in all. Whether it answered. Until it does, and when it cannot (an API without the read answers 404,
+    /// a 503 while the server does not answer it yet, or the read fails), the card keeps the room you are in, with no count.
+    /// Nothing is asked for a public room's stand-in name, which names no account.
+    @discardableResult
+    func loadSharedRooms(_ reader: any SharedRoomsReading) async -> Bool {
+        guard !RoomAuthor.isPublicAlias(state.target.senderId),
+              let page = try? await reader.sharedRooms(with: state.target.senderId, cursor: nil,
+                                                       limit: RoomProfileCardState.roomsShown),
+              !page.rooms.isEmpty else { return false }
+        state = state.with(sharedRooms: page.rooms.map(\.title), total: page.total)
+        return true
+    }
+
     /// With a direct message already open with them, the rooms you share are the server's list.
     func loadSharedRooms(_ context: RoomDirectContext) async {
         guard let existing = context.existing(state.target.senderId),
               let dm = try? await context.center.client.directMessage(existing), !dm.mutualRooms.isEmpty else { return }
-        state = RoomProfileCardState(target: state.target, sharedRooms: dm.mutualRooms.map(\.title),
-                                     canMessage: canMessage, canBlock: canBlock, phase: state.phase)
+        state = state.with(sharedRooms: dm.mutualRooms.map(\.title), total: nil)
     }
 
     /// Message: opens the direct message from `roomId`; returns it, or says why not on the card.
@@ -219,7 +232,8 @@ final class RoomProfileModel: ObservableObject {
     }
 
     private func set(_ phase: RoomProfileCardState.Phase) {
-        state = RoomProfileCardState(target: state.target, sharedRooms: state.sharedRooms, canMessage: canMessage,
+        state = RoomProfileCardState(target: state.target, sharedRooms: state.sharedRooms,
+                                     sharedRoomsTotal: state.sharedRoomsTotal, canMessage: canMessage,
                                      canBlock: canBlock, phase: phase)
     }
 }
@@ -241,10 +255,14 @@ struct RoomProfileSheet: View {
     /// The room's Flight record, for a box.
     let onOpenFlight: (() -> Void)?
     let onClose: () -> Void
+    /// The rooms you share, from the server; nil keeps the room you are in.
+    let sharedRoomsReader: (any SharedRoomsReading)?
     @StateObject private var model: RoomProfileModel
     @StateObject private var messages: RoomMemberMessagesModel
+    @State private var showsAllRooms = false
 
     init(target: RoomProfileTarget, roomId: String, sharedRoom: String?, canMessage: Bool, context: RoomDirectContext?,
+         sharedRooms sharedRoomsReader: (any SharedRoomsReading)? = nil,
          messages reader: (any RoomAuthorMessagesReading)? = nil, box: FlightRecordState.Box? = nil,
          isBlocked: Bool = false, onBlock: ((Int64) -> Void)? = nil, onOpenMessage: @escaping (Int64) -> Void = { _ in },
          onOpenFlight: (() -> Void)? = nil, onReauthenticationRequired: @escaping @MainActor () -> Void = {},
@@ -256,6 +274,7 @@ struct RoomProfileSheet: View {
         self.onOpenMessage = onOpenMessage
         self.onOpenFlight = onOpenFlight
         self.onClose = onClose
+        self.sharedRoomsReader = sharedRoomsReader
         _model = StateObject(wrappedValue: RoomProfileModel(target: target, sharedRoom: sharedRoom,
                                                             canMessage: canMessage && context != nil,
                                                             canBlock: onBlock != nil))
@@ -289,14 +308,107 @@ struct RoomProfileSheet: View {
             },
             onLoadMore: { Task { await messages.loadMore() } },
             onRetry: { Task { await messages.loadMore() } },
-            onOpenFlight: onOpenFlight
+            onOpenFlight: onOpenFlight,
+            onSeeAllRooms: sharedRoomsReader == nil ? nil : { showsAllRooms = true }
         )
         .presentationDetents([.medium, .large])
+        .sheet(isPresented: $showsAllRooms) {
+            if let sharedRoomsReader {
+                RoomSharedRoomsSheet(principal: model.state.target.senderId, name: model.state.target.name,
+                                     reader: sharedRoomsReader, onClose: { showsAllRooms = false })
+            }
+        }
         .task {
+            // The server's list of the rooms you share; a direct message's, where one is open and that read is not.
+            if let sharedRoomsReader, await model.loadSharedRooms(sharedRoomsReader) { return }
             if let context { await model.loadSharedRooms(context) }
         }
         // The first page as the sheet opens; the rest as the list scrolls.
         .task { await messages.loadMore() }
+    }
+}
+
+// MARK: - See all: the rooms you share
+
+/// Every room you share with someone, newest first by their latest activity, a page at a time as the list scrolls.
+/// Never reads two pages at once; stops on the last page (no next cursor) or a cursor that does not move.
+@MainActor
+final class RoomSharedRoomsModel: ObservableObject {
+    @Published private(set) var state: RoomSharedRoomsState
+    let principal: String
+    private let reader: any SharedRoomsReading
+    private var rooms: [SharedRoom] = []
+    private var cursor: String?
+    private var total: Int?
+    private var reachedEnd = false
+    private var isLoading = false
+    private var failure: String?
+
+    static let pageSize = 20
+
+    init(principal: String, name: String, reader: any SharedRoomsReading) {
+        self.principal = principal
+        self.reader = reader
+        state = RoomSharedRoomsState(name: name)
+    }
+
+    func loadMore() async {
+        guard !isLoading, !reachedEnd else { return }
+        isLoading = true
+        failure = nil
+        publish()
+        defer {
+            isLoading = false
+            publish()
+        }
+        do {
+            let asked = cursor
+            let page = try await reader.sharedRooms(with: principal, cursor: asked, limit: Self.pageSize)
+            let known = Set(rooms.map(\.sessionId))
+            rooms += page.rooms.filter { !known.contains($0.sessionId) }
+            total = page.total
+            guard let next = page.nextCursor, next != asked else {
+                reachedEnd = true
+                return
+            }
+            cursor = next
+        } catch SessionTransportError.cancelled {
+            // Closed while reading: nothing to say.
+        } catch {
+            failure = "The rooms couldn't load."
+        }
+    }
+
+    private func publish() {
+        state = RoomSharedRoomsState(
+            name: state.name,
+            rows: rooms.map { RoomSharedRoomsState.Row(id: $0.sessionId, title: $0.title,
+                                                       lastActive: $0.lastActiveAt.flatMap { ParsedSessionTimestamp($0).date }) },
+            total: total,
+            phase: isLoading ? .loading : (failure.map { .failed($0) } ?? .idle),
+            canLoadMore: !reachedEnd
+        )
+    }
+}
+
+/// The See all sheet's host: its own model, the first page as it opens, the rest as the list scrolls.
+struct RoomSharedRoomsSheet: View {
+    @StateObject private var model: RoomSharedRoomsModel
+    let onClose: () -> Void
+
+    init(principal: String, name: String, reader: any SharedRoomsReading, onClose: @escaping () -> Void) {
+        _model = StateObject(wrappedValue: RoomSharedRoomsModel(principal: principal, name: name, reader: reader))
+        self.onClose = onClose
+    }
+
+    var body: some View {
+        RoomSharedRoomsView(
+            state: model.state,
+            onLoadMore: { Task { await model.loadMore() } },
+            onRetry: { Task { await model.loadMore() } },
+            onClose: onClose
+        )
+        .task { await model.loadMore() }
     }
 }
 

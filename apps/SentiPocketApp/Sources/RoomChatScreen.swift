@@ -193,6 +193,8 @@ struct RoomChatScreen: View {
     @State private var profileTarget: RoomProfileTarget?
     /// Someone's messages in the room, for their profile (`GET /events/by-author`).
     private let authorMessages: (any RoomAuthorMessagesReading)?
+    /// The rooms you share with someone, for their card.
+    private let sharedRooms: (any SharedRoomsReading)?
 
     init(
         route: RoomRoute,
@@ -227,6 +229,7 @@ struct RoomChatScreen: View {
         self.route = route
         self.directContext = direct
         self.authorMessages = transport as? any RoomAuthorMessagesReading
+        self.sharedRooms = transport as? any SharedRoomsReading
         self.reader = reader
         self.search = search
         self.ticketsTransport = ticketsTransport
@@ -701,6 +704,7 @@ struct RoomChatScreen: View {
                 sharedRoom: profileSharedRoom,
                 canMessage: profileOffersMessage(target),
                 context: directContext,
+                sharedRooms: sharedRooms,
                 messages: authorMessages,
                 box: box,
                 // Block comes with the room's block flow (#312); until then the card has none. Whichever of the two

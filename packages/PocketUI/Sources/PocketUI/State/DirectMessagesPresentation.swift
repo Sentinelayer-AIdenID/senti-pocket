@@ -118,25 +118,103 @@ public struct RoomProfileCardState: Equatable, Sendable {
     }
 
     public let target: RoomProfileTarget
-    /// Titles of the rooms you share, as far as the phone knows: the server's list once a direct message exists, else
-    /// the room you are in.
+    /// Titles of the rooms you share, as far as the phone knows: the server's list, newest first (`GET
+    /// /me/shared-rooms`, or a direct message's), else the room you are in.
     public let sharedRooms: [String]
+    /// How many rooms you share in all, when the server said; nil when the phone does not know (then no count shows).
+    public let sharedRoomsTotal: Int?
     public let canMessage: Bool
     public let canBlock: Bool
     public let phase: Phase
 
-    public init(target: RoomProfileTarget, sharedRooms: [String], canMessage: Bool, canBlock: Bool = false,
-                phase: Phase = .idle) {
+    /// The most shared rooms the card lists by name; the rest are counted, or listed by See all.
+    public static let roomsShown = 4
+
+    public init(target: RoomProfileTarget, sharedRooms: [String], sharedRoomsTotal: Int? = nil, canMessage: Bool,
+                canBlock: Bool = false, phase: Phase = .idle) {
         self.target = target
         self.sharedRooms = sharedRooms
+        self.sharedRoomsTotal = sharedRoomsTotal.map { max($0, sharedRooms.count) }
         self.canMessage = canMessage
         self.canBlock = canBlock
         self.phase = phase
     }
 
+    /// "Rooms you share · 12" when the server counted them; "Room you share" or "Rooms you share" when it did not.
+    public var sharedRoomsHeader: String {
+        let count = sharedRoomsTotal ?? sharedRooms.count
+        let noun = count == 1 ? "Room you share" : "Rooms you share"
+        guard let total = sharedRoomsTotal, total > 1 else { return noun }
+        return "\(noun) · \(total)"
+    }
+
+    /// The rooms the card lists: the newest few by name. With a count from the server, See all lists the rest; without
+    /// one, "and 3 more" says how many more the phone knows of.
+    public var sharedRoomLines: [String] {
+        let shown = Array(sharedRooms.prefix(Self.roomsShown)).map { $0.isEmpty ? "Untitled room" : $0 }
+        guard sharedRoomsTotal == nil else { return shown }
+        let more = sharedRooms.count - shown.count
+        return more > 0 ? shown + ["and \(more) more"] : shown
+    }
+
+    /// See all: the server counted more rooms than the card lists.
+    public var canSeeAllRooms: Bool {
+        (sharedRoomsTotal ?? 0) > min(sharedRooms.count, Self.roomsShown)
+    }
+
+    /// The same card with the rooms you share as the server listed them, newest first, and how many in all.
+    public func with(sharedRooms: [String], total: Int?) -> RoomProfileCardState {
+        RoomProfileCardState(target: target, sharedRooms: sharedRooms, sharedRoomsTotal: total, canMessage: canMessage,
+                             canBlock: canBlock, phase: phase)
+    }
+
     /// What every refusal reads as: the server answers blocked, off and unknown alike, and so does the card.
     public static func refusal(name: String) -> String {
         "You can't message \(name) right now."
+    }
+}
+
+/// See all: every room you share with someone, newest first by their latest activity, a page at a time.
+public struct RoomSharedRoomsState: Equatable, Sendable {
+    public struct Row: Equatable, Identifiable, Sendable {
+        public let id: String
+        public let title: String
+        /// When they were last active in it, when the server said.
+        public let lastActive: Date?
+
+        public init(id: String, title: String, lastActive: Date?) {
+            self.id = id
+            self.title = title.isEmpty ? "Untitled room" : title
+            self.lastActive = lastActive
+        }
+    }
+
+    public enum Phase: Equatable, Sendable {
+        case idle
+        case loading
+        case failed(String)
+    }
+
+    /// Whom you share them with.
+    public let name: String
+    public let rows: [Row]
+    /// How many in all, once the server said.
+    public let total: Int?
+    public let phase: Phase
+    public let canLoadMore: Bool
+
+    public init(name: String, rows: [Row] = [], total: Int? = nil, phase: Phase = .idle, canLoadMore: Bool = true) {
+        self.name = name
+        self.rows = rows
+        self.total = total
+        self.phase = phase
+        self.canLoadMore = canLoadMore
+    }
+
+    /// "Rooms you share with review-agent · 12".
+    public var title: String {
+        guard let total else { return "Rooms you share with \(name)" }
+        return "Rooms you share with \(name) · \(total)"
     }
 }
 
