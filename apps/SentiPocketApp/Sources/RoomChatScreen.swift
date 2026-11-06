@@ -123,6 +123,8 @@ struct RoomChatScreen: View {
     /// The call's waveform: your microphone and the agent's words.
     @State private var voiceMeter = VoiceLevelMeter()
     @State private var choosesVoicePartner = false
+    /// When the reader changed, for the Read-aloud crumb; kept without redrawing the room.
+    @State private var readerChanges = ReaderChangeLog()
     @Environment(\.openURL) private var openExternalURL
     @Environment(\.scenePhase) private var scenePhase
     @State private var showsTickets = false
@@ -645,7 +647,15 @@ struct RoomChatScreen: View {
                     + "longest message \(longest) chars, voice room \(voiceRoom == nil ? "off" : "on"))")
                 return
             }
-            CrashReporter.shared.note(intent, rows: coordinator.state.rows.count)
+            if case .readAloud(let id, _) = intent {
+                // Where it was started, the thread open, the text size and the images on what is read: Carter's phone
+                // stopped right after a Read aloud (11-05) with only "readAloud (75 rows)" in its trail.
+                CrashReporter.shared.note(ReadAloudCrumb.make(
+                    id: id, state: coordinator.state, textSize: UIApplication.shared.preferredContentSizeCategory,
+                    readerChanges: readerChanges.count(within: 10)).step)
+            } else {
+                CrashReporter.shared.note(intent, rows: coordinator.state.rows.count)
+            }
             if case .openBreakout(let childSessionId) = intent {
                 openBreakout(childSessionId)
             } else if case .openTickets(let filing) = intent {
@@ -957,6 +967,7 @@ struct RoomChatScreen: View {
             }
         }
         .onChange(of: showsAdmissions) { shown in if shown { CrashReporter.shared.note("agent requests opened") } }
+        .onReceive(reader.objectWillChange) { _ in readerChanges.record() }
         .onChange(of: showsBreakouts) { shown in if shown { CrashReporter.shared.note("breakouts opened") } }
         .onChange(of: choosesVoicePartner) { shown in if shown { CrashReporter.shared.note("talk opened") } }
         .sheet(isPresented: $showsSummary) {
