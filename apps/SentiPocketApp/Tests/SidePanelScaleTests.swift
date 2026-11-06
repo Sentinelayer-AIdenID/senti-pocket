@@ -71,7 +71,7 @@ final class SidePanelScaleTests: XCTestCase {
         return (rooms, folders)
     }
 
-    /// The root's drawer switch, as `AuthenticatedRootView.drawerOpen`.
+    /// The root's drawer switch, as `SidePanelState.isOpen`.
     private final class Drawer: ObservableObject {
         @Published var open = false
     }

@@ -296,39 +296,228 @@ struct RootServices {
     }
 }
 
-/// The room on screen, made again and drawn again only when what it is opened with changes: the room, its saved summary
-/// and whether direct messages are on. The root draws again for every change of the room list, the bell, Waiting on you,
-/// folders and the side panel opening or closing; each of those made a new room screen (with a Keychain read) and drew
-/// the room's whole list again, under the side panel, while it opened (the freezes of build 2026110308 came right after
-/// the side panel opened, and with the bell's read landing over a room just opened).
+/// A room screen on screen, made once for what it is opened with: the room, its saved summary and whether direct messages
+/// are on. The root draws again for every change of the room list, the bell, Waiting on you, folders and its sheets;
+/// each of those made a new room screen (with a Keychain read) and drew the room's whole list again (the freezes of
+/// build 2026110308).
 ///
-/// It holds only what it is opened with and one reference that is the same for the root's life (`RoomScreenMaker`), so
-/// every part of it is equal when nothing it is opened with changed. It used to hold the closure that makes the screen,
-/// which is new at every draw of the root. In some app processes (seen in CI, iOS 26.4 simulator) every draw of the
-/// root then made the room screen again although its `==` held, the side panel's open and close included.
-struct RoomScreenHost: View, Equatable {
-    let route: RoomRoute
-    let savedSummary: String?
-    let directMessagesOn: Bool
-    let maker: RoomScreenMaker
-
-    static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.route == rhs.route && lhs.savedSummary == rhs.savedSummary && lhs.directMessagesOn == rhs.directMessagesOn
-            && lhs.maker === rhs.maker
+/// A slot is held by reference and keeps the screen it made. A draw of the root puts the same view there (the slot and
+/// its revision, nothing that needs an `==`), and a draw of that view gives the same screen, until what the room is
+/// opened with changes. A host compared by its `==` (#332) was made again at draws of the root without SwiftUI asking
+/// its `==`: on the build Mac (iOS 26.5) at a draw just after a root opened, and at every draw of the root in some CI
+/// runs (iOS 26.4), the side panel's open and close included. Carter's phone froze twice on 11-06 right after the side
+/// panel opened or a room was picked from it, its main thread inside SwiftUI with no frame of the app above `main`.
+@MainActor
+final class RoomScreenSlot {
+    private struct Opening: Equatable {
+        let route: RoomRoute
+        let savedSummary: String?
+        let directMessagesOn: Bool
     }
 
+    private var opening: Opening?
+    private var made: RoomChatScreen?
+    private var make: (@MainActor (RoomRoute, String?) -> RoomChatScreen)?
+    /// Moves only when what the room is opened with changes.
+    private(set) var revision = 0
+
+    /// What the room is opened with at this draw of the root, and how to make its screen: a new revision, and a new
+    /// screen when it is next asked for, only when the opening changed.
+    func open(_ route: RoomRoute, savedSummary: String?, directMessagesOn: Bool,
+              make: @escaping @MainActor (RoomRoute, String?) -> RoomChatScreen) -> Int {
+        self.make = make
+        let opening = Opening(route: route, savedSummary: savedSummary, directMessagesOn: directMessagesOn)
+        guard opening != self.opening else { return revision }
+        self.opening = opening
+        made = nil
+        revision &+= 1
+        return revision
+    }
+
+    /// The room screen for the current revision: made the first time it is asked for, the same screen after.
+    var screen: RoomChatScreen? {
+        if made == nil, let opening, let make {
+            made = make(opening.route, opening.savedSummary)
+        }
+        return made
+    }
+}
+
+/// The root's room screen slots: one for each room shown (the room on screen, and rooms opened over it), let go when
+/// the room is no longer shown.
+@MainActor
+final class RoomScreenSlots {
+    private var slots: [RoomRoute: RoomScreenSlot] = [:]
+
+    func slot(for route: RoomRoute) -> RoomScreenSlot {
+        if let slot = slots[route] { return slot }
+        let slot = RoomScreenSlot()
+        slots[route] = slot
+        return slot
+    }
+
+    /// Lets go of the slots of rooms no longer shown.
+    func keep(_ shown: [RoomRoute]) {
+        guard slots.keys.contains(where: { !shown.contains($0) }) else { return }
+        slots = slots.filter { shown.contains($0.key) }
+    }
+}
+
+/// A slot's room screen. It holds the slot and its revision only, so it is the same view at every draw of the root until
+/// what the room is opened with changes, and a draw of it gives the slot's screen, made once.
+struct RoomScreenSlotView: View {
+    let slot: RoomScreenSlot
+    let revision: Int
+
     var body: some View {
-        if let make = maker.make {
-            make(route, savedSummary)
+        if let screen = slot.screen {
+            screen
         }
     }
 }
 
-/// Makes a room screen from what the root has at its latest draw. The root keeps one for its life and gives it the way
-/// to make a screen at every draw; that changes nothing a `RoomScreenHost` compares.
+/// Ends editing anywhere in the app, so the keyboard starts going down now: before the side panel's spring, or before a
+/// room is put in place of the one on screen (which takes away the composer the keyboard was for). Carter's freezes of
+/// 11-06 each came after a send or a reply, with the keyboard still up as the panel opened or a room was picked from it;
+/// one hung with the keyboard's input system on the main thread.
 @MainActor
-final class RoomScreenMaker {
-    var make: (@MainActor (RoomRoute, String?) -> RoomChatScreen)?
+func endAllEditing() {
+    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+}
+
+/// Whether the side panel is open. The root keeps it without watching it (`SidePanelFrame` watches it), so the panel
+/// opening and closing draws the frame and never the root, whose draws put the room screen in place.
+@MainActor
+final class SidePanelState: ObservableObject {
+    @Published var isOpen = false
+
+    /// What ends editing before the panel opens: `endAllEditing` in the app; a test gives its own, to see it run first.
+    private let endEditing: @MainActor () -> Void
+
+    init(endEditing: @escaping @MainActor () -> Void = endAllEditing) {
+        self.endEditing = endEditing
+    }
+
+    /// Opens the panel, editing ended first, so the keyboard starts going down before the panel's spring.
+    func open() {
+        endEditing()
+        isOpen = true
+    }
+
+    func close() {
+        if isOpen { isOpen = false }
+    }
+}
+
+/// The side panel under the room, in the view tree only while open, or fading out after a close (Carter's freeze of
+/// 11-06, #62485): a closed panel kept in the tree, faded out under the room, held its lazy list there, and a room put
+/// in place could set off a layout of all its rows that never settled. Out of the tree it is also out of reach of
+/// VoiceOver (ticket 066aca7a). It fades in and out under the sliding room as it faded before.
+struct SidePanelLayer<Panel: View>: View {
+    let isOpen: Bool
+    /// How far the room card moves right when the panel opens; the panel fits in that space.
+    let width: CGFloat
+    let panel: Panel
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            if isOpen {
+                // The panel ends before the room card begins, so its right edge (unread counts, See all) is never under
+                // it.
+                panel
+                    .frame(width: width - 14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .transition(.opacity)
+            }
+        }
+        // On the holder, which stays in the tree, so they turn off at the close and cover the panel while it fades out
+        // (SidePanelClosedNotDrawnTests: no touch reaches it then).
+        .allowsHitTesting(isOpen)
+        .accessibilityHidden(!isOpen)
+    }
+}
+
+/// The side panel underneath, and the room on top as a card pushed aside while the panel is open (Carter #55006). It
+/// watches the panel's state, so the panel opening and closing draws this and not the root: the panel and the room it
+/// is given are the views the root made last. It also asks for the reads the panel's open needs, and keeps the open
+/// panel's rooms read while the app is in front.
+struct SidePanelFrame<Panel: View, Room: View>: View {
+    @ObservedObject private var state: SidePanelState
+    /// How far the room moves right when the panel opens; the panel fits in that space.
+    private let width: CGFloat
+    /// A sheet over the room: with the open panel, what tells the room it is covered.
+    private let coveredOtherwise: Bool
+    /// The open panel's read of its rooms: at once, then every `refresh` nanoseconds, with the app in front.
+    private let refresh: UInt64
+    /// The reads the panel's open asks for (what it shows that was not read lately).
+    private let onOpen: @MainActor () -> Void
+    private let poll: @MainActor () -> Void
+    private let panel: Panel
+    private let room: Room
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    init(state: SidePanelState, width: CGFloat, coveredOtherwise: Bool, refresh: UInt64,
+         onOpen: @escaping @MainActor () -> Void, poll: @escaping @MainActor () -> Void, panel: Panel, room: Room) {
+        _state = ObservedObject(wrappedValue: state)
+        self.width = width
+        self.coveredOtherwise = coveredOtherwise
+        self.refresh = refresh
+        self.onOpen = onOpen
+        self.poll = poll
+        self.panel = panel
+        self.room = room
+    }
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            SidePanelLayer(isOpen: state.isOpen, width: width, panel: panel)
+            room
+                // A sheet or the side panel over the room: its moving parts rest (warden, #269).
+                .environment(\.roomIsCovered, state.isOpen || coveredOtherwise)
+                // The room moves right, a little smaller, its corners rounded into a card; a tap or a swipe on it
+                // closes.
+                .overlay {
+                    if state.isOpen {
+                        Color.black.opacity(0.22)
+                            .onTapGesture { state.close() }
+                            .gesture(DragGesture(minimumDistance: 20).onEnded { value in
+                                if value.translation.width < -40 { state.close() }
+                            })
+                            .accessibilityLabel("Close the side panel")
+                            .accessibilityAddTraits(.isButton)
+                            .transition(.opacity)
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: state.isOpen ? 28 : 0, style: .continuous))
+                .shadow(color: .black.opacity(state.isOpen ? 0.28 : 0), radius: 20, x: -6)
+                // Only drawn differently, never laid out again: toggling the safe area here changed the room's height
+                // on every frame of the spring, and a room with a long history loaded re-measured all of its rows each
+                // time (Carter, 10-30 14:22: frozen after tapping the menu with 238 rows loaded).
+                .scaleEffect(state.isOpen ? 0.9 : 1, anchor: .leading)
+                .offset(x: state.isOpen ? width : 0)
+        }
+        // With Reduce Motion, a short fade in place of the spring.
+        .animation(reduceMotion ? .easeInOut(duration: 0.2) : .spring(response: 0.35, dampingFraction: 0.8),
+                   value: state.isOpen)
+        .onChange(of: state.isOpen) { open in
+            if open { onOpen() }
+        }
+        // While the side panel stays open its rooms keep up: a message that arrives in another room shows its unread
+        // badge without closing and opening the panel again (Carter, #61188). Only with the app in front, as the bell's
+        // and Waiting on you's polling, and never over a read still going.
+        .task(id: DrawerPoll(open: state.isOpen, active: scenePhase == .active)) {
+            guard DrawerPoll(open: state.isOpen, active: scenePhase == .active).runs else { return }
+            // Back in front with the panel open: read at once, not 15 s later (opening it reads too, and a quiet read
+            // never starts over that one).
+            poll()
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: refresh)
+                guard !Task.isCancelled, state.isOpen, scenePhase == .active else { return }
+                poll()
+            }
+        }
+    }
 }
 
 /// Release composition of the authenticated repository-backed Sessions surface and the selected-session Pocket flow.
@@ -380,9 +569,11 @@ struct AuthenticatedRootView: View {
     /// The room on screen, the root of the stack; nil shows your rooms. Breakouts push onto `roomPath`.
     @State private var currentRoom: RoomRoute?
     @State private var roomPath: [RoomRoute] = []
-    @State private var drawerOpen = false
-    /// Makes the room screen for `RoomScreenHost`; the same one for the root's life.
-    @State private var roomScreenMaker = RoomScreenMaker()
+    /// Whether the side panel is open: kept, not watched (`SidePanelFrame` watches it), so its open and close never draw
+    /// the root.
+    @State private var panelState = SidePanelState()
+    /// The room screens on screen (`RoomScreenSlot`); the same store for the root's life.
+    @State private var roomScreens = RoomScreenSlots()
     /// How often the open side panel reads the rooms again, in nanoseconds.
     static let openDrawerRefresh: UInt64 = 15_000_000_000
     /// What the side panel's open reads again: anything not read for this many seconds (the panel's own poll period;
@@ -567,112 +758,39 @@ struct AuthenticatedRootView: View {
         #if DEBUG
         let _ = RootPreview.meter.rootBodyRan()
         #endif
-        ZStack(alignment: .leading) {
-            // The side panel sits underneath; opening it pushes the room aside as a card (Carter #55006).
-            // The panel ends before the room card begins, so its right edge (unread counts, See all) is never under it.
-            sidePanel
-                .frame(width: Self.drawerWidth - 14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .opacity(drawerOpen ? 1 : 0)
-                .allowsHitTesting(drawerOpen)
-                .accessibilityHidden(!drawerOpen)
-            NavigationStack(path: $roomPath) {
-                Group {
-                    if let currentRoom {
-                        roomScreen(currentRoom)
-                            .id(currentRoom)
-                    } else {
-                        // A direct message with someone you blocked is not listed.
-                        SessionListView(state: sessions.state.withoutDirectMessages(from: blocks.actorIds),
-                                        folders: roomFolders.items,
-                                        onFolder: { roomFolders.send($0) }) { intent in
-                            sessions.send(intent)
-                            if case .selectSession(let sessionId) = intent,
-                               UTF8ExactIdentity.matches(sessions.selectedSessionId, sessionId) {
-                                show(roomRoute(for: sessionId))
-                            }
-                        }
-                    }
-                }
-                .toolbar {
-                    ToolbarItem(placement: .navigationBarLeading) { drawerButton }
-                }
-                .modifier(calendarEntry)
-                .navigationDestination(for: RoomRoute.self) { route in
-                    roomScreen(route)
-                }
-            }
-            // A sheet or the side panel over the room: its moving parts rest (warden, #269).
-            .environment(\.roomIsCovered, roomCovered)
-            // Listening goes on when you leave its room (Carter, 10-30): outside that room the app keeps the player,
-            // and its title takes you back to the message.
-            .overlay(alignment: .bottom) {
-                if let playback = messageReader.playback, let source = readingSource.sessionId,
-                   source != (roomPath.last ?? currentRoom)?.sessionId {
-                    ReadAloudPlayer(reader: messageReader, playback: playback) {
-                        if let id = messageReader.readingId {
-                            open(ReadAloudSource.link(readingId: id, sessionId: source))
-                        }
-                    }
-                    .padding(.bottom, currentRoom == nil ? 16 : 72)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-            }
-            .animation(.spring(response: 0.3, dampingFraction: 0.9), value: messageReader.playback == nil)
-            // The room moves right, a little smaller, its corners rounded into a card; a tap or a swipe on it closes.
-            .overlay {
-                if drawerOpen {
-                    Color.black.opacity(0.22)
-                        .onTapGesture { closeDrawer() }
-                        .gesture(DragGesture(minimumDistance: 20).onEnded { value in
-                            if value.translation.width < -40 { closeDrawer() }
-                        })
-                        .accessibilityLabel("Close the side panel")
-                        .accessibilityAddTraits(.isButton)
-                        .transition(.opacity)
-                }
-            }
-            .clipShape(RoundedRectangle(cornerRadius: drawerOpen ? 28 : 0, style: .continuous))
-            .shadow(color: .black.opacity(drawerOpen ? 0.28 : 0), radius: 20, x: -6)
-            // Only drawn differently, never laid out again: toggling the safe area here changed the room's height on
-            // every frame of the spring, and a room with a long history loaded re-measured all of its rows each time
-            // (Carter, 10-30 14:22: frozen after tapping the menu with 238 rows loaded).
-            .scaleEffect(drawerOpen ? 0.9 : 1, anchor: .leading)
-            .offset(x: drawerOpen ? Self.drawerWidth : 0)
-        }
+        let _ = roomScreens.keep([currentRoom].compactMap { $0 } + roomPath)
+        // The side panel sits underneath; opening it pushes the room aside as a card (Carter #55006). The frame watches
+        // whether it is open, so its open and close draw the frame, not this root.
+        SidePanelFrame(
+            state: panelState,
+            width: Self.drawerWidth,
+            coveredOtherwise: coveredBySheet,
+            refresh: Self.openDrawerRefresh,
+            // Opening the side panel reads what it shows that was not read lately: the bell, Waiting on you, whether
+            // folders and direct messages are on, and your folders, so no count is older than `panelFreshness`. The
+            // rooms are read once, at once, by the panel's own poll (a second read here was the same request again).
+            onOpen: {
+                Task { await notifications.refresh(force: true, ifOlderThan: Self.panelFreshness) }
+                Task { await waiting.refresh(ifOlderThan: Self.panelFreshness) }
+                Task { await roomFolders.refresh(ifOlderThan: Self.panelFreshness) }
+                Task { await directMessages.refresh(ifOlderThan: Self.panelFreshness) }
+            },
+            poll: { _ = sessions.refreshSessions(quietly: true) },
+            panel: sidePanel,
+            room: roomStack
+        )
         .pocketCanvas()
         // The logo at launch, while your rooms load underneath (Carter, #55287).
         .overlay { LaunchSplash(isReady: roomListSettled) }
-        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: drawerOpen)
-        // Opening the side panel reads what it shows that was not read lately: the bell, Waiting on you, whether folders
-        // and direct messages are on, and your folders, so no count is older than `panelFreshness`. The rooms are read
-        // once, at once, by the panel's own poll below (a second read here was the same request again).
-        .onChange(of: drawerOpen) { open in
-            guard open else { return }
-            Task { await notifications.refresh(force: true, ifOlderThan: Self.panelFreshness) }
-            Task { await waiting.refresh(ifOlderThan: Self.panelFreshness) }
-            Task { await roomFolders.refresh(ifOlderThan: Self.panelFreshness) }
-            Task { await directMessages.refresh(ifOlderThan: Self.panelFreshness) }
-        }
-        // While the side panel stays open its rooms keep up: a message that arrives in another room shows its unread
-        // badge without closing and opening the panel again (Carter, #61188). Only with the app in front, as the bell's
-        // and Waiting on you's polling, and never over a read still going.
-        .task(id: DrawerPoll(open: drawerOpen, active: rootScenePhase == .active)) {
-            guard DrawerPoll(open: drawerOpen, active: rootScenePhase == .active).runs else { return }
-            // Back in front with the panel open: read at once, not 15 s later (opening it reads too, and a quiet
-            // read never starts over that one).
-            sessions.refreshSessions(quietly: true)
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: Self.openDrawerRefresh)
-                guard !Task.isCancelled, drawerOpen, rootScenePhase == .active else { return }
-                sessions.refreshSessions(quietly: true)
-            }
-        }
         .preferredColorScheme(theme.wrappedValue.colorScheme)
         #if DEBUG
         // The root preview's side panel opens and closes on a signal, so a profile of it has no accessibility client
         // tapping (each tap of a UI test reads the screen's whole accessibility tree first).
-        .onReceive(RootPreview.drawerRequests) { open in drawerOpen = open }
+        .onReceive(RootPreview.drawerRequests) { open in
+            if open { panelState.open() } else { panelState.close() }
+        }
+        // A room picked as the side panel picks one, for a hosted test.
+        .onReceive(RootPreview.roomRequests) { sessionId in show(roomRoute(for: sessionId)) }
         .onAppear {
             guard RootPreview.isRequested else { return }
             let meter = RootPreview.meter
@@ -948,6 +1066,7 @@ struct AuthenticatedRootView: View {
     /// selection Pocket and Activity follow in step, and remembers it for the next launch.
     @MainActor
     private func show(_ route: RoomRoute) {
+        endAllEditing()
         pendingOpen = nil
         if !UTF8ExactIdentity.matches(sessions.selectedSessionId, route.sessionId) {
             sessions.send(.selectSession(sessionId: route.sessionId))
@@ -981,13 +1100,13 @@ struct AuthenticatedRootView: View {
 
     @MainActor
     private func closeDrawer() {
-        if drawerOpen { drawerOpen = false }
+        panelState.close()
     }
 
     private var drawerButton: some View {
         Button {
             CrashReporter.shared.note("drawerOpened")
-            drawerOpen = true
+            panelState.open()
         } label: {
             Image(systemName: "line.3.horizontal")
                 .overlay(alignment: .topTrailing) {
@@ -1017,6 +1136,7 @@ struct AuthenticatedRootView: View {
             theme: theme,
             onSelectRoom: { sessionId in show(roomRoute(for: sessionId)) },
             onAllRooms: {
+                endAllEditing()
                 roomPath = []
                 currentRoom = nil
                 closeDrawer()
@@ -1071,15 +1191,61 @@ struct AuthenticatedRootView: View {
                                   folders: roomFolders.items)
     }
 
-    /// The room on screen, made and drawn again only when what it is opened with changes (`RoomScreenHost`).
+    /// The rooms: the room on screen as the root of the stack (your rooms when there is none), rooms opened over it, and
+    /// the player of a message read aloud in another room.
+    private var roomStack: some View {
+        NavigationStack(path: $roomPath) {
+            Group {
+                if let currentRoom {
+                    roomScreen(currentRoom)
+                        .id(currentRoom)
+                } else {
+                    // A direct message with someone you blocked is not listed.
+                    SessionListView(state: sessions.state.withoutDirectMessages(from: blocks.actorIds),
+                                    folders: roomFolders.items,
+                                    onFolder: { roomFolders.send($0) }) { intent in
+                        sessions.send(intent)
+                        if case .selectSession(let sessionId) = intent,
+                           UTF8ExactIdentity.matches(sessions.selectedSessionId, sessionId) {
+                            show(roomRoute(for: sessionId))
+                        }
+                    }
+                }
+            }
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) { drawerButton }
+            }
+            .modifier(calendarEntry)
+            .navigationDestination(for: RoomRoute.self) { route in
+                roomScreen(route)
+            }
+        }
+        // Listening goes on when you leave its room (Carter, 10-30): outside that room the app keeps the player, and
+        // its title takes you back to the message.
+        .overlay(alignment: .bottom) {
+            if let playback = messageReader.playback, let source = readingSource.sessionId,
+               source != (roomPath.last ?? currentRoom)?.sessionId {
+                ReadAloudPlayer(reader: messageReader, playback: playback) {
+                    if let id = messageReader.readingId {
+                        open(ReadAloudSource.link(readingId: id, sessionId: source))
+                    }
+                }
+                .padding(.bottom, currentRoom == nil ? 16 : 72)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.spring(response: 0.3, dampingFraction: 0.9), value: messageReader.playback == nil)
+    }
+
+    /// The room on screen, made again only when what it is opened with changes (`RoomScreenSlot`).
     private func roomScreen(_ route: RoomRoute) -> some View {
         let savedSummary = sessions.state.rows.first { UTF8ExactIdentity.matches($0.sessionId, route.sessionId) }?.summary
-        roomScreenMaker.make = { route, savedSummary in
+        let slot = roomScreens.slot(for: route)
+        let revision = slot.open(route, savedSummary: savedSummary, directMessagesOn: directContext != nil) {
+            route, savedSummary in
             roomChatScreen(route, savedSummary: savedSummary, direct: directContext)
         }
-        return RoomScreenHost(route: route, savedSummary: savedSummary, directMessagesOn: directContext != nil,
-                              maker: roomScreenMaker)
-            .equatable()
+        return RoomScreenSlotView(slot: slot, revision: revision)
     }
 
     /// The calendar's ⋯ entry for the room on screen (a room, not a direct message). It sits on the navigation root
@@ -1148,9 +1314,9 @@ struct AuthenticatedRootView: View {
         return String(id.dropFirst("call:".count))
     }
 
-    /// Something over the room: a sheet, or the side panel.
-    private var roomCovered: Bool {
-        drawerOpen || presentsNotifications || presentsWaiting || presentsPocket || presentsActivity || presentsSettings
+    /// A sheet over the room (the side panel over it is `SidePanelFrame`'s to say).
+    private var coveredBySheet: Bool {
+        presentsNotifications || presentsWaiting || presentsPocket || presentsActivity || presentsSettings
             || presentsNewRoom || presentsCallLog || roomFolders.sheet != nil
     }
 
