@@ -372,11 +372,26 @@ struct RoomScreenSlotView: View {
     }
 }
 
+/// Ends editing anywhere in the app, so the keyboard starts going down now: before the side panel's spring, or before a
+/// room is put in place of the one on screen (which takes away the composer the keyboard was for). Carter's freezes of
+/// 11-06 each came after a send or a reply, with the keyboard still up as the panel opened or a room was picked from it;
+/// one hung with the keyboard's input system on the main thread.
+@MainActor
+func endAllEditing() {
+    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+}
+
 /// Whether the side panel is open. The root keeps it without watching it (`SidePanelFrame` watches it), so the panel
 /// opening and closing draws the frame and never the root, whose draws put the room screen in place.
 @MainActor
 final class SidePanelState: ObservableObject {
     @Published var isOpen = false
+
+    /// Opens the panel, editing ended first (`endAllEditing`).
+    func open() {
+        endAllEditing()
+        isOpen = true
+    }
 
     func close() {
         if isOpen { isOpen = false }
@@ -722,7 +737,9 @@ struct AuthenticatedRootView: View {
         #if DEBUG
         // The root preview's side panel opens and closes on a signal, so a profile of it has no accessibility client
         // tapping (each tap of a UI test reads the screen's whole accessibility tree first).
-        .onReceive(RootPreview.drawerRequests) { open in panelState.isOpen = open }
+        .onReceive(RootPreview.drawerRequests) { open in
+            if open { panelState.open() } else { panelState.close() }
+        }
         // A room picked as the side panel picks one, for a hosted test.
         .onReceive(RootPreview.roomRequests) { sessionId in show(roomRoute(for: sessionId)) }
         .onAppear {
@@ -983,6 +1000,7 @@ struct AuthenticatedRootView: View {
     /// selection Pocket and Activity follow in step, and remembers it for the next launch.
     @MainActor
     private func show(_ route: RoomRoute) {
+        endAllEditing()
         pendingOpen = nil
         if !UTF8ExactIdentity.matches(sessions.selectedSessionId, route.sessionId) {
             sessions.send(.selectSession(sessionId: route.sessionId))
@@ -1022,7 +1040,7 @@ struct AuthenticatedRootView: View {
     private var drawerButton: some View {
         Button {
             CrashReporter.shared.note("drawerOpened")
-            panelState.isOpen = true
+            panelState.open()
         } label: {
             Image(systemName: "line.3.horizontal")
                 .overlay(alignment: .topTrailing) {
@@ -1052,6 +1070,7 @@ struct AuthenticatedRootView: View {
             theme: theme,
             onSelectRoom: { sessionId in show(roomRoute(for: sessionId)) },
             onAllRooms: {
+                endAllEditing()
                 roomPath = []
                 currentRoom = nil
                 closeDrawer()
