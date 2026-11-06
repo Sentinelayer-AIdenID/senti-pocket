@@ -20,6 +20,10 @@ final class RoomChatCoordinator: ObservableObject {
     /// written for; a thread is summarized again only once it has grown.
     private var threadSummaries: [Int64: (replies: Int, summary: SummaryReading?)] = [:]
     private var summarizing: Int64?
+    /// How many times the room has taken in a change to the block list (the tests read it). A summary that was being
+    /// written when it changed was written from words that may now be hidden: it is dropped when it lands, and the
+    /// thread is summarized again.
+    private(set) var blockChanges = 0
     private let summarizer: (any ThreadSummarizing)?
     private let canInvite: Bool
     private let transport: any RoomTransport
@@ -393,7 +397,9 @@ final class RoomChatCoordinator: ObservableObject {
         // Published before the new value is set: the room redraws on the next turn, with it.
         blocks?.$actorIds.dropFirst().sink { [weak self] _ in
             Task { @MainActor in
-                // A summary written before a block may carry the blocked person's words: each is written again.
+                // A summary written before a block may carry the blocked person's words: each is written again, and
+                // one still being written is dropped when it lands.
+                self?.blockChanges += 1
                 self?.threadSummaries = [:]
                 self?.publish()
             }
@@ -2388,11 +2394,18 @@ final class RoomChatCoordinator: ObservableObject {
         })
         let details = ThreadSummaryInput.details(thread)
         let count = thread.count
+        let blockChangesAtStart = blockChanges
         Task.detached(priority: .utility) { [weak self] in
             let text = await summarizer.summarize(thread: lines)
             await MainActor.run {
                 guard let self else { return }
                 self.summarizing = nil
+                // Someone was blocked while this was written, from words that may be theirs: it is never kept, and
+                // the thread is written again from what the room shows now.
+                guard blockChangesAtStart == self.blockChanges else {
+                    self.publish()
+                    return
+                }
                 // Remembered even when there is none, so a phone without the model doesn't ask again for this count.
                 // The phone's own prose, shown as it was composed.
                 let summary = text.map { SummaryReading(prose: $0, details: details) }.flatMap { $0.prose.isEmpty ? nil : $0 }
