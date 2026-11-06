@@ -173,7 +173,9 @@ struct RoomSummaryFailure: Error, Equatable {
 
 extension HTTPRoomMessageSender: RoomSummaryGenerating {
     func generateSummary(sessionId: String) async throws -> RoomSummary? {
-        try await summary(sessionId: sessionId, query: nil, keyPrefix: "summary-")
+        // Making a summary sends the room's messages to the AI: never without the account's consent.
+        try await AIConsentRefused.check()
+        return try await summary(sessionId: sessionId, query: nil, keyPrefix: "summary-")
     }
 
     func readSummary(sessionId: String) async throws -> RoomSummary? {
@@ -388,6 +390,8 @@ struct RoomSummarySheet: View {
 
     private var readId: String { "summary:\(sessionId)" }
 
+    static let consentLine = "Not summarized: say whether what you share may go to AI first, then try again."
+
     private static var build: String {
         (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String) ?? "unknown"
     }
@@ -420,6 +424,11 @@ struct RoomSummarySheet: View {
             guard !Task.isCancelled else { return }
             waitsForAI = false
             phase = .ready(last)
+        } catch is AIConsentRefused {
+            // Without the consent nothing went: the saved summary, if any, as a member reads it.
+            guard !Task.isCancelled else { return }
+            waitsForAI = false
+            phase = saved.map { .ready(RoomSummary(saved: $0)) } ?? .failed(Self.consentLine, report: nil)
         } catch RoomSendError.reauthenticationRequired {
             guard !Task.isCancelled else { return }
             waitsForAI = false

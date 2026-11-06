@@ -312,8 +312,6 @@ final class RoomCalendarTests: XCTestCase {
 
     // MARK: - Draft to form, in the person's zone
 
-    /// 01:00 on November 5 in Kolkata is still November 4 in UTC: the day asked for, the zone sent and the times on the
-    /// form are the person's.
     /// What is typed goes to Senti's AI to draft: asked first, and Not now drafts nothing and keeps the text.
     func test_a_draft_waits_for_the_ai_consent_and_not_now_sends_nothing() async {
         let fake = FakeCalendar()
@@ -337,6 +335,8 @@ final class RoomCalendarTests: XCTestCase {
         XCTAssertEqual(fake.draftRequests.count, 1, "Agree: the draft is asked for")
     }
 
+    /// 01:00 on November 5 in Kolkata is still November 4 in UTC: the day asked for, the zone sent and the times on the
+    /// form are the person's.
     func test_the_draft_is_asked_and_shown_in_the_persons_zone() async throws {
         let fake = FakeCalendar()
         fake.draftAnswer = .success(lunchDraft("2026-11-05T13:00:00+05:30", "2026-11-05T14:00:00+05:30"))

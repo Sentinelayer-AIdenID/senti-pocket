@@ -87,6 +87,8 @@ struct RoomInviteError: Error, Equatable {
 
 extension HTTPRoomMessageSender: RoomInviting {
     func createInviteLink(sessionId: String, role: RoomInviteRole) async throws -> URL {
+        // An invite writes to the room: never without the account's consent to share with AI.
+        try await AIConsentRefused.check()
         let (data, http) = try await sessionMutation(
             sessionId: sessionId, path: "invitations/join-links",
             routeTemplate: "POST /api/v1/sessions/{session_id}/invitations/join-links",
@@ -103,6 +105,7 @@ extension HTTPRoomMessageSender: RoomInviting {
     }
 
     func invite(sessionId: String, who: String, role: RoomInviteRole) async throws -> RoomInviteOutcome {
+        try await AIConsentRefused.check()
         let (data, http) = try await sessionMutation(
             sessionId: sessionId, path: "members",
             routeTemplate: "POST /api/v1/sessions/{session_id}/members",

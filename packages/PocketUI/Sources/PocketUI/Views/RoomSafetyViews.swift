@@ -246,6 +246,7 @@ public struct RoomAIConsentSheet: View {
                     .foregroundStyle(PocketPalette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("pocket.aiConsent.hint")
+                PocketHelpLinks(showsContact: false)
                 answers
                     .padding(.top, 6)
             }
@@ -352,6 +353,36 @@ extension View {
     /// held send; Not now drops the send and leaves what was written where it was.
     public func aiConsentPrompt(_ held: Binding<AIConsentHeld?>, onAllow: @escaping () -> Void) -> some View {
         modifier(AIConsentPrompt(held: held, onAllow: onAllow))
+    }
+}
+/// Contact us, Terms of Use and Privacy Policy (`PocketHelp`), as links that wrap at any text size.
+public struct PocketHelpLinks: View {
+    private let showsContact: Bool
+
+    public init(showsContact: Bool = true) {
+        self.showsContact = showsContact
+    }
+
+    public var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 16) { links }
+            VStack(spacing: 10) { links }
+        }
+        .font(.footnote)
+        .tint(PocketPalette.accent)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("pocket.help.links")
+    }
+
+    @ViewBuilder private var links: some View {
+        if showsContact {
+            Link("Contact us", destination: PocketHelp.mailURL)
+                .accessibilityIdentifier("pocket.help.contact")
+        }
+        Link("Terms of Use", destination: PocketHelp.termsURL)
+            .accessibilityIdentifier("pocket.help.terms")
+        Link("Privacy Policy", destination: PocketHelp.privacyURL)
+            .accessibilityIdentifier("pocket.help.privacy")
     }
 }
 #endif

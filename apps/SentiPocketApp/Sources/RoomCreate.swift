@@ -49,7 +49,9 @@ protocol RoomCreating: Sendable {
 
 extension HTTPRoomMessageSender: RoomCreating {
     func create(title: String, kind: RoomKind) async throws -> String {
-        try await createRoom(title: title, roomType: kind.rawValue)
+        // A new room is written to as it is made: never without the account's consent to share with AI.
+        try await AIConsentRefused.check()
+        return try await createRoom(title: title, roomType: kind.rawValue)
     }
 }
 
@@ -64,6 +66,7 @@ protocol AgentChatCreating: Sendable {
 
 extension HTTPRoomMessageSender: AgentChatCreating {
     func createAgentChat(sessionId: String, title: String, idempotencyKey: String) async throws {
+        try await AIConsentRefused.check()
         let made = try await createRoom(title: title, roomType: RoomKind.general.rawValue, maxMembers: NewAgentChat.maxMembers,
                                         sessionId: sessionId, idempotencyKey: idempotencyKey)
         // The agent is sent to the id kept with its start, so a chat made under any other is not the one.

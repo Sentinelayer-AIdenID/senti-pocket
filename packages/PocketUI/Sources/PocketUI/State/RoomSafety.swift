@@ -214,3 +214,11 @@ extension RoomChatIntent {
         }
     }
 }
+
+/// Where Pocket's help and policies are, in one place: Settings, the sign-in screen and the AI notice link to them.
+public enum PocketHelp {
+    public static let email = "help@plexaura.io"
+    public static let mailURL = URL(string: "mailto:help@plexaura.io")!
+    public static let termsURL = URL(string: "https://sentinelayer.com/terms")!
+    public static let privacyURL = URL(string: "https://sentinelayer.com/privacy")!
+}

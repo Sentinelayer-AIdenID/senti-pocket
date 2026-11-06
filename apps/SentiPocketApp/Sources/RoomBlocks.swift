@@ -102,6 +102,13 @@ final class BlockList: ObservableObject {
     @Published private(set) var blocked: [BlockedAuthor] = []
     /// Lowercased author ids, for hiding.
     @Published private(set) var actorIds: Set<String> = []
+    /// A block the server refused (past its limit of 1000, say), said in Blocked people until it is dismissed.
+    @Published var refusal: String?
+
+    static func refusalLine(name: String) -> String {
+        "\(name) couldn't be blocked: the server refused it. You may have blocked as many people as you can; unblock "
+            + "someone and try again."
+    }
 
     /// The account this list belongs to; nil keeps it in memory only.
     let account: String?
@@ -189,7 +196,12 @@ final class BlockList: ObservableObject {
                     try await client.unblock(change.actorId)
                 }
             } catch RoomSendError.rejected {
-                // The server will never take it (yourself, or past its limit): its list decides below.
+                // The server will never take it (yourself, or past its limit): its list decides below, and a block it
+                // refused is said, never dropped quietly.
+                if change.blocks {
+                    let name = blocked.first { $0.actorId == change.actorId }?.name ?? BlockedAuthor.name(for: change.actorId)
+                    refusal = Self.refusalLine(name: name)
+                }
             } catch {
                 return false
             }

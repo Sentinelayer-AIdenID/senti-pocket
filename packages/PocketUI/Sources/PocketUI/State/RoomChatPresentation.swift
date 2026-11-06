@@ -934,7 +934,9 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                         inYourThread: yourThreads.contains(input.isInlineReply ? input.sequenceId : (input.replyToSequenceId ?? -1))
                     ),
                 box: input.isInlineReply ? nil : launches[input.sequenceId].map { launch in
-                    RoomBoxThread(launch: launch, replies: boxReplies[input.sequenceId] ?? [],
+                    // A box's card shows its newest reply: never one from someone you blocked.
+                    RoomBoxThread(launch: launch,
+                                  replies: (boxReplies[input.sequenceId] ?? []).filter { !isBlocked($0.authorId) },
                                   isEnded: endedBoxes.contains(launch.name.lowercased()))
                 },
                 isAuthorBlocked: input.kind == .message && isBlocked(input.authorId),

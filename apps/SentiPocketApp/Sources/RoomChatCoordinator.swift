@@ -64,6 +64,8 @@ final class RoomChatCoordinator: ObservableObject {
     private var report: RoomReportState?
     /// Writes waiting for this account's OK to share with AI, in order: they go after OK, and not after Not now.
     private var heldForConsent: [RoomChatIntent] = []
+    /// The report being sent, while it is: closing the sheet cancels it.
+    private var reportTask: Task<Void, Never>?
     /// Messages and replies from someone you blocked that you chose to see (`RoomBlocking.revealKey`), while the room
     /// is open.
     private var revealedBlocked: Set<String> = []
@@ -582,6 +584,9 @@ final class RoomChatCoordinator: ObservableObject {
         case .sendReport(let reason, let note):
             sendReport(reason: reason, note: note)
         case .closeReport:
+            // Cancel while it is sending stops it: closed is closed.
+            reportTask?.cancel()
+            reportTask = nil
             report = nil
             publish()
         case .block(let target):
@@ -634,7 +639,8 @@ final class RoomChatCoordinator: ObservableObject {
         publish()
         let request = RoomReportRequest(target: open.target, reason: reason, note: note)
         let sessionId = self.sessionId
-        Task { [weak self] in
+        reportTask = Task { [weak self] in
+            guard !Task.isCancelled else { return }
             var phase = RoomReportState.Phase.sent
             do {
                 try await reporter.report(sessionId: sessionId, request)

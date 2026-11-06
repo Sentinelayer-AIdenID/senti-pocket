@@ -117,6 +117,38 @@ final class ComposerExtrasTests: XCTestCase {
         XCTFail("timed out waiting for: \(description)")
     }
 
+    /// The check under every ticket write: without the signed-in account's consent to share with AI the answer is not
+    /// posted, whatever the screen did; once it agrees, it is.
+    func test_a_ticket_write_is_never_sent_without_the_ai_consent() async {
+        let consent = AIConsent(account: nil)
+        AIConsentAsker.shared.consent = consent
+        defer { AIConsentAsker.shared.consent = nil }
+        let ticket = RoomTicket(
+            id: "t1",
+            title: "Where should the gateway run?",
+            body: "## Decision\nQuestion: Where should the gateway run?\nOptions: The Mac · The cloud · Custom",
+            status: "assigned",
+            assignee: "review-agent",
+            version: 1
+        )
+        let sender = CapturingSender()
+        let coordinator = RoomTicketsCoordinator(
+            sessionId: "room_1",
+            transport: OneTicketTransport(ticket),
+            sender: sender,
+            sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) },
+            onReauthenticationRequired: {}
+        )
+        await coordinator.refresh()
+        coordinator.send(.answerDecision(ticketId: "t1", answer: "The cloud", detail: ""))
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertTrue(sender.messages().isEmpty, "not agreed: nothing is posted")
+
+        consent.grant()
+        coordinator.send(.answerDecision(ticketId: "t1", answer: "The cloud", detail: ""))
+        await waitUntil("posted") { sender.messages().count == 1 }
+    }
+
     func test_answering_a_decision_posts_the_web_line_mentioning_the_assignee() async {
         let ticket = RoomTicket(
             id: "t1",
