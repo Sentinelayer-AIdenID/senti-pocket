@@ -693,15 +693,16 @@ public struct RoomChatView: View {
                 focusForVoiceOver(on: target)
             }
         }
-        guard target == .bottom, !reduceMotion else { return place() }
-        let start = jumpStart(above: target)
+        guard target == .bottom else { return place() }
+        // With Reduce Motion the room is placed at its end, by the same chase, not animated.
+        let start = reduceMotion ? nil : jumpStart(above: target)
         if let start { proxy.scrollTo(row: start, anchor: .top) }
         let scroll = {
             // Put by the rows' estimated heights, a far jump to the end can already show it, or go past it (rows taller
-            // than the screen, at the largest text sizes, in CI): it is placed there, not animated back up.
+            // than the screen, at the largest text sizes, in CI): it is placed at the end, not animated back up.
             let endShown = start != nil && bottomWatch.reading?.endInView == true
             bottomWatch.jumpInFlight = true
-            if endShown || !animateToEnd(proxy) {
+            if !animateToEnd(proxy, animated: !reduceMotion && !endShown) {
                 bottomWatch.jumpInFlight = false
                 place()
             }
@@ -719,10 +720,9 @@ public struct RoomChatView: View {
     /// Readings on its way are not the reader moving (`placeFromReading`). Asked again on its way (more arrived), it
     /// goes on to the new end. False, and nothing done, with Reduce Motion on or without the list's scroll view known
     /// for sure: the caller places the room.
-    private func animateToEnd(_ proxy: ScrollViewProxy) -> Bool {
-        guard !reduceMotion else { return false }
+    private func animateToEnd(_ proxy: ScrollViewProxy, animated: Bool = true) -> Bool {
         let watching = bottomWatch.listScrolling
-        guard bottomWatch.scrollListToEnd() else { return false }
+        guard bottomWatch.scrollListToEnd(animated: animated) else { return false }
         bottomWatch.ownScroll.start(at: ProcessInfo.processInfo.systemUptime)
         if !watching { RoomNextFrame.run { watchListScroll(proxy) } }
         return true
@@ -751,8 +751,9 @@ public struct RoomChatView: View {
                 return
             }
             let snap = bottomWatch.placeListAtEnd() ?? 0
+            RoomScrollTrace.listLanded(snap: snap, at: bottomWatch.listOffset ?? 0, contentEnd: bottomWatch.listContentEnd ?? 0)
             settleOwnScroll()
-            watchAfterLanding(snap: snap)
+            watchAfterLanding()
             RoomNextFrame.run {
                 recheckPlace(proxy)
                 if jump { focusForVoiceOver(on: .bottom) }
@@ -768,9 +769,9 @@ public struct RoomChatView: View {
         }
     }
 
-    /// For 40 frames after the room's own scroll landed (while nothing else of the room's moves the list), what moved
-    /// it is added up and counted with the landing (`RoomScrollTrace.listLanded`): the tests hold it to nothing.
-    private func watchAfterLanding(snap: CGFloat) {
+    /// For 30 frames after the room's own scroll landed (while nothing else of the room's moves the list), what moved
+    /// it is added up (`RoomScrollTrace.listSettled`): the tests hold it to nothing.
+    private func watchAfterLanding() {
         guard var last = bottomWatch.listOffset else { return }
         var frames = 0
         var moved: CGFloat = 0
@@ -779,8 +780,8 @@ public struct RoomChatView: View {
             moved += abs(now - last)
             last = now
             frames += 1
-            guard frames < 40 else {
-                RoomScrollTrace.listLanded(snap: snap, swiftUIMoved: moved)
+            guard frames < 30 else {
+                RoomScrollTrace.listSettled(moved: moved, at: now)
                 return
             }
             RoomNextFrame.run { tick() }
@@ -1093,7 +1094,7 @@ public struct RoomChatView: View {
             RoomScrollTrace.followMade()
             // An arrival is followed with the room's own scroll to its end (`animateToEnd`); anything arriving on its
             // way is followed by it. Placed where it cannot be animated.
-            guard eased, !RoomScrollTrace.followMovesNothing, animateToEnd(proxy) else {
+            guard eased, !reduceMotion, !RoomScrollTrace.followMovesNothing, animateToEnd(proxy) else {
                 // Placed by UIKit where the list is known, then SwiftUI's scroll to the marker finds it there: a
                 // SwiftUI scroll that moved the list after UIKit's built every row of the room (117 in a frame of a
                 // burst, in CI).
@@ -1299,6 +1300,8 @@ private final class RoomBottomWatch {
         /// Where it goes, when it started, the frames watched, the last offset seen and for how many frames it has
         /// not moved, the furthest down it got, and how many times it went on to an end that moved or after it stalled.
         var target: CGFloat
+        /// Animated (UIKit's own), or placed at once from frame to frame (Reduce Motion, a far jump showing the end).
+        var animated = true
         let started = ProcessInfo.processInfo.systemUptime
         var frames = 0
         var last: CGFloat?
@@ -1319,6 +1322,17 @@ private final class RoomBottomWatch {
     static let listScrollRetargets = 4
     static let listScrollChaseTime: TimeInterval = 1
 
+    /// The offset at which the list shows the very end of its content (its padding below the bottom marker
+    /// included), while its scroll view is known.
+    var listContentEnd: CGFloat? {
+        #if os(iOS)
+        guard let list = listScrollView else { return nil }
+        return list.contentSize.height - list.bounds.height + list.adjustedContentInset.bottom
+        #else
+        return nil
+        #endif
+    }
+
     /// Where the list is scrolled to, while its scroll view is known.
     var listOffset: CGFloat? {
         #if os(iOS)
@@ -1331,16 +1345,17 @@ private final class RoomBottomWatch {
     /// Scrolls the list to where the room rests at its end with UIKit's own animation, which moves the content and
     /// builds only the rows that come into sight; on its way already, it goes on to the new end. False, and nothing
     /// done, where the list's scroll view is not known for sure.
-    func scrollListToEnd() -> Bool {
+    func scrollListToEnd(animated: Bool = true) -> Bool {
         #if os(iOS)
         guard let list = listScrollView, let end = restingEnd(of: list) else { return false }
-        list.setContentOffset(CGPoint(x: list.contentOffset.x, y: end), animated: true)
+        list.setContentOffset(CGPoint(x: list.contentOffset.x, y: end), animated: animated)
         if var scroll = listScroll {
             scroll.target = end
             scroll.still = 0
+            scroll.animated = animated && scroll.animated
             listScroll = scroll
         } else {
-            listScroll = ListScroll(target: end)
+            listScroll = ListScroll(target: end, animated: animated)
         }
         return true
         #else
@@ -1400,7 +1415,7 @@ private final class RoomBottomWatch {
                 listScroll = nil
                 return .endMovedOn
             }
-            list.setContentOffset(CGPoint(x: list.contentOffset.x, y: end), animated: true)
+            list.setContentOffset(CGPoint(x: list.contentOffset.x, y: end), animated: scroll.animated)
             scroll.target = end
             scroll.retargets += 1
             scroll.still = 0

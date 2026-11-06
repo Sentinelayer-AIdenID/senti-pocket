@@ -17,6 +17,7 @@ public enum RoomScrollTrace {
     private static var landings = 0
     private static var landingsMoved = 0
     private static var largestSnap: CGFloat = 0
+    private static var landedAt: [String] = []
     private static var focused: [String] = []
     private static var shortLandings = 0
     private static var retries = 0
@@ -68,16 +69,32 @@ public enum RoomScrollTrace {
         follows &+= 1
     }
 
-    /// The room's own scroll to its end landed: UIKit put the list the last `snap` points to where the bottom marker
-    /// rests, at once, and SwiftUI's scroll to the marker after it moved the list by `swiftUIMoved` points (it must be
-    /// none: one that moved the list after UIKit's scroll built every row of the room). Main thread only.
-    public static func listLanded(snap: CGFloat, swiftUIMoved: CGFloat) {
+    /// The room's own scroll to its end landed at `offset` (its content's very end at `contentEnd`): UIKit put the list
+    /// the last `snap` points to where the bottom marker rests, at once. Main thread only.
+    public static func listLanded(snap: CGFloat, at offset: CGFloat, contentEnd: CGFloat) {
         lock.lock()
         defer { lock.unlock() }
         guard counting else { return }
         landings &+= 1
         largestSnap = max(largestSnap, abs(snap))
-        if abs(swiftUIMoved) > 0.5 { landingsMoved &+= 1 }
+        landedAt.append("\(Int(offset.rounded()))/\(Int(contentEnd.rounded()))")
+    }
+
+    /// In the frames after a landing, the list moved `moved` points in all, ending at `offset` (it must be none: a
+    /// SwiftUI scroll that moved the list after UIKit's built every row of the room). Main thread only.
+    public static func listSettled(moved: CGFloat, at offset: CGFloat) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard counting else { return }
+        if moved > 0.5 { landingsMoved &+= 1 }
+        landedAt.append("settled \(Int(offset.rounded())) moved \(Int(moved.rounded()))")
+    }
+
+    /// Where the landings landed and settled, since `start()` (the offset, the content's very end).
+    public static var landingPlaces: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return landedAt
     }
 
     /// VoiceOver's focus was put on a row after the room's own scroll. Main thread only.
@@ -160,6 +177,7 @@ public enum RoomScrollTrace {
         landings = 0
         landingsMoved = 0
         largestSnap = 0
+        landedAt = []
         focused = []
         shortLandings = 0
         retries = 0

@@ -861,7 +861,8 @@ final class RoomReaderStaysPutTests: XCTestCase {
         XCTAssertTrue(arrow.accessibilityActivate(), "the arrow could be pressed")
         if endsAtBottom {
             wait("down at the latest", seconds: 4) { Self.list(in: window).map(Self.atBottom) ?? false }
-            pump(0.6)
+            // Long enough for the 30 frames after the landing to be counted (`RoomScrollTrace.listSettled`).
+            pump(1.0)
         } else {
             pump(1.5)
         }
@@ -900,6 +901,10 @@ final class RoomReaderStaysPutTests: XCTestCase {
             XCTAssertLessThanOrEqual(flip, LazyListBuildTests.mostBuiltPerStep,
                                      "rows built in the frame the room said the reader is at the bottom")
         }
+        print("READER-STAYS-PUT arrow-jump landed-at=\(RoomScrollTrace.landingPlaces) content=\(Int(list.contentSize.height)) "
+            + "bounds=\(Int(list.bounds.height)) insets=\(Int(list.adjustedContentInset.top))/"
+            + "\(Int(list.adjustedContentInset.bottom)) final=\(Int(list.contentOffset.y)) "
+            + "content-end=\(Int(Self.bottomOffset(of: list)))")
         print("READER-STAYS-PUT arrow-jump landings=\(landings.all) moved-by-swiftui=\(landings.movedBySwiftUI) "
             + "largest-snap=\(String(format: "%.1f", landings.largestSnap)) most-built-in-a-frame=\(mostInAFrame) "
             + "voiceover-focus=\(landings.voiceOverFocus)")
