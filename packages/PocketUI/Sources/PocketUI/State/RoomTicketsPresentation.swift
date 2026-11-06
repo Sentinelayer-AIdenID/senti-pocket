@@ -342,7 +342,8 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
     /// name for that login, else the login. Anything else (an agent) is its id. `isViewer`: the id is the viewer's own,
     /// by account (`viewerId`, a user id) or by their own sender id as the API writes it (`viewerSenderId`, its
     /// `sender_id`), never by their login: a Google signup's login is its email's local part, which can be someone
-    /// else's GitHub login (warden, 11-06). `names` is keyed by lowercased user id and by `human-<login>`.
+    /// else's GitHub login (warden, 11-06). `names` is keyed by lowercased actor id (`human-g.<hex>`, `human-<login>`)
+    /// or by user id: an account is found by either.
     public static func ticketPerson(_ id: String, viewerId: String?, viewerSenderId: String?,
                                     names: [String: String]) -> (name: String?, isViewer: Bool) {
         let lower = id.lowercased()
@@ -352,7 +353,10 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
             || (viewerSenderId.map { !$0.isEmpty && lower == $0.lowercased() } ?? false)
         if let name = names[lower], !name.isEmpty { return (name, isViewer) }
         if let account {
-            return (names[account].flatMap { $0.isEmpty ? nil : $0 }, isViewer)
+            // Rooms key names by actor id, the directory by user id: an account is found either way.
+            let actor = account.count == 36 ? "human-g." + account.replacingOccurrences(of: "-", with: "") : nil
+            let name = names[account] ?? actor.flatMap { names[$0] }
+            return (name.flatMap { $0.isEmpty ? nil : $0 }, isViewer)
         }
         return (displayName(id), isViewer)
     }
