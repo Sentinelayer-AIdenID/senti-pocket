@@ -93,6 +93,8 @@ public enum RoomReaderPlace {
         public private(set) var leaveSeen = false
         /// The furthest down the list has been since the end was last in view (the room's follows move it down).
         public private(set) var deepestOffset: CGFloat?
+        /// A follow was held back while the reader moved the list: it is made once the list rests (`rested`).
+        public private(set) var followHeld = false
 
         public init(atBottom: Bool = true) {
             self.atBottom = atBottom
@@ -156,11 +158,34 @@ public enum RoomReaderPlace {
                 atBottom = false
                 return .leftBottom
             case .endBelow:
+                guard atBottom else { return .none }
                 // Not while the reader is moving the list (dragging it, or its coast): a follow then lands where the
                 // rows' estimated heights say, which at the largest text size can be thousands of points above a
-                // reader who just reached the end. The room takes the reader's place again once the list is at rest.
-                return atBottom && !readerMoving ? .endMovedAway : .none
+                // reader who just reached the end. Held, and made once the list rests (`rested`).
+                guard !readerMoving else {
+                    followHeld = true
+                    return .none
+                }
+                return .endMovedAway
             }
+        }
+
+        /// Whether the room may scroll to follow now (a message arriving, a row or a preview growing, a send, the end
+        /// moving below): not while the reader moves the list (dragging it, or its coast). Held, and made once the
+        /// list rests (`rested`).
+        public mutating func mayFollow(readerMoving: Bool) -> Bool {
+            guard !readerMoving else {
+                followHeld = true
+                return false
+            }
+            return true
+        }
+
+        /// The list came to rest after the reader moved it: whether a follow held back meanwhile is to be made now,
+        /// once, for a reader still at the bottom.
+        public mutating func rested() -> Bool {
+            defer { followHeld = false }
+            return followHeld && atBottom
         }
     }
 }

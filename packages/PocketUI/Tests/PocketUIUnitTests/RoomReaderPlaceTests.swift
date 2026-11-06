@@ -28,6 +28,39 @@ final class RoomReaderPlaceTests: XCTestCase {
     /// (dragging it, or its coast) started a follow mid-flick, and at the largest text size a follow can land thousands
     /// of points short, above a reader who just reached the end (warden at `be112d8`; seen once in the control:
     /// a follow 1 s into a flick's deceleration). Now nothing is followed until the list is at rest.
+    /// Warden's KEY condition: a coast (the reader's flick decelerating) while messages land and the end moves
+    /// below: no follow during it, by either path (the content's, `mayFollow`, and the reading's, `read`), and
+    /// exactly one once it settles.
+    func test_a_coast_while_messages_land_makes_no_follow_and_exactly_one_once_it_settles() {
+        var tracker = RoomReaderPlace.Tracker(atBottom: false)
+        XCTAssertEqual(tracker.read(reading(10, offset: 9_000), readerMoving: true), .endInView, "the flick reached it")
+        var follows = 0
+        for step in 0..<6 {
+            // A message lands (the content's follow), and the reading shows the end below (the reading's follow).
+            if tracker.mayFollow(readerMoving: true) { follows += 1 }
+            let landed = reading(CGFloat(300 + step * 50), offset: CGFloat(9_010 + step * 10))
+            if tracker.read(landed, readerMoving: true) == .endMovedAway { follows += 1 }
+        }
+        XCTAssertEqual(follows, 0, "no follow while the list coasts")
+        XCTAssertTrue(tracker.atBottom, "still at the bottom")
+        if tracker.rested() { follows += 1 }
+        XCTAssertEqual(follows, 1, "exactly one follow once it settles")
+        XCTAssertFalse(tracker.rested(), "and only one")
+        XCTAssertTrue(tracker.mayFollow(readerMoving: false), "at rest, follows as before")
+    }
+
+    /// A coast AWAY from the bottom (the reader flicks up the room while a message lands): the follow held during it is
+    /// not made when it settles, since the reader is no longer at the bottom.
+    func test_a_coast_away_from_the_bottom_makes_no_follow_when_it_settles() {
+        var tracker = RoomReaderPlace.Tracker(atBottom: false)
+        XCTAssertEqual(tracker.read(reading(10, offset: 9_000)), .endInView, "at the bottom")
+        XCTAssertFalse(tracker.mayFollow(readerMoving: true), "a message lands as the reader flicks: held")
+        XCTAssertEqual(tracker.read(reading(400, offset: 8_600), readerMoving: true), .leftBottom, "the reader left")
+        XCTAssertFalse(tracker.atBottom)
+        XCTAssertFalse(tracker.rested(), "no follow for a reader who scrolled away")
+        XCTAssertFalse(tracker.rested())
+    }
+
     func test_the_end_moving_below_while_the_reader_moves_the_list_is_not_followed_until_it_rests() {
         var tracker = RoomReaderPlace.Tracker(atBottom: false)
         XCTAssertEqual(tracker.read(reading(10, offset: 9_000), readerMoving: true), .endInView, "the flick reached it")

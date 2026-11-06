@@ -502,9 +502,14 @@ public struct RoomChatView: View {
             .modifier(RoomReaderScrolling { moving in
                 let wasMoving = bottomWatch.readerMoving
                 bottomWatch.readerMoving = moving
-                // The reader's drag and its coast are over: the reader's place again, so a follow held back while the
-                // list moved is made now.
-                if wasMoving, !moving { DispatchQueue.main.async { recheckPlace(proxy) } }
+                guard wasMoving, !moving else { return }
+                // The reader's drag and its coast are over: the reader's place again, and a follow held back while
+                // the list moved is made now (`RoomReaderPlace.Tracker.rested`).
+                DispatchQueue.main.async {
+                    let held = bottomWatch.tracker.rested()
+                    recheckPlace(proxy)
+                    if held { followToBottom(proxy) }
+                }
             })
             // The whole list, its handlers with it, so a new one opens as the room does.
             .id(listEpoch)
@@ -931,6 +936,8 @@ public struct RoomChatView: View {
     /// most `RoomBottomWatch.followLimit` a second, plus one when the second is up: a room whose end kept moving can
     /// never keep it scrolling, and the last thing that arrived is still followed.
     private func scrollToBottomSoon(_ proxy: ScrollViewProxy, eased: Bool = false) {
+        // Every follow comes here: none while the reader moves the list; held, and made once it rests.
+        if bottomWatch.readsGeometry, !bottomWatch.tracker.mayFollow(readerMoving: bottomWatch.readerMoving) { return }
         guard !bottomWatch.followQueued else { return }
         let now = ProcessInfo.processInfo.systemUptime
         guard bottomWatch.mayFollow(at: now) else {
@@ -945,8 +952,9 @@ public struct RoomChatView: View {
         bottomWatch.followQueued = true
         DispatchQueue.main.async {
             bottomWatch.followQueued = false
-            // The reader may have left the bottom since this was asked for.
+            // The reader may have left the bottom since this was asked for, or started moving the list.
             guard followsBottom else { return }
+            if bottomWatch.readsGeometry, !bottomWatch.tracker.mayFollow(readerMoving: bottomWatch.readerMoving) { return }
             // Where the follow lands is taken as a new reading, even if it looks like the last one taken: in a lazy
             // list the scroll to the end goes by the rows' estimated heights, and can stop short of an end that is
             // still below (seen in a burst of 40 at 60 a second), which would otherwise never be followed again.
