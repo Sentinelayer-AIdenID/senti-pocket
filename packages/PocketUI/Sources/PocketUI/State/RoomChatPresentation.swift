@@ -1,5 +1,8 @@
 import Foundation
 import PocketContracts
+#if os(iOS)
+import UIKit
+#endif
 
 /// One room row as the app hands it to PocketUI. The app maps its sync-layer rows into this so PocketUI stays
 /// independent of the transport package.
@@ -2236,5 +2239,31 @@ public final class RoomDraftDebouncer {
         let write = pending
         pending = nil
         write?()
+    }
+}
+
+/// The line under the last message while agents prepare replies: "Senti is typing…" for Senti, "build-agent is
+/// preparing a reply…" for another agent.
+public enum RoomComposingWords {
+    /// Senti's agent id.
+    public static let senti = "senti"
+
+    public static func line(_ agents: [String]) -> String {
+        let names = agents.map { $0 == senti ? "Senti" : $0 }
+        switch names.count {
+        case 0: return ""
+        case 1: return agents[0] == senti ? "Senti is typing…" : "\(names[0]) is preparing a reply…"
+        case 2: return "\(names[0]) and \(names[1]) are preparing replies…"
+        default: return "\(names.count) agents are preparing replies…"
+        }
+    }
+
+    /// Says the line to VoiceOver (without the trailing ellipsis).
+    @MainActor
+    public static func announce(_ line: String) {
+        #if os(iOS)
+        guard !line.isEmpty, UIAccessibility.isVoiceOverRunning else { return }
+        UIAccessibility.post(notification: .announcement, argument: line.replacingOccurrences(of: "…", with: ""))
+        #endif
     }
 }
