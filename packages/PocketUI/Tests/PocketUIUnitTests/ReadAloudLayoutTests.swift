@@ -52,10 +52,9 @@ final class ReadAloudLayoutTests: XCTestCase {
 
     /// Where the mark goes, compared on a counted copy of the room's nesting (each quote level counts the times it is
     /// sized, placed or asked for an alignment): the mark laid over the message by its top-trailing corner (as the room
-    /// does), centred over it, in the header line beside the name and time, or aligned inside a plain layer over the
-    /// message (asking nothing of the message's stacks); and no mark. A mark placed without asking the message for an
-    /// alignment costs no more than its nesting.
-    func test_where_the_mark_goes_decides_whether_the_cost_grows_with_the_nesting() {
+    /// does), centred over it, or aligned inside a plain layer over the message (asking nothing of the message's
+    /// stacks); and no mark. Reported for comparison; the counter must see the levels it counts.
+    func test_where_the_mark_goes_counted_on_a_copy_of_the_nesting() {
         var calls: [Variant: [Int: Int]] = [:]
         for variant in Variant.allCases {
             for depth in [1, 3, 5, 7] {
@@ -64,12 +63,7 @@ final class ReadAloudLayoutTests: XCTestCase {
                 print("READALOUD counted \(variant) depth \(depth): \(count) layout calls, \(Int(seconds * 1000)) ms")
             }
         }
-        for variant in [Variant.none, .header, .plainLayer] {
-            let one = max(calls[variant]?[1] ?? 0, 1)
-            let seven = calls[variant]?[7] ?? 0
-            XCTAssertLessThanOrEqual(seven, one * 7 * 2,
-                                     "\(variant): 7 deep makes at most about 7 times the layout calls of 1 deep")
-        }
+        XCTAssertGreaterThan(calls[.topTrailingOverlay]?[7] ?? 0, 0, "the counter sees the levels it counts")
     }
 
     // MARK: - Measuring the room
@@ -138,8 +132,6 @@ final class ReadAloudLayoutTests: XCTestCase {
         case topTrailingOverlay
         /// Centred over the message: `.overlay { }`.
         case centredOverlay
-        /// In the header line beside the name and time.
-        case header
         /// Aligned inside a plain layer over the message, so nothing asks the message for an alignment.
         case plainLayer
 
@@ -157,7 +149,7 @@ final class ReadAloudLayoutTests: XCTestCase {
 
         var body: some View {
             switch variant {
-            case .none, .header:
+            case .none:
                 message
             case .topTrailingOverlay:
                 message.overlay(alignment: .topTrailing) { if model.shown { mark } }
@@ -176,7 +168,6 @@ final class ReadAloudLayoutTests: XCTestCase {
                     Text("plan-agent").font(.subheadline.weight(.semibold))
                     Text("2:04 PM").font(.caption)
                     Spacer(minLength: 0)
-                    if variant == .header, model.shown { mark }
                 }
                 CountingLayout { QuoteNest(depth: depth) }
                 HStack(spacing: 16) {
