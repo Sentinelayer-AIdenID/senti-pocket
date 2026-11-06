@@ -64,15 +64,15 @@ struct RoomAttachmentsView: View {
         }
     }
 
-    /// A photo's thumbnail, its middle square; until its preview arrives, a placeholder of the same size. The photo is
-    /// cropped before it is drawn, so nothing spills past the square: scaled to fill instead, a wide photo reached into
-    /// its neighbours' tap and VoiceOver areas.
+    /// A photo's thumbnail, filling its square; until its preview arrives, a placeholder of the same size. `.clipShape`
+    /// keeps the drawing inside the square; `.contentShape` makes the square, and only it, the tap and VoiceOver area
+    /// (without it, a wide photo filling its square reached into its neighbours' areas).
     private func thumbnail(_ chip: RoomAttachmentChip, side: CGFloat) -> some View {
         ZStack {
-            if let data = previews[chip.attachmentId], let image = RoomImageData.square(from: data) {
+            if let data = previews[chip.attachmentId], let image = RoomImageData.image(from: data) {
                 image
                     .resizable()
-                    .scaledToFit()
+                    .scaledToFill()
             } else {
                 PocketPalette.inset
                 Image(systemName: "photo")
