@@ -1234,14 +1234,19 @@ final class RoomSafetyTests: XCTestCase {
         XCTAssertNotNil(HostedSummary.wait(for: "pocket.aiConsent.notice", in: window, label: AIConsentText.notice))
         XCTAssertNotNil(HostedSummary.wait(for: "pocket.help.terms", in: window), "the terms, linked from the notice")
         XCTAssertNotNil(HostedSummary.wait(for: "pocket.help.privacy", in: window), "and the privacy policy")
+        XCTAssertNotNil(HostedSummary.wait(for: "pocket.help.support", in: window), "and support")
     }
 
-    func test_settings_link_the_terms_and_the_privacy_policy() throws {
+    /// Support, the terms and the privacy policy: each drawn in Settings, each opening its own page on sentinelayer.com.
+    func test_settings_link_support_the_terms_and_the_privacy_policy() throws {
+        let opened = Dictionary(uniqueKeysWithValues: PocketHelp.pages.map { ($0.id, $0.url.absoluteString) })
+        XCTAssertEqual(opened, ["support": "https://sentinelayer.com/support",
+                                "terms": "https://sentinelayer.com/terms",
+                                "privacy": "https://sentinelayer.com/privacy"])
         let window = try settings(offersModelFile: false)
         defer { HostedSummary.close(window) }
-        XCTAssertNotNil(HostedSummary.wait(for: "settings.account.terms", in: window))
-        XCTAssertNotNil(HostedSummary.wait(for: "settings.account.privacy", in: window))
-        XCTAssertEqual(PocketHelp.termsURL.absoluteString, "https://sentinelayer.com/terms")
-        XCTAssertEqual(PocketHelp.privacyURL.absoluteString, "https://sentinelayer.com/privacy")
+        XCTAssertNotNil(HostedSummary.wait(for: "settings.account.supportPage", in: window))
+        XCTAssertNotNil(HostedSummary.wait(for: "settings.account.termsPage", in: window))
+        XCTAssertNotNil(HostedSummary.wait(for: "settings.account.privacyPage", in: window))
     }
 }

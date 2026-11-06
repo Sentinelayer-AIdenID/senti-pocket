@@ -221,6 +221,21 @@ public enum PocketHelp {
     public static let mailURL = URL(string: "mailto:help@plexaura.io")!
     public static let termsURL = URL(string: "https://sentinelayer.com/terms")!
     public static let privacyURL = URL(string: "https://sentinelayer.com/privacy")!
+    public static let supportURL = URL(string: "https://sentinelayer.com/support")!
+
+    /// A page Pocket links to: its title, where it opens, and the end of its accessibility identifier.
+    public struct Page: Equatable, Sendable {
+        public let title: String
+        public let url: URL
+        public let id: String
+    }
+
+    /// The pages linked from Settings, the sign-in screen and the AI notice, in that order.
+    public static let pages: [Page] = [
+        Page(title: "Support", url: supportURL, id: "support"),
+        Page(title: "Terms of Use", url: termsURL, id: "terms"),
+        Page(title: "Privacy Policy", url: privacyURL, id: "privacy")
+    ]
 
     /// Said on the sign-in screen, the Terms of Use linked.
     public static var signInAgreement: AttributedString {

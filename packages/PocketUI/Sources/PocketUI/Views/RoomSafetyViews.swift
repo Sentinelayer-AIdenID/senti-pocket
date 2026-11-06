@@ -355,7 +355,7 @@ extension View {
         modifier(AIConsentPrompt(held: held, onAllow: onAllow))
     }
 }
-/// Contact us, Terms of Use and Privacy Policy (`PocketHelp`), as links that wrap at any text size.
+/// Contact us, Support, Terms of Use and Privacy Policy (`PocketHelp`), as links that wrap at any text size.
 public struct PocketHelpLinks: View {
     private let showsContact: Bool
 
@@ -380,10 +380,10 @@ public struct PocketHelpLinks: View {
             Link("Contact us: \(PocketHelp.email)", destination: PocketHelp.mailURL)
                 .accessibilityIdentifier("pocket.help.contact")
         }
-        Link("Terms of Use", destination: PocketHelp.termsURL)
-            .accessibilityIdentifier("pocket.help.terms")
-        Link("Privacy Policy", destination: PocketHelp.privacyURL)
-            .accessibilityIdentifier("pocket.help.privacy")
+        ForEach(PocketHelp.pages, id: \.id) { page in
+            Link(page.title, destination: page.url)
+                .accessibilityIdentifier("pocket.help." + page.id)
+        }
     }
 }
 #endif

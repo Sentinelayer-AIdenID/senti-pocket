@@ -44,14 +44,20 @@ struct SupportContactRow: View {
             .accessibilityAction(named: "Copy address") { UIPasteboard.general.string = PocketSupport.email }
             .accessibilityIdentifier("settings.account.support")
         }
-        Link(destination: PocketHelp.termsURL) {
-            Label("Terms of Use", systemImage: "doc.text")
+        ForEach(PocketHelp.pages, id: \.id) { page in
+            Link(destination: page.url) {
+                Label(page.title, systemImage: Self.symbol(page.id))
+            }
+            .accessibilityIdentifier("settings.account." + page.id + "Page")
         }
-        .accessibilityIdentifier("settings.account.terms")
-        Link(destination: PocketHelp.privacyURL) {
-            Label("Privacy Policy", systemImage: "hand.raised.square")
+    }
+
+    private static func symbol(_ page: String) -> String {
+        switch page {
+        case "support": return "questionmark.circle"
+        case "terms": return "doc.text"
+        default: return "hand.raised.square"
         }
-        .accessibilityIdentifier("settings.account.privacy")
     }
 }
 
