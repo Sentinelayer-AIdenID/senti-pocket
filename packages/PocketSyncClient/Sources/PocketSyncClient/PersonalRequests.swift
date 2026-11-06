@@ -4,9 +4,10 @@ import FoundationNetworking
 #endif
 import PocketContracts
 
-/// One call to the Senti API as the signed-in person, for the routes that are yours alone (direct messages and room
-/// folders). The origin is checked as the session transport checks it, every path segment is percent-encoded, and an
-/// answer that arrives after another account signed in is dropped: it belongs to nobody on screen.
+/// One call to the Senti API as the signed-in person, for the routes that are yours alone (direct messages, room
+/// folders and the calendar). The origin is checked as the session transport checks it, every path segment is
+/// percent-encoded, and an answer that arrives after another account signed in is dropped: it belongs to nobody
+/// on screen.
 struct PersonalRequest {
     enum Failure: Error, Equatable {
         case notConfigured
@@ -28,7 +29,9 @@ struct PersonalRequest {
     let urlSession: URLSession
     let tokenProvider: @Sendable () -> String?
 
-    func send(_ method: String, _ path: [String], body: [String: Any]? = nil,
+    /// `query` for the calendar's reads (#330), `headers` for an idempotency key on folder writes (#331). Neither can
+    /// replace the Accept or Authorization header every call carries.
+    func send(_ method: String, _ path: [String], query: [URLQueryItem] = [], body: [String: Any]? = nil,
               headers: [String: String] = [:]) async throws -> Answer {
         guard let origin = HTTPSessionTransport.validOrigin(apiBaseURL) else { throw Failure.notConfigured }
         guard let token = tokenProvider(), !token.isEmpty else { throw Failure.notLoggedIn }
@@ -37,7 +40,7 @@ struct PersonalRequest {
         }
         let url: URL
         do {
-            url = try HTTPSessionTransport.makeURL(baseURL: origin, path: path, query: [])
+            url = try HTTPSessionTransport.makeURL(baseURL: origin, path: path, query: query)
         } catch {
             throw Failure.invalidRequest
         }

@@ -143,6 +143,12 @@ final class RootPreviewMeter: @unchecked Sendable {
 
     func roomScreenBodyRan() { roomScreenBodies += 1 }
 
+    /// Whether the room's calendar entry offered Calendar the last time its body ran (nil before it ran): it watches
+    /// the calendar itself, so an answer that turns the calendar on reaches it without the root drawing again.
+    private(set) var calendarEntryOffers: Bool?
+
+    func calendarEntryRan(offers: Bool) { calendarEntryOffers = offers }
+
     private func ran(_ activity: CFRunLoopActivity) {
         let now = CFAbsoluteTimeGetCurrent()
         if activity == .afterWaiting {

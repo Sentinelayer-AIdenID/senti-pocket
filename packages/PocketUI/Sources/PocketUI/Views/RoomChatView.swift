@@ -289,7 +289,8 @@ public struct RoomChatView: View {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { opener(target) }
                     }
                 },
-                ownAuthorIds: profileOpener?.ownAuthorIds ?? []
+                ownAuthorIds: profileOpener?.ownAuthorIds ?? [],
+                opensEveryone: profileOpener?.opensEveryone ?? false
             )
             .onAppear { send(.peopleOpened) }
         }
@@ -1875,10 +1876,13 @@ private struct RoomMessageRowView: View {
 
     private var authorLine: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(row.authorName)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(row.isHuman ? PocketPalette.accentStrong : PocketPalette.textPrimary)
-                .lineLimit(1)
+            // The name opens their profile and messages, as the avatar does.
+            RoomProfileName(senderId: row.authorId, name: row.authorName, isHuman: row.isHuman) {
+                Text(row.authorName)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(row.isHuman ? PocketPalette.accentStrong : PocketPalette.textPrimary)
+                    .lineLimit(1)
+            }
             if let date = row.date {
                 Text(date, style: .time)
                     .font(.caption)
@@ -3656,15 +3660,22 @@ private struct RoomPresenceSheet: View {
     var roster: RoomRoster = .empty
     /// Invite people, for the room's owner or an admin.
     var onInvite: (() -> Void)?
-    /// Opens a member's profile card from their avatar, where direct messages are on.
+    /// Opens a member's profile from their avatar.
     var onProfile: ((RoomProfileTarget) -> Void)?
     var ownAuthorIds: Set<String> = []
+    /// Every member's profile opens (their messages), not only those a direct message can reach.
+    var opensEveryone = false
     @Environment(\.dismiss) private var dismiss
 
-    /// The member's card, unless it is you, the room's voice or a box that ended.
+    /// The member's profile: anyone's where profiles show messages; otherwise their card, unless it is you, the room's
+    /// voice or a box that ended.
     private func profileTarget(_ member: RoomRoster.Member) -> RoomProfileTarget? {
-        guard onProfile != nil, member.status != .ended,
-              RoomProfile.opens(senderId: member.id, ownAuthorIds: ownAuthorIds) else { return nil }
+        guard onProfile != nil else { return nil }
+        if opensEveryone {
+            guard RoomProfile.showsMember(senderId: member.id) else { return nil }
+        } else {
+            guard member.status != .ended, RoomProfile.opens(senderId: member.id, ownAuthorIds: ownAuthorIds) else { return nil }
+        }
         return RoomProfileTarget(senderId: member.id, name: member.name, isAgent: member.kind != .person)
     }
 

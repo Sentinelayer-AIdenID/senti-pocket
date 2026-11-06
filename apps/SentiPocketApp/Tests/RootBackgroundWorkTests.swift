@@ -146,6 +146,65 @@ final class RootBackgroundWorkTests: XCTestCase {
         XCTAssertEqual(meter.roomScreens - screens, 0, "closing it makes no new room screen either")
     }
 
+    // MARK: - The calendar's changes leave the root and its room alone
+
+    /// Review (#330): the root keeps the calendar's center without watching it, as it keeps the side panel's placement.
+    /// A calendar change (here the room's drafts check answering after the root has settled, as a slow or edge-held
+    /// answer does) draws the ⋯ entry and Settings only: never the root again, never a new room screen, no row.
+    func test_a_calendar_answer_after_the_root_settles_draws_no_root_no_room_screen_and_no_row() throws {
+        try measureCalendarAnswer(on: false)
+    }
+
+    /// The same with the calendar on: the ⋯ entry, a modifier on the navigation root, gains its Calendar item (it watches
+    /// the calendar itself, so it updates without the root), and the room screen inside it is not made again.
+    func test_the_calendar_turning_on_after_the_root_settles_makes_no_new_room_screen() throws {
+        try measureCalendarAnswer(on: true)
+    }
+
+    private func measureCalendarAnswer(on: Bool) throws {
+        let api = Self.api()
+        UserDefaults.standard.set(RootPreviewAPI.midRoom, forKey: "pocket.lastRoomId")
+        let gate = GatedCalendar()
+        defer { gate.answer(false) }
+        var services = api.services
+        services.calendar = gate
+        let links = IncomingLinkInbox()
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = UIHostingController(rootView: AuthenticatedRootView(
+            authenticationEpoch: 1,
+            whisperModelCoordinator: WhisperModelProvisioningCoordinator(),
+            incomingLinks: links,
+            services: services,
+            onSignOut: {},
+            onReauthenticationRequired: { _ in }
+        )
+        .environment(\.scenePhase, .active))
+        window.makeKeyAndVisible()
+        self.window = window
+        settleRoot(api) { links.objectWillChange.send() }
+        // The room's ⋯ entry asked whether drafting is on; the answer is held until now.
+        let end = Date().addingTimeInterval(10)
+        while Date() < end, gate.asks == 0 { pump(0.1) }
+        XCTAssertEqual(gate.asks, 1, "the room's ⋯ entry asked about the calendar once")
+        let meter = RootPreview.meter
+        XCTAssertEqual(meter.calendarEntryOffers, false, "before the answer the room's ⋯ entry offers no Calendar")
+        let rootBodies = meter.rootBodies
+        let screens = meter.roomScreens
+        let draws = RenderTrace.snapshot().draws
+
+        gate.answer(on)
+        pump(1.5)
+        XCTAssertEqual(meter.roomScreens - screens, 0, "a calendar change makes no new room screen")
+        XCTAssertEqual(meter.rootBodies - rootBodies, 0, "a calendar change does not draw the root again")
+        XCTAssertEqual(RenderTrace.snapshot().draws - draws, 0, "a calendar change draws none of the room's rows")
+        XCTAssertEqual(meter.calendarEntryOffers, on,
+                       on ? "the room's ⋯ entry offers Calendar once the answer is on: it watched the answer"
+                          : "the room's ⋯ entry still offers no Calendar")
+        print("BGAUDIT calendar answer \(on): root bodies \(meter.rootBodies - rootBodies), "
+              + "room screens \(meter.roomScreens - screens)")
+    }
+
     /// An arrival draws the row that arrived (and the one before it, whose grouping may change), never every row the
     /// list has made: with an accessibility client reading the screen the list keeps them all, and a busy room drew
     /// every one of them at every arrival.
@@ -219,6 +278,44 @@ final class RootBackgroundWorkTests: XCTestCase {
     }
 
     private final class Counter { var value = 0 }
+
+    /// A calendar whose drafts check waits until the test answers it; everything else is off.
+    private final class GatedCalendar: RoomCalendarServing, CalendarFeedServing, @unchecked Sendable {
+        private let lock = NSLock()
+        private var waiting: [CheckedContinuation<Bool, Never>] = []
+        private var _asks = 0
+
+        var asks: Int { lock.withLock { _asks } }
+
+        func answer(_ on: Bool) {
+            let held = lock.withLock { () -> [CheckedContinuation<Bool, Never>] in
+                defer { waiting = [] }
+                return waiting
+            }
+            held.forEach { $0.resume(returning: on) }
+        }
+
+        func draftsAvailable(inRoom sessionId: String) async throws -> Bool {
+            await withCheckedContinuation { (waiter: CheckedContinuation<Bool, Never>) in
+                lock.withLock {
+                    _asks += 1
+                    waiting.append(waiter)
+                }
+            }
+        }
+
+        func events(inRoom sessionId: String) async throws -> [CalendarEvent] { throw CalendarError.unavailable }
+        func agenda() async throws -> [CalendarEvent] { throw CalendarError.unavailable }
+        func draft(inRoom sessionId: String, _ request: CalendarDraftRequest) async throws -> CalendarDraft {
+            throw CalendarError.unavailable
+        }
+        func save(_ event: CalendarEventCreate, inRoom sessionId: String) async throws -> CalendarEvent {
+            throw CalendarError.unavailable
+        }
+        func feedAvailable() async throws -> Bool { false }
+        func newSubscriptionLink() async throws -> CalendarSubscriptionLink { throw CalendarError.unavailable }
+        func keptLink(_ url: URL) -> CalendarSubscriptionLink? { nil }
+    }
 
     private final class ArrivingRoom: ObservableObject {
         @Published var state: RoomChatPresentationState

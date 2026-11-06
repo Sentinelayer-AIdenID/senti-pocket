@@ -32,36 +32,54 @@ public enum RoomProfile {
         guard !id.isEmpty, !RoomChatQuiet.isRoomVoice(id), id != "human-" else { return false }
         return !ownAuthorIds.contains { $0.lowercased() == id }
     }
+
+    /// Whether `senderId` has a profile with their messages (Carter, 11-04: "tap anyone → all their messages"): anyone
+    /// with an id, you and the room's own voices included. Whether the card offers Message is `opens` alone.
+    public static func showsMember(senderId: String) -> Bool {
+        let id = senderId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return !id.isEmpty && id != "human-"
+    }
 }
 
 /// What tapping an avatar does in a room where profiles open (direct messages on). Put in the environment by the room
 /// screen; absent, avatars are not buttons and the online ring opens the people list as before.
 public struct RoomProfileOpener: Equatable {
     public let ownAuthorIds: Set<String>
+    /// Opens for everyone with an id (their profile and messages), not only for those a direct message can reach.
+    public let opensEveryone: Bool
     private let open: (RoomProfileTarget) -> Void
 
     /// Two openers for the same you are the same: the room screen makes a new one each time it draws, and every avatar
     /// reads it, so an opener that never compared equal would draw every avatar again with every message. Its action
     /// only sets the screen's own state, which every copy of the screen shares.
     public static func == (lhs: RoomProfileOpener, rhs: RoomProfileOpener) -> Bool {
-        lhs.ownAuthorIds == rhs.ownAuthorIds
+        lhs.ownAuthorIds == rhs.ownAuthorIds && lhs.opensEveryone == rhs.opensEveryone
     }
 
-    public init(ownAuthorIds: Set<String>, open: @escaping (RoomProfileTarget) -> Void) {
+    public init(ownAuthorIds: Set<String>, opensEveryone: Bool = false, open: @escaping (RoomProfileTarget) -> Void) {
         self.ownAuthorIds = ownAuthorIds
+        self.opensEveryone = opensEveryone
         self.open = open
     }
 
-    /// The card for `target`, unless it is yourself or the room's voice. Returns whether it opened.
+    /// The card for `target`, unless this opener does not open theirs. Returns whether it opened.
     @discardableResult
     public func callAsFunction(_ target: RoomProfileTarget) -> Bool {
-        guard RoomProfile.opens(senderId: target.senderId, ownAuthorIds: ownAuthorIds) else { return false }
+        guard opens(target.senderId) else { return false }
         open(target)
         return true
     }
 
     public func opens(_ senderId: String) -> Bool {
-        RoomProfile.opens(senderId: senderId, ownAuthorIds: ownAuthorIds)
+        opensEveryone ? RoomProfile.showsMember(senderId: senderId)
+            : RoomProfile.opens(senderId: senderId, ownAuthorIds: ownAuthorIds)
+    }
+
+    /// A room's opener for its member profiles: every avatar and name opens its owner's profile and messages, direct
+    /// messages on or not. Your own ids (`human-<handle>`) say where Message is never offered.
+    public static func members(ownMentionHandles: Set<String>, open: @escaping (RoomProfileTarget) -> Void) -> RoomProfileOpener {
+        RoomProfileOpener(ownAuthorIds: Set(ownMentionHandles.filter { $0 != "all" }.map { "human-\($0)" }),
+                          opensEveryone: true, open: open)
     }
 
     /// A room's opener: only where direct messages are on, and only once the room knows who you are (your mention

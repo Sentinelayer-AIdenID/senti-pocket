@@ -189,8 +189,10 @@ struct RoomChatScreen: View {
     private let onRenamed: @MainActor () -> Void
     /// Direct messages, where they are on: avatars open profile cards, and a direct message gets its switch.
     private let directContext: RoomDirectContext?
-    /// The profile card open over the room.
+    /// The profile open over the room.
     @State private var profileTarget: RoomProfileTarget?
+    /// Someone's messages in the room, for their profile (`GET /events/by-author`).
+    private let authorMessages: (any RoomAuthorMessagesReading)?
 
     init(
         route: RoomRoute,
@@ -224,6 +226,7 @@ struct RoomChatScreen: View {
         #endif
         self.route = route
         self.directContext = direct
+        self.authorMessages = transport as? any RoomAuthorMessagesReading
         self.reader = reader
         self.search = search
         self.ticketsTransport = ticketsTransport
@@ -579,14 +582,28 @@ struct RoomChatScreen: View {
         OpenURLAction { url in handle(url) }
     }
 
-    /// Where direct messages are on and the room knows who you are, an avatar opens its card: never yours, never the
-    /// room's voice. Otherwise avatars are not buttons, and the online ring opens the people list as before.
+    /// Every avatar and name opens its owner's profile and messages (Carter, 11-04: "tap anyone"), in the room, on the
+    /// people ring and in the people list. Message is offered only where direct messages are on and reach them.
     private var profileOpener: RoomProfileOpener? {
-        RoomProfileOpener.forRoom(directMessagesOn: directContext != nil,
-                                  ownMentionHandles: coordinator.state.ownMentionHandles) { target in
+        RoomProfileOpener.members(ownMentionHandles: coordinator.state.ownMentionHandles) { target in
             CrashReporter.shared.note("profile card opened")
             profileTarget = target
         }
+    }
+
+    /// Message on someone's card: where direct messages are on, from a room (never from inside a direct message), once
+    /// the room knows who you are, and never to yourself or the room's own voices.
+    private func profileOffersMessage(_ target: RoomProfileTarget) -> Bool {
+        guard directContext != nil, route.cardsOfferMessage, let opener = profileOpener, !opener.ownAuthorIds.isEmpty else {
+            return false
+        }
+        return RoomProfile.opens(senderId: target.senderId, ownAuthorIds: opener.ownAuthorIds)
+    }
+
+    /// The box an agent's profile is about, while it runs: its live steps come from the Flight record.
+    private func profileBox(_ target: RoomProfileTarget) -> FlightRecordState.Box? {
+        guard target.isAgent else { return nil }
+        return flight.state.boxes.first { $0.name.lowercased() == target.senderId.lowercased() }
     }
 
     /// The room the card names as shared before the server lists them: this room, or in a direct message the room it
@@ -677,17 +694,47 @@ struct RoomChatScreen: View {
             }
         }
         .sheet(item: $profileTarget) { target in
-            if let directContext {
-                RoomProfileSheet(
-                    target: target,
-                    roomId: route.sessionId,
-                    sharedRoom: profileSharedRoom,
-                    canMessage: route.cardsOfferMessage,
-                    context: directContext,
-                    // Block comes with the room's block flow (#312) once it lands; until then the card has none.
-                    onBlock: nil,
-                    onClose: { profileTarget = nil }
-                )
+            let box = profileBox(target)
+            RoomProfileSheet(
+                target: target,
+                roomId: route.sessionId,
+                sharedRoom: profileSharedRoom,
+                canMessage: profileOffersMessage(target),
+                context: directContext,
+                messages: authorMessages,
+                box: box,
+                // Block comes with the room's block flow (#312); until then the card has none. Whichever of the two
+                // lands second wires it here: `isBlocked:` from the room's blocks, and `onBlock:` only where
+                // `RoomMemberBlock.offers` allows it (with `profileOpener`'s own ids), blocking with the message it is
+                // handed (`RoomBlockTarget(actorId:name:sequenceId:)`), never by their id alone.
+                onBlock: nil,
+                onOpenMessage: { sequence in
+                    profileTarget = nil
+                    // Once the sheet has gone, the room brings the message into view by its own focus path.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { focus(on: sequence) }
+                },
+                onOpenFlight: box == nil ? nil : {
+                    CrashReporter.shared.note("flight record opened")
+                    flight.setAgents(flightAgents)
+                    flight.setPeople(roster.members)
+                    showsFlight = true
+                    profileTarget = nil
+                },
+                onReauthenticationRequired: onReauthenticationRequired,
+                onClose: { profileTarget = nil }
+            )
+            // An agent's profile reads the room's boxes, so a box shows its live steps; the steps of the one it is
+            // about read often while it shows.
+            .onAppear {
+                guard target.isAgent else { return }
+                flight.start()
+                if let box { flight.expand(box.id) }
+            }
+            .onChange(of: box?.id) { id in flight.expand(id) }
+            .onDisappear {
+                guard target.isAgent, !showsFlight else { return }
+                flight.expand(nil)
+                flight.stop()
             }
         }
         .toolbar {

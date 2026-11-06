@@ -118,7 +118,9 @@ struct SentiPocketApp: App {
 
     @ViewBuilder private var rootView: some View {
         #if DEBUG
-        if RootPreview.isRequested {
+        if RoomCalendarPreview.isRequested {
+            RoomCalendarPreview.rootView
+        } else if RootPreview.isRequested {
             RootPreview.rootView(whisperModel: whisperModel, incomingLinks: incomingLinks)
         } else if AgentChatPreview.isRequested {
             AgentChatPreview.rootView
@@ -237,6 +239,8 @@ struct RootServices {
     var readMarker: any RoomReadMarking
     /// Apple push for this phone: the app registers it; a preview never does.
     var registersPush = true
+    /// The calendar and its Apple Calendar link, shown once the server answers their routes; nil (a preview) hides it.
+    var calendar: (any RoomCalendarServing & CalendarFeedServing)?
 
     /// The Senti API as you.
     static func live() -> RootServices {
@@ -281,7 +285,9 @@ struct RootServices {
             identity: HTTPAccountIdentity(apiBaseURL: apiURL),
             // Read receipts and presence, as yourself, like the web.
             receipts: HTTPRoomReceipts(apiBaseURL: apiURL),
-            readMarker: HTTPRoomReadMarker(apiBaseURL: apiURL)
+            readMarker: HTTPRoomReadMarker(apiBaseURL: apiURL),
+            calendar: HTTPRoomCalendarClient(apiBaseURL: apiURL, urlSession: CalendarHTTP.session,
+                                             tokenProvider: { SessionTokenStore.load() })
         )
     }
 }
@@ -347,6 +353,10 @@ struct AuthenticatedRootView: View {
     @StateObject private var directMessages: DirectMessagesCenter
     /// Your room folders: on when the server lists them (ROOM_FOLDERS_ENABLED), else nothing shows.
     @StateObject private var roomFolders: RoomFoldersCenter
+    /// The calendar: on when the server answers its routes (CALENDAR_DRAFTS_ENABLED, CALENDAR_FEED_ENABLED). Kept, not
+    /// watched, as the side panel's placement is: the room's calendar entry and Settings watch it, so its answers draw
+    /// them and never the root (each draw of the root can make the room screen under it again).
+    @State private var calendar: CalendarCenter
     /// The side panel's rooms in your folders, placed off the main thread when the rooms or the folders change. Kept,
     /// not watched: the panel watches it, so a new placing draws the panel and not the root (and the room under it).
     @State private var sidePanelPlacement = SidePanelPlacement()
@@ -497,6 +507,18 @@ struct AuthenticatedRootView: View {
             onRoomsChanged: { sessions.send(.refreshSessions) },
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
         ))
+        let calendarClient = services.calendar ?? CalendarOff()
+        let identity = services.identity
+        _calendar = State(initialValue: CalendarCenter(
+            client: calendarClient,
+            feed: calendarClient,
+            // The link is kept for the signed-in person in this phone's Keychain only (gone with the sign-in).
+            vault: CalendarLinkVault.live,
+            person: { await identity.currentAccount().map { $0.accountId ?? $0.authorId } },
+            // The webcal link goes to the system (Apple Calendar's subscribe sheet), which says whether it opened.
+            openURL: { await UIApplication.shared.open($0) },
+            onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
+        ))
         _whisperModelCoordinator = ObservedObject(wrappedValue: whisperModelCoordinator)
         _incomingLinks = ObservedObject(wrappedValue: incomingLinks)
         self.roomTransport = services.room
@@ -556,6 +578,7 @@ struct AuthenticatedRootView: View {
                 .toolbar {
                     ToolbarItem(placement: .navigationBarLeading) { drawerButton }
                 }
+                .modifier(calendarEntry)
                 .navigationDestination(for: RoomRoute.self) { route in
                     roomScreen(route)
                 }
@@ -740,6 +763,8 @@ struct AuthenticatedRootView: View {
             WhisperModelSettingsView(
                 coordinator: whisperModelCoordinator,
                 directMessages: directMessages,
+                calendar: CalendarSettingsContext(center: calendar, rooms: calendarRooms,
+                                                  onReauthenticationRequired: invalidateProtectedAuthentication),
                 onSignOut: {
                     presentsSettings = false
                     onSignOut()
@@ -983,6 +1008,7 @@ struct AuthenticatedRootView: View {
                 closeDrawer()
                 presentsSettings = true
                 Task { await directMessages.refresh() }
+                Task { await calendar.refresh(probeRoom: calendarProbeRoom) }
             },
             onNewRoom: roomSender is any RoomCreating ? {
                 closeDrawer()
@@ -1010,6 +1036,15 @@ struct AuthenticatedRootView: View {
         return RoomScreenHost(route: route, savedSummary: savedSummary, directMessagesOn: directContext != nil,
                               maker: roomScreenMaker)
             .equatable()
+    }
+
+    /// The calendar's ⋯ entry for the room on screen (a room, not a direct message). It sits on the navigation root
+    /// beside the side panel's button, outside the room screen and its host.
+    private var calendarEntry: RoomCalendarEntry {
+        RoomCalendarEntry(center: calendar, sessionId: currentRoom?.sessionId ?? "", roomTitle: currentRoom?.title ?? "",
+                          canAdd: CalendarCenter.canAdd(role: currentRoom?.membershipRole ?? ""),
+                          isOffered: currentRoom.map { $0.direct == nil } ?? false,
+                          onReauthenticationRequired: invalidateProtectedAuthentication)
     }
 
     private func roomChatScreen(_ route: RoomRoute, savedSummary: String?, direct: RoomDirectContext?) -> RoomChatScreen {
@@ -1045,6 +1080,20 @@ struct AuthenticatedRootView: View {
             direct: direct,
             onReauthenticationRequired: invalidateProtectedAuthentication
         )
+    }
+
+    /// Any room you are in, to ask whether drafting is on: a viewer's room answers the flag as well as any.
+    private var calendarProbeRoom: String? {
+        CalendarCenter.probeRoom(in: sessions.state.rows.map {
+            (id: $0.sessionId, role: $0.membershipRole, isDirect: $0.isDirect)
+        })
+    }
+
+    /// The rooms an event can be added to from Settings' calendar: rooms (not direct messages) you can write in.
+    private var calendarRooms: [CalendarRoomChoice] {
+        sessions.state.rows
+            .filter { !$0.isDirect && CalendarCenter.canAdd(role: $0.membershipRole) }
+            .map { CalendarRoomChoice(id: $0.sessionId, title: $0.title) }
     }
 
     /// The call whose summary is being read aloud, if any.
