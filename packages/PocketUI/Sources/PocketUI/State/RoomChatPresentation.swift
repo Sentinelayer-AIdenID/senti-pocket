@@ -40,6 +40,8 @@ public struct RoomChatMessageInput: Equatable, Sendable {
     public let isVoiceTurn: Bool
     /// A checkpoint's summary.
     public let checkpointSummary: String?
+    /// The server takes a report on it (a posted message or a reply, not a file's upload notice or a relayed line).
+    public var isReportable = true
     /// Your own likes and dislikes placed on this message (`RoomOwnTaps`).
     public let ownTaps: RoomOwnTaps
 
@@ -348,6 +350,14 @@ public struct RoomChatMessageRow: Equatable, Identifiable, Sendable {
     public var files: [RoomChatFileCard] = []
     /// This post is a part of a file posted as base64 (the thread's root sequence): folded behind the file's card.
     public var filePartOf: Int64?
+    /// You blocked its author.
+    public var isAuthorBlocked = false
+    /// You blocked its author and have not asked to see this one: it shows as one line with Show.
+    public var hidesAsBlocked = false
+    /// The server takes a report on it (`RoomChatMessageInput.isReportable`).
+    public var isReportable = true
+    /// Yours, under the id this account had before (`formerOwnAuthorIds`): never reported or blocked.
+    public var wasYours = false
 }
 
 public enum RoomChatRow: Equatable, Identifiable, Sendable {
@@ -422,6 +432,14 @@ public struct RoomChatReplyRow: Equatable, Identifiable, Sendable {
     public let reactions: RoomChatReactions?
     /// This reply is a part of a file posted as base64 (the thread's root sequence): folded behind the file's card.
     public var filePartOf: Int64?
+    /// Who wrote it, as replies carry it (`human-<login>` or an agent id): what Block names.
+    public let authorId: String
+    /// You blocked its author.
+    public var isAuthorBlocked = false
+    /// You blocked its author and have not asked to see this one: it shows as one line with Show.
+    public var hidesAsBlocked = false
+    /// Yours, under the id this account had before (`formerOwnAuthorIds`): never reported or blocked.
+    public var wasYours = false
     /// Its photos and files, shown as a message's are.
     public let attachments: [RoomAttachmentChip]
 
@@ -437,6 +455,7 @@ public struct RoomChatReplyRow: Equatable, Identifiable, Sendable {
         authorHandle: String = "",
         parentReplyId: String? = nil,
         reactions: RoomChatReactions? = nil,
+        authorId: String = "",
         attachments: [RoomAttachmentChip] = []
     ) {
         self.id = id
@@ -450,6 +469,7 @@ public struct RoomChatReplyRow: Equatable, Identifiable, Sendable {
         self.authorHandle = authorHandle.isEmpty ? authorName : authorHandle
         self.parentReplyId = parentReplyId
         self.reactions = reactions
+        self.authorId = authorId
         self.attachments = attachments
     }
 
@@ -657,6 +677,17 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     /// A short summary of a thread, by its parent's sequence, shown on the room's row for it before it is opened
     /// (Carter, #55474: "I wish I had the summarized here at top level before I even open the thread").
     public let threadSummaries: [Int64: SummaryReading]
+    /// You can report someone else's message or reply (`RoomRowOption.Kind.report`).
+    public let canReport: Bool
+    /// You can block its author (`RoomRowOption.Kind.block`).
+    public let canBlock: Bool
+    /// The report sheet, while one is open.
+    public let report: RoomReportState?
+    /// Writing here first asks your OK to share with AI: this account has not said OK (or took it back). The box asks
+    /// before it empties, so Not now keeps what you wrote.
+    public let asksAIConsent: Bool
+    /// Writes are waiting for that answer (a reaction, a pin, an edit): the room asks now.
+    public let consentRequested: Bool
     /// The agent this chat was made for (`RoomAgentChat`), lowercased: what it says shows in full. Nil in other rooms.
     public let roomAgent: String?
     /// A box still running is in the room: it hears only what @-names it or answers it in its thread, so the composer
@@ -716,6 +747,14 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         files: [Int64: [RoomChatFileCard]] = [:],
         fileParts: [String: Int64] = [:],
         draftKey: String? = nil,
+        blockedAuthorIds: Set<String> = [],
+        formerOwnAuthorIds: Set<String> = [],
+        revealedBlocked: Set<String> = [],
+        canReport: Bool = false,
+        canBlock: Bool = false,
+        report: RoomReportState? = nil,
+        asksAIConsent: Bool = false,
+        consentRequested: Bool = false,
         runningBoxes: Set<String> = [],
         endedBoxNames: Set<String> = [],
         calendar: Calendar = .current
@@ -757,6 +796,11 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         self.canRename = protectedFailure ? false : canRename
         self.canInvite = protectedFailure ? false : canInvite
         self.threadSummaries = protectedFailure ? [:] : threadSummaries
+        self.canReport = protectedFailure ? false : canReport
+        self.canBlock = protectedFailure ? false : canBlock
+        self.report = protectedFailure ? nil : report
+        self.asksAIConsent = asksAIConsent
+        self.consentRequested = consentRequested
 
         // Protected content never renders beside an auth or access failure.
         guard failure?.suppressesProtectedContent != true else {
@@ -813,6 +857,15 @@ public struct RoomChatPresentationState: Equatable, Sendable {
             messages.filter { ownIds.contains($0.authorId.lowercased()) }.map(\.sequenceId)
                 + replies.filter { ownIds.contains($0.authorId.lowercased()) }.map(\.sequenceId)
         )
+        // Someone you blocked: each of their messages and replies is one line, in place, until Show opens that one.
+        // Nothing else about the room changes.
+        let blocked = Set(blockedAuthorIds.map { $0.lowercased() })
+        func isBlocked(_ authorId: String) -> Bool {
+            !blocked.isEmpty && blocked.contains(authorId.lowercased()) && !ownIds.contains(authorId.lowercased())
+        }
+        // Your posts under the id you had before: they show as they did, but you are never offered to report or block
+        // yourself.
+        let formerIds = Set(formerOwnAuthorIds.map { $0.lowercased() })
         for input in ordered {
             // The chat's own agent: everything it says is said to you, in full, without the relay's signature line.
             let byRoomAgent = roomAgent != nil && input.kind == .message && input.authorId.lowercased() == roomAgent
@@ -861,7 +914,11 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 attachments: input.attachments,
                 views: input.views,
                 inlineReplyId: input.inlineReplyId,
-                replyContext: input.replyToSequenceId.flatMap { parents[$0] }.map(Self.replyContext(for:)),
+                // A reply's quote never shows the words of a message hidden as blocked.
+                replyContext: input.replyToSequenceId.flatMap { parents[$0] }.map { parent in
+                    isBlocked(parent.authorId) && !revealedBlocked.contains(RoomBlocking.revealKey(message: parent.id))
+                        ? RoomBlocking.hiddenLine : Self.replyContext(for: parent)
+                },
                 work: input.isInlineReply ? [] : input.work,
                 call: folded.cards[input.id],
                 trail: trails.trails[input.id],
@@ -879,7 +936,13 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 box: input.isInlineReply ? nil : launches[input.sequenceId].map { launch in
                     RoomBoxThread(launch: launch, replies: boxReplies[input.sequenceId] ?? [],
                                   isEnded: endedBoxes.contains(launch.name.lowercased()))
-                }
+                },
+                isAuthorBlocked: input.kind == .message && isBlocked(input.authorId),
+                hidesAsBlocked: input.kind == .message && isBlocked(input.authorId)
+                    && !revealedBlocked.contains(input.inlineReplyId.map(RoomBlocking.revealKey(reply:))
+                        ?? RoomBlocking.revealKey(message: input.id)),
+                isReportable: input.isReportable,
+                wasYours: formerIds.contains(input.authorId.lowercased())
             )))
             if input.kind == .message, let date = input.date {
                 run = (input.authorId, date)
@@ -923,6 +986,10 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 replies: RoomChatReplyRow.nested(threadInput.replies).map { reply in
                     var reply = reply
                     reply.filePartOf = fileParts[reply.id]
+                    reply.isAuthorBlocked = !reply.isOwn && isBlocked(reply.authorId)
+                    reply.hidesAsBlocked = reply.isAuthorBlocked
+                        && !revealedBlocked.contains(RoomBlocking.revealKey(reply: reply.id))
+                    reply.wasYours = formerIds.contains(reply.authorId.lowercased())
                     return reply
                 },
                 pending: threadInput.pending,
@@ -1469,7 +1536,7 @@ public enum CheckpointText {
 /// One option in a row's long-press menu, and what it asks the room for.
 public struct RoomRowOption: Equatable, Identifiable, Sendable {
     public enum Kind: String, Sendable {
-        case reply, thread, listen, like, dislike, acknowledge, emoji, pin, edit, copy
+        case reply, thread, listen, like, dislike, acknowledge, emoji, pin, edit, copy, report, block
     }
 
     public let kind: Kind
@@ -1478,6 +1545,8 @@ public struct RoomRowOption: Equatable, Identifiable, Sendable {
     /// What it asks the room for; nil for what the view does itself (Copy, and the sheets it opens).
     public let intent: RoomChatIntent?
     public var isEnabled = true
+    /// Shown in red, as a menu shows what can't be taken back at once (Block, which asks first).
+    public var isDestructive = false
 
     public var id: Kind { kind }
 }
@@ -1528,9 +1597,11 @@ extension RoomChatMessageRow {
     }
 
     /// The long-press menu, in order. A message's options act on the message. A reply shown in the room answers
-    /// itself, opens its thread, reads itself aloud, reacts to itself and copies itself; it has no pin.
+    /// itself, opens its thread, reads itself aloud, reacts to itself and copies itself; it has no pin. Someone
+    /// else's message or reply ends with Report and Block (App Store guideline 1.2).
     public func options(canReply: Bool, canReact: Bool, canPin: Bool, isPinned: Bool, pinsFull: Bool,
-                        canEdit: Bool = false, canAddEmoji: Bool = false) -> [RoomRowOption] {
+                        canEdit: Bool = false, canAddEmoji: Bool = false, canReport: Bool = false,
+                        canBlock: Bool = false) -> [RoomRowOption] {
         var options: [RoomRowOption] = []
         if canReply {
             // Written right in the room's box, and it goes to the thread (Carter, #55074): the view starts it.
@@ -1574,7 +1645,44 @@ extension RoomChatMessageRow {
             options.append(RoomRowOption(kind: .edit, title: "Edit", symbol: "pencil", intent: nil))
         }
         options.append(RoomRowOption(kind: .copy, title: "Copy text", symbol: "doc.on.doc", intent: nil))
+        if canReport, let target = reportTarget {
+            options.append(RoomRowOption(kind: .report, title: "Report…", symbol: "exclamationmark.bubble",
+                                         intent: .openReport(target)))
+        }
+        // The view asks first; once blocked, the author is not offered again.
+        if canBlock, isBlockable {
+            options.append(RoomRowOption(kind: .block, title: "Block \(authorName)", symbol: "hand.raised",
+                                         intent: nil, isDestructive: true))
+        }
         return options
+    }
+
+    /// Someone else's message or reply whose author can be blocked: not yours, not already blocked, and never the
+    /// server's own posts.
+    public var isBlockable: Bool {
+        !isOwn && !wasYours && kind == .message && !authorId.isEmpty && !isAuthorBlocked
+            && authorId.lowercased() != RoomBlocking.serverAuthor
+    }
+
+    /// What Block names: the author, and this message (or the reply shown here), so the server ties the block to the
+    /// author you saw.
+    public var blockTarget: RoomBlockTarget {
+        RoomBlockTarget(actorId: authorId, name: authorName, sequenceId: sequenceId, replyId: inlineReplyId)
+    }
+
+    /// What Report and Block act on: someone else's message or reply, with an author to name. None for your own, for
+    /// what the room itself posts (a checkpoint, a join, a breakout), or for a row the server takes no report on.
+    public var reportTarget: RoomReportTarget? {
+        guard !isOwn, !wasYours, kind == .message, isReportable, !authorId.isEmpty else { return nil }
+        return RoomReportTarget(sequenceId: sequenceId, replyId: inlineReplyId, authorId: authorId, authorName: authorName)
+    }
+}
+
+extension RoomChatReplyRow {
+    /// Someone else's reply in an open thread, for Report and Block; none for your own, or without an author.
+    public func reportTarget(inThread sequenceId: Int64) -> RoomReportTarget? {
+        guard !isOwn, !wasYours, !authorId.isEmpty else { return nil }
+        return RoomReportTarget(sequenceId: sequenceId, replyId: id, authorId: authorId, authorName: authorName)
     }
 }
 
@@ -1649,6 +1757,19 @@ public enum RoomChatIntent: Equatable, Sendable {
     case openInvite
     /// The reader is about to jump to the bottom of a long loaded history: keep only the newest rows first.
     case keepLatestForJumpDown
+    /// Open the report sheet for someone else's message or reply.
+    case openReport(RoomReportTarget)
+    /// Send the open report.
+    case sendReport(reason: RoomReportReason, note: String)
+    case closeReport
+    /// Block a message's author, in every room (the view asked first).
+    case block(RoomBlockTarget)
+    /// Show one message or reply from someone you blocked (`RoomBlocking.revealKey`), this once.
+    case revealBlocked(key: String)
+    /// You said OK to what you share in rooms being shared with AI (`AIConsentText.notice`): the writes held for it go.
+    case allowAIAgents
+    /// Not now: the writes held for that answer don't go (what you wrote stays, to edit and send again).
+    case declineAIAgents
 }
 
 /// A room's name as the API takes it (`SessionTitlePayload`, `_normalize_session_title`): control characters out,

@@ -241,10 +241,11 @@ final class RoomCalendarTests: XCTestCase {
 
     private func makeBoard(_ fake: FakeCalendar, zone: String = "America/New_York", now: String = "2026-11-04T10:00:00-05:00",
                        scope: CalendarScope = .room(sessionId: "room-1", title: "Launch planning", canAdd: true),
-                       onUnavailable: @escaping @MainActor () -> Void = {}) -> CalendarBoard {
+                       onUnavailable: @escaping @MainActor () -> Void = {},
+                       mayShareWithAI: @escaping @MainActor () async -> Bool = { true }) -> CalendarBoard {
         let instant = at(now)
         return CalendarBoard(scope: scope, client: fake, calendar: calendar(zone), now: { instant },
-                             onUnavailable: onUnavailable)
+                             onUnavailable: onUnavailable, mayShareWithAI: mayShareWithAI)
     }
 
     /// System Keychain items a test made, under a service of its own, removed after it.
@@ -313,6 +314,29 @@ final class RoomCalendarTests: XCTestCase {
 
     /// 01:00 on November 5 in Kolkata is still November 4 in UTC: the day asked for, the zone sent and the times on the
     /// form are the person's.
+    /// What is typed goes to Senti's AI to draft: asked first, and Not now drafts nothing and keeps the text.
+    func test_a_draft_waits_for_the_ai_consent_and_not_now_sends_nothing() async {
+        let fake = FakeCalendar()
+        fake.draftAnswer = .success(lunchDraft("2026-11-05T13:00:00-05:00", "2026-11-05T14:00:00-05:00"))
+        var asked = 0
+        let declined = makeBoard(fake, mayShareWithAI: {
+            asked += 1
+            return false
+        })
+        declined.addText = "Lunch with Sam at 1"
+        await declined.draft()
+        XCTAssertEqual(asked, 1, "asked before drafting")
+        XCTAssertTrue(fake.draftRequests.isEmpty, "Not now: nothing goes to the drafts route")
+        XCTAssertNil(declined.form)
+        XCTAssertEqual(declined.addText, "Lunch with Sam at 1", "and the text stays")
+        XCTAssertFalse(declined.isDrafting)
+
+        let agreed = makeBoard(fake, mayShareWithAI: { true })
+        agreed.addText = "Lunch with Sam at 1"
+        await agreed.draft()
+        XCTAssertEqual(fake.draftRequests.count, 1, "Agree: the draft is asked for")
+    }
+
     func test_the_draft_is_asked_and_shown_in_the_persons_zone() async throws {
         let fake = FakeCalendar()
         fake.draftAnswer = .success(lunchDraft("2026-11-05T13:00:00+05:30", "2026-11-05T14:00:00+05:30"))

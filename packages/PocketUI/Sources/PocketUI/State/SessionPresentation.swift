@@ -56,8 +56,8 @@ public enum SessionLoadFailure: Equatable, Sendable {
 }
 
 public struct SessionListPresentationState: Equatable, Sendable {
-    public let rows: [SessionRowPresentation]
-    public let resultCount: Int
+    public private(set) var rows: [SessionRowPresentation]
+    public private(set) var resultCount: Int
     public let includesArchived: Bool
     public let hasMore: Bool
     public let provenance: SessionPresentationProvenance
@@ -123,6 +123,20 @@ public struct SessionListPresentationState: Equatable, Sendable {
         self.provenance = provenance
         self.isRefreshing = isRefreshing
         self.failure = identitiesAreValid && countIsValid ? failure : .invalidData
+    }
+
+    /// The list without the direct messages of anyone you blocked (`blocked`: author ids, as `BlockList` keeps them).
+    /// A room is never hidden, whoever is in it: only a direct message with them.
+    public func withoutDirectMessages(from blocked: Set<String>) -> SessionListPresentationState {
+        guard !blocked.isEmpty else { return self }
+        let ids = Set(blocked.map { $0.lowercased() })
+        var shown = self
+        shown.rows = rows.filter { row in
+            guard let counterpart = row.counterpart else { return true }
+            return !ids.contains(counterpart.senderId.lowercased())
+        }
+        shown.resultCount = max(0, resultCount - (rows.count - shown.rows.count))
+        return shown
     }
 }
 
@@ -224,7 +238,8 @@ public struct SessionActivityPresentationState: Equatable, Sendable {
         actionPage: SessionActionPage,
         provenance: SessionPresentationProvenance,
         isRefreshing: Bool = false,
-        failure: SessionLoadFailure? = nil
+        failure: SessionLoadFailure? = nil,
+        blockedAuthorIds: Set<String> = []
     ) {
         let eventSessionsMatch = eventPage.events.allSatisfy {
             OpaqueUTF8Identity.matches($0.sessionId, sessionId)
@@ -264,8 +279,10 @@ public struct SessionActivityPresentationState: Equatable, Sendable {
             return
         }
 
-        self.events = eventPage.events.map(SessionEventRowPresentation.init)
-        self.actions = actionPage.actions.map(SessionActionRowPresentation.init)
+        // Someone you blocked: their messages and replies show as one line here too, as in the room.
+        let blocked = Set(blockedAuthorIds.map { $0.lowercased() })
+        self.events = eventPage.events.map { SessionEventRowPresentation($0, blocked: blocked) }
+        self.actions = actionPage.actions.map { SessionActionRowPresentation($0, blocked: blocked) }
         self.failure = failure
     }
 }
@@ -294,7 +311,7 @@ public struct SessionEventRowPresentation: Equatable, Identifiable, Sendable {
     public let text: String?
     public let timestamp: ParsedSessionTimestamp
 
-    fileprivate init(_ event: SessionEventDTO) {
+    fileprivate init(_ event: SessionEventDTO, blocked: Set<String> = []) {
         self.id = ID(sessionId: event.sessionId, eventId: event.id)
         self.sessionId = event.sessionId
         self.sequenceId = event.sequenceId
@@ -302,7 +319,8 @@ public struct SessionEventRowPresentation: Equatable, Identifiable, Sendable {
         self.author = event.agent["displayName"]?.stringValue.pocketNonblank
             ?? event.agentId.pocketNonblank
             ?? "Unknown participant"
-        self.text = event.payload["text"]?.stringValue.pocketNonblank
+        let text = event.payload["text"]?.stringValue.pocketNonblank
+        self.text = text != nil && blocked.contains(event.agentId.lowercased()) ? RoomBlocking.hiddenLine : text
         self.timestamp = ParsedSessionTimestamp(event.ts)
     }
 
@@ -333,13 +351,14 @@ public struct SessionActionRowPresentation: Equatable, Identifiable, Sendable {
     public let note: String?
     public let createdAt: ParsedSessionTimestamp
 
-    fileprivate init(_ action: SessionActionDTO) {
+    fileprivate init(_ action: SessionActionDTO, blocked: Set<String> = []) {
         self.id = ID(sessionId: action.sessionId, actionId: action.id)
         self.sessionId = action.sessionId
         self.targetSequenceId = action.targetSequenceId
         self.actionType = action.actionType
         self.actor = action.actorId.pocketNonblank ?? "Unknown participant"
-        self.note = action.note.pocketNonblank
+        let note = action.note.pocketNonblank
+        self.note = note != nil && blocked.contains(action.actorId.lowercased()) ? RoomBlocking.hiddenLine : note
         self.createdAt = ParsedSessionTimestamp(action.createdAt)
     }
 

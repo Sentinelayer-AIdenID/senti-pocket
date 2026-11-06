@@ -168,6 +168,7 @@ final class DialHostTests: XCTestCase {
                 }
                 return ring
             },
+            mayShareWithAI: { true },
             runDial: runDial,
             endCall: endCall
         )
