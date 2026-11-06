@@ -1193,8 +1193,8 @@ final class RoomChatCoordinator: ObservableObject {
     }
 
     /// What one tap sends: the reaction itself, after taking back the opposite one you hold (like and dislike are
-    /// exclusive). An unlike, undislike or acknowledgement is sent as it is.
-    static func reactionWrites(_ type: String, liked: Bool, disliked: Bool) -> [String] {
+    /// exclusive). An unlike, undislike or acknowledgement is sent as it is. A pure rule, callable from anywhere.
+    nonisolated static func reactionWrites(_ type: String, liked: Bool, disliked: Bool) -> [String] {
         switch type {
         case "like" where disliked: return ["undislike", "like"]
         case "dislike" where liked: return ["unlike", "dislike"]
