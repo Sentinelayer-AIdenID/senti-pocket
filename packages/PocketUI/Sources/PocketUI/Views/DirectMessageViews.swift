@@ -20,10 +20,34 @@ struct RoomProfileAvatar: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("\(name)'s profile")
-            .accessibilityHint("Opens their card, to message them directly")
+            .accessibilityHint(opener.opensEveryone ? "Opens their profile and messages" : "Opens their card, to message them directly")
             .accessibilityIdentifier("pocket.room.avatar.\(senderId)")
         } else {
             RoomAvatar(name: name, isHuman: isHuman, size: size)
+        }
+    }
+}
+
+/// A message's author name: where profiles open, a tap opens their profile and messages, as their avatar does.
+struct RoomProfileName<Content: View>: View {
+    let senderId: String
+    let name: String
+    let isHuman: Bool
+    @ViewBuilder let label: () -> Content
+    @Environment(\.roomProfileOpener) private var opener
+
+    var body: some View {
+        if let opener, opener.opensEveryone, opener.opens(senderId) {
+            Button {
+                opener(RoomProfileTarget(senderId: senderId, name: name, isAgent: !isHuman))
+            } label: {
+                label()
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Opens their profile and messages")
+            .accessibilityIdentifier("pocket.room.name.\(senderId)")
+        } else {
+            label()
         }
     }
 }
