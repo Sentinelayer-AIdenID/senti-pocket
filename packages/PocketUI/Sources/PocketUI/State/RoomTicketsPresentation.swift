@@ -315,6 +315,19 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
         id.hasPrefix("human-") ? String(id.dropFirst("human-".count)) : id
     }
 
+    /// The lease, in words that cannot be misread: who holds it and until when ("Held by alex until 9:41 PM"), or that it
+    /// lapsed. A lapsed lease names its last holder only when the room names them, as the web's chip does: "Lease
+    /// expired · was alex", "Lease expired · was you", and "Lease expired" alone for someone the room does not name.
+    public func leaseLine(viewerId: String?, viewerLogin: String? = nil, names: [String: String] = [:],
+                          time: (Date) -> String = { $0.formatted(date: .omitted, time: .shortened) }) -> String? {
+        guard let lease else { return nil }
+        let holder = Self.ticketPerson(lease.holder, viewerId: viewerId, viewerLogin: viewerLogin, names: names)
+        let who = holder.isViewer ? "you" : holder.name
+        guard lease.isLive else { return who.map { "Lease expired · was \($0)" } ?? "Lease expired" }
+        guard let until = lease.expiresAt else { return "Held by \(who ?? "a person")" }
+        return "Held by \(who ?? "a person") until \(time(until))"
+    }
+
     /// Someone on a ticket the way the room names them: "you", a person by the name the room's member directory gives
     /// them, an agent by its id, and a person the directory does not know as "a person", never by an id.
     public static func actorLabel(_ id: String, viewerId: String?, viewerLogin: String? = nil,

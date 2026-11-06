@@ -809,6 +809,7 @@ struct RoomTicketLinkScreen: View {
                 writeStatus: state.ticketWriteStatus[row.id],
                 assignChoices: state.assignChoices,
                 viewerId: state.viewerId,
+                viewerLogin: state.viewerLogin,
                 names: state.personNames,
                 comments: state.comments[row.id],
                 canComment: state.canFileTickets,

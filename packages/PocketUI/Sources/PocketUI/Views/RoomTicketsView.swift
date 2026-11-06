@@ -86,6 +86,7 @@ public struct RoomTicketsView: View {
                         writeStatus: state.ticketWriteStatus[row.id],
                         assignChoices: state.assignChoices,
                         viewerId: state.viewerId,
+                        viewerLogin: state.viewerLogin,
                         names: state.personNames,
                         comments: state.comments[row.id],
                         canComment: state.canFileTickets,
@@ -265,6 +266,7 @@ public struct RoomTicketDetailView: View {
     var writeStatus: String?
     var assignChoices: [RoomTicketAssignChoice] = []
     var viewerId: String?
+    var viewerLogin: String?
     var names: [String: String] = [:]
     var comments: [RoomTicketCommentRow]?
     var canComment = false
@@ -288,6 +290,7 @@ public struct RoomTicketDetailView: View {
         writeStatus: String? = nil,
         assignChoices: [RoomTicketAssignChoice] = [],
         viewerId: String? = nil,
+        viewerLogin: String? = nil,
         names: [String: String] = [:],
         comments: [RoomTicketCommentRow]? = nil,
         canComment: Bool = false,
@@ -305,6 +308,7 @@ public struct RoomTicketDetailView: View {
         self.writeStatus = writeStatus
         self.assignChoices = assignChoices
         self.viewerId = viewerId
+        self.viewerLogin = viewerLogin
         self.names = names
         self.comments = comments
         self.canComment = canComment
@@ -380,11 +384,7 @@ public struct RoomTicketDetailView: View {
 
     /// The lease, in words that cannot be misread: who holds it and until when, or that it lapsed.
     private var leaseLine: String? {
-        guard let lease = row.lease else { return nil }
-        let who = RoomTicketRow.actorLabel(lease.holder, viewerId: viewerId, names: names)
-        guard lease.isLive else { return "Lease expired · was \(who)" }
-        guard let until = lease.expiresAt else { return "Held by \(who)" }
-        return "Held by \(who) until \(until.formatted(date: .omitted, time: .shortened))"
+        row.leaseLine(viewerId: viewerId, viewerLogin: viewerLogin, names: names)
     }
 
     @ViewBuilder

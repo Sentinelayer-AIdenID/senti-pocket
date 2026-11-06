@@ -82,6 +82,27 @@ final class RoomTicketStepCasesTests: XCTestCase {
         }
     }
 
+    /// A lapsed lease names its last holder only when the room names them, as the web's chip does (warden, #753).
+    func test_a_lapsed_lease_names_its_holder_only_when_the_room_does() throws {
+        let (_, table) = try loadTable()
+        func line(_ holder: String, live: Bool = false, until: Date? = nil) -> String? {
+            RoomTicketRow(id: "t", title: "T", status: "working",
+                          lease: RoomTicketInput.Lease(holder: holder, isLive: live, expiresAt: until))
+                .leaseLine(viewerId: table.viewer.accountId, viewerLogin: table.viewer.githubLogin, names: table.names,
+                           time: { _ in "9:41 PM" })
+        }
+        XCTAssertEqual(line("human-g.000000000000400080000000000000bb"), "Lease expired", "someone the room does not name")
+        XCTAssertEqual(line("human-g.0000000000004000800000000000aaaa"), "Lease expired · was Priya")
+        XCTAssertEqual(line("human-alex"), "Lease expired · was alex")
+        XCTAssertEqual(line("human-g.000000000000400080000000000000cc"), "Lease expired · was you", "the viewer, by account")
+        XCTAssertEqual(line("human-sam"), "Lease expired · was you", "the viewer, by login")
+        XCTAssertEqual(line("build-agent"), "Lease expired · was build-agent")
+        XCTAssertEqual(line("human-g.000000000000400080000000000000bb", live: true), "Held by a person")
+        XCTAssertEqual(line("human-g.0000000000004000800000000000aaaa", live: true, until: Date(timeIntervalSince1970: 0)),
+                       "Held by Priya until 9:41 PM")
+        XCTAssertNil(RoomTicketRow(id: "t", title: "T", status: "open").leaseLine(viewerId: nil), "no lease, no line")
+    }
+
     /// The same reading names people everywhere on a ticket ("Held by", "Assigned to"): never an account's hex.
     func test_a_person_on_a_ticket_is_never_shown_by_id() throws {
         let (_, table) = try loadTable()
