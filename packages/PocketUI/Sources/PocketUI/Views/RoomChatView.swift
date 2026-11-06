@@ -1131,9 +1131,7 @@ private struct RoomMessageRowView: View {
     /// while it is read aloud.
     private func messageChrome<Content: View>(_ content: Content) -> some View {
         content
-        .overlay(alignment: .topTrailing) {
-            if isReadingAloud { RoomReadingAloudMark { send(.stopReadingAloud) } }
-        }
+        .readingAloudMark(isReadingAloud) { send(.stopReadingAloud) }
         .offset(x: swipe)
         .background(alignment: .leading) {
             // Revealed by the swipe: the reply arrow, filled once letting go would open the reply.
@@ -2125,10 +2123,8 @@ private struct RoomThreadSheet: View {
                         .onAppear { send(.replyOnScreen(id: reply.id, isOnScreen: true)) }
                         .onDisappear { send(.replyOnScreen(id: reply.id, isOnScreen: false)) }
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .overlay(alignment: .topTrailing) {
-                            if readingAloudId == RoomReadAloud.reply(reply.id) {
-                                RoomReadingAloudMark { send(.stopReadingAloud) }
-                            }
+                        .readingAloudMark(readingAloudId == RoomReadAloud.reply(reply.id)) {
+                            send(.stopReadingAloud)
                         }
                         .contentShape(Rectangle())
                         .contextMenu { replyMenu(reply) }
@@ -3258,6 +3254,22 @@ private struct RoomViewedLine: View {
 }
 
 /// On the message or reply being read aloud: it shows that, and a tap stops the reading.
+private extension View {
+    /// The mark on a message or reply while it is read aloud, at its top-trailing corner. It sits in a plain layer over
+    /// the message and is aligned inside that layer, so placing it asks the message's own stacks for nothing. Aligned to
+    /// the message itself, it asked every stack inside for its top-trailing corner, and Carter's phone was in that
+    /// query, laying stacks out, for 19 s after a Read aloud (11-05).
+    func readingAloudMark(_ shown: Bool, onStop: @escaping () -> Void) -> some View {
+        overlay {
+            Color.clear
+                .allowsHitTesting(false)
+                .overlay(alignment: .topTrailing) {
+                    if shown { RoomReadingAloudMark(onStop: onStop) }
+                }
+        }
+    }
+}
+
 private struct RoomReadingAloudMark: View {
     let onStop: () -> Void
 
