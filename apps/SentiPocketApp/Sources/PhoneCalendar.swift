@@ -12,8 +12,9 @@ import UIKit
 //   phone sends 7 days back to 30 ahead (title, start, end, all-day, place, calendar name; never notes, attendees or
 //   links) when the app opens and when the phone's calendar changes, at most once a minute, and never the same body
 //   twice. The server forgets everything (DELETE) whenever sharing stops: the switch turned off, the last calendar
-//   unticked, or calendar access turned off in iOS Settings. A DELETE that did not go is sent again before anything
-//   else, and nothing is sent until it has gone.
+//   unticked, or calendar access turned off in iOS Settings (then once, with the switch left as the person set it, in
+//   sight, and sharing starts again by itself when access comes back). A DELETE that did not go is sent again before
+//   anything else, and nothing is sent until it has gone.
 // Both hide while the server's flag answers 404 (`DeviceCalendarServing`). The switch and the picks are the signed-in
 // account's own: another sign-in on the phone starts with the switch off.
 
@@ -189,6 +190,8 @@ final class EventKitPhoneCalendar: PhoneCalendarStore {
     /// the phone. Any left by an earlier run is removed first. Needs calendar access; nil without it.
     static let seedTitle = "Site visit (made up)"
     private var seedIdentifier: String?
+    /// The calendar the made-up event is in, for the device test to tick.
+    private(set) var seedCalendarId: String?
     private var seedRenames = 0
 
     func seedForPreview(now: Date) {
@@ -207,6 +210,7 @@ final class EventKitPhoneCalendar: PhoneCalendarStore {
         event.url = URL(string: "https://meet.example.test/room-7")
         try? store.save(event, span: .thisEvent, commit: true)
         seedIdentifier = event.eventIdentifier
+        seedCalendarId = calendar.calendarIdentifier
     }
 
     /// Renames the made-up event, as an edit on the phone would: the phone's calendar changes.
@@ -238,6 +242,9 @@ final class PhoneCalendarCenter: ObservableObject {
     /// A forget that has not gone yet: sent again first, and nothing is sent until it has gone. While it waits, the
     /// switch stays in sight, whatever iOS lets Pocket read.
     @Published private(set) var forgetPending = false
+    /// The server holds nothing of this person's: the last word it had was a DELETE (none sent since). With calendar
+    /// access gone, the server is told to forget once, not at every app open.
+    private(set) var serverForgot = false
 
     /// The least time between two sends.
     static let spacing: TimeInterval = 60
@@ -454,11 +461,11 @@ final class PhoneCalendarCenter: ObservableObject {
         requestSend()
     }
 
-    /// Calendar access went (turned off in iOS Settings, or reset) while sharing: sharing stops, and the server is to
-    /// forget what it has.
+    /// Calendar access went (turned off in iOS Settings, or reset) while sharing: the server is to forget what it has,
+    /// once. The switch stays as the person set it, in sight, so it can be turned off, and sharing starts again by
+    /// itself when access comes back.
     private func accessWent() {
-        guard sharesWithAgents else { return }
-        sharesWithAgents = false
+        guard sharesWithAgents, !serverForgot, !forgetPending else { return }
         forgetPending = true
         save()
     }
@@ -486,6 +493,8 @@ final class PhoneCalendarCenter: ObservableObject {
         do {
             _ = try await client.putDeviceEvents(upload, idempotencyKey: UUID().uuidString)
             lastSentBody = body
+            serverForgot = false
+            save()
             notice = nil
         } catch CalendarError.unavailable {
             wentAway()
@@ -499,6 +508,7 @@ final class PhoneCalendarCenter: ObservableObject {
         do {
             try await client.deleteDeviceEvents()
             forgetPending = false
+            serverForgot = true
             lastSentBody = nil
             notice = nil
         } catch CalendarError.unavailable {
@@ -529,16 +539,19 @@ final class PhoneCalendarCenter: ObservableObject {
         sharesWithAgents = key("shares").map(defaults.bool(forKey:)) ?? false
         sharedCalendarIds = Set(key("calendars").flatMap(defaults.stringArray(forKey:)) ?? [])
         forgetPending = key("forget").map(defaults.bool(forKey:)) ?? false
+        serverForgot = key("forgot").map(defaults.bool(forKey:)) ?? false
         lastSend = nil
         lastSentBody = nil
         return true
     }
 
     private func save() {
-        guard let shares = key("shares"), let picks = key("calendars"), let forget = key("forget") else { return }
+        guard let shares = key("shares"), let picks = key("calendars"), let forget = key("forget"),
+              let forgot = key("forgot") else { return }
         defaults.set(sharesWithAgents, forKey: shares)
         defaults.set(sharedCalendarIds.sorted(), forKey: picks)
         defaults.set(forgetPending, forKey: forget)
+        defaults.set(serverForgot, forKey: forgot)
     }
 }
 

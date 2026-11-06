@@ -2,10 +2,10 @@
 import XCTest
 
 /// Ticket 9583d41e, the device checks of the privacy review: Pocket's own calendar on the simulator's real calendar
-/// (calendar access granted to the app beforehand), with a made-up event that has notes and a link, and every request
-/// to the device-events routes recorded by the app's stand-in server (`-PocketCalendarStage connect`). Nothing is sent
-/// before the switch is on; a send carries only the contract's keys, never the notes or the link; edits inside a
-/// minute make at most one send a minute; off sends DELETE; and the app holds one EventKit store.
+/// (calendar access is granted to the app, or taken back, by the runner around each test), with a made-up event that
+/// has notes and a link, and every request to the device-events routes recorded by the app's stand-in server
+/// (`-PocketCalendarStage connect`). The runner calls them in order: `test_1` to `test_3` with access granted; then,
+/// with access revoked, `test_4`; then, with access granted again, `test_5` and `test_6`.
 final class CalendarConnectUITests: XCTestCase {
     private static let bodyKeys: Set<String> = ["source", "windowStart", "windowEnd", "events"]
     private static let eventKeys: Set<String> = ["id", "calendar", "title", "start", "end", "allDay", "location"]
@@ -17,8 +17,13 @@ final class CalendarConnectUITests: XCTestCase {
         let line: String
     }
 
-    private func sent(_ path: String) -> [Sent] {
-        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return [] }
+    private var capture: String {
+        let dir = ProcessInfo.processInfo.environment["CAL_SHOT_DIR"] ?? NSTemporaryDirectory()
+        return (dir as NSString).appendingPathComponent("calendar-capture.jsonl")
+    }
+
+    private func sent() -> [Sent] {
+        guard let text = try? String(contentsOfFile: capture, encoding: .utf8) else { return [] }
         let iso = ISO8601DateFormatter()
         return text.split(separator: "\n").compactMap { line in
             guard let data = String(line).data(using: .utf8),
@@ -29,72 +34,98 @@ final class CalendarConnectUITests: XCTestCase {
         }
     }
 
-    private func waitFor(_ path: String, _ method: String, count: Int, timeout: TimeInterval) -> [Sent] {
+    private func waitFor(_ method: String, count: Int, timeout: TimeInterval) -> [Sent] {
         let end = Date().addingTimeInterval(timeout)
         while Date() < end {
-            let found = sent(path).filter { $0.method == method }
+            let found = sent().filter { $0.method == method }
             if found.count >= count { return found }
             sleep(1)
         }
-        return sent(path).filter { $0.method == method }
+        return sent().filter { $0.method == method }
     }
 
-    func test_sharing_sends_only_the_contracts_keys_at_most_once_a_minute_and_off_deletes() throws {
-        let dir = ProcessInfo.processInfo.environment["CAL_SHOT_DIR"] ?? NSTemporaryDirectory()
-        let capture = (dir as NSString).appendingPathComponent("calendar-capture.jsonl")
+    /// The preview, its capture emptied first. `fresh` starts the switch and the picks afresh; without it they are
+    /// kept from the launch before.
+    private func launch(fresh: Bool, seed: Bool = true) -> XCUIApplication {
         try? FileManager.default.removeItem(atPath: capture)
         let app = XCUIApplication()
-        app.launchArguments = ["-PocketCalendarPreview", "-PocketCalendarStage", "connect", "-PocketCalendarSeedEvent"]
+        app.launchArguments = ["-PocketCalendarPreview", "-PocketCalendarStage", "connect"]
+            + (fresh ? ["-PocketCalendarFresh"] : []) + (seed ? ["-PocketCalendarSeedEvent"] : [])
         app.launchEnvironment["CAL_CAPTURE_FILE"] = capture
         app.launch()
+        return app
+    }
 
+    /// Taps a toggle on its switch, at its trailing edge (a tap in its middle lands on its words, which do not flip
+    /// it), and waits for its value; if that missed, the switch inside it.
+    private func flip(_ toggle: XCUIElement, to value: String) {
+        toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.94, dy: 0.5)).tap()
+        let end = Date().addingTimeInterval(5)
+        while (toggle.value as? String) != value, Date() < end { usleep(200_000) }
+        if (toggle.value as? String) != value { toggle.switches.firstMatch.tap() }
+        XCTAssertEqual(toggle.value as? String, value, "the switch flipped")
+    }
+
+    /// Switch on, then the made-up event's own calendar ticked in Calendars to share (never just the first row), and
+    /// back: the first PUT.
+    private func shareTheSeedCalendar(_ app: XCUIApplication) -> XCUIElement {
+        let share = app.switches["pocket.calendar.share"]
+        XCTAssertTrue(share.waitForExistence(timeout: 60), "connected: the switch is on the calendar screen\n\(app.debugDescription)")
+        let seed = app.staticTexts["pocket.debug.seedCalendar"]
+        XCTAssertTrue(seed.waitForExistence(timeout: 10))
+        let calendarId = seed.label
+        XCTAssertNotEqual(calendarId, "none", "the made-up event was added")
+        flip(share, to: "1")
+        let calendars = app.buttons["pocket.calendar.calendars"]
+        XCTAssertTrue(calendars.waitForExistence(timeout: 10), "Calendars to share, once the switch is on")
+        calendars.tap()
+        let row = app.buttons["settings.phoneCalendar.calendar.\(calendarId)"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10), "the made-up event's calendar is offered\n\(app.debugDescription)")
+        XCTAssertFalse(row.isSelected)
+        row.tap()
+        XCTAssertTrue(row.isSelected, "VoiceOver reads a picked calendar as selected")
+        print("CALCONNECT ticked calendar=\(calendarId) label=\(row.label)")
+        return row
+    }
+
+    /// 1. Nothing but the flag's read before the switch is on; the first send has only the contract's keys, the
+    /// made-up event among them and never its notes or link; four edits in the minute make one more send, at least
+    /// 59 s after; off sends DELETE; one EventKit store. VoiceOver reads the switch by its words.
+    func test_1_sharing_sends_only_the_contracts_keys_at_most_once_a_minute_and_off_deletes() throws {
+        let app = launch(fresh: true)
         let share = app.switches["pocket.calendar.share"]
         XCTAssertTrue(share.waitForExistence(timeout: 60), "connected: the switch is on the calendar screen\n\(app.debugDescription)")
         XCTAssertEqual(share.label, "Let my agents see my calendar", "VoiceOver reads the switch by its words")
         XCTAssertEqual(share.value as? String, "0", "off until it is turned on")
         sleep(3)
-        XCTAssertTrue(sent(capture).filter { $0.method != "GET" }.isEmpty, "nothing is sent before the switch is on")
-        XCTAssertFalse(sent(capture).isEmpty, "the flag was read (an empty window)")
+        XCTAssertTrue(sent().filter { $0.method != "GET" }.isEmpty, "only reads before the switch is on")
+        XCTAssertFalse(sent().isEmpty, "the flag was read (an empty window)")
         shot("1-connected")
 
-        share.tap()
-        XCTAssertEqual(share.value as? String, "1")
-        let calendars = app.buttons["pocket.calendar.calendars"]
-        XCTAssertTrue(calendars.waitForExistence(timeout: 10), "Calendars to share, once the switch is on")
-        sleep(2)
-        XCTAssertTrue(sent(capture).filter { $0.method == "PUT" }.isEmpty, "none picked: nothing is sent")
-        calendars.tap()
-        let row = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@",
-                                                   "settings.phoneCalendar.calendar.")).firstMatch
-        XCTAssertTrue(row.waitForExistence(timeout: 10), "the phone's calendars to pick")
-        XCTAssertFalse(row.isSelected)
-        row.tap()
-        XCTAssertTrue(row.isSelected, "VoiceOver reads a picked calendar as selected")
-        shot("2-picked")
+        _ = shareTheSeedCalendar(app)
+        shot("1-picked")
         app.navigationBars.buttons.element(boundBy: 0).tap()
-
-        let firstPut = waitFor(capture, "PUT", count: 1, timeout: 20)
+        let firstPut = waitFor("PUT", count: 1, timeout: 20)
         XCTAssertEqual(firstPut.count, 1, "the picked calendar is sent")
         let put = try XCTUnwrap(firstPut.first)
         let body = try XCTUnwrap(put.body)
         XCTAssertEqual(Set(body.keys), Self.bodyKeys)
         let events = try XCTUnwrap(body["events"] as? [[String: Any]])
-        XCTAssertFalse(events.isEmpty, "the made-up event is in it")
+        XCTAssertFalse(events.isEmpty)
         for event in events {
             XCTAssertEqual(Set(event.keys), Self.eventKeys, "exactly the contract's keys")
         }
-        XCTAssertTrue(put.line.contains("Site visit (made up)"))
+        XCTAssertTrue(put.line.contains("Site visit (made up)"), "the made-up event is in it")
         XCTAssertFalse(put.line.contains("blue folder"), "notes never leave the phone")
         XCTAssertFalse(put.line.contains("meet.example.test"), "links never leave the phone")
-        print("CALCONNECT put keys=\(body.keys.sorted()) events=\(events.count) eventKeys=\(events.first.map { $0.keys.sorted() } ?? [])")
+        print("CALCONNECT put keys=\(body.keys.sorted()) events=\(events.count)")
 
-        // Four edits inside the minute: one more send, at the minute.
         let edit = app.buttons["pocket.debug.editSeed"]
         for _ in 0..<4 {
             edit.tap()
             sleep(5)
         }
-        let puts = waitFor(capture, "PUT", count: 2, timeout: 75)
+        let puts = waitFor("PUT", count: 2, timeout: 75)
         XCTAssertEqual(puts.count, 2, "edits inside a minute make one more send")
         if puts.count >= 2 {
             let gap = puts[1].at.timeIntervalSince(puts[0].at)
@@ -103,14 +134,76 @@ final class CalendarConnectUITests: XCTestCase {
             print("CALCONNECT second put after \(gap) s")
         }
         sleep(5)
-        XCTAssertEqual(sent(capture).filter { $0.method == "PUT" }.count, 2, "and no more")
+        XCTAssertEqual(sent().filter { $0.method == "PUT" }.count, 2, "and no more")
 
-        share.tap()
-        let deletes = waitFor(capture, "DELETE", count: 1, timeout: 20)
+        flip(share, to: "0")
+        let deletes = waitFor("DELETE", count: 1, timeout: 20)
         XCTAssertEqual(deletes.count, 1, "off: the server is told to forget")
         XCTAssertEqual(app.staticTexts["pocket.debug.stores"].label, "EventKit stores: 1", "one EventKit store")
-        shot("3-off")
-        print("CALCONNECT requests=\(sent(capture).map { $0.method })")
+        shot("1-off")
+        print("CALCONNECT test1 requests=\(sent().map { $0.method })")
+    }
+
+    /// 2. Unticking the last calendar while sharing: a DELETE goes.
+    func test_2_unticking_the_last_calendar_sends_delete() throws {
+        let app = launch(fresh: true)
+        let row = shareTheSeedCalendar(app)
+        XCTAssertEqual(waitFor("PUT", count: 1, timeout: 20).count, 1)
+        row.tap()
+        XCTAssertFalse(row.isSelected)
+        XCTAssertEqual(waitFor("DELETE", count: 1, timeout: 20).count, 1, "the last calendar unticked: the server forgets")
+        shot("2-unticked")
+        print("CALCONNECT test2 requests=\(sent().map { $0.method })")
+    }
+
+    /// 3. Sharing left on, with the made-up event's calendar picked, for the runner to take calendar access back.
+    func test_3_sharing_is_left_on_for_the_access_check() throws {
+        let app = launch(fresh: true)
+        _ = shareTheSeedCalendar(app)
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertEqual(waitFor("PUT", count: 1, timeout: 20).count, 1)
+        print("CALCONNECT test3 requests=\(sent().map { $0.method })")
+        app.terminate()
+    }
+
+    /// 4. After the runner took calendar access back: a relaunch sends DELETE by itself, and the switch stays in sight,
+    /// on, so it can be turned off.
+    func test_4_after_access_was_taken_back_a_delete_goes_and_the_switch_stays() throws {
+        let app = launch(fresh: false, seed: false)
+        XCTAssertEqual(waitFor("DELETE", count: 1, timeout: 30).count, 1, "access went: the server forgets")
+        let share = app.switches["pocket.calendar.share"]
+        XCTAssertTrue(share.waitForExistence(timeout: 10), "the switch stays in sight\n\(app.debugDescription)")
+        XCTAssertEqual(share.value as? String, "1", "as the person set it")
+        XCTAssertTrue(sent().filter { $0.method == "PUT" }.isEmpty, "nothing is sent without access")
+        shot("4-access-taken-back")
+        print("CALCONNECT test4 requests=\(sent().map { $0.method })")
+        app.terminate()
+    }
+
+    /// 5. Access granted again: sharing is on with a calendar picked, for the cold launches.
+    func test_5_sharing_is_on_again_for_the_cold_launches() throws {
+        let app = launch(fresh: true)
+        _ = shareTheSeedCalendar(app)
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertEqual(waitFor("PUT", count: 1, timeout: 20).count, 1)
+        app.terminate()
+    }
+
+    /// 6. Three cold launches with access granted and sharing on: never a DELETE.
+    func test_6_three_cold_launches_with_access_send_no_delete() throws {
+        var methods: [String] = []
+        for launchNumber in 1...3 {
+            let app = launch(fresh: false, seed: false)
+            let share = app.switches["pocket.calendar.share"]
+            XCTAssertTrue(share.waitForExistence(timeout: 60))
+            XCTAssertEqual(share.value as? String, "1")
+            sleep(6)
+            let now = sent().map { $0.method }
+            XCTAssertFalse(now.contains("DELETE"), "cold launch \(launchNumber): no DELETE: \(now)")
+            methods += now
+            app.terminate()
+        }
+        print("CALCONNECT test6 requests=\(methods)")
     }
 
     /// Saves a screenshot where `CAL_SHOT_DIR` points (set by the runner), for the review evidence.

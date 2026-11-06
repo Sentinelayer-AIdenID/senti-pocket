@@ -80,11 +80,14 @@ enum RoomCalendarPreview {
     /// EventKit store and the real device-events client. Its requests go to a stand-in server inside the app
     /// (`DeviceCalendarRecorder`), which answers as the API does and writes each request to `CAL_CAPTURE_FILE`.
     /// `-PocketCalendarSeedEvent` first adds a made-up event with notes and a link; "Edit the made-up event" renames
-    /// it. The switch starts off on every launch.
+    /// it. The switch and the picks start afresh with `-PocketCalendarFresh`, and are kept from the launch before
+    /// without it.
     private struct ConnectPreview: View {
         @MainActor static let phone: PhoneCalendarCenter = {
             let defaults = UserDefaults(suiteName: "phone-calendar-preview") ?? .standard
-            defaults.removePersistentDomain(forName: "phone-calendar-preview")
+            if ProcessInfo.processInfo.arguments.contains("-PocketCalendarFresh") {
+                defaults.removePersistentDomain(forName: "phone-calendar-preview")
+            }
             let configuration = URLSessionConfiguration.ephemeral
             configuration.protocolClasses = [DeviceCalendarRecorder.self]
             let client = HTTPRoomCalendarClient(apiBaseURL: URL(string: "https://api.preview.invalid"),
@@ -97,6 +100,8 @@ enum RoomCalendarPreview {
                                                       vault: PreviewLinks(), person: { "preview-person" },
                                                       openURL: { _ in false }, phone: phone)
 
+        @State private var seedCalendar = "none"
+
         var body: some View {
             NavigationStack {
                 CalendarAgendaScreen(center: Self.center, rooms: [], onReauthenticationRequired: {})
@@ -108,6 +113,8 @@ enum RoomCalendarPreview {
                     Spacer()
                     Text("EventKit stores: \(EventKitPhoneCalendar.made)")
                         .accessibilityIdentifier("pocket.debug.stores")
+                    Text(seedCalendar)
+                        .accessibilityIdentifier("pocket.debug.seedCalendar")
                 }
                 .font(.caption)
                 .padding(8)
@@ -116,6 +123,7 @@ enum RoomCalendarPreview {
             .task {
                 if ProcessInfo.processInfo.arguments.contains("-PocketCalendarSeedEvent") {
                     EventKitPhoneCalendar.shared.seedForPreview(now: Date())
+                    seedCalendar = EventKitPhoneCalendar.shared.seedCalendarId ?? "none"
                 }
                 await Self.phone.appOpened()
             }

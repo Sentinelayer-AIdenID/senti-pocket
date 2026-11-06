@@ -178,6 +178,9 @@ struct PhoneCalendarCard: View {
     private var words: String {
         var words: [String] = []
         if let notice = phone.notice { words.append(notice) }
+        if phone.access != .granted, phone.sharesWithAgents {
+            words.append(PhoneCalendarSettingsSection.pausedWords)
+        }
         words.append(PhoneCalendarSettingsSection.agentsWords)
         if phone.sharesWithAgents, phone.pickedCount == 0 { words.append(PhoneCalendarSettingsSection.pickWords) }
         words.append(Self.accountsWords)
@@ -198,6 +201,8 @@ struct PhoneCalendarSettingsSection: View {
 
     static let agentsWords = "Your agents can see the titles and times of your shared calendars. Turn this off any time."
     static let pickWords = "Pick the calendars to share."
+    static let pausedWords = "Nothing is shared while Pocket can't see your calendar. Your agents see it again once "
+        + "Calendars is back on for Senti Pocket."
     static let connectWords = "Your phone's events show in your calendar here. Nothing is sent unless you turn on "
         + "Let my agents see my calendar."
 
@@ -255,6 +260,7 @@ struct PhoneCalendarSettingsSection: View {
             words.append(Self.agentsWords)
             if phone.sharesWithAgents, phone.pickedCount == 0 { words.append(Self.pickWords) }
         default:
+            if phone.sharesWithAgents { words.append(Self.pausedWords) }
             if phone.showsSharing { words.append(Self.agentsWords) }
         }
         return words.joined(separator: " ")

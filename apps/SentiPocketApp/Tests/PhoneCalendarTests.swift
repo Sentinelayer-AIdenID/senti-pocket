@@ -318,9 +318,10 @@ final class PhoneCalendarTests: XCTestCase {
         XCTAssertEqual(Set(client.puts.last?.events.map(\.calendar) ?? []), ["Home"])
     }
 
-    /// Turning calendar access off in iOS Settings while sharing stops sharing and the server forgets, by itself, the
-    /// next time the app opens. While a forget has not gone, the switch stays in sight.
-    func test_turning_calendar_access_off_stops_sharing_and_the_server_forgets() async {
+    /// Turning calendar access off in iOS Settings while sharing makes the server forget, by itself, the next time the
+    /// app opens: once, however often it opens after. The switch stays as the person set it, in sight so it can be
+    /// turned off, and sharing starts again by itself when access comes back.
+    func test_turning_calendar_access_off_makes_the_server_forget_once_and_keeps_the_switch() async {
         let store = FakePhoneCalendar(start: clock)
         let client = FakeDeviceCalendar()
         let phone = await connected(store, client)
@@ -335,18 +336,29 @@ final class PhoneCalendarTests: XCTestCase {
         await phone.appOpened()
         await phone.idle()
         XCTAssertEqual(client.deletes, 1, "access went: the server is told to forget")
-        XCTAssertFalse(phone.sharesWithAgents)
         XCTAssertTrue(phone.forgetPending)
-        XCTAssertTrue(phone.showsSharing, "the switch stays in sight while the forget has not gone")
+        XCTAssertTrue(phone.sharesWithAgents, "the switch stays as the person set it")
+        XCTAssertTrue(phone.showsSharing, "and in sight, so it can be turned off")
 
         client.failForgets(false)
         clock.addTimeInterval(120)
         await phone.appOpened()
         await phone.idle()
-        XCTAssertEqual(client.deletes, 2)
+        XCTAssertEqual(client.deletes, 2, "the forget that did not go goes first")
         XCTAssertFalse(phone.forgetPending)
-        XCTAssertFalse(phone.showsSharing, "nothing shared, nothing to stop")
+        XCTAssertTrue(phone.showsSharing)
+
+        clock.addTimeInterval(120)
+        await phone.appOpened()
+        await phone.idle()
+        XCTAssertEqual(client.deletes, 2, "once: not again at every app open")
         XCTAssertEqual(client.puts.count, 1, "nothing is sent without access")
+
+        store.access = .granted
+        clock.addTimeInterval(120)
+        await phone.appOpened()
+        await phone.idle()
+        XCTAssertEqual(client.puts.count, 2, "access back: sharing starts again by itself")
     }
 
     /// A send whose body is the same as the last one the server took is not sent again.
