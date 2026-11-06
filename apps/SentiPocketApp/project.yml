@@ -80,6 +80,10 @@ targets:
         NSCameraUsageDescription: "Senti Pocket uses the camera when you take a photo or video to share in a room."
         # The share sheet's "Save Image" / "Save Video" for a photo or video opened from a room.
         NSPhotoLibraryAddUsageDescription: "Senti Pocket saves a photo or video from a room to your library when you choose Save."
+        # Connect my calendar: the phone's events shown in Pocket's own calendar (iOS 17 asks with the first key, iOS 16
+        # with the second). Nothing is sent unless the person turns on Let my agents see my calendar.
+        NSCalendarsFullAccessUsageDescription: "Senti Pocket shows your calendar's events beside your rooms' events. Nothing is sent anywhere unless you turn on Let my agents see my calendar."
+        NSCalendarsUsageDescription: "Senti Pocket shows your calendar's events beside your rooms' events. Nothing is sent anywhere unless you turn on Let my agents see my calendar."
         # Build trust inputs. They are intentionally undefined by default: Release fails closed until CI or an
         # xcodebuild command-line setting supplies an explicit HTTPS origin. If expansion ever leaves the literal
         # placeholder intact, GatewayEndpoint rejects it too.

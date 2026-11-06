@@ -94,11 +94,16 @@ struct CalendarSheet: View {
 /// The month, the day picked, its events, and the Add field.
 struct CalendarScreen: View {
     @ObservedObject var board: CalendarBoard
+    /// Pocket's own calendar (from Settings) offers the phone's calendar too; a room's never does.
+    var phone: PhoneCalendarCenter?
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 monthHeader
+                if let phone {
+                    PhoneCalendarConnectBanner(phone: phone)
+                }
                 CalendarMonthGridView(grid: board.grid, selected: board.selected) { board.select($0) }
                     // A sideways swipe moves a month; scrolling up and down still scrolls.
                     .simultaneousGesture(DragGesture(minimumDistance: 30).onEnded { value in
@@ -177,6 +182,7 @@ struct CalendarScreen: View {
 
     private func dayDetail(_ day: CalendarDay) -> some View {
         let events = board.events(on: day)
+        let phoneEvents = board.phoneItems(on: day)
         let labels = CalendarDayLabel(calendar: board.calendar)
         return VStack(alignment: .leading, spacing: 12) {
             Text(labels.day(day))
@@ -185,7 +191,7 @@ struct CalendarScreen: View {
             if board.load == .loading {
                 ProgressView()
                     .accessibilityLabel("Reading the calendar")
-            } else if events.isEmpty, board.load == .loaded {
+            } else if events.isEmpty, phoneEvents.isEmpty, board.load == .loaded {
                 Text("Nothing on this day.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -193,6 +199,10 @@ struct CalendarScreen: View {
             ForEach(events) { event in
                 CalendarEventRow(event: event, time: CalendarEventTime.text(event, calendar: board.calendar),
                                  room: board.roomTitle(event.sessionId))
+            }
+            // The phone's own events, after the rooms': read-only, marked as from the phone.
+            ForEach(phoneEvents) { item in
+                PhoneEventRow(item: item, time: PhoneEventRow.time(item, calendar: board.calendar))
             }
             if board.canAdd {
                 if board.isPast(day) {
@@ -593,6 +603,9 @@ struct CalendarSettingsSection: View {
                 // At the accessibility sizes the rows drop their icons, so "Calendar" is not broken across lines.
                 .labelStyle(CalendarRowLabelStyle(showsIcon: !typeSize.isAccessibilitySize))
             }
+            if let phone = center.phone {
+                PhoneCalendarSettingsSection(phone: phone)
+            }
         }
     }
 
@@ -700,11 +713,12 @@ struct CalendarAgendaScreen: View {
             scope: .agenda(rooms: rooms),
             client: center.client,
             onUnavailable: { center.calendarWentAway() },
-            onReauthenticationRequired: onReauthenticationRequired
+            onReauthenticationRequired: onReauthenticationRequired,
+            phone: center.phone
         ))
     }
 
     var body: some View {
-        CalendarScreen(board: board)
+        CalendarScreen(board: board, phone: center.phone)
     }
 }

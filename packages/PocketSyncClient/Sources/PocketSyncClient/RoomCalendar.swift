@@ -453,9 +453,11 @@ public final class HTTPRoomCalendarClient: RoomCalendarServing, CalendarFeedServ
         return events.sorted { ($0.startsAt, $0.id) < ($1.startsAt, $1.id) }
     }
 
-    private func probe(_ method: String, _ path: [String], body: [String: Any]?) async throws -> Bool {
+    /// Whether a flagged route is there: anything but a 404 with no code (`unavailable`) says it is.
+    func probe(_ method: String, _ path: [String], query: [URLQueryItem] = [],
+               body: [String: Any]?) async throws -> Bool {
         do {
-            _ = try await send(method, path, body: body)
+            _ = try await send(method, path, query: query, body: body)
             return true
         } catch CalendarError.unavailable {
             return false
@@ -465,11 +467,11 @@ public final class HTTPRoomCalendarClient: RoomCalendarServing, CalendarFeedServ
         }
     }
 
-    private func send(_ method: String, _ path: [String], query: [URLQueryItem] = [],
-                      body: [String: Any]? = nil) async throws -> JSONValue? {
+    func send(_ method: String, _ path: [String], query: [URLQueryItem] = [], body: [String: Any]? = nil,
+              headers: [String: String] = [:]) async throws -> JSONValue? {
         let answer: PersonalRequest.Answer
         do {
-            answer = try await request.send(method, path, query: query, body: body)
+            answer = try await request.send(method, path, query: query, body: body, headers: headers)
         } catch PersonalRequest.Failure.notConfigured {
             throw CalendarError.notConfigured
         } catch PersonalRequest.Failure.notLoggedIn {

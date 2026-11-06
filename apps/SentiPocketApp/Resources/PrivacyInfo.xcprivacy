@@ -14,7 +14,11 @@
     <!-- What people send to their rooms, which Senti stores so the room can show it: photos and videos, and other user
          content (files, and the messages they are sent with). Linked to the account, used only to run the room, never
          for tracking. Other retained account or device fields still await the backend-retention inventory; the release
-         gate must add any that qualify. -->
+         gate must add any that qualify.
+         Also other user content: with "Let my agents see my calendar" turned on, the titles, times, all-day marks,
+         places and calendar names of the phone's events in the calendars the person picks (7 days back to 30 ahead),
+         which Senti stores so that person's own agents can read them; never notes, attendees or links. Turning it off
+         deletes them. -->
     <key>NSPrivacyCollectedDataTypes</key>
     <array>
         <dict>
