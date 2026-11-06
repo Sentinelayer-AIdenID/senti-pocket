@@ -321,6 +321,15 @@ final class RoomSafetyPresentationTests: XCTestCase {
         XCTAssertEqual(shown?.replies, 1)
     }
 
+    /// Signing in agrees to the Terms of Use, said on the sign-in screen with the terms linked.
+    func test_sign_in_says_the_terms_are_agreed_to_with_their_link() {
+        let agreement = PocketHelp.signInAgreement
+        XCTAssertEqual(String(agreement.characters), "By signing in you agree to the Terms of Use.")
+        let linked = agreement.runs.compactMap { run in run.link.map { (String(agreement[run.range].characters), $0) } }
+        XCTAssertEqual(linked.map { $0.0 }, ["Terms of Use"])
+        XCTAssertEqual(linked.map { $0.1 }, [PocketHelp.termsURL])
+    }
+
     // MARK: - Direct messages and Activity
 
     private func directList() throws -> SessionListPresentationState {

@@ -1158,6 +1158,23 @@ final class RoomSafetyTests: XCTestCase {
         XCTAssertNil(room.state.report)
     }
 
+    /// Said where it was tried: the room the block was chosen in shows the refusal, not only Settings.
+    func test_a_refused_block_is_said_in_the_room_it_was_tried_in() async {
+        let blocks = BlockList(account: "sub:a", store: temporaryStore(), client: RefusingBlocksAPI())
+        let room = room(blocks: blocks)
+        room.handle(.message(message(2, author: "human-sam", text: "Something unkind")))
+        room.send(.block(RoomBlockTarget(actorId: "human-sam", name: "Sam", sequenceId: 2)))
+        await waitUntil("said in the room") { room.state.notice == BlockList.refusalLine(name: "Sam") }
+    }
+
+    /// Contact us shows the address itself, on the sign-in screen as in Settings.
+    func test_contact_us_shows_the_address() throws {
+        let window = try HostedSummary.host(PocketHelpLinks())
+        defer { HostedSummary.close(window) }
+        let contact = HostedSummary.wait(for: "pocket.help.contact", in: window)
+        XCTAssertTrue(contact?.accessibilityLabel?.contains(PocketHelp.email) == true, contact?.accessibilityLabel ?? "")
+    }
+
     func test_a_block_the_server_refuses_is_said_not_dropped_quietly() async {
         let blocks = BlockList(account: "sub:a", store: temporaryStore(), client: RefusingBlocksAPI())
         blocks.block(RoomBlockTarget(actorId: "human-sam", name: "Sam"))

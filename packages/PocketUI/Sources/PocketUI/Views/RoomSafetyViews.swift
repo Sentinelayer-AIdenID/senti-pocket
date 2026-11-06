@@ -376,7 +376,8 @@ public struct PocketHelpLinks: View {
 
     @ViewBuilder private var links: some View {
         if showsContact {
-            Link("Contact us", destination: PocketHelp.mailURL)
+            // The address shows, for a phone without Mail set up.
+            Link("Contact us: \(PocketHelp.email)", destination: PocketHelp.mailURL)
                 .accessibilityIdentifier("pocket.help.contact")
         }
         Link("Terms of Use", destination: PocketHelp.termsURL)

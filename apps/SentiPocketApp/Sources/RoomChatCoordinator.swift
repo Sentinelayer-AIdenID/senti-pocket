@@ -389,6 +389,13 @@ final class RoomChatCoordinator: ObservableObject {
         aiConsent?.$givenAt.dropFirst().sink { [weak self] _ in
             Task { @MainActor in self?.publish() }
         }.store(in: &safetyWatch)
+        // A block the server refused is said where it was tried, in the room, as well as in Blocked people.
+        blocks?.$refusal.dropFirst().compactMap { $0 }.sink { [weak self] refusal in
+            Task { @MainActor in
+                self?.notice = refusal
+                self?.publish()
+            }
+        }.store(in: &safetyWatch)
     }
 
     // MARK: - Lifecycle

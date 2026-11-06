@@ -117,7 +117,6 @@ final class WaitingOnYouCoordinatorTests: XCTestCase {
         XCTFail("timed out waiting for: \(description)")
     }
 
-    /// Once you take care of it, it leaves the list.
     /// The check under Waiting on you's answer: without the signed-in account's consent to share with AI nothing is
     /// posted; once it agrees, the same answer goes.
     func test_an_answer_is_never_posted_without_the_ai_consent() async {
@@ -145,6 +144,7 @@ final class WaitingOnYouCoordinatorTests: XCTestCase {
         await waitUntil("sent") { sender.sent.count == 1 }
     }
 
+    /// Once you take care of it, it leaves the list.
     func test_an_answer_posts_the_webs_line_to_the_tickets_room_and_leaves_the_list_at_once() async {
         let sender = RecordingSender()
         let waiting = WaitingOnYouCoordinator(

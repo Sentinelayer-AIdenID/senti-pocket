@@ -221,4 +221,14 @@ public enum PocketHelp {
     public static let mailURL = URL(string: "mailto:help@plexaura.io")!
     public static let termsURL = URL(string: "https://sentinelayer.com/terms")!
     public static let privacyURL = URL(string: "https://sentinelayer.com/privacy")!
+
+    /// Said on the sign-in screen, the Terms of Use linked.
+    public static var signInAgreement: AttributedString {
+        var text = AttributedString("By signing in you agree to the ")
+        var terms = AttributedString("Terms of Use")
+        terms.link = termsURL
+        text.append(terms)
+        text.append(AttributedString("."))
+        return text
+    }
 }
