@@ -1,4 +1,5 @@
 #if canImport(CallKit) && canImport(PushKit)
+import AVFoundation
 import CallKit
 import Foundation
 import PocketContracts
@@ -11,6 +12,8 @@ import XCTest
 private final class FakeCallsAPI: RoomCallsAPI, @unchecked Sendable {
     private let lock = NSLock()
     private var statuses: [String] = []
+    /// Each report as "<callId> <status>", in the order the server got them.
+    private var reports: [String] = []
     private var reads = 0
     private var answerTried = false
     let details: RoomCallDetails?
@@ -49,12 +52,14 @@ private final class FakeCallsAPI: RoomCallsAPI, @unchecked Sendable {
     func setStatus(sessionId: String, callId: String, status: String) async throws {
         lock.withLock {
             statuses.append(status)
+            reports.append("\(callId) \(status)")
             if status == "answered" { answerTried = true }
         }
         if status == "answered", let answerFailure { throw answerFailure }
     }
 
     var sent: [String] { lock.withLock { statuses } }
+    var sentTo: [String] { lock.withLock { reports } }
     var readCount: Int { lock.withLock { reads } }
 }
 
@@ -221,7 +226,7 @@ final class RoomCallsTests: XCTestCase {
     }
 
     func test_ending_before_an_answer_declines_and_after_it_ends() async {
-        let api = FakeCallsAPI(details: details(), others: [details(callId: "call_2", caller: "claude-warden")])
+        let api = FakeCallsAPI(details: details(), others: [details(callId: "call_2", caller: "review-agent")])
         let desk = RoomCallDesk(api: api, sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) })
         let declined = UUID()
         desk.received(doorbell, uuid: declined)
@@ -399,7 +404,7 @@ final class RoomCallsTests: XCTestCase {
 
     /// Warden (#281): an answered call no voice room takes ends, rather than staying connected and silent.
     func test_an_answered_call_no_voice_room_takes_ends() async {
-        let api = FakeCallsAPI(details: details(), others: [details(callId: "call_2", caller: "claude-warden")])
+        let api = FakeCallsAPI(details: details(), others: [details(callId: "call_2", caller: "review-agent")])
         let desk = RoomCallDesk(api: api, ringFor: 3_600, takeWithin: 0.05,
                                 sleep: { seconds in try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) })
         var endedSystem: [UUID] = []
@@ -574,6 +579,133 @@ final class RoomCallsTests: XCTestCase {
             XCTAssertEqual(api.sent, ["answered"], "\(name): nothing else is told to the server")
             XCTAssertEqual(api.readCount, 1, "\(name): not read back")
         }
+    }
+    /// The desk hands an answered call only to its own room on screen, only once that room's voice room is free, and
+    /// once. A newer screen of the room keeps its place when an older one leaves.
+    func test_the_answered_call_goes_only_to_its_own_room_on_screen_once_its_voice_room_is_free() async {
+        let api = FakeCallsAPI(details: details(), others: [details(callId: "call_2", caller: "review-agent")])
+        let desk = RoomCallDesk(api: api, sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) })
+        var elsewhere: [UUID] = [], taken: [UUID] = []
+        _ = desk.roomShowing("another-room", canTake: { true }, take: { elsewhere.append($0.uuid) })
+        let first = UUID()
+        desk.received(doorbell, uuid: first)
+        desk.answered(first)
+        desk.audioActivated(first)
+        await confirmed(desk)
+        XCTAssertTrue(elsewhere.isEmpty, "another room on screen never takes it")
+
+        var free = false
+        let older = desk.roomShowing(doorbell.sessionId, canTake: { free }, take: { taken.append($0.uuid) })
+        XCTAssertTrue(taken.isEmpty, "its room's voice room is busy: the call waits")
+        XCTAssertEqual(desk.waiting?.uuid, first)
+        free = true
+        desk.handOffWaiting()
+        XCTAssertEqual(taken, [first], "taken once the voice room is free, when the desk is asked again")
+        XCTAssertNil(desk.waiting)
+        desk.handOffWaiting()
+        XCTAssertEqual(taken, [first], "handed once")
+
+        var newerTook: [UUID] = []
+        let newer = desk.roomShowing(doorbell.sessionId, canTake: { true }, take: { newerTook.append($0.uuid) })
+        desk.roomLeft(older)
+        let second = UUID()
+        desk.received(RoomCallDoorbell(callId: "call_2", sessionId: doorbell.sessionId, callerName: "review-agent"),
+                      uuid: second)
+        desk.answered(second)
+        desk.audioActivated(second)
+        await until("the newer screen has the second call") { newerTook == [second] }
+        XCTAssertEqual(taken, [first], "the older screen is gone")
+        desk.roomLeft(newer)
+    }
+
+    /// A call answered while its room's voice room is busy (a meeting going) waits. When that voice room ends, the call
+    /// starts there, instead of ending unheard when its wait runs out.
+    func test_a_call_waiting_for_a_busy_voice_room_starts_when_that_voice_room_ends() async {
+        let api = FakeCallsAPI(details: details())
+        let desk = RoomCallDesk(api: api, ringFor: 3_600, takeWithin: 1.5, sleep: { seconds in
+            try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+        })
+        var busy = true
+        var taken: [UUID] = []
+        let onScreen = desk.roomShowing(doorbell.sessionId, canTake: { !busy }, take: { taken.append($0.uuid) })
+        defer { desk.roomLeft(onScreen) }
+        let uuid = UUID()
+        desk.received(doorbell, uuid: uuid)
+        desk.answered(uuid)
+        desk.audioActivated(uuid)
+        await confirmed(desk)
+        XCTAssertTrue(taken.isEmpty, "the room's voice room is busy: the call waits")
+
+        busy = false
+        desk.roomIsFree(UUID())
+        XCTAssertTrue(taken.isEmpty, "only the room on screen says its own voice room ended")
+        desk.roomIsFree(onScreen)
+        XCTAssertEqual(taken, [uuid], "its voice room ended: the call starts there")
+        try? await Task.sleep(nanoseconds: 1_700_000_000)
+        XCTAssertTrue(desk.isLive(uuid), "and it is not ended when the wait runs out")
+        XCTAssertEqual(api.sent, ["answered"])
+    }
+
+    /// Two agents rang at once with their room on screen and Pocket in front (11-05: one, then the other 3 s later).
+    /// CallKit keeps one call, so answering the first ends the second's ring. The server must hear the second declined
+    /// and the first answered, and the answered call must reach the room on screen and stay up. It used to wait unheard
+    /// for a minute and end, while the room showed only the decline.
+    func test_two_calls_at_once_answering_one_declines_the_other_and_the_room_on_screen_takes_the_answered_one() async {
+        let room = doorbell.sessionId
+        let api = FakeCallsAPI(details: nil, others: [details(callId: "call_build", caller: "build-agent"),
+                                                      details(callId: "call_review", caller: "review-agent")])
+        let desk = RoomCallDesk(api: api, ringFor: 3_600, takeWithin: 0.4, sleep: { seconds in
+            try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+        })
+        let provider = CXProvider(configuration: CXProviderConfiguration())
+        var rung: [(uuid: UUID, caller: String?)] = []
+        var systemEnded: [UUID] = []
+        let manager = SentiCallManager(
+            provider: provider,
+            reportIncomingCall: { id, update, completion in
+                rung.append((id, update.localizedCallerName))
+                completion(true)
+            },
+            reportEndedCall: { systemEnded.append($0) }
+        )
+        // As DialHost wires an agent's room call: the desk owns these UUIDs.
+        manager.isRoomCallAuthorized = { true }
+        manager.onRoomCallReceived = { desk.received($0, uuid: $1) }
+        manager.onAnswered = { desk.answered($0.id) }
+        manager.onEnded = { desk.ended($0) }
+        manager.onAudioSessionActivated = { _, uuid in desk.audioActivated(uuid) }
+        desk.endSystemCall = { manager.end($0) }
+        // The room on screen, as the room screen shows itself to the desk.
+        var taken: [RoomCallDesk.Call] = []
+        let onScreen = desk.roomShowing(room, canTake: { true }, take: { taken.append($0) })
+        defer { desk.roomLeft(onScreen) }
+
+        for (callId, caller) in [("call_build", "build-agent"), ("call_review", "review-agent")] {
+            manager.handleIncomingPushPayload(["callId": callId, "sessionId": room, "callerName": caller,
+                                               "aps": [String: Any]()]) {}
+        }
+        await until("both ring and are read") { rung.count == 2 && api.readCount == 2 }
+        guard rung.count == 2 else { return }
+        let first = rung[0].uuid, second = rung[1].uuid
+        XCTAssertEqual(rung.map(\.caller), ["build-agent", "review-agent"])
+
+        // Answer on the first ring. CallKit holds one call, so it ends the second ring, then answers the first.
+        manager.provider(provider, perform: CXEndCallAction(call: second))
+        manager.provider(provider, perform: CXAnswerCallAction(call: first))
+        manager.provider(provider, didActivate: AVAudioSession.sharedInstance())
+
+        await until("the server heard both") { api.sentTo.count == 2 }
+        XCTAssertEqual(api.sentTo, ["call_review declined", "call_build answered"],
+                       "the call not taken is declined, the one tapped is answered")
+        await until("the room on screen has the answered call") { !taken.isEmpty }
+        XCTAssertEqual(taken.map(\.uuid), [first], "the room's voice room talks with the call that was answered")
+        XCTAssertEqual(taken.first?.partner, "build-agent")
+        XCTAssertFalse(desk.isLive(second))
+        // Past the time an answered call nobody took is ended: it is still up, and the server heard nothing more.
+        try? await Task.sleep(nanoseconds: 700_000_000)
+        XCTAssertTrue(desk.isLive(first), "the answered call stays up")
+        XCTAssertFalse(systemEnded.contains(first))
+        XCTAssertEqual(api.sentTo, ["call_review declined", "call_build answered"])
     }
 }
 #endif

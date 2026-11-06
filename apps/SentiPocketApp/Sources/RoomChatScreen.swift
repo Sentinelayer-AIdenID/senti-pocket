@@ -166,6 +166,9 @@ struct RoomChatScreen: View {
     /// Agents' calls answered on the call screen; the one this room's voice room is for.
     @ObservedObject private var callDesk = RoomCallDesk.shared
     @State private var answeredCall: RoomCallDesk.Call?
+    /// This room's place on the call desk while it is on screen: the desk hands it its answered call. Kept in a box,
+    /// so taking and leaving the place draws nothing.
+    @State private var callDeskPlace = RoomCallDeskPlace()
     private let route: RoomRoute
     private let ticketsTransport: (any RoomTicketsTransport)?
     private let admissionsTransport: (any RoomAdmissionsTransport)?
@@ -537,16 +540,26 @@ struct RoomChatScreen: View {
             RoomCallDesk.shared.voiceRoomEnded(answeredCall)
             self.answeredCall = nil
         }
+        // An answered call that waited for this voice room to end starts now.
+        if let token = callDeskPlace.token { callDesk.roomIsFree(token) }
     }
 
-    /// An agent's call answered on the call screen: once this room has it and CallKit has given it audio, the voice
-    /// room starts with the caller inside the system call, with Pocket in front or not.
-    private func takeAnsweredCall() {
-        guard voiceRoom == nil, voicePoster != nil, let call = callDesk.takeWaiting(for: route.sessionId),
-              let partner = call.partner else { return }
+    /// An agent's call answered on the call screen, handed over by the desk once the server took the answer and
+    /// CallKit gave it audio: the voice room starts with the caller inside the system call, with Pocket in front or not.
+    private func takeAnsweredCall(_ call: RoomCallDesk.Call) {
+        guard let partner = call.partner else { return }
         answeredCall = call
         CrashReporter.shared.note("call answered")
         startVoiceRoom(with: [partner], answering: call)
+    }
+
+    /// While this room is on screen, the call desk hands it its answered calls when its voice room is free.
+    private func showOnCallDesk() {
+        callDeskPlace.token = callDesk.roomShowing(
+            route.sessionId,
+            canTake: { voiceRoom == nil && voicePoster != nil },
+            take: { call in takeAnsweredCall(call) }
+        )
     }
 
     /// Contributors and above file and change tickets (the API's `min_role="contributor"`). An unknown role offers
@@ -1122,16 +1135,19 @@ struct RoomChatScreen: View {
             applyRouteLinksOnce()
             #if DEBUG
             if RoomPreview.isLeaderboardSheetRequested { coordinator.send(.openLeaderboard) }
+            CallScreenPreview.start()
             if RootPreview.isRequested {
                 RootPreview.meter.watch("room", coordinator)
                 RootPreview.meter.watch("roomFlight", flight)
             }
             #endif
-            takeAnsweredCall()
+            showOnCallDesk()
             connectMedia()
         }
         .onDisappear {
             CrashReporter.shared.note("room closed")
+            if let token = callDeskPlace.token { callDesk.roomLeft(token) }
+            callDeskPlace.token = nil
             coordinator.pause()
             // Reading aloud goes on after you leave (Carter, 10-30); the app's player follows you to the next screen.
         }
@@ -1139,7 +1155,7 @@ struct RoomChatScreen: View {
             switch phase {
             case .active:
                 coordinator.resume()
-                takeAnsweredCall()
+                callDesk.handOffWaiting()
                 // Back in front: a mint that gave no answer for New agent is asked again.
                 Task { await newAgentOffer.check() }
             // A call keeps the room live in the background: its answers come through the room.
@@ -1147,7 +1163,6 @@ struct RoomChatScreen: View {
             default: break
             }
         }
-        .onReceive(callDesk.$waiting) { _ in takeAnsweredCall() }
         // Muted on the phone's own call screen, or by the panel's Mute performed there: the voice room stops
         // listening (warden, #281). Never sent back as the panel's Mute, which would ask the call screen again.
         .onReceive(callDesk.$muted) { muted in
@@ -1392,6 +1407,11 @@ struct VoiceRoomHost: View {
     var body: some View {
         VoiceRoomPanel(state: room.state, meter: meter, partnerLab: partnerLab, addable: addable, send: room.send)
     }
+}
+
+/// A room screen's place on the call desk while it is on screen.
+private final class RoomCallDeskPlace {
+    var token: UUID?
 }
 
 /// The call the microphone's level goes to, set once the call exists (the listener is made before it).

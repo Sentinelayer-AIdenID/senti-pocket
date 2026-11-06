@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import PocketSyncClient
 import PocketUI
@@ -31,6 +32,13 @@ private final class FakeListener: VoiceListening {
         cancels += 1
         partial = nil
     }
+
+    var onMicrophoneLost: (@MainActor () -> Void)?
+
+    /// The microphone gives up on the turn being heard.
+    func loseMicrophone() {
+        onMicrophoneLost?()
+    }
 }
 
 @MainActor
@@ -60,7 +68,30 @@ private final class FakeSpeaker: VoiceSpeaking {
 private final class FakeAudio: VoiceRoomAudioSession {
     var active = false
     func activate() throws { active = true }
-    func deactivate() { active = false }
+    func deactivate() {
+        active = false
+        routeWatch = nil
+    }
+
+    /// Where the call plays now, and every Speaker choice asked of the phone.
+    var isSpeakerOn = true
+    var speakerAsks: [Bool] = []
+    var speakerFails = false
+    private var routeWatch: (@MainActor () -> Void)?
+
+    func setSpeaker(_ on: Bool) throws {
+        speakerAsks.append(on)
+        if speakerFails { throw VoiceRoomAudioError.invalidAudioFormat }
+        isSpeakerOn = on
+    }
+
+    func watchRoute(_ changed: @escaping @MainActor () -> Void) { routeWatch = changed }
+
+    /// The call's sound moved by itself (a headset plugged in or out).
+    func routeMoved(speaker: Bool) {
+        isSpeakerOn = speaker
+        routeWatch?()
+    }
 }
 
 @MainActor
@@ -234,6 +265,9 @@ private final class FakeCallScreen: VoiceRoomCallScreen {
 private final class BusyAudio: VoiceRoomAudioSession {
     func activate() throws { throw VoiceRoomAudioError.recognizerUnavailable }
     func deactivate() {}
+    var isSpeakerOn: Bool { false }
+    func setSpeaker(_ on: Bool) throws { throw VoiceRoomAudioError.recognizerUnavailable }
+    func watchRoute(_ changed: @escaping @MainActor () -> Void) {}
 }
 
 /// The room's answer to "is this turn finished?", the same every time, and every text it was asked about.
@@ -436,6 +470,116 @@ final class VoiceRoomCoordinatorTests: XCTestCase {
         speaker.finish()
         XCTAssertEqual(speaker.spoken.count, 1, "a message seen twice is read once")
         XCTAssertEqual(room.state.phase, .ready)
+    }
+
+    /// The call screen's Speaker (Carter, 11-05: a call picked up on the speaker had no way back to the earpiece). It
+    /// moves the call to the earpiece and back, holds for the rest of the call, follows a headset, and says when the
+    /// phone refuses.
+    func test_the_speaker_button_moves_the_call_and_the_choice_holds_for_the_call() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), poster = FakePoster()
+        let room = room(with: ["build-agent"], listener: listener, speaker: speaker, audio: audio, poster: poster)
+        room.begin(rings: false)
+        XCTAssertTrue(room.state.isSpeakerOn, "a call starts on the loudspeaker, as it always has")
+        XCTAssertEqual(room.state.speakerValue, "On")
+        await until("listening") { listener.partial != nil }
+
+        room.send(.setSpeaker(false))
+        XCTAssertEqual(audio.speakerAsks, [false], "the phone is asked for the earpiece")
+        XCTAssertFalse(room.state.isSpeakerOn)
+        XCTAssertEqual(room.state.speakerValue, "Off", "VoiceOver hears it is off")
+
+        // A whole turn and its answer: nothing moves the call back to the speaker.
+        listener.say("Is build 19 up")
+        room.send(.toggleTalk)
+        await until("posted") { poster.turns.count == 1 }
+        room.receive([message("m1", from: "build-agent", "It is up.")])
+        await until("speaking") { room.state.speaker == "build-agent" }
+        speaker.finish()
+        await until("listening again") { room.state.isListening && listener.starts >= 2 }
+        XCTAssertEqual(audio.speakerAsks, [false], "only the button moves the call")
+        XCTAssertFalse(room.state.isSpeakerOn, "the earpiece holds for the call")
+
+        // A headset plugged in and out: the button shows where the call plays.
+        audio.routeMoved(speaker: true)
+        XCTAssertTrue(room.state.isSpeakerOn)
+        audio.routeMoved(speaker: false)
+        XCTAssertFalse(room.state.isSpeakerOn)
+
+        // The phone refuses: the button stays where the call plays, and the screen says why.
+        audio.speakerFails = true
+        room.send(.setSpeaker(true))
+        XCTAssertFalse(room.state.isSpeakerOn)
+        XCTAssertEqual(room.state.notice, "The speaker could not be turned on.")
+
+        await room.hangUp()
+        audio.speakerFails = false
+        room.send(.setSpeaker(true))
+        XCTAssertEqual(audio.speakerAsks, [false, true], "a call that ended has no speaker to move")
+    }
+
+    /// The Speaker choice is the call's default route (the category's own option), so it holds for the call; the rest
+    /// of the call's options stay as they were.
+    func test_the_speaker_choice_is_the_calls_default_route() {
+        let base: AVAudioSession.CategoryOptions = [.allowBluetooth, .duckOthers]
+        let speaker = VoiceRoomSpeakerRoute.options(speaker: true, base: base)
+        XCTAssertTrue(speaker.contains(.defaultToSpeaker))
+        XCTAssertTrue(speaker.isSuperset(of: base))
+        let earpiece = VoiceRoomSpeakerRoute.options(speaker: false, base: base.union(.defaultToSpeaker))
+        XCTAssertFalse(earpiece.contains(.defaultToSpeaker), "the earpiece is the call's default route")
+        XCTAssertTrue(earpiece.isSuperset(of: base))
+    }
+
+    /// The microphone gave up on a hands-free turn before any word was heard (the phone's sound kept changing): the turn
+    /// ends at once instead of after the longest turn (50 s), the screen says why in plain words, listening does not
+    /// start again by itself, and the next turn starts as usual. The clock never moves here, so only an end that does
+    /// not wait can pass.
+    func test_when_the_microphone_gives_up_before_any_word_the_turn_ends_at_once() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), poster = FakePoster()
+        let room = room(with: ["build-agent"], listener: listener, speaker: speaker, audio: audio, poster: poster)
+        room.begin(rings: false)
+        await until("listening") { listener.partial != nil }
+        XCTAssertTrue(room.state.isListening)
+
+        listener.loseMicrophone()
+        await until("the turn ended at once") { room.state.phase == .ready }
+        XCTAssertEqual(room.state.notice,
+                       "The microphone stopped because the phone's sound kept changing. Tap Talk to go on.",
+                       "the screen says why")
+        XCTAssertTrue(poster.turns.isEmpty, "no words were heard: nothing is posted")
+        listener.loseMicrophone()
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertFalse(room.state.isListening, "listening does not start again by itself")
+        XCTAssertEqual(listener.starts, 1)
+
+        room.send(.toggleTalk)
+        await until("the next turn listens") { listener.starts == 2 && listener.partial != nil }
+        XCTAssertTrue(room.state.isListening)
+        XCTAssertNil(room.state.notice, "the next turn starts as usual")
+        listener.say("Is build 320 up")
+        room.send(.toggleTalk)
+        await until("posted") { poster.turns.count == 1 }
+        XCTAssertEqual(poster.turns, ["@build-agent Is build 320 up"])
+        await room.hangUp()
+    }
+
+    /// Words were heard before the microphone gave up: they are sent at once, and listening waits for you rather than
+    /// opening the moment after the turn.
+    func test_when_the_microphone_gives_up_after_words_they_are_sent_at_once() async {
+        let listener = FakeListener(), speaker = FakeSpeaker(), audio = FakeAudio(), poster = FakePoster()
+        let room = room(with: ["build-agent"], listener: listener, speaker: speaker, audio: audio, poster: poster)
+        room.begin(rings: false)
+        await until("listening") { listener.partial != nil }
+        listener.say("Ship the retry fix")
+
+        listener.loseMicrophone()
+        await until("posted at once") { poster.turns.count == 1 }
+        XCTAssertEqual(poster.turns, ["@build-agent Ship the retry fix"])
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertFalse(room.state.isListening, "no listening right after the turn: the microphone has stopped")
+        XCTAssertEqual(listener.starts, 1)
+        XCTAssertEqual(room.state.notice,
+                       "The microphone stopped because the phone's sound kept changing. Tap Talk to go on.")
+        await room.hangUp()
     }
 
     func test_answers_wait_while_you_talk_and_hands_free_listening_comes_back_after_them() async {
