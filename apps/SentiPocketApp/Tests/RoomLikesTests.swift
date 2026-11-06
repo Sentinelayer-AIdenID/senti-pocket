@@ -220,6 +220,17 @@ final class RoomLikesCoordinatorTests: XCTestCase {
         XCTFail("timed out waiting for: \(description)")
     }
 
+    /// Your own taps on message `seq` as its row counts them: the like thumb's pops, the dislike thumb's, and the taps of
+    /// your hand.
+    private func taps(_ coordinator: RoomChatCoordinator, _ seq: Int64) -> [Int] {
+        for row in coordinator.state.rows {
+            if case .message(let message) = row, message.sequenceId == seq, !message.isInlineReply {
+                return [message.ownTaps.pops("like"), message.ownTaps.pops("dislike"), message.ownTaps.placed]
+            }
+        }
+        return []
+    }
+
     /// The like and dislike chips under message `seq`, as the row shows them.
     private func thumbs(_ coordinator: RoomChatCoordinator, _ seq: Int64) -> [RoomChatReactions.Chip] {
         for row in coordinator.state.rows {
@@ -293,6 +304,43 @@ final class RoomLikesCoordinatorTests: XCTestCase {
         coordinator.pause()
     }
 
+    /// Your own taps that go, and only those, pop the thumb tapped, and only a like or a dislike placed taps your hand
+    /// (Carter, 2026-11-06: "Likes and stuff still don't have animation"). A tap ignored while one is on its way, and a
+    /// refresh's new count, never do: that count only rolls.
+    func test_only_your_own_taps_that_go_pop_and_only_likes_and_dislikes_tap_your_hand() async {
+        let transport = LikeRoomTransport(history: [message(5)])
+        let sender = LikeActionSender(holding: true)
+        let coordinator = await opened(transport, sender)
+        XCTAssertEqual(taps(coordinator, 5), [0, 0, 0])
+
+        coordinator.send(.react(sequenceId: 5, type: "like"))
+        XCTAssertEqual(taps(coordinator, 5), [1, 0, 1], "your like pops its thumb and taps your hand")
+        coordinator.send(.react(sequenceId: 5, type: "unlike"))
+        coordinator.send(.react(sequenceId: 5, type: "dislike"))
+        XCTAssertEqual(taps(coordinator, 5), [1, 0, 1], "taps ignored while the like is on its way never pop")
+
+        // Someone else liked it too: the refresh's count rolls, and nothing pops or taps your hand.
+        transport.answer(Self.summary(likes: 2, liked: true))
+        sender.release()
+        await waitUntil("the server's count") {
+            self.thumbs(coordinator, 5) == [.init(type: "like", count: 2, isMine: true)]
+        }
+        XCTAssertEqual(taps(coordinator, 5), [1, 0, 1], "a refresh never pops")
+
+        // A dislike takes your like back first: only the dislike's thumb pops.
+        transport.answer(Self.summary(likes: 1, dislikes: 1, disliked: true))
+        let reads = transport.actionReads()
+        coordinator.send(.react(sequenceId: 5, type: "dislike"))
+        XCTAssertEqual(taps(coordinator, 5), [1, 1, 2])
+        await waitUntil("both sent and landed") { sender.requests().count == 3 && transport.actionReads() > reads }
+
+        // Taking it back pops its thumb, and never taps your hand.
+        coordinator.send(.react(sequenceId: 5, type: "undislike"))
+        XCTAssertEqual(taps(coordinator, 5), [1, 2, 2])
+        await waitUntil("the undislike sent") { sender.requests().count == 4 }
+        coordinator.pause()
+    }
+
     func test_a_like_the_api_refuses_is_taken_back() async {
         let transport = LikeRoomTransport(history: [message(5)], page: Self.summary(likes: 1))
         let sender = LikeActionSender(failures: [RoomSendError.rejected], holding: true)
@@ -306,5 +354,29 @@ final class RoomLikesCoordinatorTests: XCTestCase {
         sender.release()
         await waitUntil("undone") { self.thumbs(coordinator, 5) == [.init(type: "like", count: 1, isMine: false)] }
         coordinator.pause()
+    }
+}
+
+// MARK: - The chip
+
+@MainActor
+final class RoomLikeChipViewTests: XCTestCase {
+    /// One like shows its "1", lit when it is yours and plain when it is only someone else's, and VoiceOver reads the
+    /// same (ticket ce169567: the number showed only from two).
+    func test_one_like_shows_its_count_and_voiceover_reads_it() throws {
+        for yours in [true, false] {
+            let message = RoomChatMessageInput(
+                id: "evt-5", sequenceId: 5, kind: .message, authorId: "review-agent", authorName: "review-agent",
+                isHuman: false, text: "The site is ready for review.", timestamp: "2026-11-06T06:00:00.000000+00:00",
+                reactions: RoomChatReactions(chips: [.init(type: "like", count: 1, isMine: yours)])
+            )
+            let state = RoomChatPresentationState(sessionId: "room-likes", title: "Site", messages: [message],
+                                                  connection: .live, canReact: true)
+            let window = try HostedSummary.host(NavigationStack { RoomChatView(state: state) { _ in } })
+            let label = yours ? "Like, 1, yours" : "Like, 1"
+            XCTAssertNotNil(HostedSummary.wait(for: "pocket.room.reaction.5.like", in: window, label: label),
+                            "the chip reads \(label)")
+            HostedSummary.close(window)
+        }
     }
 }

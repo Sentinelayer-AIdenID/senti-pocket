@@ -58,6 +58,10 @@ final class RoomChatCoordinator: ObservableObject {
     /// tap there is ignored until it lands, so taps never stack (ticket ce169567: a like that showed nothing once
     /// stacked to 10 likes and a dislike in 30 seconds).
     private var reactionsInFlight: Set<String> = []
+    /// Your own taps on each message's like and dislike that went (a tap ignored while one is on its way is not one):
+    /// its row pops the thumb tapped, and taps your hand for a like or dislike placed (`RoomOwnTaps`). A refresh never
+    /// changes them, so a count that changes on its own only rolls.
+    private var ownTaps: [Int64: RoomOwnTaps] = [:]
     /// Who answered in threads, as of each one's newest reply: most agent and box output is replies, so they are
     /// offered for @ like anyone who posted.
     private var replyAuthors: [String: (name: String, isHuman: Bool, date: Date?)] = [:]
@@ -1159,12 +1163,16 @@ final class RoomChatCoordinator: ObservableObject {
             guard !reactionsInFlight.contains(slot) else { return }
             reactionsInFlight.insert(slot)
         }
+        // This tap went: shown with what it changes, its thumb pops, and a like or dislike taps your hand.
+        ownTaps[sequenceId, default: RoomOwnTaps()].count(type)
         let before = summaries[sequenceId]
         let writes = Self.reactionWrites(type, liked: before?.likedByViewer == true,
                                          disliked: before?.dislikedByViewer == true)
         let actorName = ownAuthorIds.sorted().first ?? "you"
         for write in writes { applyOptimisticReaction(write, on: sequenceId, actor: actorName) }
         let shown = summaries[sequenceId]
+        // What it asked for was already so, so nothing was shown: it is still answered now, never at the next refresh.
+        if isThumb, shown == before { publish() }
         let sessionId = self.sessionId
         Task { [weak self] in
             var landed = false
@@ -2376,7 +2384,8 @@ final class RoomChatCoordinator: ObservableObject {
                     : nil,
                 work: work[message.sequenceId] ?? [],
                 isVoiceTurn: message.channel == "voice",
-                checkpointSummary: message.checkpointSummary
+                checkpointSummary: message.checkpointSummary,
+                ownTaps: ownTaps[message.sequenceId] ?? RoomOwnTaps()
             )
         }
         let threadInput = openThreadSequence.map { sequence in

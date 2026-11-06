@@ -40,6 +40,8 @@ public struct RoomChatMessageInput: Equatable, Sendable {
     public let isVoiceTurn: Bool
     /// A checkpoint's summary.
     public let checkpointSummary: String?
+    /// Your own taps on this message's like and dislike that went (`RoomOwnTaps`).
+    public let ownTaps: RoomOwnTaps
 
     public init(
         id: String,
@@ -59,7 +61,8 @@ public struct RoomChatMessageInput: Equatable, Sendable {
         inlineReplyId: String? = nil,
         work: [RoomChatWorkLine] = [],
         isVoiceTurn: Bool = false,
-        checkpointSummary: String? = nil
+        checkpointSummary: String? = nil,
+        ownTaps: RoomOwnTaps = RoomOwnTaps()
     ) {
         self.id = id
         self.sequenceId = sequenceId
@@ -79,6 +82,7 @@ public struct RoomChatMessageInput: Equatable, Sendable {
         self.work = work
         self.isVoiceTurn = isVoiceTurn
         self.checkpointSummary = checkpointSummary
+        self.ownTaps = ownTaps
     }
 }
 
@@ -97,6 +101,49 @@ public struct RoomChatWorkLine: Equatable, Identifiable, Sendable {
         self.text = text
         self.at = at
         self.isLive = isLive
+    }
+}
+
+/// Your own taps on a message's like and dislike that went, counted so its row answers each one once, and only those
+/// (Carter, 2026-11-06: "Likes and stuff still don't have animation"): the thumb you tapped pops, and a like or a
+/// dislike placed (never a take-back) taps your hand. A tap ignored while one is on its way is not counted, and a
+/// refresh never changes them, so a count that changes on its own only rolls.
+public struct RoomOwnTaps: Equatable, Sendable {
+    /// Taps on the like thumb: a like, or taking it back.
+    public private(set) var like = 0
+    /// Taps on the dislike thumb.
+    public private(set) var dislike = 0
+    /// Likes and dislikes placed, never a take-back: what taps your hand.
+    public private(set) var placed = 0
+
+    public init() {}
+
+    /// Counts one tap that went, by what it asked for: like, unlike, dislike or undislike. An acknowledgement is not a
+    /// thumb.
+    public mutating func count(_ type: String) {
+        switch type {
+        case "like":
+            like += 1
+            placed += 1
+        case "unlike":
+            like += 1
+        case "dislike":
+            dislike += 1
+            placed += 1
+        case "undislike":
+            dislike += 1
+        default:
+            break
+        }
+    }
+
+    /// How many times the thumb of `type` ("like" or "dislike") has popped; nought for anything else.
+    public func pops(_ type: String) -> Int {
+        switch type {
+        case "like": return like
+        case "dislike": return dislike
+        default: return 0
+        }
     }
 }
 
@@ -126,10 +173,16 @@ public struct RoomChatReactions: Equatable, Sendable {
             }
         }
 
-        /// The number beside a like or dislike: only when two or more reacted (one is the thumb itself, lit when it is
-        /// yours). Other chips always show theirs.
+        /// The number beside the chip, from one: a like's and a dislike's too, lit when it is yours and plain when it
+        /// is only others' (Carter, 2026-11-06: "Likes and stuff still don't have animation and count on mobile").
+        /// None at nought.
         public var shownCount: Int? {
-            (type == "like" || type == "dislike") && count < 2 ? nil : count
+            count > 0 ? count : nil
+        }
+
+        /// What VoiceOver reads: what the chip shows, as "Like, 1, yours", with no number where it shows none.
+        public var accessibilityLabel: String {
+            [label, shownCount.map { String($0) }, isMine ? "yours" : nil].compactMap { $0 }.joined(separator: ", ")
         }
 
         public var label: String {
@@ -260,6 +313,8 @@ public struct RoomChatMessageRow: Equatable, Identifiable, Sendable {
     /// False when this row continues a run by the same author within a few minutes, so the name is not repeated.
     public let showsHeader: Bool
     public let reactions: RoomChatReactions?
+    /// Your own taps on its like and dislike that went: what pops and what taps your hand.
+    public var ownTaps = RoomOwnTaps()
     public let attachments: [RoomAttachmentChip]
     public let views: RoomChatViews?
     /// A threaded reply shown at its own time: its own action id. Tapping it opens its thread.
@@ -807,6 +862,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 isEdited: input.isEdited,
                 showsHeader: !continuesRun,
                 reactions: input.reactions.flatMap { $0.isEmpty ? nil : $0 },
+                ownTaps: input.ownTaps,
                 attachments: input.attachments,
                 views: input.views,
                 inlineReplyId: input.inlineReplyId,
