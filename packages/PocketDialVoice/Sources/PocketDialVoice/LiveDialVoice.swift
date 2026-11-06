@@ -15,8 +15,8 @@ public protocol DialMicrophone: Sendable {
 extension MicrophoneCapture: DialMicrophone {}
 
 /// LiveDialVoice — the AUDIO half of the DIALS voice loop (Forge lane). Conforms to `PocketCall.DialVoice`:
-/// `speak` via on-device TTS (AVSpeech), `listen` via on-device Whisper STT (mic → VAD-bounded capture →
-/// 16 kHz resample → whisper.cpp).
+/// `speak` via on-device TTS (AVSpeech), `listen` via on-device STT (mic → VAD-bounded capture → 16 kHz resample →
+/// whisper.cpp where its model file is installed, else Apple's on-device speech, which needs no file).
 ///
 /// Lane split (agreed w/ Atlas): Forge owns the AUDIO I/O; the follow-up ANSWER comes from an injected
 /// `DialReasoner` (Atlas). DELIBERATELY, `listen()` does NOT auto-classify utterances as follow-up questions:
@@ -47,7 +47,7 @@ public final class LiveDialVoice: DialVoice {
         checkpointId: String? = nil,
         modelURL: URL?,
         synthesizer: any SpeechSynthesizer = AVSpeechSynthesizerAdapter(),
-        recognizer: any SpeechRecognizer = WhisperCPPRecognizer(),
+        recognizer: (any SpeechRecognizer)? = nil,
         microphone: any DialMicrophone = MicrophoneCapture(),
         requestPermission: @escaping @Sendable () async -> Bool = { await MicrophoneCapture.requestPermission() },
         tone: BriefingTone = .neutral,
@@ -59,12 +59,21 @@ public final class LiveDialVoice: DialVoice {
         self.checkpointId = checkpointId
         self.modelURL = modelURL
         self.synthesizer = synthesizer
-        self.recognizer = recognizer
+        self.recognizer = recognizer ?? Self.defaultRecognizer(modelURL: modelURL)
         self.microphone = microphone
         self.requestPermission = requestPermission
         self.tone = tone
         self.maxListenSeconds = min(max(maxListenSeconds, 1), 30)
         self.vad = vad
+    }
+
+    /// What listens when none is given: Whisper with its model file, else Apple's on-device speech, so a phone without
+    /// the file (every Release build: it never asks for one) still hears the reply. Never a server.
+    nonisolated public static func defaultRecognizer(modelURL: URL?) -> any SpeechRecognizer {
+        #if canImport(Speech)
+        if modelURL == nil { return AppleOnDeviceSpeechRecognizer() }
+        #endif
+        return WhisperCPPRecognizer()
     }
 
     /// The literal defaults (0.025/0.015/80/280 ms) satisfy every guard, so this force-try can never fire.
@@ -121,6 +130,11 @@ public final class LiveDialVoice: DialVoice {
 
     private func ensureModel() async -> Bool {
         if modelPrepared { return true }
+        // A recognizer with its own model (Apple's) is ready as it is.
+        guard recognizer.needsModelFile else {
+            modelPrepared = true
+            return true
+        }
         guard let modelURL else { return false }
         do {
             _ = try await recognizer.prepareModel(at: modelURL)

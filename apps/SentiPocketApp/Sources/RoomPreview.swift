@@ -13,9 +13,18 @@ import PocketVoice
 enum RoomPreview {
     static var isRequested: Bool {
         ProcessInfo.processInfo.arguments.contains("-PocketRoomPreview") || isTicketsRequested || isTicketLinkRequested
-            || isAnchorRequested || isSearchRequested || isProfileCardRequested || isDirectRequested
-            || isSidePanelFoldersRequested
+            || isAnchorRequested || isSearchRequested || isBlockedPeopleRequested || isProfileCardRequested
+            || isDirectRequested || isSidePanelFoldersRequested || isDialConsentRequested
     }
+
+    /// `-PocketDialConsentPreview` opens Blocked people as a sheet, then a dial asks its AI question: it shows over the
+    /// open sheet, as on a call.
+    static var isDialConsentRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-PocketDialConsentPreview")
+    }
+
+    /// The preview dial's asker, kept while it asks; in memory only, so it asks every launch.
+    @MainActor private static let dialAsker = AIConsentAsker(storedConsent: { AIConsent(account: nil) })
 
     /// `-PocketProfileCardPreview` opens the room with an agent's profile card over it, as a tap on its avatar does.
     static var isProfileCardRequested: Bool {
@@ -68,6 +77,11 @@ enum RoomPreview {
         ProcessInfo.processInfo.arguments.contains("-PocketRoomLeaderboardSheetPreview")
     }
 
+    /// `-PocketBlockedPeoplePreview` shows Settings' Blocked people with two sample blocks.
+    static var isBlockedPeopleRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-PocketBlockedPeoplePreview")
+    }
+
     /// `-PocketRoomFilesPreview` adds two files posted as base64 parts in replies: one whose parts are all there and
     /// match its declared hash, and one with a part missing.
     static var isFilesRequested: Bool {
@@ -99,6 +113,21 @@ enum RoomPreview {
             }
         } else if isSearchRequested {
             RoomSearchView(state: RoomPreviewSearch.sampleState) { _ in }
+        } else if isDialConsentRequested {
+            roomRoot
+                .sheet(isPresented: .constant(true)) {
+                    NavigationStack {
+                        BlockedPeopleView(blocks: sampleBlocks)
+                    }
+                    .task {
+                        try? await Task.sleep(nanoseconds: 1_500_000_000)
+                        _ = await dialAsker.allows()
+                    }
+                }
+        } else if isBlockedPeopleRequested {
+            NavigationStack {
+                BlockedPeopleView(blocks: sampleBlocks)
+            }
         } else if isSidePanelFoldersRequested {
             SidePanelFoldersPreview()
         } else if isDirectRequested {
@@ -159,6 +188,21 @@ enum RoomPreview {
     @MainActor
     private static let reader = MessageReader()
 
+    /// Kept on the phone for this run only, never synced: Block and Show can be tried, and the AI consent is asked
+    /// at each launch.
+    @MainActor
+    private static let blocks = BlockList(account: nil, store: nil, client: nil)
+    @MainActor
+    private static let aiConsent = AIConsent(account: nil)
+
+    @MainActor
+    private static var sampleBlocks: BlockList {
+        let list = BlockList(account: nil, store: nil, client: nil)
+        list.block(RoomBlockTarget(actorId: "build-agent", name: "build-agent"))
+        list.block(RoomBlockTarget(actorId: "human-sam", name: "Sam Rivera"))
+        return list
+    }
+
     @MainActor
     private static var roomRoot: some View {
         NavigationStack {
@@ -183,6 +227,8 @@ enum RoomPreview {
                 receipts: RoomPreviewReceipts(),
                 search: RoomPreviewSearch(),
                 reader: reader,
+                blocks: blocks,
+                aiConsent: aiConsent,
                 // Avatars open profile cards in the preview room too.
                 direct: (isProfileCardRequested || isDirectRequested) ? directContext : nil,
                 onReauthenticationRequired: {}
@@ -641,6 +687,13 @@ private struct RoomPreviewMint: MintStarting {
 }
 
 /// The voice room in the preview: turns and the transcript go nowhere.
+extension RoomPreviewSender: RoomReporting {
+    /// Taken after a moment, as the API would.
+    func report(sessionId: String, _ request: RoomReportRequest) async throws {
+        try? await Task.sleep(nanoseconds: 600_000_000)
+    }
+}
+
 extension RoomPreviewSender: VoiceRoomPosting {
     func postCallStarted(sessionId: String, text: String, clientId: String) async throws {}
 
@@ -673,7 +726,7 @@ private struct RoomPreviewTransport: RoomTransport {
             sequenceId: seq,
             kind: kind,
             authorId: author,
-            authorName: RoomMessage.isHumanAuthor(author) ? "Alex" : author,
+            authorName: RoomMessage.isHumanAuthor(author) ? String(author.dropFirst("human-".count)).capitalized : author,
             isHuman: RoomMessage.isHumanAuthor(author),
             text: text,
             timestamp: stamp,
@@ -693,6 +746,8 @@ private struct RoomPreviewTransport: RoomTransport {
         withFiles(row(114, "build-agent", minutesAgo: 79, "Simulator screenshots attached to https://github.com/example/app/pull/42")),
         row(116, "build-agent", minutesAgo: 78, "Repro:\n```\nxcodebuild test -scheme App -only-testing:OnboardingTests\n```"),
         row(115, "senti", minutesAgo: 70, "Onboarding review: 2 findings, 1 fixed", kind: .checkpoint),
+        // Someone else in the room, so Report and Block can be tried on a person (alex is you here).
+        row(118, "human-sam", minutesAgo: 14, "Can someone check the email step on a small phone before we ship?"),
         row(120, "human-alex", minutesAgo: 12, "Thanks. Ship the fix for finding 1 first, then the retry counter."),
         row(121, "review-agent", minutesAgo: 10, "@alex fix for finding 1 is up: validation now runs on paste and on blur. Call me at [support](tel:5551234) if you'd rather talk it through."),
         row(122, "build-agent", minutesAgo: 4, "Rebuilding with the fix now."),

@@ -38,7 +38,8 @@ struct SentiPocketApp: App {
     var body: some Scene {
         WindowGroup {
             rootView
-                .onAppear { whisperModel.start() }
+                // The model file is checked only where it is offered (DEBUG): Release never reads or asks for it.
+                .onAppear { if WhisperModelSettings.offersModelFile { whisperModel.start() } }
                 .onOpenURL { url in
                     LaunchUrgency.shared.raise()
                     _ = incomingLinks.receive(url)
@@ -241,6 +242,8 @@ struct RootServices {
     var registersPush = true
     /// The calendar and its Apple Calendar link, shown once the server answers their routes; nil (a preview) hides it.
     var calendar: (any RoomCalendarServing & CalendarFeedServing)?
+    /// Your blocks on the server (`/me/blocks`), for the account signed in; nil (a preview) keeps them on the phone.
+    var blocks: (_ account: String?) -> (any BlockListClient)? = { _ in nil }
 
     /// The Senti API as you.
     static func live() -> RootServices {
@@ -287,7 +290,8 @@ struct RootServices {
             receipts: HTTPRoomReceipts(apiBaseURL: apiURL),
             readMarker: HTTPRoomReadMarker(apiBaseURL: apiURL),
             calendar: HTTPRoomCalendarClient(apiBaseURL: apiURL, urlSession: CalendarHTTP.session,
-                                             tokenProvider: { SessionTokenStore.load() })
+                                             tokenProvider: { SessionTokenStore.load() }),
+            blocks: { HTTPBlockListClient(apiBaseURL: apiURL, account: $0) }
         )
     }
 }
@@ -377,6 +381,14 @@ struct AuthenticatedRootView: View {
     /// What waits on your decision across your rooms (ticket 931e1d2e).
     @StateObject private var waiting: WaitingOnYouCoordinator
     @State private var presentsWaiting = false
+    /// Who this account blocked, for every room and Settings (App Store guideline 1.2).
+    @StateObject private var blocks: BlockList
+    /// This account's OK for what it sends to reach a room's AI agents (App Store guideline 5.1.2(i)).
+    @StateObject private var aiConsent: AIConsent
+    /// An answer from Waiting on you, held for that OK.
+    @State private var waitingConsentHeld: AIConsentHeld?
+    /// A new room, held for that OK.
+    @State private var newRoomConsentHeld: AIConsentHeld?
     /// Direct messages: on when the server answers their settings (DIRECT_MESSAGES_ENABLED), else nothing shows.
     @StateObject private var directMessages: DirectMessagesCenter
     /// Your room folders: on when the server lists them (ROOM_FOLDERS_ENABLED), else nothing shows.
@@ -517,6 +529,11 @@ struct AuthenticatedRootView: View {
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
         )
         _notifications = StateObject(wrappedValue: notifications)
+        // Both belong to the account signed in now: another account signing in on this phone gets its own.
+        let account = RoomSendOutbox.account(token: SessionTokenStore.load())
+        _blocks = StateObject(wrappedValue: BlockList(account: account, store: .standard,
+                                                      client: services.blocks(account)))
+        _aiConsent = StateObject(wrappedValue: AIConsent(account: account))
         _callLog = StateObject(wrappedValue: CallLogCoordinator(
             transport: services.callLog,
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
@@ -589,7 +606,9 @@ struct AuthenticatedRootView: View {
                         roomScreen(currentRoom)
                             .id(currentRoom)
                     } else {
-                        SessionListView(state: sessions.state, folders: roomFolders.items,
+                        // A direct message with someone you blocked is not listed.
+                        SessionListView(state: sessions.state.withoutDirectMessages(from: blocks.actorIds),
+                                        folders: roomFolders.items,
                                         onFolder: { roomFolders.send($0) }) { intent in
                             sessions.send(intent)
                             if case .selectSession(let sessionId) = intent,
@@ -702,7 +721,8 @@ struct AuthenticatedRootView: View {
                     presentsPocket = false
                     presentsActivity = true
                 },
-                onReauthenticationRequired: invalidateProtectedAuthentication
+                onReauthenticationRequired: invalidateProtectedAuthentication,
+                aiConsent: aiConsent
             )
         }
         .sheet(isPresented: $presentsActivity) {
@@ -772,13 +792,23 @@ struct AuthenticatedRootView: View {
         }
         .sheet(isPresented: $presentsWaiting) {
             WaitingOnYouView(state: waiting.state, send: { intent in
+                // An answer goes to the room that asked, where its agents read it: the first asks this account's OK.
+                if case .answer = intent, aiConsent.asks {
+                    waitingConsentHeld = AIConsentHeld { _ = waiting.send(intent) }
+                    return
+                }
                 guard let link = waiting.send(intent) else { return }
                 presentsWaiting = false
                 open(link)
             }, onDone: { presentsWaiting = false })
+            .aiConsentPrompt($waitingConsentHeld) { aiConsent.grant() }
         }
+        // Activity shows a blocked person's messages and replies as one line, as rooms do.
+        .onReceive(blocks.$actorIds) { details.setBlockedAuthors($0) }
         .onChange(of: rootScenePhase) { phase in
             if phase == .active { notifications.startPolling() } else { notifications.stopPolling() }
+            // Blocks made on the web, or here while offline, catch up when Pocket comes back.
+            if phase == .active { Task { await blocks.sync() } }
             if phase == .active { waiting.startPolling() } else { waiting.stopPolling() }
         }
         .onChange(of: incomingLinks.revision) { _ in openPendingLinkIfReady() }
@@ -788,6 +818,8 @@ struct AuthenticatedRootView: View {
         .sheet(isPresented: $presentsSettings) {
             WhisperModelSettingsView(
                 coordinator: whisperModelCoordinator,
+                blocks: blocks,
+                aiConsent: aiConsent,
                 directMessages: directMessages,
                 calendar: CalendarSettingsContext(center: calendar, rooms: calendarRooms,
                                                   onReauthenticationRequired: invalidateProtectedAuthentication),
@@ -797,6 +829,7 @@ struct AuthenticatedRootView: View {
                 }
             )
         }
+        .aiConsentPrompt($newRoomConsentHeld) { aiConsent.grant() }
         .modifier(RoomFolderSheets(center: roomFolders))
         .sheet(isPresented: $presentsNewRoom) {
             if let creator = roomSender as? any RoomCreating {
@@ -825,6 +858,9 @@ struct AuthenticatedRootView: View {
             Task { await directMessages.refresh() }
             Task { await roomFolders.refresh() }
             notifications.startPolling()
+            Task { await blocks.sync() }
+            // A dial asks this account's consent (its question shows in a window of its own, over any sheet).
+            AIConsentAsker.shared.consent = aiConsent
             // Waiting on you is read from sign-in on, not only once the app comes back to the front (warden, #270).
             waiting.startPolling()
             // Apple push: a tap opens its room at the message; the room on screen gets no banner.
@@ -1038,7 +1074,12 @@ struct AuthenticatedRootView: View {
             },
             onNewRoom: roomSender is any RoomCreating ? {
                 closeDrawer()
-                presentsNewRoom = true
+                // A new room is written to as it is made: the first write asks.
+                if aiConsent.asks {
+                    newRoomConsentHeld = AIConsentHeld { presentsNewRoom = true }
+                } else {
+                    presentsNewRoom = true
+                }
             } : nil,
             folderNotice: roomFolders.notice,
             // Folders show only where they are on.
@@ -1047,10 +1088,13 @@ struct AuthenticatedRootView: View {
         .onAppear(perform: placeSidePanelRooms)
         .onChange(of: sessions.state.rows) { _ in placeSidePanelRooms() }
         .onChange(of: roomFolders.folders) { _ in placeSidePanelRooms() }
+        .onChange(of: blocks.actorIds) { _ in placeSidePanelRooms() }
     }
 
+    /// A direct message with someone you blocked is not placed (`withoutDirectMessages`).
     private func placeSidePanelRooms() {
-        sidePanelPlacement.update(rows: sessions.state.rows, folders: roomFolders.items)
+        sidePanelPlacement.update(rows: sessions.state.withoutDirectMessages(from: blocks.actorIds).rows,
+                                  folders: roomFolders.items)
     }
 
     /// The room on screen, made and drawn again only when what it is opened with changes (`RoomScreenHost`).
@@ -1103,6 +1147,8 @@ struct AuthenticatedRootView: View {
             onRead: { sessionId, sequence, caughtUp in
                 sessions.noteRead(sessionId: sessionId, through: sequence, caughtUp: caughtUp)
             },
+            blocks: blocks,
+            aiConsent: aiConsent,
             direct: direct,
             onReauthenticationRequired: invalidateProtectedAuthentication
         )
@@ -1190,6 +1236,8 @@ private struct SelectedSessionPocketView: View {
     @ObservedObject var checkpointNarrationRevocation: VerifiedCheckpointNarrationRevocationRelay
     let onCheckpointDone: @MainActor () -> Void
     let onReauthenticationRequired: @MainActor @Sendable () -> Void
+    /// This account's OK to share with AI, for what you dictate here.
+    let aiConsent: AIConsent
 
     @ViewBuilder var body: some View {
         switch checkpointPocket.phase {
@@ -1233,6 +1281,7 @@ private struct SelectedSessionPocketView: View {
         if let sessionId = sessions.selectedSessionId {
             PhoneRootView(
                 sessionId: sessionId,
+                aiConsent: aiConsent,
                 onReauthenticationRequired: onReauthenticationRequired,
                 isWriteAuthorized: {
                     UTF8ExactIdentity.matches(sessions.selectedSessionId, sessionId)
@@ -1436,12 +1485,15 @@ private struct SelectedSessionActivityBoundary: View {
 struct PhoneRootView: View {
     @StateObject private var reasoning: RealReasoningCoordinator
     @StateObject private var write: PhoneWriteViewModel
+    private let aiConsent: AIConsent
 
     init(
         sessionId: String,
+        aiConsent: AIConsent,
         onReauthenticationRequired: @escaping @MainActor @Sendable () -> Void = {},
         isWriteAuthorized: @escaping @MainActor () -> Bool = { true }
     ) {
+        self.aiConsent = aiConsent
         let unavailable = UnavailableSessionReasoningProvider()
         let gatewayURL = GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_GATEWAY_URL"])
         let authenticationExpiry = AuthenticationExpiryRelay()
@@ -1485,7 +1537,7 @@ struct PhoneRootView: View {
             isWriteAuthorized: isWriteAuthorized))
     }
 
-    var body: some View { PocketPhoneView(reasoning: reasoning, write: write) }
+    var body: some View { PocketPhoneView(reasoning: reasoning, write: write, aiConsent: aiConsent) }
 }
 
 private struct UnavailableSessionReasoningProvider: ReasoningProvider {

@@ -26,9 +26,42 @@ final class DialCoordinatorTests: XCTestCase {
                       hydrate: @escaping (DialReceiveState) async throws -> RenderableRing) -> DialCoordinator {
         DialCoordinator(
             hydrate: hydrate,
+            mayShareWithAI: { true },
             runDial: { r, _ in rec.ranRings.append(r); return outcome },
             endCall: { rec.endedCalls.append($0) }
         )
+    }
+
+    // A dial hears what you say, answers it with AI and posts your reply: without this account's OK to that (App Store
+    // guideline 5.1.2(i)), nothing runs and the call ends; with it, the dial runs.
+    @MainActor
+    func test_a_dial_runs_only_after_this_accounts_ok_to_share_with_ai() async {
+        let rec = Recorder(); let uuid = UUID()
+        var asked = 0
+        let refused = DialCoordinator(
+            hydrate: { _ in self.ring() },
+            mayShareWithAI: { asked += 1; return false },
+            runDial: { r, _ in rec.ranRings.append(r); return .posted },
+            endCall: { rec.endedCalls.append($0) }
+        )
+        refused.received(state("need_1"), dialId: "need_1", callUUID: uuid)
+        let out = await refused.answered(dialId: "need_1", callUUID: uuid)
+        if case .declined = out {} else { return XCTFail("Not now must decline, got \(out)") }
+        XCTAssertEqual(asked, 1, "asked once")
+        XCTAssertTrue(rec.ranRings.isEmpty, "nothing heard, answered or posted")
+        XCTAssertEqual(rec.endedCalls, [uuid], "the call ends")
+
+        let other = UUID()
+        let allowed = DialCoordinator(
+            hydrate: { _ in self.ring() },
+            mayShareWithAI: { true },
+            runDial: { r, _ in rec.ranRings.append(r); return .posted },
+            endCall: { rec.endedCalls.append($0) }
+        )
+        allowed.received(state("need_1"), dialId: "need_1", callUUID: other)
+        let ran = await allowed.answered(dialId: "need_1", callUUID: other)
+        XCTAssertEqual(ran, .posted)
+        XCTAssertEqual(rec.ranRings.count, 1)
     }
 
     // CRITICAL: no stored state (a stray/duplicate answer) → declined, the governed run is NEVER reached, call ends.

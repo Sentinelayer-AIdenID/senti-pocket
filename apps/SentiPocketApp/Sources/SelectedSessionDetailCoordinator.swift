@@ -108,6 +108,8 @@ final class SelectedSessionDetailCoordinator: ObservableObject {
     private var authenticationRevision: UInt64?
     private var requestRevision: UInt64 = 0
     private var activitySnapshot: ActivitySnapshot?
+    /// Who this account blocked (`BlockList.actorIds`): their messages and replies show as one line in Activity.
+    private var blockedAuthorIds: Set<String> = []
     private var checkpointSnapshot: CheckpointSnapshot?
     private var activityProvenance: SessionPresentationProvenance = .unavailable
     private var checkpointProvenance: SessionPresentationProvenance = .unavailable
@@ -243,6 +245,15 @@ final class SelectedSessionDetailCoordinator: ObservableObject {
 
     func clearDestination() {
         destination = nil
+    }
+
+    /// Who this account blocked. Activity already on screen shows their messages and replies as one line at once.
+    func setBlockedAuthors(_ ids: Set<String>) {
+        guard ids != blockedAuthorIds else { return }
+        blockedAuthorIds = ids
+        guard let snapshot = activitySnapshot, let shown = activityState else { return }
+        activityState = renderActivity(snapshot, provenance: shown.provenance, isRefreshing: shown.isRefreshing,
+                                       failure: shown.failure)
     }
 
     func event(sequenceId: Int64, eventId: String) -> SessionEventRowPresentation? {
@@ -623,7 +634,8 @@ final class SelectedSessionDetailCoordinator: ObservableObject {
             actionPage: snapshot.actionPage,
             provenance: provenance,
             isRefreshing: isRefreshing,
-            failure: failure
+            failure: failure,
+            blockedAuthorIds: blockedAuthorIds
         )
     }
 
