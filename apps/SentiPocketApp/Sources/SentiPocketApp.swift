@@ -359,6 +359,39 @@ struct SidePanelLayer<Panel: View>: View {
     }
 }
 
+/// Ends editing anywhere in the app, so the keyboard starts going down now: before the side panel's spring, or before a
+/// room is put in place of the one on screen (which takes away the composer the keyboard was for). Carter's freezes of
+/// 11-06 each came after a send or a reply, with the keyboard still up as the panel opened or a room was picked from it;
+/// on master, path (f) with the closed panel left out of the tree still hung once at the panel's open with the keyboard
+/// up.
+@MainActor
+func endAllEditing() {
+    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+}
+
+/// Whether the side panel is open, and its open: editing ends first, then the panel's state changes.
+@MainActor
+final class SidePanelState: ObservableObject {
+    @Published var isOpen = false
+
+    /// What ends editing before the panel opens: `endAllEditing` in the app; a test gives its own, to see it run first.
+    private let endEditing: @MainActor () -> Void
+
+    init(endEditing: @escaping @MainActor () -> Void = endAllEditing) {
+        self.endEditing = endEditing
+    }
+
+    /// Opens the panel, editing ended first, so the keyboard starts going down before the panel's spring.
+    func open() {
+        endEditing()
+        isOpen = true
+    }
+
+    func close() {
+        if isOpen { isOpen = false }
+    }
+}
+
 /// Release composition of the authenticated repository-backed Sessions surface and the selected-session Pocket flow.
 /// When the open side panel reads its rooms again: open, with the app in front.
 struct DrawerPoll: Equatable {
@@ -409,7 +442,9 @@ struct AuthenticatedRootView: View {
     /// The room on screen, the root of the stack; nil shows your rooms. Breakouts push onto `roomPath`.
     @State private var currentRoom: RoomRoute?
     @State private var roomPath: [RoomRoute] = []
-    @State private var drawerOpen = false
+    /// The side panel's state: its open ends editing first (`SidePanelState.open()`).
+    @StateObject private var panelState = SidePanelState()
+    private var drawerOpen: Bool { panelState.isOpen }
     /// Makes the room screen for `RoomScreenHost`; the same one for the root's life.
     @State private var roomScreenMaker = RoomScreenMaker()
     /// How often the open side panel reads the rooms again, in nanoseconds.
@@ -703,7 +738,9 @@ struct AuthenticatedRootView: View {
         #if DEBUG
         // The root preview's side panel opens and closes on a signal, so a profile of it has no accessibility client
         // tapping (each tap of a UI test reads the screen's whole accessibility tree first).
-        .onReceive(RootPreview.drawerRequests) { open in drawerOpen = open }
+        .onReceive(RootPreview.drawerRequests) { open in
+            if open { panelState.open() } else { panelState.close() }
+        }
         .onAppear {
             guard RootPreview.isRequested else { return }
             let meter = RootPreview.meter
@@ -979,6 +1016,7 @@ struct AuthenticatedRootView: View {
     /// selection Pocket and Activity follow in step, and remembers it for the next launch.
     @MainActor
     private func show(_ route: RoomRoute) {
+        endAllEditing()
         pendingOpen = nil
         if !UTF8ExactIdentity.matches(sessions.selectedSessionId, route.sessionId) {
             sessions.send(.selectSession(sessionId: route.sessionId))
@@ -1012,13 +1050,13 @@ struct AuthenticatedRootView: View {
 
     @MainActor
     private func closeDrawer() {
-        if drawerOpen { drawerOpen = false }
+        panelState.close()
     }
 
     private var drawerButton: some View {
         Button {
             CrashReporter.shared.note("drawerOpened")
-            drawerOpen = true
+            panelState.open()
         } label: {
             Image(systemName: "line.3.horizontal")
                 .overlay(alignment: .topTrailing) {
@@ -1048,6 +1086,7 @@ struct AuthenticatedRootView: View {
             theme: theme,
             onSelectRoom: { sessionId in show(roomRoute(for: sessionId)) },
             onAllRooms: {
+                endAllEditing()
                 roomPath = []
                 currentRoom = nil
                 closeDrawer()

@@ -106,7 +106,8 @@ final class RootBackgroundWorkTests: XCTestCase {
     ///
     /// The root holds the panel in its `SidePanelLayer`: closed, the panel is not in the tree, so it builds none of its
     /// rooms; each open makes it again (Carter's freeze of 11-06, #62485). Mutant it must catch: the root drawing the
-    /// panel itself, kept in the tree while closed.
+    /// panel itself, kept in the tree while closed (the closed check catches it). And the root's open ends editing
+    /// first. Mutant it must catch: the root setting the panel open without `SidePanelState.open()`.
     func test_opening_the_side_panel_draws_no_message_row_and_reads_only_the_rooms() throws {
         let panelBuiltAtStart = RenderTrace.builtCount(.sidePanel)
         let api = Self.api()
@@ -166,6 +167,20 @@ final class RootBackgroundWorkTests: XCTestCase {
                              "opened again, the panel is made again: it builds its rooms again")
         RootPreview.requestDrawer(false)
         pump(1.5)
+
+        // The root's open ends editing (`SidePanelState.open()`): a field being typed in, as the room's box after a
+        // send, is no longer first responder once the panel opens. Last, so a keyboard coming and going changes
+        // nothing measured above.
+        let field = UITextField(frame: CGRect(x: 0, y: 0, width: 200, height: 40))
+        window.addSubview(field)
+        XCTAssertTrue(field.becomeFirstResponder(), "the field is being typed in")
+        pump(0.3)
+        RootPreview.requestDrawer(true)
+        pump(1)
+        XCTAssertFalse(field.isFirstResponder, "opening the side panel ended editing")
+        RootPreview.requestDrawer(false)
+        pump(1)
+        field.removeFromSuperview()
     }
 
     // MARK: - The calendar's changes leave the root and its room alone
