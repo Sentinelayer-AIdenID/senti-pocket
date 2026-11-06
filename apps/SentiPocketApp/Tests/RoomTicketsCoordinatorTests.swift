@@ -60,8 +60,10 @@ final class RoomTicketsCoordinatorTests: XCTestCase {
         stepped.progress = RoomTicketProgress(value: 0.62, basis: "b", at: "a")
         var estimated = ticket("e", status: "working")
         estimated.progress = RoomTicketProgress(value: 0.45, basis: "b", at: "a")
+        var notStarted = ticket("n", status: "assigned")
+        notStarted.step = RoomTicketStep(index: 0, count: 4, name: nil)
         let transport = ScriptedTicketsTransport(
-            snapshots: [.success(RoomTicketSnapshotPage(items: [stepped, estimated], hasMore: false, cursor: 1))]
+            snapshots: [.success(RoomTicketSnapshotPage(items: [stepped, estimated, notStarted], hasMore: false, cursor: 1))]
         )
         let coordinator = makeCoordinator(transport)
         await coordinator.refresh()
@@ -73,6 +75,9 @@ final class RoomTicketsCoordinatorTests: XCTestCase {
         XCTAssertEqual(rows["s"]?.stepStrip?.segments, [.done, .current, .ahead, .ahead])
         XCTAssertNil(rows["e"]?.step, "only the old estimate: no step")
         XCTAssertNil(rows["e"]?.stepStrip, "and no bar: its status alone")
+        XCTAssertEqual(rows["n"]?.step, RoomTicketInput.Step(index: 0, count: 4, name: nil), "index 0 as it came")
+        XCTAssertEqual(rows["n"]?.stepStrip?.segments, [.ahead, .ahead, .ahead, .ahead])
+        XCTAssertEqual(rows["n"]?.stepStrip?.label, "Not started")
     }
 
     func test_the_board_loads_then_follows_the_feed() async {

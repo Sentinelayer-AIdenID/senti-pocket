@@ -40,11 +40,32 @@ final class RoomTicketStepTests: XCTestCase {
         XCTAssertEqual(inside.step?.waitingOn, "human-alex")
     }
 
+    /// The index counts from 1 as it is said ("Step 3 of 4"); 0 is a ticket not started yet. It is read as it came:
+    /// 0 is neither the first step nor no step.
+    func test_the_index_counts_from_one_and_zero_is_not_started() throws {
+        let zero = try XCTUnwrap(try ticket(#""step":{"index":0,"count":4,"name":"Not started"}"#).step,
+                                 "index 0 is a step: not started, not no step")
+        XCTAssertEqual(zero.index, 0, "not the first step")
+        XCTAssertEqual(zero.count, 4)
+        XCTAssertNil(zero.name, "before the first step there is no current step to name")
+        XCTAssertEqual(try ticket(#""step":{"index":0,"count":4}"#, status: "assigned").step,
+                       RoomTicketStep(index: 0, count: 4, name: nil), "a name is not needed before the first step")
+
+        let first = try ticket(#""step":{"index":1,"count":4,"name":"Taken"}"#).step
+        XCTAssertEqual(first?.index, 1)
+        XCTAssertEqual(first?.name, "Taken")
+        let last = try ticket(#""step":{"index":4,"count":4,"name":"Shipped"}"#, status: "done").step
+        XCTAssertEqual(last?.index, 4, "the last step is the count")
+        XCTAssertEqual(last?.name, "Shipped")
+        XCTAssertNil(try ticket("").step, "absent: no step")
+    }
+
     func test_no_step_or_one_it_cannot_read_is_no_step() throws {
         XCTAssertNil(try ticket("").step, "an older server sends none")
         XCTAssertNil(try ticket(#""progress":{"value":0.62,"basis":"b","at":"a"}"#).step, "the estimate alone is no step")
         let unreadable = [
-            #""step":{"index":0,"count":4,"name":"Taken"}"#,
+            #""step":{"index":-1,"count":4,"name":"Taken"}"#,
+            #""step":{"index":0,"count":0}"#,
             #""step":{"index":5,"count":4,"name":"Shipped"}"#,
             #""step":{"index":1,"count":0,"name":"Taken"}"#,
             #""step":{"index":1,"count":13,"name":"Taken"}"#,

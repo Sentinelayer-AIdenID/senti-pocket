@@ -66,29 +66,33 @@ public struct RoomTicketProgress: Equatable, Sendable {
 }
 
 /// Where a ticket is, as the server reads it from typed facts (taken, in review, merged, shipped, and later "PR open"):
-/// step `index` of `count`, counted from 1 as it is said ("Step 3 of 4"), and the step's name. When nothing has
-/// happened for a while the server adds since when, why, and whom it waits on, or who last held it. The phone never
-/// works a step out for itself: no step from the server is no step.
+/// step `index` of `count`, counted from 1 as it is said ("Step 3 of 4"), and the step's name; index 0 is a ticket not
+/// started yet, before its first step. When nothing has happened for a while the server adds since when, why, and whom
+/// it waits on, or who last held it. The phone never works a step out for itself: no step from the server is no step.
 ///
 /// The API's exact field names arrive with its change, so this reads the agreed shape tolerantly: the step in
 /// `progress.step` or as the ticket's own `step`; its notes in the step, beside it in `progress`, or on the ticket;
 /// names in camelCase or snake_case; a person as text or as an object with a name. Anything it cannot read in full is
 /// no step, never a guess.
 public struct RoomTicketStep: Equatable, Sendable {
+    /// 1...count, or 0 before the first step (not started).
     public let index: Int
     public let count: Int
-    public let name: String
+    /// The current step's name; nil only before the first step, where there is no current step.
+    public let name: String?
     /// When the ticket stopped moving, as the server wrote it; nil while it moves.
     public let stalledSince: String?
     public let stalledReason: String?
     public let waitingOn: String?
     public let lastHolder: String?
 
-    /// Nil unless 1 <= `index` <= `count` <= 12 and the name has words.
-    public init?(index: Int, count: Int, name: String, stalledSince: String? = nil, stalledReason: String? = nil,
+    /// Nil unless 0 <= `index` <= `count` <= 12 and, from the first step on, the name has words. Before the first step
+    /// (index 0) a name is not needed and not kept.
+    public init?(index: Int, count: Int, name: String?, stalledSince: String? = nil, stalledReason: String? = nil,
                  waitingOn: String? = nil, lastHolder: String? = nil) {
-        guard (1...12).contains(count), (1...count).contains(index),
-              let name = Self.line(name, limit: 40) else { return nil }
+        guard (1...12).contains(count), (0...count).contains(index) else { return nil }
+        let name: String? = index == 0 ? nil : name.flatMap { Self.line($0, limit: 40) }
+        guard index == 0 || name != nil else { return nil }
         self.index = index
         self.count = count
         self.name = name
@@ -102,8 +106,7 @@ public struct RoomTicketStep: Equatable, Sendable {
     init?(ticket json: JSONValue) {
         let progress = json["progress"]
         guard let step = Self.object(progress?["step"]) ?? Self.object(json["step"]),
-              let index = step["index"]?.intValue, let count = step["count"]?.intValue,
-              let name = step["name"]?.stringValue else { return nil }
+              let index = step["index"]?.intValue, let count = step["count"]?.intValue else { return nil }
         let places = [step, progress, json].compactMap { $0 }
         func text(_ camel: String, _ snake: String) -> String? {
             for place in places {
@@ -119,7 +122,7 @@ public struct RoomTicketStep: Equatable, Sendable {
         self.init(
             index: Int(clamping: index),
             count: Int(clamping: count),
-            name: name,
+            name: step["name"]?.stringValue,
             stalledSince: step["stalledSince"]?.stringValue ?? step["stalled_since"]?.stringValue,
             stalledReason: text("stalledReason", "stalled_reason"),
             waitingOn: text("waitingOn", "waiting_on"),

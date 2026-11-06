@@ -574,11 +574,13 @@ private struct RoomPreviewTickets: RoomTicketsTransport {
     }
 
     /// The server's steps on the preview's tickets (taken, in review, merged, shipped): one stalled since three hours
-    /// ago, one waiting on you, one shipped. The assigned and the open ticket have none, as an older server sends.
+    /// ago, one waiting on you, one shipped, and the assigned one not started. The open ticket has none, as an older
+    /// server sends.
     private static func withSteps(_ tickets: [RoomTicket]) -> [RoomTicket] {
         let stalled = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-3 * 3_600))
         let steps: [String: RoomTicketStep?] = [
             "t1": RoomTicketStep(index: 1, count: 4, name: "Taken", stalledSince: stalled, stalledReason: "Box 7 was stopped"),
+            "t2": RoomTicketStep(index: 0, count: 4, name: nil),
             "t3": RoomTicketStep(index: 2, count: 4, name: "In review", waitingOn: "your OK of the shots"),
             "t5": RoomTicketStep(index: 4, count: 4, name: "Shipped"),
             "t6": RoomTicketStep(index: 1, count: 4, name: "Taken")

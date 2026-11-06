@@ -207,7 +207,8 @@ private struct RoomTicketRowView: View {
 }
 
 /// A ticket's steps as a strip: one segment per step, those done filled, the current one filled and named, those ahead
-/// empty. At the accessibility text sizes the name goes under the strip.
+/// empty; before the first step all are empty and it says "Not started". At the accessibility text sizes the name goes
+/// under the strip.
 private struct RoomTicketStepStripView: View {
     let strip: RoomTicketStepStrip
     let tint: Color
@@ -223,9 +224,9 @@ private struct RoomTicketStepStripView: View {
                     .frame(maxWidth: .infinity)
             }
         }
-        let name = Text(strip.name)
+        let name = Text(strip.label)
             .font(.caption.weight(.semibold))
-            .foregroundStyle(tint)
+            .foregroundStyle(strip.isStarted ? tint : PocketPalette.textSecondary)
         if typeSize.isAccessibilitySize {
             VStack(alignment: .leading, spacing: 4) {
                 bar

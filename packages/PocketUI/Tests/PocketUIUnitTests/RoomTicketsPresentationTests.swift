@@ -225,11 +225,40 @@ final class RoomTicketStepsTests: XCTestCase {
     func test_the_servers_step_is_a_strip_of_steps_the_current_one_named() {
         let strip = row(RoomTicketInput.Step(index: 3, count: 4, name: "In review")).stepStrip
         XCTAssertEqual(strip, RoomTicketStepStrip(index: 3, count: 4, name: "In review"))
+        XCTAssertEqual(strip?.label, "In review")
         XCTAssertEqual(strip?.segments, [.done, .done, .current, .ahead], "the steps before it done, those after ahead")
         XCTAssertEqual(row(RoomTicketInput.Step(index: 1, count: 4, name: "Taken")).stepStrip?.segments,
                        [.current, .ahead, .ahead, .ahead])
         XCTAssertEqual(row(RoomTicketInput.Step(index: 4, count: 4, name: "Shipped"), status: "done").stepStrip?.segments,
                        [.done, .done, .done, .current], "a finished ticket shows its last step")
+    }
+
+    /// The index counts from 1 ("Step 3 of 4"); 0 is a ticket not started: the strip with no step filled, "Not
+    /// started", and VoiceOver "Not started, 4 steps". Neither the first step nor no step.
+    func test_index_zero_is_not_started_one_is_the_first_step_and_count_the_last() {
+        let zero = row(RoomTicketInput.Step(index: 0, count: 4, name: nil), status: "assigned")
+        XCTAssertEqual(zero.stepStrip?.segments, [.ahead, .ahead, .ahead, .ahead], "a strip, with no step filled")
+        XCTAssertEqual(zero.stepStrip?.label, "Not started")
+        XCTAssertEqual(zero.stepStrip?.isStarted, false)
+        XCTAssertEqual(zero.stepAccessibilityLabel(now: now, timeZone: eastern, locale: english), "Not started, 4 steps")
+        XCTAssertEqual(row(RoomTicketInput.Step(index: 0, count: 1, name: "Taken")).stepAccessibilityLabel(),
+                       "Not started, 1 step", "a name sent with index 0 does not make it a step")
+        XCTAssertEqual(plain(row(RoomTicketInput.Step(index: 0, count: 4, name: nil, waitingOn: "your OK of the plan"))
+                        .stepAccessibilityLabel(now: now, timeZone: eastern, locale: english)),
+                       "Not started, 4 steps. Waiting on: your OK of the plan")
+
+        let first = row(RoomTicketInput.Step(index: 1, count: 4, name: "Taken"), status: "working")
+        XCTAssertEqual(first.stepStrip?.segments, [.current, .ahead, .ahead, .ahead])
+        XCTAssertEqual(first.stepStrip?.label, "Taken")
+        XCTAssertEqual(first.stepAccessibilityLabel(now: now, timeZone: eastern, locale: english), "Step 1 of 4, taken")
+
+        let last = row(RoomTicketInput.Step(index: 4, count: 4, name: "Shipped"), status: "done")
+        XCTAssertEqual(last.stepStrip?.segments, [.done, .done, .done, .current])
+        XCTAssertEqual(last.stepAccessibilityLabel(now: now, timeZone: eastern, locale: english), "Step 4 of 4, shipped")
+
+        let absent = row(nil, status: "assigned")
+        XCTAssertNil(absent.stepStrip, "absent: the status alone")
+        XCTAssertNil(absent.stepAccessibilityLabel(now: now, timeZone: eastern, locale: english))
     }
 
     func test_voiceover_reads_the_step_then_the_small_print() {

@@ -3,18 +3,20 @@ import PocketContracts
 
 /// One ticket as the app hands it to PocketUI.
 public struct RoomTicketInput: Equatable, Sendable {
-    /// Where the ticket is, as the server reads it from typed facts: step `index` of `count` (counted from 1), its
-    /// name, and when it stopped moving, why, and whom it waits on or who last held it. Never worked out on the phone.
+    /// Where the ticket is, as the server reads it from typed facts: step `index` of `count` (counted from 1; 0 is not
+    /// started), its name, and when it stopped moving, why, and whom it waits on or who last held it. Never worked out
+    /// on the phone.
     public struct Step: Equatable, Sendable {
         public let index: Int
         public let count: Int
-        public let name: String
+        /// The current step's name; nil before the first step.
+        public let name: String?
         public let stalledSince: Date?
         public let stalledReason: String?
         public let waitingOn: String?
         public let lastHolder: String?
 
-        public init(index: Int, count: Int, name: String, stalledSince: Date? = nil, stalledReason: String? = nil,
+        public init(index: Int, count: Int, name: String?, stalledSince: Date? = nil, stalledReason: String? = nil,
                     waitingOn: String? = nil, lastHolder: String? = nil) {
             self.index = index
             self.count = count
@@ -85,7 +87,8 @@ public struct RoomTicketInput: Equatable, Sendable {
     }
 }
 
-/// A row's strip of steps: `count` segments; those before `index` are done, `index` is the current one, named.
+/// A row's strip of steps: `count` segments; those before `index` are done, `index` is the current one, named. At
+/// index 0 the ticket has not started: no segment is filled and the strip says so.
 public struct RoomTicketStepStrip: Equatable, Sendable {
     public enum Segment: Equatable, Sendable {
         case done
@@ -95,17 +98,27 @@ public struct RoomTicketStepStrip: Equatable, Sendable {
 
     public let index: Int
     public let count: Int
-    public let name: String
+    /// What the strip says beside it: the current step's name, or "Not started".
+    public let label: String
 
-    public init(index: Int, count: Int, name: String) {
+    public init(index: Int, count: Int, name: String?) {
         self.index = index
         self.count = count
-        self.name = name
+        self.label = index < 1 ? "Not started" : name ?? "Step \(index)"
     }
+
+    /// False before the first step (index 0).
+    public var isStarted: Bool { index >= 1 }
 
     /// Each step's segment, first to last.
     public var segments: [Segment] {
         (1...max(count, 1)).map { $0 < index ? .done : $0 == index ? .current : .ahead }
+    }
+
+    /// What VoiceOver says for the strip: "Step 3 of 4, in review", or "Not started, 4 steps".
+    public var accessibilityLabel: String {
+        guard isStarted else { return "Not started, \(count) \(count == 1 ? "step" : "steps")" }
+        return "Step \(index) of \(count), \(label.lowercased())"
     }
 }
 
@@ -198,11 +211,10 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
         return sentences.isEmpty ? nil : sentences.joined(separator: " ")
     }
 
-    /// What VoiceOver says for the strip: "Step 3 of 4, in review", then the small print.
+    /// What VoiceOver says for the strip: "Step 3 of 4, in review" (or "Not started, 4 steps"), then the small print.
     public func stepAccessibilityLabel(now: Date = Date(), timeZone: TimeZone = .current,
                                        locale: Locale = .current) -> String? {
-        guard let step else { return nil }
-        let base = "Step \(step.index) of \(step.count), \(step.name.lowercased())"
+        guard let base = stepStrip?.accessibilityLabel else { return nil }
         guard let note = stallNote(now: now, timeZone: timeZone, locale: locale) else { return base }
         return base + ". " + note
     }
