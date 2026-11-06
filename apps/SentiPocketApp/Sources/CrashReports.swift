@@ -517,6 +517,14 @@ final class CrashReporter: NSObject, ObservableObject, MXMetricManagerSubscriber
         unhandled = store.unhandled()
     }
 
+    #if DEBUG
+    /// A made-up report waiting to be offered, for pictures of the offer in the root preview (`-PocketRootCrashOffer`).
+    /// It is never stored with the phone's reports. Never compiled into Release.
+    func offerForPreview(_ report: CrashReport) {
+        unhandled = [report]
+    }
+    #endif
+
     nonisolated func didReceive(_ payloads: [MXDiagnosticPayload]) {
         let reports = payloads.flatMap { CrashReport.reports(from: $0) }
         Task { @MainActor in self.record(reports) }

@@ -13,11 +13,16 @@ import PocketUI
 /// only. Never compiled into Release.
 ///
 /// Options:
-/// - `-PocketRootRoom long|mid|none`: the room open at launch. `long` holds 1,000 messages, `mid` 165 (the room
-///   loads its newest 100, then the rest with Load earlier). Default `mid`.
+/// - `-PocketRootRoom long|mid|none|reports`: the room open at launch. `long` holds 1,000 messages, `mid` 165 (the room
+///   loads its newest 100, then the rest with Load earlier), `reports` the reports room of `-PocketRootCrashOffer sent`.
+///   Default `mid`.
 /// - `-PocketRootStream <posts per second>`: messages arriving in the open room (default none).
 /// - `-PocketRootOneListPage`: every room in the list's first page, so the side panel lists all of them (the API
 ///   pages the list by 50).
+/// - `-PocketRootCrashOffer`: one made-up crash report waits to be offered, and the preview answers as the reports
+///   room's API, so the offer (`CrashReportOffer`) shows a moment after launch. `-PocketRootCrashOffer sent` instead
+///   sends that report at launch, through the delivery "Send to the team" runs (`CrashReportDelivery`), before the root
+///   reads its rooms: the "Pocket reports" room is listed with the report in it.
 enum RootPreview {
     static var isRequested: Bool { ProcessInfo.processInfo.arguments.contains("-PocketRootPreview") }
 
@@ -32,12 +37,37 @@ enum RootPreview {
         switch argument("-PocketRootRoom") ?? "mid" {
         case "long": return RootPreviewAPI.longRoom
         case "none": return nil
+        case "reports": return RootPreviewAPI.reportsRoom
         default: return RootPreviewAPI.midRoom
         }
     }
 
+    /// `-PocketRootCrashOffer`: the report is offered at launch (`.offer`), or sent at launch (`.sent`).
+    enum CrashOffer { case offer, sent }
+
+    static var crashOffer: CrashOffer? {
+        guard ProcessInfo.processInfo.arguments.contains("-PocketRootCrashOffer") else { return nil }
+        return argument("-PocketRootCrashOffer") == "sent" ? .sent : .offer
+    }
+
+    /// The made-up report: a crash with a few steps and frames, nothing from a real run.
+    static func madeUpCrashReport(at date: Date = Date()) -> CrashReport {
+        CrashReport(id: "preview-crash-1", kind: .crash, at: date.addingTimeInterval(-20 * 60), build: "2026110600",
+                    system: "iOS 26.1", device: "iPhone17,5", reason: "EXC_BREAKPOINT (SIGTRAP), made up for the preview",
+                    frames: ["SentiPocketApp +0x0001a2b4", "SwiftUI +0x0049f210", "UIKitCore +0x00d1c0e8"],
+                    binaries: ["SentiPocketApp 00000000-0000-4000-8000-0000000000a1",
+                               "SwiftUI 00000000-0000-4000-8000-0000000000a2",
+                               "UIKitCore 00000000-0000-4000-8000-0000000000a3"],
+                    trail: ["opened room", "opened side panel", "closed side panel", "opened room"])
+    }
+
     @MainActor
     static func rootView(whisperModel: WhisperModelProvisioningCoordinator, incomingLinks: IncomingLinkInbox) -> some View {
+        switch crashOffer {
+        case .offer?: CrashReporter.shared.offerForPreview(madeUpCrashReport())
+        case .sent?: api.sendAtLaunch([madeUpCrashReport()])
+        case nil: break
+        }
         // The root reopens the room opened last once the room list has loaded, as the app does after a launch.
         UserDefaults.standard.set(openRoomId ?? "", forKey: "pocket.lastRoomId")
         // The freeze watch runs as in the app, so a stall here is written down where the app writes one.
@@ -259,14 +289,22 @@ struct RootPreviewWords {
 final class RootPreviewAPI: @unchecked Sendable {
     static let longRoom = "room-long"
     static let midRoom = "room-mid"
+    /// The reports room, once `-PocketRootCrashOffer` made it: private, and only you in it.
+    static let reportsRoom = "room-reports"
     static let agents = ["review-agent", "build-agent", "plan-agent", "docs-agent", "test-agent", "ops-agent"]
     static let me = "human-alex"
+    static let meAccountId = "6f1c2b9e-0000-4000-8000-00000000000a"
 
     private let postsPerSecond: Double
     private let onePage: Bool
     private let started = Date()
     private let lock = NSLock()
     private var histories: [String: [RoomMessage]] = [:]
+    /// The reports room's title once made, and what was posted in it.
+    private var reportsTitle: String?
+    private var reportsPosts: [(text: String, at: Date)] = []
+    /// The report sent at launch (`-PocketRootCrashOffer sent`): the room list waits for it.
+    private var reportsSent: Task<Void, Never>?
 
     /// The room open at launch, where messages arrive.
     let openRoomId: String?
@@ -294,8 +332,33 @@ final class RootPreviewAPI: @unchecked Sendable {
             notificationMarker: self, callLog: self, waiting: self, checkpoints: self, directMessages: self,
             roomFolders: self, admissionDecider: self, sender: sender, actionSender: sender, ticketWriter: self,
             ticketLeases: InMemoryTicketLeaseStore(), ticketExtras: self, identity: self, receipts: self, readMarker: self,
-            registersPush: false
+            registersPush: false, reportRooms: RootPreview.crashOffer == nil ? nil : self
         )
+    }
+
+    /// `-PocketRootCrashOffer sent`: the reports go to the reports room through the delivery "Send to the team" runs,
+    /// kept on a store of the preview's own, never the app's.
+    @MainActor
+    func sendAtLaunch(_ reports: [CrashReport]) {
+        let suite = "com.plexaura.sentipocket.preview.reports-room"
+        let defaults = UserDefaults(suiteName: suite) ?? .standard
+        defaults.removePersistentDomain(forName: suite)
+        let delivery = CrashReportDelivery(api: self, rooms: ReportRoomStore(defaults: defaults), supportLogin: nil)
+        let text = CrashReportText.message(reports)
+        let clientId = CrashReportText.clientId(for: reports)
+        let sending = Task { @MainActor in
+            _ = await delivery.deliver(text, clientId: clientId, person: Self.meAccountId)
+        }
+        lock.withLock { reportsSent = sending }
+    }
+
+    /// Every room in the list: the reports room first once it is made, then the scripted ones.
+    private func listedRooms() -> [Room] {
+        lock.withLock {
+            guard let reportsTitle else { return Self.rooms }
+            return [Room(id: Self.reportsRoom, title: reportsTitle, folderId: nil, summary: nil, unread: 0, humans: 1,
+                         agents: 0, minutesAgo: 0, direct: nil, messages: reportsPosts.count)] + Self.rooms
+        }
     }
 
     // MARK: The rooms
@@ -356,7 +419,7 @@ final class RootPreviewAPI: @unchecked Sendable {
     private func json(_ room: Room) -> [String: Any] {
         var object: [String: Any] = [
             "sessionId": room.id, "status": "active", "archiveStatus": "live", "visibility": "private",
-            "membershipRole": room.id == Self.midRoom || room.id == Self.longRoom ? "owner" : "contributor",
+            "membershipRole": [Self.midRoom, Self.longRoom, Self.reportsRoom].contains(room.id) ? "owner" : "contributor",
             "title": room.title, "agentCount": room.agents, "eventCount": room.messages, "totalCostUsd": 0,
             "lastActivityAt": stamp(lastActivity(room)),
             "online": ["humans": room.humans, "agents": room.agents],
@@ -386,6 +449,12 @@ final class RootPreviewAPI: @unchecked Sendable {
     private func history(_ roomId: String) -> [RoomMessage] {
         lock.lock()
         defer { lock.unlock() }
+        if roomId == Self.reportsRoom {
+            // Only what was posted in it, by you.
+            return reportsPosts.enumerated().map { index, post in
+                message(Int64(index + 1), author: Self.me, text: post.text, at: post.at)
+            }
+        }
         if let history = histories[roomId] { return history }
         let count = Self.rooms.first { $0.id == roomId }?.messages ?? 20
         var words = RootPreviewWords(seed: UInt64(abs(roomId.hashValue % 10_000)) + 11)
@@ -427,10 +496,12 @@ final class RootPreviewAPI: @unchecked Sendable {
 extension RootPreviewAPI: SessionTransport {
     func listSessions(includeArchived: Bool, limit: Int, cursor: String?) async throws -> SessionListPage {
         count("rooms")
+        if let sending = lock.withLock({ reportsSent }) { await sending.value }
+        let rooms = listedRooms()
         let start = Int(cursor ?? "0") ?? 0
-        let size = onePage ? Self.rooms.count : limit
-        let page = Array(Self.rooms.dropFirst(start).prefix(size))
-        let next = start + page.count < Self.rooms.count ? String(start + page.count) : nil
+        let size = onePage ? rooms.count : limit
+        let page = Array(rooms.dropFirst(start).prefix(size))
+        let next = start + page.count < rooms.count ? String(start + page.count) : nil
         let body: [String: Any] = ["sessions": page.map(json), "count": page.count, "include_archived": includeArchived,
                                    "next_cursor": next as Any, "has_more": next != nil]
         let data = try JSONSerialization.data(withJSONObject: body)
@@ -493,6 +564,8 @@ extension RootPreviewAPI: RoomTransport {
 
     func roomActions(sessionId: String, targetSequenceId: Int64?, limit: Int) async throws -> RoomActionsPage {
         count("actions")
+        // Nobody else is in the reports room to react or reply.
+        guard sessionId != Self.reportsRoom else { return RoomActionsPage() }
         let messages = history(sessionId)
         guard let newest = messages.last?.sequenceId else { return RoomActionsPage() }
         if let targetSequenceId {
@@ -635,7 +708,7 @@ extension RootPreviewAPI: AdmissionDeciding, RoomTicketWriting, RoomTicketExtras
     }
 
     func currentAccount() async -> SignedInAccount? {
-        SignedInAccount(githubUsername: "alex", accountId: "6f1c2b9e-0000-4000-8000-00000000000a")
+        SignedInAccount(githubUsername: "alex", accountId: Self.meAccountId)
     }
 }
 
@@ -644,10 +717,12 @@ extension RootPreviewAPI: RoomReceiptsClient, RoomReadMarking {
 
     func views(sessionId: String, targets: [RoomViewTarget]) async throws -> [RoomViewSummary] {
         count("views")
-        // Each viewer saw each message once, at launch: a read again finds what it found before.
+        // Each viewer saw each message once, at launch: a read again finds what it found before. Nobody else is in the
+        // reports room to see anything.
         let seen = stamp(started)
         return targets.map { target in
-            let viewers = Self.agents.prefix(2).map { RoomViewer(isHuman: false, actorId: $0, viewedAt: seen) }
+            let viewers = sessionId == Self.reportsRoom ? []
+                : Self.agents.prefix(2).map { RoomViewer(isHuman: false, actorId: $0, viewedAt: seen) }
             return RoomViewSummary(kind: target.kind, id: target.id, revision: target.revision,
                                    viewedCount: viewers.count, viewers: Array(viewers))
         }
@@ -657,6 +732,11 @@ extension RootPreviewAPI: RoomReceiptsClient, RoomReadMarking {
 
     func presence(sessionId: String) async throws -> RoomPresence {
         count("presence")
+        if sessionId == Self.reportsRoom {
+            return RoomPresence(isAvailable: true,
+                                participants: [RoomPresentParticipant(id: Self.me, isHuman: true, displayName: "Alex")],
+                                humansOnline: 1, agentsOnline: 0, ttlSeconds: 90)
+        }
         return RoomPresence(isAvailable: true,
                             participants: [RoomPresentParticipant(id: Self.me, isHuman: true, displayName: "Alex")]
                                 + Self.agents.prefix(4).map { RoomPresentParticipant(id: $0, isHuman: false) },
@@ -666,6 +746,28 @@ extension RootPreviewAPI: RoomReceiptsClient, RoomReadMarking {
     func markRead(sessionId: String, through sequenceId: Int64) async throws -> RoomReadReceipt {
         RoomReadReceipt(outcome: .recorded, lastReadSequenceId: sequenceId)
     }
+}
+
+/// The reports room's API (`-PocketRootCrashOffer`): the room is made private with only you in it, and a report posted
+/// there becomes its history.
+extension RootPreviewAPI: ReportRoomAPI {
+    func createReportRoom(title: String, maxMembers: Int, sessionId: String, idempotencyKey: String) async throws -> String {
+        lock.withLock { reportsTitle = title }
+        return Self.reportsRoom
+    }
+
+    func reportRoomMembership(sessionId: String) async throws -> RoomMembershipSnapshot {
+        let made = lock.withLock { reportsTitle != nil }
+        guard made, sessionId == Self.reportsRoom else { throw SessionTransportError.accessDenied }
+        return RoomMembershipSnapshot(visibility: "private", memberUserIds: [Self.meAccountId])
+    }
+
+    func sendReport(sessionId: String, text: String, clientId: String) async throws {
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        lock.withLock { reportsPosts.append((text: text, at: Date())) }
+    }
+
+    func addReportRoomMember(sessionId: String, login: String) async throws -> String? { nil }
 }
 
 /// Sends and actions succeed after a moment, as the API answers them.

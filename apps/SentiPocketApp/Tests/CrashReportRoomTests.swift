@@ -1,5 +1,7 @@
+import Combine
 import Foundation
 import PocketSyncClient
+import SwiftUI
 import XCTest
 @testable import SentiPocketApp
 
@@ -290,5 +292,68 @@ final class CrashReportRoomTests: XCTestCase {
     func test_the_offer_says_where_the_report_goes() {
         XCTAssertTrue(CrashReportOffer.message.contains("private room of yours"))
         XCTAssertFalse(CrashReportOffer.message.contains("this room"))
+    }
+}
+
+/// Carter, 11-06: the crash report offer is never an alert over a live call. It waits for the call to end, with the app
+/// in front; a call that starts while it is up takes it down, and it comes back after.
+@MainActor
+final class CrashOfferTimingTests: XCTestCase {
+    private var calls = CurrentValueSubject<Bool, Never>(false)
+    private var reports = CurrentValueSubject<Int, Never>(1)
+
+    override func setUp() {
+        super.setUp()
+        calls = CurrentValueSubject(false)
+        reports = CurrentValueSubject(1)
+    }
+
+    private func timing(available: Bool = true) -> CrashOfferTiming {
+        CrashOfferTiming(available: available, calls: calls.eraseToAnyPublisher(), reports: reports.eraseToAnyPublisher())
+    }
+
+    func test_the_offer_waits_for_a_call_to_end_and_never_shows_over_one() {
+        calls.send(true)
+        let offer = timing()
+        offer.inFront(true)
+        offer.settle()
+        XCTAssertFalse(offer.presented, "never over a call")
+        calls.send(false)
+        XCTAssertTrue(offer.presented, "once the call ends, with the app in front")
+        calls.send(true)
+        XCTAssertFalse(offer.presented, "a call that starts takes it down")
+        calls.send(false)
+        XCTAssertTrue(offer.presented, "and it comes back after, still unanswered")
+        offer.answer()
+        calls.send(true)
+        calls.send(false)
+        XCTAssertFalse(offer.presented, "once answered, not again this launch")
+    }
+
+    func test_the_offer_waits_for_a_moment_the_app_in_front_and_a_report() {
+        reports.send(0)
+        let offer = timing()
+        offer.inFront(true)
+        XCTAssertFalse(offer.presented, "not before a moment has passed")
+        offer.settle()
+        XCTAssertFalse(offer.presented, "nothing to offer")
+        offer.inFront(false)
+        reports.send(1)
+        XCTAssertFalse(offer.presented, "not while the app is in the background")
+        offer.inFront(true)
+        XCTAssertTrue(offer.presented)
+
+        let roomless = timing(available: false)
+        roomless.inFront(true)
+        roomless.settle()
+        XCTAssertFalse(roomless.presented, "no reports room to send to: no offer")
+    }
+
+    /// Pocket's own call screen counts as a call while it is up, as a call CallKit knows of does.
+    func test_pockets_call_screen_is_a_call_while_it_is_up() {
+        XCTAssertTrue(VoiceCallWindow.shared.show(Color.black), "the call screen opens over the test host")
+        XCTAssertTrue(CallPresence.shared.isOn)
+        VoiceCallWindow.shared.hide()
+        XCTAssertFalse(CallPresence.shared.isOn, "and the call is over when it goes")
     }
 }

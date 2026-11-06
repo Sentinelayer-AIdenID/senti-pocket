@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import PocketSyncClient
 import SwiftUI
@@ -243,47 +244,108 @@ final class CrashReportDelivery {
     }
 }
 
-/// The one offer to send crash reports, for the whole app, once each launch and only while the app is in front (not
-/// when iOS starts it in the background for a call): "Send to the team" posts them in the person's own reports room
-/// (`CrashReportDelivery`); "Not now" keeps them on the phone, where Settings shares them. Behind the root, watching
-/// only the reports, so a new report draws this and not the root.
+/// When the crash report offer is up: once a launch, a moment after the app opens (so iOS can hand over its own crash
+/// records first and both go together), while the app is in front and no call is on, and only with reports to offer. A
+/// call that starts while the offer is up takes it down, unanswered; it comes back once the call ends. (Carter, 11-06:
+/// never an alert over a live call.)
+@MainActor
+final class CrashOfferTiming: ObservableObject {
+    /// The alert is up.
+    @Published var presented = false
+    private let available: Bool
+    private var settled = false
+    private var inFront = false
+    private var callOn = false
+    private var pending = 0
+    private var answered = false
+    private var watching: [AnyCancellable] = []
+
+    /// `available`: there is a reports room to send to. `calls`: whether a call is on (`CallPresence`). `reports`: how
+    /// many reports wait to be offered.
+    init(available: Bool, calls: AnyPublisher<Bool, Never>, reports: AnyPublisher<Int, Never>) {
+        self.available = available
+        watching.append(calls.sink { [weak self] on in self?.call(on: on) })
+        watching.append(reports.sink { [weak self] count in
+            self?.pending = count
+            self?.update()
+        })
+    }
+
+    /// A moment has passed since the app opened.
+    func settle() {
+        settled = true
+        update()
+    }
+
+    func inFront(_ active: Bool) {
+        inFront = active
+        update()
+    }
+
+    /// The person answered ("Send to the team" or "Not now"): it is not offered again this launch.
+    func answer() {
+        answered = true
+        presented = false
+    }
+
+    private func call(on: Bool) {
+        callOn = on
+        // Taken down for the call, not answered: it comes back once the call ends.
+        if on, presented { presented = false }
+        update()
+    }
+
+    private func update() {
+        guard available, settled, !answered, !presented, inFront, !callOn, pending > 0 else { return }
+        presented = true
+    }
+}
+
+/// The one offer to send crash reports, for the whole app (`CrashOfferTiming` says when): "Send to the team" posts them
+/// in the person's own reports room (`CrashReportDelivery`); "Not now" keeps them on the phone, where Settings shares
+/// them. Behind the root and watching nothing the root draws, so a new report or a call draws this alone.
 struct CrashReportOffer: View {
     let api: (any ReportRoomAPI)?
     let identity: any AccountIdentityProviding
-    @ObservedObject private var crashes = CrashReporter.shared
+    @StateObject private var timing: CrashOfferTiming
     @Environment(\.scenePhase) private var scenePhase
-    /// A moment has passed since the app opened, so iOS could hand over its own crash records first and both go together.
-    @State private var settled = false
-    @State private var offered = false
-    @State private var presented = false
 
     static let message = "Send what the phone recorded to the team so it can be fixed? It goes to a private room of "
         + "yours that only the team is asked into. It has where the app stopped and your last few taps, never your "
         + "messages."
 
+    init(api: (any ReportRoomAPI)?, identity: any AccountIdentityProviding) {
+        self.api = api
+        self.identity = identity
+        _timing = StateObject(wrappedValue: CrashOfferTiming(
+            available: api != nil,
+            calls: CallPresence.shared.$isOn.eraseToAnyPublisher(),
+            reports: CrashReporter.shared.$unhandled.map(\.count).eraseToAnyPublisher()
+        ))
+    }
+
     var body: some View {
         Color.clear
             .allowsHitTesting(false)
             .accessibilityHidden(true)
-            .alert("Pocket closed unexpectedly", isPresented: $presented) {
-                Button("Send to the team") { send(crashes.unhandled) }
-                Button("Not now", role: .cancel) { crashes.markHandled(crashes.unhandled) }
+            .alert("Pocket closed unexpectedly", isPresented: $timing.presented) {
+                Button("Send to the team") {
+                    timing.answer()
+                    send(CrashReporter.shared.unhandled)
+                }
+                Button("Not now", role: .cancel) {
+                    timing.answer()
+                    CrashReporter.shared.markHandled(CrashReporter.shared.unhandled)
+                }
             } message: {
                 Text(Self.message)
             }
             .task {
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
-                settled = true
-                offer()
+                timing.settle()
             }
-            .onChange(of: crashes.unhandled.count) { _ in offer() }
-            .onChange(of: scenePhase) { _ in offer() }
-    }
-
-    private func offer() {
-        guard api != nil, settled, !offered, scenePhase == .active, !crashes.unhandled.isEmpty else { return }
-        offered = true
-        presented = true
+            .onAppear { timing.inFront(scenePhase == .active) }
+            .onChange(of: scenePhase) { phase in timing.inFront(phase == .active) }
     }
 
     private func send(_ reports: [CrashReport]) {
@@ -295,7 +357,7 @@ struct CrashReportOffer: View {
             let outcome = await delivery.deliver(CrashReportText.message(reports),
                                                  clientId: CrashReportText.clientId(for: reports), person: person)
             // Handled only once the room has them: a report that did not get there is offered again next time.
-            if case .sent = outcome { crashes.markHandled(reports) }
+            if case .sent = outcome { CrashReporter.shared.markHandled(reports) }
         }
     }
 }
