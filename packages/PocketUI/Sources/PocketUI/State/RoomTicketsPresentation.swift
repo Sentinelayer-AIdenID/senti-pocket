@@ -3,6 +3,29 @@ import PocketContracts
 
 /// One ticket as the app hands it to PocketUI.
 public struct RoomTicketInput: Equatable, Sendable {
+    /// Where the ticket is, as the server reads it from typed facts: step `index` of `count` (counted from 1), its
+    /// name, and when it stopped moving, why, and whom it waits on or who last held it. Never worked out on the phone.
+    public struct Step: Equatable, Sendable {
+        public let index: Int
+        public let count: Int
+        public let name: String
+        public let stalledSince: Date?
+        public let stalledReason: String?
+        public let waitingOn: String?
+        public let lastHolder: String?
+
+        public init(index: Int, count: Int, name: String, stalledSince: Date? = nil, stalledReason: String? = nil,
+                    waitingOn: String? = nil, lastHolder: String? = nil) {
+            self.index = index
+            self.count = count
+            self.name = name
+            self.stalledSince = stalledSince
+            self.stalledReason = stalledReason
+            self.waitingOn = waitingOn
+            self.lastHolder = lastHolder
+        }
+    }
+
     /// Who holds the ticket's lease, and whether it was live when the input was made.
     public struct Lease: Equatable, Sendable {
         public let holder: String
@@ -28,9 +51,8 @@ public struct RoomTicketInput: Equatable, Sendable {
     public let sourceSequenceId: Int64?
     public let isVerifiedDone: Bool
     public let lease: Lease?
-    /// The server's progress estimate (API #1052), 0...1, with its short reason; nil until scored.
-    public let estimate: Double?
-    public let estimateBasis: String?
+    /// Where the ticket is, from the server; nil from an older server, whose tickets show their status alone.
+    public let step: Step?
 
     public init(
         id: String,
@@ -45,8 +67,7 @@ public struct RoomTicketInput: Equatable, Sendable {
         sourceSequenceId: Int64? = nil,
         isVerifiedDone: Bool = false,
         lease: Lease? = nil,
-        estimate: Double? = nil,
-        estimateBasis: String? = nil
+        step: Step? = nil
     ) {
         self.id = id
         self.title = title
@@ -60,8 +81,31 @@ public struct RoomTicketInput: Equatable, Sendable {
         self.sourceSequenceId = sourceSequenceId
         self.isVerifiedDone = isVerifiedDone
         self.lease = lease
-        self.estimate = estimate
-        self.estimateBasis = estimateBasis
+        self.step = step
+    }
+}
+
+/// A row's strip of steps: `count` segments; those before `index` are done, `index` is the current one, named.
+public struct RoomTicketStepStrip: Equatable, Sendable {
+    public enum Segment: Equatable, Sendable {
+        case done
+        case current
+        case ahead
+    }
+
+    public let index: Int
+    public let count: Int
+    public let name: String
+
+    public init(index: Int, count: Int, name: String) {
+        self.index = index
+        self.count = count
+        self.name = name
+    }
+
+    /// Each step's segment, first to last.
+    public var segments: [Segment] {
+        (1...max(count, 1)).map { $0 < index ? .done : $0 == index ? .current : .ahead }
     }
 }
 
@@ -80,9 +124,8 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
     /// The question the ticket keeper is waiting on, while the ticket is not done.
     public let decision: TicketDecision?
     public let lease: RoomTicketInput.Lease?
-    /// The server's progress estimate and its reason, when scored (API #1052).
-    public let estimate: Double?
-    public let estimateBasis: String?
+    /// Where the ticket is, from the server (Carter, 11-05: real steps, not a percentage).
+    public let step: RoomTicketInput.Step?
 
     /// The title and body as a person sees them: the signal model's name hidden, as the web shows them. Edits and
     /// posts keep the ticket's own words.
@@ -103,8 +146,7 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
         isVerifiedDone: Bool = false,
         decision: TicketDecision? = nil,
         lease: RoomTicketInput.Lease? = nil,
-        estimate: Double? = nil,
-        estimateBasis: String? = nil
+        step: RoomTicketInput.Step? = nil
     ) {
         self.id = id
         self.title = title
@@ -119,8 +161,7 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
         self.isVerifiedDone = isVerifiedDone
         self.decision = decision
         self.lease = lease
-        self.estimate = estimate.map { min(max($0, 0), 1) }
-        self.estimateBasis = estimateBasis.flatMap { $0.isEmpty ? nil : $0 }
+        self.step = step
     }
 
     /// `done`, or `killed`, the API's other final status.
@@ -132,18 +173,54 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
         !isArchived && (["working", "in_progress", "in_review"].contains(status) || lease?.isLive == true)
     }
 
-    /// How far along a ticket being worked on is, by its stage: started, then in review. Carter asked for the signal
-    /// layer to judge this from everything happening in the room; until the API carries that estimate, the stage is
-    /// the honest number.
-    public var stageProgress: Double? {
-        guard isBeingWorkedOn else { return nil }
-        return status == "in_review" ? 0.85 : 0.45
+    /// The strip of named steps a row shows: one segment per step, those before the current one done, the current one
+    /// named. Only from the server's step; a ticket without one shows its status alone, never a bar or a percentage
+    /// (Carter, 11-05: "fix the progress thing. I hate it.").
+    public var stepStrip: RoomTicketStepStrip? {
+        step.map { RoomTicketStepStrip(index: $0.index, count: $0.count, name: $0.name) }
     }
 
-    /// What the bar shows: the server's estimate when it has one, else the stage.
-    public var barProgress: Double? {
-        guard isBeingWorkedOn else { return nil }
-        return estimate ?? stageProgress
+    /// The small print under the strip: since when the ticket has not moved, why, and whom it waits on, or who last
+    /// held it. Nil while it moves and waits on no one. A time today reads as its time ("2:10 PM"), an earlier one with
+    /// its date.
+    public func stallNote(now: Date = Date(), timeZone: TimeZone = .current, locale: Locale = .current) -> String? {
+        guard let step else { return nil }
+        var sentences: [String] = []
+        if let since = step.stalledSince {
+            sentences.append("No progress since \(Self.moment(since, now: now, timeZone: timeZone, locale: locale)).")
+            if let reason = step.stalledReason { sentences.append(Self.sentence(reason)) }
+        }
+        if let waiting = step.waitingOn {
+            sentences.append("Waiting on: \(waiting)")
+        } else if step.stalledSince != nil, step.stalledReason == nil, let holder = step.lastHolder {
+            sentences.append("Last held by \(Self.displayName(holder)).")
+        }
+        return sentences.isEmpty ? nil : sentences.joined(separator: " ")
+    }
+
+    /// What VoiceOver says for the strip: "Step 3 of 4, in review", then the small print.
+    public func stepAccessibilityLabel(now: Date = Date(), timeZone: TimeZone = .current,
+                                       locale: Locale = .current) -> String? {
+        guard let step else { return nil }
+        let base = "Step \(step.index) of \(step.count), \(step.name.lowercased())"
+        guard let note = stallNote(now: now, timeZone: timeZone, locale: locale) else { return base }
+        return base + ". " + note
+    }
+
+    private static func moment(_ date: Date, now: Date, timeZone: TimeZone, locale: Locale) -> String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        let formatter = DateFormatter()
+        formatter.locale = locale
+        formatter.timeZone = timeZone
+        formatter.setLocalizedDateFormatFromTemplate(calendar.isDate(date, inSameDayAs: now) ? "jmm" : "MMMdjmm")
+        return formatter.string(from: date)
+    }
+
+    /// A note as a sentence: it ends with a stop.
+    private static func sentence(_ text: String) -> String {
+        guard let last = text.last, !".!?".contains(last) else { return text }
+        return text + "."
     }
 
     public var statusLabel: String {
@@ -259,8 +336,7 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
                 isVerifiedDone: input.isVerifiedDone,
                 decision: input.status == "done" || input.status == "killed" ? nil : TicketDecision.parse(body),
                 lease: input.lease,
-                estimate: input.estimate,
-                estimateBasis: input.estimateBasis
+                step: input.step
             )
         }
         let protected = failure?.suppressesProtectedContent == true

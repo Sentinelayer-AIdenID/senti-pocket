@@ -177,28 +177,74 @@ private struct RoomTicketRowView: View {
                         .foregroundStyle(PocketPalette.textSecondary)
                 }
             }
-            // Being worked on: how far along, and who holds it (Carter, #55238).
-            if let progress = row.barProgress {
+            // Where it is, as the server reads it: a strip of named steps, never a percentage (Carter, 11-05). Without the
+            // server's step (an older server) the status above says it all.
+            if let strip = row.stepStrip {
                 VStack(alignment: .leading, spacing: 3) {
-                    ProgressView(value: progress)
-                        .progressViewStyle(.linear)
-                        .tint(RoomTicketPalette.status(row.status))
+                    RoomTicketStepStripView(strip: strip, tint: RoomTicketPalette.status(row.status))
                     let holder = row.lease.flatMap { $0.isLive ? $0.holder : nil }
-                    let parts = [holder.map { "Held by \(RoomTicketRow.actorLabel($0, viewerId: viewerId, names: names))" }, row.estimateBasis]
-                        .compactMap { $0 }
-                    if !parts.isEmpty {
-                        Text(parts.joined(separator: " · "))
+                    if let holder {
+                        Text("Held by \(RoomTicketRow.actorLabel(holder, viewerId: viewerId, names: names))")
                             .font(.caption2)
                             .foregroundStyle(PocketPalette.textSecondary)
                             .lineLimit(2)
                     }
+                    if let note = row.stallNote() {
+                        Text(note)
+                            .font(.caption2)
+                            .foregroundStyle(PocketPalette.warning)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("pocket.tickets.row.stalled")
+                    }
                 }
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("\(Int(progress * 100)) percent along")
-                .accessibilityIdentifier("pocket.tickets.row.progress")
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(row.stepAccessibilityLabel() ?? row.statusLabel)
+                .accessibilityIdentifier("pocket.tickets.row.step")
             }
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// A ticket's steps as a strip: one segment per step, those done filled, the current one filled and named, those ahead
+/// empty. At the accessibility text sizes the name goes under the strip.
+private struct RoomTicketStepStripView: View {
+    let strip: RoomTicketStepStrip
+    let tint: Color
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    var body: some View {
+        let segments = Array(strip.segments.enumerated())
+        let bar = HStack(spacing: 3) {
+            ForEach(segments, id: \.offset) { _, segment in
+                Capsule()
+                    .fill(color(segment))
+                    .frame(height: segment == .current ? 6 : 5)
+                    .frame(maxWidth: .infinity)
+            }
+        }
+        let name = Text(strip.name)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(tint)
+        if typeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: 4) {
+                bar
+                name
+            }
+        } else {
+            HStack(spacing: 8) {
+                bar.frame(maxWidth: 160)
+                name.lineLimit(1)
+            }
+        }
+    }
+
+    private func color(_ segment: RoomTicketStepStrip.Segment) -> Color {
+        switch segment {
+        case .done: return tint.opacity(0.55)
+        case .current: return tint
+        case .ahead: return PocketPalette.inset
+        }
     }
 }
 

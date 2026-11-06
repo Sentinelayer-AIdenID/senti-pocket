@@ -609,8 +609,18 @@ final class RoomTicketsCoordinator: ObservableObject {
                             expiresAt: lease.expiresAt.flatMap { ParsedSessionTimestamp($0).date }
                         )
                     },
-                    estimate: ticket.progress?.value,
-                    estimateBasis: ticket.progress?.basis
+                    // Where it is, as the server reads it; the old progress estimate is never shown.
+                    step: ticket.step.map { step in
+                        RoomTicketInput.Step(
+                            index: step.index,
+                            count: step.count,
+                            name: step.name,
+                            stalledSince: step.stalledSince.flatMap { ParsedSessionTimestamp($0).date },
+                            stalledReason: step.stalledReason,
+                            waitingOn: step.waitingOn,
+                            lastHolder: step.lastHolder
+                        )
+                    }
                 )
             },
             showsArchived: showsArchived,

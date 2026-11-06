@@ -563,14 +563,31 @@ private struct RoomPreviewTickets: RoomTicketsTransport {
 
     func roomTicketSnapshot(sessionId: String, afterId: String?, limit: Int) async throws -> RoomTicketSnapshotPage {
         // Ids strictly ascending, as the API pages them: the board refuses a snapshot out of order.
-        RoomTicketSnapshotPage(items: [
+        RoomTicketSnapshotPage(items: Self.withSteps([
             RoomTicket(id: "t1", title: "Fix paste validation on the email step", body: "## Priority\nP0\n\n## Decision\nQuestion: Ship the fix today?\nOptions: Yes · No · Custom\n\nPasting skips validation.", status: "working", createdBy: "human-alex", assignee: "review-agent", createdAt: "2026-10-28T13:00:00Z", updatedAt: "2026-10-28T18:40:00Z", version: 3),
             RoomTicket(id: "t2", title: "Reset retryCount only after success", body: "## Priority\nP1", status: "assigned", createdBy: "human-alex", assignee: "build-agent", createdAt: "2026-10-28T13:05:00Z", updatedAt: "2026-10-28T17:00:00Z", version: 2),
             RoomTicket(id: "t3", title: "Add onboarding screenshots to the PR", body: "## Priority\nP2", status: "in_review", createdBy: "review-agent", assignee: "build-agent", createdAt: "2026-10-28T12:00:00Z", updatedAt: "2026-10-28T16:00:00Z", version: 4),
             RoomTicket(id: "t4", title: "Draft release notes", status: "open", createdBy: "human-alex", createdAt: "2026-10-28T11:00:00Z", updatedAt: "2026-10-28T11:00:00Z", version: 1),
             RoomTicket(id: "t5", title: "Rename onboarding flags", body: "## Priority\nP3", status: "done", createdBy: "human-alex", assignee: "build-agent", createdAt: "2026-10-27T11:00:00Z", updatedAt: "2026-10-27T15:00:00Z", version: 5),
             RoomTicket(id: "t6", title: Self.title("t6"), body: "## Priority\nP2\n\nConfirm the fallback screen on a small phone.", status: "working", createdBy: "human-alex", assignee: RoomPreviewIdentity.accountId, createdAt: "2026-10-28T14:00:00Z", updatedAt: "2026-10-28T19:00:00Z", version: 2, lease: RoomTicketLease(holder: RoomPreviewIdentity.accountId, holderKind: "human", fence: 1, expiresAt: Self.leaseExpiry))
-        ], hasMore: false, cursor: 1)
+        ]), hasMore: false, cursor: 1)
+    }
+
+    /// The server's steps on the preview's tickets (taken, in review, merged, shipped): one stalled since three hours
+    /// ago, one waiting on you, one shipped. The assigned and the open ticket have none, as an older server sends.
+    private static func withSteps(_ tickets: [RoomTicket]) -> [RoomTicket] {
+        let stalled = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-3 * 3_600))
+        let steps: [String: RoomTicketStep?] = [
+            "t1": RoomTicketStep(index: 1, count: 4, name: "Taken", stalledSince: stalled, stalledReason: "Box 7 was stopped"),
+            "t3": RoomTicketStep(index: 2, count: 4, name: "In review", waitingOn: "your OK of the shots"),
+            "t5": RoomTicketStep(index: 4, count: 4, name: "Shipped"),
+            "t6": RoomTicketStep(index: 1, count: 4, name: "Taken")
+        ]
+        return tickets.map { ticket in
+            var stepped = ticket
+            stepped.step = steps[ticket.id] ?? nil
+            return stepped
+        }
     }
 
     func roomTicketEvents(sessionId: String, after: Int64, limit: Int) async throws -> RoomTicketEventsPage {

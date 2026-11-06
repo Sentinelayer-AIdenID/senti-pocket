@@ -51,6 +51,30 @@ final class RoomTicketsCoordinatorTests: XCTestCase {
         RoomTicket(id: id, title: "Ticket \(id)", body: body, status: status, version: version)
     }
 
+    /// Carter, 11-05: real steps, not a percentage. The row gets the server's step as it came, with since when it has
+    /// not moved; a ticket with only the old estimate shows its status alone.
+    func test_a_row_gets_the_servers_step_and_never_the_old_estimate() async {
+        var stepped = ticket("s", status: "in_review")
+        stepped.step = RoomTicketStep(index: 2, count: 4, name: "In review", stalledSince: "2026-11-05T19:10:00Z",
+                                      stalledReason: "Box X was stopped", waitingOn: "your OK of the shots")
+        stepped.progress = RoomTicketProgress(value: 0.62, basis: "b", at: "a")
+        var estimated = ticket("e", status: "working")
+        estimated.progress = RoomTicketProgress(value: 0.45, basis: "b", at: "a")
+        let transport = ScriptedTicketsTransport(
+            snapshots: [.success(RoomTicketSnapshotPage(items: [stepped, estimated], hasMore: false, cursor: 1))]
+        )
+        let coordinator = makeCoordinator(transport)
+        await coordinator.refresh()
+        let rows = Dictionary(uniqueKeysWithValues: coordinator.state.rows.map { ($0.id, $0) })
+        XCTAssertEqual(rows["s"]?.step, RoomTicketInput.Step(
+            index: 2, count: 4, name: "In review", stalledSince: Date(timeIntervalSince1970: 1_793_905_800),
+            stalledReason: "Box X was stopped", waitingOn: "your OK of the shots"
+        ))
+        XCTAssertEqual(rows["s"]?.stepStrip?.segments, [.done, .current, .ahead, .ahead])
+        XCTAssertNil(rows["e"]?.step, "only the old estimate: no step")
+        XCTAssertNil(rows["e"]?.stepStrip, "and no bar: its status alone")
+    }
+
     func test_the_board_loads_then_follows_the_feed() async {
         let transport = ScriptedTicketsTransport(
             snapshots: [.success(RoomTicketSnapshotPage(items: [ticket("a", body: "## Priority\nP1")], hasMore: false, cursor: 7))],

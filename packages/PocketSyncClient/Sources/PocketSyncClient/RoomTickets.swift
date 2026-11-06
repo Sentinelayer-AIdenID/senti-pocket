@@ -65,6 +65,81 @@ public struct RoomTicketProgress: Equatable, Sendable {
     }
 }
 
+/// Where a ticket is, as the server reads it from typed facts (taken, in review, merged, shipped, and later "PR open"):
+/// step `index` of `count`, counted from 1 as it is said ("Step 3 of 4"), and the step's name. When nothing has
+/// happened for a while the server adds since when, why, and whom it waits on, or who last held it. The phone never
+/// works a step out for itself: no step from the server is no step.
+///
+/// The API's exact field names arrive with its change, so this reads the agreed shape tolerantly: the step in
+/// `progress.step` or as the ticket's own `step`; its notes in the step, beside it in `progress`, or on the ticket;
+/// names in camelCase or snake_case; a person as text or as an object with a name. Anything it cannot read in full is
+/// no step, never a guess.
+public struct RoomTicketStep: Equatable, Sendable {
+    public let index: Int
+    public let count: Int
+    public let name: String
+    /// When the ticket stopped moving, as the server wrote it; nil while it moves.
+    public let stalledSince: String?
+    public let stalledReason: String?
+    public let waitingOn: String?
+    public let lastHolder: String?
+
+    /// Nil unless 1 <= `index` <= `count` <= 12 and the name has words.
+    public init?(index: Int, count: Int, name: String, stalledSince: String? = nil, stalledReason: String? = nil,
+                 waitingOn: String? = nil, lastHolder: String? = nil) {
+        guard (1...12).contains(count), (1...count).contains(index),
+              let name = Self.line(name, limit: 40) else { return nil }
+        self.index = index
+        self.count = count
+        self.name = name
+        self.stalledSince = stalledSince.flatMap { Self.line($0, limit: 40) }
+        self.stalledReason = stalledReason.flatMap { Self.line($0, limit: 160) }
+        self.waitingOn = waitingOn.flatMap { Self.line($0, limit: 120) }
+        self.lastHolder = lastHolder.flatMap { Self.line($0, limit: 80) }
+    }
+
+    /// The step a ticket read carries, or nil.
+    init?(ticket json: JSONValue) {
+        let progress = json["progress"]
+        guard let step = Self.object(progress?["step"]) ?? Self.object(json["step"]),
+              let index = step["index"]?.intValue, let count = step["count"]?.intValue,
+              let name = step["name"]?.stringValue else { return nil }
+        let places = [step, progress, json].compactMap { $0 }
+        func text(_ camel: String, _ snake: String) -> String? {
+            for place in places {
+                for key in [camel, snake] {
+                    guard let value = place[key] else { continue }
+                    if let text = value.stringValue { return text }
+                    if let text = value["name"]?.stringValue ?? value["displayName"]?.stringValue
+                        ?? value["label"]?.stringValue ?? value["id"]?.stringValue { return text }
+                }
+            }
+            return nil
+        }
+        self.init(
+            index: Int(clamping: index),
+            count: Int(clamping: count),
+            name: name,
+            stalledSince: step["stalledSince"]?.stringValue ?? step["stalled_since"]?.stringValue,
+            stalledReason: text("stalledReason", "stalled_reason"),
+            waitingOn: text("waitingOn", "waiting_on"),
+            lastHolder: text("lastHolder", "last_holder")
+        )
+    }
+
+    private static func object(_ value: JSONValue?) -> JSONValue? {
+        guard let value, case .object = value else { return nil }
+        return value
+    }
+
+    /// One line (line breaks and control characters become single spaces), cut to `limit`; nil when empty.
+    private static func line(_ text: String, limit: Int) -> String? {
+        let words = text.components(separatedBy: CharacterSet.whitespacesAndNewlines.union(.controlCharacters))
+            .filter { !$0.isEmpty }
+        return words.isEmpty ? nil : String(words.joined(separator: " ").prefix(limit))
+    }
+}
+
 public struct RoomTicket: Equatable, Identifiable, Sendable {
     public let id: String
     public let title: String
@@ -85,7 +160,10 @@ public struct RoomTicket: Equatable, Identifiable, Sendable {
     /// Present while a lease exists, live or expired.
     public let lease: RoomTicketLease?
     /// The scorer's estimate, on reads that carry it; kept across feed events that don't (`RoomTicketBoard.upsert`).
+    /// Older builds show it; this one shows the step instead.
     public var progress: RoomTicketProgress?
+    /// Where the ticket is, as the server reads it; nil from an older server.
+    public var step: RoomTicketStep?
 
     public init?(json: JSONValue) {
         guard let id = json["id"]?.stringValue, !id.isEmpty,
@@ -107,6 +185,7 @@ public struct RoomTicket: Equatable, Identifiable, Sendable {
         self.staleClaim = json["staleClaim"]?.boolValue ?? false
         self.lease = RoomTicketLease(json: json["lease"])
         self.progress = RoomTicketProgress(json: json["progress"])
+        self.step = RoomTicketStep(ticket: json)
     }
 
     public init(
@@ -226,14 +305,25 @@ public struct RoomTicketBoard: Equatable, Sendable {
     @discardableResult
     public mutating func upsert(_ ticket: RoomTicket) -> Bool {
         if let current = tickets[ticket.id], current.version >= ticket.version {
-            // The same version again, from a read that carries the scorer's estimate: take the estimate.
-            guard let progress = ticket.progress, current.version == ticket.version, current.progress != progress else { return false }
-            tickets[ticket.id]?.progress = progress
-            return true
+            // The same version again, from a read that carries the scorer's estimate or the server's step: take them.
+            guard current.version == ticket.version else { return false }
+            var changed = false
+            if let progress = ticket.progress, current.progress != progress {
+                tickets[ticket.id]?.progress = progress
+                changed = true
+            }
+            if let step = ticket.step, current.step != step {
+                tickets[ticket.id]?.step = step
+                changed = true
+            }
+            return changed
         }
         var next = ticket
         // Feed events carry no estimate: a newer version keeps the last one seen until a read brings a fresh one.
         if next.progress == nil { next.progress = tickets[ticket.id]?.progress }
+        // Nor, perhaps, a step. The last one stands only while the status is the same: a ticket whose status moved shows
+        // its status alone until a read brings the server's step, never a step from before the move.
+        if next.step == nil, let current = tickets[ticket.id], current.status == next.status { next.step = current.step }
         tickets[ticket.id] = next
         return true
     }
