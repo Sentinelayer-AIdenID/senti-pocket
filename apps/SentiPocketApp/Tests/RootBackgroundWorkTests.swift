@@ -103,6 +103,9 @@ final class RootBackgroundWorkTests: XCTestCase {
 
     /// The phone's freezes came right after the side panel opened over a room. Opening it must not draw the room's rows
     /// (nothing in them changed), and reads the rooms once (the panel's poll) and nothing read in the last 15 s.
+    /// Measured with every answer held: the room holds what changes while the panel covers it and shows it when the
+    /// panel closes, so an answer that landed while the panel was open (who viewed what, slow on a loaded machine) was
+    /// drawn as the panel closed, as if the panel had drawn it.
     func test_opening_the_side_panel_draws_no_message_row_and_reads_only_the_rooms() throws {
         let api = Self.api()
         UserDefaults.standard.set(RootPreviewAPI.midRoom, forKey: "pocket.lastRoomId")
@@ -128,16 +131,25 @@ final class RootBackgroundWorkTests: XCTestCase {
         // The reads the root made as it was shown count as fresh for `panelFreshness` (15 s), which the reads asserted
         // below rely on: how long the root took to settle is printed.
         print("BGAUDIT settled \(String(format: "%.1f", Date().timeIntervalSince(shown))) s after the root was shown")
+        // From here every read is counted as it is asked for and answered only after the measurement, so nothing can
+        // land while the panel is open or as it closes. Reads asked before are let finish, and the root settles again.
+        api.holdAnswers()
+        defer { api.releaseAnswers() }
+        settleHeld(api)
         let draws = RenderTrace.snapshot().draws
         let reads = Self.reads(api)
+        let allReads = Self.allReads(api)
         let meter = RootPreview.meter
         let screens = meter.roomScreens
         let screenBodies = meter.roomScreenBodies
 
         RootPreview.requestDrawer(true)
         pump(2)
-        XCTAssertEqual(RenderTrace.snapshot().draws - draws, 0, "opening the side panel draws none of the room's rows")
-        XCTAssertEqual(meter.roomScreens - screens, 0, "opening the side panel makes no new room screen")
+        let whileOpen = Self.readsSince(allReads, api)
+        XCTAssertEqual(RenderTrace.snapshot().draws - draws, 0,
+                       "opening the side panel draws none of the room's rows (reads asked meanwhile: \(whileOpen))")
+        XCTAssertEqual(meter.roomScreens - screens, 0,
+                       "opening the side panel makes no new room screen (reads asked meanwhile: \(whileOpen))")
         // How often the room's screen ran its body is printed, not asserted: it reads environment values the panel's
         // cover passes through, and what costs (a new screen, its rows) is asserted above.
         print("BGAUDIT room screen bodies as the panel opened: \(meter.roomScreenBodies - screenBodies)")
@@ -146,10 +158,14 @@ final class RootBackgroundWorkTests: XCTestCase {
         for name in ["bell", "waiting", "folders", "dmSettings"] {
             XCTAssertEqual(after[name]! - reads[name]!, 0, "\(name) was read moments ago: not again")
         }
+        let beforeClose = Self.allReads(api)
         RootPreview.requestDrawer(false)
         pump(1.5)
-        XCTAssertEqual(RenderTrace.snapshot().draws - draws, 0, "closing it draws none either")
-        XCTAssertEqual(meter.roomScreens - screens, 0, "closing it makes no new room screen either")
+        let whileClosing = Self.readsSince(beforeClose, api)
+        XCTAssertEqual(RenderTrace.snapshot().draws - draws, 0,
+                       "closing it draws none either (reads asked as it closed: \(whileClosing))")
+        XCTAssertEqual(meter.roomScreens - screens, 0,
+                       "closing it makes no new room screen either (reads asked as it closed: \(whileClosing))")
     }
 
     // MARK: - The calendar's changes leave the root and its room alone
@@ -263,6 +279,24 @@ final class RootBackgroundWorkTests: XCTestCase {
 
     private static func api() -> RootPreviewAPI {
         RootPreviewAPI(postsPerSecond: 0, onePage: false, openRoomId: RootPreviewAPI.midRoom)
+    }
+
+    private static let readNames = ["rooms", "bell", "waiting", "folders", "dmSettings", "history", "actions", "views",
+                                    "presence"]
+
+    /// How many times each read the preview answers was asked for.
+    private static func allReads(_ api: RootPreviewAPI) -> [String: Int] {
+        Dictionary(uniqueKeysWithValues: readNames.map { ($0, api.callCount($0)) })
+    }
+
+    /// The reads asked for since `before`, by name, and how many reads are held.
+    private static func readsSince(_ before: [String: Int], _ api: RootPreviewAPI) -> String {
+        let now = allReads(api)
+        let asked = readNames.compactMap { name -> String? in
+            let more = now[name, default: 0] - before[name, default: 0]
+            return more == 0 ? nil : "\(name) +\(more)"
+        }
+        return (asked.isEmpty ? "none" : asked.joined(separator: ", ")) + "; \(api.readsInFlight.held) held"
     }
 
     private static func reads(_ api: RootPreviewAPI) -> [String: Int] {
@@ -430,6 +464,16 @@ final class RootBackgroundWorkTests: XCTestCase {
         while Date() < end, firstReads.contains(where: { api.callCount($0) == 0 }) { pump(0.1) }
         XCTAssertEqual(firstReads.filter { api.callCount($0) == 0 }, [], "the root and its room made their first reads")
         settle(updating: update) { [RenderTrace.snapshot().draws, RootPreview.meter.roomScreens, api.totalCalls] }
+    }
+
+    /// With answers held (`RootPreviewAPI.holdAnswers()`): the reads asked before the hold are answered (at most 30 s),
+    /// so every read still going is held, and then nothing is read, drawn or made for a second.
+    private func settleHeld(_ api: RootPreviewAPI) {
+        let end = Date().addingTimeInterval(30)
+        while Date() < end, api.readsInFlight.all != api.readsInFlight.held { pump(0.1) }
+        let reads = api.readsInFlight
+        XCTAssertEqual(reads.all, reads.held, "every read asked before the hold was answered")
+        quiet { [RenderTrace.snapshot().draws, RootPreview.meter.roomScreens, api.totalCalls] }
     }
 
     private func pump(_ seconds: TimeInterval) {
