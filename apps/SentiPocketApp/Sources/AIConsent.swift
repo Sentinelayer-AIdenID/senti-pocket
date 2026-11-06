@@ -46,7 +46,8 @@ final class AIConsent: ObservableObject {
 }
 
 /// The same question, for what is not a room screen: a dial (Senti calling you about a decision) hears what you say,
-/// answers it with AI and posts your reply, so it goes on only with this account's OK. The question shows over the
+/// answers it with AI and posts your reply, so it goes on only with this account's OK; the calendar's Draft sends what
+/// you typed to Senti's AI, so it asks the same way. The question shows over the
 /// whole app, any sheet open in it included (`AIConsentWindow`), and goes again when the call ends. With the app not on
 /// screen to show it (the phone locked, Pocket in the background), the call ends at once and a notification says why:
 /// it never waits silent. The signed-in screens give it the account's consent; until they have, the phone's copy for
