@@ -85,6 +85,25 @@ final class RoomTicketsCoordinatorTests: XCTestCase {
         XCTAssertEqual(rows["n"]?.stepStrip?.label, "Not started")
     }
 
+    /// Tickets name people as the room does (warden, 11-05): by user id, their display name, else their login; by
+    /// `human-<login>`, their display name. Someone with neither has no name, so a ticket never shows their id.
+    func test_ticket_names_come_from_the_directory_by_account_and_by_login() {
+        let names = RoomTicketsCoordinator.ticketNames([
+            RoomDirectoryMember(userId: "00000000-0000-4000-8000-00000000AAAA", displayName: "Priya", githubLogin: "priya-dev"),
+            RoomDirectoryMember(userId: "00000000-0000-4000-8000-00000000bbbb", displayName: nil, githubLogin: "dana"),
+            RoomDirectoryMember(userId: "00000000-0000-4000-8000-00000000cccc", displayName: "", githubLogin: nil)
+        ])
+        XCTAssertEqual(names, [
+            "00000000-0000-4000-8000-00000000aaaa": "Priya",
+            "human-priya-dev": "Priya",
+            "00000000-0000-4000-8000-00000000bbbb": "dana"
+        ])
+        XCTAssertEqual(RoomTicketRow.actorLabel("human-g.0000000000004000800000000000aaaa", viewerId: nil, names: names),
+                       "Priya")
+        XCTAssertEqual(RoomTicketRow.actorLabel("human-g.000000000000400080000000000000cc", viewerId: nil, names: names),
+                       "a person", "a member with no name is not shown by id")
+    }
+
     func test_the_board_loads_then_follows_the_feed() async {
         let transport = ScriptedTicketsTransport(
             snapshots: [.success(RoomTicketSnapshotPage(items: [ticket("a", body: "## Priority\nP1")], hasMore: false, cursor: 7))],

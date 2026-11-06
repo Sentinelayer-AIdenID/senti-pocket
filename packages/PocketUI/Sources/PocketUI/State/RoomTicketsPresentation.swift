@@ -217,62 +217,74 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
     /// the person in it ("Stalled since 2:10 PM · waiting on review by alex"). Nil while it moves. A time today reads as
     /// its time, an earlier one with its date.
     public func stallNote(now: Date = Date(), timeZone: TimeZone = .current, locale: Locale = .current,
-                          viewerId: String? = nil, names: [String: String] = [:]) -> String? {
-        stallParts(now: now, timeZone: timeZone, locale: locale, viewerId: viewerId, names: names)?
+                          viewerId: String? = nil, viewerLogin: String? = nil,
+                          names: [String: String] = [:]) -> String? {
+        stallParts(now: now, timeZone: timeZone, locale: locale, viewerId: viewerId, viewerLogin: viewerLogin,
+                   names: names)?
             .joined(separator: " · ")
     }
 
     /// What VoiceOver says for the strip: "Step 2 of 5, in review" (or "Not started, 5 steps"), then the small print:
     /// "Step 2 of 5, in review. Stalled since 2:10 PM, waiting on review by alex".
     public func stepAccessibilityLabel(now: Date = Date(), timeZone: TimeZone = .current, locale: Locale = .current,
-                                       viewerId: String? = nil, names: [String: String] = [:]) -> String? {
+                                       viewerId: String? = nil, viewerLogin: String? = nil,
+                                       names: [String: String] = [:]) -> String? {
         guard let base = stepStrip?.accessibilityLabel else { return nil }
-        guard let parts = stallParts(now: now, timeZone: timeZone, locale: locale, viewerId: viewerId, names: names)
+        guard let parts = stallParts(now: now, timeZone: timeZone, locale: locale, viewerId: viewerId,
+                                     viewerLogin: viewerLogin, names: names)
         else { return base }
         return base + ". " + parts.joined(separator: ", ")
     }
 
-    private func stallParts(now: Date, timeZone: TimeZone, locale: Locale, viewerId: String?,
+    private func stallParts(now: Date, timeZone: TimeZone, locale: Locale, viewerId: String?, viewerLogin: String?,
                             names: [String: String]) -> [String]? {
         guard let step, let since = step.stalledSince else { return nil }
         var parts = ["Stalled since \(Self.moment(since, now: now, timeZone: timeZone, locale: locale))"]
-        if let reason = Self.stallSentence(step, viewerId: viewerId, names: names) { parts.append(reason) }
+        if let reason = Self.stallSentence(step, viewerId: viewerId, viewerLogin: viewerLogin, names: names) {
+            parts.append(reason)
+        }
         return parts
     }
 
-    /// Why it stopped, with whom it concerns named the way the room names them (never a raw id), and "you" when that
-    /// is the viewer (warden, 11-05, as on the web, #753):
-    /// - `holder_lease_expired`: "alex, who was working on it, went quiet" (the last holder);
-    /// - `waiting_on_assignee`: "waiting on alex, who it's assigned to", or "waiting on you";
-    /// - `waiting_on_review`: "waiting on review by alex";
-    /// - `waiting_on_owner`: "waiting on the owner, alex", or "waiting on you, the owner";
+    /// Why it stopped, with the person it concerns in it, as the web says it (warden, 11-05, web #753; the shared table
+    /// ticket-step-cases.json pins every case):
+    /// - `holder_lease_expired` names the last holder: "alex, who was working on it, went quiet";
+    /// - `waiting_on_assignee` names the one it waits on: "waiting on alex, who it's assigned to";
+    /// - `waiting_on_review`: "waiting on review by alex"; `waiting_on_owner`: "waiting on the owner, alex";
     /// - `blocked`, `no_activity`: as they are, with no one named.
-    /// The waiting reasons name the one it waits on. Without a name each reads as the web's plain words; without a
-    /// reason, it is "waiting on alex", else "last held by alex", else nothing.
-    static func stallSentence(_ step: RoomTicketInput.Step, viewerId: String?, names: [String: String]) -> String? {
-        func person(_ id: String?) -> (name: String, isViewer: Bool)? {
-            guard let id else { return nil }
-            let isViewer = viewerId.map { !$0.isEmpty && $0.lowercased() == id.lowercased() } ?? false
-            return (actorLabel(id, viewerId: viewerId, names: names), isViewer)
+    /// The viewer is "you" ("waiting on review by you", "waiting on you", "waiting on you, the owner", "you went quiet
+    /// while working on it"). Someone the room does not name is left out: the reason's plain words, or "waiting on the
+    /// person it's assigned to". Without a reason it is "waiting on <the one it waits on>", else "last held by <the last
+    /// holder>", and nothing when that person is not named.
+    static func stallSentence(_ step: RoomTicketInput.Step, viewerId: String?, viewerLogin: String?,
+                              names: [String: String]) -> String? {
+        func person(_ id: String?) -> (name: String?, isViewer: Bool)? {
+            id.map { ticketPerson($0, viewerId: viewerId, viewerLogin: viewerLogin, names: names) }
         }
         guard let reason = step.stalledReason else {
-            if let waiting = person(step.waitingOn) { return "waiting on \(waiting.name)" }
-            return person(step.lastHolder).map { "last held by \($0.name)" }
+            guard let who = person(step.waitingOn ?? step.lastHolder),
+                  let name = who.isViewer ? "you" : who.name else { return nil }
+            return step.waitingOn != nil ? "waiting on \(name)" : "last held by \(name)"
         }
         let plain = stallReasons[reason]
         switch reason {
         case "holder_lease_expired":
             guard let holder = person(step.lastHolder) else { return plain }
-            return holder.isViewer ? "you went quiet while working on it"
-                : "\(holder.name), who was working on it, went quiet"
+            if holder.isViewer { return "you went quiet while working on it" }
+            return holder.name.map { "\($0), who was working on it, went quiet" } ?? plain
         case "waiting_on_assignee":
             guard let assignee = person(step.waitingOn) else { return plain }
-            return assignee.isViewer ? "waiting on you" : "waiting on \(assignee.name), who it's assigned to"
+            if assignee.isViewer { return "waiting on you" }
+            return assignee.name.map { "waiting on \($0), who it's assigned to" }
+                ?? "waiting on the person it's assigned to"
         case "waiting_on_review":
-            return person(step.waitingOn).map { "waiting on review by \($0.name)" } ?? plain
+            guard let reviewer = person(step.waitingOn) else { return plain }
+            if reviewer.isViewer { return "waiting on review by you" }
+            return reviewer.name.map { "waiting on review by \($0)" } ?? plain
         case "waiting_on_owner":
             guard let owner = person(step.waitingOn) else { return plain }
-            return owner.isViewer ? "waiting on you, the owner" : "waiting on the owner, \(owner.name)"
+            if owner.isViewer { return "waiting on you, the owner" }
+            return owner.name.map { "waiting on the owner, \($0)" } ?? plain
         default:
             return plain
         }
@@ -304,12 +316,41 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
     }
 
     /// Someone on a ticket the way the room names them: "you", a person by the name the room's member directory gives
-    /// their user id, an agent by its id, and a person the directory does not know as "a person", never by user id.
-    public static func actorLabel(_ id: String, viewerId: String?, names: [String: String] = [:]) -> String {
-        if let viewerId, !viewerId.isEmpty, id.lowercased() == viewerId.lowercased() { return "you" }
-        if let name = names[id.lowercased()], !name.isEmpty { return name }
-        if UUID(uuidString: id) != nil { return "a person" }
-        return displayName(id)
+    /// them, an agent by its id, and a person the directory does not know as "a person", never by an id.
+    public static func actorLabel(_ id: String, viewerId: String?, viewerLogin: String? = nil,
+                                  names: [String: String] = [:]) -> String {
+        let person = ticketPerson(id, viewerId: viewerId, viewerLogin: viewerLogin, names: names)
+        return person.isViewer ? "you" : person.name ?? "a person"
+    }
+
+    /// How an actor id reads (API #1167, as on the web, #753). An account (`human-g.<32 hex>`, `human-<uuid>`, or a
+    /// bare user id) is the room's name for it, else not named: never its hex or its id. `human-<login>` is the room's
+    /// name for that login, else the login. Anything else (an agent) is its id. `isViewer`: the id is the viewer's own,
+    /// by account (`viewerId`, a user id) or by login. `names` is keyed by lowercased user id and by `human-<login>`.
+    public static func ticketPerson(_ id: String, viewerId: String?, viewerLogin: String?,
+                                    names: [String: String]) -> (name: String?, isViewer: Bool) {
+        let lower = id.lowercased()
+        let account = accountKey(lower)
+        let viewerAccount = viewerId.flatMap { $0.isEmpty ? nil : $0.lowercased() }
+        let isViewer = (viewerAccount != nil && (viewerAccount == lower || viewerAccount == account))
+            || (viewerLogin.map { !$0.isEmpty && lower == "human-" + $0.lowercased() } ?? false)
+        if let name = names[lower], !name.isEmpty { return (name, isViewer) }
+        if let account {
+            return (names[account].flatMap { $0.isEmpty ? nil : $0 }, isViewer)
+        }
+        return (displayName(id), isViewer)
+    }
+
+    /// The user id an account's actor id stands for, lowercased: `human-g.<32 hex>` as a UUID, `human-<uuid>` and a
+    /// bare UUID as they are, and any other `human-g.` id as its own text (never shown). Nil for a login or an agent.
+    static func accountKey(_ lower: String) -> String? {
+        let rest = lower.hasPrefix("human-") ? String(lower.dropFirst("human-".count)) : lower
+        if UUID(uuidString: rest) != nil { return rest }
+        guard lower.hasPrefix("human-g.") else { return nil }
+        let hex = Array(rest.dropFirst(2))
+        guard hex.count == 32, hex.allSatisfy(\.isHexDigit) else { return rest }
+        return [hex[0..<8], hex[8..<12], hex[12..<16], hex[16..<20], hex[20..<32]].map { String($0) }
+            .joined(separator: "-")
     }
 }
 
@@ -343,8 +384,9 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
     public let assignChoices: [RoomTicketAssignChoice]
     /// How many tickets this phone has filed here; a change tells the filing form its ticket landed.
     public let filedCount: Int
-    /// The viewer, for "you" in ticket lines.
+    /// The viewer, for "you" in ticket lines: their user id, and their login (a ticket may name them by either).
     public let viewerId: String?
+    public let viewerLogin: String?
     /// Names for people's user ids, from the room's member directory.
     public let personNames: [String: String]
     /// Per ticket: its comments, oldest first, once loaded.
@@ -421,6 +463,7 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
         self.ticketWriteStatus = protected ? [:] : ticketWriteStatus
         self.filedCount = filedCount
         self.viewerId = viewerId
+        self.viewerLogin = viewerLogin
         self.personNames = personNames
         self.comments = protected ? [:] : comments
         self.commentStatus = protected ? [:] : commentStatus

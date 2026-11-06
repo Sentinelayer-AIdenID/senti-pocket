@@ -95,7 +95,8 @@ public struct RoomTicketsView: View {
                         send: send
                     )
                 } label: {
-                    RoomTicketRowView(row: row, viewerId: state.viewerId, names: state.personNames)
+                    RoomTicketRowView(row: row, viewerId: state.viewerId, viewerLogin: state.viewerLogin,
+                                      names: state.personNames)
                 }
                 .accessibilityIdentifier("pocket.tickets.row.\(row.id)")
             }
@@ -135,8 +136,9 @@ public struct RoomTicketsView: View {
 
 private struct RoomTicketRowView: View {
     let row: RoomTicketRow
-    /// Who is reading, and the room's people by user id: a person is named, never shown by user id.
+    /// Who is reading (by user id and by login), and the room's people: a person is named, never shown by an id.
     var viewerId: String?
+    var viewerLogin: String?
     var names: [String: String] = [:]
 
     var body: some View {
@@ -184,12 +186,14 @@ private struct RoomTicketRowView: View {
                     RoomTicketStepStripView(strip: strip, tint: RoomTicketPalette.status(row.status))
                     let holder = row.lease.flatMap { $0.isLive ? $0.holder : nil }
                     if let holder {
-                        Text("Held by \(RoomTicketRow.actorLabel(holder, viewerId: viewerId, names: names))")
+                        let who = RoomTicketRow.actorLabel(holder, viewerId: viewerId, viewerLogin: viewerLogin,
+                                                           names: names)
+                        Text("Held by \(who)")
                             .font(.caption2)
                             .foregroundStyle(PocketPalette.textSecondary)
                             .lineLimit(2)
                     }
-                    if let note = row.stallNote(viewerId: viewerId, names: names) {
+                    if let note = row.stallNote(viewerId: viewerId, viewerLogin: viewerLogin, names: names) {
                         Text(note)
                             .font(.caption2)
                             .foregroundStyle(PocketPalette.warning)
@@ -198,7 +202,9 @@ private struct RoomTicketRowView: View {
                     }
                 }
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel(row.stepAccessibilityLabel(viewerId: viewerId, names: names) ?? row.statusLabel)
+                .accessibilityLabel(
+                    row.stepAccessibilityLabel(viewerId: viewerId, viewerLogin: viewerLogin, names: names) ?? row.statusLabel
+                )
                 .accessibilityIdentifier("pocket.tickets.row.step")
             }
         }

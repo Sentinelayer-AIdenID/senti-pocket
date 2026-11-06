@@ -225,8 +225,10 @@ final class RoomTicketStepsTests: XCTestCase {
         text?.replacingOccurrences(of: "\u{202F}", with: " ")
     }
 
-    private func note(_ step: RoomTicketInput.Step, viewerId: String? = nil, names: [String: String] = [:]) -> String? {
-        plain(row(step).stallNote(now: now, timeZone: eastern, locale: english, viewerId: viewerId, names: names))
+    private func note(_ step: RoomTicketInput.Step, viewerId: String? = nil, viewerLogin: String? = nil,
+                      names: [String: String] = [:]) -> String? {
+        plain(row(step).stallNote(now: now, timeZone: eastern, locale: english, viewerId: viewerId,
+                                  viewerLogin: viewerLogin, names: names))
     }
 
     func test_the_servers_step_is_a_strip_of_steps_the_current_one_named() {
@@ -316,33 +318,49 @@ final class RoomTicketStepsTests: XCTestCase {
         XCTAssertTrue(older?.contains("2:10 PM") == true)
     }
 
-    /// The person is named the way the room names them, never by a raw id, and the viewer is "you", said naturally.
+    /// The person is named the way the room names them, never by an id, and the viewer is "you", said naturally, whether
+    /// the ticket names them by account (`human-g.<32 hex>`) or by login (API #1167). The shared table
+    /// (RoomTicketStepCasesTests) pins every reason with each; these are the shapes around it.
     func test_the_person_is_named_never_a_raw_id_and_the_viewer_is_you() {
+        let viewerAccount = "00000000-0000-4000-8000-0000000000cc"
         func stalled(_ reason: String, lastHolder: String? = nil, waitingOn: String? = nil,
                      names: [String: String] = [:]) -> String? {
             note(RoomTicketInput.Step(index: 3, count: 5, name: "merged", stalledSince: since, stalledReason: reason,
                                       lastHolder: lastHolder, waitingOn: waitingOn),
-                 viewerId: "human-carter", names: names)
+                 viewerId: viewerAccount, viewerLogin: "sam", names: names)
         }
-        let person = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
-        XCTAssertEqual(stalled("waiting_on_review", waitingOn: person),
-                       "Stalled since 2:10 PM · waiting on review by a person", "a user id is never shown")
-        XCTAssertEqual(stalled("waiting_on_review", waitingOn: person, names: [person: "Dana"]),
+        let account = "00000000-0000-4000-8000-0000000000dd"
+        let accountActor = "human-g.000000000000400080000000000000dd"
+        XCTAssertEqual(stalled("waiting_on_review", waitingOn: accountActor), "Stalled since 2:10 PM · waiting on review",
+                       "an account the room does not name is left out, never shown by its hex")
+        XCTAssertEqual(stalled("waiting_on_review", waitingOn: accountActor, names: [account: "Dana"]),
                        "Stalled since 2:10 PM · waiting on review by Dana")
+        XCTAssertEqual(stalled("waiting_on_review", waitingOn: "HUMAN-G.000000000000400080000000000000DD",
+                               names: [account: "Dana"]),
+                       "Stalled since 2:10 PM · waiting on review by Dana", "whatever the case of its hex")
+        XCTAssertEqual(stalled("waiting_on_review", waitingOn: account), "Stalled since 2:10 PM · waiting on review",
+                       "a bare user id is an account too")
+        XCTAssertEqual(stalled("waiting_on_review", waitingOn: "human-g.0123abcd"),
+                       "Stalled since 2:10 PM · waiting on review", "a short account id is never shown either")
+        XCTAssertEqual(stalled("waiting_on_assignee", waitingOn: accountActor),
+                       "Stalled since 2:10 PM · waiting on the person it's assigned to")
         XCTAssertEqual(stalled("holder_lease_expired", lastHolder: "forge-box-7"),
                        "Stalled since 2:10 PM · forge-box-7, who was working on it, went quiet")
+        XCTAssertEqual(stalled("waiting_on_owner", waitingOn: "human-alex", names: ["human-alex": "Alex Rivera"]),
+                       "Stalled since 2:10 PM · waiting on the owner, Alex Rivera", "a login the room names")
 
-        XCTAssertEqual(stalled("waiting_on_review", waitingOn: "human-carter"),
-                       "Stalled since 2:10 PM · waiting on review by you")
-        XCTAssertEqual(stalled("waiting_on_assignee", waitingOn: "human-carter"), "Stalled since 2:10 PM · waiting on you")
-        XCTAssertEqual(stalled("waiting_on_owner", waitingOn: "HUMAN-CARTER"),
-                       "Stalled since 2:10 PM · waiting on you, the owner")
-        XCTAssertEqual(stalled("holder_lease_expired", lastHolder: "human-carter"),
+        let byAccount = "human-g.000000000000400080000000000000cc"
+        XCTAssertEqual(stalled("waiting_on_review", waitingOn: byAccount), "Stalled since 2:10 PM · waiting on review by you")
+        XCTAssertEqual(stalled("waiting_on_assignee", waitingOn: "human-sam"), "Stalled since 2:10 PM · waiting on you")
+        XCTAssertEqual(stalled("waiting_on_owner", waitingOn: "HUMAN-SAM"), "Stalled since 2:10 PM · waiting on you, the owner")
+        XCTAssertEqual(stalled("holder_lease_expired", lastHolder: byAccount),
                        "Stalled since 2:10 PM · you went quiet while working on it")
         for reason in RoomTicketRow.stallReasons.keys {
-            let text = stalled(reason, lastHolder: "human-carter", waitingOn: "human-carter") ?? ""
-            XCTAssertFalse(text.contains("check"), "\(reason): \(text)")
-            XCTAssertFalse(text.contains("human-"), "\(reason): \(text)")
+            for viewer in [byAccount, "human-sam"] {
+                let text = stalled(reason, lastHolder: viewer, waitingOn: viewer) ?? ""
+                XCTAssertFalse(text.contains("check") || text.contains("human-") || text.contains("g.0"),
+                               "\(reason): \(text)")
+            }
         }
     }
 
