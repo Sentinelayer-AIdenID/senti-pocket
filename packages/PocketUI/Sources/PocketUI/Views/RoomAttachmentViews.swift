@@ -6,6 +6,30 @@ import SwiftUI
 /// straight from storage, and previews any other file. A file taken back after it was sent shows only its name and
 /// "Attachment removed", and nothing opens it. Two or more photos show as one strip of smaller thumbnails, side by side,
 /// that scrolls sideways when they do not fit (`RoomAttachmentLayoutItem`).
+/// The sideways scrolls inside a room row (a strip of photos), as frames in the row's own space: a drag that starts on
+/// one scrolls it, and the row's swipe to reply leaves it alone.
+struct RoomRowSideScrolls: PreferenceKey {
+    /// The row's coordinate space, named on the row.
+    static let space = "pocket.room.row"
+    static let defaultValue: [CGRect] = []
+
+    static func reduce(value: inout [CGRect], nextValue: () -> [CGRect]) {
+        value.append(contentsOf: nextValue())
+    }
+}
+
+extension View {
+    /// Marks this view as a sideways scroll inside a room row (see `RoomRowSideScrolls`).
+    func roomRowSideScroll() -> some View {
+        background {
+            GeometryReader { proxy in
+                Color.clear.preference(key: RoomRowSideScrolls.self,
+                                       value: [proxy.frame(in: .named(RoomRowSideScrolls.space))])
+            }
+        }
+    }
+}
+
 struct RoomAttachmentsView: View {
     let chips: [RoomAttachmentChip]
     let previews: [String: Data]
@@ -51,6 +75,7 @@ struct RoomAttachmentsView: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("pocket.room.attachment.strip")
+        .roomRowSideScroll()
     }
 
     /// The strip in a sideways scroll, on a lazy stack: only the photos in sight are built.
