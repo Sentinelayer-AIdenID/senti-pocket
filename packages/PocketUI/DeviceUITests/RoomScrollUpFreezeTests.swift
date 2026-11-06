@@ -15,9 +15,9 @@ final class RoomScrollUpFreezeTests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["-PocketRoomPreview"]
         app.launch()
-        let pinned = app.descendants(matching: .any)["pocket.room.pinned"]
+        let pinned = app.otherElements["pocket.room.pinned"]
         XCTAssertTrue(pinned.waitForExistence(timeout: 30), "the room has its pins")
-        let list = app.descendants(matching: .any)["pocket.room.list"]
+        let list = app.scrollViews.matching(identifier: "pocket.room.list").firstMatch
         XCTAssertTrue(list.waitForExistence(timeout: 10))
         let start = app.descendants(matching: .any)["pocket.room.startOfRoom"]
         sleep(6)

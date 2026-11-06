@@ -3878,6 +3878,8 @@ private struct RoomPinnedStrip: View {
                 PocketPalette.warning.opacity(0.08)
             }
         }
+        // One element holding the pins, so its name is the strip's own, not stamped on each part of it.
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("pocket.room.pinned")
     }
 
