@@ -132,7 +132,7 @@ struct PhoneCalendarCard: View {
 
     @ViewBuilder
     private var phoneRows: some View {
-        if phone.access == .notAsked, !phone.showsSharing {
+        if phone.showsConnect {
             Button {
                 Task { await phone.connect() }
             } label: {
@@ -214,7 +214,7 @@ struct PhoneCalendarSettingsSection: View {
     var body: some View {
         if phone.available == true {
             Section {
-                if phone.access == .notAsked, !phone.showsSharing {
+                if phone.showsConnect {
                     Button {
                         Task { await phone.connect() }
                     } label: {

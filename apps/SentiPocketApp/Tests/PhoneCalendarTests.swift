@@ -70,23 +70,31 @@ private final class FakePhoneCalendar: PhoneCalendarStore {
     }
 }
 
-/// The server: records each send and forget; a forget can be made to fail, and the flag to be off.
+/// The server: records each send and forget; a forget can be made to fail, the flag to be off, and the whole server
+/// out of reach (no network).
 private final class FakeDeviceCalendar: DeviceCalendarServing, @unchecked Sendable {
     private let lock = NSLock()
     private let on: Bool
+    private let offline: Bool
     private var sent: [DeviceCalendarUpload] = []
     private var keys: [String] = []
     private var forgets = 0
     private var forgetFails = false
 
-    init(on: Bool = true) { self.on = on }
+    init(on: Bool = true, offline: Bool = false) {
+        self.on = on
+        self.offline = offline
+    }
 
     var puts: [DeviceCalendarUpload] { lock.withLock { sent } }
     var putKeys: [String] { lock.withLock { keys } }
     var deletes: Int { lock.withLock { forgets } }
     func failForgets(_ fails: Bool) { lock.withLock { forgetFails = fails } }
 
-    func deviceEventsAvailable(now: Date) async throws -> Bool { on }
+    func deviceEventsAvailable(now: Date) async throws -> Bool {
+        if offline { throw CalendarError.retryable }
+        return on
+    }
 
     func putDeviceEvents(_ upload: DeviceCalendarUpload, idempotencyKey: String) async throws -> Int {
         lock.withLock {
@@ -366,6 +374,66 @@ final class PhoneCalendarTests: XCTestCase {
         await phone.setSharing(true)
         await phone.idle()
         XCTAssertEqual(client.puts.count, 2, "the person turns it on: it is sent")
+    }
+
+    /// Access taken back, then the app opened with no network: sharing turns off all the same (the flag cannot be
+    /// asked). Access given again and the app opened online: sharing stays off, nothing is sent, and the DELETE that
+    /// waited goes.
+    func test_losing_access_while_offline_still_turns_sharing_off() async {
+        let store = FakePhoneCalendar(start: clock)
+        let online = FakeDeviceCalendar()
+        let phone = await connected(store, online)
+        phone.setShared("cal-work", true)
+        await phone.setSharing(true)
+        await phone.idle()
+        XCTAssertEqual(online.puts.count, 1)
+
+        store.access = .denied
+        clock.addTimeInterval(120)
+        let offlineLaunch = center(store, FakeDeviceCalendar(offline: true))
+        await offlineLaunch.appOpened()
+        await offlineLaunch.idle()
+        XCTAssertNil(offlineLaunch.available, "no network: the flag could not be asked")
+        XCTAssertFalse(offlineLaunch.sharesWithAgents, "sharing is off all the same")
+        XCTAssertTrue(offlineLaunch.forgetPending, "its DELETE waits for the flag")
+
+        store.access = .granted
+        clock.addTimeInterval(120)
+        let onlineLaunch = center(store, online)
+        await onlineLaunch.appOpened()
+        await onlineLaunch.idle()
+        XCTAssertFalse(onlineLaunch.sharesWithAgents, "access back: sharing stays off")
+        XCTAssertEqual(online.puts.count, 1, "nothing is sent")
+        XCTAssertEqual(online.deletes, 1, "the DELETE that waited goes")
+    }
+
+    /// After a privacy reset, iOS has not asked again and Settings shows no Calendars row for Pocket: Connect comes back
+    /// once sharing is off and its DELETE has gone, and connecting shows the switch, off.
+    func test_after_a_privacy_reset_connect_comes_back() async {
+        let store = FakePhoneCalendar(start: clock)
+        let client = FakeDeviceCalendar()
+        let phone = await connected(store, client)
+        phone.setShared("cal-work", true)
+        await phone.setSharing(true)
+        await phone.idle()
+
+        store.access = .denied
+        clock.addTimeInterval(120)
+        await phone.appOpened()
+        await phone.idle()
+        XCTAssertEqual(client.deletes, 1)
+
+        store.access = .notAsked
+        store.answer = .granted
+        clock.addTimeInterval(120)
+        await phone.appOpened()
+        await phone.idle()
+        XCTAssertTrue(phone.showsConnect, "reset: Connect my calendar is offered again")
+        await phone.connect()
+        XCTAssertEqual(phone.access, .granted)
+        XCTAssertFalse(phone.showsConnect)
+        XCTAssertTrue(phone.showsSharing, "the switch, off")
+        XCTAssertFalse(phone.sharesWithAgents)
     }
 
     /// A send whose body is the same as the last one the server took is not sent again.

@@ -3,7 +3,8 @@ import Foundation
 
 /// DEBUG-only stand-in for the device-events routes, for the calendar preview's `connect` stage: GET answers an empty
 /// list, PUT how many it stored, DELETE 204. Each request is written to `CAL_CAPTURE_FILE` (one JSON object a line:
-/// when, method, path, query, idempotency key and body), so a device test sees exactly what left the app.
+/// when, method, path, query, idempotency key and body), so a device test sees exactly what left the app. With
+/// `CAL_OFFLINE` set, every request fails as with no network (and is written down with "offline": true).
 final class DeviceCalendarRecorder: URLProtocol {
     private static let lock = NSLock()
 
@@ -29,7 +30,9 @@ final class DeviceCalendarRecorder: URLProtocol {
         let components = request.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) }
         var query: [String: String] = [:]
         for item in components?.queryItems ?? [] { query[item.name] = item.value ?? "" }
+        let offline = ProcessInfo.processInfo.environment["CAL_OFFLINE"] != nil
         let line: [String: Any] = [
+            "offline": offline,
             "at": ISO8601DateFormatter().string(from: Date()),
             "method": method,
             "path": components?.path ?? "",
@@ -38,6 +41,10 @@ final class DeviceCalendarRecorder: URLProtocol {
             "body": body ?? NSNull()
         ]
         Self.record(line)
+        if offline {
+            client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
+            return
+        }
 
         let status: Int
         var answer = Data()

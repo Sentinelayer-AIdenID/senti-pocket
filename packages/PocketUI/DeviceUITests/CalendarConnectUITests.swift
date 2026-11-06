@@ -4,9 +4,10 @@ import XCTest
 /// Ticket 9583d41e, the device checks of the privacy review: Pocket's own calendar on the simulator's real calendar
 /// (calendar access is granted to the app, or taken back, by the runner around each test), with a made-up event that
 /// has notes and a link, and every request to the device-events routes recorded by the app's stand-in server
-/// (`-PocketCalendarStage connect`). The runner calls them in order: `test_1` to `test_3` with access granted; then,
-/// with access revoked, `test_4`; then, with access granted again, `test_5` and `test_6`. Losing access turns sharing
-/// off; regaining it never turns sharing on.
+/// (`-PocketCalendarStage connect`). The runner calls them in order, around calendar access: granted, `test_1` to
+/// `test_3`; revoked, `test_4`; granted, `test_5` and `test_6`; revoked, `test_7` (no network); granted, `test_8`;
+/// reset, `test_9`. Losing access turns sharing off, with no network too; regaining it never turns sharing on; and a
+/// privacy reset brings Connect back. Each test keeps its own capture (`calendar-capture-<test>.jsonl`).
 final class CalendarConnectUITests: XCTestCase {
     private static let bodyKeys: Set<String> = ["source", "windowStart", "windowEnd", "events"]
     private static let eventKeys: Set<String> = ["id", "calendar", "title", "start", "end", "allDay", "location"]
@@ -46,15 +47,30 @@ final class CalendarConnectUITests: XCTestCase {
     }
 
     /// The preview, its capture emptied first. `fresh` starts the switch and the picks afresh; without it they are
-    /// kept from the launch before.
-    private func launch(fresh: Bool, seed: Bool = true) -> XCUIApplication {
+    /// kept from the launch before. `offline`: every request fails as with no network.
+    private func launch(fresh: Bool, seed: Bool = true, offline: Bool = false) -> XCUIApplication {
         try? FileManager.default.removeItem(atPath: capture)
         let app = XCUIApplication()
         app.launchArguments = ["-PocketCalendarPreview", "-PocketCalendarStage", "connect"]
             + (fresh ? ["-PocketCalendarFresh"] : []) + (seed ? ["-PocketCalendarSeedEvent"] : [])
         app.launchEnvironment["CAL_CAPTURE_FILE"] = capture
+        if offline { app.launchEnvironment["CAL_OFFLINE"] = "1" }
         app.launch()
         return app
+    }
+
+    /// Keeps the capture as `calendar-capture-<test><suffix>.jsonl`, beside the screenshots.
+    private func keep(_ suffix: String = "") {
+        let test = name.components(separatedBy: " ").last?.trimmingCharacters(in: CharacterSet(charactersIn: "]")) ?? "test"
+        let kept = ((capture as NSString).deletingLastPathComponent as NSString)
+            .appendingPathComponent("calendar-capture-\(test)\(suffix).jsonl")
+        try? FileManager.default.removeItem(atPath: kept)
+        try? FileManager.default.copyItem(atPath: capture, toPath: kept)
+    }
+
+    override func setUp() {
+        super.setUp()
+        addTeardownBlock { [weak self] in self?.keep() }
     }
 
     /// Taps a toggle on its switch, at its trailing edge (a tap in its middle lands on its words, which do not flip
@@ -209,9 +225,48 @@ final class CalendarConnectUITests: XCTestCase {
             let now = sent().map { $0.method }
             XCTAssertFalse(now.contains("DELETE"), "cold launch \(launchNumber): no DELETE: \(now)")
             methods += now
+            keep("-launch\(launchNumber)")
             app.terminate()
         }
         print("CALCONNECT test6 requests=\(methods)")
+    }
+
+    /// 7. Access taken back again (sharing was on), and the app opened with no network: nothing goes through. The
+    /// app still turns sharing off; test 8 sees it.
+    func test_7_access_taken_back_and_opened_offline_nothing_goes_through() throws {
+        let app = launch(fresh: false, seed: false, offline: true)
+        sleep(8)
+        let lines = sent()
+        XCTAssertTrue(lines.allSatisfy { $0.line.contains(#""offline":true"#) }, "with no network nothing went through")
+        print("CALCONNECT test7 requests=\(lines.map { $0.method }) offline=\(lines.count)")
+        app.terminate()
+    }
+
+    /// 8. Access given again and the app opened online: sharing stays off (it was turned off with no network), the
+    /// DELETE that waited goes, and nothing is sent.
+    func test_8_access_given_again_online_sharing_stays_off_and_the_delete_goes() throws {
+        let app = launch(fresh: false, seed: false)
+        let share = app.switches["pocket.calendar.share"]
+        XCTAssertTrue(share.waitForExistence(timeout: 60), "\(app.debugDescription)")
+        XCTAssertEqual(share.value as? String, "0", "sharing was turned off while offline")
+        XCTAssertEqual(waitFor("DELETE", count: 1, timeout: 20).count, 1, "the DELETE that waited goes")
+        sleep(4)
+        XCTAssertTrue(sent().filter { $0.method == "PUT" }.isEmpty, "nothing is sent")
+        shot("8-online-again")
+        print("CALCONNECT test8 requests=\(sent().map { $0.method })")
+        app.terminate()
+    }
+
+    /// 9. After a privacy reset (iOS has not asked, and Settings shows no Calendars row for Pocket): Connect my
+    /// calendar is offered again, not the switch.
+    func test_9_after_a_privacy_reset_connect_comes_back() throws {
+        let app = launch(fresh: false, seed: false)
+        let connect = app.buttons["pocket.calendar.connect"]
+        XCTAssertTrue(connect.waitForExistence(timeout: 60), "Connect is offered again\n\(app.debugDescription)")
+        XCTAssertFalse(app.switches["pocket.calendar.share"].exists, "not the switch")
+        shot("9-reset")
+        print("CALCONNECT test9 requests=\(sent().map { $0.method })")
+        app.terminate()
     }
 
     /// Saves a screenshot where `CAL_SHOT_DIR` points (set by the runner), for the review evidence.

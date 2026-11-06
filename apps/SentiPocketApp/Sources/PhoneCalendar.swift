@@ -308,6 +308,11 @@ final class PhoneCalendarCenter: ObservableObject {
     /// was turned off because calendar access went (that must never hide the switch).
     var showsSharing: Bool { access == .granted || sharesWithAgents || forgetPending || stoppedForAccess }
 
+    /// "Connect my calendar" is offered: iOS has not been asked (never, or since a privacy reset), and sharing is
+    /// neither on nor waiting for its DELETE. A reset after access was lost must not leave a dead end: iOS Settings
+    /// shows no Calendars row for an app it has not asked.
+    var showsConnect: Bool { access == .notAsked && !sharesWithAgents && !forgetPending }
+
     /// How many picked calendars are on the phone now: a pick whose calendar has gone is not counted.
     var pickedCount: Int {
         calendars.isEmpty ? sharedCalendarIds.count : sharedCalendarIds.intersection(calendars.map(\.id)).count
@@ -319,13 +324,12 @@ final class PhoneCalendarCenter: ObservableObject {
         listen()
         access = store.access
         guard await loadPerson() else { return }
+        // Recorded before the server is asked anything: a launch with no network still turns sharing off, and its
+        // DELETE waits for the flag.
+        if access != .granted { accessWent() }
         await checkAvailable()
         guard available == true else { return }
-        if access == .granted {
-            calendars = store.calendars()
-        } else {
-            accessWent()
-        }
+        if access == .granted { calendars = store.calendars() }
         if forgetPending { enqueue { await self.forget() } }
         requestSend()
     }
