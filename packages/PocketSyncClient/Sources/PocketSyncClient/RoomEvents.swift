@@ -44,6 +44,9 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
     public let checkpointSummary: String?
     /// The wire event type. Only `session_message` rows take view receipts (the API refuses the others).
     public let eventType: String
+    /// Who it was addressed to, as the server decided when it was written: the agent an `@any` went to, or that
+    /// nobody was free (`RoomAddressed`). Nil when the server says nothing.
+    public let addressed: RoomAddressed?
 
     public init(
         id: String,
@@ -62,7 +65,8 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         attachments: [RoomAttachment] = [],
         eventType: String = "session_message",
         channel: String? = nil,
-        checkpointSummary: String? = nil
+        checkpointSummary: String? = nil,
+        addressed: RoomAddressed? = nil
     ) {
         self.id = id
         self.sequenceId = sequenceId
@@ -81,6 +85,7 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         self.eventType = eventType
         self.channel = channel
         self.checkpointSummary = checkpointSummary
+        self.addressed = addressed
     }
 
     /// Projects one wire event. Returns nil for events a room does not display (control, presence, edit
@@ -164,6 +169,7 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
             ? payload["summary"]?.stringValue.flatMap { $0.isEmpty ? nil : String($0.prefix(20_000)) }
             : nil
         self.eventType = event
+        self.addressed = kind == .message ? RoomAddressed(payload: payload) : nil
     }
 
     /// The message as it reads now, from a `session_message_edited` envelope (`session-message-edit:v1`). The

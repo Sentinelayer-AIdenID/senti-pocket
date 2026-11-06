@@ -245,6 +245,8 @@ final class RoomChatCoordinator: ObservableObject {
     /// Owners and admins can read the member list, so they can mention people who have not posted yet.
     private let readsMembers: Bool
     private var members: [RoomMember] = []
+    /// The room takes `@any` (its read says `features.agentBroadcast`): offered in the picker only once it has said so.
+    private var offersAny = false
     /// The room's member directory (every member may read it), read once per open, for @-mentions.
     private let directory: (any RoomTicketExtrasReading)?
     private var directoryPeople: [RoomDirectoryMember] = []
@@ -417,6 +419,9 @@ final class RoomChatCoordinator: ObservableObject {
         receiptsTracker?.start()
         generation &+= 1
         let current = generation
+        // What the room offers, read beside its messages and never before them: @any stays out of the picker until
+        // the room has answered.
+        liveTasks.append(Task { [weak self] in await self?.readFeatures() })
         liveTasks.append(Task { [weak self] in
             guard let self else { return }
             if !self.hasLoadedInitial {
@@ -1117,6 +1122,16 @@ final class RoomChatCoordinator: ObservableObject {
         guard running != runningBoxNames || ended != endedBoxNames else { return }
         runningBoxNames = running
         endedBoxNames = ended
+        publish()
+    }
+
+    /// Reads what the room offers, each time it opens or comes back. A failed read changes nothing: @any is offered
+    /// only by a room that said so.
+    func readFeatures() async {
+        guard sender != nil, !failureIsTerminal,
+              let features = try? await transport.roomFeatures(sessionId: sessionId),
+              features.agentBroadcast != offersAny else { return }
+        offersAny = features.agentBroadcast
         publish()
     }
 
@@ -2552,6 +2567,10 @@ final class RoomChatCoordinator: ObservableObject {
             )
             // Reports are taken on posted messages, not a file's upload notice or a relayed line.
             input.isReportable = message.eventType == "session_message"
+            input.addressedLine = message.addressed.flatMap {
+                RoomAddressedLine.text(pickedBy: $0.any.map(Self.principalName), nobodyFree: $0.anyUnresolved,
+                                       throttled: $0.throttled)
+            }
             return input
         }
         let threadInput = openThreadSequence.map { sequence in
@@ -2951,11 +2970,19 @@ final class RoomChatCoordinator: ObservableObject {
             latest[id] = (known?.name ?? author.name, author.isHuman, author.date ?? known?.date)
         }
         let ownHandles = Set(ownAuthorIds.map { $0.hasPrefix("human-") ? String($0.dropFirst("human-".count)) : $0 })
-        return MentionSuggester.candidates(
+        // Agents in a box, under their box (`boxMember` on presence).
+        var groups: [String: MentionGroup] = [:]
+        for person in receiptsTracker?.presence?.participants ?? [] where !person.isHuman {
+            guard let box = person.boxMember else { continue }
+            groups[person.id.lowercased()] = MentionGroup(id: box.id, index: box.index, label: box.label)
+        }
+        let people = MentionSuggester.candidates(
             authors: latest.map { (id: $0.key, name: $0.value.name, isHuman: $0.value.isHuman, lastActive: $0.value.date) },
             ownHandles: ownHandles,
-            now: now()
+            now: now(),
+            groups: groups
         )
+        return offersAny ? [.anyFree] + people : people
     }
 
     private static func kind(of message: RoomMessage) -> RoomChatMessageInput.Kind {

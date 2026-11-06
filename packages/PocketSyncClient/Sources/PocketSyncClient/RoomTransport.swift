@@ -16,6 +16,8 @@ public protocol RoomTransport: Sendable {
     func attachmentDownload(sessionId: String, attachmentId: String, asDownload: Bool) async throws -> RoomAttachmentDownload
     /// The room's people, for owners and admins (the API refuses everyone else).
     func roomMembers(sessionId: String) async throws -> RoomMembersPage
+    /// What the room offers (`@any`), from its read.
+    func roomFeatures(sessionId: String) async throws -> RoomFeatures
 }
 
 extension RoomTransport {
@@ -42,6 +44,11 @@ extension RoomTransport {
     /// Transports without a member list offer only the people seen in the room.
     public func roomMembers(sessionId: String) async throws -> RoomMembersPage {
         RoomMembersPage()
+    }
+
+    /// Transports without the room's read offer nothing beyond what every room has.
+    public func roomFeatures(sessionId: String) async throws -> RoomFeatures {
+        RoomFeatures()
     }
 }
 
