@@ -16,12 +16,21 @@ struct SupportContactRow: View {
     var body: some View {
         if let url = PocketSupport.mailURL {
             Link(destination: url) {
-                HStack {
-                    Label("Contact us", systemImage: "envelope")
-                    Spacer(minLength: 8)
-                    Text(PocketSupport.email)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                // Side by side where they fit; at large text sizes the address goes under the words, whole.
+                ViewThatFits(in: .horizontal) {
+                    HStack {
+                        Label("Contact us", systemImage: "envelope")
+                        Spacer(minLength: 8)
+                        Text(PocketSupport.email)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label("Contact us", systemImage: "envelope")
+                        Text(PocketSupport.email)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
             // The address can be copied, for a phone without Mail set up.
