@@ -13,13 +13,16 @@ import XCTest
 private final class FeatureRoom: RoomTransport, @unchecked Sendable {
     private let lock = NSLock()
     private let history: [RoomMessage]
+    private let actions: RoomActionsPage
     private let answer: Result<RoomFeatures, Error>
     private var gate: CheckedContinuation<Void, Never>?
     private var held: Bool
     private var reads = 0
 
-    init(history: [RoomMessage], answer: Result<RoomFeatures, Error>, held: Bool = false) {
+    init(history: [RoomMessage], answer: Result<RoomFeatures, Error>, held: Bool = false,
+         actions: RoomActionsPage = RoomActionsPage()) {
         self.history = history
+        self.actions = actions
         self.answer = answer
         self.held = held
     }
@@ -49,6 +52,10 @@ private final class FeatureRoom: RoomTransport, @unchecked Sendable {
     }
 
     func roomStream(sessionId: String, fromSequence: Int64?) -> AsyncStream<RoomStreamEvent> { AsyncStream { _ in } }
+
+    func roomActions(sessionId: String, targetSequenceId: Int64?, limit: Int) async throws -> RoomActionsPage {
+        actions
+    }
 
     func roomFeatures(sessionId: String) async throws -> RoomFeatures {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
@@ -178,6 +185,45 @@ final class AgentBroadcastRoomTests: XCTestCase {
         XCTAssertEqual(lines[3], "Nobody free right now")
         XCTAssertEqual(lines[4], .some(nil), "over the limit: nothing extra")
         XCTAssertEqual(lines[5], .some(nil))
+        coordinator.pause()
+    }
+
+    /// A thread reply that asked for any free agent says who picked it up, as a message does.
+    func test_a_thread_reply_shows_who_picked_up_its_at_any() async {
+        let replies = [
+            RoomReply(id: "act-1", targetSequenceId: 2, authorId: "human-alex", text: "@any can you check?",
+                      createdAt: "2026-11-06T18:40:00Z", addressed: RoomAddressed(any: "senti-3f2a9c01-1")),
+            RoomReply(id: "act-2", targetSequenceId: 2, authorId: "human-alex", text: "@any anyone?",
+                      createdAt: "2026-11-06T18:41:00Z", addressed: RoomAddressed(anyUnresolved: true)),
+            RoomReply(id: "act-3", targetSequenceId: 2, authorId: "human-alex", text: "thanks",
+                      createdAt: "2026-11-06T18:42:00Z"),
+        ]
+        let transport = FeatureRoom(history: Self.history, answer: .success(RoomFeatures()),
+                                    actions: RoomActionsPage(replies: replies))
+        let coordinator = room(transport)
+        coordinator.resume()
+        await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
+        coordinator.send(.openThread(sequenceId: 2))
+        await waitUntil("the thread's replies") { coordinator.state.thread?.replies.count == 3 }
+        XCTAssertEqual(coordinator.state.thread?.replies.map(\.addressedLine),
+                       ["Picked up by senti-3f2a9c01-1", "Nobody free right now", nil])
+        coordinator.pause()
+    }
+
+    /// A box member who posted but is not here now groups from the author record of what it posted
+    /// (`agent.boxMember`), with no presence at all.
+    func test_a_box_member_who_posted_but_is_not_here_still_groups() async {
+        let history = Self.history + [
+            RoomMessage(id: "e3", sequenceId: 3, kind: .message, authorId: "senti-3f2a9c01-1",
+                        authorName: "senti-3f2a9c01-1", isHuman: false, text: "done", timestamp: "2026-11-06T18:33:00Z",
+                        authorBox: RoomAgentBox(id: "3f2a9c01", index: 1)),
+        ]
+        let coordinator = room(FeatureRoom(history: history, answer: .success(RoomFeatures())))
+        coordinator.resume()
+        await waitUntil("offered") { coordinator.state.mentionCandidates.contains { $0.handle == "senti-3f2a9c01-1" } }
+        let candidates = coordinator.state.mentionCandidates
+        XCTAssertEqual(candidates.first { $0.handle == "senti-3f2a9c01-1" }?.group?.label, "Box 3f2a")
+        XCTAssertNil(candidates.first { $0.handle == "build-agent" }?.group, "an agent outside any box")
         coordinator.pause()
     }
 

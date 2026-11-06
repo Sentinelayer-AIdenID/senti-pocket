@@ -446,6 +446,8 @@ public struct RoomChatReplyRow: Equatable, Identifiable, Sendable {
     public var wasYours = false
     /// Its photos and files, shown as a message's are.
     public let attachments: [RoomAttachmentChip]
+    /// Who picked up an @any in it, or that nobody was free (`RoomAddressedLine`).
+    public var addressedLine: String?
 
     public init(
         id: String,

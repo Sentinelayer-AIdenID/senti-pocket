@@ -47,6 +47,8 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
     /// Who it was addressed to, as the server decided when it was written: the agent an `@any` went to, or that
     /// nobody was free (`RoomAddressed`). Nil when the server says nothing.
     public let addressed: RoomAddressed?
+    /// The box its author runs in, from the author record (`RoomAgentBox`).
+    public let authorBox: RoomAgentBox?
 
     public init(
         id: String,
@@ -66,7 +68,8 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         eventType: String = "session_message",
         channel: String? = nil,
         checkpointSummary: String? = nil,
-        addressed: RoomAddressed? = nil
+        addressed: RoomAddressed? = nil,
+        authorBox: RoomAgentBox? = nil
     ) {
         self.id = id
         self.sequenceId = sequenceId
@@ -86,6 +89,7 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         self.channel = channel
         self.checkpointSummary = checkpointSummary
         self.addressed = addressed
+        self.authorBox = authorBox
     }
 
     /// Projects one wire event. Returns nil for events a room does not display (control, presence, edit
@@ -169,7 +173,8 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
             ? payload["summary"]?.stringValue.flatMap { $0.isEmpty ? nil : String($0.prefix(20_000)) }
             : nil
         self.eventType = event
-        self.addressed = kind == .message ? RoomAddressed(payload: payload) : nil
+        self.addressed = kind == .message ? RoomAddressed(in: payload) : nil
+        self.authorBox = RoomAgentBox.author(of: json)
     }
 
     /// The message as it reads now, from a `session_message_edited` envelope (`session-message-edit:v1`). The

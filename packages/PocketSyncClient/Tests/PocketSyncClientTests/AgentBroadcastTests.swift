@@ -70,6 +70,44 @@ final class AgentBroadcastTests: XCTestCase {
             .addressed, "only a message is addressed")
     }
 
+    /// A thread reply (an action) carries the same `addressed` as a message.
+    func test_a_thread_reply_carries_who_its_at_any_went_to() throws {
+        func reply(_ addressed: String) throws -> RoomReply? {
+            let json = try JSONDecoder().decode(JSONValue.self, from: Data("""
+            {"id":"act-1","actionType":"reply","targetSequenceId":12,"actorId":"human-alex",
+             "note":"@any can you check?","createdAt":"2026-11-06T18:40:00Z"\(addressed)}
+            """.utf8))
+            return RoomReply(json: json)
+        }
+        XCTAssertEqual(try reply(#","addressed":{"any":"build-agent"}"#)?.addressed, RoomAddressed(any: "build-agent"))
+        XCTAssertEqual(try reply(#","addressed":{"anyUnresolved":true}"#)?.addressed,
+                       RoomAddressed(anyUnresolved: true))
+        XCTAssertEqual(try reply(#","addressed":{"throttled":true}"#)?.addressed, RoomAddressed(throttled: true))
+        XCTAssertNil(try reply("")?.addressed)
+    }
+
+    /// The author of a message carries its box (`agent.boxMember`), and a reply carries its author's beside its flat
+    /// `actorId` (`actorBoxMember`), so one who posted but is not here now can still be grouped.
+    func test_the_author_of_a_message_or_reply_carries_its_box() throws {
+        let box = #"{"id":"senti-3f2a9c01-1","boxMember":{"id":"3f2a9c01","index":1}}"#
+        let event = try JSONDecoder().decode(JSONValue.self, from: Data("""
+        {"id":"e1","event":"session_message","sequenceId":12,"ts":"2026-11-06T18:30:00Z","agent":\(box),
+         "payload":{"text":"done"}}
+        """.utf8))
+        XCTAssertEqual(RoomMessage(json: event)?.authorBox, RoomAgentBox(id: "3f2a9c01", index: 1))
+        func action(_ author: String) throws -> RoomReply? {
+            RoomReply(json: try JSONDecoder().decode(JSONValue.self, from: Data("""
+            {"id":"act-1","actionType":"reply","targetSequenceId":12,"actorId":"senti-3f2a9c01-1","note":"on it",
+             "createdAt":"2026-11-06T18:40:00Z",\(author)}
+            """.utf8)))
+        }
+        XCTAssertEqual(try action(#""actorBoxMember":{"id":"3f2a9c01","index":1}"#)?.authorBox,
+                       RoomAgentBox(id: "3f2a9c01", index: 1))
+        XCTAssertNil(try action(#""agent":\#(box)"#)?.authorBox, "an action's box is beside actorId, not in an agent")
+        XCTAssertNil(try action(#""actorBoxMember":{"id":"NOTHEX!!","index":1}"#)?.authorBox)
+        XCTAssertNil(try message(#"{"text":"plain"}"#)?.authorBox, "an author outside any box")
+    }
+
     /// `box: true` keeps meaning the agent runs in a box; `boxMember` says which box and its place in it.
     func test_box_true_with_box_member_is_a_box_and_says_which() throws {
         let presence = try JSONDecoder().decode(RoomPresence.self, from: Data("""

@@ -2567,17 +2567,14 @@ final class RoomChatCoordinator: ObservableObject {
             )
             // Reports are taken on posted messages, not a file's upload notice or a relayed line.
             input.isReportable = message.eventType == "session_message"
-            input.addressedLine = message.addressed.flatMap {
-                RoomAddressedLine.text(pickedBy: $0.any.map(Self.principalName), nobodyFree: $0.anyUnresolved,
-                                       throttled: $0.throttled)
-            }
+            input.addressedLine = Self.addressedLine(message.addressed)
             return input
         }
         let threadInput = openThreadSequence.map { sequence in
             RoomChatThreadInput(
                 sequenceId: sequence,
                 replies: threadReplies.map { reply in
-                    RoomChatReplyRow(
+                    var row = RoomChatReplyRow(
                         id: reply.id,
                         authorName: reply.isHuman ? String(reply.authorId.dropFirst("human-".count)) : reply.authorId,
                         isHuman: reply.isHuman,
@@ -2591,6 +2588,8 @@ final class RoomChatCoordinator: ObservableObject {
                         authorId: reply.authorId,
                         attachments: reply.attachments.map { Self.chip($0, removed: removedAttachments.contains($0.attachmentId)) }
                     )
+                    row.addressedLine = Self.addressedLine(reply.addressed)
+                    return row
                 },
                 pending: pendingReplies.filter { $0.targetSequenceId == sequence }.map {
                     RoomChatPendingRow(clientId: $0.clientId, text: $0.text, status: $0.status)
@@ -2872,7 +2871,7 @@ final class RoomChatCoordinator: ObservableObject {
             guard let date = ParsedSessionTimestamp(reply.createdAt).date else { return nil }
             if let floor, date < floor { return nil }
             if let ceiling, date > ceiling { return nil }
-            return RoomChatMessageInput(
+            var input = RoomChatMessageInput(
                 id: "reply-\(reply.id)",
                 sequenceId: reply.targetSequenceId,
                 kind: .message,
@@ -2887,6 +2886,17 @@ final class RoomChatCoordinator: ObservableObject {
                 attachments: reply.attachments.map { Self.chip($0, removed: removedAttachments.contains($0.attachmentId)) },
                 inlineReplyId: reply.id
             )
+            input.addressedLine = Self.addressedLine(reply.addressed)
+            return input
+        }
+    }
+
+    /// The line under a message or reply that asked for any free agent (`RoomAddressedLine`), its agent named as the
+    /// room names people and agents.
+    private static func addressedLine(_ addressed: RoomAddressed?) -> String? {
+        addressed.flatMap {
+            RoomAddressedLine.text(pickedBy: $0.any.map(principalName), nobodyFree: $0.anyUnresolved,
+                                   throttled: $0.throttled)
         }
     }
 
@@ -2970,12 +2980,22 @@ final class RoomChatCoordinator: ObservableObject {
             latest[id] = (known?.name ?? author.name, author.isHuman, author.date ?? known?.date)
         }
         let ownHandles = Set(ownAuthorIds.map { $0.hasPrefix("human-") ? String($0.dropFirst("human-".count)) : $0 })
-        // Agents in a box, under their box (`boxMember` on presence).
-        var groups: [String: MentionGroup] = [:]
-        for person in receiptsTracker?.presence?.participants ?? [] where !person.isHuman {
-            guard let box = person.boxMember else { continue }
-            groups[person.id.lowercased()] = MentionGroup(id: box.id, index: box.index, label: box.label)
+        // Agents in a box, under their box: from presence, and from the author of what they posted (messages,
+        // replies), so one who posted but is not here now still groups.
+        var boxes: [String: RoomAgentBox] = [:]
+        func note(_ id: String, _ box: RoomAgentBox?) {
+            if let box, boxes[id.lowercased()] == nil { boxes[id.lowercased()] = box }
         }
+        for person in receiptsTracker?.presence?.participants ?? [] where !person.isHuman {
+            note(person.id, person.boxMember)
+        }
+        for message in timeline.messages where !message.isHuman {
+            note(message.authorId, message.authorBox)
+        }
+        for reply in threadReplies + Array(inlineReplies.values) where !reply.isHuman {
+            note(reply.authorId, reply.authorBox)
+        }
+        let groups = boxes.mapValues { MentionGroup(id: $0.id, index: $0.index, label: $0.label) }
         let people = MentionSuggester.candidates(
             authors: latest.map { (id: $0.key, name: $0.value.name, isHuman: $0.value.isHuman, lastActive: $0.value.date) },
             ownHandles: ownHandles,

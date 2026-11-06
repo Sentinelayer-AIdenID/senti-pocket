@@ -2502,6 +2502,14 @@ private struct RoomThreadSheet: View {
             if !reply.attachments.isEmpty {
                 RoomAttachmentsView(chips: reply.attachments, previews: previews, send: send)
             }
+            // Who the server chose for an @any in it, or that nobody was free, as under a message.
+            if let line = reply.addressedLine {
+                Text(line)
+                    .font(.caption2)
+                    .foregroundStyle(PocketPalette.textSecondary)
+                    .accessibilityLabel(line)
+                    .accessibilityIdentifier("pocket.thread.addressed.\(reply.id)")
+            }
             if let views = reply.views {
                 RoomViewedLine(views: views)
             }
