@@ -742,18 +742,16 @@ public struct RoomChatView: View {
         case .moving:
             break
         case .landed:
-            // Put exactly where the bottom marker rests by UIKit, then SwiftUI's own scroll to the marker, which finds
-            // the list there and moves nothing: SwiftUI's own place is then the list's (after UIKit's scroll alone, the
-            // accessibility tree held no message at all: VoiceOver would find nothing). A SwiftUI scroll after UIKit's
-            // that moved the list built every row of the room in one frame (376 and 362 of 404, run 42118520117): what
-            // moves the list after the landing is counted (`watchAfterLanding`), and the tests hold it to nothing.
+            // Put exactly where the bottom marker rests, by UIKit only. A SwiftUI scroll after UIKit's built every row of
+            // the room in one frame, whether or not it moved the list: moving it the last 7 or 8 points (376 and 362 of
+            // 404, run 42118520117), and as an exact no-op at the marker's rest (371 to 399, run 42147783459). What moves
+            // the list after the landing is counted (`watchAfterLanding`), and the tests hold it to nothing.
             guard bottomWatch.isActive, heldAnchor == nil else {
                 RoomNextFrame.run { recheckPlace(proxy) }
                 return
             }
             let snap = bottomWatch.placeListAtEnd() ?? 0
             RoomScrollTrace.listLanded(snap: snap, at: bottomWatch.listOffset ?? 0, contentEnd: bottomWatch.listContentEnd ?? 0)
-            proxy.scrollTo(Self.bottomId, anchor: .bottom)
             settleOwnScroll()
             watchAfterLanding()
             RoomNextFrame.run {
