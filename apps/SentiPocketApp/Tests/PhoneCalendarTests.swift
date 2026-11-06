@@ -123,6 +123,12 @@ final class PhoneCalendarTests: XCTestCase {
                             later: { [unowned self] delay, work in self.waits.append((delay, work)) })
     }
 
+    /// The calendar center the screens take, holding `phone`; its subscribe link's flag on or off.
+    private func calendarCenter(_ phone: PhoneCalendarCenter, feedOn: Bool = false) -> CalendarCenter {
+        CalendarCenter(client: NoRoomEvents(), feed: feedOn ? FeedOn() as any CalendarFeedServing : CalendarOff(),
+                       vault: NoKeptLink(), person: { "acct-1" }, openURL: { _ in true }, phone: phone)
+    }
+
     /// Opened, with the flag on, and connected.
     private func connected(_ store: FakePhoneCalendar, _ client: FakeDeviceCalendar) async -> PhoneCalendarCenter {
         let phone = center(store, client)
@@ -370,7 +376,9 @@ final class PhoneCalendarTests: XCTestCase {
         await phone.appOpened()
         let room = CalendarBoard(scope: .room(sessionId: "room-1", title: "Site", canAdd: true), client: NoRoomEvents(),
                                  calendar: newYork, now: { [unowned self] in self.clock })
-        let window = try HostedSummary.host(NavigationStack { CalendarScreen(board: room, phone: phone) })
+        let window = try HostedSummary.host(NavigationStack {
+            CalendarScreen(board: room, calendar: calendarCenter(phone))
+        })
         defer { HostedSummary.close(window) }
         let connect = try XCTUnwrap(HostedSummary.wait(for: "pocket.calendar.connect", in: window),
                                     "Connect is on the calendar screen")
@@ -380,6 +388,39 @@ final class PhoneCalendarTests: XCTestCase {
         XCTAssertEqual(store.asks, 1)
         XCTAssertTrue(client.puts.isEmpty, "connecting sends nothing")
     }
+
+    /// "Sync to my other calendars" is on the calendar screen's card too (Carter: "it doesn't give me a sync with others
+    /// button"), and opens the same subscribe flow as Settings: with no link kept, it asks before it makes one.
+    func test_sync_to_my_other_calendars_is_on_the_calendar_screen_and_asks_before_a_new_link() async throws {
+        let phone = center(FakePhoneCalendar(start: clock), FakeDeviceCalendar())
+        await phone.appOpened()
+        let calendar = calendarCenter(phone, feedOn: true)
+        await calendar.refresh(probeRoom: nil)
+        XCTAssertTrue(calendar.showsSubscribe)
+        let room = CalendarBoard(scope: .room(sessionId: "room-1", title: "Site", canAdd: true), client: NoRoomEvents(),
+                                 calendar: newYork, now: { [unowned self] in self.clock })
+        let window = try HostedSummary.host(NavigationStack { CalendarScreen(board: room, calendar: calendar) })
+        defer { HostedSummary.close(window) }
+        let sync = try XCTUnwrap(HostedSummary.wait(for: "pocket.calendar.sync", in: window),
+                                 "Sync is on the calendar screen")
+        XCTAssertEqual(sync.accessibilityLabel, "Sync to my other calendars")
+        XCTAssertTrue(sync.accessibilityActivate())
+        XCTAssertNotNil(HostedSummary.wait(for: "settings.calendar.newLink.title", in: window),
+                        "with no link kept it asks first, as Settings' Subscribe does")
+    }
+}
+
+/// The subscribe link's flag on, with no link kept for anyone: Subscribe asks before it makes one.
+private struct FeedOn: CalendarFeedServing {
+    func feedAvailable() async throws -> Bool { true }
+    func newSubscriptionLink() async throws -> CalendarSubscriptionLink { throw CalendarError.unavailable }
+    func keptLink(_ url: URL) -> CalendarSubscriptionLink? { nil }
+}
+
+private struct NoKeptLink: CalendarLinkKeeping {
+    func link(for person: String) -> URL? { nil }
+    func keep(_ link: URL, for person: String) {}
+    func forgetAll() {}
 }
 
 /// A calendar service with no room events.

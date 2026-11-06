@@ -81,7 +81,7 @@ struct CalendarSheet: View {
 
     var body: some View {
         NavigationStack {
-            CalendarScreen(board: board, phone: center.phone)
+            CalendarScreen(board: board, calendar: center)
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Done") { dismiss() }
@@ -94,16 +94,16 @@ struct CalendarSheet: View {
 /// The month, the day picked, its events, and the Add field.
 struct CalendarScreen: View {
     @ObservedObject var board: CalendarBoard
-    /// The phone's calendar: Connect and the agents switch over the month in every calendar, and the phone's events in
-    /// Pocket's own (from Settings) only.
-    var phone: PhoneCalendarCenter?
+    /// The calendar center: "Your calendars" over the month in every calendar (Connect, the agents switch, Sync to my
+    /// other calendars), and the phone's events in Pocket's own (from Settings) only.
+    var calendar: CalendarCenter?
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 monthHeader
-                if let phone {
-                    PhoneCalendarCard(phone: phone, showsEventsHere: board.showsPhoneEvents)
+                if let calendar, let phone = calendar.phone {
+                    PhoneCalendarCard(phone: phone, center: calendar, showsEventsHere: board.showsPhoneEvents)
                 }
                 CalendarMonthGridView(grid: board.grid, selected: board.selected) { board.select($0) }
                     // A sideways swipe moves a month; scrolling up and down still scrolls.
@@ -569,18 +569,8 @@ struct CalendarSettingsSection: View {
                         .accessibilityIdentifier("settings.calendar.open")
                     }
                     if center.showsSubscribe {
-                        Button {
-                            Task { await center.subscribe() }
-                        } label: {
-                            Label("Subscribe in Apple Calendar", systemImage: "calendar.badge.plus")
-                        }
-                        .disabled(center.isWorkingOnFeed)
-                        .accessibilityIdentifier("settings.calendar.subscribe")
-                        // Subscribe with no kept link: a new link replaces any made before, so it asks first, in a
-                        // sheet. The sheet hangs on this row: put on the Section, it never presented.
-                        .sheet(isPresented: $center.confirmsNewLink) {
-                            CalendarLinkQuestion(kind: .newLink) { Task { await center.confirmNewLink() } }
-                        }
+                        CalendarSubscribeButton(center: center, title: "Subscribe in Apple Calendar",
+                                                identifier: "settings.calendar.subscribe")
                         Button(role: .destructive) {
                             confirmsReset = true
                         } label: {
@@ -615,6 +605,30 @@ struct CalendarSettingsSection: View {
             ? "Apple Calendar shows the events from your rooms and keeps them up to date. Subscribe opens your link "
                 + "again; Reset link makes a new one and stops the old."
             : "Events from your rooms, by day."
+    }
+}
+
+/// Subscribe, wherever it is offered (Settings, and the calendar screen's "Your calendars"): one presenter. It opens
+/// the kept link; with none kept it asks first, in its own sheet, since a new link replaces any made before. The
+/// question is this button's own: only the button that was tapped asks, never two sheets at once.
+struct CalendarSubscribeButton: View {
+    @ObservedObject var center: CalendarCenter
+    let title: String
+    let identifier: String
+    @State private var asks = false
+
+    var body: some View {
+        Button {
+            Task { asks = await center.subscribe() }
+        } label: {
+            Label(title, systemImage: "calendar.badge.plus")
+        }
+        .disabled(center.isWorkingOnFeed)
+        .accessibilityIdentifier(identifier)
+        // The sheet hangs on the button itself: put on Settings' Section, it never presented.
+        .sheet(isPresented: $asks) {
+            CalendarLinkQuestion(kind: .newLink) { Task { await center.confirmNewLink() } }
+        }
     }
 }
 
@@ -720,6 +734,6 @@ struct CalendarAgendaScreen: View {
     }
 
     var body: some View {
-        CalendarScreen(board: board, phone: center.phone)
+        CalendarScreen(board: board, calendar: center)
     }
 }

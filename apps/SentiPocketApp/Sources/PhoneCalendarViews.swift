@@ -90,9 +90,11 @@ struct PhoneCalendarRefusedLine: View {
 /// "Your calendars", over the month in every calendar screen, so they are found where the calendar is (Carter looked
 /// there, not in Settings): Connect my calendar until Pocket may read the phone's calendars (Apple's, and Google's or
 /// Outlook's once their account is on the phone), the plain line when it may not, and then the switch that lets the
-/// person's agents see the calendars they pick. Nothing while the server's flag is off.
+/// person's agents see the calendars they pick; and Sync to my other calendars, which puts Pocket's events in Apple
+/// Calendar (Carter: "it doesn't give me a sync with others button"). Each part only while its server flag is on.
 struct PhoneCalendarCard: View {
     @ObservedObject var phone: PhoneCalendarCenter
+    @ObservedObject var center: CalendarCenter
     /// Pocket's own calendar shows the phone's events; a room's calendar only offers the switches, and says where the
     /// events show.
     let showsEventsHere: Bool
@@ -102,47 +104,22 @@ struct PhoneCalendarCard: View {
     static let accountsWords = "A Google or Outlook calendar shows once its account is on this phone, in Settings, "
         + "Calendar, Accounts."
     static let elsewhereWords = "Your phone's events show in your own calendar, in Settings, Calendar."
+    static let syncWords = "Adds Pocket's events to Apple Calendar; Google Calendar can subscribe to the same link."
 
     var body: some View {
-        if phone.available == true {
+        if phone.available == true || center.showsSubscribe {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Your calendars")
                     .font(.headline)
                     .accessibilityAddTraits(.isHeader)
-                if phone.access == .notAsked {
-                    Button {
-                        Task { await phone.connect() }
-                    } label: {
-                        Label("Connect my calendar", systemImage: "calendar.badge.plus")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .accessibilityIdentifier("pocket.calendar.connect")
-                    note(Self.connectWords)
-                } else if phone.access.isRefused {
-                    PhoneCalendarRefusedLine()
-                } else {
-                    Label(showsEventsHere ? "Your phone's calendars show here" : Self.elsewhereWords,
-                          systemImage: "iphone")
-                        .font(.subheadline)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Toggle(isOn: Binding(get: { phone.sharesWithAgents },
-                                         set: { on in Task { await phone.setSharing(on) } })) {
-                        Text("Let my agents see my calendar")
-                            .font(.subheadline.weight(.semibold))
-                    }
-                    .accessibilityIdentifier("pocket.calendar.share")
-                    if phone.sharesWithAgents {
-                        NavigationLink {
-                            PhoneCalendarPicker(phone: phone)
-                        } label: {
-                            LabeledContent("Calendars to share",
-                                           value: PhoneCalendarSettingsSection.picked(phone.sharedCalendarIds.count))
-                                .font(.subheadline)
-                        }
-                        .accessibilityIdentifier("pocket.calendar.calendars")
-                    }
-                    note(words)
+                if phone.available == true {
+                    phoneRows
+                }
+                if center.showsSubscribe {
+                    CalendarSubscribeButton(center: center, title: "Sync to my other calendars",
+                                            identifier: "pocket.calendar.sync")
+                        .font(.subheadline.weight(.semibold))
+                    note(center.feedNotice ?? Self.syncWords)
                 }
             }
             .padding(12)
@@ -150,6 +127,45 @@ struct PhoneCalendarCard: View {
                 .fill(Color(uiColor: .secondarySystemBackground)))
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("pocket.calendar.yourCalendars")
+        }
+    }
+
+    @ViewBuilder
+    private var phoneRows: some View {
+        if phone.access == .notAsked {
+            Button {
+                Task { await phone.connect() }
+            } label: {
+                Label("Connect my calendar", systemImage: "calendar.badge.plus")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .accessibilityIdentifier("pocket.calendar.connect")
+            note(Self.connectWords)
+        } else if phone.access.isRefused {
+            PhoneCalendarRefusedLine()
+        } else {
+            Label(showsEventsHere ? "Your phone's calendars show here" : Self.elsewhereWords,
+                  systemImage: "iphone")
+                .font(.subheadline)
+                .fixedSize(horizontal: false, vertical: true)
+            Toggle(isOn: Binding(get: { phone.sharesWithAgents },
+                                 set: { on in Task { await phone.setSharing(on) } })) {
+                Text("Let my agents see my calendar")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .accessibilityIdentifier("pocket.calendar.share")
+            if phone.sharesWithAgents {
+                NavigationLink {
+                    PhoneCalendarPicker(phone: phone)
+                } label: {
+                    LabeledContent("Calendars to share",
+                                   value: PhoneCalendarSettingsSection.picked(phone.sharedCalendarIds.count))
+                        .font(.subheadline)
+                }
+                .accessibilityIdentifier("pocket.calendar.calendars")
+            }
+            note(words)
         }
     }
 

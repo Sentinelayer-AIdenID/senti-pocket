@@ -21,9 +21,6 @@ final class CalendarCenter: ObservableObject {
     /// person's own Keychain item.
     @Published private(set) var feedNotice: String?
     @Published private(set) var isWorkingOnFeed = false
-    /// Subscribe found no kept link: making one replaces any link made before (another phone, before a sign-out), so
-    /// it asks first, as Reset does.
-    @Published var confirmsNewLink = false
 
     let client: any RoomCalendarServing
     /// The phone's own calendar in Pocket's (connect my calendar); nil where the app has none to offer.
@@ -119,27 +116,28 @@ final class CalendarCenter: ObservableObject {
         draftsSchedule.answered(on: false, at: now())
     }
 
-    /// Opens Apple Calendar's subscribe sheet on the link kept for this person, without making a new one. With no
-    /// kept link it asks first (`confirmsNewLink`): a new link stops any older one.
-    func subscribe() async {
-        guard showsSubscribe, !isWorkingOnFeed else { return }
+    /// Opens Apple Calendar's subscribe sheet on the link kept for this person, without making a new one. True when
+    /// no link is kept: making one replaces any link made before (another phone, before a sign-out), so the button
+    /// that was tapped asks first (`CalendarSubscribeButton`), as Reset does, and `confirmNewLink()` makes it.
+    @discardableResult
+    func subscribe() async -> Bool {
+        guard showsSubscribe, !isWorkingOnFeed else { return false }
         isWorkingOnFeed = true
         feedNotice = nil
         defer { isWorkingOnFeed = false }
         guard let key = await signedInPerson() else {
             feedNotice = Self.noPerson
-            return
+            return false
         }
         if let kept = vault.link(for: key).flatMap({ feed.keptLink($0) }) {
             await open(kept.url)
-        } else {
-            confirmsNewLink = true
+            return false
         }
+        return true
     }
 
     /// The person confirmed: a new link is made, kept for them, and opened.
     func confirmNewLink() async {
-        confirmsNewLink = false
         await makeLink(opening: true)
     }
 
