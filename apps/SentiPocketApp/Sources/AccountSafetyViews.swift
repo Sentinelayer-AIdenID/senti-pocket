@@ -9,13 +9,13 @@ enum PocketSupport {
     static var mailURL: URL? { URL(string: "mailto:\(email)") }
 }
 
-/// Settings, Account: "Contact support", with the address, opening Mail.
+/// Settings, Account: "Contact us", with the address, opening Mail.
 struct SupportContactRow: View {
     var body: some View {
         if let url = PocketSupport.mailURL {
             Link(destination: url) {
                 HStack {
-                    Label("Contact support", systemImage: "envelope")
+                    Label("Contact us", systemImage: "envelope")
                     Spacer(minLength: 8)
                     Text(PocketSupport.email)
                         .foregroundStyle(.secondary)
@@ -87,7 +87,7 @@ struct AIConsentSettingsView: View {
             }
             Section {
                 if let givenAt = consent.givenAt {
-                    LabeledContent("You said OK", value: givenAt.formatted(date: .abbreviated, time: .omitted))
+                    LabeledContent("You agreed", value: givenAt.formatted(date: .abbreviated, time: .omitted))
                     Button("Withdraw", role: .destructive) { consent.withdraw() }
                         .accessibilityIdentifier("settings.aiConsent.withdraw")
                 } else {
@@ -98,7 +98,7 @@ struct AIConsentSettingsView: View {
                 }
             } footer: {
                 if consent.isGiven {
-                    Text("Withdrawing doesn't remove what you already shared. Until you say OK again, Pocket asks "
+                    Text("Withdrawing doesn't remove what you already shared. Until you agree again, Pocket asks "
                          + "before you write in any room.")
                 }
             }

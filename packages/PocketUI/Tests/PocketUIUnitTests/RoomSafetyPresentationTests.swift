@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+import PocketContracts
 @testable import PocketUI
 
 /// Report, Block and the AI consent, as the room shows them (App Store guidelines 1.2 and 5.1.2(i)).
@@ -275,15 +276,88 @@ final class RoomSafetyPresentationTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(RoomBlocking.minimumTapSize, 44, "Show takes a 44 pt tap")
     }
 
-    func test_block_from_a_profile_card_is_by_id_and_never_the_server_or_someone_already_blocked() {
-        let card = RoomProfileTarget(senderId: "human-sam", name: "Sam", isAgent: false)
-        XCTAssertEqual(RoomBlockTarget.fromCard(card, alreadyBlocked: false),
-                       RoomBlockTarget(actorId: "human-sam", name: "Sam"), "by id, with no post")
-        XCTAssertNil(RoomBlockTarget.fromCard(card, alreadyBlocked: true), "already blocked: not offered again")
-        XCTAssertNil(RoomBlockTarget.fromCard(RoomProfileTarget(senderId: "Senti", name: "Senti", isAgent: true),
-                                              alreadyBlocked: false), "never the server's own posts")
-        XCTAssertEqual(RoomBlockTarget.fromCard(RoomProfileTarget(senderId: "review-agent", name: "review-agent",
-                                                                  isAgent: true), alreadyBlocked: false)?.isAgent, true)
+    /// Block from someone's card (master's member card): with the newest of their messages in the list, never by their
+    /// id alone, and never for yourself, the server or someone already blocked.
+    func test_block_from_a_profile_card_names_their_newest_message_and_never_the_server_or_someone_already_blocked() {
+        let own: Set<String> = ["human-me"]
+        XCTAssertTrue(RoomMemberBlock.offers(senderId: "human-sam", ownAuthorIds: own, alreadyBlocked: false))
+        XCTAssertFalse(RoomMemberBlock.offers(senderId: "human-sam", ownAuthorIds: own, alreadyBlocked: true),
+                       "already blocked: not offered again")
+        XCTAssertFalse(RoomMemberBlock.offers(senderId: "senti", ownAuthorIds: own, alreadyBlocked: false),
+                       "never the server's own posts")
+        XCTAssertFalse(RoomMemberBlock.offers(senderId: "human-me", ownAuthorIds: own, alreadyBlocked: false),
+                       "never yourself")
+        let listed = RoomMemberMessagesState(rows: [
+            RoomMemberMessageRow(sequenceId: 4, text: "More of the same", date: nil),
+            RoomMemberMessageRow(sequenceId: 2, text: "Something unkind", date: nil)
+        ])
+        var blocked: Int64?
+        listed.blockAction { blocked = $0 }?()
+        XCTAssertEqual(blocked, 4, "the newest of theirs in the list")
+        XCTAssertNil(RoomMemberMessagesState().blockAction { _ in }, "no message listed yet: no Block by id alone")
+        XCTAssertNil(RoomMemberMessagesState(rows: [RoomMemberMessageRow(sequenceId: 2, text: "x", date: nil)],
+                                             isBlocked: true).blockAction { _ in },
+                     "someone already blocked: their messages are not listed, and Block is not offered")
+    }
+
+    // MARK: - Direct messages and Activity
+
+    private func directList() throws -> SessionListPresentationState {
+        let page = try JSONDecoder().decode(SessionListPage.self, from: Data("""
+        {"sessions":[
+          {"sessionId":"room-1","status":"active","archiveStatus":"active","visibility":"private","membershipRole":"owner",
+           "title":"Design review","agentCount":2,"eventCount":9,"totalCostUsd":0,"kind":"room"},
+          {"sessionId":"dm-sam","status":"active","archiveStatus":"active","visibility":"private","membershipRole":"owner",
+           "title":"dm","agentCount":0,"eventCount":2,"totalCostUsd":0,"kind":"direct",
+           "counterpart":{"senderId":"Human-Sam","kind":"human","displayName":"Sam"},"originRoomId":"room-1"},
+          {"sessionId":"dm-ada","status":"active","archiveStatus":"active","visibility":"private","membershipRole":"owner",
+           "title":"dm","agentCount":0,"eventCount":2,"totalCostUsd":0,"kind":"direct",
+           "counterpart":{"senderId":"human-ada","kind":"human","displayName":"Ada"},"originRoomId":"room-1"}
+        ],"count":3,"include_archived":false,"next_cursor":null,"has_more":false}
+        """.utf8))
+        return SessionListPresentationState(page: page, provenance: .fixture)
+    }
+
+    /// Someone you blocked can't reach you in a direct message: theirs is not listed (the room list and the side panel),
+    /// and nothing else is hidden.
+    func test_a_direct_message_with_someone_you_blocked_is_not_listed() throws {
+        let list = try directList()
+        let shown = list.withoutDirectMessages(from: ["human-sam"])
+        XCTAssertEqual(shown.rows.map(\.sessionId), ["room-1", "dm-ada"], "by id, whatever its case")
+        XCTAssertEqual(shown.resultCount, 2)
+        XCTAssertEqual(list.withoutDirectMessages(from: []), list, "nobody blocked: the list as it is")
+        XCTAssertEqual(list.withoutDirectMessages(from: ["human-zed"]).rows.count, 3)
+    }
+
+    /// Room info's Activity shows a blocked person's messages and replies as one line, as the room does; everyone else's
+    /// as they are.
+    func test_activity_shows_a_blocked_persons_messages_and_replies_as_one_line() throws {
+        let events = try JSONDecoder().decode(SessionEventForwardPage.self, from: Data("""
+        {"events":[{"id":"ev-1","event":"session_message","agent":{"displayName":"sam"},
+        "agentId":"Human-Sam","agentModel":null,"payload":{"text":"Something unkind"},
+        "ts":"2026-11-06T10:35:00Z","timestamp":"2026-11-06T10:35:00Z","cursor":"c1",
+        "sequenceId":2,"sessionId":"room-1","source":"app"},
+        {"id":"ev-2","event":"session_message","agent":{"displayName":"ada"},
+        "agentId":"human-ada","agentModel":null,"payload":{"text":"Build 319 is green"},
+        "ts":"2026-11-06T10:36:00Z","timestamp":"2026-11-06T10:36:00Z","cursor":"c2",
+        "sequenceId":3,"sessionId":"room-1","source":"app"}]}
+        """.utf8))
+        let actions = try JSONDecoder().decode(SessionActionPage.self, from: Data("""
+        {"sessionId":"room-1","count":2,"projection":{},"actions":[{"id":"act-1",
+        "sessionId":"room-1","targetSequenceId":3,"targetCursor":null,"targetActionId":null,
+        "actionType":"reply","actorKind":"human","actorId":"human-sam","actorUserId":null,"actorRole":"member",
+        "note":"More of the same","metadata":{},"idempotencyKey":"idem-1","createdAt":"2026-11-06T10:37:00Z"},
+        {"id":"act-2","sessionId":"room-1","targetSequenceId":2,"targetCursor":null,"targetActionId":null,
+        "actionType":"reply","actorKind":"human","actorId":"human-ada","actorUserId":null,"actorRole":"member",
+        "note":"Thanks","metadata":{},"idempotencyKey":"idem-2","createdAt":"2026-11-06T10:38:00Z"}]}
+        """.utf8))
+        let state = SessionActivityPresentationState(sessionId: "room-1", eventPage: events, actionPage: actions,
+                                                     provenance: .fixture, blockedAuthorIds: ["human-sam"])
+        XCTAssertEqual(state.events.map(\.text), [RoomBlocking.hiddenLine, "Build 319 is green"])
+        XCTAssertEqual(state.actions.map(\.note), [RoomBlocking.hiddenLine, "Thanks"])
+        let unblocked = SessionActivityPresentationState(sessionId: "room-1", eventPage: events, actionPage: actions,
+                                                         provenance: .fixture)
+        XCTAssertEqual(unblocked.events.first?.text, "Something unkind", "nobody blocked: as it is")
     }
 
     func test_block_names_the_post_it_was_chosen_on() {

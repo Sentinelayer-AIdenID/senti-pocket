@@ -142,14 +142,6 @@ public struct RoomBlockTarget: Equatable, Identifiable, Sendable {
 
     public var id: String { actorId.lowercased() }
 
-    /// Block from someone's profile card: by their id, with no post. None for the server's own posts, or someone already
-    /// blocked.
-    public static func fromCard(_ card: RoomProfileTarget, alreadyBlocked: Bool) -> RoomBlockTarget? {
-        guard !alreadyBlocked, !card.senderId.isEmpty,
-              card.senderId.lowercased() != RoomBlocking.serverAuthor else { return nil }
-        return RoomBlockTarget(actorId: card.senderId, name: card.name)
-    }
-
     /// An agent, not a person: blocked by this one id, so the same agent under another id is not.
     public var isAgent: Bool { !actorId.lowercased().hasPrefix("human-") }
 }
@@ -199,6 +191,9 @@ public enum AIConsentText {
         + "scoring and noticing when you've finished speaking on a call. These run on AI models from third-party "
         + "providers."
     public static let settingsHint = "You can change this in Settings, under AI and your messages."
+    /// The two answers: Agree records consent for this account; Not now sends nothing.
+    public static let agree = "Agree"
+    public static let notNow = "Not now"
 }
 
 extension RoomChatIntent {

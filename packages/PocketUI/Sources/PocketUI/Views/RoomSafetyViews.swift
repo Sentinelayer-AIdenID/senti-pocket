@@ -213,7 +213,7 @@ extension View {
 }
 
 /// The one-time notice before anything you write in a room is shared with AI (App Store guideline 5.1.2(i)): what is
-/// shared, and with whom. OK records your consent for this account and the write goes ahead; Not now cancels it.
+/// shared, and with whom. Agree records your consent for this account and the write goes ahead; Not now cancels it.
 public struct RoomAIConsentSheet: View {
     private let onAllow: () -> Void
     private let onNotNow: () -> Void
@@ -224,7 +224,7 @@ public struct RoomAIConsentSheet: View {
     }
 
     public var body: some View {
-        // At full height, every word, then OK and Not now after them, at every text size: what is shared is read
+        // At full height, every word, then Agree and Not now after them, at every text size: what is shared is read
         // before it is agreed to, and at the largest sizes the whole of it scrolls.
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
@@ -261,14 +261,14 @@ public struct RoomAIConsentSheet: View {
 
     @ViewBuilder private var answers: some View {
         Button(action: onAllow) {
-            Text("OK").frame(maxWidth: .infinity)
+            Text(AIConsentText.agree).frame(maxWidth: .infinity)
         }
         .buttonStyle(.borderedProminent)
         .controlSize(.large)
         .tint(PocketPalette.accent)
         .accessibilityIdentifier("pocket.aiConsent.ok")
         Button(action: onNotNow) {
-            Text("Not now").frame(maxWidth: .infinity)
+            Text(AIConsentText.notNow).frame(maxWidth: .infinity)
         }
         .buttonStyle(.bordered)
         .controlSize(.large)

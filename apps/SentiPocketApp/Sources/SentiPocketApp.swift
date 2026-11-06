@@ -581,7 +581,9 @@ struct AuthenticatedRootView: View {
                         roomScreen(currentRoom)
                             .id(currentRoom)
                     } else {
-                        SessionListView(state: sessions.state, folders: roomFolders.items,
+                        // A direct message with someone you blocked is not listed.
+                        SessionListView(state: sessions.state.withoutDirectMessages(from: blocks.actorIds),
+                                        folders: roomFolders.items,
                                         onFolder: { roomFolders.send($0) }) { intent in
                             sessions.send(intent)
                             if case .selectSession(let sessionId) = intent,
@@ -774,6 +776,8 @@ struct AuthenticatedRootView: View {
             }, onDone: { presentsWaiting = false })
             .aiConsentPrompt($waitingConsentHeld) { aiConsent.grant() }
         }
+        // Activity shows a blocked person's messages and replies as one line, as rooms do.
+        .onReceive(blocks.$actorIds) { details.setBlockedAuthors($0) }
         .onChange(of: rootScenePhase) { phase in
             if phase == .active { notifications.startPolling() } else { notifications.stopPolling() }
             // Blocks made on the web, or here while offline, catch up when Pocket comes back.
@@ -1057,10 +1061,13 @@ struct AuthenticatedRootView: View {
         .onAppear(perform: placeSidePanelRooms)
         .onChange(of: sessions.state.rows) { _ in placeSidePanelRooms() }
         .onChange(of: roomFolders.folders) { _ in placeSidePanelRooms() }
+        .onChange(of: blocks.actorIds) { _ in placeSidePanelRooms() }
     }
 
+    /// A direct message with someone you blocked is not placed (`withoutDirectMessages`).
     private func placeSidePanelRooms() {
-        sidePanelPlacement.update(rows: sessions.state.rows, folders: roomFolders.items)
+        sidePanelPlacement.update(rows: sessions.state.withoutDirectMessages(from: blocks.actorIds).rows,
+                                  folders: roomFolders.items)
     }
 
     /// The room on screen, made and drawn again only when what it is opened with changes (`RoomScreenHost`).

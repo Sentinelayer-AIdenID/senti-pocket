@@ -594,6 +594,7 @@ public struct RoomChatView: View {
             canReply: state.composer.canPost,
             canReport: state.canReport,
             canBlock: state.canBlock,
+            asksAIConsent: state.asksAIConsent,
             canPin: state.canPin,
             isPinned: state.isPinned(message),
             pinsFull: state.pinned.count >= state.pinLimit,
@@ -984,6 +985,9 @@ private struct RoomMessageRowView: View {
     /// Someone else's message offers Report and Block.
     var canReport = false
     var canBlock = false
+    /// The room asks the AI consent before an edit opens (`onEdit`): the row is drawn again when that changes, so its
+    /// Edit asks as the room does now.
+    var asksAIConsent = false
     var canPin = false
     var isPinned = false
     /// The room holds as many pins as it can: Pin waits until one is unpinned.
@@ -3991,7 +3995,8 @@ extension RoomMessageRowView: Equatable {
             && lhs.breakouts == rhs.breakouts && lhs.attachmentPreviews == rhs.attachmentPreviews
             && lhs.isReadingAloud == rhs.isReadingAloud && lhs.isExpanded == rhs.isExpanded
             && lhs.threadSummary == rhs.threadSummary && lhs.isReadingSummary == rhs.isReadingSummary
-            && lhs.isMinimized == rhs.isMinimized
+            && lhs.isMinimized == rhs.isMinimized && lhs.canReport == rhs.canReport && lhs.canBlock == rhs.canBlock
+            && lhs.asksAIConsent == rhs.asksAIConsent
     }
 
     /// The previews of this row's own attachments: another row's preview arriving leaves it as it is.

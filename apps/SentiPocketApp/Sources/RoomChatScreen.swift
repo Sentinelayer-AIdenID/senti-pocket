@@ -762,7 +762,8 @@ struct RoomChatScreen: View {
                 target: target,
                 roomId: route.sessionId,
                 sharedRoom: profileSharedRoom,
-                canMessage: profileOffersMessage(target),
+                // Never to someone you blocked.
+                canMessage: profileOffersMessage(target) && !blocked,
                 context: directContext,
                 sharedRooms: sharedRooms,
                 messages: authorMessages,
