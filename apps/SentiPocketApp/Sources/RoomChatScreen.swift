@@ -313,9 +313,12 @@ struct RoomChatScreen: View {
         // Bound to the account signed in now: its files are kept under it, and their uploads carry only its token, so
         // another account signing in here never sees or posts them (warden, #298 review).
         let account = RoomSendOutbox.account(token: SessionTokenStore.load())
-        let mediaUploader: (any RoomMediaUploading)? = route.membershipRole.lowercased() == "viewer"
+        var mediaUploader: (any RoomMediaUploading)? = route.membershipRole.lowercased() == "viewer"
             ? nil
             : (sender as? HTTPRoomMessageSender).map { HTTPRoomMediaUploader(api: $0.bound(toAccount: account)) }
+        #if DEBUG
+        if RoomPreview.isComposerTrayRequested { mediaUploader = RoomPreviewUploader() }
+        #endif
         _media = StateObject(wrappedValue: RoomMediaUploadCoordinator.forRoom(route.sessionId, account: account,
                                                                               uploader: mediaUploader,
                                                                               aiConsent: aiConsent) {
@@ -1178,6 +1181,11 @@ struct RoomChatScreen: View {
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             offerCrashReports()
         }
+        #if DEBUG
+        .task {
+            if RoomPreview.isComposerTrayRequested, media.board.tray.isEmpty { media.add(RoomPreview.composerTraySources()) }
+        }
+        #endif
         // The mint's boxes for this room, as the Flight record reads them: the chat's own agent and the composer's hint.
         .onChange(of: [Set(flight.state.boxes.map(\.name)), flight.state.endedBoxNames]) { boxes in
             coordinator.setBoxes(running: boxes[0], ended: boxes[1])

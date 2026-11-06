@@ -524,6 +524,17 @@ final class RoomMediaUploadCoordinatorTests: XCTestCase {
         XCTAssertNotNil(media.board.tray.first?.thumbnail, "the picture shows at once")
     }
 
+    /// Ticket 77fcdd2b: a file in the tray opens from its copy on the phone, the picked one at once and the one it will
+    /// send once prepared.
+    func test_a_file_in_the_tray_opens_from_its_copy_on_the_phone() async throws {
+        let media = coordinator(FakeUploader())
+        let picked = try source("IMG_0042.jpg")
+        media.add([picked])
+        XCTAssertEqual(media.board.tray.first?.localFile, picked.file, "the picked copy at once")
+        await until("uploaded", boards: [media.board]) { media.board.tray.first?.phase == .uploaded }
+        XCTAssertEqual(media.board.tray.first?.localFile, picked.file, "the prepared copy (the fake prepares in place)")
+    }
+
     func test_send_posts_one_message_naming_every_file_in_order() async throws {
         let uploader = FakeUploader()
         let media = coordinator(uploader)
