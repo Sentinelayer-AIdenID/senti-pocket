@@ -166,6 +166,8 @@ struct RoomChatScreen: View {
     /// Agents' calls answered on the call screen; the one this room's voice room is for.
     @ObservedObject private var callDesk = RoomCallDesk.shared
     @State private var answeredCall: RoomCallDesk.Call?
+    /// The AI question for that call, while it is asked (`AnsweredCallConsent`).
+    @State private var callConsent: Task<Void, Never>?
     private let route: RoomRoute
     private let ticketsTransport: (any RoomTicketsTransport)?
     private let admissionsTransport: (any RoomAdmissionsTransport)?
@@ -569,18 +571,17 @@ struct RoomChatScreen: View {
               let partner = call.partner else { return }
         answeredCall = call
         CrashReporter.shared.note("call answered")
-        // An agent's call answered before this account said OK: nothing is said to it until you do, and Not now ends
-        // the call.
-        afterAIConsent({
-            guard RoomCallDesk.shared.isLive(call.uuid) else {
-                answeredCall = nil
-                return
-            }
-            startVoiceRoom(with: [partner], answering: call)
-        }, onDecline: {
-            RoomCallDesk.shared.voiceRoomEnded(call)
-            answeredCall = nil
-        })
+        // An agent's call answered before this account said OK: nothing is said to it until you do. Asked as a dial
+        // asks, in a window of its own over any sheet; with Pocket not on screen the call ends and a notification says
+        // why, and Not now ends it.
+        callConsent?.cancel()
+        callConsent = AnsweredCallConsent.ask(AIConsentAsker.shared, isLive: { RoomCallDesk.shared.isLive(call.uuid) },
+                                              begin: { startVoiceRoom(with: [partner], answering: call) },
+                                              end: {
+                                                  guard answeredCall?.uuid == call.uuid else { return }
+                                                  RoomCallDesk.shared.voiceRoomEnded(call)
+                                                  answeredCall = nil
+                                              })
     }
 
     /// Runs `action` once this account has said OK to sharing with AI (App Store guideline 5.1.2(i)), asking first if it
@@ -879,7 +880,12 @@ struct RoomChatScreen: View {
             if summaryGenerator != nil, makesSummary || savedSummary != nil {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
-                        showsSummary = true
+                        // Making the summary sends the room's messages to the AI: the owner's first asks.
+                        if makesSummary {
+                            afterAIConsent { showsSummary = true }
+                        } else {
+                            showsSummary = true
+                        }
                     } label: {
                         Label(makesSummary ? "Summarize this room" : "Room summary", systemImage: "text.badge.star")
                     }
@@ -1250,6 +1256,8 @@ struct RoomChatScreen: View {
             guard let voiceRoom else {
                 // Hung up while the AI question was still asked: the question goes with the call.
                 consentHeld = nil
+                callConsent?.cancel()
+                callConsent = nil
                 answeredCall = nil
                 return
             }
@@ -1561,5 +1569,22 @@ private struct RoomMediaPresenters: ViewModifier {
             } message: {
                 Text(attachmentProblem ?? "")
             }
+    }
+}
+
+/// An agent's call answered before the account agreed to share with AI: asked as a dial asks (`AIConsentAsker`), and
+/// begun only once it agrees and the call is still live; anything else (Not now, hung up, nothing on screen to ask
+/// with) ends it.
+enum AnsweredCallConsent {
+    @MainActor
+    static func ask(_ asker: AIConsentAsker, isLive: @escaping @MainActor () -> Bool,
+                    begin: @escaping @MainActor () -> Void, end: @escaping @MainActor () -> Void) -> Task<Void, Never> {
+        Task { @MainActor in
+            if await asker.allows(), !Task.isCancelled, isLive() {
+                begin()
+            } else {
+                end()
+            }
+        }
     }
 }

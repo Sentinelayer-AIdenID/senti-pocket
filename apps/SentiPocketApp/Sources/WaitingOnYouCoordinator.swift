@@ -136,6 +136,8 @@ final class WaitingOnYouCoordinator: ObservableObject {
     }
 
     private func answer(_ id: String, choice: String, detail: String) {
+        // An answer goes to the room that asked, where its agents read it: never without the account's consent.
+        guard !AIConsentAsker.shared.refusesWrites else { return }
         guard let item = items.first(where: { $0.ticketId == id && !answered.contains($0.askKey) }),
               !state.sending.contains(id),
               !choice.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }

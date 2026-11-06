@@ -383,6 +383,11 @@ final class AgentStartModel: ObservableObject {
             phase = .failed(Self.notKeptMessage)
             return
         }
+        // Starting an agent writes to the room: never without the account's consent to share with AI.
+        guard !AIConsentAsker.shared.refusesWrites else {
+            phase = .failed(Self.consentMessage)
+            return
+        }
         do {
             try ledger.keep(request, chat: chat, account: account, sessionId: sessionId, ticketId: ticket?.id)
         } catch MintStartLedger.Refusal.anotherStartPending {
@@ -456,6 +461,8 @@ final class AgentStartModel: ObservableObject {
     /// not recorded): nothing started under its key, so it is forgotten, and the form can be changed and sent again; a new
     /// chat made for it stays kept. A check again refused: the first send may have started the agent, so the start stays
     /// as it was, to be checked again under its own key, never replaced by a new one.
+    static let consentMessage = "Not started: say whether what you share may go to AI first, then try again."
+
     private func notThrough(_ message: String, again: Bool) {
         if again {
             checkProblem = message

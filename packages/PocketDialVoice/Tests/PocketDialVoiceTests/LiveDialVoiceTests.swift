@@ -39,12 +39,17 @@ private struct StubRecognizer: SpeechRecognizer {
     let transcribeFails: Bool
     /// False plays Apple's on-device recognizer: no model file.
     let needsModelFile: Bool
-    init(transcript: String = "", prepareFails: Bool = false, transcribeFails: Bool = false, needsModelFile: Bool = true) {
+    /// The answer to its own permission question (Apple's: Speech Recognition).
+    let authorizes: Bool
+    init(transcript: String = "", prepareFails: Bool = false, transcribeFails: Bool = false, needsModelFile: Bool = true,
+         authorizes: Bool = true) {
         self.transcript = transcript
         self.prepareFails = prepareFails
         self.transcribeFails = transcribeFails
         self.needsModelFile = needsModelFile
+        self.authorizes = authorizes
     }
+    func authorize() async -> Bool { authorizes }
     func prepareModel(at modelURL: URL) async throws -> SpeechModelMetrics {
         if prepareFails { throw StubError() }
         return SpeechModelMetrics(modelIdentifier: "stub", loadMilliseconds: 1, residentMemoryBytes: nil, thermalState: .nominal)
@@ -172,6 +177,15 @@ final class LiveDialVoiceTests: XCTestCase {
                               modelURL: nil)
         let heard = await voice.listen()
         XCTAssertEqual(heard, "ship it")
+    }
+
+    /// Speech Recognition is asked with the microphone, before anything is heard: refused, nothing is transcribed.
+    @MainActor
+    func test_listen_asks_the_recognizers_permission_before_it_hears_anything() async {
+        let voice = makeVoice(recognizer: StubRecognizer(transcript: "ship it", needsModelFile: false, authorizes: false),
+                              modelURL: nil)
+        let heard = await voice.listen()
+        XCTAssertEqual(heard, "")
     }
 
     /// Without the file the call listens with Apple's on-device speech; with it, with Whisper.

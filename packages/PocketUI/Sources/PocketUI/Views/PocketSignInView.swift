@@ -70,6 +70,8 @@ public struct PocketSignInView: View {
                     .foregroundStyle(PocketPalette.textSecondary)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
+
+                PocketHelpLinks()
             }
             .padding(28)
             .frame(maxWidth: 560)

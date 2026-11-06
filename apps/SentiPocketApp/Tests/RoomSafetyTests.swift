@@ -117,6 +117,20 @@ private final class FakeBlocksAPI: BlockListClient, @unchecked Sendable {
     }
 }
 
+/// A blocks API that refuses every block (as at its limit) and lists none.
+private final class RefusingBlocksAPI: BlockListClient, @unchecked Sendable {
+    func blocks() async throws -> [ServerBlock] { [] }
+    func block(_ actorId: String, from reference: BlockReference?) async throws { throw RoomSendError.rejected }
+    func unblock(_ actorId: String) async throws {}
+}
+
+/// No calendar links to forget.
+private struct NoCalendarLinks: CalendarLinkKeeping {
+    func link(for person: String) -> URL? { nil }
+    func keep(_ link: URL, for person: String) {}
+    func forgetAll() {}
+}
+
 /// A blocks API whose first list answers only when released, and that cannot take changes (as if it went offline).
 /// A later list answers at once with the same blocks, so a sync that should have stopped fails its test, never hangs.
 private final class HeldListAPI: BlockListClient, @unchecked Sendable {
@@ -1064,6 +1078,106 @@ final class RoomSafetyTests: XCTestCase {
         XCTAssertEqual(PocketSupport.mailURL?.absoluteString, "mailto:help@plexaura.io")
     }
 
+    // MARK: The checks under the screens (App Store guideline 5.1.2(i))
+
+    /// New room, New agent's chat, Invite (by name or by link) and Summarize send nothing without the signed-in
+    /// account's consent, whatever the screen did; once it agrees, they go.
+    func test_requests_that_share_with_ai_are_never_made_without_the_consent() async throws {
+        let consent = AIConsent(account: "sub:consent-test", defaults: temporaryDefaults())
+        AIConsentAsker.shared.consent = consent
+        defer { AIConsentAsker.shared.consent = nil }
+        SafetyURLProtocol.reset(["POST /api/v1/sessions/room_1/members": (201, "{}")])
+        let sender = HTTPRoomMessageSender(apiBaseURL: URL(string: "https://api.example.test"),
+                                           urlSession: SafetyURLProtocol.session,
+                                           tokenProvider: { token(subject: "user-a") })
+        func refused(_ what: String, _ request: () async throws -> Void) async {
+            do {
+                try await request()
+                XCTFail("\(what) went without the consent")
+            } catch {
+                XCTAssertTrue(error is AIConsentRefused, "\(what): \(error)")
+            }
+        }
+        await refused("a new room") { _ = try await sender.create(title: "Launch", kind: .general) }
+        await refused("a new agent's chat") {
+            try await sender.createAgentChat(sessionId: "room_2", title: "Agent", idempotencyKey: "create-1")
+        }
+        await refused("an invite") { _ = try await sender.invite(sessionId: "room_1", who: "sam", role: .contributor) }
+        await refused("an invite link") { _ = try await sender.createInviteLink(sessionId: "room_1", role: .contributor) }
+        await refused("a summary") { _ = try await sender.generateSummary(sessionId: "room_1") }
+        XCTAssertTrue(SafetyURLProtocol.requests.isEmpty, "nothing reached the API")
+
+        consent.grant()
+        _ = try await sender.invite(sessionId: "room_1", who: "sam", role: .contributor)
+        XCTAssertEqual(SafetyURLProtocol.requests.count, 1, "agreed: the invite goes")
+    }
+
+    /// An agent's call answered before the account agreed: it begins only once the account agrees, and ends when
+    /// nothing is on screen to ask with (or Not now).
+    func test_an_answered_agent_call_begins_only_after_the_ai_consent() async {
+        let notGiven = AIConsent(account: nil)
+        let noScreen = AIConsentAsker(storedConsent: { notGiven }, show: { _, _ in nil }, tell: { _ in })
+        var begun = 0
+        var ended = 0
+        await AnsweredCallConsent.ask(noScreen, isLive: { true }, begin: { begun += 1 }, end: { ended += 1 }).value
+        XCTAssertEqual(begun, 0, "not agreed: nothing is said to the agent")
+        XCTAssertEqual(ended, 1)
+
+        let given = AIConsent(account: nil)
+        given.grant()
+        let agreed = AIConsentAsker(storedConsent: { given }, show: { _, _ in nil }, tell: { _ in })
+        await AnsweredCallConsent.ask(agreed, isLive: { true }, begin: { begun += 1 }, end: { ended += 1 }).value
+        XCTAssertEqual(begun, 1, "agreed: the call begins")
+        await AnsweredCallConsent.ask(agreed, isLive: { false }, begin: { begun += 1 }, end: { ended += 1 }).value
+        XCTAssertEqual(begun, 1, "hung up meanwhile: it does not begin")
+        XCTAssertEqual(ended, 2)
+    }
+
+    /// Consent belongs to the account signed in: sign-out (and a refused credential, as after the account is deleted)
+    /// forgets it, so whoever signs in next is asked.
+    func test_sign_out_forgets_the_ai_consent() {
+        let defaults = temporaryDefaults()
+        let consent = AIConsent(account: "sub:a", defaults: defaults)
+        consent.grant()
+        XCTAssertFalse(AIConsent(account: "sub:a", defaults: defaults).asks)
+        defaults.set(true, forKey: "pocket.push.sound")
+        SignInCoordinator.clearPersonalState(calendarLinks: NoCalendarLinks(), consents: defaults)
+        XCTAssertTrue(AIConsent(account: "sub:a", defaults: defaults).asks, "signed out: asked again")
+        XCTAssertEqual(defaults.object(forKey: "pocket.push.sound") as? Bool, true, "nothing else is forgotten")
+    }
+
+    func test_closing_a_report_while_it_sends_stops_it() async {
+        let reporter = FakeReporter()
+        let room = room(reporter: reporter)
+        room.handle(.message(message(2, author: "human-sam", text: "Something unkind")))
+        room.send(.openReport(RoomReportTarget(sequenceId: 2, authorId: "human-sam", authorName: "sam")))
+        room.send(.sendReport(reason: .spam, note: ""))
+        room.send(.closeReport)
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertTrue(reporter.requests.isEmpty, "closed while sending: not sent")
+        XCTAssertNil(room.state.report)
+    }
+
+    func test_a_block_the_server_refuses_is_said_not_dropped_quietly() async {
+        let blocks = BlockList(account: "sub:a", store: temporaryStore(), client: RefusingBlocksAPI())
+        blocks.block(RoomBlockTarget(actorId: "human-sam", name: "Sam"))
+        await blocks.sync()
+        await waitUntil("said") { blocks.refusal != nil }
+        XCTAssertEqual(blocks.refusal, BlockList.refusalLine(name: "Sam"))
+    }
+
+    /// Release never offers the model file, nor looks for one; DEBUG does unless it draws Settings as Release does.
+    func test_release_offers_no_model_file_and_never_looks_for_one() {
+        XCTAssertFalse(WhisperModelSettings.offers(debug: false, arguments: []))
+        XCTAssertTrue(WhisperModelSettings.offers(debug: true, arguments: []))
+        XCTAssertFalse(WhisperModelSettings.offers(debug: true, arguments: ["-PocketReleaseSettings"]))
+        var looked = 0
+        let file = URL(fileURLWithPath: "/tmp/ggml-base.en.bin")
+        XCTAssertNil(WhisperModelSettings.dialModelURL(offers: false, resolve: { looked += 1; return file }))
+        XCTAssertEqual(looked, 0, "not offered: the file is never looked for")
+        XCTAssertEqual(WhisperModelSettings.dialModelURL(offers: true, resolve: { looked += 1; return file }), file)
+    }
+
     // MARK: Settings and the consent sheet, as drawn
 
     /// Settings in a window tall enough to draw every row of its list.
@@ -1101,5 +1215,16 @@ final class RoomSafetyTests: XCTestCase {
         XCTAssertNotNil(HostedSummary.wait(for: "pocket.aiConsent.ok", in: window, label: "Agree"))
         XCTAssertNotNil(HostedSummary.wait(for: "pocket.aiConsent.notNow", in: window, label: "Not now"))
         XCTAssertNotNil(HostedSummary.wait(for: "pocket.aiConsent.notice", in: window, label: AIConsentText.notice))
+        XCTAssertNotNil(HostedSummary.wait(for: "pocket.help.terms", in: window), "the terms, linked from the notice")
+        XCTAssertNotNil(HostedSummary.wait(for: "pocket.help.privacy", in: window), "and the privacy policy")
+    }
+
+    func test_settings_link_the_terms_and_the_privacy_policy() throws {
+        let window = try settings(offersModelFile: false)
+        defer { HostedSummary.close(window) }
+        XCTAssertNotNil(HostedSummary.wait(for: "settings.account.terms", in: window))
+        XCTAssertNotNil(HostedSummary.wait(for: "settings.account.privacy", in: window))
+        XCTAssertEqual(PocketHelp.termsURL.absoluteString, "https://sentinelayer.com/terms")
+        XCTAssertEqual(PocketHelp.privacyURL.absoluteString, "https://sentinelayer.com/privacy")
     }
 }

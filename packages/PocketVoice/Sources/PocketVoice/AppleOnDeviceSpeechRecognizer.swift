@@ -9,17 +9,20 @@ import Speech
 /// it transcribes nothing.
 public actor AppleOnDeviceSpeechRecognizer: SpeechRecognizer {
     private let localeIdentifier: String
-    private let authorize: @Sendable () async -> Bool
+    private let authorizer: @Sendable () async -> Bool
     private var running: RecognitionRun?
 
     public nonisolated var needsModelFile: Bool { false }
+
+    /// Speech Recognition, asked with the microphone's permission, before anything is captured.
+    public func authorize() async -> Bool { await authorizer() }
 
     public init(
         localeIdentifier: String = "en-US",
         authorize: @escaping @Sendable () async -> Bool = { await AppleOnDeviceSpeechRecognizer.requestAuthorization() }
     ) {
         self.localeIdentifier = localeIdentifier
-        self.authorize = authorize
+        self.authorizer = authorize
     }
 
     /// Nothing to load: Apple's model is on the device. Answers at once, whatever `modelURL` is.
@@ -34,7 +37,7 @@ public actor AppleOnDeviceSpeechRecognizer: SpeechRecognizer {
 
     public func transcribe(_ request: TranscriptionRequest) async throws -> TranscriptionResult {
         guard running == nil else { throw VoiceError.recognizerBusy }
-        guard await authorize() else { throw VoiceError.speechPermissionDenied }
+        guard await authorizer() else { throw VoiceError.speechPermissionDenied }
         guard running == nil else { throw VoiceError.recognizerBusy }
         guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: localeIdentifier)),
               recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else {
@@ -100,14 +103,20 @@ public actor AppleOnDeviceSpeechRecognizer: SpeechRecognizer {
 
     /// Asks for Speech Recognition once; true only when it is allowed. An answer that doesn't come within `wait` seconds
     /// (a call answered on a locked phone, where the question can't show yet) counts as no, so a call never waits on it.
-    public static func requestAuthorization(wait seconds: Double = 20) async -> Bool {
-        let status = SFSpeechRecognizer.authorizationStatus()
-        if status == .authorized { return true }
-        guard status == .notDetermined else { return false }
+    public static func requestAuthorization(
+        wait seconds: Double = 20,
+        status: () -> SFSpeechRecognizerAuthorizationStatus = { SFSpeechRecognizer.authorizationStatus() },
+        request: @escaping (@escaping (SFSpeechRecognizerAuthorizationStatus) -> Void) -> Void = {
+            SFSpeechRecognizer.requestAuthorization($0)
+        }
+    ) async -> Bool {
+        let current = status()
+        if current == .authorized { return true }
+        guard current == .notDetermined else { return false }
         let answer = AuthorizationAnswer()
         return await withCheckedContinuation { continuation in
             answer.start(continuation)
-            SFSpeechRecognizer.requestAuthorization { answer.resume($0 == .authorized) }
+            request { answer.resume($0 == .authorized) }
             Task {
                 try? await Task.sleep(nanoseconds: UInt64(max(seconds, 0) * 1_000_000_000))
                 answer.resume(false)

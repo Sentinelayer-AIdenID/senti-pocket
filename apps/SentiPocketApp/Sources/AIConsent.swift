@@ -42,7 +42,17 @@ final class AIConsent: ObservableObject {
         if let account { defaults.removeObject(forKey: Self.key(account)) }
     }
 
-    static func key(_ account: String) -> String { "pocket.aiConsent." + account }
+    nonisolated static let keyPrefix = "pocket.aiConsent."
+
+    nonisolated static func key(_ account: String) -> String { keyPrefix + account }
+
+    /// Forgets every account's answer on this phone: on sign-out, on a refused credential (as after the account is
+    /// deleted) and at a launch with no one signed in, so whoever signs in next is asked for itself.
+    nonisolated static func forgetAll(defaults: UserDefaults = .standard) {
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(keyPrefix) {
+            defaults.removeObject(forKey: key)
+        }
+    }
 }
 
 /// The same question, for what is not a room screen: a dial (Senti calling you about a decision) hears what you say,
@@ -89,7 +99,9 @@ final class AIConsentAsker {
 
     /// True at once when this account has said OK. Otherwise asks, and is true only once OK is tapped; Not now, or the
     /// call ending first, is false, and the question goes. Nothing on screen to ask with is false at once, said.
-    func allows() async -> Bool {
+    /// `notOnScreen` is what a notification says when nothing is on screen to ask with (a call's own words by default);
+    /// nil says nothing.
+    func allows(notOnScreen: String? = AIConsentAsker.notOnScreen) async -> Bool {
         let consent = self.consent ?? storedConsent()
         if consent.isGiven { return true }
         guard !Task.isCancelled else { return false }
@@ -100,7 +112,7 @@ final class AIConsentAsker {
             consent.grant()
             answer.give(true)
         }, { answer.give(false) }) else {
-            tell(Self.notOnScreen)
+            if let notOnScreen { tell(notOnScreen) }
             return false
         }
         let allowed = await withTaskCancellationHandler {
@@ -113,6 +125,14 @@ final class AIConsentAsker {
         // Answered, or the call ended: the question goes either way.
         showing.withdraw()
         return allowed
+    }
+
+    /// The check under every write that shares with AI, read when its request is made: true while the signed-in account
+    /// (`consent`, set by the signed-in screens) has not agreed. The screens ask first; this refuses what slips past them.
+    /// No account to ask for (previews, a signed-out root, tests of a request alone) refuses nothing.
+    var refusesWrites: Bool {
+        guard let consent, consent.account != nil else { return false }
+        return consent.asks
     }
 
     /// Resumes a wait once, whichever answer comes first, an answer given before the wait began included.
@@ -187,5 +207,15 @@ private struct AIConsentWindowContent: View {
                 RoomAIConsentSheet(onAllow: onAllow, onNotNow: onNotNow)
                     .interactiveDismissDisabled()
             }
+    }
+}
+
+/// A request that shares with AI, made without the signed-in account's consent (`AIConsentAsker.refusesWrites`): it is
+/// never sent.
+struct AIConsentRefused: Error, Equatable {
+    /// Throws, and sends nothing, while the signed-in account has not agreed.
+    @MainActor
+    static func check() throws {
+        if AIConsentAsker.shared.refusesWrites { throw AIConsentRefused() }
     }
 }

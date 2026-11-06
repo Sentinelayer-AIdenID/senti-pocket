@@ -158,6 +158,32 @@ final class NewAgentTests: XCTestCase {
         AgentStartModel(newAgentIn: "room-1", mint: mint, chats: chats, ledger: ledger, account: account, onStarted: onStarted)
     }
 
+    /// The check under New agent and Start agent: without the signed-in account's consent to share with AI the mint is
+    /// never asked.
+    func test_an_agent_is_never_started_without_the_ai_consent() async throws {
+        let ledger = temporaryLedger()
+        defer { remove(ledger) }
+        let suite = "consent-\(UUID().uuidString)"
+        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        let consent = AIConsent(account: "sub:consent-test", defaults: UserDefaults(suiteName: suite)!)
+        AIConsentAsker.shared.consent = consent
+        defer { AIConsentAsker.shared.consent = nil }
+        let mint = ScriptedMint(models: models)
+        let model = newAgent(mint, chats: FakeChats(), ledger: ledger) { _ in }
+        await model.load()
+        model.job = "Review the onboarding PR."
+        await model.start()
+        XCTAssertTrue(mint.sent.isEmpty, "not agreed: nothing goes to the mint")
+        XCTAssertEqual(model.phase, .failed(AgentStartModel.consentMessage))
+
+        consent.grant()
+        let agreed = newAgent(mint, chats: FakeChats(), ledger: ledger) { _ in }
+        await agreed.load()
+        agreed.job = "Review the onboarding PR."
+        await agreed.start()
+        XCTAssertEqual(mint.sent.count, 1, "agreed: it starts")
+    }
+
     func test_a_plain_start_goes_to_this_room_with_no_ticket_under_its_own_key() async throws {
         let ledger = temporaryLedger()
         defer { remove(ledger) }

@@ -4,6 +4,8 @@ import PocketContracts
 public protocol SpeechRecognizer: Sendable {
     /// It reads a model file `prepareModel(at:)` is given (Whisper); false for one that brings its own (Apple's).
     var needsModelFile: Bool { get }
+    /// The permission it needs to hear (Apple's: Speech Recognition), asked with the microphone's, before you speak.
+    func authorize() async -> Bool
     func prepareModel(at modelURL: URL) async throws -> SpeechModelMetrics
     func transcribe(_ request: TranscriptionRequest) async throws -> TranscriptionResult
     func cancel() async
@@ -11,6 +13,9 @@ public protocol SpeechRecognizer: Sendable {
 
 extension SpeechRecognizer {
     public var needsModelFile: Bool { true }
+
+    /// Asks for whatever permission it needs to hear, before anything is captured; Whisper needs none.
+    public func authorize() async -> Bool { true }
 }
 
 public protocol SpeechSynthesizer: Sendable {

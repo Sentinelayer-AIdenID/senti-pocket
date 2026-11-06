@@ -109,6 +109,8 @@ public final class LiveDialVoice: DialVoice {
         guard await ensureModel() else { return "" }
         guard !Task.isCancelled else { return "" }
         guard await requestPermission() else { return "" }
+        // Speech Recognition (Apple's recognizer) is asked with the microphone, before you speak, never after.
+        guard await recognizer.authorize() else { return "" }
         guard !Task.isCancelled else { return "" }
         guard let request = await captureUtterance() else { return "" }
         guard !Task.isCancelled else { return "" }

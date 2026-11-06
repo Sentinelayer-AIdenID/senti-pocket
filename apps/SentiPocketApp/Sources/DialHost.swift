@@ -594,7 +594,7 @@ final class DialHost: ObservableObject {
         let voice = LiveDialVoice(reasoner: reasoner,
                                   sessionId: ring.core.sessionId,
                                   checkpointId: ring.core.checkpointId,
-                                  modelURL: WhisperModelLocator.resolve())
+                                  modelURL: WhisperModelSettings.dialModelURL())
         let writeViewModel = PhoneWriteViewModel(
             sessionId: ring.core.sessionId,
             client: PocketWriteClient(apiBaseURL: gatewayURL),

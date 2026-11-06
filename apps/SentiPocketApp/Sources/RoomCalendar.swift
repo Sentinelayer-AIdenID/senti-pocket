@@ -319,7 +319,9 @@ final class CalendarBoard: ObservableObject {
     init(scope: CalendarScope, client: any RoomCalendarServing, calendar: Calendar = CalendarBoard.personsCalendar(),
          now: @escaping () -> Date = { Date() }, onUnavailable: @escaping @MainActor () -> Void = {},
          onReauthenticationRequired: @escaping @MainActor () -> Void = {},
-         mayShareWithAI: @escaping @MainActor () async -> Bool = { await AIConsentAsker.shared.allows() }) {
+         mayShareWithAI: @escaping @MainActor () async -> Bool = {
+             await AIConsentAsker.shared.allows(notOnScreen: nil)
+         }) {
         self.scope = scope
         self.mayShareWithAI = mayShareWithAI
         self.client = client

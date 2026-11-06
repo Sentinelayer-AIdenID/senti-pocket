@@ -1,12 +1,14 @@
 import Foundation
 import SwiftUI
 import PocketUI
+import UIKit
 
-// SUPPORT CONTACT: the one address the app gives for help (Settings, Account). To change it, change `email` here.
+// SUPPORT CONTACT: the one address the app gives for help, and the policies (Settings, sign-in, the AI notice) are
+// `PocketHelp` in PocketUI. To change them, change them there.
 enum PocketSupport {
-    static let email = "help@plexaura.io"
+    static let email = PocketHelp.email
 
-    static var mailURL: URL? { URL(string: "mailto:\(email)") }
+    static var mailURL: URL? { PocketHelp.mailURL }
 }
 
 /// Settings, Account: "Contact us", with the address, opening Mail.
@@ -22,8 +24,25 @@ struct SupportContactRow: View {
                         .lineLimit(1)
                 }
             }
+            // The address can be copied, for a phone without Mail set up.
+            .contextMenu {
+                Button {
+                    UIPasteboard.general.string = PocketSupport.email
+                } label: {
+                    Label("Copy address", systemImage: "doc.on.doc")
+                }
+            }
+            .accessibilityAction(named: "Copy address") { UIPasteboard.general.string = PocketSupport.email }
             .accessibilityIdentifier("settings.account.support")
         }
+        Link(destination: PocketHelp.termsURL) {
+            Label("Terms of Use", systemImage: "doc.text")
+        }
+        .accessibilityIdentifier("settings.account.terms")
+        Link(destination: PocketHelp.privacyURL) {
+            Label("Privacy Policy", systemImage: "hand.raised.square")
+        }
+        .accessibilityIdentifier("settings.account.privacy")
     }
 }
 
@@ -34,6 +53,14 @@ struct BlockedPeopleView: View {
 
     var body: some View {
         List {
+            if let refusal = blocks.refusal {
+                Section {
+                    Text(refusal)
+                        .foregroundStyle(.orange)
+                        .accessibilityIdentifier("settings.blocked.refusal")
+                    Button("OK") { blocks.refusal = nil }
+                }
+            }
             if blocks.blocked.isEmpty {
                 Text("You haven't blocked anyone.")
                     .foregroundStyle(.secondary)
@@ -98,8 +125,8 @@ struct AIConsentSettingsView: View {
                 }
             } footer: {
                 if consent.isGiven {
-                    Text("Withdrawing doesn't remove what you already shared. Until you agree again, Pocket asks "
-                         + "before you write in any room.")
+                    Text("Withdrawing doesn't remove what you already shared. Until you agree again, Pocket on this "
+                         + "phone asks before you write in any room. Signing out forgets your answer here.")
                 }
             }
         }

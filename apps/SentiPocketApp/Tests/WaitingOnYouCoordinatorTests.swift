@@ -118,6 +118,33 @@ final class WaitingOnYouCoordinatorTests: XCTestCase {
     }
 
     /// Once you take care of it, it leaves the list.
+    /// The check under Waiting on you's answer: without the signed-in account's consent to share with AI nothing is
+    /// posted; once it agrees, the same answer goes.
+    func test_an_answer_is_never_posted_without_the_ai_consent() async {
+        let suite = "consent-\(UUID().uuidString)"
+        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        let consent = AIConsent(account: "sub:consent-test", defaults: UserDefaults(suiteName: suite)!)
+        AIConsentAsker.shared.consent = consent
+        defer { AIConsentAsker.shared.consent = nil }
+        let sender = RecordingSender()
+        let waiting = WaitingOnYouCoordinator(
+            transport: ScriptedWaiting([
+                .success(SentiWaitingPage(total: 1, items: [ask("t1")])),
+                .success(SentiWaitingPage(total: 1, items: [ask("t1")]))
+            ]),
+            sender: sender
+        )
+        await waiting.refresh()
+        _ = waiting.send(.answer(id: "t1", choice: "Yes", detail: ""))
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertTrue(sender.sent.isEmpty, "not agreed: nothing is posted")
+        XCTAssertEqual(waiting.state.rows.map(\.id), ["t1"], "and the question stays")
+
+        consent.grant()
+        _ = waiting.send(.answer(id: "t1", choice: "Yes", detail: ""))
+        await waitUntil("sent") { sender.sent.count == 1 }
+    }
+
     func test_an_answer_posts_the_webs_line_to_the_tickets_room_and_leaves_the_list_at_once() async {
         let sender = RecordingSender()
         let waiting = WaitingOnYouCoordinator(

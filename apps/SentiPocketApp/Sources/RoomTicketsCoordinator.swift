@@ -159,6 +159,9 @@ final class RoomTicketsCoordinator: ObservableObject {
     }
 
     func send(_ intent: RoomTicketsIntent) {
+        // A write to the room's tickets or chat: never without the account's consent to share with AI (the screen asks
+        // first; this is the check under it).
+        if intent.writesToTheRoom, AIConsentAsker.shared.refusesWrites { return }
         switch intent {
         case .setShowsArchived(let archived):
             showsArchived = archived

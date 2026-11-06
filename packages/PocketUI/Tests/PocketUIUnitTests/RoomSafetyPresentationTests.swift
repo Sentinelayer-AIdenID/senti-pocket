@@ -300,6 +300,27 @@ final class RoomSafetyPresentationTests: XCTestCase {
                      "someone already blocked: their messages are not listed, and Block is not offered")
     }
 
+    /// A box's card shows its newest reply in the room: never one from someone you blocked.
+    func test_a_box_card_never_shows_a_blocked_persons_reply() {
+        let launch = "🚀 Minted box-runner-7 on model-x for ticket 1a2b3c4d (Fix the build): its own machine "
+            + "(life 0a1b2c3d4e5f), until 03:30Z unless extended.\n"
+            + "It works in its box and reports here as box-runner-7; messages in this room reach it."
+        let messages = [input("l10", seq: 10, at: 0, author: "respawn-orchestrator", text: launch)]
+        let replies = [
+            input("reply-b1", seq: 10, at: 60, author: "box-runner-7", text: "Reproducing the failure", replyTo: 10,
+                  inline: true),
+            input("reply-b2", seq: 10, at: 120, author: "human-sam", text: "Something unkind", replyTo: 10, inline: true)
+        ]
+        func box(blocked: Set<String>) -> RoomBoxThread? {
+            rows(RoomChatPresentationState(sessionId: "room", title: "Room", messages: messages, ownAuthorIds: ["human-me"],
+                                           replies: replies, blockedAuthorIds: blocked))["l10"]?.box
+        }
+        XCTAssertEqual(box(blocked: [])?.status, "sam: Something unkind", "nobody blocked: the newest reply, as it is")
+        let shown = box(blocked: ["human-sam"])
+        XCTAssertEqual(shown?.status, "Reproducing the failure", "blocked: their reply is left out of the card")
+        XCTAssertEqual(shown?.replies, 1)
+    }
+
     // MARK: - Direct messages and Activity
 
     private func directList() throws -> SessionListPresentationState {
