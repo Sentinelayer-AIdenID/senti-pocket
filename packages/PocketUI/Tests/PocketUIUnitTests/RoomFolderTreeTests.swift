@@ -127,7 +127,7 @@ final class RoomFolderTreeTests: XCTestCase {
         XCTAssertTrue(rows.contains(.room(room("r-night", in: "night"), depth: 2)))
         XCTAssertTrue(rows.contains(.direct(dm("d1", from: "r-studio", unread: 0), depth: 1)))
         XCTAssertTrue(rows.contains(.room(room("r-free"), depth: 0)))
-        XCTAssertTrue(rows.contains(.label(id: "unfiled", title: "Your rooms")))
+        XCTAssertTrue(rows.contains(.label(id: "unfiled", title: "Your chats")))
     }
 
     /// Folded, a folder hides its rooms and every folder inside it, and shows the server's total for all of them and

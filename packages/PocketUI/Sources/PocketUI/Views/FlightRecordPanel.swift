@@ -1,8 +1,9 @@
 #if canImport(SwiftUI)
 import SwiftUI
 
-/// The Flight record, from the right: who is working on what in the room, live. Each box shows what it is doing now
-/// in one line; tap it to see its thoughts and commands, newest first.
+/// Room info, from the right: who is in the room and who is working on what, live. People first, then agents, then
+/// the boxes (agents on their own machines) when the room has boxes the person can see: each shows what it is doing
+/// now in one line; tap it to see its thoughts and commands, newest first. A person without boxes sees no box words.
 public struct FlightRecordPanel: View {
     private let state: FlightRecordState
     private let onClose: () -> Void
@@ -34,13 +35,15 @@ public struct FlightRecordPanel: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Flight record")
+                    Text("Room info")
                         .font(.title3.bold())
                         .foregroundStyle(PocketPalette.textPrimary)
                         .accessibilityAddTraits(.isHeader)
-                    Text(summary)
-                        .font(.caption)
-                        .foregroundStyle(PocketPalette.textSecondary)
+                    if let summary = state.summary {
+                        Text(summary)
+                            .font(.caption)
+                            .foregroundStyle(PocketPalette.textSecondary)
+                    }
                 }
                 Spacer()
                 Button(action: onClose) {
@@ -49,7 +52,7 @@ public struct FlightRecordPanel: View {
                         .foregroundStyle(PocketPalette.textSecondary)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Close the flight record")
+                .accessibilityLabel("Close room info")
                 .accessibilityIdentifier("pocket.flight.close")
             }
             .padding(.horizontal, 18)
@@ -58,35 +61,37 @@ public struct FlightRecordPanel: View {
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
-                    if let totals = state.totals {
+                    // The room's figures are about its boxes: only for a room with boxes this person can see.
+                    if state.showsBoxes, let totals = state.totals {
                         FlightTotalsCard(totals: totals)
                             .padding(.horizontal, 12)
                     }
-                    if let failure = state.failure, state.boxes.isEmpty {
+                    if let failure = state.shownFailure {
                         Text(failure)
                             .font(.footnote)
                             .foregroundStyle(PocketPalette.warning)
                             .padding(.horizontal, 18)
                     }
-                    if state.isLoading && state.boxes.isEmpty {
-                        ProgressView("Loading the flight record")
+                    if state.isLoading && state.sections.isEmpty {
+                        ProgressView("Loading")
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 16)
                     }
-                    if !state.boxes.isEmpty {
-                        sectionTitle("Boxes")
-                        ForEach(state.boxes) { box in boxRow(box) }
+                    ForEach(state.sections, id: \.self) { section in
+                        switch section {
+                        case .people:
+                            sectionTitle("People")
+                            ForEach(state.people) { person in personRow(person) }
+                        case .agents:
+                            sectionTitle("Agents")
+                            ForEach(state.agents) { agent in agentRow(agent) }
+                        case .boxes:
+                            sectionTitle("Boxes")
+                            ForEach(state.boxes) { box in boxRow(box) }
+                        }
                     }
-                    if !state.agents.isEmpty {
-                        sectionTitle("Agents")
-                        ForEach(state.agents) { agent in agentRow(agent) }
-                    }
-                    if !state.people.isEmpty {
-                        sectionTitle("People")
-                        ForEach(state.people) { person in personRow(person) }
-                    }
-                    if !state.isLoading, state.boxes.isEmpty, state.agents.isEmpty, state.people.isEmpty, state.failure == nil {
-                        Text("Nobody is working in this room right now.")
+                    if !state.isLoading, state.sections.isEmpty, state.shownFailure == nil {
+                        Text("No one is working here right now.")
                             .font(.footnote)
                             .foregroundStyle(PocketPalette.textSecondary)
                             .padding(.horizontal, 18)
@@ -107,14 +112,6 @@ public struct FlightRecordPanel: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("pocket.flight")
-    }
-
-    private var summary: String {
-        let working = state.boxes.filter(\.isWorking).count
-        var parts = ["\(state.boxes.count) \(state.boxes.count == 1 ? "box" : "boxes")"]
-        if working > 0 { parts.append("\(working) working now") }
-        if state.finishedBoxes > 0 { parts.append("\(state.finishedBoxes) finished") }
-        return parts.joined(separator: " · ")
     }
 
     private func sectionTitle(_ title: String) -> some View {
@@ -264,7 +261,7 @@ public struct FlightRecordPanel: View {
                     .foregroundStyle(PocketPalette.textPrimary)
                     .lineLimit(1)
                 if let last = person.lastSeen, person.status != .here {
-                    Text("last seen \(PocketSidePanel.compactAge(of: last)) ago")
+                    Text(PocketSidePanel.lastSeen(of: last))
                         .font(.caption)
                         .foregroundStyle(PocketPalette.textSecondary)
                 }

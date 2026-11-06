@@ -1314,9 +1314,9 @@ private struct SelectedSessionActivityBoundary: View {
             Group {
                 if sessions.selectedSessionId == nil {
                     StatusView(
-                        title: "Choose a session",
+                        title: "Open a chat",
                         systemImage: "waveform.path.ecg",
-                        message: "Select an authorized session before loading its activity or room checkpoints."
+                        message: "Open a chat to see its activity."
                     )
                     .navigationTitle("Activity")
                 } else {
@@ -1326,10 +1326,10 @@ private struct SelectedSessionActivityBoundary: View {
                                 NavigationLink {
                                     checkpointContent
                                 } label: {
-                                    Label("Room checkpoints", systemImage: "tray.full")
+                                    Label("Saved summaries", systemImage: "tray.full")
                                         .labelStyle(.iconOnly)
                                 }
-                                .accessibilityLabel("Room checkpoints")
+                                .accessibilityLabel("Saved summaries")
                             }
                         }
                 }
@@ -1390,7 +1390,7 @@ private struct SelectedSessionActivityBoundary: View {
         } else {
             loadStatus(
                 details.activityLoadState,
-                emptyTitle: "No activity loaded",
+                emptyTitle: "No activity yet",
                 systemImage: "waveform.path.ecg",
                 retry: { details.refreshActivity() }
             )
@@ -1411,7 +1411,7 @@ private struct SelectedSessionActivityBoundary: View {
                 systemImage: "tray.full",
                 retry: { details.refreshCheckpoints() }
             )
-            .navigationTitle("Room checkpoints")
+            .navigationTitle("Saved summaries")
         }
     }
 
@@ -1429,7 +1429,7 @@ private struct SelectedSessionActivityBoundary: View {
         switch loadState {
         case .loading:
             title = "Loading"
-            message = "Fetching the selected session through your current Senti authorization."
+            message = "Getting this chat's activity."
             actionTitle = nil
             action = nil
         case .failed(let failure):
@@ -1439,7 +1439,7 @@ private struct SelectedSessionActivityBoundary: View {
             action = retry
         case .idle, .loaded:
             title = emptyTitle
-            message = "Refresh to load the currently selected authorized session."
+            message = "Refresh to see this chat's activity."
             actionTitle = "Refresh"
             action = retry
         }
