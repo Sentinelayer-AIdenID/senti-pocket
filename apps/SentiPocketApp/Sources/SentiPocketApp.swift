@@ -405,6 +405,34 @@ final class SidePanelState: ObservableObject {
     }
 }
 
+/// The side panel under the room, in the view tree only while open, or fading out after a close (Carter's freeze of
+/// 11-06, #62485): a closed panel kept in the tree, faded out under the room, held its lazy list there, and a room put
+/// in place could set off a layout of all its rows that never settled. Out of the tree it is also out of reach of
+/// VoiceOver (ticket 066aca7a). It fades in and out under the sliding room as it faded before.
+struct SidePanelLayer<Panel: View>: View {
+    let isOpen: Bool
+    /// How far the room card moves right when the panel opens; the panel fits in that space.
+    let width: CGFloat
+    let panel: Panel
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            if isOpen {
+                // The panel ends before the room card begins, so its right edge (unread counts, See all) is never under
+                // it.
+                panel
+                    .frame(width: width - 14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .transition(.opacity)
+            }
+        }
+        // On the holder, which stays in the tree, so they turn off at the close and cover the panel while it fades out
+        // (SidePanelClosedNotDrawnTests: no touch reaches it then).
+        .allowsHitTesting(isOpen)
+        .accessibilityHidden(!isOpen)
+    }
+}
+
 /// The side panel underneath, and the room on top as a card pushed aside while the panel is open (Carter #55006). It
 /// watches the panel's state, so the panel opening and closing draws this and not the root: the panel and the room it
 /// is given are the views the root made last. It also asks for the reads the panel's open needs, and keeps the open
@@ -439,20 +467,7 @@ struct SidePanelFrame<Panel: View, Room: View>: View {
 
     var body: some View {
         ZStack(alignment: .leading) {
-            // In the tree only while open, or fading out after a close (Carter's freeze of 11-06, #62485): a closed panel
-            // kept in the tree (faded out under the room) held its lazy list there, and a room put in place could set
-            // off a layout of all its rows that never settled. Out of the tree it is also out of reach of VoiceOver
-            // (ticket 066aca7a). It fades in and out under the sliding room as it faded before.
-            if state.isOpen {
-                // The panel ends before the room card begins, so its right edge (unread counts, See all) is never under
-                // it.
-                panel
-                    .frame(width: width - 14)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .allowsHitTesting(state.isOpen)
-                    .accessibilityHidden(!state.isOpen)
-                    .transition(.opacity)
-            }
+            SidePanelLayer(isOpen: state.isOpen, width: width, panel: panel)
             room
                 // A sheet or the side panel over the room: its moving parts rest (warden, #269).
                 .environment(\.roomIsCovered, state.isOpen || coveredOtherwise)
