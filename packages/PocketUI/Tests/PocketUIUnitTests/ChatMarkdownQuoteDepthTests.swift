@@ -421,16 +421,38 @@ final class ChatMarkdownQuoteDepthLayoutTests: XCTestCase {
                                  "four times the lines make about four times the work")
     }
 
+    /// `line` repeated, one to a line, as many times as fit in what the parser reads.
+    private static func filled(_ line: String) -> String {
+        let count = (ChatMarkdown.maximumParsedCharacters - 1) / (line.count + 1)
+        return Array(repeating: line, count: count).joined(separator: "\n")
+    }
+
+    /// The most counted layout calls a line may take, each pass, four quotes deep. Measured at about 15 (200 lines four
+    /// deep took 3,045 calls); the bar beside the blocks in a stack took about 2,400 (50 lines, 122,042).
+    private static let mostCallsPerLine = 20
+
+    /// A message as long as the parser reads, all of it short paragraphs four quotes deep, takes at most
+    /// `mostCallsPerLine` counted calls a line, fresh and again: a fixed cost per line, however long the message.
+    func test_the_longest_message_four_deep_takes_at_most_twenty_calls_a_line() {
+        let text = Self.filled(">>>> x\n>>>>")
+        XCTAssertLessThanOrEqual(text.count, ChatMarkdown.maximumParsedCharacters, "the parser reads all of it")
+        let lines = text.components(separatedBy: "\n").filter { $0 == ">>>> x" }.count
+        let counted = work(text)
+        print("QUOTEDEPTH counted \(lines) lines four deep (\(text.count) chars): fresh \(counted.allFresh), again "
+            + "\(counted.allAgain); calls a line: fresh \(Self.ratio(counted.allFresh, lines)), again "
+            + "\(Self.ratio(counted.allAgain, lines))")
+        XCTAssertLessThanOrEqual(counted.allFresh, lines * Self.mostCallsPerLine, "fresh: "
+            + "\(Self.ratio(counted.allFresh, lines)) calls a line (at most \(Self.mostCallsPerLine))")
+        XCTAssertLessThanOrEqual(counted.allAgain, lines * Self.mostCallsPerLine, "again: "
+            + "\(Self.ratio(counted.allAgain, lines)) calls a line (at most \(Self.mostCallsPerLine))")
+    }
+
     /// For the record (printed, not bounded: time varies by runner): the real view laid out fresh at 200 levels, and
     /// at the most text the parser reads, all of it four quotes deep, once as short paragraphs and once as lines from a
     /// quote four levels deeper (one run in the fourth quote).
     func test_print_the_real_view_at_two_hundred_levels_and_at_the_most_the_parser_reads() {
-        func filled(_ line: String) -> String {
-            let count = (ChatMarkdown.maximumParsedCharacters - 1) / (line.count + 1)
-            return Array(repeating: line, count: count).joined(separator: "\n")
-        }
-        let paragraphs = filled(">>>> x\n>>>>")
-        let deeper = filled(">>>>>>>> x")
+        let paragraphs = Self.filled(">>>> x\n>>>>")
+        let deeper = Self.filled(">>>>>>>> x")
         XCTAssertLessThanOrEqual(paragraphs.count, ChatMarkdown.maximumParsedCharacters)
         XCTAssertLessThanOrEqual(deeper.count, ChatMarkdown.maximumParsedCharacters)
         print("QUOTEDEPTH real view 200 levels: \(realMilliseconds(ChatMarkdownQuoteDepthTests.nested(200))) ms; "
