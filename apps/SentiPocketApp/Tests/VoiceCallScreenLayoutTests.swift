@@ -49,6 +49,14 @@ final class VoiceCallScreenLayoutTests: XCTestCase {
         let header = try XCTUnwrap(frames["header"])
         let controls = try XCTUnwrap(frames["controls"])
         XCTAssertLessThanOrEqual(controls.height, 120, "the controls stay one row: \(controls)")
+        // Hands-free's text stops growing at the largest standard size, so it reads in full on its one line: its line is
+        // no taller at AX5 than at that size.
+        let handsFree = try XCTUnwrap(frames["handsFree.label"])
+        let largestStandard = UIFont.preferredFont(
+            forTextStyle: .caption2, compatibleWith: UITraitCollection(preferredContentSizeCategory: .extraExtraExtraLarge)
+        )
+        XCTAssertLessThanOrEqual(handsFree.height, largestStandard.lineHeight + 1,
+                                 "Hands-free stays at the largest standard size: \(handsFree)")
         let window = try XCTUnwrap(self.window)
         XCTAssertGreaterThanOrEqual(header.minY, window.safeAreaInsets.top - 1, "the header is on screen: \(header)")
         XCTAssertLessThanOrEqual(controls.maxY, window.bounds.height - window.safeAreaInsets.bottom + 1,

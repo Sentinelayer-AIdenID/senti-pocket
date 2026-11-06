@@ -299,6 +299,7 @@ public struct VoiceRoomPanel: View {
                 .roundButtonLargeContent("Skip this answer", systemImage: "forward.end.fill")
                 Toggle(isOn: Binding(get: { state.isHandsFree }, set: { send(.setHandsFree($0)) })) {
                     Text("Hands-free").font(.caption2).lineLimit(1)
+                        .voiceLayoutProbe("handsFree.label")
                 }
                 .toggleStyle(.button)
                 .font(.caption2)
