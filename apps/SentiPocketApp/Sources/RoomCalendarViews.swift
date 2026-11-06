@@ -81,7 +81,7 @@ struct CalendarSheet: View {
 
     var body: some View {
         NavigationStack {
-            CalendarScreen(board: board)
+            CalendarScreen(board: board, phone: center.phone)
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Done") { dismiss() }
@@ -94,7 +94,8 @@ struct CalendarSheet: View {
 /// The month, the day picked, its events, and the Add field.
 struct CalendarScreen: View {
     @ObservedObject var board: CalendarBoard
-    /// Pocket's own calendar (from Settings) offers the phone's calendar too; a room's never does.
+    /// The phone's calendar: Connect and the agents switch over the month in every calendar, and the phone's events in
+    /// Pocket's own (from Settings) only.
     var phone: PhoneCalendarCenter?
 
     var body: some View {
@@ -102,7 +103,7 @@ struct CalendarScreen: View {
             VStack(alignment: .leading, spacing: 18) {
                 monthHeader
                 if let phone {
-                    PhoneCalendarConnectBanner(phone: phone)
+                    PhoneCalendarCard(phone: phone, showsEventsHere: board.showsPhoneEvents)
                 }
                 CalendarMonthGridView(grid: board.grid, selected: board.selected) { board.select($0) }
                     // A sideways swipe moves a month; scrolling up and down still scrolls.

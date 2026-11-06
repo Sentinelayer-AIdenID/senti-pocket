@@ -378,6 +378,9 @@ final class CalendarBoard: ObservableObject {
         eventsByDay[day] ?? []
     }
 
+    /// Pocket's own calendar shows the phone's events; a room's never does.
+    var showsPhoneEvents: Bool { phone != nil }
+
     /// The phone's own events that day, read-only.
     func phoneItems(on day: CalendarDay) -> [PhoneCalendarItem] {
         phoneByDay[day] ?? []

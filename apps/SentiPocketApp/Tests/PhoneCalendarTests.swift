@@ -1,6 +1,7 @@
 import EventKit
 import Foundation
 import PocketSyncClient
+import SwiftUI
 import XCTest
 @testable import SentiPocketApp
 
@@ -356,6 +357,28 @@ final class PhoneCalendarTests: XCTestCase {
         XCTAssertEqual(cell?.accessibilityLabel.hasSuffix("1 event"), true)
         XCTAssertEqual(PhoneEventRow.label(board.phoneItems(on: day)[0], time: "12:00 – 1:00 PM"),
                        "Design review, 12:00 – 1:00 PM, from your phone, Work")
+    }
+
+    // MARK: - Found where the calendar is
+
+    /// The calendar screen itself offers Connect, then the switch that lets your agents see your calendar (Carter
+    /// looked there for them, not in Settings): here in a room's calendar, as in Pocket's own.
+    func test_the_calendar_screen_itself_offers_connect_and_then_the_agents_switch() async throws {
+        let store = FakePhoneCalendar(start: clock)
+        let client = FakeDeviceCalendar()
+        let phone = center(store, client)
+        await phone.appOpened()
+        let room = CalendarBoard(scope: .room(sessionId: "room-1", title: "Site", canAdd: true), client: NoRoomEvents(),
+                                 calendar: newYork, now: { [unowned self] in self.clock })
+        let window = try HostedSummary.host(NavigationStack { CalendarScreen(board: room, phone: phone) })
+        defer { HostedSummary.close(window) }
+        let connect = try XCTUnwrap(HostedSummary.wait(for: "pocket.calendar.connect", in: window),
+                                    "Connect is on the calendar screen")
+        XCTAssertTrue(connect.accessibilityActivate())
+        XCTAssertNotNil(HostedSummary.wait(for: "pocket.calendar.share", in: window),
+                        "then the agents switch, on the same screen")
+        XCTAssertEqual(store.asks, 1)
+        XCTAssertTrue(client.puts.isEmpty, "connecting sends nothing")
     }
 }
 

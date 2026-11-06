@@ -87,31 +87,86 @@ struct PhoneCalendarRefusedLine: View {
     }
 }
 
-/// Over Pocket's own calendar: "Connect my calendar" until the phone's events show here, or the plain line when
-/// Pocket may not read them. Nothing while the server's flag is off.
-struct PhoneCalendarConnectBanner: View {
+/// "Your calendars", over the month in every calendar screen, so they are found where the calendar is (Carter looked
+/// there, not in Settings): Connect my calendar until Pocket may read the phone's calendars (Apple's, and Google's or
+/// Outlook's once their account is on the phone), the plain line when it may not, and then the switch that lets the
+/// person's agents see the calendars they pick. Nothing while the server's flag is off.
+struct PhoneCalendarCard: View {
     @ObservedObject var phone: PhoneCalendarCenter
+    /// Pocket's own calendar shows the phone's events; a room's calendar only offers the switches, and says where the
+    /// events show.
+    let showsEventsHere: Bool
+
+    static let connectWords = "Apple, Google, Outlook: every calendar on this phone shows here, read-only. Nothing is "
+        + "sent anywhere unless you turn on Let my agents see my calendar."
+    static let accountsWords = "A Google or Outlook calendar shows once its account is on this phone, in Settings, "
+        + "Calendar, Accounts."
+    static let elsewhereWords = "Your phone's events show in your own calendar, in Settings, Calendar."
 
     var body: some View {
         if phone.available == true {
-            if phone.access == .notAsked {
-                VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Your calendars")
+                    .font(.headline)
+                    .accessibilityAddTraits(.isHeader)
+                if phone.access == .notAsked {
                     Button {
                         Task { await phone.connect() }
                     } label: {
                         Label("Connect my calendar", systemImage: "calendar.badge.plus")
+                            .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("pocket.calendar.connect")
-                    Text("Your phone's events show here, on this phone.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                    note(Self.connectWords)
+                } else if phone.access.isRefused {
+                    PhoneCalendarRefusedLine()
+                } else {
+                    Label(showsEventsHere ? "Your phone's calendars show here" : Self.elsewhereWords,
+                          systemImage: "iphone")
+                        .font(.subheadline)
                         .fixedSize(horizontal: false, vertical: true)
+                    Toggle(isOn: Binding(get: { phone.sharesWithAgents },
+                                         set: { on in Task { await phone.setSharing(on) } })) {
+                        Text("Let my agents see my calendar")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                    .accessibilityIdentifier("pocket.calendar.share")
+                    if phone.sharesWithAgents {
+                        NavigationLink {
+                            PhoneCalendarPicker(phone: phone)
+                        } label: {
+                            LabeledContent("Calendars to share",
+                                           value: PhoneCalendarSettingsSection.picked(phone.sharedCalendarIds.count))
+                                .font(.subheadline)
+                        }
+                        .accessibilityIdentifier("pocket.calendar.calendars")
+                    }
+                    note(words)
                 }
-            } else if phone.access.isRefused {
-                PhoneCalendarRefusedLine()
             }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color(uiColor: .secondarySystemBackground)))
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("pocket.calendar.yourCalendars")
         }
+    }
+
+    private var words: String {
+        var words: [String] = []
+        if let notice = phone.notice { words.append(notice) }
+        words.append(PhoneCalendarSettingsSection.agentsWords)
+        if phone.sharesWithAgents, phone.sharedCalendarIds.isEmpty { words.append(PhoneCalendarSettingsSection.pickWords) }
+        words.append(Self.accountsWords)
+        return words.joined(separator: " ")
+    }
+
+    private func note(_ text: String) -> some View {
+        Text(text)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 
