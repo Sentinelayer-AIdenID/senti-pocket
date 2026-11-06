@@ -78,6 +78,7 @@ final class RoomCreateTests: XCTestCase {
         let sent = json(body)
         XCTAssertEqual(sent["title"] as? String, "Exam prep")
         XCTAssertEqual(sent["roomType"] as? String, "study")
+        XCTAssertNil(sent["templateId"], "a kind of the phone's own carries no templateId")
         XCTAssertEqual(sent["visibility"] as? String, "private")
         XCTAssertEqual(sent["maxMembers"] as? Int, 25)
         let sessionId = try XCTUnwrap(sent["sessionId"] as? String)
@@ -95,6 +96,60 @@ final class RoomCreateTests: XCTestCase {
         let (_, body) = try XCTUnwrap(CreateURLProtocol.requests().first)
         XCTAssertNil(json(body)["roomType"], "general is the default, so it isn't sent")
         XCTAssertEqual(json(body)["sessionId"] as? String, id, "the id made here is the room's when the API echoes none")
+    }
+
+    /// A chat started from one of the server's ways to start sends its templateId and never a roomType: the server
+    /// derives the type, and refuses the two together.
+    func test_a_way_to_start_sends_its_templateId_and_no_roomType() async throws {
+        CreateURLProtocol.reset(status: 200, answer: #"{"ok":true,"sessionId":"server-id"}"#)
+        let template = RoomTemplate(id: "sample-week", name: "Sample week", roomType: "study")
+        let id = try await sender().create(title: "Exam prep", start: NewChatChoice.template(template).start)
+        XCTAssertEqual(id, "server-id")
+        let (request, body) = try XCTUnwrap(CreateURLProtocol.requests().first)
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.url?.path, "/api/v1/sessions")
+        let sent = json(body)
+        XCTAssertEqual(sent["templateId"] as? String, "sample-week")
+        XCTAssertNil(sent["roomType"], "the server derives the type; a roomType beside a templateId is refused")
+        XCTAssertEqual(sent["title"] as? String, "Exam prep")
+        XCTAssertEqual(sent["visibility"] as? String, "private")
+        XCTAssertEqual(sent["maxMembers"] as? Int, 25)
+        let sessionId = try XCTUnwrap(sent["sessionId"] as? String)
+        let key = try XCTUnwrap(request.value(forHTTPHeaderField: "Idempotency-Key"))
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-Sentinelayer-Session-Mutation"), "session-mutation")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-CSRF-Token"),
+                       SessionMutationCSRF.token(bearer: "test-bearer-token", sessionId: sessionId,
+                                                 routeTemplate: "POST /api/v1/sessions", idempotencyKey: key),
+                       "signed as every new room is")
+    }
+
+    /// Blank is the general chat every chat was before: neither a templateId nor a roomType.
+    func test_blank_sends_neither_a_templateId_nor_a_roomType() async throws {
+        CreateURLProtocol.reset(status: 200, answer: #"{"ok":true}"#)
+        _ = try await sender().create(title: "Team", start: NewChatChoice.blank.start)
+        let (_, body) = try XCTUnwrap(CreateURLProtocol.requests().first)
+        XCTAssertNil(json(body)["templateId"])
+        XCTAssertNil(json(body)["roomType"])
+    }
+
+    func test_start_with_is_blank_first_then_the_servers_in_its_order_and_none_offered_keeps_the_kinds() {
+        let a = RoomTemplate(id: "sample-a", name: "Sample A")
+        let b = RoomTemplate(id: "sample-b", name: "Sample B")
+        XCTAssertEqual(NewChatChoice.startWith([a, b]), [.blank, .template(a), .template(b)])
+        XCTAssertNil(NewChatChoice.startWith(nil), "none offered (a 404, or no answer yet): the phone's own kinds")
+        XCTAssertNil(NewChatChoice.startWith([]), "an empty list offers none either")
+    }
+
+    func test_each_card_starts_the_chat_it_shows() {
+        let a = RoomTemplate(id: "sample-a", name: "Sample A", symbol: "calendar", summary: "One line.")
+        XCTAssertEqual(NewChatChoice.blank.start, .kind(.general))
+        XCTAssertEqual(NewChatChoice.template(a).start, .template(id: "sample-a"))
+        XCTAssertEqual(NewChatChoice.blank.untitled, "New chat")
+        XCTAssertEqual(NewChatChoice.template(a).untitled, "Sample A", "an unnamed chat takes its way to start's name")
+        XCTAssertEqual(NewChatChoice.template(a).symbol, "calendar")
+        let unknown = RoomTemplate(id: "sample-b", name: "Sample B", symbol: "no.such.symbol.anywhere")
+        XCTAssertEqual(NewChatChoice.template(unknown).symbol, NewChatChoice.plainSymbol,
+                       "a symbol this phone doesn't have draws a plain one, never nothing")
     }
 
     /// A New agent's chat goes out under the id and key kept with its start, every time: private, general, for four.
@@ -160,5 +215,78 @@ final class RoomCreateTests: XCTestCase {
                        SessionMutationCSRF.token(bearer: "test-bearer-token", sessionId: "r1",
                                                  routeTemplate: "POST /api/v1/sessions/{session_id}/members",
                                                  idempotencyKey: key))
+    }
+}
+
+/// Answers the ways to start from the test, one answer per read.
+private final class ScriptedTemplates: RoomTemplatesServing, @unchecked Sendable {
+    private let lock = NSLock()
+    private var answers: [Result<[RoomTemplate], RoomTemplatesError>]
+    private var count = 0
+
+    init(_ answers: [Result<[RoomTemplate], RoomTemplatesError>]) {
+        self.answers = answers
+    }
+
+    var asked: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+
+    func templates() async throws -> [RoomTemplate] {
+        try next().get()
+    }
+
+    private func next() -> Result<[RoomTemplate], RoomTemplatesError> {
+        lock.lock()
+        defer { lock.unlock() }
+        count += 1
+        return answers.removeFirst()
+    }
+}
+
+/// New chat's ways to start show once the server lists them, and where it offers none the phone keeps its own kinds and
+/// says nothing about it.
+@MainActor
+final class RoomTemplatesCenterTests: XCTestCase {
+    func test_ways_to_start_show_once_offered_and_go_quietly_when_the_server_stops_offering_them() async {
+        let a = RoomTemplate(id: "sample-a", name: "Sample A")
+        let client = ScriptedTemplates([.success([a]), .failure(.retryable), .failure(.unavailable), .success([])])
+        var signIns = 0
+        let center = RoomTemplatesCenter(client: client, onReauthenticationRequired: { signIns += 1 })
+        XCTAssertNil(center.templates, "nothing before the server answers: the phone's own kinds")
+        await center.refresh()
+        XCTAssertEqual(center.templates, [a])
+        await center.refresh()
+        XCTAssertEqual(center.templates, [a], "a failure that says nothing either way keeps what was read")
+        await center.refresh()
+        XCTAssertNil(center.templates, "a 404 or 403: none offered any more, and nothing to show the person")
+        await center.refresh()
+        XCTAssertNil(center.templates, "an empty list offers none")
+        XCTAssertEqual(signIns, 0)
+        XCTAssertEqual(client.asked, 4)
+    }
+
+    func test_a_refused_sign_in_asks_to_sign_in_again_and_a_preview_never_asks() async {
+        let client = ScriptedTemplates([.failure(.reauthenticationRequired)])
+        var signIns = 0
+        let center = RoomTemplatesCenter(client: client, onReauthenticationRequired: { signIns += 1 })
+        await center.refresh()
+        XCTAssertEqual(signIns, 1)
+        XCTAssertNil(center.templates)
+        let preview = RoomTemplatesCenter(client: nil)
+        await preview.refresh()
+        XCTAssertNil(preview.templates, "no client: New chat shows the phone's own kinds")
+    }
+
+    func test_a_fresh_read_is_not_asked_again() async {
+        let a = RoomTemplate(id: "sample-a", name: "Sample A")
+        let client = ScriptedTemplates([.success([a]), .success([])])
+        let center = RoomTemplatesCenter(client: client)
+        await center.refresh()
+        await center.refresh(ifOlderThan: RoomTemplatesCenter.freshness)
+        XCTAssertEqual(client.asked, 1, "read moments ago: not asked again")
+        XCTAssertEqual(center.templates, [a])
     }
 }

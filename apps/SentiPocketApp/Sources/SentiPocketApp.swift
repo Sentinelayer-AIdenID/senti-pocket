@@ -124,6 +124,8 @@ struct SentiPocketApp: App {
             RootPreview.rootView(whisperModel: whisperModel, incomingLinks: incomingLinks)
         } else if AgentChatPreview.isRequested {
             AgentChatPreview.rootView
+        } else if NewChatPreview.isRequested {
+            NewChatPreview.rootView
         } else if RoomPreview.isRequested {
             RoomPreview.rootView
         } else {
@@ -241,6 +243,8 @@ struct RootServices {
     var registersPush = true
     /// The calendar and its Apple Calendar link, shown once the server answers their routes; nil (a preview) hides it.
     var calendar: (any RoomCalendarServing & CalendarFeedServing)?
+    /// The server's ways to start a chat, for New chat; nil (a preview) shows the phone's own kinds.
+    var templates: (any RoomTemplatesServing)?
 
     /// The Senti API as you.
     static func live() -> RootServices {
@@ -287,7 +291,10 @@ struct RootServices {
             receipts: HTTPRoomReceipts(apiBaseURL: apiURL),
             readMarker: HTTPRoomReadMarker(apiBaseURL: apiURL),
             calendar: HTTPRoomCalendarClient(apiBaseURL: apiURL, urlSession: CalendarHTTP.session,
-                                             tokenProvider: { SessionTokenStore.load() })
+                                             tokenProvider: { SessionTokenStore.load() }),
+            templates: HTTPRoomTemplatesClient(apiBaseURL: apiURL,
+                                               urlSession: SentiHTTPTransportPolicy.protectedReadSession,
+                                               tokenProvider: { SessionTokenStore.load() })
         )
     }
 }
@@ -357,6 +364,8 @@ struct AuthenticatedRootView: View {
     /// watched, as the side panel's placement is: the room's calendar entry and Settings watch it, so its answers draw
     /// them and never the root (each draw of the root can make the room screen under it again).
     @State private var calendar: CalendarCenter
+    /// The server's ways to start a chat. Kept, not watched: only New chat reads it, as it opens.
+    @State private var roomTemplates: RoomTemplatesCenter
     /// The side panel's rooms in your folders, placed off the main thread when the rooms or the folders change. Kept,
     /// not watched: the panel watches it, so a new placing draws the panel and not the root (and the room under it).
     @State private var sidePanelPlacement = SidePanelPlacement()
@@ -517,6 +526,10 @@ struct AuthenticatedRootView: View {
             person: { await identity.currentAccount().map { $0.accountId ?? $0.authorId } },
             // The webcal link goes to the system (Apple Calendar's subscribe sheet), which says whether it opened.
             openURL: { await UIApplication.shared.open($0) },
+            onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
+        ))
+        _roomTemplates = State(initialValue: RoomTemplatesCenter(
+            client: services.templates,
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
         ))
         _whisperModelCoordinator = ObservedObject(wrappedValue: whisperModelCoordinator)
@@ -776,6 +789,7 @@ struct AuthenticatedRootView: View {
             if let creator = roomSender as? any RoomCreating {
                 NewRoomSheet(
                     creator: creator,
+                    templates: roomTemplates.templates,
                     onCreated: { sessionId, title in
                         presentsNewRoom = false
                         sessions.send(.refreshSessions)
@@ -798,6 +812,7 @@ struct AuthenticatedRootView: View {
             sessions.start()
             Task { await directMessages.refresh() }
             Task { await roomFolders.refresh() }
+            Task { await roomTemplates.refresh() }
             notifications.startPolling()
             // Waiting on you is read from sign-in on, not only once the app comes back to the front (warden, #270).
             waiting.startPolling()
@@ -1013,6 +1028,8 @@ struct AuthenticatedRootView: View {
             onNewRoom: roomSender is any RoomCreating ? {
                 closeDrawer()
                 presentsNewRoom = true
+                // This sheet uses what was read before; a read that lands now is for the next one.
+                Task { await roomTemplates.refresh(ifOlderThan: RoomTemplatesCenter.freshness) }
             } : nil,
             folderNotice: roomFolders.notice,
             // Folders show only where they are on.

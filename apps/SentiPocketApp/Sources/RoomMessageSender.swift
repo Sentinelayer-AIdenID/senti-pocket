@@ -682,7 +682,8 @@ extension HTTPRoomMessageSender {
     /// `POST /api/v1/sessions`: a new private room you own, of a type (Carter, #55287: "rooms optimized just for
     /// specific things like study together"). The id is made here, unless the caller kept one to send again (a New
     /// agent's chat); the mutation token is signed over it and the route, as the API checks before anything else.
-    func createRoom(title: String, roomType: String, maxMembers: Int = 25,
+    /// Started from one of the server's ways to start, it carries that `templateId` and no type.
+    func createRoom(title: String, start: RoomStart, maxMembers: Int = 25,
                     sessionId: String = UUID().uuidString.lowercased(),
                     idempotencyKey key: String = "create-" + UUID().uuidString.lowercased()) async throws -> String {
         guard let apiBaseURL,
@@ -706,8 +707,14 @@ extension HTTPRoomMessageSender {
         request.setValue("session-mutation", forHTTPHeaderField: "X-Sentinelayer-Session-Mutation")
         request.setValue(csrf, forHTTPHeaderField: "X-CSRF-Token")
         var body: [String: Any] = ["sessionId": sessionId, "title": title, "visibility": "private", "maxMembers": maxMembers]
-        // A general room is the API's default; only another kind is sent (warden).
-        if roomType != "general" { body["roomType"] = roomType }
+        switch start {
+        case .kind(let kind):
+            // A general room is the API's default; only another kind is sent.
+            if kind != .general { body["roomType"] = kind.rawValue }
+        case .template(let id):
+            // The server derives the type from the template, and refuses a roomType sent with a templateId.
+            body["templateId"] = id
+        }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let data: Data
         let response: URLResponse
