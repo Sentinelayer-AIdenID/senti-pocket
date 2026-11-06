@@ -1,6 +1,7 @@
 import Foundation
 import PocketSyncClient
 import PocketUI
+import SwiftUI
 import XCTest
 @testable import SentiPocketApp
 
