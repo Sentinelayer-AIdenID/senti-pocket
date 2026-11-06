@@ -573,17 +573,21 @@ private struct RoomPreviewTickets: RoomTicketsTransport {
         ]), hasMore: false, cursor: 1)
     }
 
-    /// The server's steps on the preview's tickets (taken, in review, merged, shipped): one stalled since three hours
-    /// ago, one waiting on you, one shipped, and the assigned one not started. The open ticket has none, as an older
-    /// server sends.
+    /// The server's steps on the preview's tickets (taken, in review, merged, shipped, done): one whose holder went
+    /// quiet three hours ago, one waiting on review for an hour, one done, and the assigned one not started. The open
+    /// ticket has none, as an older server sends.
     private static func withSteps(_ tickets: [RoomTicket]) -> [RoomTicket] {
-        let stalled = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-3 * 3_600))
+        let stamp = ISO8601DateFormatter()
+        let quiet = stamp.string(from: Date().addingTimeInterval(-3 * 3_600))
+        let waiting = stamp.string(from: Date().addingTimeInterval(-3_600))
         let steps: [String: RoomTicketStep?] = [
-            "t1": RoomTicketStep(index: 1, count: 4, name: "Taken", stalledSince: stalled, stalledReason: "Box 7 was stopped"),
-            "t2": RoomTicketStep(index: 0, count: 4, name: nil),
-            "t3": RoomTicketStep(index: 2, count: 4, name: "In review", waitingOn: "your OK of the shots"),
-            "t5": RoomTicketStep(index: 4, count: 4, name: "Shipped"),
-            "t6": RoomTicketStep(index: 1, count: 4, name: "Taken")
+            "t1": RoomTicketStep(index: 1, count: 5, name: .taken, stalledSince: quiet,
+                                 stalledReason: .holderLeaseExpired, lastHolder: "review-agent"),
+            "t2": RoomTicketStep(index: 0, count: 5, name: .notStarted),
+            "t3": RoomTicketStep(index: 2, count: 5, name: .inReview, stalledSince: waiting,
+                                 stalledReason: .waitingOnReview, waitingOn: "human-alex"),
+            "t5": RoomTicketStep(index: 5, count: 5, name: .done),
+            "t6": RoomTicketStep(index: 1, count: 5, name: .taken)
         ]
         return tickets.map { ticket in
             var stepped = ticket

@@ -614,11 +614,11 @@ final class RoomTicketsCoordinator: ObservableObject {
                         RoomTicketInput.Step(
                             index: step.index,
                             count: step.count,
-                            name: step.name,
+                            name: step.name.rawValue,
                             stalledSince: step.stalledSince.flatMap { ParsedSessionTimestamp($0).date },
-                            stalledReason: step.stalledReason,
-                            waitingOn: step.waitingOn,
-                            lastHolder: step.lastHolder
+                            stalledReason: step.stalledReason?.rawValue,
+                            lastHolder: step.lastHolder,
+                            waitingOn: step.waitingOn
                         )
                     }
                 )

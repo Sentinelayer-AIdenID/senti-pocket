@@ -189,7 +189,7 @@ private struct RoomTicketRowView: View {
                             .foregroundStyle(PocketPalette.textSecondary)
                             .lineLimit(2)
                     }
-                    if let note = row.stallNote() {
+                    if let note = row.stallNote(viewerId: viewerId, names: names) {
                         Text(note)
                             .font(.caption2)
                             .foregroundStyle(PocketPalette.warning)
@@ -198,7 +198,7 @@ private struct RoomTicketRowView: View {
                     }
                 }
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel(row.stepAccessibilityLabel() ?? row.statusLabel)
+                .accessibilityLabel(row.stepAccessibilityLabel(viewerId: viewerId, names: names) ?? row.statusLabel)
                 .accessibilityIdentifier("pocket.tickets.row.step")
             }
         }

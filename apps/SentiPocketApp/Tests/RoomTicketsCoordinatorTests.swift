@@ -55,13 +55,14 @@ final class RoomTicketsCoordinatorTests: XCTestCase {
     /// not moved; a ticket with only the old estimate shows its status alone.
     func test_a_row_gets_the_servers_step_and_never_the_old_estimate() async {
         var stepped = ticket("s", status: "in_review")
-        stepped.step = RoomTicketStep(index: 2, count: 4, name: "In review", stalledSince: "2026-11-05T19:10:00Z",
-                                      stalledReason: "Box X was stopped", waitingOn: "your OK of the shots")
+        stepped.step = RoomTicketStep(index: 2, count: 5, name: .inReview, stalledSince: "2026-11-05T19:10:00Z",
+                                      stalledReason: .waitingOnReview, lastHolder: "forge-box-7",
+                                      waitingOn: "human-alex")
         stepped.progress = RoomTicketProgress(value: 0.62, basis: "b", at: "a")
         var estimated = ticket("e", status: "working")
         estimated.progress = RoomTicketProgress(value: 0.45, basis: "b", at: "a")
         var notStarted = ticket("n", status: "assigned")
-        notStarted.step = RoomTicketStep(index: 0, count: 4, name: nil)
+        notStarted.step = RoomTicketStep(index: 0, count: 5, name: .notStarted)
         // Ids strictly ascending, as the API pages them: the board refuses a snapshot out of order.
         let transport = ScriptedTicketsTransport(
             snapshots: [.success(RoomTicketSnapshotPage(items: [estimated, notStarted, stepped], hasMore: false, cursor: 1))]
@@ -71,14 +72,16 @@ final class RoomTicketsCoordinatorTests: XCTestCase {
         let rows = Dictionary(uniqueKeysWithValues: coordinator.state.rows.map { ($0.id, $0) })
         XCTAssertEqual(Set(rows.keys), ["e", "n", "s"], "the board loaded: every ticket has a row")
         XCTAssertEqual(rows["s"]?.step, RoomTicketInput.Step(
-            index: 2, count: 4, name: "In review", stalledSince: Date(timeIntervalSince1970: 1_793_905_800),
-            stalledReason: "Box X was stopped", waitingOn: "your OK of the shots"
-        ))
-        XCTAssertEqual(rows["s"]?.stepStrip?.segments, [.done, .current, .ahead, .ahead])
+            index: 2, count: 5, name: "in_review", stalledSince: Date(timeIntervalSince1970: 1_793_905_800),
+            stalledReason: "waiting_on_review", lastHolder: "forge-box-7", waitingOn: "human-alex"
+        ), "the server's words, as they came")
+        XCTAssertEqual(rows["s"]?.stepStrip?.segments, [.done, .current, .ahead, .ahead, .ahead])
+        XCTAssertEqual(rows["s"]?.stepStrip?.label, "In review")
         XCTAssertNil(rows["e"]?.step, "only the old estimate: no step")
         XCTAssertNil(rows["e"]?.stepStrip, "and no bar: its status alone")
-        XCTAssertEqual(rows["n"]?.step, RoomTicketInput.Step(index: 0, count: 4, name: nil), "index 0 as it came")
-        XCTAssertEqual(rows["n"]?.stepStrip?.segments, [.ahead, .ahead, .ahead, .ahead])
+        XCTAssertEqual(rows["n"]?.step, RoomTicketInput.Step(index: 0, count: 5, name: "not_started"),
+                       "index 0 as it came")
+        XCTAssertEqual(rows["n"]?.stepStrip?.segments, [.ahead, .ahead, .ahead, .ahead, .ahead])
         XCTAssertEqual(rows["n"]?.stepStrip?.label, "Not started")
     }
 

@@ -206,12 +206,15 @@ final class RoomTicketsWorkedOnTests: XCTestCase {
 }
 
 /// Carter, 11-05: "So fix the progress thing. I hate it." A ticket shows the real step the server read from typed
-/// facts (taken, in review, merged, shipped), never a percentage, and never a step worked out on the phone.
+/// facts, never a percentage, and never a step worked out on the phone. The step comes in the server's own words
+/// (warden, 11-05): names `not_started` to `done`, reasons such as `waiting_on_review`, people as actor ids.
 final class RoomTicketStepsTests: XCTestCase {
     private let eastern = TimeZone(identifier: "America/New_York")!
     private let english = Locale(identifier: "en_US")
     /// 6:00 PM in New York on 11-05.
     private let now = Date(timeIntervalSince1970: 1_793_919_600)
+    /// 2:10 PM in New York on 11-05.
+    private let since = Date(timeIntervalSince1970: 1_793_905_800)
 
     private func row(_ step: RoomTicketInput.Step?, status: String = "in_review") -> RoomTicketRow {
         RoomTicketRow(id: "t", title: "T", status: status, step: step)
@@ -222,80 +225,110 @@ final class RoomTicketStepsTests: XCTestCase {
         text?.replacingOccurrences(of: "\u{202F}", with: " ")
     }
 
-    func test_the_servers_step_is_a_strip_of_steps_the_current_one_named() {
-        let strip = row(RoomTicketInput.Step(index: 3, count: 4, name: "In review")).stepStrip
-        XCTAssertEqual(strip, RoomTicketStepStrip(index: 3, count: 4, name: "In review"))
-        XCTAssertEqual(strip?.label, "In review")
-        XCTAssertEqual(strip?.segments, [.done, .done, .current, .ahead], "the steps before it done, those after ahead")
-        XCTAssertEqual(row(RoomTicketInput.Step(index: 1, count: 4, name: "Taken")).stepStrip?.segments,
-                       [.current, .ahead, .ahead, .ahead])
-        XCTAssertEqual(row(RoomTicketInput.Step(index: 4, count: 4, name: "Shipped"), status: "done").stepStrip?.segments,
-                       [.done, .done, .done, .current], "a finished ticket shows its last step")
+    private func note(_ step: RoomTicketInput.Step, viewerId: String? = nil, names: [String: String] = [:]) -> String? {
+        plain(row(step).stallNote(now: now, timeZone: eastern, locale: english, viewerId: viewerId, names: names))
     }
 
-    /// The index counts from 1 ("Step 3 of 4"); 0 is a ticket not started: the strip with no step filled, "Not
-    /// started", and VoiceOver "Not started, 4 steps". Neither the first step nor no step.
+    func test_the_servers_step_is_a_strip_of_steps_the_current_one_named() {
+        let strip = row(RoomTicketInput.Step(index: 3, count: 5, name: "merged")).stepStrip
+        XCTAssertEqual(strip, RoomTicketStepStrip(index: 3, count: 5, name: "merged"))
+        XCTAssertEqual(strip?.label, "Merged")
+        XCTAssertEqual(strip?.segments, [.done, .done, .current, .ahead, .ahead],
+                       "the steps before it done, those after ahead")
+        let names = ["taken": "Taken", "in_review": "In review", "merged": "Merged", "shipped": "Shipped", "done": "Done"]
+        for (index, wire) in ["taken", "in_review", "merged", "shipped", "done"].enumerated() {
+            XCTAssertEqual(row(RoomTicketInput.Step(index: index + 1, count: 5, name: wire)).stepStrip?.label, names[wire])
+        }
+    }
+
+    /// The index counts from 1 ("Step 2 of 5"); 0 is a ticket not started: the strip with no step filled, "Not
+    /// started", and VoiceOver "Not started, 5 steps". Neither the first step nor no step.
     func test_index_zero_is_not_started_one_is_the_first_step_and_count_the_last() {
-        let zero = row(RoomTicketInput.Step(index: 0, count: 4, name: nil), status: "assigned")
-        XCTAssertEqual(zero.stepStrip?.segments, [.ahead, .ahead, .ahead, .ahead], "a strip, with no step filled")
+        let zero = row(RoomTicketInput.Step(index: 0, count: 5, name: "not_started"), status: "assigned")
+        XCTAssertEqual(zero.stepStrip?.segments, [.ahead, .ahead, .ahead, .ahead, .ahead], "a strip, with no step filled")
         XCTAssertEqual(zero.stepStrip?.label, "Not started")
         XCTAssertEqual(zero.stepStrip?.isStarted, false)
-        XCTAssertEqual(zero.stepAccessibilityLabel(now: now, timeZone: eastern, locale: english), "Not started, 4 steps")
-        XCTAssertEqual(row(RoomTicketInput.Step(index: 0, count: 1, name: "Taken")).stepAccessibilityLabel(),
-                       "Not started, 1 step", "a name sent with index 0 does not make it a step")
-        XCTAssertEqual(plain(row(RoomTicketInput.Step(index: 0, count: 4, name: nil, waitingOn: "your OK of the plan"))
-                        .stepAccessibilityLabel(now: now, timeZone: eastern, locale: english)),
-                       "Not started, 4 steps. Waiting on: your OK of the plan")
+        XCTAssertEqual(zero.stepAccessibilityLabel(now: now, timeZone: eastern, locale: english), "Not started, 5 steps")
+        XCTAssertEqual(row(RoomTicketInput.Step(index: 0, count: 1, name: "not_started")).stepAccessibilityLabel(),
+                       "Not started, 1 step")
 
-        let first = row(RoomTicketInput.Step(index: 1, count: 4, name: "Taken"), status: "working")
-        XCTAssertEqual(first.stepStrip?.segments, [.current, .ahead, .ahead, .ahead])
+        let first = row(RoomTicketInput.Step(index: 1, count: 5, name: "taken"), status: "working")
+        XCTAssertEqual(first.stepStrip?.segments, [.current, .ahead, .ahead, .ahead, .ahead])
         XCTAssertEqual(first.stepStrip?.label, "Taken")
-        XCTAssertEqual(first.stepAccessibilityLabel(now: now, timeZone: eastern, locale: english), "Step 1 of 4, taken")
+        XCTAssertEqual(first.stepAccessibilityLabel(now: now, timeZone: eastern, locale: english), "Step 1 of 5, taken")
 
-        let last = row(RoomTicketInput.Step(index: 4, count: 4, name: "Shipped"), status: "done")
-        XCTAssertEqual(last.stepStrip?.segments, [.done, .done, .done, .current])
-        XCTAssertEqual(last.stepAccessibilityLabel(now: now, timeZone: eastern, locale: english), "Step 4 of 4, shipped")
+        let last = row(RoomTicketInput.Step(index: 5, count: 5, name: "done"), status: "done")
+        XCTAssertEqual(last.stepStrip?.segments, [.done, .done, .done, .done, .current])
+        XCTAssertEqual(last.stepAccessibilityLabel(now: now, timeZone: eastern, locale: english), "Step 5 of 5, done")
 
         let absent = row(nil, status: "assigned")
         XCTAssertNil(absent.stepStrip, "absent: the status alone")
         XCTAssertNil(absent.stepAccessibilityLabel(now: now, timeZone: eastern, locale: english))
     }
 
-    func test_voiceover_reads_the_step_then_the_small_print() {
-        XCTAssertEqual(row(RoomTicketInput.Step(index: 3, count: 4, name: "In review"))
-                        .stepAccessibilityLabel(now: now, timeZone: eastern, locale: english),
-                       "Step 3 of 4, in review")
-        let stalled = RoomTicketInput.Step(index: 3, count: 4, name: "In review",
-                                           stalledSince: Date(timeIntervalSince1970: 1_793_905_800),
-                                           stalledReason: "Box X was stopped")
-        XCTAssertEqual(plain(row(stalled).stepAccessibilityLabel(now: now, timeZone: eastern, locale: english)),
-                       "Step 3 of 4, in review. No progress since 2:10 PM. Box X was stopped.")
+    /// "Stalled since {date} · {reason in plain words} · check {name}", the reasons in the web's words.
+    func test_the_small_print_says_since_when_why_and_whom_to_check() {
+        XCTAssertNil(note(RoomTicketInput.Step(index: 2, count: 5, name: "in_review", stalledReason: "waiting_on_review",
+                                               waitingOn: "human-alex")),
+                     "a ticket that has not stopped has no small print")
+        XCTAssertEqual(note(RoomTicketInput.Step(index: 2, count: 5, name: "in_review", stalledSince: since,
+                                                 stalledReason: "waiting_on_review", waitingOn: "human-alex")),
+                       "Stalled since 2:10 PM · waiting on review · check alex")
+        let words = [
+            "holder_lease_expired": "the person working on it went quiet",
+            "waiting_on_assignee": "waiting on whoever it's assigned to",
+            "waiting_on_review": "waiting on review",
+            "waiting_on_owner": "waiting on the owner",
+            "blocked": "blocked",
+            "no_activity": "no activity"
+        ]
+        XCTAssertEqual(RoomTicketRow.stallReasons, words)
+        for (reason, plainWords) in words {
+            XCTAssertEqual(note(RoomTicketInput.Step(index: 1, count: 5, name: "taken", stalledSince: since,
+                                                     stalledReason: reason)),
+                           "Stalled since 2:10 PM · \(plainWords)", reason)
+        }
+        XCTAssertEqual(note(RoomTicketInput.Step(index: 1, count: 5, name: "taken", stalledSince: since)),
+                       "Stalled since 2:10 PM")
+        let earlier = Date(timeIntervalSince1970: 1_793_733_000)   // 2:10 PM in New York on 11-03
+        let older = note(RoomTicketInput.Step(index: 1, count: 5, name: "taken", stalledSince: earlier))
+        XCTAssertTrue(older?.hasPrefix("Stalled since Nov 3") == true, "an earlier day says its date: \(older ?? "nil")")
+        XCTAssertTrue(older?.contains("2:10 PM") == true)
     }
 
-    func test_the_small_print_says_since_when_why_and_whom_it_waits_on() {
-        let since = Date(timeIntervalSince1970: 1_793_905_800)    // 2:10 PM in New York on 11-05
-        func note(_ step: RoomTicketInput.Step) -> String? {
-            plain(row(step).stallNote(now: now, timeZone: eastern, locale: english))
+    /// Whom to check: the one it waits on, else the one who last held it, by the room's name for them, never a raw id.
+    func test_whom_to_check_is_named_never_a_raw_id() {
+        func check(lastHolder: String? = nil, waitingOn: String? = nil, viewerId: String? = nil,
+                   names: [String: String] = [:]) -> String? {
+            note(RoomTicketInput.Step(index: 3, count: 5, name: "merged", stalledSince: since, stalledReason: "blocked",
+                                      lastHolder: lastHolder, waitingOn: waitingOn),
+                 viewerId: viewerId, names: names)
         }
-        XCTAssertNil(note(RoomTicketInput.Step(index: 2, count: 4, name: "In review")), "a moving ticket has none")
-        XCTAssertEqual(note(RoomTicketInput.Step(index: 2, count: 4, name: "In review", stalledSince: since,
-                                                 stalledReason: "Box X was stopped")),
-                       "No progress since 2:10 PM. Box X was stopped.")
-        XCTAssertEqual(note(RoomTicketInput.Step(index: 2, count: 4, name: "In review",
-                                                 waitingOn: "your OK of the shots")),
-                       "Waiting on: your OK of the shots")
-        XCTAssertEqual(note(RoomTicketInput.Step(index: 2, count: 4, name: "In review", stalledSince: since,
-                                                 waitingOn: "your OK of the shots")),
-                       "No progress since 2:10 PM. Waiting on: your OK of the shots")
-        XCTAssertEqual(note(RoomTicketInput.Step(index: 1, count: 4, name: "Taken", stalledSince: since,
-                                                 lastHolder: "human-alex")),
-                       "No progress since 2:10 PM. Last held by alex.")
-        XCTAssertEqual(note(RoomTicketInput.Step(index: 1, count: 4, name: "Taken", stalledSince: since)),
-                       "No progress since 2:10 PM.")
-        let earlier = Date(timeIntervalSince1970: 1_793_733_000)   // 2:10 PM in New York on 11-03
-        let older = note(RoomTicketInput.Step(index: 1, count: 4, name: "Taken", stalledSince: earlier))
-        XCTAssertTrue(older?.hasPrefix("No progress since Nov 3") == true, "an earlier day says its date: \(older ?? "nil")")
-        XCTAssertTrue(older?.contains("2:10 PM") == true)
+        XCTAssertEqual(check(lastHolder: "forge-box-7", waitingOn: "human-alex"),
+                       "Stalled since 2:10 PM · blocked · check alex", "the one it waits on comes first")
+        XCTAssertEqual(check(lastHolder: "forge-box-7"), "Stalled since 2:10 PM · blocked · check forge-box-7",
+                       "else the one who last held it")
+        let person = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+        XCTAssertEqual(check(waitingOn: person), "Stalled since 2:10 PM · blocked · check a person",
+                       "a user id is never shown")
+        XCTAssertEqual(check(waitingOn: person, names: [person: "Dana"]), "Stalled since 2:10 PM · blocked · check Dana")
+        XCTAssertEqual(check(waitingOn: "human-carter", viewerId: "human-carter"),
+                       "Stalled since 2:10 PM · blocked · check you")
+    }
+
+    func test_voiceover_reads_the_step_then_the_small_print() {
+        XCTAssertEqual(row(RoomTicketInput.Step(index: 2, count: 5, name: "in_review"))
+                        .stepAccessibilityLabel(now: now, timeZone: eastern, locale: english),
+                       "Step 2 of 5, in review")
+        let stalled = RoomTicketInput.Step(index: 2, count: 5, name: "in_review", stalledSince: since,
+                                           stalledReason: "waiting_on_review", waitingOn: "human-alex")
+        XCTAssertEqual(plain(row(stalled).stepAccessibilityLabel(now: now, timeZone: eastern, locale: english)),
+                       "Step 2 of 5, in review. Stalled since 2:10 PM, waiting on review, check alex")
+        let notStarted = RoomTicketInput.Step(index: 0, count: 5, name: "not_started", stalledSince: since,
+                                              stalledReason: "waiting_on_assignee", waitingOn: "build-agent")
+        XCTAssertEqual(plain(row(notStarted, status: "assigned")
+                                .stepAccessibilityLabel(now: now, timeZone: eastern, locale: english)),
+                       "Not started, 5 steps. Stalled since 2:10 PM, waiting on whoever it's assigned to, check build-agent")
     }
 
     func test_without_the_servers_step_a_ticket_shows_its_status_alone_and_no_percentage() {
@@ -305,11 +338,10 @@ final class RoomTicketStepsTests: XCTestCase {
             XCTAssertNil(plainRow.stallNote(now: now, timeZone: eastern, locale: english))
             XCTAssertNil(plainRow.stepAccessibilityLabel(now: now, timeZone: eastern, locale: english))
         }
-        let shown = [row(RoomTicketInput.Step(index: 2, count: 4, name: "In review", stalledSince: now,
-                                              stalledReason: "Box X was stopped"))]
-        for text in shown.flatMap({ [$0.statusLabel, $0.stallNote(now: now, timeZone: eastern, locale: english),
-                                     $0.stepAccessibilityLabel(now: now, timeZone: eastern, locale: english)] })
-            .compactMap({ $0 }) {
+        let shown = row(RoomTicketInput.Step(index: 2, count: 5, name: "in_review", stalledSince: since,
+                                             stalledReason: "no_activity", lastHolder: "forge-box-7"))
+        for text in [shown.statusLabel, shown.stallNote(now: now, timeZone: eastern, locale: english),
+                     shown.stepAccessibilityLabel(now: now, timeZone: eastern, locale: english)].compactMap({ $0 }) {
             XCTAssertFalse(text.contains("%") || text.lowercased().contains("percent"), "no percentage: \(text)")
         }
     }

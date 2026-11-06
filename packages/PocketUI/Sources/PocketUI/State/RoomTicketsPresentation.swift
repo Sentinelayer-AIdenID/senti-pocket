@@ -4,27 +4,30 @@ import PocketContracts
 /// One ticket as the app hands it to PocketUI.
 public struct RoomTicketInput: Equatable, Sendable {
     /// Where the ticket is, as the server reads it from typed facts: step `index` of `count` (counted from 1; 0 is not
-    /// started), its name, and when it stopped moving, why, and whom it waits on or who last held it. Never worked out
-    /// on the phone.
+    /// started), its name, and when it stopped moving, why, and whom it waits on or who last held it, in the server's
+    /// own words (`in_review`, `waiting_on_review`, actor ids). Never worked out on the phone.
     public struct Step: Equatable, Sendable {
         public let index: Int
         public let count: Int
-        /// The current step's name; nil before the first step.
-        public let name: String?
+        /// `not_started`, `taken`, `in_review`, `merged`, `shipped` or `done`.
+        public let name: String
         public let stalledSince: Date?
+        /// `holder_lease_expired`, `waiting_on_assignee`, `waiting_on_review`, `waiting_on_owner`, `blocked` or
+        /// `no_activity`.
         public let stalledReason: String?
-        public let waitingOn: String?
+        /// Actor ids.
         public let lastHolder: String?
+        public let waitingOn: String?
 
-        public init(index: Int, count: Int, name: String?, stalledSince: Date? = nil, stalledReason: String? = nil,
-                    waitingOn: String? = nil, lastHolder: String? = nil) {
+        public init(index: Int, count: Int, name: String, stalledSince: Date? = nil, stalledReason: String? = nil,
+                    lastHolder: String? = nil, waitingOn: String? = nil) {
             self.index = index
             self.count = count
             self.name = name
             self.stalledSince = stalledSince
             self.stalledReason = stalledReason
-            self.waitingOn = waitingOn
             self.lastHolder = lastHolder
+            self.waitingOn = waitingOn
         }
     }
 
@@ -98,13 +101,20 @@ public struct RoomTicketStepStrip: Equatable, Sendable {
 
     public let index: Int
     public let count: Int
-    /// What the strip says beside it: the current step's name, or "Not started".
+    /// What the strip says beside it: the current step's name ("In review"), or "Not started".
     public let label: String
 
-    public init(index: Int, count: Int, name: String?) {
+    /// The steps' names as a person reads them.
+    public static let names = [
+        "not_started": "Not started", "taken": "Taken", "in_review": "In review", "merged": "Merged",
+        "shipped": "Shipped", "done": "Done"
+    ]
+
+    /// `name` as the server sends it (`in_review`).
+    public init(index: Int, count: Int, name: String) {
         self.index = index
         self.count = count
-        self.label = index < 1 ? "Not started" : name ?? "Step \(index)"
+        self.label = index < 1 ? "Not started" : Self.names[name] ?? "Step \(index)"
     }
 
     /// False before the first step (index 0).
@@ -193,30 +203,44 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
         step.map { RoomTicketStepStrip(index: $0.index, count: $0.count, name: $0.name) }
     }
 
-    /// The small print under the strip: since when the ticket has not moved, why, and whom it waits on, or who last
-    /// held it. Nil while it moves and waits on no one. A time today reads as its time ("2:10 PM"), an earlier one with
-    /// its date.
-    public func stallNote(now: Date = Date(), timeZone: TimeZone = .current, locale: Locale = .current) -> String? {
-        guard let step else { return nil }
-        var sentences: [String] = []
-        if let since = step.stalledSince {
-            sentences.append("No progress since \(Self.moment(since, now: now, timeZone: timeZone, locale: locale)).")
-            if let reason = step.stalledReason { sentences.append(Self.sentence(reason)) }
-        }
-        if let waiting = step.waitingOn {
-            sentences.append("Waiting on: \(waiting)")
-        } else if step.stalledSince != nil, step.stalledReason == nil, let holder = step.lastHolder {
-            sentences.append("Last held by \(Self.displayName(holder)).")
-        }
-        return sentences.isEmpty ? nil : sentences.joined(separator: " ")
+    /// Why a ticket stopped, in plain words, the same as the web's (warden, 11-05).
+    public static let stallReasons = [
+        "holder_lease_expired": "the person working on it went quiet",
+        "waiting_on_assignee": "waiting on whoever it's assigned to",
+        "waiting_on_review": "waiting on review",
+        "waiting_on_owner": "waiting on the owner",
+        "blocked": "blocked",
+        "no_activity": "no activity"
+    ]
+
+    /// The small print under the strip, once the ticket has stopped moving: "Stalled since 2:10 PM · waiting on review
+    /// · check alex". Whom to check is the one it waits on, else the one who last held it, by name, never by raw id.
+    /// Nil while it moves. A time today reads as its time, an earlier one with its date.
+    public func stallNote(now: Date = Date(), timeZone: TimeZone = .current, locale: Locale = .current,
+                          viewerId: String? = nil, names: [String: String] = [:]) -> String? {
+        stallParts(now: now, timeZone: timeZone, locale: locale, viewerId: viewerId, names: names)?
+            .joined(separator: " · ")
     }
 
-    /// What VoiceOver says for the strip: "Step 3 of 4, in review" (or "Not started, 4 steps"), then the small print.
-    public func stepAccessibilityLabel(now: Date = Date(), timeZone: TimeZone = .current,
-                                       locale: Locale = .current) -> String? {
+    /// What VoiceOver says for the strip: "Step 2 of 5, in review" (or "Not started, 5 steps"), then the small print:
+    /// "Step 2 of 5, in review. Stalled since 2:10 PM, waiting on review, check alex".
+    public func stepAccessibilityLabel(now: Date = Date(), timeZone: TimeZone = .current, locale: Locale = .current,
+                                       viewerId: String? = nil, names: [String: String] = [:]) -> String? {
         guard let base = stepStrip?.accessibilityLabel else { return nil }
-        guard let note = stallNote(now: now, timeZone: timeZone, locale: locale) else { return base }
-        return base + ". " + note
+        guard let parts = stallParts(now: now, timeZone: timeZone, locale: locale, viewerId: viewerId, names: names)
+        else { return base }
+        return base + ". " + parts.joined(separator: ", ")
+    }
+
+    private func stallParts(now: Date, timeZone: TimeZone, locale: Locale, viewerId: String?,
+                            names: [String: String]) -> [String]? {
+        guard let step, let since = step.stalledSince else { return nil }
+        var parts = ["Stalled since \(Self.moment(since, now: now, timeZone: timeZone, locale: locale))"]
+        if let words = step.stalledReason.flatMap({ Self.stallReasons[$0] }) { parts.append(words) }
+        if let who = step.waitingOn ?? step.lastHolder {
+            parts.append("check \(Self.actorLabel(who, viewerId: viewerId, names: names))")
+        }
+        return parts
     }
 
     private static func moment(_ date: Date, now: Date, timeZone: TimeZone, locale: Locale) -> String {
@@ -227,12 +251,6 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
         formatter.timeZone = timeZone
         formatter.setLocalizedDateFormatFromTemplate(calendar.isDate(date, inSameDayAs: now) ? "jmm" : "MMMdjmm")
         return formatter.string(from: date)
-    }
-
-    /// A note as a sentence: it ends with a stop.
-    private static func sentence(_ text: String) -> String {
-        guard let last = text.last, !".!?".contains(last) else { return text }
-        return text + "."
     }
 
     public var statusLabel: String {

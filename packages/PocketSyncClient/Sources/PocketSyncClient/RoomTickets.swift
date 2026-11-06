@@ -65,74 +65,88 @@ public struct RoomTicketProgress: Equatable, Sendable {
     }
 }
 
-/// Where a ticket is, as the server reads it from typed facts (taken, in review, merged, shipped, and later "PR open"):
-/// step `index` of `count`, counted from 1 as it is said ("Step 3 of 4"), and the step's name; index 0 is a ticket not
-/// started yet, before its first step. When nothing has happened for a while the server adds since when, why, and whom
-/// it waits on, or who last held it. The phone never works a step out for itself: no step from the server is no step.
-///
-/// The API's exact field names arrive with its change, so this reads the agreed shape tolerantly: the step in
-/// `progress.step` or as the ticket's own `step`; its notes in the step, beside it in `progress`, or on the ticket;
-/// names in camelCase or snake_case; a person as text or as an object with a name. Anything it cannot read in full is
-/// no step, never a guess.
+/// Where a ticket is, as the server reads it from typed facts, in the ticket's `progress.step` (warden, 11-05):
+/// `{index, count, name, stalledSince?, stalledReason?, lastHolder?, waitingOn?}`. `index` counts from 1 as it is said
+/// ("Step 2 of 5"), and 0 is a ticket not started (`not_started`). `lastHolder` and `waitingOn` are actor ids, which
+/// the phone shows by name, never raw. The phone never works a step out for itself: a name or a reason it does not
+/// know, a field of the wrong type, or a time it cannot read is no step, never a guess.
 public struct RoomTicketStep: Equatable, Sendable {
-    /// 1...count, or 0 before the first step (not started).
+    /// The step's name, as the server sends it.
+    public enum Name: String, CaseIterable, Sendable {
+        case notStarted = "not_started"
+        case taken
+        case inReview = "in_review"
+        case merged
+        case shipped
+        case done
+    }
+
+    /// Why the ticket stopped moving, as the server sends it.
+    public enum StallReason: String, CaseIterable, Sendable {
+        case holderLeaseExpired = "holder_lease_expired"
+        case waitingOnAssignee = "waiting_on_assignee"
+        case waitingOnReview = "waiting_on_review"
+        case waitingOnOwner = "waiting_on_owner"
+        case blocked
+        case noActivity = "no_activity"
+    }
+
+    /// 1...count, or 0 before the first step (`not_started`).
     public let index: Int
     public let count: Int
-    /// The current step's name; nil only before the first step, where there is no current step.
-    public let name: String?
+    public let name: Name
     /// When the ticket stopped moving, as the server wrote it; nil while it moves.
     public let stalledSince: String?
-    public let stalledReason: String?
-    public let waitingOn: String?
+    public let stalledReason: StallReason?
+    /// Actor ids.
     public let lastHolder: String?
+    public let waitingOn: String?
 
-    /// Nil unless 0 <= `index` <= `count` <= 12 and, from the first step on, the name has words. Before the first step
-    /// (index 0) a name is not needed and not kept.
-    public init?(index: Int, count: Int, name: String?, stalledSince: String? = nil, stalledReason: String? = nil,
-                 waitingOn: String? = nil, lastHolder: String? = nil) {
-        guard (1...12).contains(count), (0...count).contains(index) else { return nil }
-        let name: String? = index == 0 ? nil : name.flatMap { Self.line($0, limit: 40) }
-        guard index == 0 || name != nil else { return nil }
+    /// Nil unless 0 <= `index` <= `count` <= 12, `not_started` is exactly index 0, and `stalledSince`, when given, is
+    /// a time.
+    public init?(index: Int, count: Int, name: Name, stalledSince: String? = nil, stalledReason: StallReason? = nil,
+                 lastHolder: String? = nil, waitingOn: String? = nil) {
+        guard (1...12).contains(count), (0...count).contains(index), (index == 0) == (name == .notStarted) else {
+            return nil
+        }
+        if let stalledSince, ParsedSessionTimestamp(stalledSince).date == nil { return nil }
         self.index = index
         self.count = count
         self.name = name
-        self.stalledSince = stalledSince.flatMap { Self.line($0, limit: 40) }
-        self.stalledReason = stalledReason.flatMap { Self.line($0, limit: 160) }
+        self.stalledSince = stalledSince
+        self.stalledReason = stalledReason
+        self.lastHolder = lastHolder.flatMap { Self.line($0, limit: 120) }
         self.waitingOn = waitingOn.flatMap { Self.line($0, limit: 120) }
-        self.lastHolder = lastHolder.flatMap { Self.line($0, limit: 80) }
     }
 
-    /// The step a ticket read carries, or nil.
+    /// The step a ticket read carries in `progress.step`, or nil.
     init?(ticket json: JSONValue) {
-        let progress = json["progress"]
-        guard let step = Self.object(progress?["step"]) ?? Self.object(json["step"]),
-              let index = step["index"]?.intValue, let count = step["count"]?.intValue else { return nil }
-        let places = [step, progress, json].compactMap { $0 }
-        func text(_ camel: String, _ snake: String) -> String? {
-            for place in places {
-                for key in [camel, snake] {
-                    guard let value = place[key] else { continue }
-                    if let text = value.stringValue { return text }
-                    if let text = value["name"]?.stringValue ?? value["displayName"]?.stringValue
-                        ?? value["label"]?.stringValue ?? value["id"]?.stringValue { return text }
-                }
-            }
+        guard let step = json["progress"]?["step"], case .object = step,
+              let index = step["index"]?.intValue, let count = step["count"]?.intValue,
+              let name = step["name"]?.stringValue.flatMap(Name.init(rawValue:)) else { return nil }
+        /// A field the step may leave out: absent or null is nil; anything but text makes the whole step malformed.
+        struct Malformed: Error {}
+        func text(_ key: String) throws -> String? {
+            guard let value = step[key], value != .null else { return nil }
+            guard let text = value.stringValue else { throw Malformed() }
+            return text
+        }
+        let stalledSince, reason, lastHolder, waitingOn: String?
+        do {
+            stalledSince = try text("stalledSince")
+            reason = try text("stalledReason")
+            lastHolder = try text("lastHolder")
+            waitingOn = try text("waitingOn")
+        } catch {
             return nil
         }
-        self.init(
-            index: Int(clamping: index),
-            count: Int(clamping: count),
-            name: step["name"]?.stringValue,
-            stalledSince: step["stalledSince"]?.stringValue ?? step["stalled_since"]?.stringValue,
-            stalledReason: text("stalledReason", "stalled_reason"),
-            waitingOn: text("waitingOn", "waiting_on"),
-            lastHolder: text("lastHolder", "last_holder")
-        )
-    }
-
-    private static func object(_ value: JSONValue?) -> JSONValue? {
-        guard let value, case .object = value else { return nil }
-        return value
+        var stalledReason: StallReason?
+        if let reason {
+            guard let known = StallReason(rawValue: reason) else { return nil }
+            stalledReason = known
+        }
+        self.init(index: Int(clamping: index), count: Int(clamping: count), name: name, stalledSince: stalledSince,
+                  stalledReason: stalledReason, lastHolder: lastHolder, waitingOn: waitingOn)
     }
 
     /// One line (line breaks and control characters become single spaces), cut to `limit`; nil when empty.
