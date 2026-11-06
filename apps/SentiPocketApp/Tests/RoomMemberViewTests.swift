@@ -213,20 +213,73 @@ final class RoomMemberViewTests: XCTestCase {
             }
         }
         for author in ["build-agent", "human-alex"] {
-            let reader = FailingThenAnswer(page: RoomAuthorPage(messages: [message(62392, author: author),
-                                                                         message(62300, author: author)],
+            // Oldest first on purpose: the card puts them newest first itself.
+            let reader = FailingThenAnswer(page: RoomAuthorPage(messages: [message(62300, author: author),
+                                                                         message(62392, author: author)],
                                                               nextBeforeSequence: nil))
             let model = RoomMemberMessagesModel(sessionId: "room_1", authorId: author, reader: reader)
             await model.loadMore()
             XCTAssertEqual(model.state.phase, .failed("Their messages couldn't load."), author)
             XCTAssertTrue(model.state.rows.isEmpty, author)
             XCTAssertTrue(model.state.canLoadMore, "\(author): Retry is offered")
+            XCTAssertNil(model.state.emptyLine(name: author), "\(author): after a failure, never \"no messages yet\"")
             reader.answered = true
             await model.loadMore()
             XCTAssertEqual(model.state.phase, .idle, author)
             XCTAssertEqual(model.state.rows.map(\.sequenceId), [62392, 62300], "\(author)'s messages, newest first")
             XCTAssertFalse(model.state.canLoadMore, "\(author): the room's start")
         }
+    }
+
+    /// Two taps on Retry while it reads read once: the card never reads two pages at once, and shows their messages once.
+    func test_two_taps_on_retry_read_once() async {
+        final class FailThenHold: RoomAuthorMessagesReading, @unchecked Sendable {
+            private let lock = NSLock()
+            private var reads = 0
+            private var released = false
+            let page: RoomAuthorPage
+            init(page: RoomAuthorPage) { self.page = page }
+
+            var calls: Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return reads
+            }
+
+            func release() {
+                lock.lock()
+                released = true
+                lock.unlock()
+            }
+
+            private var isReleased: Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                return released
+            }
+
+            func roomMessages(by authorId: String, sessionId: String, beforeSequence: Int64?, limit: Int) async throws -> RoomAuthorPage {
+                lock.lock()
+                reads += 1
+                let first = reads == 1
+                lock.unlock()
+                if first { throw SessionTransportError.service(statusCode: 503) }
+                while !isReleased { try? await Task.sleep(nanoseconds: 2_000_000) }
+                return page
+            }
+        }
+        let reader = FailThenHold(page: RoomAuthorPage(messages: [message(10, author: "build-agent")], nextBeforeSequence: nil))
+        let model = RoomMemberMessagesModel(sessionId: "room_1", authorId: "build-agent", reader: reader)
+        await model.loadMore()
+        XCTAssertEqual(model.state.phase, .failed("Their messages couldn't load."))
+        async let first: Void = model.loadMore()
+        async let second: Void = model.loadMore()
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        reader.release()
+        _ = await (first, second)
+        XCTAssertEqual(reader.calls, 2, "the failed read and one Retry, never two at once")
+        XCTAssertEqual(model.state.rows.map(\.sequenceId), [10], "their message, once")
+        XCTAssertEqual(model.state.phase, .idle)
     }
 
     /// Tapping one of their messages brings that message into view in the room, by the room's own focus path: one far
