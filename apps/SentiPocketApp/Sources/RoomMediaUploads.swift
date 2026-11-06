@@ -1352,8 +1352,10 @@ final class RoomMediaUploadCoordinator: ObservableObject {
     }
 
     private static func row(_ item: Item) -> RoomMediaItemRow {
+        // The file to open before it is sent: as it will go once prepared (location removed), the picked copy until then.
         RoomMediaItemRow(id: item.id, filename: item.filename, kind: item.kind, sizeBytes: item.sizeBytes,
-                         thumbnail: item.thumbnail, phase: item.phase, progress: item.progress)
+                         thumbnail: item.thumbnail, phase: item.phase, progress: item.progress,
+                         localFile: item.prepared?.file ?? item.source.file)
     }
 
     /// While anything uploads or posts, the app asks for time to finish in the background. A grant iOS ended at its
