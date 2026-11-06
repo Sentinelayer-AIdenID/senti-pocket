@@ -162,6 +162,12 @@ run_rejection build-number-dotted "must be a positive integer" \
   SENTI_BUILD_NUMBER "1.2"
 run_rejection http-origin "must be an HTTPS origin" \
   SENTI_API_URL "http://api.plexaura.dev"
+run_rejection support-member-email "SENTI_SUPPORT_MEMBER must be a GitHub login" \
+  SENTI_SUPPORT_MEMBER "team@example.invalid"
+run_rejection support-member-command-syntax "SENTI_SUPPORT_MEMBER must be a GitHub login" \
+  SENTI_SUPPORT_MEMBER '$(HOME)'
+run_rejection support-member-too-long "SENTI_SUPPORT_MEMBER must be a GitHub login" \
+  SENTI_SUPPORT_MEMBER "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 run_rejection origin-query "must be an HTTPS origin" \
   SENTI_GATEWAY_URL "https://gateway.plexaura.dev/?token=forged"
 run_rejection origin-command-syntax "must use an ASCII DNS or IPv4 host" \
@@ -283,6 +289,9 @@ run_acceptance enterprise-production-aps \
 run_acceptance private-diagnostics-flag \
   "$POLICY_DEBUGGING" \
   SENTI_RETAIN_PRIVATE_DIAGNOSTICS "1"
+run_acceptance support-member-login \
+  "$POLICY_DEBUGGING" \
+  SENTI_SUPPORT_MEMBER "team-account"
 
 run_rejection asc-key-partial "must be given together" \
   SENTI_ASC_KEY_ID "$ASC_KEY_ID"

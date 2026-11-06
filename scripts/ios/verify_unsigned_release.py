@@ -64,7 +64,7 @@ APP_ICON_NAME = "AppIcon"
 APP_ICON_FILENAME = "SentiPocketAppIcon.png"
 APP_ICON_SHA256 = "b3f463a44915661d153effb65066892339496aeb8d387be29246b9d42ad98f4c"
 PROJECT_SPEC_RELATIVE = Path("apps/SentiPocketApp/project.yml")
-PROJECT_SPEC_SHA256 = "ad29e3d254bfdee7d03a106be8a02ea856543b68c8ddd73f0d1d454a51caa0db"
+PROJECT_SPEC_SHA256 = "d8d74193c9e5031bdd63703759624dafcff7fc3407047445b5bac25dafe80d51"
 APP_ICON_WIDTH = 1024
 APP_ICON_HEIGHT = 1024
 APP_ICON_CHANNELS = 3
@@ -190,7 +190,11 @@ APPROVED_BUILT_ICON_SIZES = {
     "AppIcon83.5x83.5": 83.5,
 }
 PBX_ID_RE = re.compile(r"^[A-F0-9]{24}$")
-SENSITIVE_SETTING_KEYS = frozenset({"SENTI_API_URL", "SENTI_GATEWAY_URL", "SENTI_MINT_URL"})
+SENSITIVE_SETTING_KEYS = frozenset(
+    {"SENTI_API_URL", "SENTI_GATEWAY_URL", "SENTI_MINT_URL", "SENTI_SUPPORT_MEMBER"}
+)
+# The team's account that crash reports are shared with: a GitHub login (the API's own rule for a verified login).
+SUPPORT_MEMBER_PATTERN = re.compile(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*")
 EMPTY_EXECUTION_OVERRIDE_KEYS = frozenset(
     {
         "C_COMPILER_LAUNCHER",
@@ -338,6 +342,8 @@ class Expectations:
     sdk_version: str
     # Optional: the Flight record's service. Empty means the build carries none (empty or absent everywhere).
     mint_url: str = ""
+    # Optional: the team's account crash reports are shared with. Empty means none (empty or absent everywhere).
+    support_member: str = ""
 
 
 @dataclass(frozen=True)
@@ -349,6 +355,7 @@ class BundleExpectations:
     gateway_url: str
     deployment_target: str
     mint_url: str = ""
+    support_member: str = ""
 
 
 def _safe_repr(value: Any) -> str:
@@ -593,6 +600,10 @@ def validate_expectations(expected: Expectations) -> list[str]:
         error = _https_origin_error("mint_url", expected.mint_url)
         if error:
             errors.append(error)
+    if expected.support_member:
+        error = _support_member_error(expected.support_member)
+        if error:
+            errors.append(error)
     products_root = expected.products_root
     if (
         not isinstance(products_root, Path)
@@ -664,6 +675,10 @@ def validate_bundle_expectations(expected: BundleExpectations) -> list[str]:
             errors.append(error)
     if expected.mint_url:
         error = _https_origin_error("mint_url", expected.mint_url)
+        if error:
+            errors.append(error)
+    if expected.support_member:
+        error = _support_member_error(expected.support_member)
         if error:
             errors.append(error)
     return errors
@@ -2435,10 +2450,23 @@ def _require_optional_origin(
     values: Mapping[str, Any], key: str, wanted: str, errors: list[str]
 ) -> None:
     """An optional origin: exactly the requested one, or empty or absent when none was requested."""
+    _require_optional_value(values, key, wanted, errors)
+
+
+def _require_optional_value(
+    values: Mapping[str, Any], key: str, wanted: str, errors: list[str]
+) -> None:
+    """An optional build value: exactly the requested one, or empty or absent when none was requested."""
     if wanted:
         _require_exact(values, {key: wanted}, errors)
     else:
         _require_empty_or_absent(values, {key}, errors)
+
+
+def _support_member_error(value: str) -> str | None:
+    if len(value) > 39 or not SUPPORT_MEMBER_PATTERN.fullmatch(value):
+        return "support_member must be a GitHub login"
+    return None
 
 
 def _require_empty_or_absent(
@@ -2587,6 +2615,7 @@ def verify_settings_file(
         errors,
     )
     _require_optional_origin(settings, "SENTI_MINT_URL", expected.mint_url, errors)
+    _require_optional_value(settings, "SENTI_SUPPORT_MEMBER", expected.support_member, errors)
     optional_empty_settings = set(OPTIONAL_EMPTY_RESOLVED_SETTINGS)
     if expected.configuration == "Debug":
         optional_empty_settings.add("EXCLUDED_SOURCE_FILE_NAMES")
@@ -3711,6 +3740,7 @@ def _verify_app_bundle_contents(
             errors,
         )
         _require_optional_origin(info, "SENTI_MINT_URL", expected.mint_url, errors)
+        _require_optional_value(info, "SENTI_SUPPORT_MEMBER", expected.support_member, errors)
         background_modes = info.get("UIBackgroundModes")
         if (
             not isinstance(background_modes, list)
@@ -3799,6 +3829,7 @@ def _add_expectation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--api-url", required=True)
     parser.add_argument("--gateway-url", required=True)
     parser.add_argument("--mint-url", default="")
+    parser.add_argument("--support-member", default="")
     parser.add_argument("--deployment-target", default="16.0")
     parser.add_argument("--products-root", required=True, type=Path)
     parser.add_argument("--developer-dir", required=True, type=PurePosixPath)
@@ -3823,6 +3854,7 @@ def _expectations_from_args(args: argparse.Namespace) -> Expectations:
         sdk_root=args.sdk_root,
         sdk_version=args.sdk_version,
         mint_url=args.mint_url,
+        support_member=args.support_member,
     )
 
 
@@ -3833,6 +3865,7 @@ def _add_bundle_identity_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--api-url", required=True)
     parser.add_argument("--gateway-url", required=True)
     parser.add_argument("--mint-url", default="")
+    parser.add_argument("--support-member", default="")
     parser.add_argument("--deployment-target", default="16.0")
 
 
@@ -3845,6 +3878,7 @@ def _bundle_expectations_from_args(args: argparse.Namespace) -> BundleExpectatio
         gateway_url=args.gateway_url,
         deployment_target=args.deployment_target,
         mint_url=args.mint_url,
+        support_member=args.support_member,
     )
 
 

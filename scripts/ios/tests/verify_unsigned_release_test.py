@@ -980,6 +980,39 @@ class UnsignedReleaseVerifierTests(unittest.TestCase):
         _, errors = verify.verify_settings_file(self.settings_path, insecure)
         self.assertTrue(any("mint_url" in error for error in errors), errors)
 
+    def test_settings_support_member_is_optional_but_exact_when_requested(self) -> None:
+        # Not requested: the setting may be absent or empty, never an account nobody asked for.
+        self.write_settings(dict(self.settings))
+        _, errors = verify.verify_settings_file(self.settings_path, self.expected)
+        self.assertEqual(errors, [])
+        for value, passes in (("", True), ("team-account", False)):
+            with self.subTest(unrequested=value):
+                changed = dict(self.settings)
+                changed["SENTI_SUPPORT_MEMBER"] = value
+                self.write_settings(changed)
+                _, errors = verify.verify_settings_file(self.settings_path, self.expected)
+                self.assertEqual(not errors, passes, errors)
+        # Requested: exactly that account, and the value is never echoed in an error.
+        requested = dataclasses.replace(self.expected, support_member="team-account")
+        for value, passes in (("team-account", True), ("other-account", False), ("", False)):
+            with self.subTest(requested=value):
+                changed = dict(self.settings)
+                changed["SENTI_SUPPORT_MEMBER"] = value
+                self.write_settings(changed)
+                _, errors = verify.verify_settings_file(self.settings_path, requested)
+                self.assertEqual(not errors, passes, errors)
+                if not passes:
+                    self.assertIn("SENTI_SUPPORT_MEMBER: resolved value does not match expected", errors)
+                    self.assertFalse(any("other-account" in error for error in errors), errors)
+
+    def test_a_requested_support_member_must_be_a_github_login(self) -> None:
+        self.write_settings(dict(self.settings))
+        for value in ("team@example.invalid", "-team", "team--account", "a" * 40, "$(SENTI_SUPPORT_MEMBER)"):
+            with self.subTest(value=value):
+                bad = dataclasses.replace(self.expected, support_member=value)
+                _, errors = verify.verify_settings_file(self.settings_path, bad)
+                self.assertIn("support_member must be a GitHub login", errors)
+
     def test_settings_accept_trusted_resolved_tool_selectors(self) -> None:
         changed = dict(self.settings)
         changed.update(
@@ -3074,6 +3107,43 @@ class UnsignedReleaseVerifierTests(unittest.TestCase):
                 self.settings_path, self.source_privacy_path, self.expected
             ),
         )
+
+    def test_bundle_support_member_is_optional_but_exact_when_requested(self) -> None:
+        original = self.read_info()
+
+        def write_member(value: str | None) -> None:
+            info = dict(original)
+            info.pop("SENTI_SUPPORT_MEMBER", None)
+            if value is not None:
+                info["SENTI_SUPPORT_MEMBER"] = value
+            self.write_info(info)
+
+        # Not requested: the bundle carries it empty or not at all, never an account nobody asked for.
+        for value, passes in ((None, True), ("", True), ("team-account", False)):
+            with self.subTest(unrequested=value):
+                write_member(value)
+                errors = verify.verify_bundle(
+                    self.settings_path, self.source_privacy_path, self.expected
+                )
+                self.assertEqual(not errors, passes, errors)
+                if not passes:
+                    self.assertIn("SENTI_SUPPORT_MEMBER: expected an empty or omitted value", errors)
+        # Requested: exactly that account, and the value is never echoed in an error.
+        settings = dict(self.settings)
+        settings["SENTI_SUPPORT_MEMBER"] = "team-account"
+        self.write_settings(settings)
+        requested = dataclasses.replace(self.expected, support_member="team-account")
+        for value, passes in (("team-account", True), ("other-account", False), ("", False), (None, False)):
+            with self.subTest(requested=value):
+                write_member(value)
+                errors = verify.verify_bundle(
+                    self.settings_path, self.source_privacy_path, requested
+                )
+                self.assertEqual(not errors, passes, errors)
+                if not passes:
+                    self.assertIn("SENTI_SUPPORT_MEMBER: resolved value does not match expected", errors)
+                self.assertFalse(any("other-account" in error for error in errors), errors)
+        self.write_info(original)
 
     def test_bundle_rejects_info_plist_drift(self) -> None:
         mutations = {

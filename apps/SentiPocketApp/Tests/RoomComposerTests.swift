@@ -305,31 +305,6 @@ final class RoomComposerCoordinatorTests: XCTestCase {
         coordinator.pause()
     }
 
-    /// A shared crash report is marked handled only once the room accepted it: a failed send keeps it for next time.
-    func test_a_crash_report_is_handled_only_after_the_room_accepts_it() async {
-        let failing = ScriptedSender([.failure(.retryable(retryAfterSeconds: nil))])
-        let lost = makeCoordinator(sender: failing)
-        lost.resume()
-        var handledAfterFailure = 0
-        lost.sendCrashReport("Pocket closed unexpectedly") { handledAfterFailure += 1 }
-        await waitUntil("the send failed") {
-            if case .failed = lost.state.pending.first?.status { return true }
-            return false
-        }
-        XCTAssertEqual(handledAfterFailure, 0, "a lost send leaves the report unhandled")
-        lost.pause()
-
-        let sender = ScriptedSender([.success(())])
-        let coordinator = makeCoordinator(sender: sender)
-        coordinator.resume()
-        var handled = 0
-        coordinator.sendCrashReport("Pocket closed unexpectedly") { handled += 1 }
-        XCTAssertEqual(handled, 0, "not before the room answers")
-        await waitUntil("sent") { coordinator.state.pending.first?.status == .sent }
-        XCTAssertEqual(handled, 1)
-        coordinator.pause()
-    }
-
     /// The room kept the message but the answer was lost, then the app was killed. After the relaunch
     /// the message comes back unconfirmed under its own client id; Retry sends that same id, so the room keeps one copy.
     func test_a_send_cut_off_by_a_kill_comes_back_under_its_own_client_id_and_retries_once() async {

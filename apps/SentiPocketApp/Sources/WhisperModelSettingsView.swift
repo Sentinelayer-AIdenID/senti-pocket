@@ -248,7 +248,7 @@ struct WhisperModelSettingsView: View {
         } header: {
             Text("Crash reports")
         } footer: {
-            Text("When Pocket closes unexpectedly, the phone records where it stopped and your last few taps, never your messages. Pocket offers to send each one to the next room you open; here you can share them all.")
+            Text("When Pocket closes unexpectedly, the phone records where it stopped and your last few taps, never your messages. Pocket offers to send them to the team, in a private room of yours that only the team is asked into; here you can share them all.")
         }
     }
 
