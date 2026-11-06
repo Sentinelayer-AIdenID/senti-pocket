@@ -217,9 +217,9 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
     /// the person in it ("Stalled since 2:10 PM · waiting on review by alex"). Nil while it moves. A time today reads as
     /// its time, an earlier one with its date.
     public func stallNote(now: Date = Date(), timeZone: TimeZone = .current, locale: Locale = .current,
-                          viewerId: String? = nil, viewerLogin: String? = nil,
+                          viewerId: String? = nil, viewerSenderId: String? = nil,
                           names: [String: String] = [:]) -> String? {
-        stallParts(now: now, timeZone: timeZone, locale: locale, viewerId: viewerId, viewerLogin: viewerLogin,
+        stallParts(now: now, timeZone: timeZone, locale: locale, viewerId: viewerId, viewerSenderId: viewerSenderId,
                    names: names)?
             .joined(separator: " · ")
     }
@@ -227,20 +227,20 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
     /// What VoiceOver says for the strip: "Step 2 of 5, in review" (or "Not started, 5 steps"), then the small print:
     /// "Step 2 of 5, in review. Stalled since 2:10 PM, waiting on review by alex".
     public func stepAccessibilityLabel(now: Date = Date(), timeZone: TimeZone = .current, locale: Locale = .current,
-                                       viewerId: String? = nil, viewerLogin: String? = nil,
+                                       viewerId: String? = nil, viewerSenderId: String? = nil,
                                        names: [String: String] = [:]) -> String? {
         guard let base = stepStrip?.accessibilityLabel else { return nil }
         guard let parts = stallParts(now: now, timeZone: timeZone, locale: locale, viewerId: viewerId,
-                                     viewerLogin: viewerLogin, names: names)
+                                     viewerSenderId: viewerSenderId, names: names)
         else { return base }
         return base + ". " + parts.joined(separator: ", ")
     }
 
-    private func stallParts(now: Date, timeZone: TimeZone, locale: Locale, viewerId: String?, viewerLogin: String?,
+    private func stallParts(now: Date, timeZone: TimeZone, locale: Locale, viewerId: String?, viewerSenderId: String?,
                             names: [String: String]) -> [String]? {
         guard let step, let since = step.stalledSince else { return nil }
         var parts = ["Stalled since \(Self.moment(since, now: now, timeZone: timeZone, locale: locale))"]
-        if let reason = Self.stallSentence(step, viewerId: viewerId, viewerLogin: viewerLogin, names: names) {
+        if let reason = Self.stallSentence(step, viewerId: viewerId, viewerSenderId: viewerSenderId, names: names) {
             parts.append(reason)
         }
         return parts
@@ -256,10 +256,10 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
     /// while working on it"). Someone the room does not name is left out: the reason's plain words, or "waiting on the
     /// person it's assigned to". Without a reason it is "waiting on <the one it waits on>", else "last held by <the last
     /// holder>", and nothing when that person is not named.
-    static func stallSentence(_ step: RoomTicketInput.Step, viewerId: String?, viewerLogin: String?,
+    static func stallSentence(_ step: RoomTicketInput.Step, viewerId: String?, viewerSenderId: String?,
                               names: [String: String]) -> String? {
         func person(_ id: String?) -> (name: String?, isViewer: Bool)? {
-            id.map { ticketPerson($0, viewerId: viewerId, viewerLogin: viewerLogin, names: names) }
+            id.map { ticketPerson($0, viewerId: viewerId, viewerSenderId: viewerSenderId, names: names) }
         }
         guard let reason = step.stalledReason else {
             guard let who = person(step.waitingOn ?? step.lastHolder),
@@ -316,12 +316,13 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
     }
 
     /// The lease, in words that cannot be misread: who holds it and until when ("Held by alex until 9:41 PM"), or that it
-    /// lapsed. A lapsed lease names its last holder only when the room names them, as the web's chip does: "Lease
-    /// expired · was alex", "Lease expired · was you", and "Lease expired" alone for someone the room does not name.
-    public func leaseLine(viewerId: String?, viewerLogin: String? = nil, names: [String: String] = [:],
+    /// lapsed. A lapsed lease names its last holder only when the room names them, as warden set for the web's chip
+    /// (#753): "Lease expired · was alex", "Lease expired · was you", and "Lease expired" alone for someone the room does
+    /// not name.
+    public func leaseLine(viewerId: String?, viewerSenderId: String? = nil, names: [String: String] = [:],
                           time: (Date) -> String = { $0.formatted(date: .omitted, time: .shortened) }) -> String? {
         guard let lease else { return nil }
-        let holder = Self.ticketPerson(lease.holder, viewerId: viewerId, viewerLogin: viewerLogin, names: names)
+        let holder = Self.ticketPerson(lease.holder, viewerId: viewerId, viewerSenderId: viewerSenderId, names: names)
         let who = holder.isViewer ? "you" : holder.name
         guard lease.isLive else { return who.map { "Lease expired · was \($0)" } ?? "Lease expired" }
         guard let until = lease.expiresAt else { return "Held by \(who ?? "a person")" }
@@ -330,23 +331,25 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
 
     /// Someone on a ticket the way the room names them: "you", a person by the name the room's member directory gives
     /// them, an agent by its id, and a person the directory does not know as "a person", never by an id.
-    public static func actorLabel(_ id: String, viewerId: String?, viewerLogin: String? = nil,
+    public static func actorLabel(_ id: String, viewerId: String?, viewerSenderId: String? = nil,
                                   names: [String: String] = [:]) -> String {
-        let person = ticketPerson(id, viewerId: viewerId, viewerLogin: viewerLogin, names: names)
+        let person = ticketPerson(id, viewerId: viewerId, viewerSenderId: viewerSenderId, names: names)
         return person.isViewer ? "you" : person.name ?? "a person"
     }
 
     /// How an actor id reads (API #1167, as on the web, #753). An account (`human-g.<32 hex>`, `human-<uuid>`, or a
     /// bare user id) is the room's name for it, else not named: never its hex or its id. `human-<login>` is the room's
     /// name for that login, else the login. Anything else (an agent) is its id. `isViewer`: the id is the viewer's own,
-    /// by account (`viewerId`, a user id) or by login. `names` is keyed by lowercased user id and by `human-<login>`.
-    public static func ticketPerson(_ id: String, viewerId: String?, viewerLogin: String?,
+    /// by account (`viewerId`, a user id) or by their own sender id as the API writes it (`viewerSenderId`, its
+    /// `sender_id`), never by their login: a Google signup's login is its email's local part, which can be someone
+    /// else's GitHub login (warden, 11-06). `names` is keyed by lowercased user id and by `human-<login>`.
+    public static func ticketPerson(_ id: String, viewerId: String?, viewerSenderId: String?,
                                     names: [String: String]) -> (name: String?, isViewer: Bool) {
         let lower = id.lowercased()
         let account = accountKey(lower)
         let viewerAccount = viewerId.flatMap { $0.isEmpty ? nil : $0.lowercased() }
         let isViewer = (viewerAccount != nil && (viewerAccount == lower || viewerAccount == account))
-            || (viewerLogin.map { !$0.isEmpty && lower == "human-" + $0.lowercased() } ?? false)
+            || (viewerSenderId.map { !$0.isEmpty && lower == $0.lowercased() } ?? false)
         if let name = names[lower], !name.isEmpty { return (name, isViewer) }
         if let account {
             return (names[account].flatMap { $0.isEmpty ? nil : $0 }, isViewer)
@@ -397,9 +400,10 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
     public let assignChoices: [RoomTicketAssignChoice]
     /// How many tickets this phone has filed here; a change tells the filing form its ticket landed.
     public let filedCount: Int
-    /// The viewer, for "you" in ticket lines: their user id, and their login (a ticket may name them by either).
+    /// The viewer, for "you" in ticket lines: their user id, and their own sender id as the API writes it (its
+    /// `sender_id`; a ticket may name them by either). Never their login, which a Google signup can share with someone.
     public let viewerId: String?
-    public let viewerLogin: String?
+    public let viewerSenderId: String?
     /// Names for people's user ids, from the room's member directory.
     public let personNames: [String: String]
     /// Per ticket: its comments, oldest first, once loaded.
@@ -432,6 +436,7 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
         ticketWriteStatus: [String: String] = [:],
         filedCount: Int = 0,
         viewerLogin: String? = nil,
+        viewerSenderId: String? = nil,
         rosterAgentIds: [String] = [],
         people: [RoomTicketAssignChoice] = [],
         personNames: [String: String] = [:],
@@ -476,7 +481,7 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
         self.ticketWriteStatus = protected ? [:] : ticketWriteStatus
         self.filedCount = filedCount
         self.viewerId = viewerId
-        self.viewerLogin = viewerLogin
+        self.viewerSenderId = viewerSenderId
         self.personNames = personNames
         self.comments = protected ? [:] : comments
         self.commentStatus = protected ? [:] : commentStatus

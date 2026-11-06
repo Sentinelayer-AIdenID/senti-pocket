@@ -86,7 +86,7 @@ public struct RoomTicketsView: View {
                         writeStatus: state.ticketWriteStatus[row.id],
                         assignChoices: state.assignChoices,
                         viewerId: state.viewerId,
-                        viewerLogin: state.viewerLogin,
+                        viewerSenderId: state.viewerSenderId,
                         names: state.personNames,
                         comments: state.comments[row.id],
                         canComment: state.canFileTickets,
@@ -96,7 +96,7 @@ public struct RoomTicketsView: View {
                         send: send
                     )
                 } label: {
-                    RoomTicketRowView(row: row, viewerId: state.viewerId, viewerLogin: state.viewerLogin,
+                    RoomTicketRowView(row: row, viewerId: state.viewerId, viewerSenderId: state.viewerSenderId,
                                       names: state.personNames)
                 }
                 .accessibilityIdentifier("pocket.tickets.row.\(row.id)")
@@ -137,9 +137,10 @@ public struct RoomTicketsView: View {
 
 private struct RoomTicketRowView: View {
     let row: RoomTicketRow
-    /// Who is reading (by user id and by login), and the room's people: a person is named, never shown by an id.
+    /// Who is reading (by user id and by their own sender id), and the room's people: a person is named, never shown by
+    /// an id.
     var viewerId: String?
-    var viewerLogin: String?
+    var viewerSenderId: String?
     var names: [String: String] = [:]
 
     var body: some View {
@@ -187,14 +188,14 @@ private struct RoomTicketRowView: View {
                     RoomTicketStepStripView(strip: strip, tint: RoomTicketPalette.status(row.status))
                     let holder = row.lease.flatMap { $0.isLive ? $0.holder : nil }
                     if let holder {
-                        let who = RoomTicketRow.actorLabel(holder, viewerId: viewerId, viewerLogin: viewerLogin,
+                        let who = RoomTicketRow.actorLabel(holder, viewerId: viewerId, viewerSenderId: viewerSenderId,
                                                            names: names)
                         Text("Held by \(who)")
                             .font(.caption2)
                             .foregroundStyle(PocketPalette.textSecondary)
                             .lineLimit(2)
                     }
-                    if let note = row.stallNote(viewerId: viewerId, viewerLogin: viewerLogin, names: names) {
+                    if let note = row.stallNote(viewerId: viewerId, viewerSenderId: viewerSenderId, names: names) {
                         Text(note)
                             .font(.caption2)
                             .foregroundStyle(PocketPalette.warning)
@@ -204,7 +205,7 @@ private struct RoomTicketRowView: View {
                 }
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(
-                    row.stepAccessibilityLabel(viewerId: viewerId, viewerLogin: viewerLogin, names: names) ?? row.statusLabel
+                    row.stepAccessibilityLabel(viewerId: viewerId, viewerSenderId: viewerSenderId, names: names) ?? row.statusLabel
                 )
                 .accessibilityIdentifier("pocket.tickets.row.step")
             }
@@ -266,7 +267,7 @@ public struct RoomTicketDetailView: View {
     var writeStatus: String?
     var assignChoices: [RoomTicketAssignChoice] = []
     var viewerId: String?
-    var viewerLogin: String?
+    var viewerSenderId: String?
     var names: [String: String] = [:]
     var comments: [RoomTicketCommentRow]?
     var canComment = false
@@ -290,7 +291,7 @@ public struct RoomTicketDetailView: View {
         writeStatus: String? = nil,
         assignChoices: [RoomTicketAssignChoice] = [],
         viewerId: String? = nil,
-        viewerLogin: String? = nil,
+        viewerSenderId: String? = nil,
         names: [String: String] = [:],
         comments: [RoomTicketCommentRow]? = nil,
         canComment: Bool = false,
@@ -308,7 +309,7 @@ public struct RoomTicketDetailView: View {
         self.writeStatus = writeStatus
         self.assignChoices = assignChoices
         self.viewerId = viewerId
-        self.viewerLogin = viewerLogin
+        self.viewerSenderId = viewerSenderId
         self.names = names
         self.comments = comments
         self.canComment = canComment
@@ -384,7 +385,7 @@ public struct RoomTicketDetailView: View {
 
     /// The lease, in words that cannot be misread: who holds it and until when, or that it lapsed.
     private var leaseLine: String? {
-        row.leaseLine(viewerId: viewerId, viewerLogin: viewerLogin, names: names)
+        row.leaseLine(viewerId: viewerId, viewerSenderId: viewerSenderId, names: names)
     }
 
     @ViewBuilder

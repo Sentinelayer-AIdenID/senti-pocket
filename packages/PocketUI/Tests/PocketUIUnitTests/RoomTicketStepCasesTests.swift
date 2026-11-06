@@ -17,6 +17,13 @@ final class RoomTicketStepCasesTests: XCTestCase {
         struct Viewer: Decodable {
             let accountId: String
             let githubLogin: String
+            /// The viewer's own sender id, when the table states it.
+            let senderId: String?
+
+            /// The viewer as the phone knows them: their account, and their own sender id as the API writes it. The
+            /// table's viewer is a verified GitHub user, whose sender id is `human-<login>`; the phone never matches
+            /// "you" on a login itself (a Google signup's login can be someone else's).
+            var sender: String { senderId ?? "human-" + githubLogin }
         }
 
         struct Case: Decodable {
@@ -74,7 +81,7 @@ final class RoomTicketStepCasesTests: XCTestCase {
                                             waitingOn: item.waitingOn)
             let note = plain(RoomTicketRow(id: "t", title: "T", status: "in_review", step: step)
                 .stallNote(now: now, timeZone: eastern, locale: english, viewerId: table.viewer.accountId,
-                           viewerLogin: table.viewer.githubLogin, names: table.names))
+                           viewerSenderId: table.viewer.sender, names: table.names))
             let expected = item.expected.map { "Stalled since 2:10 PM · \($0)" } ?? "Stalled since 2:10 PM"
             XCTAssertEqual(note, expected, "\(item.reason ?? "no reason"): \(item.about)")
             XCTAssertFalse(note?.contains("human-") == true || note?.contains("g.0000") == true,
@@ -88,14 +95,14 @@ final class RoomTicketStepCasesTests: XCTestCase {
         func line(_ holder: String, live: Bool = false, until: Date? = nil) -> String? {
             RoomTicketRow(id: "t", title: "T", status: "working",
                           lease: RoomTicketInput.Lease(holder: holder, isLive: live, expiresAt: until))
-                .leaseLine(viewerId: table.viewer.accountId, viewerLogin: table.viewer.githubLogin, names: table.names,
+                .leaseLine(viewerId: table.viewer.accountId, viewerSenderId: table.viewer.sender, names: table.names,
                            time: { _ in "9:41 PM" })
         }
         XCTAssertEqual(line("human-g.000000000000400080000000000000bb"), "Lease expired", "someone the room does not name")
         XCTAssertEqual(line("human-g.0000000000004000800000000000aaaa"), "Lease expired · was Priya")
         XCTAssertEqual(line("human-alex"), "Lease expired · was alex")
         XCTAssertEqual(line("human-g.000000000000400080000000000000cc"), "Lease expired · was you", "the viewer, by account")
-        XCTAssertEqual(line("human-sam"), "Lease expired · was you", "the viewer, by login")
+        XCTAssertEqual(line("human-sam"), "Lease expired · was you", "the viewer, by their own sender id")
         XCTAssertEqual(line("build-agent"), "Lease expired · was build-agent")
         XCTAssertEqual(line("human-g.000000000000400080000000000000bb", live: true), "Held by a person")
         XCTAssertEqual(line("human-g.0000000000004000800000000000aaaa", live: true, until: Date(timeIntervalSince1970: 0)),
@@ -103,17 +110,37 @@ final class RoomTicketStepCasesTests: XCTestCase {
         XCTAssertNil(RoomTicketRow(id: "t", title: "T", status: "open").leaseLine(viewerId: nil), "no lease, no line")
     }
 
+    /// Warden, 11-06 (the web's review, P2 here too): "you" is the viewer's own sender id or account, never their login.
+    /// A Google signup's login is its email's local part, which can be someone else's GitHub login: that person is
+    /// named on their own ticket, not called "you".
+    func test_a_google_viewer_sharing_a_login_is_not_you_on_that_persons_ticket() {
+        let googleAccount = "00000000-0000-4000-8000-0000000000ee"
+        let googleSender = "human-g.000000000000400080000000000000ee"
+        let step = RoomTicketInput.Step(index: 3, count: 5, name: "merged", stalledSince: since,
+                                        stalledReason: "waiting_on_review", waitingOn: "human-mrrcarter")
+        let ticket = RoomTicketRow(id: "t", title: "T", status: "in_review",
+                                   lease: RoomTicketInput.Lease(holder: "human-mrrcarter", isLive: false), step: step)
+        XCTAssertEqual(plain(ticket.stallNote(now: now, timeZone: eastern, locale: english, viewerId: googleAccount,
+                                              viewerSenderId: googleSender)),
+                       "Stalled since 2:10 PM · waiting on review by mrrcarter")
+        XCTAssertEqual(ticket.leaseLine(viewerId: googleAccount, viewerSenderId: googleSender), "Lease expired · was mrrcarter")
+        XCTAssertEqual(RoomTicketRow.actorLabel("human-mrrcarter", viewerId: googleAccount, viewerSenderId: googleSender),
+                       "mrrcarter")
+        XCTAssertEqual(RoomTicketRow.actorLabel(googleSender, viewerId: googleAccount, viewerSenderId: googleSender), "you",
+                       "their own sender id is still you")
+    }
+
     /// The same reading names people everywhere on a ticket ("Held by", "Assigned to"): never an account's hex.
     func test_a_person_on_a_ticket_is_never_shown_by_id() throws {
         let (_, table) = try loadTable()
         func label(_ id: String) -> String {
-            RoomTicketRow.actorLabel(id, viewerId: table.viewer.accountId, viewerLogin: table.viewer.githubLogin,
+            RoomTicketRow.actorLabel(id, viewerId: table.viewer.accountId, viewerSenderId: table.viewer.sender,
                                      names: table.names)
         }
         XCTAssertEqual(label("human-g.0000000000004000800000000000aaaa"), "Priya", "an account, by the room's name")
         XCTAssertEqual(label("human-g.000000000000400080000000000000bb"), "a person", "an account the room does not name")
         XCTAssertEqual(label("human-g.000000000000400080000000000000cc"), "you", "the viewer, by account")
-        XCTAssertEqual(label("human-sam"), "you", "the viewer, by login")
+        XCTAssertEqual(label("human-sam"), "you", "the viewer, by their own sender id")
         XCTAssertEqual(label("human-alex"), "alex", "a login the room has no other name for")
         XCTAssertEqual(label("build-agent"), "build-agent", "an agent, by its id")
         XCTAssertEqual(label("00000000-0000-4000-8000-00000000aaaa"), "Priya", "a bare user id, by the room's name")

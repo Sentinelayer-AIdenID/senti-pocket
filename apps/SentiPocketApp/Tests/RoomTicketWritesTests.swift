@@ -96,6 +96,16 @@ private struct SignedInAsViewer: AccountIdentityProviding {
     func currentAccount() async -> SignedInAccount? { SignedInAccount(githubUsername: "mrrcarter", accountId: viewer) }
 }
 
+/// A Google signup: the API sets its login to the email's local part, here another person's GitHub login, and writes
+/// its messages under its account (`sender_id` from /auth/me).
+private let googleViewer = "00000000-0000-4000-8000-0000000000ee"
+private let googleSender = "human-g.000000000000400080000000000000ee"
+private struct SignedInWithGoogle: AccountIdentityProviding {
+    func currentAccount() async -> SignedInAccount? {
+        SignedInAccount(githubUsername: "mrrcarter", accountId: googleViewer, senderId: googleSender)
+    }
+}
+
 @MainActor
 final class RoomTicketWritesTests: XCTestCase {
     private func ticket(
@@ -122,7 +132,8 @@ final class RoomTicketWritesTests: XCTestCase {
         leases: TicketLeaseStoring = InMemoryTicketLeaseStore(),
         sender: (any RoomMessageSending)? = nil,
         roster: [String] = [],
-        extras: (any RoomTicketExtrasReading)? = nil
+        extras: (any RoomTicketExtrasReading)? = nil,
+        identity: any AccountIdentityProviding = SignedInAsViewer()
     ) -> RoomTicketsCoordinator {
         RoomTicketsCoordinator(
             sessionId: "room_1",
@@ -130,7 +141,7 @@ final class RoomTicketWritesTests: XCTestCase {
             sender: sender,
             writer: writer,
             leases: leases,
-            identity: SignedInAsViewer(),
+            identity: identity,
             canWriteTickets: true,
             assignRoster: roster,
             extras: extras,
@@ -138,6 +149,29 @@ final class RoomTicketWritesTests: XCTestCase {
             sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) },
             onReauthenticationRequired: {}
         )
+    }
+
+    /// Warden, 11-06 (the web's review, P2 here too): "you" is the viewer's own sender id (the API's `sender_id`) or
+    /// account, never their login. A Google signup whose login is another person's GitHub login sees that person named
+    /// on their ticket, not "you".
+    func test_a_google_viewer_sharing_a_login_is_not_you_on_that_persons_ticket() async throws {
+        var held = ticket("a", status: "in_review")
+        held.step = RoomTicketStep(index: 3, count: 5, name: .merged, stalledSince: "2026-10-29T08:00:00Z",
+                                   stalledReason: .waitingOnReview, waitingOn: "human-mrrcarter")
+        let coordinator = makeCoordinator(TicketsFeed([held]), writer: ScriptedTicketWriter([]), identity: SignedInWithGoogle())
+        await coordinator.refresh()
+        let state = coordinator.state
+        XCTAssertEqual(state.viewerSenderId, googleSender, "the API's sender id, never one made from the login")
+        let row = try XCTUnwrap(state.rows.first)
+        let note = row.stallNote(now: nineAM, timeZone: TimeZone(identifier: "UTC")!, locale: Locale(identifier: "en_US"),
+                                 viewerId: state.viewerId, viewerSenderId: state.viewerSenderId, names: state.personNames)
+        XCTAssertEqual(note?.replacingOccurrences(of: "\u{202F}", with: " "),
+                       "Stalled since 8:00 AM · waiting on review by mrrcarter")
+        XCTAssertEqual(RoomTicketRow.actorLabel(googleSender, viewerId: state.viewerId,
+                                                viewerSenderId: state.viewerSenderId, names: state.personNames), "you")
+        XCTAssertNil(SignedInAccount(githubUsername: "x", accountId: "y", senderId: " ")?.senderId, "none sent: none")
+        XCTAssertNil(SignedInAccount(githubUsername: "x", accountId: "y", senderId: "alex")?.senderId, "not a sender id")
+        XCTAssertEqual(SignedInAccount(githubUsername: "x", accountId: "y", senderId: "HUMAN-G.AB")?.senderId, "human-g.ab")
     }
 
     func test_filing_lands_once_and_filing_the_same_fields_again_reuses_its_key() async {
