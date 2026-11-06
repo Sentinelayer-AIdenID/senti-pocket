@@ -338,13 +338,20 @@ struct SidePanelLayer<Panel: View>: View {
     let panel: Panel
 
     var body: some View {
-        if isOpen {
-            // The panel ends before the room card begins, so its right edge (unread counts, See all) is never under it.
-            panel
-                .frame(width: width - 14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .transition(.opacity)
+        ZStack(alignment: .leading) {
+            if isOpen {
+                // The panel ends before the room card begins, so its right edge (unread counts, See all) is never under
+                // it.
+                panel
+                    .frame(width: width - 14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .transition(.opacity)
+            }
         }
+        // On the holder, which stays in the tree, so they turn off at the close and cover the panel while it fades out
+        // (SidePanelLayerTests: no touch reaches it then).
+        .allowsHitTesting(isOpen)
+        .accessibilityHidden(!isOpen)
     }
 }
 
