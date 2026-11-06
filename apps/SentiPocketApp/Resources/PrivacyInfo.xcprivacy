@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- PrivacyInfo.xcprivacy — required-reason API declarations for the current native target. On-device Whisper audio is
-     not uploaded for transcription. Data-collection declarations and App Store privacy answers still require a release
-     inventory of every retained backend field; this file must not be treated as proof that account-linked app traffic
-     is outside Apple's collection definitions. -->
+<!-- PrivacyInfo.xcprivacy — what the app collects and the required-reason APIs it uses. Speech becomes text on the
+     phone and audio is never uploaded. The collected types below match the privacy policy (sentinelayer.com/privacy) and
+     must match the App Store privacy answers; a new kind of data the app sends and the server keeps is added here, in
+     the policy and in those answers together. -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -11,10 +11,14 @@
     <false/>
     <key>NSPrivacyTrackingDomains</key>
     <array/>
-    <!-- What people send to their rooms, which Senti stores so the room can show it: photos and videos, and other user
-         content (files, and the messages they are sent with). Linked to the account, used only to run the room, never
-         for tracking. Other retained account or device fields still await the backend-retention inventory; the release
-         gate must add any that qualify. -->
+    <!-- All linked to the account (except search), used only to run the service, never for tracking:
+         - what people send to their rooms, which Senti stores so the room can show it: photos and videos, and other
+           user content (messages, and the files sent with them);
+         - the account: its user id, name and email address, from the sign-in provider;
+         - the device: push tokens and the installation id, registered for notifications and calls;
+         - diagnostics: the automatic report of a failed request (feature, error code, app version, time, no text), and
+           a crash report when the person sends one to a room;
+         - search: room search queries, kept in the server's request log, not linked to the account. -->
     <key>NSPrivacyCollectedDataTypes</key>
     <array>
         <dict>
@@ -34,6 +38,98 @@
             <string>NSPrivacyCollectedDataTypeOtherUserContent</string>
             <key>NSPrivacyCollectedDataTypeLinked</key>
             <true/>
+            <key>NSPrivacyCollectedDataTypeTracking</key>
+            <false/>
+            <key>NSPrivacyCollectedDataTypePurposes</key>
+            <array>
+                <string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+            </array>
+        </dict>
+        <dict>
+            <!-- The account's user id and the sender id it posts as. -->
+            <key>NSPrivacyCollectedDataType</key>
+            <string>NSPrivacyCollectedDataTypeUserID</string>
+            <key>NSPrivacyCollectedDataTypeLinked</key>
+            <true/>
+            <key>NSPrivacyCollectedDataTypeTracking</key>
+            <false/>
+            <key>NSPrivacyCollectedDataTypePurposes</key>
+            <array>
+                <string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+            </array>
+        </dict>
+        <dict>
+            <!-- The name the sign-in provider supplies, shown to room members. -->
+            <key>NSPrivacyCollectedDataType</key>
+            <string>NSPrivacyCollectedDataTypeName</string>
+            <key>NSPrivacyCollectedDataTypeLinked</key>
+            <true/>
+            <key>NSPrivacyCollectedDataTypeTracking</key>
+            <false/>
+            <key>NSPrivacyCollectedDataTypePurposes</key>
+            <array>
+                <string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+            </array>
+        </dict>
+        <dict>
+            <!-- The sign-in email address. -->
+            <key>NSPrivacyCollectedDataType</key>
+            <string>NSPrivacyCollectedDataTypeEmailAddress</string>
+            <key>NSPrivacyCollectedDataTypeLinked</key>
+            <true/>
+            <key>NSPrivacyCollectedDataTypeTracking</key>
+            <false/>
+            <key>NSPrivacyCollectedDataTypePurposes</key>
+            <array>
+                <string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+            </array>
+        </dict>
+        <dict>
+            <!-- Push tokens and the installation id. -->
+            <key>NSPrivacyCollectedDataType</key>
+            <string>NSPrivacyCollectedDataTypeDeviceID</string>
+            <key>NSPrivacyCollectedDataTypeLinked</key>
+            <true/>
+            <key>NSPrivacyCollectedDataTypeTracking</key>
+            <false/>
+            <key>NSPrivacyCollectedDataTypePurposes</key>
+            <array>
+                <string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+            </array>
+        </dict>
+        <dict>
+            <!-- Automatic failed-request reports: feature, error code, app version, time. -->
+            <key>NSPrivacyCollectedDataType</key>
+            <string>NSPrivacyCollectedDataTypeOtherDiagnosticData</string>
+            <key>NSPrivacyCollectedDataTypeLinked</key>
+            <true/>
+            <key>NSPrivacyCollectedDataTypeTracking</key>
+            <false/>
+            <key>NSPrivacyCollectedDataTypePurposes</key>
+            <array>
+                <string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+            </array>
+        </dict>
+        <dict>
+            <!-- A crash or hang report, sent only when the person taps Send to this room. -->
+            <key>NSPrivacyCollectedDataType</key>
+            <string>NSPrivacyCollectedDataTypeCrashData</string>
+            <key>NSPrivacyCollectedDataTypeLinked</key>
+            <true/>
+            <key>NSPrivacyCollectedDataTypeTracking</key>
+            <false/>
+            <key>NSPrivacyCollectedDataTypePurposes</key>
+            <array>
+                <string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+            </array>
+        </dict>
+        <dict>
+            <!-- Room search queries: the server's request log keeps full URLs (with ?q=) for hours, under the client IP,
+                 not the account. Not linked. Remove once the API logs paths without query strings. -->
+            <key>NSPrivacyCollectedDataType</key>
+            <string>NSPrivacyCollectedDataTypeSearchHistory</string>
+            <key>NSPrivacyCollectedDataTypeLinked</key>
+            <false/>
             <key>NSPrivacyCollectedDataTypeTracking</key>
             <false/>
             <key>NSPrivacyCollectedDataTypePurposes</key>
