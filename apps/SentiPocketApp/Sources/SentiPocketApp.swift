@@ -327,6 +327,27 @@ final class RoomScreenMaker {
     var make: (@MainActor (RoomRoute, String?) -> RoomChatScreen)?
 }
 
+/// The side panel under the room, in the view tree only while open, or fading out after a close (Carter's freeze of
+/// 11-06, #62485): a closed panel kept in the tree, faded out under the room, held its lazy list there, and a room put
+/// in place could set off a layout of all its rows that never settled. Out of the tree it is also out of reach of
+/// VoiceOver (ticket 066aca7a). It fades in and out under the sliding room as it faded before.
+struct SidePanelLayer<Panel: View>: View {
+    let isOpen: Bool
+    /// How far the room card moves right when the panel opens; the panel fits in that space.
+    let width: CGFloat
+    let panel: Panel
+
+    var body: some View {
+        if isOpen {
+            // The panel ends before the room card begins, so its right edge (unread counts, See all) is never under it.
+            panel
+                .frame(width: width - 14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .transition(.opacity)
+        }
+    }
+}
+
 /// Release composition of the authenticated repository-backed Sessions surface and the selected-session Pocket flow.
 /// When the open side panel reads its rooms again: open, with the app in front.
 struct DrawerPoll: Equatable {
@@ -361,6 +382,7 @@ struct AuthenticatedRootView: View {
     /// not watched: the panel watches it, so a new placing draws the panel and not the root (and the room under it).
     @State private var sidePanelPlacement = SidePanelPlacement()
     @Environment(\.scenePhase) private var rootScenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject private var whisperModelCoordinator: WhisperModelProvisioningCoordinator
     @ObservedObject private var incomingLinks: IncomingLinkInbox
     @State private var presentsNewRoom = false
@@ -551,14 +573,9 @@ struct AuthenticatedRootView: View {
         let _ = RootPreview.meter.rootBodyRan()
         #endif
         ZStack(alignment: .leading) {
-            // The side panel sits underneath; opening it pushes the room aside as a card (Carter #55006).
-            // The panel ends before the room card begins, so its right edge (unread counts, See all) is never under it.
-            sidePanel
-                .frame(width: Self.drawerWidth - 14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .opacity(drawerOpen ? 1 : 0)
-                .allowsHitTesting(drawerOpen)
-                .accessibilityHidden(!drawerOpen)
+            // The side panel sits underneath; opening it pushes the room aside as a card (Carter #55006). It is in the
+            // tree only while open, or fading out after a close.
+            SidePanelLayer(isOpen: drawerOpen, width: Self.drawerWidth, panel: sidePanel)
             NavigationStack(path: $roomPath) {
                 Group {
                     if let currentRoom {
@@ -624,7 +641,9 @@ struct AuthenticatedRootView: View {
         .pocketCanvas()
         // The logo at launch, while your rooms load underneath (Carter, #55287).
         .overlay { LaunchSplash(isReady: roomListSettled) }
-        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: drawerOpen)
+        // With Reduce Motion, a short fade in place of the spring.
+        .animation(reduceMotion ? .easeInOut(duration: 0.2) : .spring(response: 0.35, dampingFraction: 0.8),
+                   value: drawerOpen)
         // Opening the side panel reads what it shows that was not read lately: the bell, Waiting on you, whether folders
         // and direct messages are on, and your folders, so no count is older than `panelFreshness`. The rooms are read
         // once, at once, by the panel's own poll below (a second read here was the same request again).

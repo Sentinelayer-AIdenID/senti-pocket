@@ -18,6 +18,8 @@ import PocketUI
 /// - `-PocketRootStream <posts per second>`: messages arriving in the open room (default none).
 /// - `-PocketRootOneListPage`: every room in the list's first page, so the side panel lists all of them (the API
 ///   pages the list by 50).
+/// - `-PocketRootInlineReplies`: every message with replies shows its newest reply in the room, as a row to answer in
+///   place (a reply to a reply, from the room's box).
 enum RootPreview {
     static var isRequested: Bool { ProcessInfo.processInfo.arguments.contains("-PocketRootPreview") }
 
@@ -504,12 +506,21 @@ extension RootPreviewAPI: RoomTransport {
             return RoomActionsPage(replies: replies)
         }
         var byTarget: [Int64: RoomReactionSummary] = [:]
+        // With -PocketRootInlineReplies, each of these messages' newest reply is shown in the room as a row,
+        // to answer in place (a reply to a reply, from the room's box).
+        let inline = ProcessInfo.processInfo.arguments.contains("-PocketRootInlineReplies")
+        var replies: [RoomReply] = []
         for target in stride(from: newest, to: max(newest - 120, 0), by: -7) {
             byTarget[target] = RoomReactionSummary(targetSequenceId: target, counts: ["ack": 1, "like": 2, "reply": 3],
                                                    actorsByType: ["ack": [Self.agents[Int(target) % Self.agents.count]]],
                                                    replyTotal: 3)
+            if inline {
+                replies.append(RoomReply(id: "reply-\(target)-3", targetSequenceId: target,
+                                         authorId: Self.agents[3 % Self.agents.count], text: "Reply 3 to message \(target).",
+                                         createdAt: stamp(started.addingTimeInterval(-Double(newest - target) * 47 + 20))))
+            }
         }
-        return RoomActionsPage(byTarget: byTarget)
+        return RoomActionsPage(byTarget: byTarget, replies: replies)
     }
 }
 
