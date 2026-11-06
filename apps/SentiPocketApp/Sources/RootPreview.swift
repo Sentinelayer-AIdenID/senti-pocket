@@ -13,8 +13,12 @@ import PocketUI
 /// only. Never compiled into Release.
 ///
 /// Options:
-/// - `-PocketRootRoom long|mid|none`: the room open at launch. `long` holds 1,000 messages, `mid` 165 (the room
-///   loads its newest 100, then the rest with Load earlier). Default `mid`.
+/// - `-PocketRootRoom long|mid|none|<room id>`: the room open at launch. `long` holds 1,000 messages, `mid` 165 (the
+///   room loads its newest 100, then the rest with Load earlier); `room-000` to `room-137` hold 30 each, so the start of
+///   the room is in reach. Default `mid`.
+/// - `-PocketRootActivity`: the open room's Activity shows a few events and actions (the server's own types, and one
+///   this app does not know); without it Activity is not served here, as before.
+/// - `-PocketRootCreates`: the preview can make a chat, so the side panel offers New chat; without it, as before.
 /// - `-PocketRootStream <posts per second>`: messages arriving in the open room (default none).
 /// - `-PocketRootOneListPage`: every room in the list's first page, so the side panel lists all of them (the API
 ///   pages the list by 50).
@@ -32,6 +36,7 @@ enum RootPreview {
         switch argument("-PocketRootRoom") ?? "mid" {
         case "long": return RootPreviewAPI.longRoom
         case "none": return nil
+        case let id where RootPreviewAPI.rooms.contains(where: { $0.id == id }): return id
         default: return RootPreviewAPI.midRoom
         }
     }
@@ -287,8 +292,16 @@ final class RootPreviewAPI: @unchecked Sendable {
 
     private func count(_ name: String) { lock.withLock { calls[name, default: 0] += 1 } }
 
+    /// Whether the preview can make a chat (`-PocketRootCreates`).
+    static let createsRooms = ProcessInfo.processInfo.arguments.contains("-PocketRootCreates")
+
     var services: RootServices {
-        let sender = RootPreviewSender()
+        let sender: any RoomMessageSending & RoomActionSending
+        if Self.createsRooms {
+            sender = RootPreviewCreatingSender()
+        } else {
+            sender = RootPreviewSender()
+        }
         return RootServices(
             sessions: self, room: self, tickets: self, admissions: self, search: self, notifications: self,
             notificationMarker: self, callLog: self, waiting: self, checkpoints: self, directMessages: self,
@@ -438,7 +451,8 @@ extension RootPreviewAPI: SessionTransport {
     }
 
     func listEvents(sessionId: String, after: String?, fromSequence: Int64?, limit: Int) async throws -> SessionEventForwardPage {
-        throw SessionTransportError.notConfigured
+        guard Self.servesActivity else { throw SessionTransportError.notConfigured }
+        return try Self.activityEvents(sessionId: sessionId)
     }
 
     func listEventsBefore(sessionId: String, beforeSequence: Int64?, limit: Int) async throws -> SessionEventBeforePage {
@@ -447,7 +461,59 @@ extension RootPreviewAPI: SessionTransport {
 
     func listActions(sessionId: String, targetSequenceId: Int64?, targetActionId: String?, limit: Int) async throws
         -> SessionActionPage {
-        throw SessionTransportError.notConfigured
+        guard Self.servesActivity else { throw SessionTransportError.notConfigured }
+        return try Self.activityActions(sessionId: sessionId)
+    }
+
+    /// Whether the open room's Activity is served (`-PocketRootActivity`).
+    static let servesActivity = ProcessInfo.processInfo.arguments.contains("-PocketRootActivity")
+
+    /// A few of a room's events for Activity, as the server writes them: its own types, and one this app does not know
+    /// (it reads as an update). Made-up words only.
+    static func activityEvents(sessionId: String) throws -> SessionEventForwardPage {
+        let rows: [(type: String, name: String, text: String?, minutes: Double)] = [
+            ("session_message", "Alex", "Can someone check the release notes before lunch?", 42),
+            ("agent_response", "review-agent", "The notes read well. Two links were old; I fixed them.", 38),
+            ("session_titled", "Alex", nil, 31),
+            ("room_event_reminder", "Senti", "Design review in 15 minutes.", 15),
+            ("file_lock", "build-agent", nil, 9)
+        ]
+        let now = Date()
+        let events: [[String: Any]] = rows.enumerated().map { index, row in
+            let at = ISO8601DateFormatter().string(from: now.addingTimeInterval(-row.minutes * 60))
+            var event: [String: Any] = [
+                "id": "preview-event-\(index)", "event": row.type, "agent": ["displayName": row.name],
+                "agentId": row.name, "agentModel": "", "payload": [String: Any](), "ts": at, "timestamp": at,
+                "cursor": "c\(index)",
+                "sequenceId": 7_000 + index, "sessionId": sessionId, "source": "preview"
+            ]
+            if let text = row.text { event["payload"] = ["text": text] }
+            return event
+        }
+        let data = try JSONSerialization.data(withJSONObject: ["events": events])
+        return try JSONDecoder().decode(SessionEventForwardPage.self, from: data)
+    }
+
+    /// A few of a room's actions for Activity, as the server writes them (one of a type this app does not know).
+    static func activityActions(sessionId: String) throws -> SessionActionPage {
+        let rows: [(type: String, actor: String, target: Int, minutes: Double)] = [
+            ("ack", "Alex", 7_001, 37), ("like", "Sam", 7_001, 36), ("view", "Sam", 7_000, 35),
+            ("working_on", "review-agent", 0, 30), ("escalate", "ops-agent", 7_003, 12)
+        ]
+        let now = Date()
+        let actions: [[String: Any]] = rows.enumerated().map { index, row in
+            [
+                "id": "preview-action-\(index)", "sessionId": sessionId, "targetSequenceId": row.target,
+                "targetCursor": NSNull(), "targetActionId": NSNull(), "actionType": row.type, "actorKind": "human",
+                "actorId": row.actor, "actorUserId": NSNull(), "actorRole": NSNull(), "note": NSNull(), "metadata": [String: Any](),
+                "idempotencyKey": "preview-\(index)",
+                "createdAt": ISO8601DateFormatter().string(from: now.addingTimeInterval(-row.minutes * 60))
+            ]
+        }
+        let page: [String: Any] = ["sessionId": sessionId, "count": actions.count, "projection": [String: Any](),
+                                   "actions": actions]
+        let data = try JSONSerialization.data(withJSONObject: page)
+        return try JSONDecoder().decode(SessionActionPage.self, from: data)
     }
 
     func listCheckpoints(sessionId: String, limit: Int) async throws -> SessionCheckpointListPage {
@@ -676,6 +742,22 @@ private struct RootPreviewSender: RoomMessageSending, RoomActionSending {
 
     func sendAction(_ action: RoomActionRequest) async throws {
         try? await Task.sleep(nanoseconds: 200_000_000)
+    }
+}
+
+/// The preview's sender that can also make a chat (`-PocketRootCreates`): the side panel offers New chat.
+private struct RootPreviewCreatingSender: RoomMessageSending, RoomActionSending, RoomCreating {
+    func sendHumanMessage(sessionId: String, text: String, clientId: String) async throws {
+        try? await Task.sleep(nanoseconds: 300_000_000)
+    }
+
+    func sendAction(_ action: RoomActionRequest) async throws {
+        try? await Task.sleep(nanoseconds: 200_000_000)
+    }
+
+    func create(title: String, kind: RoomKind) async throws -> String {
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        return "room-made-" + String(UUID().uuidString.prefix(8)).lowercased()
     }
 }
 #endif

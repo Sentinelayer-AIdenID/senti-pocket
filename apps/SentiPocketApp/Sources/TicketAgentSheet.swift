@@ -208,7 +208,7 @@ final class AgentStartModel: ObservableObject {
     }
 
     static let unconfirmedMessage = "Not confirmed: the agent may already be starting. Check again; it can only bring back this one agent."
-    static let tooOldMessage = "Not confirmed, and too old to check again safely. Look for its agent in the Flight record before starting another; this start clears a day after it was made."
+    static let tooOldMessage = "Not confirmed, and too old to check again safely. Look for its agent in Room info before starting another; this start clears a day after it was made."
     static let notKeptMessage = "This phone could not keep a record of the start, so it was not sent. Nothing started."
     static let chatNotRecordedMessage = "The new chat is made, but this phone could not record it, so the agent was not sent. Nothing started; starting again uses that chat."
 
@@ -577,7 +577,7 @@ struct TicketAgentSheet: View {
         Section {
             Label("\(started.agentName) is starting on its own machine.", systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.teal)
-            Text("It will post a short plan in the room. The ticket is assigned to it; its box shows in the Flight record.")
+            Text("It will post a short plan in the room. The ticket is assigned to it; its box shows in Room info.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
@@ -683,7 +683,7 @@ struct AgentStartForm: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .accessibilityIdentifier("pocket.agent.checkAgain")
-                Text("Its box shows in the Flight record once it is up.")
+                Text("Its box shows in Room info once it is up.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else if model.phase == .unconfirmedTooOld {

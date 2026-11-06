@@ -842,7 +842,8 @@ struct RoomChatScreen: View {
                         Label("Talk", systemImage: "waveform")
                     }
                     .disabled(voiceRoom != nil)
-                    .accessibilityLabel("Talk with the agents by voice")
+                    // A plain name for VoiceOver (Carter, 2026-11-06): "Voice", "Room info", "More".
+                    .accessibilityLabel("Voice")
                     .accessibilityIdentifier("pocket.room.talk")
                 }
             }
@@ -853,9 +854,11 @@ struct RoomChatScreen: View {
                     flight.setPeople(roster.members)
                     showsFlight = true
                 } label: {
-                    Label("Flight record", systemImage: "airplane")
+                    // Room info, not the Flight record and its airplane (Carter, 2026-11-06: "doesn't sound good for
+                    // non technical people"); the side panel already has Activity.
+                    Label("Room info", systemImage: "info.circle")
                 }
-                .accessibilityLabel("Flight record: who is working on what")
+                .accessibilityLabel("Room info")
                 .accessibilityIdentifier("pocket.room.flight")
             }
             if decidesAdmissions {
@@ -906,7 +909,7 @@ struct RoomChatScreen: View {
                     Color.black.opacity(0.32)
                         .ignoresSafeArea()
                         .onTapGesture { showsFlight = false }
-                        .accessibilityLabel("Close the flight record")
+                        .accessibilityLabel("Close room info")
                         .accessibilityAddTraits(.isButton)
                     FlightRecordPanel(
                         state: flight.state,

@@ -63,9 +63,10 @@ struct WhisperModelSettingsView: View {
                     CalendarSettingsSection(context: calendar)
                 }
                 crashSection
+                // The speech model's sections sit under Advanced, and only where the model file is offered (DEBUG):
+                // a Release build shows nothing of it, not even the way to it.
                 if offersModelFile {
-                    modelStatusSection
-                    modelActionsSection
+                    advancedSection
                 }
                 accountSection
             }
@@ -257,23 +258,50 @@ struct WhisperModelSettingsView: View {
 
     @ObservedObject private var crashes = CrashReporter.shared
 
-    /// The times Pocket closed unexpectedly, as the phone recorded them, to share for fixing.
+    /// The times the app closed unexpectedly, as the phone recorded them, to send for fixing. Plain words, and no
+    /// destination named here (Carter, 2026-11-06: crash reports read plainly).
     private var crashSection: some View {
         Section {
             if crashes.recorded.isEmpty {
-                Text("None recorded")
+                Text("None so far")
                     .foregroundStyle(.secondary)
             } else {
                 ShareLink(item: CrashReportText.message(crashes.recorded)) {
-                    Label("Share \(crashes.recorded.count) \(crashes.recorded.count == 1 ? "report" : "reports")",
-                          systemImage: "square.and.arrow.up")
+                    Label(Self.sendReports(crashes.recorded.count), systemImage: "square.and.arrow.up")
                 }
                 .accessibilityIdentifier("settings.crashes.share")
             }
         } header: {
-            Text("Crash reports")
+            Text(Self.crashTitle)
         } footer: {
-            Text("When Pocket closes unexpectedly, the phone records where it stopped and your last few taps, never your messages. Pocket offers to send each one to the next room you open; here you can share them all.")
+            Text(Self.crashFooter)
+        }
+    }
+
+    static let crashTitle = "If the app closes unexpectedly"
+    static let crashFooter = "Your phone keeps a short note of where the app stopped and your last few taps, never "
+        + "your messages. Sending them helps us fix it."
+
+    static func sendReports(_ count: Int) -> String {
+        count == 1 ? "Send 1 report" : "Send \(count) reports"
+    }
+
+    /// The on-device speech model (its file, its checks) is for the few who set it up: it sits under Advanced, not on
+    /// the first screen of Settings (Carter, 2026-11-06).
+    private var advancedSection: some View {
+        Section {
+            NavigationLink {
+                Form {
+                    modelStatusSection
+                    modelActionsSection
+                }
+                .navigationTitle("Advanced")
+                .navigationBarTitleDisplayMode(.inline)
+                .accessibilityIdentifier("settings.advanced.page")
+            } label: {
+                Label("Advanced", systemImage: "slider.horizontal.3")
+            }
+            .accessibilityIdentifier("settings.advanced")
         }
     }
 

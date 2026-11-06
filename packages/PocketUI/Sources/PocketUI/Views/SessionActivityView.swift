@@ -41,7 +41,7 @@ public struct SessionActivityView: View {
             }
 
             if !state.events.isEmpty {
-                Section("Messages and events") {
+                Section("Messages") {
                     ForEach(state.events) { event in
                         Button {
                             send(.openEvent(sessionId: event.sessionId, sequenceId: event.sequenceId))
@@ -60,7 +60,7 @@ public struct SessionActivityView: View {
             }
 
             if !state.actions.isEmpty {
-                Section("Reactions and actions") {
+                Section("Reactions") {
                     ForEach(state.actions) { action in
                         Button {
                             send(.openAction(sessionId: action.sessionId, actionId: action.id.actionId))
@@ -82,7 +82,7 @@ public struct SessionActivityView: View {
         .refreshable { send(.refreshActivity(sessionId: state.sessionId)) }
         .overlay {
             if state.isRefreshing {
-                ProgressView("Refreshing activity")
+                ProgressView("Loading")
                     .padding()
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
             }
@@ -99,7 +99,7 @@ public struct SessionActivityView: View {
                     .accessibilityHidden(true)
                 Text(state.failure?.title ?? "No activity yet")
                     .font(.title2.bold())
-                Text(state.failure?.detail ?? "Messages, replies, reactions, and acknowledgements will appear in separate, clearly labeled sections.")
+                Text(state.failure?.detail ?? "Messages and reactions in this chat show up here.")
                     .foregroundStyle(PocketPalette.textSecondary)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
@@ -123,17 +123,7 @@ private struct EventRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .firstTextBaseline) {
-                    author
-                    Spacer(minLength: 10)
-                    sequence
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    author
-                    sequence
-                }
-            }
+            author
             Text(event.eventTypeLabel)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(PocketPalette.accent)
@@ -151,12 +141,6 @@ private struct EventRow: View {
 
     private var author: some View {
         Text(event.author).font(.headline)
-    }
-
-    private var sequence: some View {
-        Text("#\(event.sequenceId)")
-            .font(.caption.monospacedDigit())
-            .foregroundStyle(PocketPalette.textSecondary)
     }
 }
 
@@ -196,8 +180,8 @@ private struct ActionRow: View {
     }
 
     private var target: some View {
-        Text("Target #\(action.targetSequenceId)")
-            .font(.caption.monospacedDigit())
+        Text(action.targetLabel)
+            .font(.caption)
             .foregroundStyle(PocketPalette.textSecondary)
     }
 }

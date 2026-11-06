@@ -1,8 +1,9 @@
 import Foundation
 import PocketContracts
 
-/// The Flight record panel: who is working on what in the room. Boxes (agents on their own machines) with what
-/// they are thinking and doing, and the room's other agents with their latest "working on" line.
+/// The Room info panel (once the Flight record): who is in the room and who is working on what. Boxes (agents on their
+/// own machines) with what they are thinking and doing, and the room's other agents with their latest "working on"
+/// line.
 public struct FlightRecordState: Equatable, Sendable {
     public enum Tone: Equatable, Sendable {
         case neutral
@@ -168,6 +169,45 @@ public struct FlightRecordState: Equatable, Sendable {
         self.failure = failure
         self.totals = totals
         self.endedBoxNames = endedBoxNames
+    }
+
+    /// The panel's parts, in the order it shows them.
+    public enum Section: Hashable, Sendable {
+        case people
+        case agents
+        case boxes
+    }
+
+    /// Whether the room has boxes this person can see: running now, finished, or counted in the room's totals. Only
+    /// then does the panel speak of boxes at all (their count, the totals, a box read that failed); a person without
+    /// boxes never sees box words (Carter, 2026-11-06).
+    public var showsBoxes: Bool {
+        !boxes.isEmpty || finishedBoxes > 0 || (totals?.minted ?? 0) > 0
+    }
+
+    /// The line under the title: the boxes' count and what they are doing, or nothing for a room without boxes.
+    public var summary: String? {
+        guard showsBoxes else { return nil }
+        let working = boxes.filter(\.isWorking).count
+        var parts = ["\(boxes.count) \(boxes.count == 1 ? "box" : "boxes")"]
+        if working > 0 { parts.append("\(working) working now") }
+        if finishedBoxes > 0 { parts.append("\(finishedBoxes) finished") }
+        return parts.joined(separator: " · ")
+    }
+
+    /// The people first (Carter: the panel opens to People), then the agents, then the boxes; empty parts are left out.
+    public var sections: [Section] {
+        var sections: [Section] = []
+        if !people.isEmpty { sections.append(.people) }
+        if !agents.isEmpty { sections.append(.agents) }
+        if !boxes.isEmpty { sections.append(.boxes) }
+        return sections
+    }
+
+    /// A box read that failed, said only to a person who has boxes in this room.
+    public var shownFailure: String? {
+        guard showsBoxes, boxes.isEmpty else { return nil }
+        return failure
     }
 
     /// Thoughts and commands merged newest first, at most `limit`.

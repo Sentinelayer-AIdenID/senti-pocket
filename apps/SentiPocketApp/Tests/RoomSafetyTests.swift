@@ -1085,13 +1085,15 @@ final class RoomSafetyTests: XCTestCase {
         XCTAssertNotNil(contact)
         XCTAssertTrue(contact?.accessibilityLabel?.contains("Contact us") == true, contact?.accessibilityLabel ?? "")
         let drawn = HostedSummary.identifiers(in: release)
-        XCTAssertFalse(drawn.contains { $0.hasPrefix("settings.whisper.") }, "nothing of the model file: \(drawn)")
+        XCTAssertFalse(drawn.contains { $0.hasPrefix("settings.whisper.") || $0 == "settings.advanced" },
+                       "nothing of the model file, nor Advanced, the way to it: \(drawn)")
         HostedSummary.close(release)
 
-        // The same check sees the picker where it is offered (DEBUG), so it can fail.
+        // The same check sees the way to the picker where it is offered (DEBUG: Advanced, which holds it), so it can
+        // fail.
         let debug = try settings(offersModelFile: true)
         defer { HostedSummary.close(debug) }
-        XCTAssertNotNil(HostedSummary.wait(for: "settings.whisper.choose-file", in: debug))
+        XCTAssertNotNil(HostedSummary.wait(for: "settings.advanced", in: debug))
     }
 
     /// The consent sheet's answers read Agree and Not now, under the notice.
