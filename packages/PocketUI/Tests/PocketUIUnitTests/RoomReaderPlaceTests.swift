@@ -7,8 +7,37 @@ import XCTest
 /// The reader's place now comes from the scroll view's geometry: at the bottom is exact, only the list moving up from
 /// where it was at the bottom leaves it, and the end moving away from a reader at the bottom is followed.
 final class RoomReaderPlaceTests: XCTestCase {
-    private func reading(_ distanceToEnd: CGFloat, offset: CGFloat) -> RoomReaderPlace.Reading {
-        RoomReaderPlace.Reading(distanceToEnd: distanceToEnd, offset: offset)
+    private func reading(_ distanceToEnd: CGFloat, offset: CGFloat, visible: CGFloat = 640) -> RoomReaderPlace.Reading {
+        RoomReaderPlace.Reading(distanceToEnd: distanceToEnd, offset: offset, visibleHeight: visible)
+    }
+
+    /// A list scrolled a whole screen past its end shows none of the room (a blank list, warden at `be112d8`): that is
+    /// not the end in view, and the reader is not at the bottom. A pull past the end, or a room shorter than the
+    /// screen, still is.
+    func test_a_list_a_whole_screen_past_its_end_is_not_the_end_in_view() {
+        XCTAssertTrue(reading(-60, offset: 900).endInView, "pulled past the end")
+        XCTAssertTrue(reading(-639, offset: 0).endInView, "a room shorter than the screen")
+        XCTAssertFalse(reading(-640, offset: 50_000).endInView, "a whole screen past the end: nothing of the room")
+        XCTAssertFalse(reading(-48_000, offset: 50_000).endInView, "far past it")
+        var tracker = RoomReaderPlace.Tracker(atBottom: false)
+        XCTAssertEqual(tracker.read(reading(-48_000, offset: 50_000)), .none, "not taken for the bottom")
+        XCTAssertFalse(tracker.atBottom)
+    }
+
+    /// Once a reading says the reader is at the bottom, the end moving below while the reader is moving the list
+    /// (dragging it, or its coast) started a follow mid-flick, and at the largest text size a follow can land thousands
+    /// of points short, above a reader who just reached the end (warden at `be112d8`; seen once in the control:
+    /// a follow 1 s into a flick's deceleration). Now nothing is followed until the list is at rest.
+    func test_the_end_moving_below_while_the_reader_moves_the_list_is_not_followed_until_it_rests() {
+        var tracker = RoomReaderPlace.Tracker(atBottom: false)
+        XCTAssertEqual(tracker.read(reading(10, offset: 9_000), readerMoving: true), .endInView, "the flick reached it")
+        XCTAssertTrue(tracker.atBottom)
+        XCTAssertEqual(tracker.read(reading(400, offset: 9_010), readerMoving: true), .none,
+                       "rows measured on the way, the end pushed below, the list still coasting: no follow")
+        XCTAssertEqual(tracker.read(reading(380, offset: 9_030), readerMoving: true), .none, "still coasting")
+        XCTAssertTrue(tracker.atBottom, "still at the bottom")
+        XCTAssertEqual(tracker.read(reading(380, offset: 9_030), readerMoving: false), .endMovedAway,
+                       "at rest: followed now")
     }
 
     func test_the_bottom_is_the_end_of_the_room_within_24_points() {

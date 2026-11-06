@@ -22,14 +22,21 @@ public enum RoomReaderPlace {
         public let distanceToEnd: CGFloat
         /// How far the list is scrolled from its top.
         public let offset: CGFloat
+        /// The height that can be read (between the navigation bar and the composer).
+        public let visibleHeight: CGFloat
 
-        public init(distanceToEnd: CGFloat, offset: CGFloat) {
+        public init(distanceToEnd: CGFloat, offset: CGFloat, visibleHeight: CGFloat = .greatestFiniteMagnitude) {
             self.distanceToEnd = distanceToEnd
             self.offset = offset
+            self.visibleHeight = visibleHeight
         }
 
-        /// The end of the room is in view.
-        public var endInView: Bool { distanceToEnd < RoomReaderPlace.atBottomDistance }
+        /// The end of the room is in view: within `atBottomDistance` below the bottom of what can be read, and not a
+        /// whole screen above it. A list scrolled that far past its end shows none of the room (a blank list): that is
+        /// not the reader at the bottom, and the arrow shows.
+        public var endInView: Bool {
+            distanceToEnd < RoomReaderPlace.atBottomDistance && distanceToEnd > -visibleHeight
+        }
     }
 
     /// What a reading says about the reader.
@@ -149,7 +156,10 @@ public enum RoomReaderPlace {
                 atBottom = false
                 return .leftBottom
             case .endBelow:
-                return atBottom ? .endMovedAway : .none
+                // Not while the reader is moving the list (dragging it, or its coast): a follow then lands where the
+                // rows' estimated heights say, which at the largest text size can be thousands of points above a
+                // reader who just reached the end. The room takes the reader's place again once the list is at rest.
+                return atBottom && !readerMoving ? .endMovedAway : .none
             }
         }
     }

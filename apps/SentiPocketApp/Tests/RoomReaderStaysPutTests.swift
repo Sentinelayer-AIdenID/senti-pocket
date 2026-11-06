@@ -401,10 +401,14 @@ final class RoomReaderStaysPutTests: XCTestCase {
             func belowNow() -> CGFloat {
                 Self.list(in: window).map { Self.bottomOffset(of: $0) - $0.contentOffset.y } ?? below
             }
-            wait("batch \(batch): the arrow took the reader down a screen", seconds: 8) { below - belowNow() >= screen }
+            // Down a screen, and not a screen past the end (a list scrolled past its end shows nothing).
+            wait("batch \(batch): the arrow took the reader down a screen", seconds: 8) {
+                below - belowNow() >= screen && belowNow() > -screen
+            }
             print("READER-STAYS-PUT tall-arrivals arrow batch=\(batch) after the tap: end-below=\(Int(belowNow()))")
             XCTAssertGreaterThanOrEqual(below - belowNow(), screen, "batch \(batch): the arrow did not take the reader "
                 + "down a screen")
+            XCTAssertGreaterThan(belowNow(), -screen, "batch \(batch): the list is not a screen past its end")
             pump(1)
             RoomScrollTrace.followMovesNothing = true
             RoomScrollTrace.injectedRetry = .movesNothing
@@ -554,9 +558,12 @@ final class RoomReaderStaysPutTests: XCTestCase {
     }
 
     /// The end of the room within the bottom's 24 points of the composer (`RoomReaderPlace.atBottomDistance`): the room
-    /// rests there, a few points above the very end (the list's own padding).
+    /// rests there, a few points above the very end (the list's own padding). Not a whole screen past it: a list
+    /// scrolled that far shows none of the room.
     private static func atBottom(_ scroll: UIScrollView) -> Bool {
-        bottomOffset(of: scroll) - scroll.contentOffset.y < 24
+        let below = bottomOffset(of: scroll) - scroll.contentOffset.y
+        let visible = scroll.bounds.height - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom
+        return below < 24 && below > -visible
     }
 
     /// The room's list: the tallest scroll view in the window.

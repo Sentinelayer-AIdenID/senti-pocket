@@ -499,7 +499,13 @@ public struct RoomChatView: View {
             .modifier(StartsAtBottom())
             // Where the reader is, from the scroll view's own geometry (iOS 18 and later).
             .modifier(RoomScrollReading { readingSeen($0, proxy: proxy) })
-            .modifier(RoomReaderScrolling { bottomWatch.readerMoving = $0 })
+            .modifier(RoomReaderScrolling { moving in
+                let wasMoving = bottomWatch.readerMoving
+                bottomWatch.readerMoving = moving
+                // The reader's drag and its coast are over: the reader's place again, so a follow held back while the
+                // list moved is made now.
+                if wasMoving, !moving { DispatchQueue.main.async { recheckPlace(proxy) } }
+            })
             // The whole list, its handlers with it, so a new one opens as the room does.
             .id(listEpoch)
         }
@@ -1199,7 +1205,8 @@ private struct RoomScrollReading: ViewModifier {
                     seen(RoomReaderPlace.Reading(
                         distanceToEnd: geometry.contentSize.height
                             - (geometry.contentOffset.y + geometry.contentInsets.top + geometry.containerSize.height),
-                        offset: geometry.contentOffset.y
+                        offset: geometry.contentOffset.y,
+                        visibleHeight: geometry.containerSize.height
                     ))
                 }
                 return true
