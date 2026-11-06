@@ -67,7 +67,7 @@ struct CrashReportPayload: Encodable, Equatable {
 
 /// What a report may say on its way to the team: never a room's id or title, a message's number or text, or a
 /// person's name or address. The steps keep their kind and counts only ("closeThread (101 rows)"). The server
-/// scrubs again. (Warden, #352.)
+/// scrubs again. (Review, #352.)
 enum CrashStepScrub {
     private static let identifierRules: [(pattern: String, placeholder: String)] = [
         (#"https?://\S+"#, "<link>"),
@@ -185,7 +185,7 @@ final class CrashReportDelivery {
     /// a report never goes to any room from here.
     func deliver(_ reports: [CrashReport]) async -> [CrashReport] {
         // The credential and its account when the person chose to send: every request carries this credential, and
-        // the send stops once another one is stored, or none (a sign-out, another account) (Codex review, #352).
+        // the send stops once another one is stored, or none (a sign-out, another account) (review, #352).
         guard let token = api.currentToken(), let account = RoomSendOutbox.account(token: token) else { return [] }
         var done: [CrashReport] = []
         for report in reports.sorted(by: { $0.at > $1.at }) {

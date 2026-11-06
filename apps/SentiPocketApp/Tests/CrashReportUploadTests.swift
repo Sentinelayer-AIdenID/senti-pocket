@@ -147,7 +147,7 @@ final class CrashReportUploadTests: XCTestCase {
                        200, "counted in code points, as the API counts")
     }
 
-    /// Warden, #352: no room's id or title, no message's number or text, no person's name or address, ever.
+    /// Review, #352: no room's id or title, no message's number or text, no person's name or address, ever.
     func test_breadcrumbs_never_carry_a_room_a_message_a_name_or_an_address() {
         let steps = [
             "12:00:01 room opened 3f1c2b9e-1234-4abc-8def-0123456789ab",
@@ -237,7 +237,7 @@ final class CrashReportUploadTests: XCTestCase {
         }
     }
 
-    /// Codex review, #352: the send keeps the credential and account it started with, and stops once another is stored.
+    /// Review, #352: the send keeps the credential and account it started with, and stops once another is stored.
     func test_a_send_stops_when_the_signed_in_account_changes() async {
         let alex = credential("alex")
         let api = ScriptedCrashReports(token: alex)
