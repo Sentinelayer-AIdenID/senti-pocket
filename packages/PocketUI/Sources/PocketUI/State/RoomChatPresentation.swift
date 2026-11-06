@@ -44,6 +44,8 @@ public struct RoomChatMessageInput: Equatable, Sendable {
     public var isReportable = true
     /// Your own likes and dislikes placed on this message (`RoomOwnTaps`).
     public let ownTaps: RoomOwnTaps
+    /// Who picked up an @any in it, or that nobody was free (`RoomAddressedLine`).
+    public var addressedLine: String?
 
     public init(
         id: String,
@@ -358,6 +360,8 @@ public struct RoomChatMessageRow: Equatable, Identifiable, Sendable {
     public var isReportable = true
     /// Yours, under the id this account had before (`formerOwnAuthorIds`): never reported or blocked.
     public var wasYours = false
+    /// Who picked up an @any in it, or that nobody was free (`RoomAddressedLine`).
+    public var addressedLine: String?
 }
 
 public enum RoomChatRow: Equatable, Identifiable, Sendable {
@@ -442,6 +446,8 @@ public struct RoomChatReplyRow: Equatable, Identifiable, Sendable {
     public var wasYours = false
     /// Its photos and files, shown as a message's are.
     public let attachments: [RoomAttachmentChip]
+    /// Who picked up an @any in it, or that nobody was free (`RoomAddressedLine`).
+    public var addressedLine: String?
 
     public init(
         id: String,
@@ -942,7 +948,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                     && !revealedBlocked.contains(input.inlineReplyId.map(RoomBlocking.revealKey(reply:))
                         ?? RoomBlocking.revealKey(message: input.id)),
                 isReportable: input.isReportable,
-                wasYours: formerIds.contains(input.authorId.lowercased())
+                wasYours: formerIds.contains(input.authorId.lowercased()),
+                addressedLine: input.addressedLine
             )))
             if input.kind == .message, let date = input.date {
                 run = (input.authorId, date)
@@ -2236,5 +2243,17 @@ public final class RoomDraftDebouncer {
         let write = pending
         pending = nil
         write?()
+    }
+}
+
+/// The line under a message that asked for any free agent (`@any`), from what the server decided when it was
+/// written: "Picked up by build-agent", or "Nobody free right now". Nothing when the author was over their broadcast
+/// limit (the words were kept, nobody was asked), or when the message asked no one.
+public enum RoomAddressedLine {
+    /// `pickedBy`: the chosen agent, already named as the room names people and agents.
+    public static func text(pickedBy: String?, nobodyFree: Bool, throttled: Bool) -> String? {
+        if throttled { return nil }
+        if let pickedBy, !pickedBy.isEmpty { return "Picked up by \(pickedBy)" }
+        return nobodyFree ? "Nobody free right now" : nil
     }
 }
