@@ -54,6 +54,28 @@ private struct TicketLinkRow: View {
     }
 }
 
+/// A block quote's frame: its blocks, set in from a bar drawn behind them. Behind them, not beside them in a stack: a
+/// stack holding the bar beside the blocks measured the blocks again and again, at every level of quote, so a quote's
+/// layout cost about five times more at each level it nested, for every line inside it. Padded, with the bar behind,
+/// each level measures its blocks once for each size it is asked about.
+struct ChatQuoteFrame<Content: View>: View {
+    let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        content
+            .padding(.leading, 11)
+            .background(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(PocketPalette.separator)
+                    .frame(width: 3)
+            }
+    }
+}
+
 private struct ChatMarkdownBlocksView: View {
     let blocks: [ChatMarkdownBlock]
     let ownHandles: Set<String>
@@ -105,10 +127,7 @@ private struct ChatMarkdownBlocksView: View {
                 }
             }
         case .quote(let inner):
-            HStack(alignment: .top, spacing: 8) {
-                RoundedRectangle(cornerRadius: 1.5)
-                    .fill(PocketPalette.separator)
-                    .frame(width: 3)
+            ChatQuoteFrame {
                 ChatMarkdownBlocksView(blocks: inner, ownHandles: ownHandles)
                     .foregroundStyle(PocketPalette.textSecondary)
             }

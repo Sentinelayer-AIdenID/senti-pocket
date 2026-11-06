@@ -87,10 +87,10 @@ final class ChatMarkdownQuoteDepthTests: XCTestCase {
 import AppKit
 import SwiftUI
 
-/// The work of laying a quote out, counted, not timed (a hosted runner's speed varies): the parsed blocks drawn as
-/// `ChatMarkdownView` draws a quote (a bar beside its blocks, at every level) with a counter at each level, which counts
-/// each time that level is sized, placed or asked for an alignment. Laying stacks nested that way costs more at every
-/// level, so the cap must keep a deep quote's work near what four levels cost. The real view's times are printed too.
+/// The work of laying a quote out, counted, not timed (a hosted runner's speed varies): the parsed blocks drawn in the
+/// app's own quote frame (`ChatQuoteFrame`, as `ChatMarkdownView` draws a quote), with a counter on each quote level and
+/// on each line, which counts each time it is sized, placed or asked for an alignment. The real view's times are
+/// printed too.
 final class ChatMarkdownQuoteDepthLayoutTests: XCTestCase {
     /// Counts each time a level is sized, placed or asked for an alignment, and passes it all to its one view.
     private struct CountingLayout: Layout {
@@ -119,7 +119,8 @@ final class ChatMarkdownQuoteDepthLayoutTests: XCTestCase {
         }
     }
 
-    /// Parsed blocks drawn the way `ChatMarkdownView` draws them, a counter on each quote's blocks.
+    /// Parsed blocks drawn the way `ChatMarkdownView` draws them (a quote in the app's own `ChatQuoteFrame`), a counter on
+    /// each quote's blocks and on each paragraph.
     private struct CountedBlocks: View {
         let blocks: [ChatMarkdownBlock]
 
@@ -128,10 +129,7 @@ final class ChatMarkdownQuoteDepthLayoutTests: XCTestCase {
                 ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                     switch block {
                     case .quote(let inner):
-                        HStack(alignment: .top, spacing: 8) {
-                            RoundedRectangle(cornerRadius: 1.5).frame(width: 3)
-                            CountingLayout { CountedBlocks(blocks: inner) }
-                        }
+                        ChatQuoteFrame { CountingLayout { CountedBlocks(blocks: inner) } }
                     case .deeperQuote(let levels, let text):
                         HStack(alignment: .firstTextBaseline, spacing: 4) {
                             Text(ChatMarkdown.deeperQuoteMark(levels: levels)).font(.caption)
@@ -148,7 +146,7 @@ final class ChatMarkdownQuoteDepthLayoutTests: XCTestCase {
                             }
                         }
                     case .paragraph(let text):
-                        Text(text)
+                        CountingLayout { Text(text) }
                     default:
                         Text("…")
                     }
@@ -204,6 +202,33 @@ final class ChatMarkdownQuoteDepthLayoutTests: XCTestCase {
         XCTAssertLessThanOrEqual(seven.fresh, four.fresh * 2, "7 deep, laid out fresh, makes at most twice 4 deep's work")
         XCTAssertLessThanOrEqual(seven.again, max(four.again, 1) * 2,
                                  "7 deep, laid out again, makes at most twice 4 deep's work")
+    }
+
+    /// `lines` paragraphs inside quotes `levels` deep.
+    private static func lines(_ lines: Int, levels: Int) -> String {
+        var text = (1..<max(levels, 1)).map { String(repeating: ">", count: $0) + " level \($0)" }
+        let marks = String(repeating: ">", count: levels)
+        for line in 1...lines {
+            text.append(marks + " Line \(line), long enough to wrap onto a second line in a row of the room.")
+            text.append(marks)
+        }
+        return text.joined(separator: "\n")
+    }
+
+    /// Lines inside a quote four deep make at most twice the layout work of the same lines one deep: each level adds a
+    /// little, it does not multiply what is inside it. And twice the lines make about twice the work.
+    func test_lines_four_quotes_deep_cost_about_what_they_cost_one_deep() {
+        let oneDeep = work(Self.lines(50, levels: 1))
+        let fourDeep = work(Self.lines(50, levels: 4))
+        let fourDeepMore = work(Self.lines(200, levels: 4))
+        print("QUOTEDEPTH counted 50 lines 1 deep: fresh \(oneDeep.fresh), again \(oneDeep.again); 4 deep: fresh "
+            + "\(fourDeep.fresh), again \(fourDeep.again); 200 lines 4 deep: fresh \(fourDeepMore.fresh), again "
+            + "\(fourDeepMore.again)")
+        XCTAssertGreaterThan(oneDeep.fresh, 50, "the counter sees every line")
+        XCTAssertLessThanOrEqual(fourDeep.fresh, oneDeep.fresh * 2, "4 deep makes at most twice 1 deep's work, fresh")
+        XCTAssertLessThanOrEqual(fourDeep.again, max(oneDeep.again, 1) * 2, "and laid out again")
+        XCTAssertLessThanOrEqual(fourDeepMore.fresh, fourDeep.fresh * 4 + fourDeep.fresh / 2,
+                                 "four times the lines make about four times the work")
     }
 
     /// 50 and 200 levels make at most twice the layout work of four levels: every line past the fourth sits in the
