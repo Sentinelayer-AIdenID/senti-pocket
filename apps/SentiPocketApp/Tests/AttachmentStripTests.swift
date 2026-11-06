@@ -62,6 +62,20 @@ final class AttachmentStripTests: XCTestCase {
         p.r > 200 && (110...190).contains(p.g) && p.b < 80
     }
 
+    /// The room with one message of `photos` photos in a 390-pt-wide window (an iPhone's), each a teal preview.
+    private func hostPhone(photos: Int, send: @escaping (RoomChatIntent) -> Void = { _ in }) throws -> UIWindow {
+        let window = try host(photos: photos, send: send)
+        window.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        HostedSummary.pump(0.3)
+        return window
+    }
+
+    /// The strip's sideways scroll, if it has one: a scroll view wider inside than out, and no taller.
+    private func sidewaysScroll(in window: UIWindow) -> UIScrollView? {
+        HostedSummary.elements(in: window).compactMap { $0 as? UIScrollView }
+            .first { $0.contentSize.width > $0.bounds.width + 1 && $0.contentSize.height <= $0.bounds.height + 1 }
+    }
+
     /// The strip's photos the screen has, left to right.
     private func stripPhotos(in window: UIWindow) -> [NSObject] {
         HostedSummary.elements(in: window)
@@ -118,6 +132,67 @@ final class AttachmentStripTests: XCTestCase {
             XCTAssertFalse(left.accessibilityFrame.intersects(right.accessibilityFrame),
                            "neighbouring thumbnails' tap areas do not overlap")
         }
+    }
+
+    /// Carter's three photos on an iPhone: they all fit, so they fill the row, each wholly in sight, the same size, and
+    /// nothing scrolls (they were 120 pt, and the third was cut off at the screen's edge).
+    func test_three_photos_on_a_phone_fit_the_row_all_in_sight_the_same_size_and_nothing_scrolls() throws {
+        let window = try hostPhone(photos: 3)
+        defer { HostedSummary.close(window) }
+        XCTAssertNotNil(HostedSummary.wait(for: "pocket.room.attachment.strip.photo", in: window), "the photos show in a strip")
+        HostedSummary.pump(0.5)
+        let photos = stripPhotos(in: window).map { window.convert($0.accessibilityFrame, from: nil) }
+        XCTAssertEqual(photos.count, 3)
+        print("STRIP three on a phone: photos \(photos.map { "\(Int($0.minX))-\(Int($0.maxX))x\(Int($0.height))" })")
+        for photo in photos {
+            XCTAssertTrue(window.bounds.contains(photo), "each photo is wholly on the screen: \(photo)")
+            XCTAssertEqual(photo.width, photos[0].width, accuracy: 0.5, "the photos are the same size")
+            XCTAssertEqual(photo.width, photo.height, accuracy: 0.5, "and square")
+        }
+        XCTAssertGreaterThanOrEqual(photos[0].width, 96)
+        XCTAssertLessThanOrEqual(photos[0].width, 120)
+        XCTAssertNil(sidewaysScroll(in: window), "nothing scrolls sideways, so nothing is cut off")
+    }
+
+    /// Four or twelve photos on an iPhone do not fit at 96 pt: they stay at 120 pt and scroll, and the first photo not
+    /// wholly in sight shows at least 30 pt of itself, so it is plain there is more.
+    func test_four_or_twelve_photos_on_a_phone_scroll_at_120_pt_showing_30_pt_or_more_of_the_next() throws {
+        for count in [4, 12] {
+            let window = try hostPhone(photos: count)
+            XCTAssertNotNil(HostedSummary.wait(for: "pocket.room.attachment.strip.photo", in: window),
+                            "\(count) photos show in a strip")
+            HostedSummary.pump(0.5)
+            let photos = stripPhotos(in: window).map { window.convert($0.accessibilityFrame, from: nil) }
+            let scroll = try XCTUnwrap(sidewaysScroll(in: window), "\(count) photos scroll sideways")
+            let strip = scroll.convert(scroll.bounds, to: window)
+            print("STRIP \(count) on a phone: in sight \(strip), photos \(photos.map { "\(Int($0.minX))-\(Int($0.maxX))" })")
+            XCTAssertEqual(photos.first?.width ?? 0, 120, accuracy: 0.5, "\(count) photos stay 120 pt")
+            let next = try XCTUnwrap(photos.first { $0.maxX > strip.maxX + 0.5 }, "a photo runs past the strip's edge")
+            XCTAssertGreaterThanOrEqual(strip.maxX - next.minX, 30,
+                                        "\(count) photos: the next one shows at least 30 pt: \(next) in \(strip)")
+            HostedSummary.close(window)
+        }
+    }
+
+    /// The text size leaves the photos alone: three photos on an iPhone are the same size at the largest text size as
+    /// at the default one, and still fit (the strip used to grow its photos with the text, up to 200 pt).
+    func test_the_largest_text_size_leaves_the_photos_the_same_size() throws {
+        var widths: [CGFloat] = []
+        for ax5 in [false, true] {
+            let window = try hostPhone(photos: 3)
+            if #available(iOS 17.0, *), ax5 {
+                window.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge
+            }
+            XCTAssertNotNil(HostedSummary.wait(for: "pocket.room.attachment.strip.photo", in: window), "the photos show")
+            HostedSummary.pump(0.5)
+            let photos = stripPhotos(in: window).map { window.convert($0.accessibilityFrame, from: nil) }
+            XCTAssertEqual(photos.count, 3)
+            XCTAssertTrue(photos.allSatisfy { window.bounds.contains($0) }, "all three in sight (AX5: \(ax5))")
+            widths.append(photos.first?.width ?? 0)
+            HostedSummary.close(window)
+        }
+        print("STRIP three on a phone, default and AX5: \(widths)")
+        XCTAssertEqual(widths[0], widths[1], accuracy: 0.5, "the same size at the default and the largest text size")
     }
 
     /// What is drawn stays inside each square too: between two wide photos the room's background shows, never the photo

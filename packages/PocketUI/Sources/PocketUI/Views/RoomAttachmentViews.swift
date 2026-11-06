@@ -1,11 +1,6 @@
 #if canImport(SwiftUI)
 import SwiftUI
 
-/// Files under a message. Photos show their preview, videos their poster frame with a play button, and other files a
-/// card with the name, size and type, and a Share button. Tapping opens a photo full size (zoomable), plays a video
-/// straight from storage, and previews any other file. A file taken back after it was sent shows only its name and
-/// "Attachment removed", and nothing opens it. Two or more photos show as one strip of smaller thumbnails, side by side,
-/// that scrolls sideways when they do not fit (`RoomAttachmentLayoutItem`).
 /// The sideways scrolls inside a room row (a strip of photos), as frames in the row's own space: a drag that starts on
 /// one scrolls it, and the row's swipe to reply leaves it alone.
 struct RoomRowSideScrolls: PreferenceKey {
@@ -30,14 +25,43 @@ extension View {
     }
 }
 
+/// A strip of photos' frame, from the width its row gives it: as tall as `RoomStripMetrics` makes the strip at that
+/// width, and as wide as its photos when they fit (the whole width when they scroll). Its one view (a reader) is laid
+/// out at exactly that size and works the photos' side out again from it, so the photos and the frame agree in one
+/// layout pass.
+struct RoomStripFrame: Layout {
+    let count: Int
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let offered = proposal.width ?? .infinity
+        let width = offered.isFinite ? offered : RoomStripMetrics.idealWidth(count: count)
+        let metrics = RoomStripMetrics(count: count, width: width)
+        // A strip that fits is as wide as its photos, so your own message's photos still line up on the right; one
+        // that scrolls takes the whole width.
+        let gaps = RoomStripMetrics.spacing * CGFloat(max(count - 1, 0))
+        let used = metrics.mode == .fit ? CGFloat(count) * metrics.side + gaps : width
+        return CGSize(width: used, height: metrics.height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        for subview in subviews {
+            subview.place(at: bounds.origin, anchor: .topLeading, proposal: ProposedViewSize(bounds.size))
+        }
+    }
+}
+
+/// Files under a message. Photos show their preview, videos their poster frame with a play button, and other files a
+/// card with the name, size and type, and a Share button. Tapping opens a photo full size (zoomable), plays a video
+/// straight from storage, and previews any other file. A file taken back after it was sent shows only its name and
+/// "Attachment removed", and nothing opens it. Two or more photos show as one strip of smaller thumbnails, side by side,
+/// sized to the row: filling it when they all fit, scrolling sideways when they do not (`RoomAttachmentLayoutItem`,
+/// `RoomStripMetrics`).
 struct RoomAttachmentsView: View {
     let chips: [RoomAttachmentChip]
     let previews: [String: Data]
     /// Your own message's files line up on the right, with its bubble.
     var alignment: HorizontalAlignment = .leading
     let send: (RoomChatIntent) -> Void
-    /// A strip's thumbnail side: about 120 pt, as the web shows them, growing with the text size up to 200 pt.
-    @ScaledMetric(relativeTo: .caption) private var thumbnailSide: CGFloat = 120
 
     var body: some View {
         VStack(alignment: alignment, spacing: 6) {
@@ -53,24 +77,22 @@ struct RoomAttachmentsView: View {
         .padding(.top, 4)
     }
 
-    /// A strip of this many photos or fewer shows them as they are when they fit, and scrolls when they do not. A longer
-    /// one always scrolls: measuring whether they fit would build every photo it holds.
-    static let measuredStripLimit = 4
-
-    /// Photos side by side: as they are when a few fit, in a sideways scroll otherwise. Each opens as one alone does.
-    /// The strip's own horizontal scroll view sits inside the message's one row.
+    /// Photos side by side, sized to the width the row gives them (`RoomStripMetrics`): filling it when they all fit,
+    /// in a sideways scroll otherwise. The width is read as the strip is laid out, in one pass: `RoomStripFrame` makes
+    /// the strip as tall as that width needs, and the reader inside it lays the photos out at that width. Nothing is
+    /// built to measure it. Each photo opens as one alone does. The strip's own horizontal scroll view sits inside the
+    /// message's one row.
     private func strip(_ photos: [RoomAttachmentChip]) -> some View {
-        let side = min(thumbnailSide, 200)
-        return Group {
-            if photos.count <= Self.measuredStripLimit {
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 8) {
-                        stripPhotos(photos, side: side)
+        RoomStripFrame(count: photos.count) {
+            GeometryReader { proxy in
+                let metrics = RoomStripMetrics(count: photos.count, width: proxy.size.width)
+                if metrics.mode == .fit {
+                    HStack(spacing: RoomStripMetrics.spacing) {
+                        stripPhotos(photos, side: metrics.side)
                     }
-                    scrollingStrip(photos, side: side)
+                } else {
+                    scrollingStrip(photos, side: metrics.side)
                 }
-            } else {
-                scrollingStrip(photos, side: side)
             }
         }
         .accessibilityElement(children: .contain)
@@ -81,12 +103,12 @@ struct RoomAttachmentsView: View {
     /// The strip in a sideways scroll, on a lazy stack: only the photos in sight are built.
     private func scrollingStrip(_ photos: [RoomAttachmentChip], side: CGFloat) -> some View {
         ScrollView(.horizontal, showsIndicators: true) {
-            LazyHStack(spacing: 8) {
+            LazyHStack(spacing: RoomStripMetrics.spacing) {
                 stripPhotos(photos, side: side)
             }
-            .padding(.bottom, 8)
+            .padding(.bottom, RoomStripMetrics.indicator)
         }
-        .frame(height: side + 8)
+        .frame(height: side + RoomStripMetrics.indicator)
     }
 
     private func stripPhotos(_ photos: [RoomAttachmentChip], side: CGFloat) -> some View {
