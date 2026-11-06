@@ -5,10 +5,16 @@ import PocketContracts   // ParsedSessionTimestamp (SessionAtlasTypes) — used 
 public struct SessionListView: View {
     private let state: SessionListPresentationState
     private let send: (PocketProductIntent) -> Void
+    /// Your folders, where folders are on: a room's long press moves it to one or out of it.
+    private let folders: [RoomFolderItem]?
+    private let onFolder: ((RoomFolderIntent) -> Void)?
 
-    public init(state: SessionListPresentationState, send: @escaping (PocketProductIntent) -> Void) {
+    public init(state: SessionListPresentationState, folders: [RoomFolderItem]? = nil,
+                onFolder: ((RoomFolderIntent) -> Void)? = nil, send: @escaping (PocketProductIntent) -> Void) {
         self.state = state
         self.send = send
+        self.folders = onFolder == nil ? nil : folders
+        self.onFolder = folders == nil ? nil : onFolder
     }
 
     public var body: some View {
@@ -25,7 +31,8 @@ public struct SessionListView: View {
     }
 
     private var sessionList: some View {
-        List {
+        let yours = Set(folders?.map(\.id) ?? [])
+        return List {
             Section {
                 SessionProvenanceBanner(provenance: state.provenance)
             }
@@ -44,6 +51,10 @@ public struct SessionListView: View {
                         SessionRow(row: row)
                     }
                     .buttonStyle(.plain)
+                    // A room's long press files it in a folder; a direct message lives under its room, in none.
+                    .modifier(RoomFolderContextMenu(roomId: row.sessionId,
+                                                    filedIn: row.folderId.flatMap { yours.contains($0) ? $0 : nil },
+                                                    send: row.isDirect ? nil : onFolder))
                     .accessibilityIdentifier("pocket.sessions.row.\(row.sessionId)")
                     .accessibilityHint("Opens this session")
                     .listRowBackground(PocketPalette.raised)
@@ -143,23 +154,30 @@ public struct SessionListView: View {
 
 private struct SessionRow: View {
     let row: SessionRowPresentation
+    /// At the largest text sizes when and who go on their own line, under the role.
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
+            // The unread badge sits on the right of the name's line, as Discord shows it.
             ViewThatFits(in: .horizontal) {
                 HStack(alignment: .firstTextBaseline) {
                     title
                     Spacer(minLength: 10)
                     status
+                    PocketCountBadge(count: row.activity.unread)
                 }
                 VStack(alignment: .leading, spacing: 5) {
                     title
-                    status
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        status
+                        PocketCountBadge(count: row.activity.unread)
+                    }
                 }
             }
 
             if let summary = row.summary {
-                Text(summary)
+                SummaryPreviewText(summary, title: row.title, identifier: "pocket.sessions.row.\(row.sessionId).summary")
                     .font(.subheadline)
                     .foregroundStyle(PocketPalette.textSecondary)
                     .lineLimit(3)
@@ -176,10 +194,24 @@ private struct SessionRow: View {
             .font(.caption)
             .foregroundStyle(PocketPalette.textSecondary)
 
-            HStack {
-                Text(row.membershipRoleLabel)
-                Spacer(minLength: 8)
-                timestamp(row.lastActivity)
+            // When it was last active, then who is in it now.
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: 4) {
+                        roleAndKind
+                        HStack(spacing: 6) {
+                            timestamp(row.lastActivity)
+                            RoomOnlineCounts(activity: row.activity)
+                        }
+                    }
+                } else {
+                    HStack(spacing: 6) {
+                        roleAndKind
+                        Spacer(minLength: 8)
+                        timestamp(row.lastActivity)
+                        RoomOnlineCounts(activity: row.activity)
+                    }
+                }
             }
             .font(.caption)
             .foregroundStyle(PocketPalette.textSecondary)
@@ -205,6 +237,15 @@ private struct SessionRow: View {
         Text(row.statusLabel)
             .font(.caption.weight(.semibold))
             .foregroundStyle(PocketPalette.accent)
+    }
+
+    private var roleAndKind: some View {
+        HStack(spacing: 4) {
+            Text(row.membershipRoleLabel)
+            if let kind = row.roomTypeLabel {
+                Text("· \(kind)")
+            }
+        }
     }
 
     @ViewBuilder

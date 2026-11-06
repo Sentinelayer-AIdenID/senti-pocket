@@ -6,6 +6,8 @@ import Foundation
 /// coordinator maps them to Atlas/Relay-owned deterministic auth and repository operations.
 public enum PocketProductIntent: Equatable, Sendable {
     case beginSignIn
+    /// Sign in with Apple, offered only when the build turns it on.
+    case beginAppleSignIn
     case cancelSignIn
     case retryAuthentication
     case signOut

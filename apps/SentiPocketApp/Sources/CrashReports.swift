@@ -1,0 +1,791 @@
+import CryptoKit
+import Foundation
+import MetricKit
+import os
+import PocketUI
+import SwiftUI
+import UIKit
+
+/// Where the app stopped, as the phone recorded it, kept small enough to post in a room: the build, the reason, the
+/// last steps taken in the app, and the code addresses of the thread that stopped. Never message text.
+struct CrashReport: Codable, Equatable, Identifiable, Sendable {
+    enum Kind: String, Codable, Sendable {
+        /// iOS recorded a crash, with the thread that stopped.
+        case crash
+        /// The app stopped answering for seconds.
+        case hang
+        /// The app was on screen and then gone with no crash of its own: the system ended it, most often for memory.
+        case closed
+    }
+
+    var id: String
+    var kind: Kind
+    var at: Date
+    var build: String
+    var system: String
+    var device: String
+    var reason: String
+    /// The thread that stopped, innermost first: "binary +0xoffset".
+    var frames: [String] = []
+    /// Each binary in `frames` with its UUID, to find its symbols.
+    var binaries: [String] = []
+    /// The last steps taken in the app, oldest first.
+    var trail: [String] = []
+}
+
+extension CrashReport {
+    /// The crashes and the long hangs in one of iOS's diagnostic payloads.
+    static func reports(from payload: MXDiagnosticPayload, minimumHang: TimeInterval = 2) -> [CrashReport] {
+        var reports: [CrashReport] = []
+        for crash in payload.crashDiagnostics ?? [] {
+            var exception: String?
+            if #available(iOS 17.0, *), let thrown = crash.exceptionReason {
+                exception = exceptionLine(name: thrown.exceptionName, className: thrown.className,
+                                          format: thrown.formatString)
+            }
+            let reason = Self.reason(
+                exceptionType: crash.exceptionType?.intValue,
+                signal: crash.signal?.intValue,
+                termination: crash.terminationReason,
+                exception: exception,
+                memoryRegion: crash.virtualMemoryRegionInfo
+            )
+            reports.append(make(.crash, at: payload.timeStampEnd, metaData: crash.metaData, reason: reason,
+                                callStackTree: crash.callStackTree.jsonRepresentation()))
+        }
+        for hang in payload.hangDiagnostics ?? [] {
+            let seconds = hang.hangDuration.converted(to: .seconds).value
+            guard seconds >= minimumHang else { continue }
+            reports.append(make(.hang, at: payload.timeStampEnd, metaData: hang.metaData,
+                                reason: String(format: "Not responding for %.1f s", seconds),
+                                callStackTree: hang.callStackTree.jsonRepresentation()))
+        }
+        return reports
+    }
+
+    private static func make(_ kind: Kind, at: Date, metaData: MXMetaData, reason: String, callStackTree: Data) -> CrashReport {
+        let thread = stoppedThread(callStackTree: callStackTree)
+        return CrashReport(
+            id: identity(kind, at: at, reason: reason, frames: thread.frames),
+            kind: kind,
+            at: at,
+            build: metaData.applicationBuildVersion,
+            system: metaData.osVersion,
+            device: metaData.deviceType,
+            reason: reason,
+            frames: thread.frames,
+            binaries: thread.binaries
+        )
+    }
+
+    /// The thread that stopped, from iOS's call stack JSON: the thread it blames (else the first), innermost frame
+    /// first. A hang's stacks are samples, so each step follows the most-sampled branch.
+    static func stoppedThread(callStackTree json: Data, limit: Int = 30) -> (frames: [String], binaries: [String]) {
+        guard let tree = try? JSONSerialization.jsonObject(with: json) as? [String: Any],
+              let stacks = tree["callStacks"] as? [[String: Any]], !stacks.isEmpty else { return ([], []) }
+        let stack = stacks.first { $0["threadAttributed"] as? Bool == true } ?? stacks[0]
+        var frames: [String] = []
+        var binaries: [String] = []
+        var level = stack["callStackRootFrames"] as? [[String: Any]] ?? []
+        var depth = 0
+        // The first `limit` frames, then, deeper on the same path, only the app's own frames (each with its depth): a
+        // freeze inside SwiftUI's update shows its first 30 frames all in the system, and the app's view that started
+        // it sits further down (10-02 freeze on build 2026110205).
+        while depth < deepest, let frame = level.max(by: { samples($0) < samples($1) }) {
+            let name = frame["binaryName"] as? String ?? "?"
+            let offset = (frame["offsetIntoBinaryTextSegment"] as? NSNumber)?.uint64Value ?? 0
+            if depth < limit {
+                frames.append("\(name) +0x\(String(offset, radix: 16))")
+            } else if appBinaries.contains(name) {
+                frames.append("#\(depth) \(name) +0x\(String(offset, radix: 16))")
+            }
+            if depth < limit || appBinaries.contains(name), let uuid = frame["binaryUUID"] as? String,
+               !binaries.contains("\(name) \(uuid)") {
+                binaries.append("\(name) \(uuid)")
+            }
+            level = frame["subFrames"] as? [[String: Any]] ?? []
+            depth += 1
+        }
+        return (frames, binaries)
+    }
+
+    /// How deep a stack is followed for the app's own frames, and which binaries are the app's.
+    static let deepest = 400
+    static let appBinaries: Set<String> = ["SentiPocketApp"]
+
+    private static func samples(_ frame: [String: Any]) -> Int {
+        (frame["sampleCount"] as? NSNumber)?.intValue ?? 0
+    }
+
+    /// The crash in words: the exception and signal by name and what they usually mean, then what the code or the
+    /// system said.
+    /// An Objective-C exception as a report shows it: its name, its class and its format string as written in the
+    /// code. The values filled into that format can describe objects, paths or links, so they never leave the phone.
+    static func exceptionLine(name: String, className: String, format: String) -> String {
+        var line = name
+        if !className.isEmpty, className != name { line += " (\(className))" }
+        if !format.isEmpty { line += ": " + format }
+        return line
+    }
+
+    static func reason(exceptionType: Int?, signal: Int?, termination: String?, exception: String?, memoryRegion: String?) -> String {
+        var names: [String] = []
+        if let exceptionType { names.append(machExceptions[exceptionType] ?? "exception \(exceptionType)") }
+        if let signal { names.append(signals[signal] ?? "signal \(signal)") }
+        var lines = [names.isEmpty ? "Crash" : names.joined(separator: " / ")]
+        if let meaning = meaning(exceptionType: exceptionType, signal: signal) { lines[0] += ": " + meaning }
+        if let exception, !exception.isEmpty { lines.append("Exception: " + clip(exception, 300)) }
+        if let termination, !termination.isEmpty {
+            var line = "Ended by the system: " + clip(termination, 200)
+            if let code = terminationCodes.first(where: { termination.lowercased().contains($0.code) }) {
+                line += " (\(code.meaning))"
+            }
+            lines.append(line)
+        }
+        if let memoryRegion, !memoryRegion.isEmpty { lines.append("Address: " + clip(memoryRegion, 200)) }
+        return lines.joined(separator: "\n")
+    }
+
+    static let machExceptions = [
+        1: "EXC_BAD_ACCESS", 2: "EXC_BAD_INSTRUCTION", 3: "EXC_ARITHMETIC", 5: "EXC_SOFTWARE", 6: "EXC_BREAKPOINT",
+        10: "EXC_CRASH", 11: "EXC_RESOURCE", 12: "EXC_GUARD"
+    ]
+    static let signals = [4: "SIGILL", 5: "SIGTRAP", 6: "SIGABRT", 8: "SIGFPE", 9: "SIGKILL", 10: "SIGBUS", 11: "SIGSEGV"]
+    static let terminationCodes = [
+        (code: "0x8badf00d", meaning: "the watchdog: too slow to start or to respond"),
+        (code: "0xbaadca11", meaning: "a call push arrived and no call was shown"),
+        (code: "0xdead10cc", meaning: "held a locked file in the background"),
+        (code: "0xc00010ff", meaning: "the phone was too hot")
+    ]
+
+    private static func meaning(exceptionType: Int?, signal: Int?) -> String? {
+        switch (exceptionType, signal) {
+        case (_, 9): return "the system ended it"
+        case (6, _), (_, 5): return "a Swift check failed (a nil unwrapped, an index out of range, or a fatal error)"
+        case (1, _), (_, 10), (_, 11): return "a bad memory access"
+        case (10, _), (_, 6): return "the app aborted, most often on an uncaught exception"
+        case (11, _): return "it used too much of a limited resource"
+        case (12, _): return "a guarded system resource was misused"
+        default: return nil
+        }
+    }
+
+    private static func clip(_ text: String, _ length: Int) -> String {
+        text.count > length ? String(text.prefix(length)) + "…" : text
+    }
+
+    /// The same report, delivered again, gets the same id.
+    static func identity(_ kind: Kind, at: Date, reason: String, frames: [String]) -> String {
+        let key = [kind.rawValue, String(Int(at.timeIntervalSince1970)), reason, frames.prefix(6).joined(separator: "|")]
+            .joined(separator: "\n")
+        let digest = SHA256.hash(data: Data(key.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
+        return "\(kind.rawValue)-\(digest)"
+    }
+}
+
+/// The room message for crash reports: newest first, each with its reason, the last steps and the stopped thread.
+enum CrashReportText {
+    /// Well under a room message's limit.
+    static let maximumLength = 12_000
+
+    static func message(_ reports: [CrashReport]) -> String {
+        let newestFirst = reports.sorted { $0.at > $1.at }
+        var text = newestFirst.count == 1
+            ? "Pocket closed unexpectedly. What the phone recorded:"
+            : "Pocket closed unexpectedly \(newestFirst.count) times. What the phone recorded:"
+        for (index, report) in newestFirst.enumerated() {
+            let block = "\n\n" + section(report)
+            guard text.count + block.count <= maximumLength else {
+                text += "\n\n(\(newestFirst.count - index) older not shown)"
+                break
+            }
+            text += block
+        }
+        return text
+    }
+
+    static func section(_ report: CrashReport) -> String {
+        var lines = [
+            "**\(title(report.kind))** \(stamp(report.at)) · build \(report.build) · \(report.system) · \(report.device)",
+            report.reason
+        ]
+        if !report.trail.isEmpty { lines.append("Last steps: " + report.trail.joined(separator: " → ")) }
+        if !report.frames.isEmpty {
+            lines.append("```")
+            lines += report.frames.enumerated().map { "\($0.offset) \($0.element)" }
+            lines.append("```")
+            lines.append("Binaries: " + report.binaries.joined(separator: "; "))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    static func title(_ kind: CrashReport.Kind) -> String {
+        switch kind {
+        case .crash: return "Crash"
+        case .hang: return "Hang"
+        case .closed: return "Closed while open"
+        }
+    }
+
+    static func stamp(_ date: Date) -> String { formatter("yyyy-MM-dd HH:mm:ss 'UTC'").string(from: date) }
+
+    static func clock(_ date: Date) -> String { formatter("HH:mm:ss").string(from: date) }
+
+    private static func formatter(_ format: String) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = format
+        return formatter
+    }
+}
+
+/// The reports kept on the phone (the newest few) and which were sent or declined, so each is offered once.
+struct CrashReportStore {
+    struct Contents: Codable, Equatable {
+        var reports: [CrashReport] = []
+        var handled: [String] = []
+    }
+
+    static let keptReports = 10
+    static let keptHandled = 100
+
+    let url: URL
+
+    func load() -> Contents {
+        guard let data = try? Data(contentsOf: url),
+              let contents = try? JSONDecoder().decode(Contents.self, from: data) else { return Contents() }
+        return contents
+    }
+
+    /// Keeps the reports not seen before, and returns every report not yet sent or declined, newest first.
+    @discardableResult
+    func add(_ new: [CrashReport]) -> [CrashReport] {
+        var contents = load()
+        var known = Set(contents.reports.map(\.id)).union(contents.handled)
+        let fresh = new.filter { known.insert($0.id).inserted }
+        if !fresh.isEmpty {
+            contents.reports = Array((contents.reports + fresh).sorted { $0.at > $1.at }.prefix(Self.keptReports))
+            save(contents)
+        }
+        return Self.unhandled(in: contents)
+    }
+
+    func unhandled() -> [CrashReport] { Self.unhandled(in: load()) }
+
+    func markHandled(_ ids: [String]) {
+        var contents = load()
+        for id in ids where !contents.handled.contains(id) { contents.handled.append(id) }
+        contents.handled = Array(contents.handled.suffix(Self.keptHandled))
+        save(contents)
+    }
+
+    private func save(_ contents: Contents) {
+        guard let data = try? JSONEncoder().encode(contents) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
+
+    private static func unhandled(in contents: Contents) -> [CrashReport] {
+        let handled = Set(contents.handled)
+        return contents.reports.filter { !handled.contains($0.id) }.sorted { $0.at > $1.at }
+    }
+}
+
+/// What the app last knew about itself, rewritten as it runs, and read at the next launch. Leaving the app, the app
+/// switcher (where a swipe closes it), a system screen and an update all make it inactive first, so a run that ended
+/// while active was ended by a crash or by the system, most often for memory, which leaves no crash report of its own.
+struct LastRun: Codable, Equatable {
+    var build: String
+    var launchedAt: Date
+    var updatedAt: Date
+    /// On screen and in use.
+    var isActive: Bool
+    var trail: [String] = []
+    var footprintMB: Int?
+    var peakFootprintMB: Int?
+    var availableMB: Int?
+    var memoryWarnings = 0
+
+    static let keptSteps = 12
+
+    mutating func note(_ step: String, at date: Date) {
+        trail.append("\(CrashReportText.clock(date)) \(step)")
+        if trail.count > Self.keptSteps { trail.removeFirst(trail.count - Self.keptSteps) }
+        updatedAt = date
+    }
+
+    /// The report for a run that ended while active; nil for one that ended inactive or in the background.
+    func closedReport(system: String, device: String, stall: MainThreadWatch.Stall? = nil) -> CrashReport? {
+        guard isActive else { return nil }
+        // With memory to spare, the likeliest end is a freeze the system ended (the watchdog), not a memory kill.
+        let memoryWasShort = availableMB.map { $0 < 200 } ?? true
+        var lines = [memoryWasShort
+            ? "On screen, then gone, with no crash of its own: the system ended it, most often for memory."
+            : "On screen, then gone, with no crash of its own and memory to spare: most likely the app stopped responding and the system ended it."]
+        if let footprintMB {
+            var memory = "Memory at \(CrashReportText.clock(updatedAt)): \(footprintMB) MB in use"
+            if let peakFootprintMB, peakFootprintMB > footprintMB { memory += " (peak \(peakFootprintMB) MB)" }
+            if let availableMB { memory += ", \(availableMB) MB left before the limit" }
+            lines.append(memory + ".")
+        }
+        if memoryWarnings > 0 {
+            lines.append("iOS warned about memory \(memoryWarnings) \(memoryWarnings == 1 ? "time" : "times") before it ended.")
+        }
+        // The watch's last word on this run: the main thread stopped answering and never came back, and where it was.
+        var frames: [String] = []
+        var binaries: [String] = []
+        if let stall, stall.startedAt >= launchedAt {
+            lines.append(String(format: "The main thread stopped answering at %@, right after \"%@\", and was still stuck %.1f s later when the app ended.",
+                                CrashReportText.clock(stall.startedAt), stall.afterStep, stall.seconds))
+            if let draws = stall.drawsText { lines.append("While it was stuck: \(draws).") }
+            frames = stall.frames ?? []
+            binaries = stall.binaries ?? []
+            let later = stall.laterFrames ?? []
+            if !frames.isEmpty, !later.isEmpty {
+                lines.append(later == frames
+                    ? "\(Int(MainThreadWatch.secondLookAfter)) s in it was at the same place."
+                    : "\(Int(MainThreadWatch.secondLookAfter)) s in it was elsewhere: " + later.prefix(6).joined(separator: " · ") + ".")
+            }
+        }
+        return CrashReport(
+            id: "closed-\(Int(launchedAt.timeIntervalSince1970))",
+            kind: .closed,
+            at: updatedAt,
+            build: build,
+            system: system,
+            device: device,
+            reason: lines.joined(separator: "\n"),
+            frames: frames,
+            binaries: binaries,
+            trail: trail
+        )
+    }
+}
+
+/// Catches what ends the app: iOS's crash and hang records (MetricKit, handed over at the next launch) and a run that
+/// ended on screen without one. Each new report is offered once, in the next room opened, to send there.
+@MainActor
+final class CrashReporter: NSObject, ObservableObject, MXMetricManagerSubscriber {
+    static let shared = CrashReporter(
+        store: CrashReportStore(url: CrashReporter.file("pocket-crash-reports.json")),
+        runURL: CrashReporter.file("pocket-last-run.json")
+    )
+
+    /// Not yet sent or declined, newest first.
+    @Published private(set) var unhandled: [CrashReport] = []
+    /// Every report kept on the phone, newest first.
+    @Published private(set) var recorded: [CrashReport] = []
+
+    private let store: CrashReportStore
+    private let runURL: URL
+    private var run: LastRun?
+    private var sampler: Timer?
+    private var observers: [NSObjectProtocol] = []
+
+    init(store: CrashReportStore, runURL: URL) {
+        self.store = store
+        self.runURL = runURL
+    }
+
+    /// Previews and tests start the app with "-Pocket…" scenario flags or inside XCTest, and end it at will.
+    nonisolated static var isTestRun: Bool {
+        ProcessInfo.processInfo.arguments.contains { $0.hasPrefix("-Pocket") } || NSClassFromString("XCTestCase") != nil
+    }
+
+    func start() {
+        guard run == nil, !Self.isTestRun else { return }
+        let now = Date()
+        var found: [CrashReport] = []
+        let stall = MainThreadWatch.shared.unrecoveredStall()
+        if let data = try? Data(contentsOf: runURL), let previous = try? JSONDecoder().decode(LastRun.self, from: data),
+           let closed = previous.closedReport(system: Self.system, device: Self.device, stall: stall) {
+            found.append(closed)
+        }
+        MainThreadWatch.shared.activeChanged(UIApplication.shared.applicationState == .active)
+        MainThreadWatch.shared.start()
+        run = LastRun(build: Self.build, launchedAt: now, updatedAt: now,
+                      isActive: UIApplication.shared.applicationState == .active)
+        sample()
+        MXMetricManager.shared.add(self)
+        found += MXMetricManager.shared.pastDiagnosticPayloads.flatMap { CrashReport.reports(from: $0) }
+        record(found)
+        let center = NotificationCenter.default
+        observers = [
+            center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.activeChanged(true) }
+            },
+            center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.activeChanged(false) }
+            },
+            center.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.memoryWarning() }
+            }
+        ]
+        samples(while: UIApplication.shared.applicationState == .active)
+    }
+
+    /// The memory sampler runs only while the app is active: a run that ends while it is not makes no report, so a
+    /// sample then was never read, and each one encoded and wrote the run's file on the main thread.
+    private func samples(while isActive: Bool) {
+        if isActive {
+            guard sampler == nil else { return }
+            sampler = Timer.scheduledTimer(withTimeInterval: Self.sampleInterval, repeats: true) { [weak self] _ in
+                Task { @MainActor in self?.sample() }
+            }
+        } else {
+            sampler?.invalidate()
+            sampler = nil
+        }
+    }
+
+    static let sampleInterval: TimeInterval = 5
+
+    /// The sampler is running.
+    var isSampling: Bool { sampler != nil }
+
+    /// Active or not. Leaving the app, the app switcher and system screens all make it inactive first, and the app
+    /// delegate reports a quit (`applicationWillTerminate`) here before the app ends.
+    func activeChanged(_ isActive: Bool) {
+        MainThreadWatch.shared.activeChanged(isActive)
+        if run != nil { samples(while: isActive) }
+        guard var run, run.isActive != isActive else { return }
+        run.isActive = isActive
+        run.note(isActive ? "active" : "inactive", at: Date())
+        self.run = run
+        write()
+    }
+
+    /// A step taken in the app, by name only, for the next report.
+    func note(_ step: String) {
+        MainThreadWatch.shared.note(step)
+        trail(step)
+    }
+
+    /// A line in the trail that is not a step (a stall the app came back from), so the next stall still names the
+    /// step it came after, not the stall before it.
+    func trail(_ line: String) {
+        guard var run else { return }
+        run.note(line, at: Date())
+        self.run = run
+        write()
+    }
+
+    /// A room intent as a step: its name, never what it carries. Scrolling and on-screen tracking are left out.
+    func note(_ intent: RoomChatIntent) {
+        guard let step = Self.step(for: intent) else { return }
+        note(step)
+    }
+
+    /// The same, with how many rows the room had, so a freeze can be tied to the room's size. A send also says how
+    /// long the text was and whether it was being dictated (every freeze on 10-30 began at a send, on a phone).
+    func note(_ intent: RoomChatIntent, rows: Int) {
+        guard let step = Self.step(for: intent) else { return }
+        var details = ["\(rows) rows"]
+        if let length = Self.sentLength(intent) {
+            details.append("\(length) chars")
+            if KeyboardInput.isDictating { details.append("dictating") }
+        }
+        note("\(step) (\(details.joined(separator: ", ")))")
+    }
+
+    /// How long a sent text is (never what it says).
+    nonisolated static func sentLength(_ intent: RoomChatIntent) -> Int? {
+        switch intent {
+        case .sendMessage(let text), .sendReply(_, let text), .sendReplyToReply(_, _, let text): return text.count
+        case .sendTapped(let characters): return characters
+        default: return nil
+        }
+    }
+
+    nonisolated static func step(for intent: RoomChatIntent) -> String? {
+        let name = Mirror(reflecting: intent).children.first?.label ?? String(describing: intent)
+        let quiet: Set<String> = ["readerAtBottom", "messageOnScreen", "replyOnScreen", "attachmentAppeared", "focusHandled"]
+        return quiet.contains(name) ? nil : name
+    }
+
+    func markHandled(_ reports: [CrashReport]) {
+        store.markHandled(reports.map(\.id))
+        unhandled = store.unhandled()
+    }
+
+    nonisolated func didReceive(_ payloads: [MXDiagnosticPayload]) {
+        let reports = payloads.flatMap { CrashReport.reports(from: $0) }
+        Task { @MainActor in self.record(reports) }
+    }
+
+    private func record(_ reports: [CrashReport]) {
+        unhandled = store.add(reports)
+        recorded = store.load().reports
+    }
+
+    private func memoryWarning() {
+        run?.memoryWarnings += 1
+        note("memory warning")
+    }
+
+    private func sample() {
+        guard var run else { return }
+        let footprint = Self.footprintMB()
+        run.footprintMB = footprint
+        run.peakFootprintMB = max(run.peakFootprintMB ?? 0, footprint ?? 0)
+        run.availableMB = Self.availableMB()
+        run.updatedAt = Date()
+        self.run = run
+        write()
+    }
+
+    private func write() {
+        guard let run, let data = try? JSONEncoder().encode(run) else { return }
+        try? data.write(to: runURL, options: .atomic)
+    }
+
+    private static func file(_ name: String) -> URL {
+        let folder = (try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                                   appropriateFor: nil, create: true))
+            ?? FileManager.default.temporaryDirectory
+        return folder.appendingPathComponent(name)
+    }
+
+    private static var build: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?" }
+
+    private static var system: String { "iOS " + UIDevice.current.systemVersion }
+
+    private static var device: String {
+        var info = utsname()
+        uname(&info)
+        let machine = withUnsafeBytes(of: &info.machine) { raw in
+            String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self)
+        }
+        return machine.isEmpty ? UIDevice.current.model : machine
+    }
+
+    /// The memory iOS counts against the app's limit.
+    private static func footprintMB() -> Int? {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return nil }
+        return Int(info.phys_footprint / 1_048_576)
+    }
+
+    private static func availableMB() -> Int? {
+        let bytes = os_proc_available_memory()
+        return bytes > 0 ? Int(bytes / 1_048_576) : nil
+    }
+}
+
+/// Watches the main thread from a background queue (Carter's 07:39 freeze: the phone's stack held only Apple's
+/// frames, and the last step was a send). When the main thread stops answering for more than 1.5 s, the stall is
+/// written down from here at once, since a frozen app cannot write it later, and rewritten while it lasts, so the
+/// next launch can say when it began, after which step, and how long it went on.
+final class MainThreadWatch: @unchecked Sendable {
+    struct Stall: Codable, Equatable {
+        var startedAt: Date
+        var afterStep: String
+        var seconds: Double
+        var recovered: Bool
+        /// Message rows drawn while it lasted, and the last one drawn (`RenderTrace`); nil in older records.
+        var rowDraws: Int?
+        var lastRow: Int64?
+        /// Where the main thread was when the stall was first seen ("binary +0xoffset", innermost first), each binary
+        /// with its UUID, and where it was `secondLookAfter` seconds in if still stuck (`MainThreadStack`); nil in older
+        /// records.
+        var frames: [String]?
+        var binaries: [String]?
+        var laterFrames: [String]?
+
+        /// "1,240 row draws, the last #12345", or nil when none were counted.
+        var drawsText: String? {
+            guard let rowDraws else { return nil }
+            let count = rowDraws.formatted(.number.locale(Locale(identifier: "en_US")))
+            let last = (lastRow ?? 0) > 0 ? ", the last #\(lastRow ?? 0)" : ""
+            return "\(count) row \(rowDraws == 1 ? "draw" : "draws")\(last)"
+        }
+    }
+
+    static let shared = MainThreadWatch(url: MainThreadWatch.file)
+    static let threshold: TimeInterval = 1.5
+    /// A stall still going this long is looked at again: the same place twice is a thread that waits, two places one
+    /// that is busy.
+    static let secondLookAfter: TimeInterval = 8
+
+    private let url: URL
+    private let lock = NSLock()
+    private let queue = DispatchQueue(label: "pocket.main-thread-watch", qos: .utility)
+    private var timer: DispatchSourceTimer?
+    private var lastBeat = Date()
+    private var lastStep = "launch"
+    private var stall: Stall?
+    /// Row draws counted when the current stall began.
+    private var drawsAtStart = 0
+    /// Only an app on screen is watched: a suspended app's threads all stop, and its first moments back are no stall.
+    private var isActive = true
+    /// The timer is stopped while the app is not active: it neither wakes nor asks the main thread to answer.
+    private var timerSuspended = false
+
+    deinit {
+        // A dispatch source must not be released while suspended.
+        if timerSuspended { timer?.resume() }
+        timer?.cancel()
+    }
+
+    init(url: URL) {
+        self.url = url
+    }
+
+    private static var file: URL {
+        let folder = (try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                                   appropriateFor: nil, create: true))
+            ?? FileManager.default.temporaryDirectory
+        return folder.appendingPathComponent("pocket-main-stall.json")
+    }
+
+    /// The stall the last run ended in, if it never recovered; read once, before this run starts watching.
+    func unrecoveredStall() -> Stall? {
+        guard let data = try? Data(contentsOf: url), let stall = try? JSONDecoder().decode(Stall.self, from: data),
+              !stall.recovered else { return nil }
+        return stall
+    }
+
+    func start() {
+        guard timer == nil else { return }
+        MainThreadStack.rememberMainThread()
+        try? FileManager.default.removeItem(at: url)
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 0.5, repeating: 0.5)
+        timer.setEventHandler { [weak self] in self?.tick() }
+        lock.lock()
+        self.timer = timer
+        timer.resume()
+        if !isActive {
+            timer.suspend()
+            timerSuspended = true
+        }
+        lock.unlock()
+    }
+
+    /// The watch's timer runs (it is stopped while the app is not active).
+    var isTicking: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return timer != nil && !timerSuspended
+    }
+
+    func note(_ step: String) {
+        lock.lock()
+        lastStep = step
+        lock.unlock()
+    }
+
+    func activeChanged(_ active: Bool) {
+        lock.lock()
+        isActive = active
+        lastBeat = Date()
+        if let timer, active == timerSuspended {
+            if active { timer.resume() } else { timer.suspend() }
+            timerSuspended = !active
+        }
+        lock.unlock()
+    }
+
+    private func tick() {
+        let now = Date()
+        lock.lock()
+        let gap = now.timeIntervalSince(lastBeat)
+        var written: Stall?
+        if !isActive {
+            lastBeat = now
+        } else if gap > Self.threshold {
+            let trace = RenderTrace.snapshot()
+            if stall == nil { drawsAtStart = trace.draws }
+            var current = stall ?? Stall(startedAt: lastBeat, afterStep: lastStep, seconds: 0, recovered: false)
+            current.seconds = gap
+            current.rowDraws = trace.draws - drawsAtStart
+            current.lastRow = trace.lastRow
+            stall = current
+            written = current
+        }
+        lock.unlock()
+        // Where the main thread is stuck: read when the stall is first seen, and once more `secondLookAfter` seconds in,
+        // with this watch's lock released (the main thread may be holding it, in `note`). The stall is written first:
+        // naming the frames can wait on a lock the stuck thread holds (the loader's), and the plain record must survive.
+        if let current = written,
+           current.frames == nil || (current.laterFrames == nil && current.seconds >= Self.secondLookAfter) {
+            write(current)
+            let stack = MainThreadStack.capture()
+            lock.lock()
+            if var still = stall {
+                if still.frames == nil {
+                    still.frames = stack.frames
+                    still.binaries = stack.binaries
+                } else {
+                    still.laterFrames = stack.frames
+                    still.binaries = (still.binaries ?? []) + stack.binaries.filter { !(still.binaries ?? []).contains($0) }
+                }
+                stall = still
+                written = still
+            }
+            lock.unlock()
+        }
+        if let written { write(written) }
+        DispatchQueue.main.async { [weak self] in self?.beat() }
+    }
+
+    private func beat() {
+        lock.lock()
+        lastBeat = Date()
+        let ended = stall.map { stall -> Stall in
+            var ended = stall
+            ended.recovered = true
+            return ended
+        }
+        stall = nil
+        lock.unlock()
+        if let ended {
+            write(ended)
+            var line = String(format: "main thread stalled %.1f s after %@", ended.seconds, ended.afterStep)
+            if let draws = ended.drawsText { line += " (\(draws))" }
+            Task { @MainActor in CrashReporter.shared.trail(line) }
+        }
+    }
+
+    private func write(_ stall: Stall) {
+        guard let data = try? JSONEncoder().encode(stall) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
+}
+
+/// The keyboard of the field being typed in, for the freeze recorder's notes.
+@MainActor
+enum KeyboardInput {
+    /// Dictation is the input mode of the field being typed in.
+    static var isDictating: Bool {
+        FirstResponder.find()?.textInputMode?.primaryLanguage == "dictation"
+    }
+
+    /// The responder the keyboard types into, found the way UIKit offers: an action sent to nil reaches it first.
+    private final class FirstResponder: NSObject {
+        static var found: UIResponder?
+
+        static func find() -> UIResponder? {
+            found = nil
+            UIApplication.shared.sendAction(#selector(UIResponder.pocketCaptureFirstResponder), to: nil, from: nil, for: nil)
+            defer { found = nil }
+            return found
+        }
+    }
+
+    fileprivate static func captured(_ responder: UIResponder) {
+        FirstResponder.found = responder
+    }
+}
+
+extension UIResponder {
+    @objc fileprivate func pocketCaptureFirstResponder() {
+        KeyboardInput.captured(self)
+    }
+}

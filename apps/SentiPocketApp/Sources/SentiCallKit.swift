@@ -56,6 +56,13 @@ public final class SentiCallManager: NSObject {
     var isIncomingBindingAuthorized: ((String, DeviceRingBindingFence) -> Bool)?
     /// The call ended / was declined → tear down (stop audio, drop the episode).
     public var onEnded: ((UUID) -> Void)?
+    /// Mute or unmute on the system's call screen (the lock screen included).
+    var onMuted: ((UUID, Bool) -> Void)?
+    /// An agent's room call (the API's doorbell push) that CallKit accepted, with the UUID it rings under.
+    var onRoomCallReceived: ((RoomCallDoorbell, UUID) -> Void)?
+    /// Whether a room call may ring here at all: it is for the person signed in. Otherwise its mandatory ring shows no
+    /// caller and ends at once.
+    var isRoomCallAuthorized: (() -> Bool)?
     /// CallKit ACTIVATED the audio session → safe to start capture/playback (hand to PocketVoice's DuplexAudioSessionLease).
     public var onAudioSessionActivated: ((AVAudioSession, UUID) -> Void)?
     /// CallKit DEACTIVATED audio. Any running or activation-waiting dial must stop before it can speak or write.
@@ -70,6 +77,8 @@ public final class SentiCallManager: NSObject {
         @escaping @MainActor @Sendable (Bool) -> Void
     ) -> Void
     private let reportEndedCall: (UUID) -> Void
+    /// Asks CallKit to perform an action, as the call screen would (CXCallController); true when it accepted.
+    private let requestTransaction: @MainActor (CXTransaction, @escaping @MainActor (Bool) -> Void) -> Void
     private var active: [UUID: IncomingDecisionCall] = [:]
     private struct PendingIncomingReport {
         let call: IncomingDecisionCall
@@ -89,6 +98,8 @@ public final class SentiCallManager: NSObject {
         configuration.maximumCallGroups = 1
         configuration.includesCallsInRecents = false
         configuration.supportedHandleTypes = [.generic]
+        // An agent's call rings with Senti's own ringtone (Carter, 10-30), rendered by scripts/ios/make_sounds.py.
+        configuration.ringtoneSound = "ring.caf"
         let provider = CXProvider(configuration: configuration)
         let pushRegistry = PKPushRegistry(queue: .main)
         self.provider = provider
@@ -105,12 +116,27 @@ public final class SentiCallManager: NSObject {
         self.reportEndedCall = { id in
             provider.reportCall(with: id, endedAt: nil, reason: .remoteEnded)
         }
+        let controller = CXCallController()
+        self.requestTransaction = { transaction, completion in
+            controller.request(transaction) { error in
+                Task { @MainActor in completion(error == nil) }
+            }
+        }
         self.audioActivationTimeoutNanoseconds = 8_000_000_000
         super.init()
         provider.setDelegate(self, queue: nil)            // nil → main queue
         pushRegistry.delegate = self
-        pushRegistry.desiredPushTypes = [.voIP]
+        // PushKit stays off until the host turns it on for a signed-in person (`setVoipPushes`).
     }
+
+    /// Whether this phone takes VoIP pushes (calls). Only while someone is signed in: a registration the server still
+    /// holds for the last account (an unregister that never got through) must not ring here (warden, #298 review).
+    func setVoipPushes(enabled: Bool) {
+        pushRegistry?.desiredPushTypes = enabled ? [.voIP] : []
+    }
+
+    /// Whether PushKit delivers VoIP pushes (calls) to this phone now.
+    var takesVoipPushes: Bool { pushRegistry?.desiredPushTypes?.contains(.voIP) == true }
 
     /// Hermetic lifecycle-test initializer: no PushKit registration, provider delegate callbacks, or real CallKit
     /// report side effects. Tests invoke delegate methods directly when exercising provider lifecycle behavior.
@@ -123,6 +149,9 @@ public final class SentiCallManager: NSObject {
             @escaping @MainActor @Sendable (Bool) -> Void
         ) -> Void = { _, _, completion in completion(true) },
         reportEndedCall: @escaping (UUID) -> Void = { _ in },
+        requestTransaction: @escaping @MainActor (CXTransaction, @escaping @MainActor (Bool) -> Void) -> Void = { _, completion in
+            completion(false)
+        },
         audioActivationTimeoutNanoseconds: UInt64 = 8_000_000_000
     ) {
         self.provider = provider
@@ -130,6 +159,7 @@ public final class SentiCallManager: NSObject {
         self.currentVoipTokenProvider = currentVoipToken
         self.reportIncomingCall = reportIncomingCall
         self.reportEndedCall = reportEndedCall
+        self.requestTransaction = requestTransaction
         self.audioActivationTimeoutNanoseconds = audioActivationTimeoutNanoseconds
         super.init()
     }
@@ -219,6 +249,17 @@ public final class SentiCallManager: NSObject {
         if pendingReports[id] != nil {
             pendingReports[id]?.cancelled = true
         }
+    }
+
+    /// The app's own Mute: CallKit is asked to mute the call as if on its screen, so the
+    /// call screen shows it too, and then performs it through `CXSetMutedCallAction`, which reaches `onMuted` like a
+    /// tap there. `completion(false)` when the call is not live here or CallKit refused.
+    func requestMuted(_ id: UUID, _ isMuted: Bool, completion: @escaping @MainActor (Bool) -> Void) {
+        guard active[id] != nil else {
+            completion(false)
+            return
+        }
+        requestTransaction(CXTransaction(action: CXSetMutedCallAction(call: id, muted: isMuted)), completion)
     }
 
     /// Revoke ringing and answered calls together. Selection/auth transitions cannot wait for an answer before
@@ -325,6 +366,17 @@ extension SentiCallManager: @preconcurrency CXProviderDelegate {
         action.fulfill()
     }
 
+    /// Mute on the call screen: the call's own microphone stops listening until unmuted (warden, #281). A person who
+    /// taps Mute expects the room to stop hearing them.
+    public func provider(_ provider: CXProvider, perform action: CXSetMutedCallAction) {
+        guard active[action.callUUID] != nil else {
+            action.fail()
+            return
+        }
+        onMuted?(action.callUUID, action.isMuted)
+        action.fulfill()
+    }
+
     public func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
         guard let callUUID = answeredCallAwaitingAudio,
               audioActiveCall == nil || audioActiveCall == callUUID else { return }
@@ -374,6 +426,27 @@ extension SentiCallManager: @preconcurrency PKPushRegistryDelegate {
         completion: @escaping () -> Void
     ) {
         replayCurrentVoipToken()
+        // An agent's room call (sentinelayer-api #1046): the doorbell names the caller, and the call is read with
+        // the person's own session after CallKit accepts the report. Every push is still reported, under a fresh UUID.
+        if let doorbell = RoomCallDoorbell.parse(dict) {
+            // A ring that is not for the person signed in is still reported (iOS requires it), but names no one.
+            let authorized = isRoomCallAuthorized?() == true
+            let call = IncomingDecisionCall(
+                id: UUID(), dialId: "", callerDisplayName: authorized ? doorbell.callerName : "Senti", message: "",
+                context: nil, priority: "high"
+            )
+            ring(call) { [weak self] accepted in
+                if accepted {
+                    if authorized {
+                        self?.onRoomCallReceived?(doorbell, call.id)
+                    } else {
+                        self?.end(call.id)
+                    }
+                }
+                completion()
+            }
+            return
+        }
         let authorize = isIncomingBindingAuthorized ?? { _, _ in false }
         let prepared = Self.prepareIncomingPush(
             dict,

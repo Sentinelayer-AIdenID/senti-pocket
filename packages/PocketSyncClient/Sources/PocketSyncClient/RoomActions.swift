@@ -13,10 +13,14 @@ public struct RoomReply: Equatable, Identifiable, Sendable {
     public let targetActionId: String?
     public let authorId: String
     public let isHuman: Bool
+    /// What it says; empty for a reply that is only photos or files.
     public let text: String
     public let createdAt: String
     public let revision: Int64
     public let isEdited: Bool
+    /// Its photos and files, in the shape a message's take (sentinelayer-api #1135). An API that stores none, and a
+    /// reply from before it, carries none.
+    public let attachments: [RoomAttachment]
 
     public init(
         id: String,
@@ -26,7 +30,8 @@ public struct RoomReply: Equatable, Identifiable, Sendable {
         text: String,
         createdAt: String,
         revision: Int64 = 1,
-        isEdited: Bool = false
+        isEdited: Bool = false,
+        attachments: [RoomAttachment] = []
     ) {
         self.id = id
         self.targetSequenceId = targetSequenceId
@@ -37,16 +42,21 @@ public struct RoomReply: Equatable, Identifiable, Sendable {
         self.createdAt = createdAt
         self.revision = revision
         self.isEdited = isEdited
+        self.attachments = attachments
     }
 
+    /// A reply action, or nil. It says something, or carries a photo or file; a reply with neither is not shown.
     public init?(json: JSONValue) {
         guard json["actionType"]?.stringValue == "reply",
               let id = json["id"]?.stringValue, !id.isEmpty,
-              let target = json["targetSequenceId"]?.intValue, target > 0,
-              let note = json["note"]?.stringValue,
-              !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+              let target = json["targetSequenceId"]?.intValue, target > 0 else {
             return nil
         }
+        let raw = json["note"]?.stringValue ?? ""
+        let note = raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : raw
+        // Absent (an API without reply attachments, or an older row) is none.
+        let attachments = RoomAttachment.list(from: json)
+        guard !note.isEmpty || !attachments.isEmpty else { return nil }
         let author = json["actorId"]?.stringValue ?? ""
         self.init(
             id: id,
@@ -56,8 +66,68 @@ public struct RoomReply: Equatable, Identifiable, Sendable {
             text: note,
             createdAt: json["createdAt"]?.stringValue ?? "",
             revision: json["messageRevision"]?.intValue ?? 1,
-            isEdited: json["editedAt"]?.stringValue.map { !$0.isEmpty } ?? false
+            isEdited: json["editedAt"]?.stringValue.map { !$0.isEmpty } ?? false,
+            attachments: attachments
         )
+    }
+}
+
+/// Whether the API takes photos and files on a reply (sentinelayer-api #1135), as its reads show: that API writes an
+/// `attachments` list on every action it returns (empty when there are none), and an older one writes none.
+public enum RoomReplyAttachmentSupport: Equatable, Sendable {
+    /// Nothing read yet says.
+    case unknown
+    case supported
+    case unsupported
+
+    /// What a page of action rows says: any row with an `attachments` list is the API that takes them; rows with none
+    /// are an older API; no rows say nothing.
+    static func reading(_ rows: [JSONValue]) -> RoomReplyAttachmentSupport {
+        let objects = rows.filter { $0.objectValue != nil }
+        guard !objects.isEmpty else { return .unknown }
+        return objects.contains { $0["attachments"]?.arrayValue != nil } ? .supported : .unsupported
+    }
+}
+
+/// One emoji reaction on a message: the emoji, how many reacted with it, whether you did, and some of who did.
+public struct RoomEmojiReaction: Equatable, Sendable {
+    public let emoji: String
+    public let count: Int
+    public let viewerReacted: Bool
+    /// Public ids of who reacted, at most `actorLimit`.
+    public let actors: [String]
+
+    /// The most distinct emoji a message holds (the API's limit).
+    public static let limit = 20
+    /// The most reactors the API lists per emoji.
+    public static let actorLimit = 10
+
+    public init(emoji: String, count: Int, viewerReacted: Bool, actors: [String] = []) {
+        self.emoji = emoji
+        self.count = count
+        self.viewerReacted = viewerReacted
+        self.actors = actors
+    }
+
+    /// One entry of the summary's `emojiReactions`, or nil unless it holds exactly one emoji and a count.
+    init?(json: JSONValue) {
+        guard let emoji = json["emoji"]?.stringValue, ReactionEmoji.isValid(emoji),
+              let count = json["count"]?.intValue, count > 0 else { return nil }
+        let actors = (json["actors"]?.arrayValue ?? []).compactMap(\.stringValue).filter { !$0.isEmpty }
+        self.init(
+            emoji: emoji,
+            count: Int(clamping: count),
+            viewerReacted: json["viewerReacted"]?.boolValue ?? false,
+            actors: Array(actors.prefix(Self.actorLimit))
+        )
+    }
+
+    /// The summary's `emojiReactions` in first-use order: entries that are not one emoji are dropped, an emoji
+    /// listed twice counts once, and at most `limit` are kept.
+    static func list(_ json: JSONValue?) -> [RoomEmojiReaction] {
+        var seen = Set<String>()
+        let entries = (json?.arrayValue ?? []).compactMap(RoomEmojiReaction.init(json:))
+        return Array(entries.filter { seen.insert($0.emoji).inserted }.prefix(limit))
     }
 }
 
@@ -76,6 +146,8 @@ public struct RoomReactionSummary: Equatable, Sendable {
     public let latestReplies: [RoomReply]
     public let hasMoreReplies: Bool
     public let isPinned: Bool
+    /// Emoji reactions, in the order they were first used.
+    public let emojiReactions: [RoomEmojiReaction]
 
     public init(
         targetSequenceId: Int64,
@@ -87,7 +159,8 @@ public struct RoomReactionSummary: Equatable, Sendable {
         replyTotal: Int = 0,
         latestReplies: [RoomReply] = [],
         hasMoreReplies: Bool = false,
-        isPinned: Bool = false
+        isPinned: Bool = false,
+        emojiReactions: [RoomEmojiReaction] = []
     ) {
         self.targetSequenceId = targetSequenceId
         self.counts = counts
@@ -99,6 +172,7 @@ public struct RoomReactionSummary: Equatable, Sendable {
         self.latestReplies = latestReplies
         self.hasMoreReplies = hasMoreReplies
         self.isPinned = isPinned
+        self.emojiReactions = emojiReactions
     }
 
     init?(json: JSONValue) {
@@ -132,9 +206,41 @@ public struct RoomReactionSummary: Equatable, Sendable {
             replyTotal: max(Int(clamping: json["replyTotal"]?.intValue ?? 0), counts["reply"] ?? 0, replies.count),
             latestReplies: replies,
             hasMoreReplies: json["hasMoreReplies"]?.boolValue ?? false,
-            isPinned: json["isPinned"]?.boolValue ?? false
+            isPinned: json["isPinned"]?.boolValue ?? false,
+            emojiReactions: RoomEmojiReaction.list(json["emojiReactions"])
         )
     }
+}
+
+/// An agent saying what it is doing about a message (an action of type `working_on`), e.g. "drafting the fix" or
+/// "done: filed 1 ticket".
+public struct RoomWorkingOn: Equatable, Identifiable, Sendable {
+    public let id: String
+    public let targetSequenceId: Int64
+    public let actorId: String
+    public let note: String
+    public let createdAt: String
+
+    public init(id: String, targetSequenceId: Int64, actorId: String, note: String, createdAt: String) {
+        self.id = id
+        self.targetSequenceId = targetSequenceId
+        self.actorId = actorId
+        self.note = note
+        self.createdAt = createdAt
+    }
+
+    init?(json: JSONValue) {
+        guard json["actionType"]?.stringValue == "working_on",
+              let id = json["id"]?.stringValue, !id.isEmpty,
+              let target = json["targetSequenceId"]?.intValue, target > 0,
+              let actor = json["actorId"]?.stringValue, !actor.isEmpty else { return nil }
+        let note = (json["note"]?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        self.init(id: id, targetSequenceId: target, actorId: actor, note: note.isEmpty ? "working on it" : note,
+                  createdAt: json["createdAt"]?.stringValue ?? "")
+    }
+
+    /// Finished: the agent's note says so.
+    public var isDone: Bool { note.lowercased().hasPrefix("done") }
 }
 
 /// A message pinned for the room (`projection.pinnedMessages`): newest pin first, at most the room's pin limit.
@@ -170,21 +276,33 @@ public struct RoomPinnedMessage: Equatable, Identifiable, Sendable {
 public struct RoomActionsPage: Decodable, Equatable, Sendable {
     public let byTarget: [Int64: RoomReactionSummary]
     public let replies: [RoomReply]
+    /// "Working on" updates in the page, oldest first.
+    public let workingOn: [RoomWorkingOn]
+    /// How long a "working on" stays current without a newer one (the API's `workingOnStaleAfterSeconds`).
+    public let workingOnStaleAfter: TimeInterval
     /// The room's pinned messages, newest pin first.
     public let pinned: [RoomPinnedMessage]
     /// How many messages the room can pin at once (the API's limit).
     public let pinLimit: Int
+    /// Whether this API takes photos and files on a reply, as its rows show.
+    public let replyAttachments: RoomReplyAttachmentSupport
 
     public init(
         byTarget: [Int64: RoomReactionSummary] = [:],
         replies: [RoomReply] = [],
+        workingOn: [RoomWorkingOn] = [],
+        workingOnStaleAfter: TimeInterval = 900,
         pinned: [RoomPinnedMessage] = [],
-        pinLimit: Int = 10
+        pinLimit: Int = 10,
+        replyAttachments: RoomReplyAttachmentSupport = .unknown
     ) {
         self.byTarget = byTarget
         self.replies = replies
+        self.workingOn = workingOn
+        self.workingOnStaleAfter = workingOnStaleAfter
         self.pinned = pinned
         self.pinLimit = pinLimit
+        self.replyAttachments = replyAttachments
     }
 
     enum CodingKeys: String, CodingKey { case actions, projection }
@@ -209,9 +327,12 @@ public struct RoomActionsPage: Decodable, Equatable, Sendable {
             if let existing = latest[reply.id], existing.revision >= reply.revision { continue }
             latest[reply.id] = reply
         }
+        self.workingOn = actions.compactMap(RoomWorkingOn.init(json:)).sorted { ($0.createdAt, $0.id) < ($1.createdAt, $1.id) }
+        self.workingOnStaleAfter = TimeInterval(max(60, min(86_400, projection["workingOnStaleAfterSeconds"]?.intValue ?? 900)))
         self.replies = latest.values.sorted {
             ($0.createdAt, $0.id) < ($1.createdAt, $1.id)
         }
+        self.replyAttachments = RoomReplyAttachmentSupport.reading(actions)
     }
 }
 

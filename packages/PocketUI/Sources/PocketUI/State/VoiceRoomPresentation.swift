@@ -1,0 +1,315 @@
+import Foundation
+
+/// One spoken turn in a voice room: yours (recognized on the phone) or an agent's (read aloud in its voice).
+public struct VoiceRoomTurn: Equatable, Identifiable, Sendable {
+    public let id: String
+    public let speaker: String
+    public let isYou: Bool
+    public let text: String
+    public let at: Date
+    /// In a meeting, another agent already had the floor for this turn: kept in the transcript, never read aloud.
+    public let isHeld: Bool
+
+    public init(id: String, speaker: String, isYou: Bool, text: String, at: Date, isHeld: Bool = false) {
+        self.id = id
+        self.speaker = speaker
+        self.isYou = isYou
+        self.text = text
+        self.at = at
+        self.isHeld = isHeld
+    }
+}
+
+/// How fast a call felt, measured on the phone (Carter, 10-30: "something to measure response time for TTS and
+/// STT"). Each measure keeps every sample; the call's end reports the middle (p50) and the slow end (p95).
+public struct VoiceCallTimings: Equatable, Sendable {
+    public enum Measure: String, CaseIterable, Sendable {
+        /// You stopped talking to the first sound of the answer: the gap people feel. "You stop" is the last sound
+        /// loud enough to be you talking, not the recognizer's last word, which comes a beat later (the voice
+        /// comparison, 10-31: the old clock hid that lag); without the microphone's level it is the last word.
+        case gap
+        /// You stopped talking (as for `gap`) to the room accepting your turn: the pause that ends it, the recognizer's
+        /// last words and the post. It shows what ending turns on sound saves.
+        case endpoint
+        /// Your turn accepted by the room to the first answer arriving on the phone.
+        case answer
+        /// Ending your turn to the phone's recognizer handing over its words.
+        case recognition
+        /// Sending your turn to the room accepting it.
+        case post
+        /// Asking the phone to speak an answer to its first sound.
+        case voiceStart
+
+        public var label: String {
+            switch self {
+            case .gap: return "you stop → answer heard"
+            case .endpoint: return "end of sound → turn posted"
+            case .answer: return "turn posted → answer arrives"
+            case .recognition: return "speech recognized"
+            case .post: return "turn posted"
+            case .voiceStart: return "voice starts"
+            }
+        }
+    }
+
+    public private(set) var samples: [Measure: [TimeInterval]] = [:]
+    /// Answers held because another agent had the floor.
+    public private(set) var held = 0
+    /// Turns ended early because the signal model said they were finished.
+    public private(set) var endedEarly = 0
+    /// Turns you went on with just after they were sent: a pause mid-thought had ended them, and the words joined them.
+    public private(set) var continued = 0
+
+    public init() {}
+
+    public var isEmpty: Bool { samples.values.allSatisfy(\.isEmpty) && held == 0 }
+
+    /// A turn ended on a short pause, the signal model having said it was finished.
+    public mutating func noteEarlyEnd() {
+        endedEarly += 1
+    }
+
+    /// You went on talking just after a turn was sent, and the words joined it.
+    public mutating func noteContinued() {
+        continued += 1
+    }
+
+    public mutating func record(_ measure: Measure, _ seconds: TimeInterval) {
+        guard seconds.isFinite, seconds >= 0 else { return }
+        samples[measure, default: []].append(seconds)
+    }
+
+    public mutating func noteHeld() { held += 1 }
+
+    /// The nearest-rank percentile (0...1) of a measure, nil without samples.
+    public func percentile(_ measure: Measure, _ fraction: Double) -> TimeInterval? {
+        guard let values = samples[measure], !values.isEmpty else { return nil }
+        let sorted = values.sorted()
+        let rank = Int((fraction * Double(sorted.count)).rounded(.up)) - 1
+        return sorted[min(max(rank, 0), sorted.count - 1)]
+    }
+
+    /// For the call's closing message: "Timings: you stop → answer heard 4.2 s (p95 6.0 s, 5 turns) · …".
+    public func line() -> String? {
+        let parts = Measure.allCases.compactMap { measure -> String? in
+            guard let middle = percentile(measure, 0.5), let slow = percentile(measure, 0.95) else { return nil }
+            let count = samples[measure]?.count ?? 0
+            return count > 1
+                ? "\(measure.label) \(Self.seconds(middle)) (p95 \(Self.seconds(slow)), \(count))"
+                : "\(measure.label) \(Self.seconds(middle))"
+        }
+        var line = parts.joined(separator: " · ")
+        if held > 0 { line += (line.isEmpty ? "" : " · ") + "\(held) held for the floor" }
+        if endedEarly > 0 { line += (line.isEmpty ? "" : " · ") + "\(endedEarly) ended on a short pause" }
+        if continued > 0 { line += (line.isEmpty ? "" : " · ") + "\(continued) continued after a pause" }
+        return line.isEmpty ? nil : "Timings: " + line + "."
+    }
+
+    /// For the transcript: a table of every measure.
+    public func markdown() -> [String] {
+        var lines = ["| Measure | p50 | p95 | Samples |", "| --- | --- | --- | --- |"]
+        for measure in Measure.allCases {
+            guard let middle = percentile(measure, 0.5), let slow = percentile(measure, 0.95) else { continue }
+            lines.append("| \(measure.label) | \(Self.seconds(middle)) | \(Self.seconds(slow)) | \(samples[measure]?.count ?? 0) |")
+        }
+        if held > 0 { lines.append("| answers held for the floor | | | \(held) |") }
+        if endedEarly > 0 { lines.append("| turns ended on a short pause | | | \(endedEarly) |") }
+        if continued > 0 { lines.append("| turns continued after a pause | | | \(continued) |") }
+        return lines.count > 2 ? lines : []
+    }
+
+    static func seconds(_ value: TimeInterval) -> String {
+        String(format: "%.1f s", value)
+    }
+}
+
+/// A voice conversation in a room, as the panel shows it.
+public struct VoiceRoomState: Equatable, Sendable {
+    public enum Phase: Equatable, Sendable {
+        /// Ready for you to talk.
+        case ready
+        /// Listening to you; `partial` holds what has been recognized so far.
+        case listening
+        /// Your turn is on its way to the room.
+        case sending
+        /// An agent's answer is being read aloud.
+        case speaking(speaker: String)
+        /// Hanging up: the transcript is being saved to the room.
+        case ending
+        case ended
+    }
+
+    public var phase: Phase
+    /// Who you are talking with: one agent, several you picked or added, or everyone in the room (a meeting) when empty.
+    public var with: [String]
+    public var partial: String
+    public var turns: [VoiceRoomTurn]
+    public var startedAt: Date
+    /// Answers waiting to be read aloud after the current one.
+    public var waiting: Int
+    /// After an answer is read, listening starts again by itself, and a pause ends your turn.
+    public var isHandsFree: Bool
+    public var notice: String?
+    /// The agents who have answered so far; until one does, the call is ringing.
+    public var joined: [String] = []
+    /// The ring has stopped: an agent picked up, nobody did for a while, or you started talking.
+    public var ringStopped = false
+    /// The agents' posts not read because the voice line answered their turn, by turn id: the transcript says so,
+    /// rather than "another agent had the floor".
+    public var answeredByLine: Set<String> = []
+    /// Why the agent called, when you answered its call; shown until someone speaks.
+    public var about: String?
+    /// Muted, by the panel's Mute or on the phone's call screen: nothing you say is heard or posted until unmuted.
+    public var isMuted = false
+    /// The call is also on the phone's own call screen (an agent's call you answered), whose Mute is this one.
+    public var hasCallScreen = false
+
+    public init(
+        phase: Phase = .ready,
+        with: [String] = [],
+        partial: String = "",
+        turns: [VoiceRoomTurn] = [],
+        startedAt: Date = Date(),
+        waiting: Int = 0,
+        isHandsFree: Bool = true,
+        notice: String? = nil
+    ) {
+        self.phase = phase
+        self.with = with
+        self.partial = partial
+        self.turns = turns
+        self.startedAt = startedAt
+        self.waiting = waiting
+        self.isHandsFree = isHandsFree
+        self.notice = notice
+    }
+
+    /// "pocket-forge", "pocket-forge and warden", or "everyone".
+    public var title: String {
+        switch with.count {
+        case 0: return "everyone"
+        case 1: return with[0]
+        default: return with.dropLast().joined(separator: ", ") + " and " + (with.last ?? "")
+        }
+    }
+
+    public var isListening: Bool { phase == .listening }
+
+    /// More than one agent can answer, so the first to answer a turn has the floor.
+    public var sharesFloor: Bool { with.count != 1 }
+
+    /// Someone can be brought in: a call with agents you picked, still going and not yet full. A meeting already has
+    /// everyone.
+    public var canAdd: Bool {
+        !with.isEmpty && with.count < VoiceCallRoster.limit && phase != .ending && phase != .ended
+    }
+
+    public var isRinging: Bool { joined.isEmpty && !ringStopped && phase != .ending && phase != .ended }
+
+    public var speaker: String? {
+        if case .speaking(let speaker) = phase { return speaker }
+        return nil
+    }
+
+    /// What the panel's Mute button says; a call always has one. As on the phone's own call screen, it always shows a
+    /// crossed-out mic, filled while muted.
+    public var muteLabel: String { isMuted ? "Unmute" : "Mute" }
+
+    /// What the panel says while muted. In a call the phone's call screen also shows, the call screen is muted too.
+    public var mutedStatus: String { hasCallScreen ? "Muted on the call screen" : "Muted" }
+
+    /// The Talk button takes a turn: never while muted, or once the call is ending.
+    public var canTalk: Bool { !isMuted && phase != .ending && phase != .ended }
+}
+
+public enum VoiceRoomIntent: Equatable, Sendable {
+    /// Start or stop your turn (a tap), or hold to talk: `talk(true)` when pressed and `talk(false)` when let go.
+    case toggleTalk
+    case talk(Bool)
+    /// Stop reading the current answer (the next one, if any, follows).
+    case skip
+    case setHandsFree(Bool)
+    /// Bring another agent into the call.
+    case add(String)
+    /// The panel's Mute (or Unmute): the microphone stops listening. In a call on the phone's call screen, the call
+    /// screen is asked, so both show the same.
+    case setMuted(Bool)
+    case hangUp
+}
+
+/// The agents ticked in the call picker, to call several at once. The call rings them in the list's
+/// order, so its title reads the way the list does; one that drops off the list is not rung.
+public struct VoiceCallPick: Equatable, Sendable {
+    public private(set) var picked: Set<String> = []
+
+    public init() {}
+
+    public mutating func toggle(_ agent: String) {
+        let key = agent.lowercased()
+        if picked.remove(key) == nil { picked.insert(key) }
+    }
+
+    public func isPicked(_ agent: String) -> Bool { picked.contains(agent.lowercased()) }
+
+    /// Whom the call rings, of those offered now.
+    public func agents(of partners: [String]) -> [String] {
+        partners.filter { picked.contains($0.lowercased()) }
+    }
+
+    /// "Call pocket-forge", "Call these 3", or a prompt while nobody is ticked.
+    public func callTitle(of partners: [String]) -> String {
+        let agents = agents(of: partners)
+        switch agents.count {
+        case 0: return "Tick who to call"
+        case 1: return "Call \(agents[0])"
+        default: return "Call these \(agents.count)"
+        }
+    }
+}
+
+/// Whom a call can ring (Carter, #55061): only agents that can answer now. A box (an agent minted for a job) while it
+/// runs, never once it ended; any other agent while it is here (active or idle) or has posted within the hour. The
+/// room's own services (costs, mints, ticket filing) never answer a call.
+public enum VoiceCallRoster {
+    /// An agent heard from within this long can still answer.
+    public static let recent: TimeInterval = 60 * 60
+    /// The most the picker offers.
+    public static let limit = 8
+
+    public struct Post: Equatable, Sendable {
+        public let authorId: String
+        public let at: Date?
+
+        public init(authorId: String, at: Date?) {
+            self.authorId = authorId
+            self.at = at
+        }
+    }
+
+    /// - Parameters:
+    ///   - present: the agents here now, active or idle, in the order the room shows them.
+    ///   - posts: agents' messages, newest first.
+    ///   - runningBoxes: the boxes the Flight record shows running, which answer even when quiet.
+    ///   - endedBoxes: boxes that ended, from the Flight record and the room's own lines.
+    public static func partners(present: [String], posts: [Post], runningBoxes: [String], endedBoxes: Set<String>,
+                                now: Date) -> [String] {
+        let running = Set(runningBoxes.map { $0.lowercased() })
+        let ended = Set(endedBoxes.map { $0.lowercased() })
+        var partners: [String] = []
+        var seen = Set<String>()
+        func offer(_ id: String) {
+            let key = id.lowercased()
+            guard !key.isEmpty, !key.hasPrefix("human"), !RoomChatQuiet.isRoomVoice(key),
+                  running.contains(key) || !ended.contains(key),
+                  seen.insert(key).inserted else { return }
+            partners.append(id)
+        }
+        present.forEach(offer)
+        for post in posts {
+            guard let at = post.at, now.timeIntervalSince(at) <= recent else { continue }
+            offer(post.authorId)
+        }
+        runningBoxes.forEach(offer)
+        return Array(partners.prefix(limit))
+    }
+}

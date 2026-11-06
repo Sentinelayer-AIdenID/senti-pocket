@@ -38,6 +38,161 @@ public struct SessionSummary: Codable, Equatable, Sendable, Identifiable {
     public let templateName: String?
     public let codebasePath: String?
     public let s3ArchivePath: String?
+    /// What the room is for: general, study, research or conference (absent from older servers).
+    public let roomType: String?
+    /// Who is in the room now, people and agents, for the room list's online counts. Absent from older servers; null
+    /// when the server cannot say.
+    public let online: SessionOnlineCounts?
+    /// Your unread messages in the room and the first of them (absent from older servers).
+    public let unread: SessionUnreadSummary?
+    /// How far the server holds you have read the room (absent from older servers, and before you read it).
+    public let lastReadSequenceId: Int64?
+    /// "room" or "direct" (a direct message with one person or agent). Absent from servers without direct messages.
+    public let kind: String?
+    /// A direct room's other side, as you see it. Nil for a room.
+    public let counterpart: SessionCounterpart?
+    /// The room a direct room was opened from, or nil when that room is gone or no longer visible to you.
+    public let originRoomId: String?
+    /// Your folder for this room, or nil when it is in none (folders are yours alone).
+    public let folderId: String?
+
+    /// A direct message with one person or agent, which the room list nests under the room it was opened from.
+    public var isDirect: Bool { kind == "direct" && counterpart != nil }
+
+    enum CodingKeys: String, CodingKey {
+        case sessionId, status, archiveStatus, visibility, membershipRole, title, summaryText, summaryGeneratedAt
+        case summaryModel, agentCount, eventCount, totalCostUsd, createdAt, lastActivityAt, expiresAt, killedAt
+        case templateName, codebasePath, s3ArchivePath, roomType, online, unread, lastReadSequenceId
+        case kind, counterpart, originRoomId, folderId
+    }
+
+    /// The room's own fields decode exactly as the wire guarantees them (a missing required key fails the list).
+    /// Who is online and what is unread are counts to show and never content or authority, so they decode
+    /// tolerantly: missing, null or malformed, they read as unknown and the room list shows nothing for them,
+    /// rather than the whole list failing over a count.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sessionId = try container.decode(String.self, forKey: .sessionId)
+        status = try container.decode(String.self, forKey: .status)
+        archiveStatus = try container.decode(String.self, forKey: .archiveStatus)
+        visibility = try container.decode(String.self, forKey: .visibility)
+        membershipRole = try container.decode(String.self, forKey: .membershipRole)
+        title = try container.decodeIfPresent(String.self, forKey: .title)
+        summaryText = try container.decodeIfPresent(String.self, forKey: .summaryText)
+        summaryGeneratedAt = try container.decodeIfPresent(String.self, forKey: .summaryGeneratedAt)
+        summaryModel = try container.decodeIfPresent(String.self, forKey: .summaryModel)
+        agentCount = try container.decode(Int.self, forKey: .agentCount)
+        eventCount = try container.decode(Int.self, forKey: .eventCount)
+        totalCostUsd = try container.decode(Decimal.self, forKey: .totalCostUsd)
+        createdAt = try container.decodeIfPresent(String.self, forKey: .createdAt)
+        lastActivityAt = try container.decodeIfPresent(String.self, forKey: .lastActivityAt)
+        expiresAt = try container.decodeIfPresent(String.self, forKey: .expiresAt)
+        killedAt = try container.decodeIfPresent(String.self, forKey: .killedAt)
+        templateName = try container.decodeIfPresent(String.self, forKey: .templateName)
+        codebasePath = try container.decodeIfPresent(String.self, forKey: .codebasePath)
+        s3ArchivePath = try container.decodeIfPresent(String.self, forKey: .s3ArchivePath)
+        roomType = try container.decodeIfPresent(String.self, forKey: .roomType)
+        online = try? container.decodeIfPresent(SessionOnlineCounts.self, forKey: .online)
+        unread = try? container.decodeIfPresent(SessionUnreadSummary.self, forKey: .unread)
+        lastReadSequenceId = SessionTolerant.sequence(in: container, .lastReadSequenceId)
+        // Where a room sits in your list (direct or not, nested under which room, in which folder) never fails the
+        // list: missing, null or malformed, a row reads as an ordinary room, unfiled.
+        kind = SessionTolerant.identifier(in: container, .kind)?.lowercased()
+        counterpart = try? container.decodeIfPresent(SessionCounterpart.self, forKey: .counterpart)
+        originRoomId = SessionTolerant.identifier(in: container, .originRoomId)
+        folderId = SessionTolerant.identifier(in: container, .folderId)
+    }
+}
+
+/// The other side of a direct room, as the viewer sees it: who, a person or an agent, and the name to show.
+public struct SessionCounterpart: Codable, Equatable, Hashable, Sendable {
+    /// The id the room's messages carry for them (`human-<login>` for a person, the agent's id for an agent).
+    public let senderId: String
+    /// "human" or "agent".
+    public let kind: String
+    public let displayName: String
+
+    public var isAgent: Bool { kind == "agent" }
+
+    public init(senderId: String, kind: String, displayName: String) {
+        self.senderId = senderId
+        self.kind = kind
+        self.displayName = displayName
+    }
+
+    enum CodingKeys: String, CodingKey { case senderId, kind, displayName }
+
+    /// A counterpart needs an id; a kind other than "agent" reads as a person, and a missing name shows the id.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        guard let senderId = SessionTolerant.identifier(in: container, .senderId) else {
+            throw DecodingError.dataCorruptedError(forKey: .senderId, in: container, debugDescription: "no sender id")
+        }
+        let kind = SessionTolerant.identifier(in: container, .kind)?.lowercased() == "agent" ? "agent" : "human"
+        let name = (try? container.decodeIfPresent(String.self, forKey: .displayName))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        self.init(senderId: senderId, kind: kind, displayName: name.flatMap { $0.isEmpty ? nil : $0 } ?? senderId)
+    }
+}
+
+/// How many people and agents are in a room now, as the room list shows them. A count that is missing, null,
+/// negative or not a whole number reads as 0.
+public struct SessionOnlineCounts: Codable, Equatable, Sendable {
+    public let humans: Int
+    public let agents: Int
+
+    enum CodingKeys: String, CodingKey { case humans, agents }
+
+    public init(humans: Int, agents: Int) {
+        self.humans = max(humans, 0)
+        self.agents = max(agents, 0)
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try? decoder.container(keyedBy: CodingKeys.self)
+        self.init(humans: SessionTolerant.count(in: container, .humans),
+                  agents: SessionTolerant.count(in: container, .agents))
+    }
+}
+
+/// Your unread messages in a room: how many, and the first one's sequence (where the room opens). A count that is
+/// missing or malformed reads as 0; a first unread that is missing, malformed or not positive reads as unknown.
+public struct SessionUnreadSummary: Codable, Equatable, Sendable {
+    public let count: Int
+    public let firstUnreadSequenceId: Int64?
+
+    enum CodingKeys: String, CodingKey { case count, firstUnreadSequenceId }
+
+    public init(count: Int, firstUnreadSequenceId: Int64?) {
+        self.count = max(count, 0)
+        self.firstUnreadSequenceId = firstUnreadSequenceId.flatMap { $0 > 0 ? $0 : nil }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try? decoder.container(keyedBy: CodingKeys.self)
+        self.init(count: SessionTolerant.count(in: container, .count),
+                  firstUnreadSequenceId: SessionTolerant.sequence(in: container, .firstUnreadSequenceId))
+    }
+}
+
+/// Reads display counts and sequence positions without ever failing the response they are in.
+enum SessionTolerant {
+    static func count<Key: CodingKey>(in container: KeyedDecodingContainer<Key>?, _ key: Key) -> Int {
+        guard let value = try? container?.decodeIfPresent(Int.self, forKey: key) else { return 0 }
+        return max(value, 0)
+    }
+
+    static func sequence<Key: CodingKey>(in container: KeyedDecodingContainer<Key>?, _ key: Key) -> Int64? {
+        guard let value = try? container?.decodeIfPresent(Int64.self, forKey: key), value > 0 else { return nil }
+        return value
+    }
+
+    /// A non-blank string of at most 256 bytes, trimmed; anything else (missing, null, not a string) is nil.
+    static func identifier<Key: CodingKey>(in container: KeyedDecodingContainer<Key>?, _ key: Key) -> String? {
+        guard let value = try? container?.decodeIfPresent(String.self, forKey: key) else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty || trimmed.utf8.count > 256 ? nil : trimmed
+    }
 }
 
 /// GET /api/v1/sessions -> route wrapper (sessions.py:2512-2517).

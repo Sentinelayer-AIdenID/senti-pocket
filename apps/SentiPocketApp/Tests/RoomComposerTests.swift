@@ -85,6 +85,44 @@ final class RoomMessageSenderTests: XCTestCase {
                        "no author field: the API authors human messages itself")
     }
 
+    /// Warden, #298 review: a sender bound to the account that queued the work sends only while that account is the
+    /// one signed in. After another account signs in (a forced sign-in on a shared phone), it sends nothing at all.
+    func test_a_sender_bound_to_one_account_never_sends_with_another_accounts_token() async throws {
+        func jwt(_ sub: String) -> String {
+            let payload = Data("{\"sub\":\"\(sub)\"}".utf8).base64EncodedString()
+                .replacingOccurrences(of: "=", with: "").replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+            return "e30.\(payload).sig"
+        }
+        final class Current: @unchecked Sendable { var token: String? }
+        let current = Current()
+        RoomSendURLProtocol.reset(status: 200, headers: [:])
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RoomSendURLProtocol.self]
+        let sender = HTTPRoomMessageSender(apiBaseURL: URL(string: "https://api.example.test"),
+                                           urlSession: URLSession(configuration: configuration),
+                                           tokenProvider: { current.token }).bound(toAccount: "sub:alice")
+        current.token = jwt("alice")
+        try await sender.sendHumanMessage(sessionId: "room_1", text: "from alice", clientId: "hm_1")
+        XCTAssertEqual(RoomSendURLProtocol.requests().count, 1, "sent while its account is signed in")
+
+        current.token = jwt("bob")
+        do {
+            try await sender.sendHumanMessage(sessionId: "room_1", text: "from alice", clientId: "hm_2")
+            XCTFail("never sent with another account's token")
+        } catch {
+            XCTAssertEqual(error as? RoomSendError, .reauthenticationRequired)
+        }
+        XCTAssertEqual(RoomSendURLProtocol.requests().count, 1, "nothing went out as bob")
+        let none = HTTPRoomMessageSender(apiBaseURL: URL(string: "https://api.example.test"),
+                                         urlSession: URLSession(configuration: configuration),
+                                         tokenProvider: { current.token }).bound(toAccount: nil)
+        do {
+            try await none.sendHumanMessage(sessionId: "room_1", text: "x", clientId: "hm_3")
+            XCTFail("a sender bound to no account never sends")
+        } catch {}
+        XCTAssertEqual(RoomSendURLProtocol.requests().count, 1)
+    }
+
     func test_status_classes_map_to_retry_or_stop() async {
         let cases: [(Int, [String: String], RoomSendError)] = [
             (401, [:], .reauthenticationRequired),
@@ -198,6 +236,9 @@ final class RoomComposerCoordinatorTests: XCTestCase {
         sender: ScriptedSender?,
         role: String = "owner",
         identity: (any AccountIdentityProviding)? = nil,
+        outbox: RoomSendOutbox? = nil,
+        account: String? = "sub:carter",
+        ownAuthorIds: Set<String> = [],
         onReauth: @escaping @MainActor () -> Void = {}
     ) -> RoomChatCoordinator {
         RoomChatCoordinator(
@@ -207,11 +248,19 @@ final class RoomComposerCoordinatorTests: XCTestCase {
             sender: sender,
             identity: identity,
             membershipRole: role,
+            ownAuthorIds: ownAuthorIds,
             sleep: { seconds in
                 if seconds > 5 { try? await Task.sleep(nanoseconds: 3_600_000_000_000) }
             },
+            outbox: outbox,
+            outboxAccount: outbox == nil ? nil : account,
             onReauthenticationRequired: onReauth
         )
+    }
+
+    private func temporaryOutbox() -> RoomSendOutbox {
+        RoomSendOutbox(url: FileManager.default.temporaryDirectory
+            .appendingPathComponent("outbox-\(UUID().uuidString).json"))
     }
 
     private func waitUntil(_ description: String, _ condition: @MainActor () -> Bool) async {
@@ -254,6 +303,142 @@ final class RoomComposerCoordinatorTests: XCTestCase {
         XCTAssertTrue(coordinator.state.pending.isEmpty, "the room's own copy replaces the pending row")
         XCTAssertTrue(coordinator.state.ownMentionHandles.contains("mrrcarter"), "your echo teaches the app who you are")
         coordinator.pause()
+    }
+
+    /// A shared crash report is marked handled only once the room accepted it: a failed send keeps it for next time.
+    func test_a_crash_report_is_handled_only_after_the_room_accepts_it() async {
+        let failing = ScriptedSender([.failure(.retryable(retryAfterSeconds: nil))])
+        let lost = makeCoordinator(sender: failing)
+        lost.resume()
+        var handledAfterFailure = 0
+        lost.sendCrashReport("Pocket closed unexpectedly") { handledAfterFailure += 1 }
+        await waitUntil("the send failed") {
+            if case .failed = lost.state.pending.first?.status { return true }
+            return false
+        }
+        XCTAssertEqual(handledAfterFailure, 0, "a lost send leaves the report unhandled")
+        lost.pause()
+
+        let sender = ScriptedSender([.success(())])
+        let coordinator = makeCoordinator(sender: sender)
+        coordinator.resume()
+        var handled = 0
+        coordinator.sendCrashReport("Pocket closed unexpectedly") { handled += 1 }
+        XCTAssertEqual(handled, 0, "not before the room answers")
+        await waitUntil("sent") { coordinator.state.pending.first?.status == .sent }
+        XCTAssertEqual(handled, 1)
+        coordinator.pause()
+    }
+
+    /// The room kept the message but the answer was lost, then the app was killed. After the relaunch
+    /// the message comes back unconfirmed under its own client id; Retry sends that same id, so the room keeps one copy.
+    func test_a_send_cut_off_by_a_kill_comes_back_under_its_own_client_id_and_retries_once() async {
+        let outbox = temporaryOutbox()
+        let first = ScriptedSender([.failure(.retryable(retryAfterSeconds: nil))])
+        let before = makeCoordinator(sender: first, outbox: outbox)
+        before.resume()
+        before.send(.sendMessage(text: "ship it"))
+        await waitUntil("the answer was lost") {
+            if case .failed = before.state.pending.first?.status { return true }
+            return false
+        }
+        let original = first.snapshot()[0].clientId
+        before.pause()
+
+        // A new process: the same room, a new coordinator, nothing in memory.
+        let second = ScriptedSender([.success(())])
+        let after = makeCoordinator(sender: second, outbox: outbox)
+        XCTAssertEqual(after.state.pending.map(\.clientId), [original], "the unsent message is back")
+        XCTAssertEqual(after.state.pending.first?.text, "ship it")
+        guard case .failed(let reason, true) = after.state.pending.first?.status else {
+            return XCTFail("offered to retry, not sent on its own")
+        }
+        XCTAssertEqual(reason, RoomChatCoordinator.unconfirmedReason)
+        XCTAssertTrue(second.snapshot().isEmpty, "nothing is sent until the person chooses Retry")
+        after.resume()
+        after.send(.retrySend(clientId: original))
+        await waitUntil("sent") { after.state.pending.first?.status == .sent }
+        XCTAssertEqual(second.snapshot().map(\.clientId), [original], "the same client id, never a new one")
+        XCTAssertTrue(outbox.items(account: "sub:carter", sessionId: "room_1").isEmpty, "confirmed, so forgotten")
+        after.pause()
+    }
+
+    /// Review of #298: with no account passed in, sends are kept under the one from your author ids, and a relaunch
+    /// must restore them from that same account, not look for none.
+    func test_a_send_kept_under_the_author_id_account_comes_back_after_a_kill() async {
+        let outbox = temporaryOutbox()
+        let first = ScriptedSender([.failure(.retryable(retryAfterSeconds: nil))])
+        let before = makeCoordinator(sender: first, outbox: outbox, account: nil, ownAuthorIds: ["human-mrrcarter"])
+        before.resume()
+        before.send(.sendMessage(text: "ship it"))
+        await waitUntil("the answer was lost") {
+            if case .failed = before.state.pending.first?.status { return true }
+            return false
+        }
+        let original = first.snapshot()[0].clientId
+        before.pause()
+        XCTAssertEqual(outbox.items(account: "human-mrrcarter", sessionId: "room_1").map(\.clientId), [original])
+
+        let after = makeCoordinator(sender: ScriptedSender([]), outbox: outbox, account: nil,
+                                    ownAuthorIds: ["human-mrrcarter"])
+        XCTAssertEqual(after.state.pending.map(\.clientId), [original], "the unsent message is back, same client id")
+    }
+
+    /// Review of #298: a write the phone could not make is reported, and the send still goes.
+    func test_an_outbox_the_phone_cannot_write_reports_it_and_the_send_still_goes() async {
+        let unwritable = RoomSendOutbox(url: FileManager.default.temporaryDirectory
+            .appendingPathComponent("missing-\(UUID().uuidString)/outbox.json"))
+        let item = RoomSendOutbox.Item(clientId: "c1", text: "hi", createdAt: Date())
+        XCTAssertFalse(unwritable.add(item, account: "sub:carter", sessionId: "room_1"))
+        let writable = temporaryOutbox()
+        XCTAssertTrue(writable.add(item, account: "sub:carter", sessionId: "room_1"))
+        XCTAssertTrue(writable.remove(clientId: "c1", account: "sub:carter", sessionId: "room_1"))
+
+        let sender = ScriptedSender([.success(())])
+        let coordinator = makeCoordinator(sender: sender, outbox: unwritable)
+        coordinator.resume()
+        coordinator.send(.sendMessage(text: "still sent"))
+        await waitUntil("sent") { coordinator.state.pending.first?.status == .sent }
+        XCTAssertEqual(sender.snapshot().map(\.text), ["still sent"])
+        coordinator.pause()
+    }
+
+    func test_discarding_an_unsent_message_forgets_it_and_another_account_never_sees_it() async {
+        let outbox = temporaryOutbox()
+        let sender = ScriptedSender([.failure(.retryable(retryAfterSeconds: nil))])
+        let coordinator = makeCoordinator(sender: sender, outbox: outbox)
+        coordinator.resume()
+        coordinator.send(.sendMessage(text: "draft for later"))
+        await waitUntil("failed") {
+            if case .failed = coordinator.state.pending.first?.status { return true }
+            return false
+        }
+        XCTAssertTrue(outbox.items(account: "sub:someone-else", sessionId: "room_1").isEmpty)
+        coordinator.send(.discardSend(clientId: sender.snapshot()[0].clientId))
+        XCTAssertTrue(outbox.items(account: "sub:carter", sessionId: "room_1").isEmpty)
+        coordinator.pause()
+    }
+
+    /// Warden, #298 review: unsent text is kept per account, so another account signing in on this phone (a forced
+    /// sign-in, say) never finds the last one's draft in its composer; the old key shared by everyone goes.
+    func test_drafts_are_kept_per_account_and_the_old_shared_key_goes() {
+        let legacy = RoomComposerDraft.savedKey(sessionId: "room_1")
+        UserDefaults.standard.set("the last person's text", forKey: legacy)
+        let coordinator = makeCoordinator(sender: ScriptedSender([]), outbox: temporaryOutbox())
+        XCTAssertEqual(coordinator.state.draftKey, RoomComposerDraft.savedKey(sessionId: "room_1", account: "sub:carter"))
+        XCTAssertNil(UserDefaults.standard.string(forKey: legacy), "no one can tell whose the old text was: it goes")
+        XCTAssertNotEqual(RoomComposerDraft.savedKey(sessionId: "room_1", account: "sub:carter"),
+                          RoomComposerDraft.savedKey(sessionId: "room_1", account: "sub:someone-else"))
+        XCTAssertNil(makeCoordinator(sender: ScriptedSender([])).state.draftKey, "no account, no draft kept")
+    }
+
+    func test_the_account_comes_from_the_tokens_subject() {
+        let payload = Data(#"{"sub":"user-42","exp":1}"#.utf8).base64EncodedString()
+            .replacingOccurrences(of: "=", with: "").replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+        XCTAssertEqual(RoomSendOutbox.account(token: "h.\(payload).s"), "sub:user-42")
+        XCTAssertNil(RoomSendOutbox.account(token: "not-a-jwt"))
+        XCTAssertNil(RoomSendOutbox.account(token: nil))
     }
 
     func test_a_failed_send_can_be_retried_with_the_same_client_id_and_discarded() async {

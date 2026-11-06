@@ -82,6 +82,10 @@ public struct SessionListPresentationState: Equatable, Sendable {
     }
 
     /// Projects an already validated repository snapshot without manufacturing a wire response.
+    /// - Parameters:
+    ///   - readThrough: how far this phone has read each room since, as the server confirmed it (by session id). A
+    ///     count the server made before that read is stale and shows no badge (`SessionRowPresentation`).
+    ///   - caughtUp: rooms this phone caught up on, thread replies included, since these rows were counted.
     public init(
         sessions: [SessionSummary],
         resultCount: Int? = nil,
@@ -89,7 +93,9 @@ public struct SessionListPresentationState: Equatable, Sendable {
         hasMore: Bool,
         provenance: SessionPresentationProvenance,
         isRefreshing: Bool = false,
-        failure: SessionLoadFailure? = nil
+        failure: SessionLoadFailure? = nil,
+        readThrough: [String: Int64] = [:],
+        caughtUp: Set<String> = []
     ) {
         let reportedCount = resultCount ?? sessions.count
         let ids = sessions.map(\.sessionId)
@@ -105,7 +111,12 @@ public struct SessionListPresentationState: Equatable, Sendable {
         let failureAllowsContent = failure?.suppressesProtectedContent != true
         let canPresentRows = identitiesAreValid && countIsValid && sourceAllowsContent && failureAllowsContent
 
-        self.rows = canPresentRows ? sessions.map(SessionRowPresentation.init) : []
+        self.rows = canPresentRows
+            ? sessions.map {
+                SessionRowPresentation($0, readThrough: readThrough[$0.sessionId],
+                                       caughtUp: caughtUp.contains($0.sessionId))
+            }
+            : []
         self.resultCount = canPresentRows ? reportedCount : 0
         self.includesArchived = includesArchived
         self.hasMore = canPresentRows && hasMore
@@ -126,18 +137,72 @@ public struct SessionRowPresentation: Equatable, Identifiable, Sendable {
     public let agentCount: Int
     public let eventCount: Int
     public let lastActivity: ParsedSessionTimestamp?
+    /// The room's kind when it isn't a general room: "Study together", "Research" or "Meetings".
+    public let roomTypeLabel: String?
+    /// Who is in the room now and your unread messages, for the row's counts and badge.
+    public let activity: RoomListActivity
+    /// The first message you have not read, where the room opens; nil with nothing unread.
+    public let firstUnreadSequenceId: Int64?
+    /// How far you have read the room: the server's mark, or further where this phone has read since.
+    public let lastReadSequenceId: Int64?
+    /// A direct message's other side, as you see it; nil for a room.
+    public let counterpart: SessionCounterpart?
+    /// The room a direct message was opened from, where the side panel nests it; nil when that room is gone or no
+    /// longer visible to you.
+    public let originRoomId: String?
+    /// Your folder for the room, as the room list says (the only copy the app keeps).
+    public let folderId: String?
 
-    fileprivate init(_ session: SessionSummary) {
+    /// A direct message with one person or agent.
+    public var isDirect: Bool { counterpart != nil }
+
+    /// - Parameters:
+    ///   - readThrough: how far this phone has read the room since the list was counted, as the server confirmed it.
+    ///     The server's unread messages all come at or after its first unread, so a first unread at or behind that
+    ///     point means the count was made before the read: no badge until the server counts again. One after it is
+    ///     news the read did not cover, and shows.
+    ///   - caughtUp: this phone caught up on the room since it was counted. A count with no first unread message is
+    ///     thread replies alone (the count includes them), which that read covered.
+    fileprivate init(_ session: SessionSummary, readThrough: Int64?, caughtUp: Bool = false) {
         self.id = OpaqueUTF8Identity(session.sessionId)
         self.sessionId = session.sessionId
-        self.title = session.title.pocketNonblank ?? "Untitled session"
-        self.summary = session.summaryText.pocketNonblank
+        // A direct message is named for whom it is with.
+        self.counterpart = session.isDirect ? session.counterpart : nil
+        self.originRoomId = session.isDirect ? session.originRoomId : nil
+        self.folderId = session.isDirect ? nil : session.folderId
+        self.title = self.counterpart?.displayName ?? session.title.pocketNonblank ?? "Untitled session"
+        // The room's saved summary: the server's prose as written, or an older server's five labelled parts read
+        // into sentences.
+        self.summary = session.summaryText.pocketNonblank.map(SummaryProse.saved).pocketNonblank
         self.status = session.status
         self.archiveStatus = session.archiveStatus
         self.membershipRole = session.membershipRole
         self.agentCount = session.agentCount
         self.eventCount = session.eventCount
         self.lastActivity = ParsedSessionTimestamp(session.lastActivityAt)
+        self.roomTypeLabel = Self.roomTypeLabel(session.roomType)
+        let readHere = readThrough ?? 0
+        let first = session.unread?.firstUnreadSequenceId
+        let staleCount = first.map { $0 <= readHere } ?? caughtUp
+        let unread = staleCount ? 0 : (session.unread?.count ?? 0)
+        self.activity = RoomListActivity(
+            humansOnline: session.online?.humans,
+            agentsOnline: session.online?.agents,
+            unread: unread
+        )
+        self.firstUnreadSequenceId = unread > 0 ? first : nil
+        let lastRead = max(session.lastReadSequenceId ?? 0, readHere)
+        self.lastReadSequenceId = lastRead > 0 ? lastRead : nil
+    }
+
+    /// The label a room kind shows, the phone's New room names; nil for general rooms and kinds this build doesn't know.
+    public static func roomTypeLabel(_ type: String?) -> String? {
+        switch type?.lowercased() {
+        case "study": return "Study together"
+        case "research": return "Research"
+        case "conference": return "Meetings"
+        default: return nil
+        }
     }
 
     public var statusLabel: String { status.pocketTokenLabel }

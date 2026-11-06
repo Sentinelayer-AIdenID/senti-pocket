@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import PocketContracts
 import PocketSyncClient
@@ -16,6 +17,10 @@ private final class ScriptedRoomTransport: RoomTransport, @unchecked Sendable {
     private(set) var beforeCalls: [Int64?] = []
     private(set) var afterCalls: [Int64] = []
     private(set) var streamCalls: [Int64?] = []
+    /// A before call (by its index) that waits for `releaseHeldPage()` before it answers.
+    private var heldBeforeCall: Int?
+    private var heldWaiter: CheckedContinuation<Void, Never>?
+    private var heldReleased = false
 
     init(
         before: [Result<RoomEventPage, Error>] = [],
@@ -28,10 +33,40 @@ private final class ScriptedRoomTransport: RoomTransport, @unchecked Sendable {
     }
 
     func roomEventsBefore(sessionId: String, beforeSequence: Int64?, limit: Int) async throws -> RoomEventPage {
-        try locked {
+        let (index, held) = locked { () -> (Int, Int?) in
             beforeCalls.append(beforeSequence)
-            return beforePages.isEmpty ? RoomEventPage(messages: []) : try beforePages.removeFirst().get()
+            return (beforeCalls.count - 1, heldBeforeCall)
         }
+        if index == held {
+            await withCheckedContinuation { (waiter: CheckedContinuation<Void, Never>) in
+                let now = locked { () -> Bool in
+                    if heldReleased { return true }
+                    heldWaiter = waiter
+                    return false
+                }
+                if now { waiter.resume() }
+            }
+        }
+        return try locked {
+            beforePages.isEmpty ? RoomEventPage(messages: []) : try beforePages.removeFirst().get()
+        }
+    }
+
+    func hold(beforeCall index: Int) {
+        locked { heldBeforeCall = index }
+    }
+
+    var isHoldingPage: Bool {
+        locked { heldWaiter != nil }
+    }
+
+    func releaseHeldPage() {
+        let waiter = locked { () -> CheckedContinuation<Void, Never>? in
+            heldReleased = true
+            defer { heldWaiter = nil }
+            return heldWaiter
+        }
+        waiter?.resume()
     }
 
     func roomEventsAfter(sessionId: String, fromSequence: Int64, limit: Int) async throws -> RoomEventPage {
@@ -65,6 +100,11 @@ private final class ScriptedRoomTransport: RoomTransport, @unchecked Sendable {
     }
 }
 
+/// Takes every message at once.
+private struct AcceptingSender: RoomMessageSending {
+    func sendHumanMessage(sessionId: String, text: String, clientId: String) async throws {}
+}
+
 @MainActor
 final class RoomChatCoordinatorTests: XCTestCase {
     private func message(_ seq: Int64, author: String = "cobalt-warden", text: String = "hi") -> RoomMessage {
@@ -91,12 +131,14 @@ final class RoomChatCoordinatorTests: XCTestCase {
 
     private func makeCoordinator(
         _ transport: ScriptedRoomTransport,
+        sender: (any RoomMessageSending)? = nil,
         onReauth: @escaping @MainActor () -> Void = {}
     ) -> RoomChatCoordinator {
         RoomChatCoordinator(
             sessionId: "room_1",
             title: "Room",
             transport: transport,
+            sender: sender,
             ownAuthorIds: ["human-mrrcarter"],
             // Short delays (reconnect backoff) return at once; the long safety-poll waits park until cancelled.
             sleep: { seconds in
@@ -178,6 +220,77 @@ final class RoomChatCoordinatorTests: XCTestCase {
         coordinator.pause()
     }
 
+    /// A freeze on build 17 ended with the room telling its place over and over: the same place again is never
+    /// news, and only coming back with something unread publishes, once.
+    func test_the_readers_place_told_again_never_publishes() async {
+        let transport = ScriptedRoomTransport(before: [.success(page([1]))])
+        let coordinator = makeCoordinator(transport)
+        coordinator.resume()
+        await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
+        coordinator.send(.readerAtBottom(false))
+        coordinator.handle(.message(message(7)))
+        XCTAssertEqual(coordinator.state.unreadCount, 1)
+
+        var publishes = 0
+        let watching = coordinator.$state.dropFirst().sink { _ in publishes += 1 }
+        coordinator.send(.readerAtBottom(false))
+        coordinator.send(.readerAtBottom(false))
+        XCTAssertEqual(publishes, 0, "the same place again")
+        coordinator.send(.readerAtBottom(true))
+        XCTAssertEqual(publishes, 1, "back at the bottom: the unread line goes")
+        coordinator.send(.readerAtBottom(true))
+        coordinator.send(.readerAtBottom(true))
+        XCTAssertEqual(publishes, 1)
+        XCTAssertEqual(coordinator.state.unreadCount, 0)
+        coordinator.send(.bottomFlapHeld(rows: 12, longestText: 9_700))
+        XCTAssertEqual(publishes, 1, "the freeze recorder's note is the screen's, never the room's")
+        watching.cancel()
+        coordinator.pause()
+    }
+
+    /// Carter, #59940: "it keeps saying connecting". The room is Live once the server takes the stream, with no frame.
+    func test_the_room_is_live_once_the_stream_opens_before_any_frame() async {
+        let transport = ScriptedRoomTransport(before: [.success(page([1]))], streams: [[.opened]])
+        let coordinator = makeCoordinator(transport)
+        coordinator.resume()
+        await waitUntil("live") { coordinator.state.connection == .live }
+        XCTAssertEqual(messageSequences(coordinator), [1])
+        coordinator.pause()
+    }
+
+    /// A stream that stayed open and then closed is the server's periodic close: back at once, still Live. One that
+    /// closes as soon as it opens still waits before trying again.
+    func test_a_stream_that_stayed_open_reconnects_at_once_and_a_quick_close_still_waits() async {
+        for (openFor, waits) in [(TimeInterval(60), false), (TimeInterval(1), true)] {
+            let transport = ScriptedRoomTransport(
+                before: [.success(page([1]))],
+                streams: [[.opened, .ended(.closed)], [.opened]]
+            )
+            let clock = SteppingClock(step: openFor)
+            let sleeps = SleepLog()
+            let coordinator = RoomChatCoordinator(
+                sessionId: "room_1",
+                title: "Room",
+                transport: transport,
+                ownAuthorIds: ["human-mrrcarter"],
+                sleep: { seconds in
+                    sleeps.add(seconds)
+                    if seconds > 5 { try? await Task.sleep(nanoseconds: 3_600_000_000_000) }
+                },
+                now: { clock.next() },
+                onReauthenticationRequired: {}
+            )
+            coordinator.resume()
+            await waitUntil("reconnected") { transport.snapshot().streams.count == 2 }
+            await waitUntil("live") { coordinator.state.connection == .live }
+            // The first wait after a failed stream (the room's other loops wait 3, 15 or 60 seconds, never this).
+            var fresh = RoomStreamBackoff()
+            let firstWait = fresh.delayAfter(.closed, deliveredEvents: false)
+            XCTAssertEqual(sleeps.values.contains { $0 == firstWait }, waits, "open for \(openFor) s: \(sleeps.values)")
+            coordinator.pause()
+        }
+    }
+
     func test_a_dropped_stream_catches_up_then_reconnects_from_the_new_high_water_mark() async {
         let transport = ScriptedRoomTransport(
             before: [.success(page([1, 2]))],
@@ -191,6 +304,129 @@ final class RoomChatCoordinatorTests: XCTestCase {
         XCTAssertEqual(transport.snapshot().after.first, 2, "catch-up reads after the last applied row")
         XCTAssertEqual(transport.snapshot().streams, [2, 6])
         XCTAssertEqual(messageSequences(coordinator), [1, 2, 3, 4])
+        coordinator.pause()
+    }
+
+    /// Carter, #55371: a message edited elsewhere showed neither its new text nor "edited" until the room reopened.
+    private func edit(of seq: Int64, text: String) -> RoomMessage {
+        RoomMessage(id: "evt-\(seq)", sequenceId: seq, kind: .message, authorId: "human-mrrcarter", authorName: "mrrCarter",
+                    isHuman: true, text: text, timestamp: "2026-10-28T18:00:00.000000+00:00", revision: 2, isEdited: true)
+    }
+
+    private func editedRow(_ coordinator: RoomChatCoordinator, _ seq: Int64) -> (text: String, isEdited: Bool)? {
+        for row in coordinator.state.rows {
+            if case .message(let message) = row, message.sequenceId == seq { return (message.text, message.isEdited) }
+        }
+        return nil
+    }
+
+    func test_an_edit_made_elsewhere_shows_live_with_edited_and_adds_no_row() async {
+        let transport = ScriptedRoomTransport(before: [.success(page([1, 2]))])
+        let coordinator = makeCoordinator(transport)
+        coordinator.resume()
+        await waitUntil("stream opened") { transport.snapshot().streams.count == 1 }
+
+        coordinator.handle(.edited(edit(of: 2, text: "Better words"), sequenceId: 7))
+        XCTAssertEqual(editedRow(coordinator, 2)?.text, "Better words")
+        XCTAssertEqual(editedRow(coordinator, 2)?.isEdited, true)
+        XCTAssertEqual(messageSequences(coordinator), [1, 2])
+
+        coordinator.handle(.edited(edit(of: 40, text: "Not loaded"), sequenceId: 41))
+        XCTAssertEqual(messageSequences(coordinator), [1, 2], "an edit of a message not loaded brings nothing in")
+        coordinator.pause()
+    }
+
+    func test_a_catch_up_page_applies_the_edits_in_it_after_its_rows() async {
+        let transport = ScriptedRoomTransport(
+            before: [.success(page([1, 2]))],
+            after: [.success(RoomEventPage(messages: [message(3)], edits: [edit(of: 3, text: "Edited at once"), edit(of: 1, text: "First, edited")],
+                                           maxSequence: 6))],
+            streams: [[.ended(.retryable(retryAfterSeconds: nil))]]
+        )
+        let coordinator = makeCoordinator(transport)
+        coordinator.resume()
+
+        await waitUntil("reconnected") { transport.snapshot().streams.count == 2 }
+        XCTAssertEqual(transport.snapshot().streams, [2, 6], "the next read starts after the edit")
+        XCTAssertEqual(messageSequences(coordinator), [1, 2, 3])
+        XCTAssertEqual(editedRow(coordinator, 1)?.text, "First, edited")
+        XCTAssertEqual(editedRow(coordinator, 3)?.text, "Edited at once")
+        XCTAssertEqual(editedRow(coordinator, 2)?.isEdited, false)
+        coordinator.pause()
+    }
+
+    /// Carter's freezes on 10-30: going to the bottom of a long loaded history measured every row in between. The
+    /// room keeps only its newest rows before the jump; older ones load again on demand.
+    func test_a_long_history_keeps_only_its_newest_rows_before_the_jump_down() async {
+        let transport = ScriptedRoomTransport(before: [.success(page(Array(1...130), hasMore: true))])
+        let coordinator = makeCoordinator(transport)
+        coordinator.resume()
+        await waitUntil("loaded") { messageSequences(coordinator).count == 130 }
+        XCTAssertTrue(coordinator.state.jumpDownKeepsLatest, "Jump to latest keeps the newest rows first")
+
+        coordinator.send(.keepLatestForJumpDown)
+        XCTAssertEqual(messageSequences(coordinator), Array(71...130), "the newest 60 stay")
+        XCTAssertTrue(coordinator.state.canLoadOlder, "and the rest can load again")
+        XCTAssertFalse(coordinator.state.jumpDownKeepsLatest, "the jump is now short enough to animate")
+
+        coordinator.send(.keepLatestForJumpDown)
+        XCTAssertEqual(messageSequences(coordinator).count, 60, "a short history is left alone")
+        coordinator.pause()
+    }
+
+    /// Carter's freezes came from sending far up a long history (10-30, "sendMessage (497 rows)").
+    func test_sending_from_up_a_long_history_keeps_only_the_newest_rows_first() async {
+        let transport = ScriptedRoomTransport(before: [.success(page(Array(1...497), hasMore: true))])
+        let coordinator = makeCoordinator(transport, sender: AcceptingSender())
+        coordinator.resume()
+        await waitUntil("loaded") { messageSequences(coordinator).count == 497 }
+
+        coordinator.send(.readerAtBottom(false))
+        coordinator.send(.sendMessage(text: "on my way down"))
+        XCTAssertEqual(messageSequences(coordinator), Array(438...497), "only the newest 60 are crossed on the way down")
+        XCTAssertTrue(coordinator.state.canLoadOlder)
+        XCTAssertEqual(coordinator.state.pending.map(\.text), ["on my way down"])
+        coordinator.pause()
+    }
+
+    func test_sending_at_the_bottom_leaves_the_history_loaded() async {
+        let transport = ScriptedRoomTransport(before: [.success(page(Array(1...130), hasMore: true))])
+        let coordinator = makeCoordinator(transport, sender: AcceptingSender())
+        coordinator.resume()
+        await waitUntil("loaded") { messageSequences(coordinator).count == 130 }
+
+        coordinator.send(.readerAtBottom(true))
+        coordinator.send(.sendMessage(text: "here"))
+        XCTAssertEqual(messageSequences(coordinator).count, 130, "already at the bottom: nothing to cross")
+        coordinator.pause()
+    }
+
+    /// Warden, #253: an older page in flight when the rows are trimmed must not land above the rows kept.
+    func test_an_older_page_requested_before_a_trim_is_dropped_and_asked_again_from_the_rows_kept() async {
+        let transport = ScriptedRoomTransport(before: [
+            .success(page(Array(101...230), hasMore: true)),
+            .success(page(Array(21...100), hasMore: true)),
+            .success(page(Array(111...170), hasMore: true))
+        ])
+        let coordinator = makeCoordinator(transport)
+        coordinator.resume()
+        await waitUntil("loaded") { messageSequences(coordinator).count == 130 }
+
+        transport.hold(beforeCall: 1)
+        coordinator.send(.loadOlder)
+        await waitUntil("older page in flight") { transport.isHoldingPage }
+        coordinator.send(.keepLatestForJumpDown)
+        XCTAssertEqual(messageSequences(coordinator), Array(171...230))
+
+        transport.releaseHeldPage()
+        await waitUntil("late page answered") { !coordinator.state.isLoadingOlder }
+        XCTAssertEqual(messageSequences(coordinator), Array(171...230), "the late page is dropped: no gap above the rows kept")
+        XCTAssertTrue(coordinator.state.canLoadOlder)
+
+        coordinator.send(.loadOlder)
+        await waitUntil("asked again") { transport.snapshot().before.count == 3 && !coordinator.state.isLoadingOlder }
+        XCTAssertEqual(transport.snapshot().before.last, 171, "from the oldest row kept")
+        XCTAssertEqual(messageSequences(coordinator), Array(111...230), "and history is whole again")
         coordinator.pause()
     }
 
@@ -529,4 +765,24 @@ final class RoomChatCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.state.focusFallbackCount, 1)
         coordinator.pause()
     }
+}
+
+/// Each reading is `step` seconds after the last: a stream opened at one reading has been open `step` seconds at the next.
+private final class SteppingClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current = Date(timeIntervalSince1970: 1_800_000_000)
+    private let step: TimeInterval
+    init(step: TimeInterval) { self.step = step }
+    func next() -> Date {
+        lock.lock(); defer { lock.unlock() }
+        current = current.addingTimeInterval(step)
+        return current
+    }
+}
+
+private final class SleepLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [TimeInterval] = []
+    func add(_ seconds: TimeInterval) { lock.lock(); stored.append(seconds); lock.unlock() }
+    var values: [TimeInterval] { lock.lock(); defer { lock.unlock() }; return stored }
 }

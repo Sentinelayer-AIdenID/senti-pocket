@@ -3,12 +3,54 @@ import SwiftUI
 
 /// Renders a chat or ticket body as the web does: block layout from `ChatMarkdown`, inline styling from
 /// `ChatInlineMarkdown`. Parsed blocks are cached by text, so scrolling a long room does not re-parse rows.
-struct ChatMarkdownView: View {
+public struct ChatMarkdownView: View {
     let text: String
     var ownHandles: Set<String> = []
 
-    var body: some View {
+    public init(text: String, ownHandles: Set<String> = []) {
+        self.text = text
+        self.ownHandles = ownHandles
+    }
+
+    public var body: some View {
         ChatMarkdownBlocksView(blocks: ChatMarkdownCache.blocks(for: text), ownHandles: ownHandles)
+    }
+}
+
+/// One ticket link as its own row, like the web's ticket chip: one line, cut with "…", and it opens the ticket.
+private struct TicketLinkRow: View {
+    let ticket: ChatReferences.TicketLink
+
+    var body: some View {
+        Link(destination: ticket.url) {
+            HStack(spacing: 8) {
+                Image(systemName: "ticket")
+                    .foregroundStyle(PocketPalette.accentStrong)
+                    .accessibilityHidden(true)
+                Text(ticket.title)
+                    .foregroundStyle(PocketPalette.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(PocketPalette.textSecondary)
+                    .accessibilityHidden(true)
+            }
+            .font(.subheadline)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(PocketPalette.inset, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(PocketPalette.separator.opacity(0.6), lineWidth: 0.5)
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Ticket: \(ticket.title)")
+        .accessibilityHint("Opens the ticket")
+        .accessibilityIdentifier("pocket.ticketLink.\(ticket.ticketId)")
     }
 }
 
@@ -28,7 +70,17 @@ private struct ChatMarkdownBlocksView: View {
     private func blockView(_ block: ChatMarkdownBlock) -> some View {
         switch block {
         case .paragraph(let text):
-            inline(text)
+            let split = ChatReferences.ticketLinks(in: text)
+            if split.tickets.isEmpty {
+                inline(text)
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    if !split.prose.isEmpty { inline(split.prose) }
+                    ForEach(split.tickets, id: \.ticketId) { ticket in
+                        TicketLinkRow(ticket: ticket)
+                    }
+                }
+            }
         case .heading(let level, let text):
             inline(text)
                 .font(level <= 1 ? .title3.bold() : (level == 2 ? .headline : .subheadline.weight(.semibold)))
@@ -36,10 +88,18 @@ private struct ChatMarkdownBlocksView: View {
             VStack(alignment: .leading, spacing: 3) {
                 ForEach(Array(items.enumerated()), id: \.offset) { offset, item in
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(ordered ? "\(start + offset)." : (item.depth == 0 ? "•" : "◦"))
-                            .monospacedDigit()
-                            .foregroundStyle(PocketPalette.textSecondary)
-                        inline(item.text)
+                        // A task item ("- [ ] ..." / "- [x] ...") shows its box, as GitHub does.
+                        if let task = ChatMarkdownListItem.task(item.text) {
+                            Image(systemName: task.done ? "checkmark.square.fill" : "square")
+                                .foregroundStyle(task.done ? PocketPalette.verified : PocketPalette.textSecondary)
+                                .accessibilityLabel(task.done ? "Done" : "Not done")
+                            inline(task.text)
+                        } else {
+                            Text(ordered ? "\(start + offset)." : (item.depth == 0 ? "•" : "◦"))
+                                .monospacedDigit()
+                                .foregroundStyle(PocketPalette.textSecondary)
+                            inline(item.text)
+                        }
                     }
                     .padding(.leading, CGFloat(item.depth) * 16)
                 }
@@ -66,7 +126,13 @@ private struct ChatMarkdownBlocksView: View {
             )
         case .rule:
             Divider().padding(.vertical, 4)
+        case .table(let table):
+            tableView(table)
         }
+    }
+
+    private func tableView(_ table: ChatMarkdownTable) -> some View {
+        ChatMarkdownTableView(table: table, ownHandles: ownHandles)
     }
 
     private func inline(_ text: String) -> some View {
@@ -76,13 +142,113 @@ private struct ChatMarkdownBlocksView: View {
     }
 }
 
+/// A table as a grid with a shaded header row and lines between rows (Carter, #55366). A narrow table fits the width
+/// it is given, its cells wrapping; a wide one keeps its columns readable and scrolls sideways, with its scroll bar
+/// showing (Carter, #55517).
+private struct ChatMarkdownTableView: View {
+    let table: ChatMarkdownTable
+    let ownHandles: Set<String>
+    /// The width the message gives the table, once measured; a phone's until then.
+    @State private var available: Double = 330
+
+    /// More rows than this are left out on the phone; the whole message is in its long view and on the web.
+    private static let maximumTableRows = 200
+
+    var body: some View {
+        let fit = table.fittedWidths(available: available)
+        Group {
+            if fit.scrolls {
+                ScrollView(.horizontal, showsIndicators: true) { grid(fit.widths) }
+            } else {
+                grid(fit.widths)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(GeometryReader { proxy in
+            Color.clear
+                .onAppear { available = proxy.size.width }
+                .onChange(of: proxy.size.width) { available = $0 }
+        })
+        .accessibilityElement(children: .contain)
+    }
+
+    private func grid(_ widths: [Double]) -> some View {
+        Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
+            GridRow {
+                ForEach(Array(table.header.enumerated()), id: \.offset) { column, text in
+                    cell(text, width: widths[column], alignment: table.alignments[column])
+                        .font(.subheadline.weight(.semibold))
+                }
+            }
+            .background(PocketPalette.inset)
+            ForEach(Array(table.rows.prefix(Self.maximumTableRows).enumerated()), id: \.offset) { _, row in
+                Divider()
+                GridRow {
+                    ForEach(Array(row.enumerated()), id: \.offset) { column, text in
+                        cell(text, width: widths[column], alignment: table.alignments[column])
+                            .font(.subheadline)
+                    }
+                }
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(PocketPalette.separator, lineWidth: 0.5)
+        )
+        .padding(.vertical, 2)
+    }
+
+    private func cell(_ text: String, width: Double, alignment: ChatMarkdownTable.Alignment) -> some View {
+        let frameAlignment: Alignment
+        let textAlignment: TextAlignment
+        switch alignment {
+        case .leading: (frameAlignment, textAlignment) = (.leading, .leading)
+        case .center: (frameAlignment, textAlignment) = (.center, .center)
+        case .trailing: (frameAlignment, textAlignment) = (.trailing, .trailing)
+        }
+        return Text(ChatInlineMarkdown.attributed(text, ownHandles: ownHandles))
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .multilineTextAlignment(textAlignment)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .frame(width: width, alignment: frameAlignment)
+    }
+}
+
 /// Inline Markdown with the web's rules applied:
 /// - links: only http(s) to a real host stay tappable (`RoomLinkPolicy`); bare URLs are linked like GFM autolinks;
 /// - GitHub pull-request links read as `owner/repo#n` chips (custom link text becomes "text · owner/repo#n");
 /// - `@handle` mentions are highlighted, and mentions of you stand out more;
 /// - code spans are left alone.
 enum ChatInlineMarkdown {
+    /// Every paragraph of every row on screen asks for this on every redraw, and building it parses Markdown and
+    /// scans for links and mentions, so each answer is kept per text and handles (with the expressions compiled once,
+    /// as for the room's other per-redraw helpers).
     static func attributed(_ text: String, ownHandles: Set<String> = []) -> AttributedString {
+        let key = (ownHandles.sorted().joined(separator: ",") + "\u{1}" + text) as NSString
+        if let known = memo.object(forKey: key) { return known.value }
+        let value = build(text, ownHandles: ownHandles)
+        memo.setObject(Built(value), forKey: key)
+        return value
+    }
+
+    private final class Built {
+        let value: AttributedString
+        init(_ value: AttributedString) { self.value = value }
+    }
+
+    private static let memo: NSCache<NSString, Built> = {
+        let cache = NSCache<NSString, Built>()
+        cache.countLimit = 4_000
+        return cache
+    }()
+
+    private static let linkExpression = try? NSRegularExpression(pattern: #"https?://[^\s<>()\[\]]+"#)
+    private static let mentionExpression = try? NSRegularExpression(pattern: #"(?:^|(?<=\s))@([A-Za-z0-9_-]+)"#)
+
+    private static func build(_ text: String, ownHandles: Set<String>) -> AttributedString {
         let options = AttributedString.MarkdownParsingOptions(
             interpretedSyntax: .inlineOnlyPreservingWhitespace,
             failurePolicy: .returnPartiallyParsedIfPossible
@@ -127,7 +293,7 @@ enum ChatInlineMarkdown {
     }
 
     private static func autolink(_ attributed: inout AttributedString) {
-        guard let regex = try? NSRegularExpression(pattern: #"https?://[^\s<>()\[\]]+"#) else { return }
+        guard let regex = linkExpression else { return }
         var additions: [(Range<AttributedString.Index>, URL)] = []
         for run in attributed.runs where run.link == nil && !isCode(run) {
             let segment = String(attributed[run.range].characters)
@@ -147,7 +313,7 @@ enum ChatInlineMarkdown {
     }
 
     private static func highlightMentions(_ attributed: inout AttributedString, ownHandles: Set<String>) {
-        guard let regex = try? NSRegularExpression(pattern: #"(?:^|(?<=\s))@([A-Za-z0-9_-]+)"#) else { return }
+        guard let regex = mentionExpression else { return }
         var marks: [(Range<AttributedString.Index>, Bool)] = []
         for run in attributed.runs where run.link == nil && !isCode(run) {
             let segment = String(attributed[run.range].characters)

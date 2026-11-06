@@ -28,6 +28,9 @@ public struct RoomTicketInput: Equatable, Sendable {
     public let sourceSequenceId: Int64?
     public let isVerifiedDone: Bool
     public let lease: Lease?
+    /// The server's progress estimate (API #1052), 0...1, with its short reason; nil until scored.
+    public let estimate: Double?
+    public let estimateBasis: String?
 
     public init(
         id: String,
@@ -41,7 +44,9 @@ public struct RoomTicketInput: Equatable, Sendable {
         priority: Int? = nil,
         sourceSequenceId: Int64? = nil,
         isVerifiedDone: Bool = false,
-        lease: Lease? = nil
+        lease: Lease? = nil,
+        estimate: Double? = nil,
+        estimateBasis: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -55,6 +60,8 @@ public struct RoomTicketInput: Equatable, Sendable {
         self.sourceSequenceId = sourceSequenceId
         self.isVerifiedDone = isVerifiedDone
         self.lease = lease
+        self.estimate = estimate
+        self.estimateBasis = estimateBasis
     }
 }
 
@@ -73,6 +80,14 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
     /// The question the ticket keeper is waiting on, while the ticket is not done.
     public let decision: TicketDecision?
     public let lease: RoomTicketInput.Lease?
+    /// The server's progress estimate and its reason, when scored (API #1052).
+    public let estimate: Double?
+    public let estimateBasis: String?
+
+    /// The title and body as a person sees them: the signal model's name hidden, as the web shows them. Edits and
+    /// posts keep the ticket's own words.
+    public var displayTitle: String { TicketSignal.publicTitle(title) }
+    public var displayBody: String { TicketSignal.hideModelName(body) }
 
     public init(
         id: String,
@@ -87,7 +102,9 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
         sourceSequenceId: Int64? = nil,
         isVerifiedDone: Bool = false,
         decision: TicketDecision? = nil,
-        lease: RoomTicketInput.Lease? = nil
+        lease: RoomTicketInput.Lease? = nil,
+        estimate: Double? = nil,
+        estimateBasis: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -102,10 +119,32 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
         self.isVerifiedDone = isVerifiedDone
         self.decision = decision
         self.lease = lease
+        self.estimate = estimate.map { min(max($0, 0), 1) }
+        self.estimateBasis = estimateBasis.flatMap { $0.isEmpty ? nil : $0 }
     }
 
     /// `done`, or `killed`, the API's other final status.
     public var isArchived: Bool { status == "done" || status == "killed" }
+
+    /// Someone is on it now: working, or in review, or held by a live lease (Carter, #55238: "the ones that are
+    /// currently being worked on should be atop with a progress bar").
+    public var isBeingWorkedOn: Bool {
+        !isArchived && (["working", "in_progress", "in_review"].contains(status) || lease?.isLive == true)
+    }
+
+    /// How far along a ticket being worked on is, by its stage: started, then in review. Carter asked for the signal
+    /// layer to judge this from everything happening in the room; until the API carries that estimate, the stage is
+    /// the honest number.
+    public var stageProgress: Double? {
+        guard isBeingWorkedOn else { return nil }
+        return status == "in_review" ? 0.85 : 0.45
+    }
+
+    /// What the bar shows: the server's estimate when it has one, else the stage.
+    public var barProgress: Double? {
+        guard isBeingWorkedOn else { return nil }
+        return estimate ?? stageProgress
+    }
 
     public var statusLabel: String {
         switch status {
@@ -172,6 +211,8 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
     public let commentStatus: [String: String]
     /// Tickets whose comment failed in a way posting it again may fix (Retry reuses its key, so it never posts twice).
     public let retryableComments: Set<String>
+    /// "Start an agent on this" is offered: you can write tickets here and the mint admits your account.
+    public let canStartAgents: Bool
 
     public static let fileStatusKey = "__file__"
     /// The status a comment reaches once the ticket has it.
@@ -199,7 +240,8 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
         personNames: [String: String] = [:],
         comments: [String: [RoomTicketCommentRow]] = [:],
         commentStatus: [String: String] = [:],
-        retryableComments: Set<String> = []
+        retryableComments: Set<String> = [],
+        canStartAgents: Bool = false
     ) {
         let all = tickets.map { input in
             let body = input.body
@@ -216,12 +258,15 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
                 sourceSequenceId: input.sourceSequenceId,
                 isVerifiedDone: input.isVerifiedDone,
                 decision: input.status == "done" || input.status == "killed" ? nil : TicketDecision.parse(body),
-                lease: input.lease
+                lease: input.lease,
+                estimate: input.estimate,
+                estimateBasis: input.estimateBasis
             )
         }
         let protected = failure?.suppressesProtectedContent == true
         let canWrite = canWriteTickets && !protected
         self.canFileTickets = canWrite
+        self.canStartAgents = canWrite && canStartAgents
         var actions: [String: RoomTicketActions] = [:]
         if canWrite {
             for row in all {
@@ -275,6 +320,8 @@ public struct RoomTicketsPresentationState: Equatable, Sendable {
 
     /// P0 first, unprioritised last; then the most recently changed.
     static func byImpact(_ lhs: RoomTicketRow, _ rhs: RoomTicketRow) -> Bool {
+        // Tickets being worked on come first (Carter, #55238), then by priority and the newest change.
+        if lhs.isBeingWorkedOn != rhs.isBeingWorkedOn { return lhs.isBeingWorkedOn }
         let left = lhs.priority ?? 9
         let right = rhs.priority ?? 9
         if left != right { return left < right }

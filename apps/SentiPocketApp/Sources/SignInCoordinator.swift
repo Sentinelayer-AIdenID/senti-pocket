@@ -28,6 +28,9 @@ final class SignInCoordinator: ObservableObject {
     /// The REAL login (device flow → SessionTokenStore.save). Injected so the composition binds the auth-API config
     /// and tests stay hermetic. Throws on failure (NativeAuthError, mapped to a phase below).
     private let login: () async throws -> Void
+    /// Sign in with Apple (Apple's sheet → the API → SessionTokenStore.save), when the build offers it. It runs through
+    /// the same gate as `login`: only a real stored token counts.
+    private let appleLogin: (() async throws -> Void)?
     /// Truth source for "is a real token in the store" — defaults to the Keychain-backed SentiNativeAuth.isLoggedIn.
     private let isLoggedIn: () -> Bool
     /// Sign-out side effect — defaults to clearing the Keychain token and reports secure-storage failure.
@@ -48,18 +51,28 @@ final class SignInCoordinator: ObservableObject {
     var onWillSignOut: (() async throws -> Void)?
 
     private var loginTask: Task<Void, Never>?
+    /// Which login attempt may still land. Moved on whenever an attempt is ended or replaced, so a result that comes
+    /// back after that is dropped even if it already finished.
+    private var loginAttempt: UInt64 = 0
     private var signOutTask: Task<Void, Never>?
     private var signOutPending = false
     private var pendingSignOutRequiresReauthentication = false
 
     init(login: @escaping () async throws -> Void,
+         appleLogin: (() async throws -> Void)? = nil,
          // NB: default is the nonisolated `SessionTokenStore.load() != nil` (exactly what SentiNativeAuth.isLoggedIn
          // computes) — referencing the @MainActor `SentiNativeAuth.isLoggedIn` from this nonisolated default-arg
          // context is a concurrency error (caught on the Mac build).
          isLoggedIn: @escaping () -> Bool = { SessionTokenStore.load() != nil },
-         signOut: @escaping () throws -> Void = { try SessionTokenStore.delete() },
-         clearProtectedLocalState: @escaping () -> Void = { OutboxStore.clear() }) {
+         signOut: @escaping () throws -> Void = {
+             try SessionTokenStore.delete()
+             RoomSendOutbox.clearStandard()
+             // Unconfirmed agent starts stay (MintStartLedger): only the same account sees them, and forgetting one
+             // could let a second paid agent start after signing back in.
+         },
+         clearProtectedLocalState: @escaping () -> Void = { SignInCoordinator.clearPersonalState() }) {
         self.login = login
+        self.appleLogin = appleLogin
         self.isLoggedIn = isLoggedIn
         self.signOutAction = signOut
         self.clearProtectedLocalState = clearProtectedLocalState
@@ -71,6 +84,17 @@ final class SignInCoordinator: ObservableObject {
             clearProtectedLocalState()
         }
     }
+
+    /// What belongs to the person who was signed in and must not cross a sign-out, a refused credential (another
+    /// account may sign in next, as after an account deletion revokes the session) or a launch with no credential:
+    /// confirmed write intents, and the calendar's subscribe link kept in the Keychain.
+    nonisolated static func clearPersonalState(calendarLinks: any CalendarLinkKeeping = CalendarLinkVault.live) {
+        OutboxStore.clear()
+        calendarLinks.forgetAll()
+    }
+
+    /// Whether the sign-in screen offers Sign in with Apple.
+    var offersApple: Bool { appleLogin != nil }
 
     /// The gate SentiPocketApp reads: the authed surfaces are reachable ONLY when this is true.
     var isAuthenticated: Bool { phase == .signedIn }
@@ -98,8 +122,7 @@ final class SignInCoordinator: ObservableObject {
             // ordinary signed-in flow.
             pendingSignOutRequiresReauthentication = true
             authenticationEpoch &+= 1
-            loginTask?.cancel()
-            loginTask = nil
+            endLogin()
             signOutTask?.cancel()
             signOutTask = nil
             clearProtectedLocalState()
@@ -114,8 +137,7 @@ final class SignInCoordinator: ObservableObject {
         guard phase == .signedIn else { return }
         if let expectedEpoch, authenticationEpoch != expectedEpoch { return }
         authenticationEpoch &+= 1
-        loginTask?.cancel()
-        loginTask = nil
+        endLogin()
         signOutTask?.cancel()
         signOutTask = nil
         onAuthenticationRevoked?()
@@ -133,19 +155,26 @@ final class SignInCoordinator: ObservableObject {
     @discardableResult
     func handle(_ intent: PocketProductIntent) -> Task<Void, Never>? {
         switch intent {
-        case .beginSignIn, .retryAuthentication:
+        case .beginSignIn, .retryAuthentication, .beginAppleSignIn:
+            let run: () async throws -> Void
+            if intent == .beginAppleSignIn {
+                guard let appleLogin else { return nil }
+                run = appleLogin
+            } else {
+                run = login
+            }
+            // One sign-in at a time (the cleanup one for a pending sign-out included), and none while signing out.
+            guard phase != .authorizing, phase != .signingOut else { return nil }
             if signOutPending {
-                guard phase != .signingOut else { return nil }
                 if pendingSignOutRequiresReauthentication {
-                    return startLogin(resumingPendingSignOut: true)
+                    return startLogin(resumingPendingSignOut: true, using: run)
                 }
                 return startSignOut()
             }
-            guard phase != .authorizing, phase != .signingOut else { return nil }
-            return startLogin()
+            return startLogin(using: run)
         case .cancelSignIn:
             guard phase == .authorizing else { return nil }
-            loginTask?.cancel(); loginTask = nil
+            endLogin()
             phase = .signedOut
             return nil
         case .signOut:
@@ -156,17 +185,20 @@ final class SignInCoordinator: ObservableObject {
         }
     }
 
-    private func startLogin(resumingPendingSignOut: Bool = false) -> Task<Void, Never> {
+    private func startLogin(resumingPendingSignOut: Bool = false,
+                            using run: @escaping () async throws -> Void) -> Task<Void, Never> {
         if !resumingPendingSignOut {
             signOutPending = false
             pendingSignOutRequiresReauthentication = false
         }
+        endLogin()
+        let attempt = loginAttempt
         phase = .authorizing
         let task = Task { [weak self] in
             guard let self else { return }
             do {
-                try await self.login()
-                if Task.isCancelled { return }
+                try await run()
+                if Task.isCancelled || self.loginAttempt != attempt { return }
                 // GATE #2: only a REAL stored token counts as signed-in — never fake success.
                 if self.isLoggedIn() {
                     self.authenticationEpoch &+= 1
@@ -184,7 +216,7 @@ final class SignInCoordinator: ObservableObject {
                     self.phase = .unavailable(.secureStorage)   // login returned but no token persisted
                 }
             } catch {
-                if Task.isCancelled { return }
+                if Task.isCancelled || self.loginAttempt != attempt { return }
                 self.phase = Self.mappedPhase(for: error)
             }
         }
@@ -192,10 +224,16 @@ final class SignInCoordinator: ObservableObject {
         return task
     }
 
+    /// Ends any login in flight: cancelled, and its result no longer accepted even if it has already come back.
+    private func endLogin() {
+        loginTask?.cancel()
+        loginTask = nil
+        loginAttempt &+= 1
+    }
+
     private func startSignOut() -> Task<Void, Never> {
         if !signOutPending {
-            loginTask?.cancel()
-            loginTask = nil
+            endLogin()
             authenticationEpoch &+= 1
             signOutPending = true
         }
@@ -259,7 +297,7 @@ final class SignInCoordinator: ObservableObject {
         switch e {
         case .network:                      return .unavailable(.network)
         case .userCancelledWeb, .rejected:  return .signedOut          // user cancelled / denied → clean retry
-        case .timedOut, .rateLimited, .malformedResponse: return .unavailable(.service)
+        case .timedOut, .rateLimited, .malformedResponse, .appleUnavailable: return .unavailable(.service)
         }
     }
 }

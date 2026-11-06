@@ -1,4 +1,5 @@
 import Foundation
+import PocketContracts
 
 /// Someone you can @-mention in a room.
 public struct MentionCandidate: Equatable, Identifiable, Sendable {
@@ -29,10 +30,112 @@ public struct MentionCandidate: Equatable, Identifiable, Sendable {
 /// - humans first, then agents active in the last 10 minutes, then the rest, alphabetical in each group;
 /// - your own handle is never offered; `@all` is offered for an empty query or a prefix of "all";
 /// - a match is a case-insensitive substring of the handle or the display name.
-/// The phone composer treats the end of the draft as the caret.
+/// The text field does not say where the caret is, so the composer takes the place the text last changed (Carter: a
+/// mention anywhere in the text, not only at its end).
 public enum MentionSuggester {
     public static let recentWindow: TimeInterval = 10 * 60
-    public static let maximumSuggestions = 6
+    /// Everyone who matches, in a list the composer scrolls (a room can have hundreds of agents).
+    public static let maximumSuggestions = 60
+
+    static func isHandleCharacter(_ character: Character) -> Bool {
+        character.isLetter || character.isNumber || character == "_" || character == "-"
+    }
+
+    /// Where an edit ended in `new`, in characters: just after what was typed or pasted, or where text was removed.
+    ///
+    /// It runs on every keystroke, so it walks the two texts in place instead of copying each into an array of
+    /// characters (a long draft made typing lag, ticket 7674d10b). Typing at the end, the common case, is one
+    /// forward pass.
+    public static func editOffset(from old: String, to new: String) -> Int {
+        var oldIndex = old.startIndex
+        var newIndex = new.startIndex
+        var prefix = 0
+        while oldIndex < old.endIndex, newIndex < new.endIndex, old[oldIndex] == new[newIndex] {
+            old.formIndex(after: &oldIndex)
+            new.formIndex(after: &newIndex)
+            prefix += 1
+        }
+        // What is left of each after the common start; the edit ends where their common end begins.
+        let oldRest = old[oldIndex...]
+        let newRest = new[newIndex...]
+        var oldEnd = oldRest.endIndex
+        var newEnd = newRest.endIndex
+        while oldEnd > oldRest.startIndex, newEnd > newRest.startIndex {
+            let oldBefore = oldRest.index(before: oldEnd)
+            let newBefore = newRest.index(before: newEnd)
+            guard oldRest[oldBefore] == newRest[newBefore] else { break }
+            oldEnd = oldBefore
+            newEnd = newBefore
+        }
+        return prefix + newRest.distance(from: newRest.startIndex, to: newEnd)
+    }
+
+    /// The `@word` being typed at character `offset` of `draft`, anywhere in the text: the query and the characters
+    /// it covers (from the `@`). Walks back from the offset only as far as the word goes.
+    /// `editOffset(from:to:)`, or nil when the edit ended at the very end of `new`: typing or deleting at the end,
+    /// the common case. That answer is a byte comparison, not a walk over the characters, so a keystroke into a long
+    /// draft costs the same as into a short one (Carter, 11-04: still slow at 2,000 characters; a keystroke at 10,000
+    /// cost 23 ms on the simulator). Where `editOffset` says the edit ended at `new`'s end, this says nil.
+    public static func editOffsetUnlessAtEnd(from old: String, to new: String) -> Int? {
+        let appendedOrTrimmed = new.utf8.count >= old.utf8.count
+            ? new.utf8.starts(with: old.utf8)
+            : old.utf8.starts(with: new.utf8)
+        return appendedOrTrimmed ? nil : editOffset(from: old, to: new)
+    }
+
+    /// The longest `@word` looked for at the end of a draft: past this many handle characters it is not a mention.
+    static let longestQuery = 128
+
+    /// The `@word` being typed at the very end of `draft` (`activeQuery(in:at:)` at `draft.count`), found by walking
+    /// back over that word only: the draft is never counted.
+    public static func queryAtEnd(of draft: String) -> String? {
+        var start = draft.endIndex
+        var length = 0
+        while start > draft.startIndex {
+            let before = draft.index(before: start)
+            guard isHandleCharacter(draft[before]) else { break }
+            length += 1
+            guard length <= longestQuery else { return nil }
+            start = before
+        }
+        guard start > draft.startIndex else { return nil }
+        let at = draft.index(before: start)
+        guard draft[at] == "@" else { return nil }
+        if at > draft.startIndex, !draft[draft.index(before: at)].isWhitespace { return nil }
+        return String(draft[start...])
+    }
+
+    public static func activeQuery(in draft: String, at offset: Int) -> (query: String, range: Range<Int>)? {
+        guard offset >= 0, let end = draft.index(draft.startIndex, offsetBy: offset, limitedBy: draft.endIndex) else {
+            return nil
+        }
+        var start = end
+        var length = 0
+        while start > draft.startIndex {
+            let before = draft.index(before: start)
+            guard isHandleCharacter(draft[before]) else { break }
+            start = before
+            length += 1
+        }
+        guard start > draft.startIndex else { return nil }
+        let at = draft.index(before: start)
+        guard draft[at] == "@" else { return nil }
+        if at > draft.startIndex, !draft[draft.index(before: at)].isWhitespace { return nil }
+        let atOffset = offset - length - 1
+        return (String(draft[start..<end]), atOffset..<offset)
+    }
+
+    /// Puts `candidate` in place of the `@word` at `offset` (and the rest of that word after it), with a space after
+    /// it unless one is already there.
+    public static func apply(_ candidate: MentionCandidate, to draft: String, at offset: Int) -> String {
+        guard let active = activeQuery(in: draft, at: offset) else { return draft }
+        var characters = Array(draft)
+        var end = active.range.upperBound
+        while end < characters.count, isHandleCharacter(characters[end]) { end += 1 }
+        let spaced = end < characters.count && characters[end].isWhitespace
+        characters.replaceSubrange(active.range.lowerBound..<end, with: Array("@" + candidate.handle + (spaced ? "" : " ")))
+        return String(characters)
+    }
 
     /// The query being typed at the end of `draft`, and where its `@` starts.
     public static func activeQuery(in draft: String) -> (query: String, atIndex: String.Index)? {
@@ -164,8 +267,9 @@ public struct TicketDecision: Equatable, Sendable {
                 if key == "option" || key == "options" {
                     sawOptions = true
                     for part in value.components(separatedBy: "·") {
-                        let option = part.trimmingCharacters(in: .whitespaces)
-                        guard !option.isEmpty else { continue }
+                        // A one-tap answer is posted as the person: an option that would not show whole (padding,
+                        // invisible characters, a mention, or too long) is left out (`AnswerOption`).
+                        guard let option = AnswerOption.answerable(part) else { continue }
                         if ["custom", "other", "free text", "something else"].contains(option.lowercased()) {
                             custom = true
                         } else if !options.contains(option), options.count < maximumOptions {
@@ -223,6 +327,25 @@ public struct TicketDecision: Equatable, Sendable {
         let who = assignee?.trimmingCharacters(in: .whitespaces) ?? ""
         if who.isEmpty { return "Unassigned \(card)" }
         return "Assigned \(card) to \(UUID(uuidString: who) != nil ? personLabel(who) : "@\(who)")"
+    }
+
+    /// What "Chat about it" posts (web `ticketChatMessage`): the card, ` — raised by <name>` when the raiser is known,
+    /// then the note after a blank line. The room renders the card as the ticket.
+    public static func chatAboutIt(
+        sessionId: String,
+        ticketId: String,
+        title: String,
+        note: String,
+        raisedBy: String?
+    ) -> String {
+        let card = Self.ticketCard(sessionId: sessionId, ticketId: ticketId, title: title)
+        let raiser = (raisedBy ?? "")
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        let head = raiser.isEmpty ? card : "\(card) — raised by \(raiser)"
+        let body = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        return body.isEmpty ? head : "\(head)\n\n\(body)"
     }
 
     /// `[Ticket: <title on one line, no brackets>](/dashboard/sessions/<room>?ticket=<id>)`, the web's bare card.

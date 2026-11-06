@@ -70,6 +70,20 @@ final class RoomTicketsCoordinator: ObservableObject {
     static let fileStatusKey = RoomTicketsPresentationState.fileStatusKey
     private var filedCount = 0
 
+    /// Starting agents for tickets: offered once the mint has answered for this account.
+    private let mint: (any MintStarting)?
+    private var mintAdmits = false
+    private var askedMint = false
+    /// The ticket an agent is being started for, for the screen's sheet.
+    @Published var agentTicket: AgentTicket?
+
+    struct AgentTicket: Identifiable, Equatable {
+        let id: String
+        let title: String
+        let status: String
+        let body: String
+    }
+
     struct TicketFields: Equatable {
         let title: String
         let body: String
@@ -89,6 +103,7 @@ final class RoomTicketsCoordinator: ObservableObject {
         assignRoster: [String] = [],
         extras: (any RoomTicketExtrasReading)? = nil,
         focusTicketId: String? = nil,
+        mint: (any MintStarting)? = nil,
         now: @escaping @Sendable () -> Date = { Date() },
         sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
             try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
@@ -105,6 +120,7 @@ final class RoomTicketsCoordinator: ObservableObject {
         self.assignRoster = assignRoster
         self.extras = extras
         self.focusTicketId = focusTicketId
+        self.mint = mint
         self.now = now
         self.sleep = sleep
         self.onReauthenticationRequired = onReauthenticationRequired
@@ -112,6 +128,7 @@ final class RoomTicketsCoordinator: ObservableObject {
     }
 
     func start() {
+        askMintOnce()
         guard pollTask == nil else { return }
         pollTask = Task { [weak self] in
             guard let self else { return }
@@ -129,6 +146,18 @@ final class RoomTicketsCoordinator: ObservableObject {
         pollTask = nil
     }
 
+    /// Whether this account may start agents: the mint lists its models only for accounts it admits.
+    private func askMintOnce() {
+        guard let mint, canWriteTickets, !askedMint else { return }
+        askedMint = true
+        Task { [weak self] in
+            let models = try? await mint.models()
+            guard let self, let models, !models.isEmpty else { return }
+            self.mintAdmits = true
+            self.publish()
+        }
+    }
+
     func send(_ intent: RoomTicketsIntent) {
         switch intent {
         case .setShowsArchived(let archived):
@@ -141,6 +170,9 @@ final class RoomTicketsCoordinator: ObservableObject {
             Task { await refresh() }
         case .openSourceMessage:
             break   // the room screen handles jumping to a message
+        case .startAgent(let ticketId):
+            guard mintAdmits, let ticket = board?.tickets[ticketId] else { return }
+            agentTicket = AgentTicket(id: ticket.id, title: ticket.title, status: ticket.status, body: ticket.body)
         case .answerDecision(let ticketId, let answer, let detail):
             answerDecision(ticketId: ticketId, answer: answer, detail: detail)
         case .retryDecision(let ticketId):
@@ -171,6 +203,8 @@ final class RoomTicketsCoordinator: ObservableObject {
                     progress: "Saving…")
         case .loadComments(let ticketId):
             Task { await loadComments(ticketId) }
+        case .chatAboutIt(let ticketId, let note):
+            chatAboutIt(ticketId: ticketId, note: note)
         case .comment(let ticketId, let body):
             let key = pendingComment[ticketId].flatMap { $0.body == body ? $0.key : nil } ?? Self.newKey()
             pendingComment[ticketId] = (body, key)
@@ -426,6 +460,28 @@ final class RoomTicketsCoordinator: ObservableObject {
 
     private static func newKey() -> String { "tk_" + UUID().uuidString.lowercased() }
 
+    /// "Chat about it" (web `ticketChatMessage`): the ticket's card, who raised it when that was a person, and the note,
+    /// posted to the room as you. The ticket says whether it went.
+    private func chatAboutIt(ticketId: String, note: String) {
+        guard let sender, let ticket = board?.tickets[ticketId] else { return }
+        let raiser = ticket.createdBy.lowercased().hasPrefix("human-") ? String(ticket.createdBy.dropFirst("human-".count)) : nil
+        let text = TicketDecision.chatAboutIt(sessionId: sessionId, ticketId: ticket.id, title: ticket.title,
+                                              note: note, raisedBy: raiser)
+        let sessionId = self.sessionId
+        let clientId = "hm_" + UUID().uuidString.lowercased()
+        ticketWriteStatus[ticketId] = "Posting to the room…"
+        publish()
+        Task { [weak self] in
+            do {
+                try await sender.sendHumanMessage(sessionId: sessionId, text: text, clientId: clientId)
+                self?.ticketWriteStatus[ticketId] = "Posted to the room."
+            } catch {
+                self?.ticketWriteStatus[ticketId] = "It did not post to the room. Try again."
+            }
+            self?.publish()
+        }
+    }
+
     /// Posts the web's decision line to the room as you: one message that @-mentions the ticket's assignee.
     private func answerDecision(ticketId: String, answer: String, detail: String) {
         guard sender != nil, let ticket = board?.tickets[ticketId], !answering.contains(ticketId) else { return }
@@ -552,7 +608,9 @@ final class RoomTicketsCoordinator: ObservableObject {
                             isLive: lease.isLive(at: instant),
                             expiresAt: lease.expiresAt.flatMap { ParsedSessionTimestamp($0).date }
                         )
-                    }
+                    },
+                    estimate: ticket.progress?.value,
+                    estimateBasis: ticket.progress?.basis
                 )
             },
             showsArchived: showsArchived,
@@ -577,7 +635,8 @@ final class RoomTicketsCoordinator: ObservableObject {
                 list.map { RoomTicketCommentRow(id: $0.id, authorId: $0.actorId, body: $0.body, createdAt: $0.createdAt) }
             },
             commentStatus: commentStatus,
-            retryableComments: retryableComments
+            retryableComments: retryableComments,
+            canStartAgents: mintAdmits
         )
     }
 }
@@ -586,6 +645,7 @@ final class RoomTicketsCoordinator: ObservableObject {
 struct RoomTicketsScreen: View {
     @StateObject private var coordinator: RoomTicketsCoordinator
     private let onOpenMessage: (@MainActor (Int64) -> Void)?
+    private let startsFiling: Bool
 
     init(
         sessionId: String,
@@ -596,10 +656,15 @@ struct RoomTicketsScreen: View {
         identity: (any AccountIdentityProviding)? = nil,
         assignRoster: [String] = [],
         extras: (any RoomTicketExtrasReading)? = nil,
+        mint: (any MintStarting)? = nil,
+        startsFiling: Bool = false,
         onOpenMessage: (@MainActor (Int64) -> Void)? = nil,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.onOpenMessage = onOpenMessage
+        self.startsFiling = startsFiling && writer != nil
+        self.sessionId = sessionId
+        self.mint = mint
         _coordinator = StateObject(wrappedValue: RoomTicketsCoordinator(
             sessionId: sessionId,
             transport: transport,
@@ -610,12 +675,16 @@ struct RoomTicketsScreen: View {
             canWriteTickets: writer != nil,
             assignRoster: assignRoster,
             extras: extras,
+            mint: mint,
             onReauthenticationRequired: onReauthenticationRequired
         ))
     }
 
+    private let sessionId: String
+    private let mint: (any MintStarting)?
+
     var body: some View {
-        RoomTicketsView(state: coordinator.state) { intent in
+        RoomTicketsView(state: coordinator.state, startsFiling: startsFiling) { intent in
             if case .openSourceMessage(let sequence) = intent, let onOpenMessage {
                 onOpenMessage(sequence)
             } else {
@@ -624,6 +693,13 @@ struct RoomTicketsScreen: View {
         }
         .onAppear { coordinator.start() }
         .onDisappear { coordinator.stop() }
+        .sheet(item: $coordinator.agentTicket) { ticket in
+            if let mint {
+                TicketAgentSheet(ticket: ticket, sessionId: sessionId, mint: mint) { agentName in
+                    coordinator.send(.assign(ticketId: ticket.id, assignee: agentName))
+                }
+            }
+        }
     }
 }
 
@@ -644,10 +720,13 @@ struct RoomTicketLinkScreen: View {
         identity: (any AccountIdentityProviding)? = nil,
         assignRoster: [String] = [],
         extras: (any RoomTicketExtrasReading)? = nil,
+        mint: (any MintStarting)? = nil,
         onOpenMessage: @escaping @MainActor (Int64) -> Void,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.onOpenMessage = onOpenMessage
+        self.sessionId = sessionId
+        self.mint = mint
         _coordinator = StateObject(wrappedValue: RoomTicketsCoordinator(
             sessionId: sessionId,
             transport: transport,
@@ -659,9 +738,13 @@ struct RoomTicketLinkScreen: View {
             assignRoster: assignRoster,
             extras: extras,
             focusTicketId: ticketId,
+            mint: mint,
             onReauthenticationRequired: onReauthenticationRequired
         ))
     }
+
+    private let sessionId: String
+    private let mint: (any MintStarting)?
 
     var body: some View {
         NavigationStack {
@@ -676,6 +759,13 @@ struct RoomTicketLinkScreen: View {
         }
         .onAppear { coordinator.start() }
         .onDisappear { coordinator.stop() }
+        .sheet(item: $coordinator.agentTicket) { ticket in
+            if let mint {
+                TicketAgentSheet(ticket: ticket, sessionId: sessionId, mint: mint) { agentName in
+                    coordinator.send(.assign(ticketId: ticket.id, assignee: agentName))
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -695,7 +785,8 @@ struct RoomTicketLinkScreen: View {
                 comments: state.comments[row.id],
                 canComment: state.canFileTickets,
                 commentStatus: state.commentStatus[row.id],
-                canRetryComment: state.retryableComments.contains(row.id)
+                canRetryComment: state.retryableComments.contains(row.id),
+                canStartAgent: state.canStartAgents
             ) { intent in
                 if case .openSourceMessage(let sequence) = intent {
                     onOpenMessage(sequence)

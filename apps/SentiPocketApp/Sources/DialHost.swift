@@ -56,7 +56,8 @@ final class DialHost: ObservableObject {
 
     init(
         gatewayURL: URL? = DialHost.gatewayURL(),
-        registryStateStore: DeviceRingRegistryStateStore = DeviceRingRegistryStateStore()
+        registryStateStore: DeviceRingRegistryStateStore = DeviceRingRegistryStateStore(),
+        isSignedIn: () -> Bool = { SessionTokenStore.load()?.isEmpty == false }
     ) {
         let selectionGate = DialSessionSelectionGate()
         let authenticationExpiry = AuthenticationExpiryRelay()
@@ -79,6 +80,9 @@ final class DialHost: ObservableObject {
         }
 
         let cm = SentiCallManager()
+        // Calls ring only while someone is signed in. Decided here, at launch: a call that launches the app is
+        // delivered only if PushKit is already on.
+        cm.setVoipPushes(enabled: isSignedIn())
         let registryClient = DeviceRingRegistrationClient(
             apiBaseURL: gatewayURL,
             onReauthenticationRequired: { authenticationExpiry.signal(expectedToken: $0) }
@@ -184,21 +188,52 @@ final class DialHost: ObservableObject {
         on callManager: SentiCallManager,
         coordinator: DialCoordinator
     ) {
+        // Agents' room calls (the API's doorbell) ring through the same CallKit provider. The desk owns their UUIDs,
+        // so none of them ever reaches the dial flow below, and no dial UUID reaches the desk.
+        let desk = RoomCallDesk.shared
+        desk.endSystemCall = { [weak callManager] uuid in callManager?.end(uuid) }
+        // The app's own Mute is performed by CallKit, whose answer comes back through onMuted below.
+        desk.muteSystemCall = { [weak callManager] uuid, muted, done in
+            guard let callManager else { return done(false) }
+            callManager.requestMuted(uuid, muted, completion: done)
+        }
+        // Only for the account this phone's call row was confirmed for: until the person signed in now has registered,
+        // the server may still ring the last account's row here (warden, #298 review).
+        callManager.isRoomCallAuthorized = { PushRegistrar.shared.ringsForSignedInAccount }
+        callManager.onRoomCallReceived = { doorbell, uuid in desk.received(doorbell, uuid: uuid) }
         // Adapter 1 — admit one reported CallKit episode, then store its receive state under the exact UUID.
         callManager.onDialReceived = { [weak self] state, dialId, callUUID in
             self?.callReported(state: state, dialId: dialId, callUUID: callUUID)
         }
         // Adapter 2 — hydrate + run off the dialId + CallKit UUID ONLY; never off IncomingDecisionCall.message.
         callManager.onAnswered = { [weak self] call in
+            if desk.owns(call.id) {
+                // CallKit activates audio after the answer; set the call category first, as a dial does.
+                try? self?.prepareCallKitAudioSession()
+                desk.answered(call.id)
+                return
+            }
             self?.answer(dialId: call.dialId, callUUID: call.id)
         }
         callManager.onEnded = { [weak self] callUUID in
+            if desk.owns(callUUID) {
+                desk.ended(callUUID)
+                return
+            }
             self?.callEnded(callUUID)
         }
+        callManager.onMuted = { callUUID, muted in
+            if desk.owns(callUUID) { desk.setMuted(callUUID, muted) }
+        }
         callManager.onAudioSessionActivated = { [weak self] _, callUUID in
+            if desk.owns(callUUID) {
+                desk.audioActivated(callUUID)
+                return
+            }
             self?.callKitAudioActivated(callUUID)
         }
         callManager.onAudioSessionDeactivated = { [weak self] _, callUUID in
+            guard !desk.owns(callUUID) else { return }
             self?.callKitAudioDeactivated(callUUID)
         }
     }
@@ -228,12 +263,14 @@ final class DialHost: ObservableObject {
     /// Login alone never chooses a ring target. It merely arms registration for a later authorized selection.
     func onLoginCompleted() {
         authenticated = true
+        callManager?.setVoipPushes(enabled: true)
         _ = registrar?.loginCompleted()
     }
 
     /// Revoke all selected-session dial authority before the stale authenticated root is removed.
     func onAuthenticationInvalidated() {
         authenticated = false
+        callManager?.setVoipPushes(enabled: false)
         closeLocalAuthority()
         registrar?.authenticationInvalidated()
         selectedSessionId = nil
@@ -242,6 +279,7 @@ final class DialHost: ObservableObject {
     /// Synchronous sign-out half. This runs before SignInCoordinator.handle(.signOut) returns: runtime authority closes
     /// immediately and the registrar durably marks the old binding for revoke while the old bearer is still available.
     func beginSignOut() throws {
+        callManager?.setVoipPushes(enabled: false)
         closeLocalAuthority()
         selectedSessionId = nil
         if let registrar {
@@ -305,6 +343,8 @@ final class DialHost: ObservableObject {
     private func voipTokenUpdated(_ token: String) {
         let replacedExistingRoute = observedVoipToken.map { $0 != token } ?? false
         observedVoipToken = token
+        // The API rings this phone for agents' room calls with the same token (`kind: voip`).
+        PushRegistrar.shared.voipTokenUpdated(token)
         // Mutate the registrar's token synchronously before CallKit teardown can re-enter receive authorization.
         _ = registrar?.tokenUpdated(token)
         if replacedExistingRoute {
@@ -314,6 +354,7 @@ final class DialHost: ObservableObject {
 
     private func voipTokenInvalidated() {
         observedVoipToken = nil
+        PushRegistrar.shared.voipTokenInvalidated()
         // Clear the binding gate and persist denial before CallKit teardown invokes any external callbacks.
         _ = registrar?.tokenInvalidated()
         closeCallAuthorityPreservingSelection()
@@ -388,6 +429,7 @@ final class DialHost: ObservableObject {
     }
 
     private func answer(dialId: String, callUUID: UUID) {
+        LaunchUrgency.shared.raise()
         guard selectedSessionId != nil, let coordinator else {
             self.coordinator?.discard(callUUID: callUUID)
             callManager?.end(callUUID)

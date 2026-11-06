@@ -52,6 +52,8 @@ public enum RoomStreamFrame: Equatable, Sendable {
     case message(RoomMessage)
     /// A durable event the room does not display; carries its sequence so the resume point still advances.
     case nonDisplayable(sequenceId: Int64)
+    /// A message was edited: the message as it reads now, and the edit's own sequence for the resume point.
+    case edited(RoomMessage, sequenceId: Int64)
     /// `agent_composing` control: an agent is preparing a reply. Never enters the transcript.
     case composing(agentId: String, targetSequenceId: Int64?)
     /// Any other control frame (for example an observability tick).
@@ -79,6 +81,7 @@ public enum RoomStreamFrame: Equatable, Sendable {
         default:
             if let message = RoomMessage(json: json) { return .message(message) }
             if let sequence = json["sequenceId"]?.intValue ?? json["sequence_id"]?.intValue, sequence > 0 {
+                if let edited = RoomMessage.edited(from: json) { return .edited(edited, sequenceId: sequence) }
                 return .nonDisplayable(sequenceId: sequence)
             }
             return nil
@@ -135,6 +138,7 @@ extension HTTPSessionTransport {
                 let end = await self.runRoomStream(
                     sessionId: sessionId,
                     fromSequence: fromSequence,
+                    opened: { continuation.yield(.opened) },
                     yield: { continuation.yield(.frame($0)) }
                 )
                 continuation.yield(.ended(end))
@@ -147,6 +151,7 @@ extension HTTPSessionTransport {
     private func runRoomStream(
         sessionId: String,
         fromSequence: Int64?,
+        opened: () -> Void,
         yield: (RoomStreamFrame) -> Void
     ) async -> RoomStreamEnd {
         #if canImport(FoundationNetworking)
@@ -174,7 +179,7 @@ extension HTTPSessionTransport {
             guard let http = response as? HTTPURLResponse else { return .retryable(retryAfterSeconds: nil) }
             switch http.statusCode {
             case 200..<300:
-                break
+                opened()
             case 401:
                 return .reauthenticationRequired
             case 403, 404, 410:
@@ -219,8 +224,10 @@ extension HTTPSessionTransport {
     }
 }
 
-/// What `roomStream` yields: frames, then exactly one `ended`.
+/// What `roomStream` yields: `opened` once the server accepts the stream, frames, then exactly one `ended`.
 public enum RoomStreamEvent: Equatable, Sendable {
+    /// The server accepted the stream: the room is live now, before its first frame (a quiet room may send none).
+    case opened
     case frame(RoomStreamFrame)
     case ended(RoomStreamEnd)
 }

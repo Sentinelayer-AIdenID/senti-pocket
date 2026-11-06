@@ -1,0 +1,197 @@
+import Foundation
+import PocketContracts
+import PocketSyncClient
+import PocketUI
+
+/// What waits on your decision across your rooms (ticket 931e1d2e): read from the server's one list, so the phone and
+/// the web agree on what is waiting and how much; answered with the same chat line the web posts, so an answer here
+/// clears it there too: however you take care of it, it leaves the list. An answer leaves the list at once and stays
+/// gone until the server agrees or brings it back.
+@MainActor
+final class WaitingOnYouCoordinator: ObservableObject {
+    @Published private(set) var state = WaitingOnYouState()
+
+    private let transport: any WaitingTransport
+    private let sender: any RoomMessageSending
+    private let onReauthenticationRequired: @MainActor () -> Void
+    private let sleep: @Sendable (TimeInterval) async -> Void
+    private let now: @Sendable () -> Date
+
+    private var items: [SentiWaitingItem] = []
+    private var total = 0
+    /// Asks answered here that the server may not have caught up with, by ask (a ticket can ask again).
+    private var answered: Set<String> = []
+    /// Each answer keeps the id it was first sent with, so a retry after a timed-out send never posts twice.
+    private var pending: [String: (line: String, clientId: String)] = [:]
+    private var pollTask: Task<Void, Never>?
+
+    static let pollInterval: TimeInterval = 60
+
+    init(
+        transport: any WaitingTransport,
+        sender: any RoomMessageSending,
+        sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+        },
+        now: @escaping @Sendable () -> Date = { Date() },
+        onReauthenticationRequired: @escaping @MainActor () -> Void = {}
+    ) {
+        self.transport = transport
+        self.sender = sender
+        self.sleep = sleep
+        self.now = now
+        self.onReauthenticationRequired = onReauthenticationRequired
+    }
+
+    func startPolling() {
+        guard pollTask == nil else { return }
+        pollTask = Task { [weak self] in
+            while let self, !Task.isCancelled {
+                await self.refresh()
+                await self.sleep(Self.pollInterval)
+            }
+        }
+    }
+
+    func stopPolling() {
+        pollTask?.cancel()
+        pollTask = nil
+    }
+
+    /// When the server last answered a read of the list, for the side panel's open. A failed read leaves it, so the
+    /// next open asks again.
+    private var readAt: Date?
+
+    /// Reads again unless the list was read less than `age` seconds ago (the side panel opening: the list polls on its
+    /// own while the app is in front).
+    func refresh(ifOlderThan age: TimeInterval) async {
+        if let readAt, now().timeIntervalSince(readAt) < age { return }
+        await refresh()
+    }
+
+    /// What a failed read says; a later good read takes back only this line, never an answer's own notice.
+    static let readFailedNotice = "Could not update. Pull to try again."
+
+    private enum ReadOutcome { case read, unavailable, failed, untouched }
+
+    func refresh() async {
+        if items.isEmpty, !state.isLoading { state.isLoading = true }
+        let outcome: ReadOutcome
+        do {
+            let page = try await transport.waiting(limit: 50)
+            // The signal model's name never shows, here or in the answer posted (warden, #270).
+            items = page.items.map { $0.redacted(TicketSignal.hideModelName) }
+            total = page.total
+            // The server's word wins once it no longer lists an answered ask.
+            answered = answered.filter { key in items.contains { $0.askKey == key } }
+            outcome = .read
+        } catch SessionTransportError.accessDenied {
+            // An older server without the list answers 404, which the shared fetch reads as access denied; so does a
+            // server that will not show it to this sign-in. Either way the side panel leaves it out.
+            outcome = .unavailable
+        } catch SessionTransportError.reauthenticationRequired {
+            onReauthenticationRequired()
+            outcome = .untouched
+        } catch SessionTransportError.cancelled {
+            outcome = .untouched
+        } catch {
+            outcome = .failed
+        }
+        // Only an answer counts as a read for the side panel's 15 s: a failed one is tried again at the next open.
+        if outcome == .read || outcome == .unavailable { readAt = now() }
+        // The state as it is now, after the wait: an answer sent or failed meanwhile keeps its `sending` and notice.
+        var next = state
+        switch outcome {
+        case .read:
+            next.isAvailable = true
+            if next.notice == Self.readFailedNotice { next.notice = nil }
+        case .unavailable:
+            next.isAvailable = false
+        case .failed:
+            if next.isAvailable { next.notice = Self.readFailedNotice }
+        case .untouched:
+            break
+        }
+        next.isLoading = false
+        publish(into: &next)
+        show(next)
+    }
+
+    /// One write, and none when the list shows the same: the root and the side panel draw only for a change.
+    private func show(_ next: WaitingOnYouState) {
+        if next != state { state = next }
+    }
+
+    func send(_ intent: WaitingOnYouIntent) -> SentiLink? {
+        switch intent {
+        case .refresh:
+            Task { await refresh() }
+        case .open(let id):
+            guard let item = items.first(where: { $0.ticketId == id }) else { return nil }
+            return SentiLink(sessionId: item.roomId, ticketId: item.ticketId)
+        case .answer(let id, let choice, let detail):
+            answer(id, choice: choice, detail: detail)
+        }
+        return nil
+    }
+
+    private func answer(_ id: String, choice: String, detail: String) {
+        guard let item = items.first(where: { $0.ticketId == id && !answered.contains($0.askKey) }),
+              !state.sending.contains(id),
+              !choice.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let key = item.askKey
+        let line = item.answerLine(choice, detail: detail)
+        // The same answer again (a retry) keeps its id; a different answer is a new message.
+        let clientId = pending[key].flatMap { $0.line == line ? $0.clientId : nil } ?? "hm_" + UUID().uuidString.lowercased()
+        pending[key] = (line, clientId)
+        var next = state
+        next.sending.insert(id)
+        next.notice = nil
+        publish(into: &next)
+        show(next)
+        Task { [weak self] in
+            guard let self else { return }
+            var notice: String?
+            do {
+                try await self.sender.sendHumanMessage(sessionId: item.roomId, text: line, clientId: clientId)
+                self.pending[key] = nil
+                self.answered.insert(key)
+            } catch RoomSendError.reauthenticationRequired {
+                self.onReauthenticationRequired()
+            } catch RoomSendError.notAllowed {
+                // Said plainly, with no retry to offer (warden, #270).
+                self.pending[key] = nil
+                notice = "You can't post in that room any more, so your answer to \"\(item.title)\" was not sent."
+            } catch RoomSendError.rejected {
+                self.pending[key] = nil
+                notice = "Senti did not accept your answer to \"\(item.title)\". Open the ticket to answer there."
+            } catch {
+                notice = "Your answer to \"\(item.title)\" did not go. Tap it again to retry."
+            }
+            var next = self.state
+            if let notice { next.notice = notice }
+            next.sending.remove(id)
+            self.publish(into: &next)
+            self.show(next)
+        }
+    }
+
+    private func publish(into state: inout WaitingOnYouState) {
+        let shown = items.filter { !answered.contains($0.askKey) }
+        state.rows = shown.map { item in
+            WaitingOnYouRow(
+                id: item.ticketId,
+                roomId: item.roomId,
+                roomTitle: item.roomTitle,
+                title: item.title.isEmpty ? "(untitled)" : item.title,
+                question: item.question,
+                options: item.options,
+                custom: item.custom,
+                askedAt: ParsedSessionTimestamp(item.askedAt).date,
+                askedBy: item.askedBy.flatMap { UUID(uuidString: $0) == nil ? $0 : nil },
+                askKey: item.askKey
+            )
+        }
+        state.total = max(0, total - (items.count - shown.count))
+    }
+}

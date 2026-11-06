@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import functools
 import hashlib
 import importlib.util
@@ -948,6 +949,36 @@ class UnsignedReleaseVerifierTests(unittest.TestCase):
                     self.settings_path, self.expected
                 )
                 self.assertTrue(errors, f"mutation for {key} unexpectedly passed")
+
+    def test_settings_mint_origin_is_optional_but_exact_when_requested(self) -> None:
+        # Not requested: the setting may be absent or empty, never a value nobody asked for.
+        self.write_settings(dict(self.settings))
+        _, errors = verify.verify_settings_file(self.settings_path, self.expected)
+        self.assertEqual(errors, [])
+        for value, passes in (("", True), ("https://mint.ci.invalid", False)):
+            with self.subTest(unrequested=value):
+                changed = dict(self.settings)
+                changed["SENTI_MINT_URL"] = value
+                self.write_settings(changed)
+                _, errors = verify.verify_settings_file(self.settings_path, self.expected)
+                self.assertEqual(not errors, passes, errors)
+        # Requested: exactly that origin.
+        requested = dataclasses.replace(self.expected, mint_url="https://mint.ci.invalid")
+        for value, passes in (("https://mint.ci.invalid", True), ("https://wrong-mint.ci.invalid", False), ("", False)):
+            with self.subTest(requested=value):
+                changed = dict(self.settings)
+                changed["SENTI_MINT_URL"] = value
+                self.write_settings(changed)
+                _, errors = verify.verify_settings_file(self.settings_path, requested)
+                self.assertEqual(not errors, passes, errors)
+                if not passes:
+                    self.assertIn("SENTI_MINT_URL: resolved value does not match expected", errors)
+
+    def test_a_requested_mint_origin_must_be_https(self) -> None:
+        self.write_settings(dict(self.settings))
+        insecure = dataclasses.replace(self.expected, mint_url="http://mint.ci.invalid")
+        _, errors = verify.verify_settings_file(self.settings_path, insecure)
+        self.assertTrue(any("mint_url" in error for error in errors), errors)
 
     def test_settings_accept_trusted_resolved_tool_selectors(self) -> None:
         changed = dict(self.settings)
