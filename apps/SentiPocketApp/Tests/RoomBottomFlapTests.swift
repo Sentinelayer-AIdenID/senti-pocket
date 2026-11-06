@@ -468,6 +468,10 @@ private final class MainThreadStuckWatch: @unchecked Sendable {
     private var drawsAtPhase = 0
     private var timer: DispatchSourceTimer?
     static let limit: TimeInterval = 8
+    /// The warm-up (a test process's first SwiftUI window, unmeasured) may take longer: on a loaded hosted runner it
+    /// stalled past `limit` with no room loop at all (master acbdcbd, two tests, 0 and 4 row draws). Every measured
+    /// step keeps `limit`, so a room that redraws without end is still caught.
+    static let warmUpLimit: TimeInterval = 30
 
     func start() {
         lock.lock()
@@ -499,7 +503,7 @@ private final class MainThreadStuckWatch: @unchecked Sendable {
         let phase = name
         let draws = RenderTrace.snapshot().draws - drawsAtPhase
         lock.unlock()
-        if stuck > Self.limit {
+        if stuck > (phase == "warm-up" ? Self.warmUpLimit : Self.limit) {
             fatalError("The room never settled after \"\(phase)\": the main thread was stuck \(Int(stuck)) s, "
                 + "with \(draws) row draws.")
         }

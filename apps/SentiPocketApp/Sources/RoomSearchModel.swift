@@ -165,7 +165,7 @@ final class RoomSearchModel: ObservableObject {
                     guard let author else { return true }
                     return result.message?.authorId.lowercased() == author
                 }
-                self.rows += kept.filter { seen.insert($0.sequenceId).inserted }.map(Self.row)
+                self.rows += kept.filter { seen.insert($0.sequenceId).inserted }.map { Self.row($0, query: query) }
                 self.nextBeforeSequence = page.nextBeforeSequence
                 self.isSearching = false
                 self.isLoadingMore = false
@@ -204,13 +204,13 @@ final class RoomSearchModel: ObservableObject {
         )
     }
 
-    nonisolated static func row(_ result: RoomSearchResult) -> RoomSearchRow {
+    nonisolated static func row(_ result: RoomSearchResult, query: String = "") -> RoomSearchRow {
         RoomSearchRow(
             sequenceId: result.sequenceId,
             author: result.message?.authorName,
             isHuman: result.message?.isHuman ?? false,
             date: result.message.flatMap { ParsedSessionTimestamp($0.timestamp).date },
-            snippet: result.snippet
+            snippet: RoomSearchPresentationState.plainSnippet(result.snippet, query: query)
         )
     }
 }

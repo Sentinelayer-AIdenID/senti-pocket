@@ -129,6 +129,52 @@ struct AccountDeletionScheduledView: View {
     }
 }
 
+/// The date a deletion was scheduled for, over the sign-in screen once the request went through. It watches the
+/// deletion's state itself, so the app's root is not drawn again for it.
+struct AccountDeletionScheduledOverlay: View {
+    @ObservedObject var coordinator: AccountDeletionCoordinator
+
+    var body: some View {
+        ZStack {
+            Color.clear.allowsHitTesting(false)
+            if let scheduled = coordinator.scheduled {
+                AccountDeletionScheduledView(scheduled: scheduled) { coordinator.dismissScheduled() }
+            }
+        }
+    }
+}
+
+/// The notice over the signed-in root while the account is scheduled for deletion. It watches the deletion's state
+/// itself, so the root is not drawn again for it; when the notice comes up, `onShown` puts away whatever the root had
+/// open over it.
+struct AccountDeletionPendingOverlay: View {
+    @ObservedObject var coordinator: AccountDeletionCoordinator
+    let onShown: @MainActor () -> Void
+    let onContinue: @MainActor () -> Void
+    let onSignOut: @MainActor () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.clear.allowsHitTesting(false)
+            if let notice = coordinator.pending {
+                AccountDeletionPendingView(
+                    notice: notice,
+                    onKeepAccount: {
+                        Task { await coordinator.keepAccount(onContinue: onContinue) }
+                    },
+                    onSignOut: onSignOut
+                )
+            }
+        }
+        .onAppear {
+            if coordinator.pending != nil { onShown() }
+        }
+        .onChange(of: coordinator.pending != nil) { isPending in
+            if isPending { onShown() }
+        }
+    }
+}
+
 /// Shown over the whole app while the account is scheduled for deletion.
 struct AccountDeletionPendingView: View {
     let notice: AccountDeletionPendingNotice

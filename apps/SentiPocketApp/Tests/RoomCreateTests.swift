@@ -97,6 +97,35 @@ final class RoomCreateTests: XCTestCase {
         XCTAssertEqual(json(body)["sessionId"] as? String, id, "the id made here is the room's when the API echoes none")
     }
 
+    /// A New agent's chat goes out under the id and key kept with its start, every time: private, general, for four.
+    func test_a_new_agents_chat_is_made_under_its_kept_id_and_key() async throws {
+        CreateURLProtocol.reset(status: 200, answer: #"{"ok":true,"sessionId":"chat-kept"}"#)
+        try await sender().createAgentChat(sessionId: "chat-kept", title: "reviewer · Review it", idempotencyKey: "create-kept")
+        let (request, body) = try XCTUnwrap(CreateURLProtocol.requests().first)
+        XCTAssertEqual(request.url?.path, "/api/v1/sessions")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Idempotency-Key"), "create-kept")
+        let sent = json(body)
+        XCTAssertEqual(sent["sessionId"] as? String, "chat-kept")
+        XCTAssertEqual(sent["title"] as? String, "reviewer · Review it")
+        XCTAssertEqual(sent["visibility"] as? String, "private")
+        XCTAssertEqual(sent["maxMembers"] as? Int, 4)
+        XCTAssertNil(sent["roomType"], "a general room")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-CSRF-Token"),
+                       SessionMutationCSRF.token(bearer: "test-bearer-token", sessionId: "chat-kept",
+                                                 routeTemplate: "POST /api/v1/sessions", idempotencyKey: "create-kept"))
+    }
+
+    /// The agent is sent to the id kept with its start: a chat the API made under any other id is not that chat.
+    func test_a_chat_made_under_another_id_is_not_the_new_agents() async {
+        CreateURLProtocol.reset(status: 200, answer: #"{"ok":true,"sessionId":"another-room"}"#)
+        do {
+            try await sender().createAgentChat(sessionId: "chat-kept", title: "x", idempotencyKey: "create-kept")
+            XCTFail("the agent would go to a chat that is not the one made")
+        } catch {
+            XCTAssertEqual(error as? RoomSendError, .rejected)
+        }
+    }
+
     func test_a_refused_create_says_so() async {
         CreateURLProtocol.reset(status: 403)
         do {

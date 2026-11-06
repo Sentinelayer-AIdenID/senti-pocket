@@ -2,6 +2,7 @@
 import Foundation
 import SwiftUI
 import UIKit
+import PocketContracts
 import PocketSyncClient
 import PocketUI
 import PocketVoice
@@ -12,7 +13,27 @@ import PocketVoice
 enum RoomPreview {
     static var isRequested: Bool {
         ProcessInfo.processInfo.arguments.contains("-PocketRoomPreview") || isTicketsRequested || isTicketLinkRequested
-            || isAnchorRequested || isSearchRequested
+            || isAnchorRequested || isSearchRequested || isProfileCardRequested || isDirectRequested
+            || isSidePanelFoldersRequested
+    }
+
+    /// `-PocketProfileCardPreview` opens the room with an agent's profile card over it, as a tap on its avatar does.
+    static var isProfileCardRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-PocketProfileCardPreview")
+    }
+
+    /// `-PocketDMPreview` opens a direct message with an agent: its header (compact unless `-PocketDMHeaderExpanded`;
+    /// `-PocketDMMemoryOpen` opens the compact one's switch) and the memory switch, off as the server starts it.
+    static var isDirectRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-PocketDMPreview")
+    }
+
+    /// `-PocketSidePanelFoldersPreview` shows the side panel with folders three levels deep, direct messages under the
+    /// rooms they were opened from, and one whose room is gone under Messages. `-PocketFolderShot <state>` sets it up
+    /// for a screenshot: `folded` (two folders folded), `newInside` (New folder inside a level-2 folder), `moveTo` (Move
+    /// to… for a level-2 folder that has one inside it) or `delete` (the delete confirmation).
+    static var isSidePanelFoldersRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-PocketSidePanelFoldersPreview")
     }
 
     /// `-PocketRoomSearchPreview` shows the room's search with sample matches.
@@ -72,8 +93,60 @@ enum RoomPreview {
             }
         } else if isSearchRequested {
             RoomSearchView(state: RoomPreviewSearch.sampleState) { _ in }
+        } else if isSidePanelFoldersRequested {
+            SidePanelFoldersPreview()
+        } else if isDirectRequested {
+            directRoot
+        } else if isProfileCardRequested {
+            roomRoot
+                .sheet(isPresented: .constant(true)) {
+                    RoomProfileSheet(
+                        target: RoomProfileTarget(senderId: "review-agent", name: "review-agent", isAgent: true),
+                        roomId: "preview-room",
+                        sharedRoom: "Design review",
+                        canMessage: true,
+                        context: directContext,
+                        onClose: {}
+                    )
+                }
         } else {
             roomRoot
+        }
+    }
+
+    /// Direct messages in the preview: on, with one already open with review-agent.
+    @MainActor
+    private static let directCenter = DirectMessagesCenter(client: RoomPreviewDirectMessages())
+
+    @MainActor
+    private static var directContext: RoomDirectContext {
+        RoomDirectContext(
+            center: directCenter,
+            existing: { $0.lowercased() == "review-agent" ? RoomPreviewDirectMessages.sessionId : nil },
+            open: { _ in }
+        )
+    }
+
+    @MainActor
+    private static var directRoot: some View {
+        NavigationStack {
+            RoomChatScreen(
+                route: RoomRoute(
+                    sessionId: RoomPreviewDirectMessages.sessionId,
+                    title: "review-agent",
+                    membershipRole: "owner",
+                    direct: DirectRoomInfo(RoomPreviewDirectMessages.dm(memoryShare: []))
+                ),
+                transport: RoomPreviewTransport(directScenario: true),
+                sender: RoomPreviewSender(),
+                actionSender: RoomPreviewSender(),
+                identity: RoomPreviewIdentity(),
+                mint: RoomPreviewMint(),
+                receipts: RoomPreviewReceipts(),
+                reader: reader,
+                direct: directContext,
+                onReauthenticationRequired: {}
+            )
         }
     }
 
@@ -99,12 +172,220 @@ enum RoomPreview {
                 ticketWriter: RoomPreviewTicketWriter(),
                 ticketLeases: RoomPreviewTickets.leases,
                 ticketExtras: RoomPreviewExtras(),
+                mint: RoomPreviewMint(),
                 attachmentFetcher: RoomPreviewFiles(),
                 receipts: RoomPreviewReceipts(),
                 search: RoomPreviewSearch(),
                 reader: reader,
+                // Avatars open profile cards in the preview room too.
+                direct: (isProfileCardRequested || isDirectRequested) ? directContext : nil,
                 onReauthenticationRequired: {}
             )
+            .modifier(RoomCalendarPreview.roomEntry)
+        }
+    }
+}
+
+/// Direct messages in the preview, as the server's phase-1 contract answers them: a direct message with review-agent
+/// opened from "Design review", whose memory switch starts off and turns on when tapped; anyone else can be messaged.
+private final class RoomPreviewDirectMessages: DirectMessaging, @unchecked Sendable {
+    static let sessionId = "preview-dm"
+    private let lock = NSLock()
+    private var shares: [DirectMemoryShare] = []
+
+    static func dm(memoryShare: [DirectMemoryShare], created: Bool = false) -> DirectMessage {
+        DirectMessage(
+            sessionId: sessionId,
+            counterpart: SessionCounterpart(senderId: "review-agent", kind: "agent", displayName: "review-agent"),
+            originRoom: DirectRoomReference(sessionId: "preview-room", title: "Design review"),
+            mutualRooms: [DirectRoomReference(sessionId: "preview-room", title: "Design review"),
+                          DirectRoomReference(sessionId: "preview-release", title: "Release train")],
+            memoryShare: memoryShare,
+            created: created
+        )
+    }
+
+    private var current: [DirectMemoryShare] { lock.withLock { shares } }
+
+    func openDirectMessage(with targetSenderId: String, from contextRoomId: String) async throws -> DirectMessage {
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        return Self.dm(memoryShare: current, created: true)
+    }
+
+    func directMessage(_ sessionId: String) async throws -> DirectMessage {
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        return Self.dm(memoryShare: current)
+    }
+
+    func setMemoryShare(_ sessionId: String, roomId: String, enabled: Bool) async throws -> [DirectMemoryShare] {
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        return lock.withLock {
+            shares = shares.filter { $0.roomId != roomId } + [DirectMemoryShare(roomId: roomId, enabled: enabled)]
+            return shares
+        }
+    }
+
+    func directMessageSettings() async throws -> DirectMessagesAllowance? { .sharedRooms }
+
+    func setDirectMessageSettings(_ allowance: DirectMessagesAllowance) async throws -> DirectMessagesAllowance? {
+        allowance
+    }
+}
+
+/// The side panel with folders three levels deep and direct messages, beside a stand-in for the room it slides over.
+/// The folders are the app's own (`RoomFoldersCenter` and its sheets) over an in-memory stand-in for the server.
+private struct SidePanelFoldersPreview: View {
+    @State private var theme = PocketThemePreference.system
+    @StateObject private var center = RoomFoldersCenter(client: RoomPreviewFolders(SidePanelFoldersPreview.folders),
+                                                        onRoomsChanged: {})
+    @StateObject private var placement = SidePanelPlacement(defaults: nil)
+    private static let now = Date()
+    /// `-PocketFolderShot <state>`.
+    private static let shot = UserDefaults.standard.string(forKey: "PocketFolderShot") ?? "open"
+
+    private static func room(_ id: String, _ title: String, minutesAgo: Double, unread: Int = 0, folder: String? = nil,
+                             summary: String? = nil, humans: Int? = nil, agents: Int? = nil) -> PocketSidePanel.Room {
+        PocketSidePanel.Room(id: id, title: title, subtitle: summary, lastActivity: now.addingTimeInterval(-minutesAgo * 60),
+                             activity: RoomListActivity(humansOnline: humans, agentsOnline: agents, unread: unread),
+                             folderId: folder)
+    }
+
+    private static func direct(_ id: String, _ name: String, agent: Bool, from origin: String?, minutesAgo: Double,
+                               unread: Int = 0) -> PocketSidePanel.Room {
+        PocketSidePanel.Room(id: id, title: name, subtitle: nil, lastActivity: now.addingTimeInterval(-minutesAgo * 60),
+                             activity: RoomListActivity(humansOnline: nil, agentsOnline: nil, unread: unread),
+                             direct: PocketSidePanel.Direct(name: name, isAgent: agent, originRoomId: origin))
+    }
+
+    private static let rooms: [PocketSidePanel.Room] = [
+        direct("dm-review", "review-agent", agent: true, from: "room-design", minutesAgo: 3, unread: 2),
+        room("room-design", "Design review", minutesAgo: 4, unread: 5, folder: "f-studio",
+             summary: "Onboarding fixes before the next build.", humans: 2, agents: 3),
+        direct("dm-priya", "Priya", agent: false, from: "room-design", minutesAgo: 25),
+        room("room-sketch", "Daily sketch", minutesAgo: 12, unread: 1, folder: "f-sketches", humans: 1),
+        room("room-color", "Color study", minutesAgo: 30, unread: 2, folder: "f-ideas"),
+        room("room-weekly", "Weekly sync", minutesAgo: 40, humans: 4, agents: 1),
+        direct("dm-build", "build-agent", agent: true, from: "room-weekly", minutesAgo: 55, unread: 1),
+        room("room-supply", "Supply run", minutesAgo: 70, folder: "f-ops", agents: 2),
+        room("room-pager", "Pager drill", minutesAgo: 95, unread: 3, folder: "f-night"),
+        room("room-book", "Book club", minutesAgo: 240),
+        direct("dm-sam", "Sam", agent: false, from: nil, minutesAgo: 300)
+    ]
+
+    /// Studio holds Sketches, which holds Ideas (three levels); Ops holds Night shift; Notes is empty.
+    private static let folders = [
+        RoomFolder(id: "f-studio", name: "Studio", position: 0, roomCount: 1, totalRoomCount: 3),
+        RoomFolder(id: "f-sketches", name: "Sketches", parentFolderId: "f-studio", position: 0, roomCount: 1,
+                   totalRoomCount: 2),
+        RoomFolder(id: "f-ideas", name: "Ideas", parentFolderId: "f-sketches", position: 0, roomCount: 1),
+        RoomFolder(id: "f-ops", name: "Ops", position: 1, roomCount: 1, totalRoomCount: 2),
+        RoomFolder(id: "f-night", name: "Night shift", parentFolderId: "f-ops", position: 0, roomCount: 1),
+        RoomFolder(id: "f-notes", name: "Notes", position: 2)
+    ]
+
+    var body: some View {
+        HStack(spacing: 0) {
+            PocketSidePanel(
+                placement: placement,
+                currentRoomId: "room-design",
+                unreadNotifications: 3,
+                accountName: "Alex",
+                theme: $theme,
+                onSelectRoom: { _ in },
+                onAllRooms: {},
+                onNotifications: {},
+                onCalls: {},
+                onActivity: {},
+                onSettings: {},
+                folderNotice: center.notice,
+                onFolder: center.items == nil ? nil : { center.send($0) }
+            )
+            .frame(width: 300)
+            Color.black.opacity(0.12)
+                .ignoresSafeArea()
+        }
+        .modifier(RoomFolderSheets(center: center))
+        .onChange(of: center.folders) { _ in placement.update(rooms: Self.rooms, folders: center.items) }
+        .task {
+            if Self.shot == "folded" {
+                placement.toggleFolded("f-studio")
+                placement.toggleFolded("f-night")
+            }
+            await center.refresh()
+            placement.update(rooms: Self.rooms, folders: center.items)
+            await placement.settle()
+            switch Self.shot {
+            case "newInside": center.send(.createInside(folderId: "f-night"))
+            case "moveTo": center.send(.pickParent(folderId: "f-sketches"))
+            case "delete": center.send(.delete(folderId: "f-studio"))
+            default: break
+            }
+        }
+    }
+}
+
+/// The preview's folders, kept in memory as the server keeps them: a create goes after the folders beside it, a move
+/// into another folder goes after the ones there, a delete moves what was inside up one level.
+private final class RoomPreviewFolders: RoomFoldersServing, @unchecked Sendable {
+    private let lock = NSLock()
+    private var list: [RoomFolder]
+    private var made = 0
+
+    init(_ list: [RoomFolder]) {
+        self.list = list
+    }
+
+    func folders() async throws -> [RoomFolder] {
+        lock.withLock { list }
+    }
+
+    func createFolder(named name: String, in parentFolderId: String?, idempotencyKey: String?) async throws -> RoomFolder {
+        lock.withLock {
+            made += 1
+            let folder = RoomFolder(id: "f-made-\(made)", name: name, parentFolderId: parentFolderId,
+                                    position: list.filter { $0.parentFolderId == parentFolderId }.count)
+            list.append(folder)
+            return folder
+        }
+    }
+
+    func renameFolder(_ folderId: String, to name: String) async throws -> RoomFolder {
+        try change(folderId) { RoomFolder(id: $0.id, name: name, parentFolderId: $0.parentFolderId, position: $0.position,
+                                          roomCount: $0.roomCount, totalRoomCount: $0.totalRoomCount) }
+    }
+
+    func moveFolder(_ folderId: String, to position: Int) async throws -> RoomFolder {
+        try change(folderId) { RoomFolder(id: $0.id, name: $0.name, parentFolderId: $0.parentFolderId, position: position,
+                                          roomCount: $0.roomCount, totalRoomCount: $0.totalRoomCount) }
+    }
+
+    func moveFolder(_ folderId: String, into parentFolderId: String?) async throws -> RoomFolder {
+        let after = lock.withLock { list.filter { $0.parentFolderId == parentFolderId }.count }
+        return try change(folderId) { RoomFolder(id: $0.id, name: $0.name, parentFolderId: parentFolderId, position: after,
+                                                 roomCount: $0.roomCount, totalRoomCount: $0.totalRoomCount) }
+    }
+
+    func deleteFolder(_ folderId: String) async throws {
+        lock.withLock {
+            guard let gone = list.first(where: { $0.id == folderId }) else { return }
+            list = list.filter { $0.id != folderId }.map { folder in
+                guard folder.parentFolderId == folderId else { return folder }
+                return RoomFolder(id: folder.id, name: folder.name, parentFolderId: gone.parentFolderId,
+                                  position: gone.position, roomCount: folder.roomCount,
+                                  totalRoomCount: folder.totalRoomCount)
+            }
+        }
+    }
+
+    func file(room sessionId: String, in folderId: String) async throws {}
+
+    func unfile(room sessionId: String, from folderId: String) async throws {}
+
+    private func change(_ id: String, _ update: (RoomFolder) -> RoomFolder) throws -> RoomFolder {
+        try lock.withLock {
+            guard let index = list.firstIndex(where: { $0.id == id }) else { throw RoomFolderError.gone }
+            list[index] = update(list[index])
+            return list[index]
         }
     }
 }
@@ -114,7 +395,7 @@ enum RoomPreview {
 private struct RoomPreviewSearch: RoomSearching {
     static let sampleState = RoomSearchPresentationState(
         query: "paste",
-        rows: matches(for: "paste", before: nil, limit: 10).map(RoomSearchModel.row),
+        rows: matches(for: "paste", before: nil, limit: 10).map { RoomSearchModel.row($0, query: "paste") },
         hasMore: true
     )
 
@@ -158,9 +439,10 @@ private struct RoomPreviewReceipts: RoomReceiptsClient {
             isAvailable: true,
             participants: [
                 RoomPresentParticipant(id: "human-\(Self.alex)", isHuman: true, displayName: "Alex"),
-                RoomPresentParticipant(id: "review-agent", isHuman: false),
+                RoomPresentParticipant(id: "review-agent", isHuman: false)
+            ] + (sessionId == RoomPreviewDirectMessages.sessionId ? [] : [
                 RoomPresentParticipant(id: "build-agent", isHuman: false, isIdle: true)
-            ],
+            ]),
             humansOnline: 1,
             agentsOnline: 2,
             ttlSeconds: 90
@@ -327,6 +609,31 @@ private struct RoomPreviewSender: RoomMessageSending, RoomActionSending, RoomSum
     }
 }
 
+/// New agent in the preview: the new chat is "made" after a moment, and goes nowhere.
+extension RoomPreviewSender: AgentChatCreating {
+    func createAgentChat(sessionId: String, title: String, idempotencyKey: String) async throws {
+        try? await Task.sleep(nanoseconds: 600_000_000)
+    }
+
+    func nameAgentChat(sessionId: String, title: String) async throws {}
+}
+
+/// The mint in the preview: two models, so the room's owner sees New agent; a start "boots" for a few seconds and
+/// starts nothing.
+private struct RoomPreviewMint: MintStarting {
+    func models() async throws -> [MintModel] {
+        [MintModel(id: "preview-strong", label: "Strong model", note: "Plans, writes and reviews code.",
+                   efforts: ["low", "medium", "high"], defaultEffort: "medium"),
+         MintModel(id: "preview-fast", label: "Fast model")]
+    }
+
+    func startAgent(_ request: MintUpRequest) async throws -> MintUpResponse {
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
+        return MintUpResponse(lifeId: "preview-life", agentName: request.agentName ?? "mint-preview",
+                              sessionId: request.sessionId, phase: "booting", consoleURL: nil)
+    }
+}
+
 /// The voice room in the preview: turns and the transcript go nowhere.
 extension RoomPreviewSender: VoiceRoomPosting {
     func postCallStarted(sessionId: String, text: String, clientId: String) async throws {}
@@ -429,7 +736,7 @@ private struct RoomPreviewTransport: RoomTransport {
     }
 
     func roomBreakouts(parentSessionId: String, cursor: String?, limit: Int) async throws -> RoomBreakoutsPage {
-        guard parentSessionId != Self.breakoutRoom else { return RoomBreakoutsPage() }
+        guard parentSessionId != Self.breakoutRoom, !directScenario else { return RoomBreakoutsPage() }
         return RoomBreakoutsPage(items: [RoomBreakout(
             childSessionId: Self.breakoutRoom,
             parentSessionId: parentSessionId,
@@ -449,6 +756,14 @@ private struct RoomPreviewTransport: RoomTransport {
 
     /// The reading-position scenario: forty earlier notes before the usual history.
     var anchorScenario = false
+    /// A direct message with review-agent: a few messages, your own last.
+    var directScenario = false
+
+    private static let directHistory: [RoomMessage] = [
+        row(201, "human-alex", minutesAgo: 40, "Quick one outside the room: can you look at paste validation before the demo?"),
+        row(202, "review-agent", minutesAgo: 38, "Yes. I'll check it against the onboarding tests and answer here."),
+        row(203, "human-alex", minutesAgo: 2, "Also: does the retry counter fix need a migration?")
+    ]
 
     private static let earlier: [RoomMessage] = (1...40).map { seq in
         row(Int64(seq), seq.isMultiple(of: 3) ? "human-alex" : "review-agent", minutesAgo: Double(30 * 60 - seq),
@@ -456,6 +771,7 @@ private struct RoomPreviewTransport: RoomTransport {
     }
 
     private var allHistory: [RoomMessage] {
+        if directScenario { return Self.directHistory }
         let files = RoomPreview.isFilesRequested ? Self.fileRoots : []
         return (anchorScenario ? Self.earlier + Self.history : Self.history) + files
     }
@@ -510,6 +826,7 @@ private struct RoomPreviewTransport: RoomTransport {
     ]
 
     func roomActions(sessionId: String, targetSequenceId: Int64?, limit: Int) async throws -> RoomActionsPage {
+        if directScenario { return RoomActionsPage() }
         if targetSequenceId == 111 { return RoomActionsPage(replies: Self.threadReplies) }
         let files = RoomPreview.isFilesRequested ? Self.fileParts : []
         if let targetSequenceId, targetSequenceId == 124 || targetSequenceId == 125 {
@@ -569,6 +886,10 @@ private struct RoomPreviewTransport: RoomTransport {
 
     func roomStream(sessionId: String, fromSequence: Int64?) -> AsyncStream<RoomStreamEvent> {
         if anchorScenario { return anchorStream() }
+        if directScenario {
+            // A direct message to an agent wakes no model by itself: the stream stays quiet.
+            return AsyncStream { continuation in continuation.yield(.frame(.control)) }
+        }
         return AsyncStream { continuation in
             let task = Task {
                 continuation.yield(.frame(.control))

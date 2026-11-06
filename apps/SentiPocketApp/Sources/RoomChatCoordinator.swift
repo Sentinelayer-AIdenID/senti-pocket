@@ -66,6 +66,8 @@ final class RoomChatCoordinator: ObservableObject {
     private var lastActionsRefresh: Date?
     private var actionsRefreshInFlight = false
     private var openThreadSequence: Int64?
+    /// The reply the open thread was opened at (a reply notification), brought into view there.
+    private var threadFocusReply: String?
     private var threadReplies: [RoomReply] = []
     private var threadLoading = false
     private var threadFailure: String?
@@ -128,6 +130,9 @@ final class RoomChatCoordinator: ObservableObject {
     /// How often replies are read while a voice room is open: an answer in a thread is read aloud soon after.
     static let voiceActionsPollInterval: TimeInterval = 3
 
+    /// Whether the API takes photos and files on a reply, each time a read of replies says (the room's uploads ask it
+    /// before posting one).
+    var onReplyAttachmentSupport: (@MainActor (RoomReplyAttachmentSupport) -> Void)?
     /// A voice room listening in: each live message as it arrives, and each reply the first time it is read.
     var onLiveMessages: (@MainActor ([RoomMessage]) -> Void)?
     var onNewReplies: (@MainActor ([RoomReply]) -> Void)?
@@ -180,6 +185,9 @@ final class RoomChatCoordinator: ObservableObject {
     private var nextBeforeSequence: Int64?
     private var connection: RoomConnectionState = .connecting
     private var composing: [String: Date] = [:]
+    /// The room's boxes as the mint lists them, by name: running, and ended (`setBoxes`).
+    private var runningBoxNames: Set<String> = []
+    private var endedBoxNames: Set<String> = []
     private var failure: SessionLoadFailure?
     private var isLoadingInitial = false
     private var isLoadingOlder = false
@@ -339,6 +347,23 @@ final class RoomChatCoordinator: ObservableObject {
 
     // MARK: - Lifecycle
 
+    /// Something covers the room from outside it (the side panel or a sheet the app shows over it): what arrives is kept
+    /// but not shown, so nothing in the room is built or drawn for it, and it shows at once, in one update, when the
+    /// room is uncovered. A call keeps the room shown: its voice room follows what arrives.
+    var isCovered = false {
+        didSet {
+            guard isCovered != oldValue, !isCovered, publishesWhenShown else { return }
+            publishesWhenShown = false
+            publish()
+        }
+    }
+
+    /// Something arrived or changed while the room was covered.
+    private var publishesWhenShown = false
+
+    /// The room shows nothing new while covered, unless a call needs it.
+    private var restsUnderCover: Bool { isCovered && !readsRepliesOften }
+
     /// Opens the room (first time) or resumes it after `pause()`: catch up, then go live.
     func resume() {
         guard liveTasks.isEmpty, !failureIsTerminal else { return }
@@ -460,6 +485,7 @@ final class RoomChatCoordinator: ObservableObject {
         case .closeThread:
             // Unsent replies stay with their thread and show again when it reopens.
             openThreadSequence = nil
+            threadFocusReply = nil
             threadReplies = []
             threadFailure = nil
             publish()
@@ -786,6 +812,10 @@ final class RoomChatCoordinator: ObservableObject {
         for message in timeline.messages.reversed() {
             if let match = message.attachments.first(where: { $0.attachmentId == attachmentId }) { return match }
         }
+        // A reply's photos and files, in the open thread or shown in the room.
+        for reply in threadReplies + Array(inlineReplies.values) {
+            if let match = reply.attachments.first(where: { $0.attachmentId == attachmentId }) { return match }
+        }
         return nil
     }
 
@@ -856,15 +886,21 @@ final class RoomChatCoordinator: ObservableObject {
         } catch {}
     }
 
-    /// Attachments marked `removed` in their messages lose their previews, here and on the phone, once.
+    /// Attachments marked `removed` in their messages or replies lose their previews, here and on the phone, once.
     private func forgetRemovedAttachments() {
-        for message in timeline.messages where message.attachments.contains(where: \.isRemoved) {
-            for attachment in message.attachments where attachment.isRemoved
+        func forget(_ attachments: [RoomAttachment]) {
+            for attachment in attachments where attachment.isRemoved
                 && !removedAttachments.contains(attachment.attachmentId) {
                 removedAttachments.insert(attachment.attachmentId)
                 forgetPreview(attachment.attachmentId)
             }
         }
+        for message in timeline.messages where message.attachments.contains(where: \.isRemoved) {
+            forget(message.attachments)
+        }
+        // A reply's, in the open thread or shown in the room.
+        for reply in threadReplies where reply.attachments.contains(where: \.isRemoved) { forget(reply.attachments) }
+        for reply in inlineReplies.values where reply.attachments.contains(where: \.isRemoved) { forget(reply.attachments) }
     }
 
     /// A preview gone from memory, and from the phone's disk.
@@ -945,6 +981,15 @@ final class RoomChatCoordinator: ObservableObject {
         Task { [weak self] in await self?.catchUp(current) }
     }
 
+    /// The room's boxes as the mint lists them (the Flight record's reads, from the room screen): they tell a chat made
+    /// for one agent, whose posts then show in full, and a room with a running box, whose composer says how to reach it.
+    func setBoxes(running: Set<String>, ended: Set<String>) {
+        guard running != runningBoxNames || ended != endedBoxNames else { return }
+        runningBoxNames = running
+        endedBoxNames = ended
+        publish()
+    }
+
     /// Re-reads the room's people (owners and admins only). A failed read keeps the list already loaded.
     func refreshMembers() async {
         guard readsMembers, sender != nil, !failureIsTerminal,
@@ -1011,6 +1056,7 @@ final class RoomChatCoordinator: ObservableObject {
         guard let page = try? await transport.roomActions(sessionId: sessionId, targetSequenceId: nil, limit: 500) else {
             return
         }
+        noteReplyAttachmentSupport(page.replyAttachments)
         // The projection covers the newest actions; keep older summaries it no longer includes.
         for (sequence, summary) in page.byTarget { summaries[sequence] = summary }
         noteReplyAuthors(page.replies)
@@ -1212,7 +1258,36 @@ final class RoomChatCoordinator: ObservableObject {
         publish()
     }
 
+    /// Opens a thread at one of its replies (a reply notification): the reply is brought into view and marked.
+    func openThread(_ sequenceId: Int64, at replyId: String?) {
+        openThread(sequenceId)
+        threadFocusReply = replyId
+        publish()
+    }
+
+    /// A reply with files was posted from this phone (or its words were, without the files): its saved words go, and
+    /// its thread and the room read it now.
+    func replyPosted(to sequenceId: Int64, answering replyId: String? = nil, text: String? = nil) async {
+        if let text { forgetReplyDraft(thread: sequenceId, answering: replyId, text: text) }
+        if openThreadSequence == sequenceId { await loadThread(sequenceId) }
+        await refreshActions(force: true)
+    }
+
+    /// Words typed for a reply reached the room (in the reply, or in a new message carrying its files): their saved
+    /// draft in the thread goes, and in the room's box if they were typed there.
+    func forgetReplyDraft(thread sequenceId: Int64, answering replyId: String?, text: String) {
+        guard let draftKey else { return }
+        RoomComposerDraft.forgetSaved(key: draftKey, sent: text)
+        RoomReplyDrafts(base: draftKey).forgetSent(text, thread: sequenceId, reply: replyId)
+    }
+
+    private func noteReplyAttachmentSupport(_ support: RoomReplyAttachmentSupport) {
+        guard support != .unknown else { return }
+        onReplyAttachmentSupport?(support)
+    }
+
     private func openThread(_ sequenceId: Int64) {
+        if openThreadSequence != sequenceId { threadFocusReply = nil }
         openThreadSequence = sequenceId
         threadReplies = summaries[sequenceId]?.latestReplies ?? []
         threadFailure = nil
@@ -1237,6 +1312,7 @@ final class RoomChatCoordinator: ObservableObject {
     private func loadThread(_ sequenceId: Int64) async {
         do {
             let page = try await transport.roomActions(sessionId: sessionId, targetSequenceId: sequenceId, limit: 500)
+            noteReplyAttachmentSupport(page.replyAttachments)
             guard openThreadSequence == sequenceId else { return }
             threadReplies = page.replies.filter { $0.targetSequenceId == sequenceId }
             threadFailure = nil
@@ -1322,7 +1398,11 @@ final class RoomChatCoordinator: ObservableObject {
             do {
                 try await actionSender.sendAction(request)
                 guard let self else { return }
-                if let draftKey = self.draftKey { RoomComposerDraft.forgetSaved(key: draftKey, sent: item.text) }
+                // The server has it: its saved text goes (the room box's, for a swipe to reply, or the thread's).
+                if let draftKey = self.draftKey {
+                    RoomComposerDraft.forgetSaved(key: draftKey, sent: item.text)
+                    RoomReplyDrafts(base: draftKey).forgetSent(item.text, thread: item.targetSequenceId, reply: item.toReply)
+                }
                 self.onFeedback?(.sent)
                 if self.openThreadSequence == item.targetSequenceId { await self.loadThread(item.targetSequenceId) }
                 self.pendingReplies.removeAll { $0.clientId == clientId }
@@ -2163,6 +2243,10 @@ final class RoomChatCoordinator: ObservableObject {
     }
 
     private func publish() {
+        if restsUnderCover {
+            publishesWhenShown = true
+            return
+        }
         forgetRemovedAttachments()
         // What is shown of a pinned message comes from here, so the newest revision the loaded rows hold is kept
         // first: a board shown at a newer revision (in a window loaded around it, say) never goes back to an older
@@ -2262,7 +2346,8 @@ final class RoomChatCoordinator: ObservableObject {
                         isEdited: reply.isEdited,
                         views: views(of: reply.id, at: reply.revision, author: viewAuthor(reply.authorId, isHuman: reply.isHuman)),
                         authorHandle: reply.isHuman ? String(reply.authorId.dropFirst("human-".count)) : reply.authorId,
-                        parentReplyId: reply.targetActionId
+                        parentReplyId: reply.targetActionId,
+                        attachments: reply.attachments.map { Self.chip($0, removed: removedAttachments.contains($0.attachmentId)) }
                     )
                 },
                 pending: pendingReplies.filter { $0.targetSequenceId == sequence }.map {
@@ -2271,11 +2356,12 @@ final class RoomChatCoordinator: ObservableObject {
                 isLoading: threadLoading,
                 failureText: threadFailure,
                 canReply: actionSender != nil && postingRefusedReason == nil,
-                maximumReplyLength: RoomActionRequest.replyLimit
+                maximumReplyLength: RoomActionRequest.replyLimit,
+                focusReplyId: threadFocusReply
             )
         }
         let replyInputs = inlineReplyInputs()
-        state = RoomChatPresentationState(
+        let next = RoomChatPresentationState(
             sessionId: sessionId,
             title: title,
             messages: inputs,
@@ -2318,8 +2404,13 @@ final class RoomChatCoordinator: ObservableObject {
             expandedRepeats: expandedRepeats,
             files: placedFiles?.cards ?? [:],
             fileParts: placedFiles?.parts ?? [:],
-            draftKey: draftKey
+            draftKey: draftKey,
+            runningBoxes: runningBoxNames,
+            endedBoxNames: endedBoxNames
         )
+        // A poll, a presence beat or a read of who viewed what that changed nothing writes nothing: every write draws
+        // the room's whole list again.
+        if next != state { state = next }
         summarizeNextThread(replyInputs, messages: inputs)
     }
 
@@ -2538,6 +2629,7 @@ final class RoomChatCoordinator: ObservableObject {
                 replyToSequenceId: reply.targetSequenceId,
                 isEdited: reply.isEdited,
                 date: date,
+                attachments: reply.attachments.map { Self.chip($0, removed: removedAttachments.contains($0.attachmentId)) },
                 inlineReplyId: reply.id
             )
         }

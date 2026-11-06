@@ -366,6 +366,8 @@ public struct RoomChatReplyRow: Equatable, Identifiable, Sendable {
     public let reactions: RoomChatReactions?
     /// This reply is a part of a file posted as base64 (the thread's root sequence): folded behind the file's card.
     public var filePartOf: Int64?
+    /// Its photos and files, shown as a message's are.
+    public let attachments: [RoomAttachmentChip]
 
     public init(
         id: String,
@@ -378,7 +380,8 @@ public struct RoomChatReplyRow: Equatable, Identifiable, Sendable {
         views: RoomChatViews? = nil,
         authorHandle: String = "",
         parentReplyId: String? = nil,
-        reactions: RoomChatReactions? = nil
+        reactions: RoomChatReactions? = nil,
+        attachments: [RoomAttachmentChip] = []
     ) {
         self.id = id
         self.authorName = authorName
@@ -391,6 +394,7 @@ public struct RoomChatReplyRow: Equatable, Identifiable, Sendable {
         self.authorHandle = authorHandle.isEmpty ? authorName : authorHandle
         self.parentReplyId = parentReplyId
         self.reactions = reactions
+        self.attachments = attachments
     }
 
     /// The deepest indent a thread shows; deeper replies sit at this depth, under their parent.
@@ -435,6 +439,8 @@ public struct RoomChatThreadState: Equatable, Sendable {
     public let canReply: Bool
     /// The longest reply the API accepts, in characters; nil when there is no known limit.
     public let maximumReplyLength: Int?
+    /// The reply the thread was opened at (a reply notification): brought into view and marked.
+    public let focusReplyId: String?
 
     public init(
         parent: RoomChatMessageRow,
@@ -443,7 +449,8 @@ public struct RoomChatThreadState: Equatable, Sendable {
         isLoading: Bool = false,
         failureText: String? = nil,
         canReply: Bool = false,
-        maximumReplyLength: Int? = nil
+        maximumReplyLength: Int? = nil,
+        focusReplyId: String? = nil
     ) {
         self.parent = parent
         self.replies = replies
@@ -452,6 +459,7 @@ public struct RoomChatThreadState: Equatable, Sendable {
         self.failureText = failureText
         self.canReply = canReply
         self.maximumReplyLength = maximumReplyLength
+        self.focusReplyId = focusReplyId
     }
 
     /// Why this reply cannot be sent as it is, or nil. A reply over the limit stays in the reply box.
@@ -469,6 +477,8 @@ public struct RoomChatThreadInput: Equatable, Sendable {
     public let failureText: String?
     public let canReply: Bool
     public let maximumReplyLength: Int?
+    /// The reply the thread was opened at, if any.
+    public let focusReplyId: String?
 
     public init(
         sequenceId: Int64,
@@ -477,7 +487,8 @@ public struct RoomChatThreadInput: Equatable, Sendable {
         isLoading: Bool = false,
         failureText: String? = nil,
         canReply: Bool = false,
-        maximumReplyLength: Int? = nil
+        maximumReplyLength: Int? = nil,
+        focusReplyId: String? = nil
     ) {
         self.sequenceId = sequenceId
         self.replies = replies
@@ -486,6 +497,7 @@ public struct RoomChatThreadInput: Equatable, Sendable {
         self.failureText = failureText
         self.canReply = canReply
         self.maximumReplyLength = maximumReplyLength
+        self.focusReplyId = focusReplyId
     }
 }
 
@@ -589,6 +601,11 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     /// A short summary of a thread, by its parent's sequence, shown on the room's row for it before it is opened
     /// (Carter, #55474: "I wish I had the summarized here at top level before I even open the thread").
     public let threadSummaries: [Int64: SummaryReading]
+    /// The agent this chat was made for (`RoomAgentChat`), lowercased: what it says shows in full. Nil in other rooms.
+    public let roomAgent: String?
+    /// A box still running is in the room: it hears only what @-names it or answers it in its thread, so the composer
+    /// says so (`RoomComposerPlaceholder`).
+    public let hasRunningBox: Bool
 
     /// Same-author rows closer together than this share one header.
     public static let groupingWindow: TimeInterval = 5 * 60
@@ -643,6 +660,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         files: [Int64: [RoomChatFileCard]] = [:],
         fileParts: [String: Int64] = [:],
         draftKey: String? = nil,
+        runningBoxes: Set<String> = [],
+        endedBoxNames: Set<String> = [],
         calendar: Calendar = .current
     ) {
         // Emoji reactions show only in a build that turns them on (`RoomEmojiReactions`), and never on a reply shown
@@ -687,6 +706,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         guard failure?.suppressesProtectedContent != true else {
             self.rows = []
             self.thread = nil
+            self.roomAgent = nil
+            self.hasRunningBox = false
             return
         }
 
@@ -698,13 +719,20 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         // A box's thread starts collapsed (warden, at Carter's #54962): its launch line is one line with the box's name
         // and status, and what is said in the thread stays there, unless it is said to you.
         let launches = RoomBoxThread.launches(in: messages)
+        let endedBoxes = RoomBoxThread.endedBoxes(in: messages)
+        // The mint's boxes for this room (running, or ended) come from the app; launch lines and final costs from the room.
+        let boxes = RoomAgentChat.Boxes(launches: launches.values.map(\.name), running: runningBoxes, ended: endedBoxNames,
+                                        finished: endedBoxes)
+        let roomAgent = RoomAgentChat.agent(boxes: boxes.all,
+                                            agents: RoomAgentChat.agents(in: messages, replies: replies, presence: presence))
+        self.roomAgent = roomAgent
+        self.hasRunningBox = !boxes.running.isEmpty
         var boxReplies: [Int64: [RoomChatMessageInput]] = [:]
         let roomReplies = replies.filter { reply in
             guard launches[reply.sequenceId] != nil else { return true }
             boxReplies[reply.sequenceId, default: []].append(reply)
             return ChatReferences.mentionHandles(in: reply.text).contains(where: ownHandles.contains)
         }
-        let endedBoxes = RoomBoxThread.endedBoxes(in: messages)
         // A voice room's turns fold into one card on the message that started it.
         let folded = VoiceCallCard.fold(Self.interleave(
             messages: messages.sorted { $0.sequenceId < $1.sequenceId },
@@ -730,6 +758,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 + replies.filter { ownIds.contains($0.authorId.lowercased()) }.map(\.sequenceId)
         )
         for input in ordered {
+            // The chat's own agent: everything it says is said to you, in full, without the relay's signature line.
+            let byRoomAgent = roomAgent != nil && input.kind == .message && input.authorId.lowercased() == roomAgent
             if let date = input.date {
                 let day = calendar.dateComponents([.year, .month, .day], from: date)
                 if day != lastDay {
@@ -765,7 +795,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 authorName: input.authorName,
                 isHuman: input.isHuman,
                 isOwn: ownAuthorIds.contains(input.authorId.lowercased()),
-                text: input.text,
+                text: byRoomAgent ? RoomBoxThread.unsigned(input.text) : input.text,
                 date: input.date,
                 replyToSequenceId: input.replyToSequenceId,
                 isEdited: input.isEdited,
@@ -784,7 +814,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 checkpointSummary: input.checkpointSummary,
                 // A box's launch line is its own collapsed line, never background.
                 isQuiet: folded.cards[input.id] == nil && (input.isInlineReply || launches[input.sequenceId] == nil)
-                    && RoomChatQuiet.isQuiet(
+                    && !byRoomAgent && RoomChatQuiet.isQuiet(
                         input,
                         ownHandles: ownHandles,
                         inYourThread: yourThreads.contains(input.isInlineReply ? input.sequenceId : (input.replyToSequenceId ?? -1))
@@ -842,7 +872,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 isLoading: threadInput.isLoading,
                 failureText: threadInput.failureText,
                 canReply: threadInput.canReply,
-                maximumReplyLength: threadInput.maximumReplyLength
+                maximumReplyLength: threadInput.maximumReplyLength,
+                focusReplyId: threadInput.focusReplyId
             )
         } else {
             self.thread = nil
@@ -931,9 +962,11 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         return result
     }
 
-    /// "author: first line" of the message a reply answers, kept short.
+    /// "author: first line" of the message a reply answers, kept short. Reads only up to that line's end: the
+    /// message can be a 27,000-character packet, and this runs for every reply on every update.
     static func replyContext(for parent: RoomChatMessageInput) -> String {
-        let line = parent.text.split(whereSeparator: \.isNewline).first.map(String.init) ?? parent.text
+        let body = parent.text.drop { $0.isNewline }
+        let line = String(body.firstIndex(where: \.isNewline).map { body[..<$0] } ?? body)
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         let snippet = trimmed.count > 70 ? String(trimmed.prefix(70)) + "…" : trimmed
         return "\(parent.authorName): \(snippet)"
@@ -1217,6 +1250,49 @@ public enum RoomChatQuiet {
         cache.countLimit = 2_000
         return cache
     }()
+}
+
+/// The agent a chat was made for (Carter, #61679): a room whose only agent is one box, as a New agent's new chat is.
+/// What it says there is said to you, so it shows in full, never as background. The room's own voices (Senti, the
+/// orchestrator's costs and launches, the ticket keeper) are not agents here, and stay as they are.
+enum RoomAgentChat {
+    /// The room's boxes, by lowercased name: from its launch lines and from the mint, running or ended.
+    struct Boxes {
+        /// Every box the room has had.
+        let all: Set<String>
+        /// The boxes still running: the mint's running boxes, and launch lines whose box has not ended.
+        let running: Set<String>
+
+        init(launches: [String], running: Set<String>, ended: Set<String>, finished: Set<String>) {
+            let launched = Set(launches.map { $0.lowercased() })
+            let mintRunning = Set(running.map { $0.lowercased() })
+            let gone = Set(ended.map { $0.lowercased() }).union(finished.map { $0.lowercased() }).subtracting(mintRunning)
+            all = launched.union(mintRunning).union(ended.map { $0.lowercased() })
+            self.running = mintRunning.union(launched.subtracting(gone))
+        }
+    }
+
+    /// The box's id when the room's one agent is that box; nil in a room with no box, with two, or with any other agent.
+    static func agent(boxes: Set<String>, agents: Set<String>) -> String? {
+        guard boxes.count == 1, let box = boxes.first, agents.isSubset(of: boxes) else { return nil }
+        return box
+    }
+
+    /// Every agent the room shows, lowercased: who posted, answered or joined, and who is here now.
+    static func agents(in messages: [RoomChatMessageInput], replies: [RoomChatMessageInput],
+                       presence: RoomChatPresence?) -> Set<String> {
+        var ids = Set<String>()
+        func note(_ id: String) {
+            let key = id.lowercased()
+            if !key.isEmpty, !RoomChatQuiet.isRoomVoice(key) { ids.insert(key) }
+        }
+        for input in messages where !input.isHuman && (input.kind == .message || input.kind == .memberJoined) {
+            note(input.authorId)
+        }
+        for reply in replies where !reply.isHuman { note(reply.authorId) }
+        for person in presence?.people ?? [] where !person.isHuman { note(person.id) }
+        return ids
+    }
 }
 
 /// A box's thread, collapsed (warden, at Carter's #54962). The respawn orchestrator's launch line ("🚀 Minted <name> …
@@ -1685,7 +1761,8 @@ public enum RoomComposerDraft {
         if kept == gone || gone.contains(kept) { defaults.removeObject(forKey: key) }
     }
 
-    /// Every room's saved text, on sign-out: the next person on the phone does not see it.
+    /// Every room's saved text, on sign-out: the next person on the phone does not see it. Thread replies' saved text
+    /// (`RoomReplyDrafts`) sits under the same prefix and goes with it.
     public static func forgetAllSaved(in defaults: UserDefaults = .standard) {
         for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(savedKeyPrefix) {
             defaults.removeObject(forKey: key)
@@ -1731,7 +1808,9 @@ public struct RoomComposerWriteBack: Equatable {
 
 /// A message too long to read in the room shows its start and a card that opens the whole of it (Carter, #55006).
 public enum LongMessage {
-    public static let characters = 1_500
+    /// Folded from 1,000 characters: the 11-04 freezes came right after sends of 1,342 and 1,486 characters, which drew
+    /// in full under the old 1,500.
+    public static let characters = 1_000
     public static let lines = 30
     static let previewLines = 8
     static let previewCharacters = 600
@@ -1812,5 +1891,172 @@ public enum RoomLinkPolicy {
         }
         guard raw.hasPrefix("/"), !raw.hasPrefix("//"), !raw.hasPrefix("/\\") else { return nil }
         return webOrigin.flatMap { URL(string: raw, relativeTo: $0)?.absoluteURL }
+    }
+}
+
+/// A thread's unsent reply, kept on the phone as the room's own box keeps its text (`RoomComposerDraft`): under the
+/// room's key for this account, per thread, and per reply when it answers one. Written once typing pauses
+/// (`RoomDraftDebouncer`), restored when the thread opens (a new room screen, a relaunch), and let go only once the server
+/// has the reply (`forgetSent`), never on a failed send (Carter lost a half-written reply on the web when new replies
+/// folded in, #61872). An account keeps at most `limit` of them across its rooms (the one written longest ago goes
+/// first), and one not written for `lifetime` is gone.
+public struct RoomReplyDrafts {
+    /// The room's own saved-text key (`RoomComposerDraft.savedKey(sessionId:account:)`).
+    public let base: String
+    private let defaults: UserDefaults
+    private let now: () -> Date
+
+    /// The most reply drafts one account keeps on the phone.
+    public static let limit = 50
+    /// How long a reply draft is kept after it was last written: 14 days.
+    public static let lifetime: TimeInterval = 14 * 24 * 60 * 60
+
+    public init(base: String, defaults: UserDefaults = .standard, now: @escaping () -> Date = Date.init) {
+        self.base = base
+        self.defaults = defaults
+        self.now = now
+    }
+
+    /// The reply a thread's box answers when it sends: the one chosen, else the one restored text answered, whose row
+    /// may not have loaded yet (so an early send still answers it, never the message instead); nil answers the message.
+    public static func answering(chosen: String?, restoring: String?) -> String? {
+        chosen ?? restoring
+    }
+
+    /// Where the reply to `thread` (or to its reply `reply`) is kept.
+    public func key(thread: Int64, reply: String?) -> String {
+        base + "|thread." + String(thread) + (reply.map { "|reply." + $0 } ?? "")
+    }
+
+    /// Which reply the thread's saved text answers, when it answers one.
+    private func answeringKey(thread: Int64) -> String { base + "|thread." + String(thread) + "|answering" }
+
+    /// Every reply draft the account keeps, in any room, with when it was last written (seconds since 1970). `base` is
+    /// `pocket.draft.<account>|<room>`: the account is what comes before the room.
+    private var indexKey: String {
+        let prefix = RoomComposerDraft.savedKeyPrefix
+        let rest = base.hasPrefix(prefix) ? String(base.dropFirst(prefix.count)) : base
+        let account = rest.range(of: "|", options: .backwards).map { String(rest[..<$0.lowerBound]) } ?? rest
+        return "pocket.replyDrafts." + account
+    }
+
+    private var index: [String: Double] {
+        get { defaults.dictionary(forKey: indexKey) as? [String: Double] ?? [:] }
+        nonmutating set {
+            if newValue.isEmpty { defaults.removeObject(forKey: indexKey) } else { defaults.set(newValue, forKey: indexKey) }
+        }
+    }
+
+    /// Keeps what is in the thread's reply box. The box answers one thing at a time, so the text moves with it: saved
+    /// under the reply it answers now, and gone from where it was before. An empty box keeps nothing.
+    public func save(_ text: String, thread: Int64, reply: String?) {
+        let previous = defaults.string(forKey: answeringKey(thread: thread))
+        if previous != reply { drop(key(thread: thread, reply: previous)) }
+        let current = key(thread: thread, reply: reply)
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            drop(current)
+            defaults.removeObject(forKey: answeringKey(thread: thread))
+        } else {
+            defaults.set(text, forKey: current)
+            if let reply {
+                defaults.set(reply, forKey: answeringKey(thread: thread))
+            } else {
+                defaults.removeObject(forKey: answeringKey(thread: thread))
+            }
+            written(current)
+        }
+    }
+
+    /// What the thread's box held when it was last written, and the reply it answered; nil when nothing was kept, or
+    /// what was kept is older than `lifetime`.
+    public func restore(thread: Int64) -> (text: String, reply: String?)? {
+        let reply = defaults.string(forKey: answeringKey(thread: thread))
+        let current = key(thread: thread, reply: reply)
+        if let written = index[current], now().timeIntervalSince1970 - written > Self.lifetime {
+            drop(current)
+            return nil
+        }
+        guard let text = defaults.string(forKey: current),
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return (text, reply)
+    }
+
+    /// The server has the reply: its saved text goes, unless newer text was saved since (`RoomComposerDraft.forgetSaved`).
+    public func forgetSent(_ sent: String, thread: Int64, reply: String?) {
+        let current = key(thread: thread, reply: reply)
+        RoomComposerDraft.forgetSaved(key: current, sent: sent, in: defaults)
+        guard defaults.string(forKey: current) == nil else { return }
+        index[current] = nil
+        if reply != nil, defaults.string(forKey: answeringKey(thread: thread)) == reply {
+            defaults.removeObject(forKey: answeringKey(thread: thread))
+        }
+    }
+
+    /// Notes `key` as written now, then lets go of what is past `lifetime` and, past `limit`, the ones written longest
+    /// ago.
+    private func written(_ key: String) {
+        let at = now().timeIntervalSince1970
+        var kept = index
+        kept[key] = at
+        let expired = kept.filter { at - $0.value > Self.lifetime }.map(\.key)
+        for gone in expired { kept[gone] = nil }
+        let overflow = kept.count > Self.limit
+            ? kept.sorted { $0.value == $1.value ? $0.key < $1.key : $0.value < $1.value }
+                .prefix(kept.count - Self.limit).map(\.key)
+            : []
+        for gone in overflow { kept[gone] = nil }
+        index = kept
+        for gone in expired + overflow { remove(gone) }
+    }
+
+    /// Takes one draft off the phone and out of the account's list.
+    private func drop(_ key: String) {
+        remove(key)
+        var kept = index
+        guard kept[key] != nil else { return }
+        kept[key] = nil
+        index = kept
+    }
+
+    /// A draft's text, and its thread's note of the reply it answered when that note is about it.
+    private func remove(_ key: String) {
+        defaults.removeObject(forKey: key)
+        guard let marker = key.range(of: "|reply.", options: .backwards) else { return }
+        let answering = String(key[..<marker.lowerBound]) + "|answering"
+        if defaults.string(forKey: answering) == String(key[marker.upperBound...]) {
+            defaults.removeObject(forKey: answering)
+        }
+    }
+}
+
+/// Writes a moment after the last change instead of on every keystroke: `schedule` replaces what is waiting, and
+/// `flush` writes it at once (the thread closing, a reply being sent). Used on the main thread.
+public final class RoomDraftDebouncer {
+    /// How long typing pauses before the text is written.
+    public static let delay: TimeInterval = 0.3
+    private let delay: TimeInterval
+    private var pending: (() -> Void)?
+    private var work: DispatchWorkItem?
+
+    public init(delay: TimeInterval = RoomDraftDebouncer.delay) {
+        self.delay = delay
+    }
+
+    /// `write` runs once typing has paused for `delay`, unless another write replaces it first.
+    public func schedule(_ write: @escaping () -> Void) {
+        work?.cancel()
+        pending = write
+        let item = DispatchWorkItem { [weak self] in self?.flush() }
+        work = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+
+    /// Writes what is waiting now, if anything is.
+    public func flush() {
+        work?.cancel()
+        work = nil
+        let write = pending
+        pending = nil
+        write?()
     }
 }

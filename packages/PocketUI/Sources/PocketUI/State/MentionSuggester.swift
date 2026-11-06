@@ -72,6 +72,39 @@ public enum MentionSuggester {
 
     /// The `@word` being typed at character `offset` of `draft`, anywhere in the text: the query and the characters
     /// it covers (from the `@`). Walks back from the offset only as far as the word goes.
+    /// `editOffset(from:to:)`, or nil when the edit ended at the very end of `new`: typing or deleting at the end,
+    /// the common case. That answer is a byte comparison, not a walk over the characters, so a keystroke into a long
+    /// draft costs the same as into a short one (Carter, 11-04: still slow at 2,000 characters; a keystroke at 10,000
+    /// cost 23 ms on the simulator). Where `editOffset` says the edit ended at `new`'s end, this says nil.
+    public static func editOffsetUnlessAtEnd(from old: String, to new: String) -> Int? {
+        let appendedOrTrimmed = new.utf8.count >= old.utf8.count
+            ? new.utf8.starts(with: old.utf8)
+            : old.utf8.starts(with: new.utf8)
+        return appendedOrTrimmed ? nil : editOffset(from: old, to: new)
+    }
+
+    /// The longest `@word` looked for at the end of a draft: past this many handle characters it is not a mention.
+    static let longestQuery = 128
+
+    /// The `@word` being typed at the very end of `draft` (`activeQuery(in:at:)` at `draft.count`), found by walking
+    /// back over that word only: the draft is never counted.
+    public static func queryAtEnd(of draft: String) -> String? {
+        var start = draft.endIndex
+        var length = 0
+        while start > draft.startIndex {
+            let before = draft.index(before: start)
+            guard isHandleCharacter(draft[before]) else { break }
+            length += 1
+            guard length <= longestQuery else { return nil }
+            start = before
+        }
+        guard start > draft.startIndex else { return nil }
+        let at = draft.index(before: start)
+        guard draft[at] == "@" else { return nil }
+        if at > draft.startIndex, !draft[draft.index(before: at)].isWhitespace { return nil }
+        return String(draft[start...])
+    }
+
     public static func activeQuery(in draft: String, at offset: Int) -> (query: String, range: Range<Int>)? {
         guard offset >= 0, let end = draft.index(draft.startIndex, offsetBy: offset, limitedBy: draft.endIndex) else {
             return nil

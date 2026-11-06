@@ -9,6 +9,12 @@
 	     /.well-known/apple-app-site-association naming this app (Team ID + com.plexaura.sentipocket.app). Today both
 	     answer that path with the web app's HTML, so links from Mail or Messages open in the browser; links inside
 	     the app are routed in-app either way. SentiLink decides what opens in-app. -->
+	<!-- Sign in with Apple (App Store guideline 4.8, since sign-in also offers GitHub and Google). The App ID carries
+	     the capability and the App Store profile includes it. -->
+	<key>com.apple.developer.applesignin</key>
+	<array>
+		<string>Default</string>
+	</array>
 	<key>com.apple.developer.associated-domains</key>
 	<array>
 		<string>applinks:sentinelayer.com</string>

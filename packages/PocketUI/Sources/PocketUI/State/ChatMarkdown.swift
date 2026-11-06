@@ -383,7 +383,9 @@ public enum ChatReferences {
     /// Pulls a paragraph's ticket links (`[Ticket: title](/dashboard/sessions/<room>?ticket=<id>)`, also with
     /// `https://sentinelayer.com` in front) out of the text, with the "·" between them: the ticket keeper writes
     /// several on one line, and they read better one per row. Returns the text that is left and the links, in order.
-    public static func ticketLinks(in paragraph: String) -> (prose: String, tickets: [TicketLink]) {
+    /// `cleaningProse: false` for a caller that only wants the tickets (the room's shared things), so a whole message's
+    /// text is never cleaned for nothing.
+    public static func ticketLinks(in paragraph: String, cleaningProse: Bool = true) -> (prose: String, tickets: [TicketLink]) {
         guard paragraph.contains("?ticket="), let regex = ticketLinkExpression else { return (paragraph, []) }
         let whole = NSRange(paragraph.startIndex..., in: paragraph)
         var tickets: [TicketLink] = []
@@ -405,6 +407,7 @@ public enum ChatReferences {
             removed.append(all)
         }
         guard !tickets.isEmpty else { return (paragraph, []) }
+        guard cleaningProse else { return (paragraph, tickets) }
         var prose = ""
         var cursor = paragraph.startIndex
         for range in removed {
@@ -412,10 +415,14 @@ public enum ChatReferences {
             cursor = range.upperBound
         }
         prose += paragraph[cursor...]
-        // The separators that stood between the links go with them.
+        // The separators that stood between the links go with them. Possessive (`*+`, `++`), so a run of separators
+        // that is not at the end fails in one pass: the nested `(\s*·\s*)+$` tried every way to share the spaces
+        // between the separators: in a list of tickets followed by more text, the cost about tripled with each ticket.
+        // A match also starts only where a run starts (`(?<![\s·])`), so a long run is tried once, not at each of its
+        // characters.
         let cleaned = prose
-            .replacingOccurrences(of: #"(\s*·\s*)+$"#, with: "", options: .regularExpression)
-            .replacingOccurrences(of: #"(\s*·\s*){2,}"#, with: " · ", options: .regularExpression)
+            .replacingOccurrences(of: #"(?<![\s·])(?:\s*+·)++\s*+$"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"(?<![\s·])\s*+·(?:\s*+·)++\s*+"#, with: " · ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return (cleaned, tickets)
     }

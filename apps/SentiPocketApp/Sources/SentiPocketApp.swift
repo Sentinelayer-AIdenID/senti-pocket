@@ -33,8 +33,10 @@ struct SentiPocketApp: App {
     /// unreachable until a REAL token is stored (warden gate #1). DEBUG stays on the fixture flow (no real auth).
     @StateObject private var signIn = SignInCoordinator(login: SentiPocketApp.makeLogin(),
                                                         appleLogin: SentiPocketApp.makeAppleLogin())
-    /// Outlives each sign-in, so the date a deletion was scheduled for shows over the sign-in screen.
-    @StateObject private var accountDeletion = AccountDeletionCoordinator(client: HTTPAccountDeletionClient(
+    /// Outlives each sign-in, so the date a deletion was scheduled for shows over the sign-in screen. Kept, not
+    /// watched: the views that show its state watch it (the notice, the Settings row, the scheduled date), so its
+    /// answers draw them and never the app's root.
+    @State private var accountDeletion = AccountDeletionCoordinator(client: HTTPAccountDeletionClient(
         apiBaseURL: GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_API_URL", "SENTI_GATEWAY_URL"])
     ))
     #endif
@@ -141,7 +143,13 @@ struct SentiPocketApp: App {
 
     @ViewBuilder private var rootView: some View {
         #if DEBUG
-        if RoomPreview.isRequested {
+        if RoomCalendarPreview.isRequested {
+            RoomCalendarPreview.rootView
+        } else if RootPreview.isRequested {
+            RootPreview.rootView(whisperModel: whisperModel, incomingLinks: incomingLinks)
+        } else if AgentChatPreview.isRequested {
+            AgentChatPreview.rootView
+        } else if RoomPreview.isRequested {
             RoomPreview.rootView
         } else {
             RootAppView(model: model, whisperModelCoordinator: whisperModel)
@@ -154,6 +162,10 @@ struct SentiPocketApp: App {
                 authenticationEpoch: signIn.authenticationEpoch,
                 whisperModelCoordinator: whisperModel,
                 incomingLinks: incomingLinks,
+                // A read refused because the account is scheduled for deletion brings up its notice.
+                services: .live(onAccountDeletionPending: { [accountDeletion] in
+                    Task { @MainActor in accountDeletion.pendingReported() }
+                }),
                 accountDeletion: accountDeletion,
                 onSignOut: {
                     // This phone stops getting the person's notifications before the sign-in goes.
@@ -179,6 +191,10 @@ struct SentiPocketApp: App {
                 authenticationEpoch: signIn.authenticationEpoch,
                 whisperModelCoordinator: whisperModel,
                 incomingLinks: incomingLinks,
+                // A read refused because the account is scheduled for deletion brings up its notice.
+                services: .live(onAccountDeletionPending: { [accountDeletion] in
+                    Task { @MainActor in accountDeletion.pendingReported() }
+                }),
                 accountDeletion: accountDeletion,
                 onSignOut: {
                     // This phone stops getting the person's notifications before the sign-in goes.
@@ -198,11 +214,7 @@ struct SentiPocketApp: App {
         } else {
             PocketSignInView(phase: signIn.phase, offersApple: signIn.offersApple, send: signIn.send)
                 // After a deletion request went through, its date stays on screen while this phone signs out.
-                .overlay {
-                    if let scheduled = accountDeletion.scheduled {
-                        AccountDeletionScheduledView(scheduled: scheduled) { accountDeletion.dismissScheduled() }
-                    }
-                }
+                .overlay { AccountDeletionScheduledOverlay(coordinator: accountDeletion) }
         }
         #endif
     }
@@ -238,8 +250,131 @@ struct SentiPocketApp: App {
     #endif
 }
 
+/// What the signed-in app reads and writes through: the Senti API as you in the app; scripted rooms and people in the
+/// DEBUG root preview (`RootPreview`), which hosts this same root, its side panel and its rooms.
+struct RootServices {
+    var sessions: any SessionTransport
+    var room: any RoomTransport
+    var tickets: any RoomTicketsTransport
+    var admissions: any RoomAdmissionsTransport
+    var search: any RoomSearching
+    var notifications: any NotificationsTransport
+    var notificationMarker: (any NotificationReadMarking)?
+    var callLog: any CallLogTransport
+    var waiting: any WaitingTransport
+    var checkpoints: any CheckpointTransport
+    var directMessages: any DirectMessaging
+    var roomFolders: any RoomFoldersServing
+    var admissionDecider: any AdmissionDeciding
+    var sender: any RoomMessageSending
+    var actionSender: any RoomActionSending
+    var ticketWriter: any RoomTicketWriting
+    var ticketLeases: any TicketLeaseStoring
+    var ticketExtras: any RoomTicketExtrasReading
+    var identity: any AccountIdentityProviding
+    var receipts: any RoomReceiptsClient
+    var readMarker: any RoomReadMarking
+    /// Apple push for this phone: the app registers it; a preview never does.
+    var registersPush = true
+    /// The calendar and its Apple Calendar link, shown once the server answers their routes; nil (a preview) hides it.
+    var calendar: (any RoomCalendarServing & CalendarFeedServing)?
+
+    /// The Senti API as you. `onAccountDeletionPending` hears a read refused because the account is scheduled for
+    /// deletion (the read still fails as denied).
+    static func live(onAccountDeletionPending: @escaping @Sendable () -> Void = {}) -> RootServices {
+        let apiURL = GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_API_URL", "SENTI_GATEWAY_URL"])
+        let transport = HTTPSessionTransport(
+            apiBaseURL: apiURL,
+            urlSession: SentiHTTPTransportPolicy.protectedReadSession,
+            streamingSession: SentiHTTPTransportPolicy.roomStreamSession,
+            tokenProvider: { SessionTokenStore.load() },
+            onAccountDeletionPending: onAccountDeletionPending
+        )
+        // Typed room messages go straight to the Senti API as you, like the web; the gateway's confirm-and-receipt
+        // flow stays for AI-drafted writes (the Pocket tab and voice replies).
+        let sender = HTTPRoomMessageSender(apiBaseURL: apiURL)
+        return RootServices(
+            sessions: transport,
+            room: transport,
+            tickets: transport,
+            admissions: transport,
+            search: transport,
+            notifications: transport,
+            notificationMarker: HTTPNotificationReadMarker(apiBaseURL: apiURL),
+            callLog: transport,
+            waiting: transport,
+            checkpoints: HTTPCheckpointTransport(
+                gatewayBaseURL: GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_GATEWAY_URL"]),
+                urlSession: SentiHTTPTransportPolicy.checkpointSession,
+                tokenProvider: { SessionTokenStore.load() }
+            ),
+            // Yours alone, as you: no cache, no cookies, the bearer per request.
+            directMessages: HTTPDirectMessagesClient(apiBaseURL: apiURL,
+                                                     urlSession: SentiHTTPTransportPolicy.protectedReadSession,
+                                                     tokenProvider: { SessionTokenStore.load() }),
+            roomFolders: HTTPRoomFoldersClient(apiBaseURL: apiURL, urlSession: SentiHTTPTransportPolicy.protectedReadSession,
+                                               tokenProvider: { SessionTokenStore.load() }),
+            admissionDecider: HTTPAdmissionDecider(apiBaseURL: apiURL),
+            sender: sender,
+            actionSender: HTTPRoomActionSender(apiBaseURL: apiURL),
+            // Ticket writes as you, like the web; the lease a claim returns is kept in the Keychain to release it.
+            ticketWriter: HTTPRoomTicketWriter(apiBaseURL: apiURL),
+            ticketLeases: KeychainTicketLeaseStore(),
+            ticketExtras: HTTPRoomTicketExtras(apiBaseURL: apiURL),
+            identity: HTTPAccountIdentity(apiBaseURL: apiURL),
+            // Read receipts and presence, as yourself, like the web.
+            receipts: HTTPRoomReceipts(apiBaseURL: apiURL),
+            readMarker: HTTPRoomReadMarker(apiBaseURL: apiURL),
+            calendar: HTTPRoomCalendarClient(apiBaseURL: apiURL, urlSession: CalendarHTTP.session,
+                                             tokenProvider: { SessionTokenStore.load() })
+        )
+    }
+}
+
+/// The room on screen, made again and drawn again only when what it is opened with changes: the room, its saved summary
+/// and whether direct messages are on. The root draws again for every change of the room list, the bell, Waiting on you,
+/// folders and the side panel opening or closing; each of those made a new room screen (with a Keychain read) and drew
+/// the room's whole list again, under the side panel, while it opened (the freezes of build 2026110308 came right after
+/// the side panel opened, and with the bell's read landing over a room just opened).
+///
+/// It holds only what it is opened with and one reference that is the same for the root's life (`RoomScreenMaker`), so
+/// every part of it is equal when nothing it is opened with changed. It used to hold the closure that makes the screen,
+/// which is new at every draw of the root. In some app processes (seen in CI, iOS 26.4 simulator) every draw of the
+/// root then made the room screen again although its `==` held, the side panel's open and close included.
+struct RoomScreenHost: View, Equatable {
+    let route: RoomRoute
+    let savedSummary: String?
+    let directMessagesOn: Bool
+    let maker: RoomScreenMaker
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.route == rhs.route && lhs.savedSummary == rhs.savedSummary && lhs.directMessagesOn == rhs.directMessagesOn
+            && lhs.maker === rhs.maker
+    }
+
+    var body: some View {
+        if let make = maker.make {
+            make(route, savedSummary)
+        }
+    }
+}
+
+/// Makes a room screen from what the root has at its latest draw. The root keeps one for its life and gives it the way
+/// to make a screen at every draw; that changes nothing a `RoomScreenHost` compares.
+@MainActor
+final class RoomScreenMaker {
+    var make: (@MainActor (RoomRoute, String?) -> RoomChatScreen)?
+}
+
 /// Release composition of the authenticated repository-backed Sessions surface and the selected-session Pocket flow.
-private struct AuthenticatedRootView: View {
+/// When the open side panel reads its rooms again: open, with the app in front.
+struct DrawerPoll: Equatable {
+    let open: Bool
+    let active: Bool
+    var runs: Bool { open && active }
+}
+
+struct AuthenticatedRootView: View {
     @StateObject private var sessions: SessionListCoordinator
     @StateObject private var details: SelectedSessionDetailCoordinator
     @StateObject private var checkpointPocket: CheckpointPocketCoordinator
@@ -253,22 +388,44 @@ private struct AuthenticatedRootView: View {
     /// What waits on your decision across your rooms (ticket 931e1d2e).
     @StateObject private var waiting: WaitingOnYouCoordinator
     @State private var presentsWaiting = false
+    /// Direct messages: on when the server answers their settings (DIRECT_MESSAGES_ENABLED), else nothing shows.
+    @StateObject private var directMessages: DirectMessagesCenter
+    /// Your room folders: on when the server lists them (ROOM_FOLDERS_ENABLED), else nothing shows.
+    @StateObject private var roomFolders: RoomFoldersCenter
+    /// The calendar: on when the server answers its routes (CALENDAR_DRAFTS_ENABLED, CALENDAR_FEED_ENABLED). Kept, not
+    /// watched, as the side panel's placement is: the room's calendar entry and Settings watch it, so its answers draw
+    /// them and never the root (each draw of the root can make the room screen under it again).
+    @State private var calendar: CalendarCenter
+    /// The side panel's rooms in your folders, placed off the main thread when the rooms or the folders change. Kept,
+    /// not watched: the panel watches it, so a new placing draws the panel and not the root (and the room under it).
+    @State private var sidePanelPlacement = SidePanelPlacement()
     @Environment(\.scenePhase) private var rootScenePhase
     @ObservedObject private var whisperModelCoordinator: WhisperModelProvisioningCoordinator
     @ObservedObject private var incomingLinks: IncomingLinkInbox
-    /// The Settings row to delete the account, and the notice while a deletion is scheduled.
-    @ObservedObject private var accountDeletion: AccountDeletionCoordinator
+    /// The Settings row to delete the account, and the notice while a deletion is scheduled; nil (a preview) shows
+    /// neither. Kept, not watched, as the calendar is: the notice and the row watch it, so its answers draw them and
+    /// never the root (each draw of the root can make the room screen under it again).
+    private let accountDeletion: AccountDeletionCoordinator?
     @State private var presentsNewRoom = false
     @State private var presentsSettings = false
     /// The room on screen, the root of the stack; nil shows your rooms. Breakouts push onto `roomPath`.
     @State private var currentRoom: RoomRoute?
     @State private var roomPath: [RoomRoute] = []
     @State private var drawerOpen = false
+    /// Makes the room screen for `RoomScreenHost`; the same one for the root's life.
+    @State private var roomScreenMaker = RoomScreenMaker()
+    /// How often the open side panel reads the rooms again, in nanoseconds.
+    static let openDrawerRefresh: UInt64 = 15_000_000_000
+    /// What the side panel's open reads again: anything not read for this many seconds (the panel's own poll period;
+    /// the bell and Waiting on you poll on their own while the app is in front).
+    static let panelFreshness: TimeInterval = 15
     /// How far the room card moves right when the side panel opens; the panel fits in that space.
     private static let drawerWidth: CGFloat = 300
     @State private var presentsPocket = false
     @State private var presentsActivity = false
     @State private var accountName: String?
+    /// A room being opened from its id while the server says what it is; any other open replaces it.
+    @State private var pendingOpen: UUID?
     /// The room opened last, reopened when the app starts (as the big assistant apps reopen your last chat).
     @AppStorage("pocket.lastRoomId") private var lastRoomId = ""
     @State private var restoredLastRoom = false
@@ -292,11 +449,15 @@ private struct AuthenticatedRootView: View {
     private let authenticationRevision: UInt64
     private let onSignOut: @MainActor () -> Void
 
+    /// Apple push for this phone is registered by the app's root, and never by a preview of it.
+    private let registersPush: Bool
+
     init(
         authenticationEpoch: UInt64,
         whisperModelCoordinator: WhisperModelProvisioningCoordinator,
         incomingLinks: IncomingLinkInbox,
-        accountDeletion: AccountDeletionCoordinator,
+        services: RootServices = .live(),
+        accountDeletion: AccountDeletionCoordinator? = nil,
         onSignOut: @escaping @MainActor () -> Void,
         onReauthenticationRequired: @escaping @MainActor @Sendable (UInt64) -> Void,
         onSessionSelectionChanged: @escaping @MainActor (UInt64, String?) -> Void = { _, _ in }
@@ -304,20 +465,7 @@ private struct AuthenticatedRootView: View {
         let guardedReauthentication: @MainActor @Sendable () -> Void = {
             onReauthenticationRequired(authenticationEpoch)
         }
-        let apiURL = GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_API_URL", "SENTI_GATEWAY_URL"])
-        let transport = HTTPSessionTransport(
-            apiBaseURL: apiURL,
-            urlSession: SentiHTTPTransportPolicy.protectedReadSession,
-            streamingSession: SentiHTTPTransportPolicy.roomStreamSession,
-            tokenProvider: { SessionTokenStore.load() },
-            // A read refused because the account is scheduled for deletion brings up its notice.
-            onAccountDeletionPending: { Task { @MainActor in accountDeletion.pendingReported() } }
-        )
-        let checkpointTransport = HTTPCheckpointTransport(
-            gatewayBaseURL: GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_GATEWAY_URL"]),
-            urlSession: SentiHTTPTransportPolicy.checkpointSession,
-            tokenProvider: { SessionTokenStore.load() }
-        )
+        let checkpointTransport = services.checkpoints
         let revocationRelay = AuthenticatedSessionRevocationRelay(
             onReauthenticationRequired: guardedReauthentication
         )
@@ -335,7 +483,7 @@ private struct AuthenticatedRootView: View {
             }
         )
         let details = SelectedSessionDetailCoordinator(
-            transport: transport,
+            transport: services.sessions,
             // The signing gateway is not deployed and Release pins no signing key yet: checkpoints
             // open as the server holds them until it is.
             opensVerifiedCheckpoints: PocketGatewayTrust.verifiesBundles,
@@ -350,7 +498,7 @@ private struct AuthenticatedRootView: View {
             }
         )
         let sessions = SessionListCoordinator(
-            repository: SessionRepository(transport: transport),
+            repository: SessionRepository(transport: services.sessions),
             onReauthenticationRequired: {
                 revocationRelay.invalidateAuthentication()
             },
@@ -376,8 +524,8 @@ private struct AuthenticatedRootView: View {
         _checkpointNarrationRevocation = StateObject(wrappedValue: checkpointNarrationRevocation)
         _revocationRelay = StateObject(wrappedValue: revocationRelay)
         let notifications = NotificationsCoordinator(
-            transport: transport,
-            marker: HTTPNotificationReadMarker(apiBaseURL: apiURL),
+            transport: services.notifications,
+            marker: services.notificationMarker,
             roomTitle: { sessionId in
                 sessions.state.rows.first { UTF8ExactIdentity.matches($0.sessionId, sessionId) }?.title
             },
@@ -385,34 +533,53 @@ private struct AuthenticatedRootView: View {
         )
         _notifications = StateObject(wrappedValue: notifications)
         _callLog = StateObject(wrappedValue: CallLogCoordinator(
-            transport: transport,
+            transport: services.callLog,
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
         ))
         _waiting = StateObject(wrappedValue: WaitingOnYouCoordinator(
-            transport: transport,
-            sender: HTTPRoomMessageSender(apiBaseURL: apiURL),
+            transport: services.waiting,
+            sender: services.sender,
+            onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
+        ))
+        _directMessages = StateObject(wrappedValue: DirectMessagesCenter(
+            client: services.directMessages,
+            onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
+        ))
+        _roomFolders = StateObject(wrappedValue: RoomFoldersCenter(
+            client: services.roomFolders,
+            // Where each room is filed is the room list's: it is read again after every change.
+            onRoomsChanged: { sessions.send(.refreshSessions) },
+            onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
+        ))
+        let calendarClient = services.calendar ?? CalendarOff()
+        let identity = services.identity
+        _calendar = State(initialValue: CalendarCenter(
+            client: calendarClient,
+            feed: calendarClient,
+            // The link is kept for the signed-in person in this phone's Keychain only (gone with the sign-in).
+            vault: CalendarLinkVault.live,
+            person: { await identity.currentAccount().map { $0.accountId ?? $0.authorId } },
+            // The webcal link goes to the system (Apple Calendar's subscribe sheet), which says whether it opened.
+            openURL: { await UIApplication.shared.open($0) },
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
         ))
         _whisperModelCoordinator = ObservedObject(wrappedValue: whisperModelCoordinator)
         _incomingLinks = ObservedObject(wrappedValue: incomingLinks)
-        _accountDeletion = ObservedObject(wrappedValue: accountDeletion)
-        self.roomTransport = transport
-        self.ticketsTransport = transport
-        self.admissionsTransport = transport
-        self.admissionDecider = HTTPAdmissionDecider(apiBaseURL: apiURL)
-        // Typed room messages go straight to the Senti API as you, like the web; the gateway's confirm-and-receipt
-        // flow stays for AI-drafted writes (the Pocket tab and voice replies).
-        self.roomSender = HTTPRoomMessageSender(apiBaseURL: apiURL)
-        self.roomActionSender = HTTPRoomActionSender(apiBaseURL: apiURL)
-        // Ticket writes as you, like the web; the lease a claim returns is kept in the Keychain to release it later.
-        self.ticketWriter = HTTPRoomTicketWriter(apiBaseURL: apiURL)
-        self.ticketLeases = KeychainTicketLeaseStore()
-        self.ticketExtras = HTTPRoomTicketExtras(apiBaseURL: apiURL)
-        self.accountIdentity = HTTPAccountIdentity(apiBaseURL: apiURL)
-        // Read receipts and presence, as yourself, like the web.
-        self.roomReceipts = HTTPRoomReceipts(apiBaseURL: apiURL)
-        self.roomSearch = transport
-        self.roomReadMarker = HTTPRoomReadMarker(apiBaseURL: apiURL)
+        self.accountDeletion = accountDeletion
+        self.roomTransport = services.room
+        self.ticketsTransport = services.tickets
+        self.admissionsTransport = services.admissions
+        self.admissionDecider = services.admissionDecider
+        self.roomSender = services.sender
+        self.roomActionSender = services.actionSender
+        self.ticketWriter = services.ticketWriter
+        self.ticketLeases = services.ticketLeases
+        self.ticketExtras = services.ticketExtras
+        self.accountIdentity = services.identity
+        self.roomReceipts = services.receipts
+        self.roomSearch = services.search
+        self.roomReadMarker = services.readMarker
+        self.registersPush = services.registersPush
         self.authenticationRevision = authenticationEpoch
         self.onSignOut = onSignOut
     }
@@ -425,6 +592,9 @@ private struct AuthenticatedRootView: View {
     }
 
     var body: some View {
+        #if DEBUG
+        let _ = RootPreview.meter.rootBodyRan()
+        #endif
         ZStack(alignment: .leading) {
             // The side panel sits underneath; opening it pushes the room aside as a card (Carter #55006).
             // The panel ends before the room card begins, so its right edge (unread counts, See all) is never under it.
@@ -440,7 +610,8 @@ private struct AuthenticatedRootView: View {
                         roomScreen(currentRoom)
                             .id(currentRoom)
                     } else {
-                        SessionListView(state: sessions.state) { intent in
+                        SessionListView(state: sessions.state, folders: roomFolders.items,
+                                        onFolder: { roomFolders.send($0) }) { intent in
                             sessions.send(intent)
                             if case .selectSession(let sessionId) = intent,
                                UTF8ExactIdentity.matches(sessions.selectedSessionId, sessionId) {
@@ -452,6 +623,7 @@ private struct AuthenticatedRootView: View {
                 .toolbar {
                     ToolbarItem(placement: .navigationBarLeading) { drawerButton }
                 }
+                .modifier(calendarEntry)
                 .navigationDestination(for: RoomRoute.self) { route in
                     roomScreen(route)
                 }
@@ -497,30 +669,59 @@ private struct AuthenticatedRootView: View {
         .pocketCanvas()
         // While the account is scheduled for deletion, its notice is all there is.
         .overlay {
-            if let notice = accountDeletion.pending {
-                AccountDeletionPendingView(
-                    notice: notice,
-                    onKeepAccount: {
-                        Task { await accountDeletion.keepAccount(onContinue: resumeAfterKeepingAccount) }
-                    },
+            if let accountDeletion {
+                AccountDeletionPendingOverlay(
+                    coordinator: accountDeletion,
+                    onShown: closeForDeletionNotice,
+                    onContinue: resumeAfterKeepingAccount,
                     onSignOut: onSignOut
                 )
             }
         }
-        .onChange(of: accountDeletion.pending != nil) { isPending in
-            if isPending { closeForDeletionNotice() }
-        }
         // The logo at launch, while your rooms load underneath (Carter, #55287).
         .overlay { LaunchSplash(isReady: roomListSettled) }
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: drawerOpen)
-        // Opening the side panel reads the bell, so its count is never older than the panel; and the rooms, so who is
-        // online and their unread badges are not either.
+        // Opening the side panel reads what it shows that was not read lately: the bell, Waiting on you, whether folders
+        // and direct messages are on, and your folders, so no count is older than `panelFreshness`. The rooms are read
+        // once, at once, by the panel's own poll below (a second read here was the same request again).
         .onChange(of: drawerOpen) { open in
-            if open { Task { await notifications.refresh(force: true) } }
-            if open { Task { await waiting.refresh() } }
-            if open { sessions.send(.refreshSessions) }
+            guard open else { return }
+            Task { await notifications.refresh(force: true, ifOlderThan: Self.panelFreshness) }
+            Task { await waiting.refresh(ifOlderThan: Self.panelFreshness) }
+            Task { await roomFolders.refresh(ifOlderThan: Self.panelFreshness) }
+            Task { await directMessages.refresh(ifOlderThan: Self.panelFreshness) }
+        }
+        // While the side panel stays open its rooms keep up: a message that arrives in another room shows its unread
+        // badge without closing and opening the panel again (Carter, #61188). Only with the app in front, as the bell's
+        // and Waiting on you's polling, and never over a read still going.
+        .task(id: DrawerPoll(open: drawerOpen, active: rootScenePhase == .active)) {
+            guard DrawerPoll(open: drawerOpen, active: rootScenePhase == .active).runs else { return }
+            // Back in front with the panel open: read at once, not 15 s later (opening it reads too, and a quiet
+            // read never starts over that one).
+            sessions.refreshSessions(quietly: true)
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: Self.openDrawerRefresh)
+                guard !Task.isCancelled, drawerOpen, rootScenePhase == .active else { return }
+                sessions.refreshSessions(quietly: true)
+            }
         }
         .preferredColorScheme(theme.wrappedValue.colorScheme)
+        #if DEBUG
+        // The root preview's side panel opens and closes on a signal, so a profile of it has no accessibility client
+        // tapping (each tap of a UI test reads the screen's whole accessibility tree first).
+        .onReceive(RootPreview.drawerRequests) { open in drawerOpen = open }
+        .onAppear {
+            guard RootPreview.isRequested else { return }
+            let meter = RootPreview.meter
+            meter.watch("sessions", sessions)
+            meter.watch("notifications", notifications)
+            meter.watch("waiting", waiting)
+            meter.watch("directMessages", directMessages)
+            meter.watch("roomFolders", roomFolders)
+            meter.watch("details", details)
+            meter.watch("messageReader", messageReader)
+        }
+        #endif
         .sheet(isPresented: $presentsPocket) {
             SelectedSessionPocketView(
                 sessions: sessions,
@@ -566,6 +767,8 @@ private struct AuthenticatedRootView: View {
                     presentsNotifications = false
                 }
             }
+            .onAppear { notifications.listShown(true) }
+            .onDisappear { notifications.listShown(false) }
         }
         .sheet(isPresented: $presentsCallLog) {
             CallLogView(state: callLog.state, readingId: readingCallId) { intent in
@@ -615,6 +818,9 @@ private struct AuthenticatedRootView: View {
         .sheet(isPresented: $presentsSettings) {
             WhisperModelSettingsView(
                 coordinator: whisperModelCoordinator,
+                directMessages: directMessages,
+                calendar: CalendarSettingsContext(center: calendar, rooms: calendarRooms,
+                                                  onReauthenticationRequired: invalidateProtectedAuthentication),
                 onSignOut: {
                     presentsSettings = false
                     onSignOut()
@@ -622,6 +828,7 @@ private struct AuthenticatedRootView: View {
                 accountDeletion: accountDeletion
             )
         }
+        .modifier(RoomFolderSheets(center: roomFolders))
         .sheet(isPresented: $presentsNewRoom) {
             if let creator = roomSender as? any RoomCreating {
                 NewRoomSheet(
@@ -646,6 +853,8 @@ private struct AuthenticatedRootView: View {
                 authenticationRevision: authenticationRevision
             )
             sessions.start()
+            Task { await directMessages.refresh() }
+            Task { await roomFolders.refresh() }
             notifications.startPolling()
             // Waiting on you is read from sign-in on, not only once the app comes back to the front (warden, #270).
             waiting.startPolling()
@@ -669,10 +878,10 @@ private struct AuthenticatedRootView: View {
             RoomCallDesk.shared.openRoom = { [weak incomingLinks] sessionId in
                 incomingLinks?.receive(SentiLink(sessionId: sessionId))
             }
-            Task { await PushRegistrar.shared.start() }
+            if registersPush { Task { await PushRegistrar.shared.start() } }
             openPendingLinkIfReady()
             // Whether this account can be deleted here, and whether a deletion is already scheduled.
-            accountDeletion.start()
+            accountDeletion?.start()
         }
         .onDisappear {
             InAppBanner.shared.isHosted = false
@@ -701,6 +910,7 @@ private struct AuthenticatedRootView: View {
         presentsNewRoom = false
         presentsPocket = false
         presentsActivity = false
+        if roomFolders.sheet != nil { roomFolders.sheet = nil }
         closeDrawer()
     }
 
@@ -723,21 +933,67 @@ private struct AuthenticatedRootView: View {
         presentsSettings = false
         presentsPocket = false
         presentsActivity = false
+        func route(direct: DirectRoomInfo?) -> RoomRoute {
+            RoomRoute(
+                sessionId: link.sessionId,
+                title: row?.title ?? direct?.counterpart.displayName ?? "Room",
+                membershipRole: row?.membershipRole ?? "",
+                focusSequenceId: link.messageSequence,
+                // A reply notification opens the thread at the reply.
+                focusReplyId: link.messageSequence == nil ? nil : link.replyId,
+                focusTicketId: link.ticketId,
+                opensAdmissions: link.admissionId != nil,
+                readMark: row.map(RoomReadMark.init(row:)),
+                // A direct message (from its push, too) opens as one: whom it is with, and its room.
+                direct: direct
+            )
+        }
+        guard row == nil else {
+            show(route(direct: DirectRoomInfo(row: row, rows: sessions.state.rows)))
+            return
+        }
+        // Not in the room list yet (the push of a direct message that just started): ask the server what it is first,
+        // so it opens with its header. A room the list reads meanwhile, or another open, wins.
+        sessions.send(.refreshSessions)
+        let token = UUID()
+        pendingOpen = token
+        Task { @MainActor in
+            let direct = await directMessages.directInfo(for: link.sessionId, row: nil, rows: sessions.state.rows)
+            guard pendingOpen == token else { return }
+            show(route(direct: direct))
+        }
+    }
+
+    /// A direct message the server opened from a profile card: the room on screen, and the room list reads it.
+    @MainActor
+    private func openDirect(_ dm: DirectMessage) {
+        let row = sessions.state.rows.first { UTF8ExactIdentity.matches($0.sessionId, dm.sessionId) }
         show(RoomRoute(
-            sessionId: link.sessionId,
-            title: row?.title ?? "Room",
+            sessionId: dm.sessionId,
+            title: dm.counterpart.displayName,
             membershipRole: row?.membershipRole ?? "",
-            focusSequenceId: link.messageSequence,
-            focusTicketId: link.ticketId,
-            opensAdmissions: link.admissionId != nil,
-            readMark: row.map(RoomReadMark.init(row:))
+            readMark: row.map(RoomReadMark.init(row:)),
+            direct: DirectRoomInfo(dm)
         ))
+        sessions.send(.refreshSessions)
+    }
+
+    /// What a room screen needs for direct messages, where they are on.
+    private var directContext: RoomDirectContext? {
+        RoomDirectContext.ifAvailable(
+            directMessages,
+            existing: { senderId in
+                sessions.state.rows.first { $0.counterpart?.senderId.lowercased() == senderId.lowercased() }?.sessionId
+            },
+            open: { dm in openDirect(dm) }
+        )
     }
 
     /// Puts a room on screen as the root (no back button: the side panel is the way between rooms), keeps the
     /// selection Pocket and Activity follow in step, and remembers it for the next launch.
     @MainActor
     private func show(_ route: RoomRoute) {
+        pendingOpen = nil
         if !UTF8ExactIdentity.matches(sessions.selectedSessionId, route.sessionId) {
             sessions.send(.selectSession(sessionId: route.sessionId))
         }
@@ -753,7 +1009,8 @@ private struct AuthenticatedRootView: View {
             sessionId: sessionId,
             title: row?.title ?? "Room",
             membershipRole: row?.membershipRole ?? "",
-            readMark: row.map(RoomReadMark.init(row:))
+            readMark: row.map(RoomReadMark.init(row:)),
+            direct: DirectRoomInfo(row: row, rows: sessions.state.rows)
         )
     }
 
@@ -793,18 +1050,11 @@ private struct AuthenticatedRootView: View {
         .accessibilityIdentifier("pocket.drawer.open")
     }
 
+    /// The side panel. Its rooms and folders are placed off the main thread, and only when the room list or your
+    /// folders change: opening it, and a read that finds nothing new, place nothing.
     private var sidePanel: some View {
         PocketSidePanel(
-            rooms: sessions.state.rows.map { row in
-                PocketSidePanel.Room(
-                    id: row.sessionId,
-                    title: row.title,
-                    subtitle: row.summary,
-                    lastActivity: row.lastActivity?.date,
-                    kind: row.roomTypeLabel,
-                    activity: row.activity
-                )
-            },
+            placement: sidePanelPlacement,
             currentRoomId: currentRoom?.sessionId,
             unreadNotifications: notifications.unreadCount,
             waitingOnYou: waiting.state.isAvailable ? waiting.state.total : nil,
@@ -838,17 +1088,48 @@ private struct AuthenticatedRootView: View {
             onSettings: {
                 closeDrawer()
                 presentsSettings = true
-                accountDeletion.refresh()
+                Task { await directMessages.refresh() }
+                Task { await calendar.refresh(probeRoom: calendarProbeRoom) }
+                accountDeletion?.refresh()
             },
             onNewRoom: roomSender is any RoomCreating ? {
                 closeDrawer()
                 presentsNewRoom = true
-            } : nil
+            } : nil,
+            folderNotice: roomFolders.notice,
+            // Folders show only where they are on.
+            onFolder: roomFolders.items == nil ? nil : { roomFolders.send($0) }
         )
+        .onAppear(perform: placeSidePanelRooms)
+        .onChange(of: sessions.state.rows) { _ in placeSidePanelRooms() }
+        .onChange(of: roomFolders.folders) { _ in placeSidePanelRooms() }
     }
 
-    @ViewBuilder
+    private func placeSidePanelRooms() {
+        sidePanelPlacement.update(rows: sessions.state.rows, folders: roomFolders.items)
+    }
+
+    /// The room on screen, made and drawn again only when what it is opened with changes (`RoomScreenHost`).
     private func roomScreen(_ route: RoomRoute) -> some View {
+        let savedSummary = sessions.state.rows.first { UTF8ExactIdentity.matches($0.sessionId, route.sessionId) }?.summary
+        roomScreenMaker.make = { route, savedSummary in
+            roomChatScreen(route, savedSummary: savedSummary, direct: directContext)
+        }
+        return RoomScreenHost(route: route, savedSummary: savedSummary, directMessagesOn: directContext != nil,
+                              maker: roomScreenMaker)
+            .equatable()
+    }
+
+    /// The calendar's ⋯ entry for the room on screen (a room, not a direct message). It sits on the navigation root
+    /// beside the side panel's button, outside the room screen and its host.
+    private var calendarEntry: RoomCalendarEntry {
+        RoomCalendarEntry(center: calendar, sessionId: currentRoom?.sessionId ?? "", roomTitle: currentRoom?.title ?? "",
+                          canAdd: CalendarCenter.canAdd(role: currentRoom?.membershipRole ?? ""),
+                          isOffered: currentRoom.map { $0.direct == nil } ?? false,
+                          onReauthenticationRequired: invalidateProtectedAuthentication)
+    }
+
+    private func roomChatScreen(_ route: RoomRoute, savedSummary: String?, direct: RoomDirectContext?) -> RoomChatScreen {
         RoomChatScreen(
             route: route,
             transport: roomTransport,
@@ -863,18 +1144,38 @@ private struct AuthenticatedRootView: View {
             admissionDecider: admissionDecider,
             openRoom: { link in open(link) },
             openChildRoom: { child in roomPath.append(child) },
+            // A New agent's new chat: the room list reads it, and it opens as the room on screen, as a new room does.
+            openNewRoom: { route in
+                sessions.send(.refreshSessions)
+                show(route)
+            },
             receipts: roomReceipts,
             search: roomSearch,
             readMarker: roomReadMarker,
             reader: messageReader,
             onRenamed: { sessions.send(.refreshSessions) },
             // What the room list has of the room's summary, for a member who reads it without making one.
-            savedSummary: sessions.state.rows.first { UTF8ExactIdentity.matches($0.sessionId, route.sessionId) }?.summary,
+            savedSummary: savedSummary,
             onRead: { sessionId, sequence, caughtUp in
                 sessions.noteRead(sessionId: sessionId, through: sequence, caughtUp: caughtUp)
             },
+            direct: direct,
             onReauthenticationRequired: invalidateProtectedAuthentication
         )
+    }
+
+    /// Any room you are in, to ask whether drafting is on: a viewer's room answers the flag as well as any.
+    private var calendarProbeRoom: String? {
+        CalendarCenter.probeRoom(in: sessions.state.rows.map {
+            (id: $0.sessionId, role: $0.membershipRole, isDirect: $0.isDirect)
+        })
+    }
+
+    /// The rooms an event can be added to from Settings' calendar: rooms (not direct messages) you can write in.
+    private var calendarRooms: [CalendarRoomChoice] {
+        sessions.state.rows
+            .filter { !$0.isDirect && CalendarCenter.canAdd(role: $0.membershipRole) }
+            .map { CalendarRoomChoice(id: $0.sessionId, title: $0.title) }
     }
 
     /// The call whose summary is being read aloud, if any.
@@ -886,7 +1187,7 @@ private struct AuthenticatedRootView: View {
     /// Something over the room: a sheet, or the side panel.
     private var roomCovered: Bool {
         drawerOpen || presentsNotifications || presentsWaiting || presentsPocket || presentsActivity || presentsSettings
-            || presentsNewRoom || presentsCallLog
+            || presentsNewRoom || presentsCallLog || roomFolders.sheet != nil
     }
 
     /// The room list has loaded or failed, so a room opened from a link knows its title and your role in it.
