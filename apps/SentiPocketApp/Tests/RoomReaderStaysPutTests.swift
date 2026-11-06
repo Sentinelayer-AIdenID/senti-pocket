@@ -439,16 +439,21 @@ final class RoomReaderStaysPutTests: XCTestCase {
                 + "is at the bottom with the end out of view for \(String(format: "%.2f", longestStranded)) s")
             guard below > RoomReaderPlace.atBottomDistance else { continue }
             endedShort += 1
-            // Short of the end and not at the bottom: the arrow shows, and takes the reader down.
+            // Short of the end and not at the bottom: the arrow shows, and takes the reader down. The seam is off for
+            // the arrow's way down: the list it opens at its newest rows settles there by the room's own follows.
             let arrow = try XCTUnwrap(HostedSummary.wait(for: "pocket.room.jumpToLatest", in: window,
                                                          timeout: Self.strandedLimit),
                                       "batch \(batch): the arrow shows within \(Self.strandedLimit) s")
+            RoomScrollTrace.followMovesNothing = false
+            RoomScrollTrace.injectedRetry = nil
             XCTAssertTrue(arrow.accessibilityActivate(), "batch \(batch): the arrow could be pressed")
             wait("batch \(batch): the arrow took the reader to the end", seconds: 8) {
                 Self.list(in: window).map(Self.atBottom) ?? false
             }
             XCTAssertTrue(Self.list(in: window).map(Self.atBottom) ?? false, "batch \(batch): at the end")
             pump(1)
+            RoomScrollTrace.followMovesNothing = true
+            RoomScrollTrace.injectedRetry = .movesNothing
         }
         XCTAssertGreaterThan(endedShort, 0, "no batch ended short of the end: the arrow was not tested")
     }
