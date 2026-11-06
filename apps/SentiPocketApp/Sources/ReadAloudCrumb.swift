@@ -90,8 +90,9 @@ struct ReadAloudCrumb: Equatable {
         let images = chips.filter { $0.kind == .image }
         let sizes = images.compactMap { state.attachmentPreviews[$0.attachmentId].flatMap(pixelSize(of:)) }
         let largest = sizes.max { $0.width * $0.height < $1.width * $1.height }
+        let depth = state.thread?.replies.map(\.depth).max() ?? 0
         return ReadAloudCrumb(origin: origin(of: id), rows: state.rows.count,
-                              threadReplies: state.thread?.replies.count, threadDepth: state.thread?.replies.map(\.depth).max() ?? 0,
+                              threadReplies: state.thread?.replies.count, threadDepth: depth,
                               textSize: Self.textSize(textSize), images: images.count, largestImage: largest,
                               readerChanges: readerChanges)
     }
