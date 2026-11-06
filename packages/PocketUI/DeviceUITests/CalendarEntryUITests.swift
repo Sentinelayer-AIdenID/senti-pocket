@@ -61,9 +61,9 @@ final class CalendarEntryUITests: XCTestCase {
         shot("day-events")
     }
 
-    /// Follow-up to #330: at the largest text size, Subscribe (no link kept) and Reset each ask in a sheet whose message
-    /// can be seen whole on the screen at once (scrolled to it if need be). As confirmation dialogs they were narrow
-    /// popovers that showed a line or two of it.
+    /// Follow-up to #330: at the largest text size, Subscribe (no link kept) and Reset each ask in a sheet that takes
+    /// most of the screen, and whose whole message can be seen in it at once (scrolled to it by one measured drag if need
+    /// be). As confirmation dialogs they were narrow popovers that showed a line or two of it.
     func test_the_link_questions_present_as_sheets_that_show_their_whole_message_at_ax5() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-PocketCalendarPreview", "-PocketCalendarStage", "subscribe",
@@ -82,16 +82,25 @@ final class CalendarEntryUITests: XCTestCase {
             button.tap()
             let message = app.staticTexts["\(id).message"]
             XCTAssertTrue(message.waitForExistence(timeout: 10), "\(id): the question shows its message in a sheet")
-            var scrolls = 0
-            while message.exists, !screen.contains(message.frame), scrolls < 4 {
-                app.swipeUp(velocity: .slow)
-                scrolls += 1
+            let sheet = app.scrollViews["\(id).sheet"]
+            XCTAssertTrue(sheet.waitForExistence(timeout: 5), "\(id): the question is a sheet of its own")
+            sleep(1)
+            let visible = sheet.frame.intersection(screen)
+            XCTAssertGreaterThanOrEqual(visible.height, screen.height * 0.8,
+                                        "\(id): at the largest text size the question takes most of the screen")
+            // One measured drag brings the message's end into the sheet, if it is below it.
+            let below = message.frame.maxY - visible.maxY
+            if below > 0, message.frame.height <= visible.height {
+                let start = sheet.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
+                start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -(below + 16))),
+                            withVelocity: .slow, thenHoldForDuration: 0.5)
+                sleep(1)
             }
-            print("CALAX5UI \(id) message \(message.frame) screen \(screen) scrolls \(scrolls)")
-            XCTAssertTrue(screen.contains(message.frame), "\(id): the whole message can be seen on the screen at once")
+            print("CALAX5UI \(id) message \(message.frame) sheet \(visible) screen \(screen)")
+            XCTAssertTrue(visible.contains(message.frame), "\(id): the whole message can be seen in the sheet at once")
             shot("question-\(id)-ax5")
             let cancel = app.buttons["\(id).cancel"]
-            if cancel.exists { cancel.tap() }
+            if cancel.exists, cancel.isHittable { cancel.tap() } else { sheet.swipeDown(velocity: .fast) }
             sleep(1)
         }
     }

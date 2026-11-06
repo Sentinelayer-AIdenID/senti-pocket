@@ -669,6 +669,7 @@ struct CalendarLinkQuestion: View {
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .accessibilityIdentifier("\(id).sheet")
         .presentationDetents(typeSize.isAccessibilitySize ? [.large] : [.medium, .large])
         .presentationDragIndicator(.visible)
     }
