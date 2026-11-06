@@ -9,10 +9,12 @@ final class ComposerFileOpenUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["-PocketRoomPreview", "-PocketRoomComposerTrayPreview"]
         app.launch()
-        let composer = app.textViews["pocket.room.composer"].exists ? app.textViews["pocket.room.composer"]
-            : app.textFields["pocket.room.composer"]
         XCTAssertTrue(app.descendants(matching: .any)["pocket.room.composer"].waitForExistence(timeout: 60),
                       "the preview room opened")
+        // Found once the room has opened: before, neither kind of field exists yet.
+        let composer = app.textViews["pocket.room.composer"].exists ? app.textViews["pocket.room.composer"]
+            : app.textFields["pocket.room.composer"]
+        XCTAssertTrue(composer.exists, "the composer is a text view or a text field")
         let photo = app.buttons["Open site.png"]
         let pdf = app.buttons["Open plan.pdf"]
         XCTAssertTrue(pdf.waitForExistence(timeout: 20), "the tray's files are buttons that open them")
