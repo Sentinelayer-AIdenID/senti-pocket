@@ -984,7 +984,7 @@ private struct RoomMessageRowView: View {
 
     var body: some View {
         RenderTrace.row(row.sequenceId)
-        return rowBody
+        return rowBody.modifier(RoomLikeHaptic(placed: row.ownTaps.placed))
     }
 
     @ViewBuilder
@@ -1372,6 +1372,7 @@ private struct RoomMessageRowView: View {
                 sequenceId: row.sequenceId,
                 canReact: canReact,
                 canAddEmoji: canAddEmoji,
+                ownTaps: row.ownTaps,
                 onReact: { send(row.reaction($0)) },
                 onEmoji: { send(row.emojiToggle($0)) },
                 onAddReaction: { onAddReaction(row) },
@@ -1552,7 +1553,8 @@ private struct RoomMessageRowView: View {
             .filter { $0.kind != .thread || !options.contains { $0.kind == .reply } }
         return HStack(spacing: 18) {
             ForEach(shown) { option in
-                actionButton(option.kind == .thread ? "arrowshape.turn.up.left" : option.symbol, label: option.title) {
+                actionButton(option.kind == .thread ? "arrowshape.turn.up.left" : option.symbol, label: option.title,
+                             pops: row.ownTaps.pops(option.kind.rawValue)) {
                     perform(option)
                 }
             }
@@ -1592,9 +1594,12 @@ private struct RoomMessageRowView: View {
         }
     }
 
-    private func actionButton(_ symbol: String, label: String, action: @escaping () -> Void) -> some View {
+    /// An action button. A thumb pops once for each like or dislike of yours placed with it (`pops`).
+    private func actionButton(_ symbol: String, label: String, pops: Int = 0,
+                              action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
+                .modifier(RoomThumbPop(pops: pops))
                 .font(.footnote)
                 .foregroundStyle(PocketPalette.textSecondary)
                 .frame(width: 28, height: 28)
@@ -1732,6 +1737,71 @@ private func copyToPasteboard(_ text: String) {
     #endif
 }
 
+/// A like or dislike thumb pops once for each like or dislike of yours placed (`RoomOwnTaps`): never for taking one
+/// back, never for a count that changed on its own. Not with Reduce Motion on; on iOS 16 the thumb only changes.
+private struct RoomThumbPop: ViewModifier {
+    let pops: Int
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 17.0, macOS 14.0, *) {
+            if reduceMotion {
+                content
+            } else {
+                content.symbolEffect(.bounce, value: pops)
+            }
+        } else {
+            content
+        }
+    }
+}
+
+/// A reaction's count rolls to its new number, whoever changed it (your tap, or a refresh); with Reduce Motion on it
+/// just changes.
+private struct RoomCountRoll: ViewModifier {
+    let count: Int
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if reduceMotion {
+            content
+        } else {
+            if #available(iOS 17.0, macOS 14.0, *) {
+                content
+                    .contentTransition(.numericText(value: Double(count)))
+                    .animation(.snappy(duration: 0.3), value: count)
+            } else {
+                content
+                    .contentTransition(.numericText())
+                    .animation(.easeOut(duration: 0.25), value: count)
+            }
+        }
+    }
+}
+
+/// A light tap of the hand when your own like or dislike is placed (`RoomOwnTaps.placed`): never for a take-back,
+/// never for a refresh. iOS 17 and later.
+private struct RoomLikeHaptic: ViewModifier {
+    let placed: Int
+
+    #if os(iOS)
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 17.0, *) {
+            content.sensoryFeedback(.impact(weight: .light), trigger: placed) { old, new in new > old }
+        } else {
+            content
+        }
+    }
+    #else
+    func body(content: Content) -> some View {
+        content
+    }
+    #endif
+}
+
 /// Reaction chips, the acknowledged and working lines, and the reply count under a message.
 private struct RoomReactionBar: View {
     let reactions: RoomChatReactions
@@ -1739,6 +1809,8 @@ private struct RoomReactionBar: View {
     let sequenceId: Int64
     let canReact: Bool
     var canAddEmoji = false
+    /// Your own likes and dislikes placed here: their thumbs pop (`RoomOwnTaps`).
+    var ownTaps = RoomOwnTaps()
     let onReact: (String) -> Void
     /// An emoji chip was tapped.
     var onEmoji: (RoomChatReactions.EmojiChip) -> Void = { _ in }
@@ -1764,7 +1836,11 @@ private struct RoomReactionBar: View {
                         } label: {
                             HStack(spacing: 4) {
                                 Image(systemName: chip.isMine ? chip.symbol + ".fill" : chip.symbol)
-                                Text("\(chip.count)").monospacedDigit()
+                                    .modifier(RoomThumbPop(pops: ownTaps.pops(chip.type)))
+                                if let count = chip.shownCount {
+                                    Text("\(count)").monospacedDigit()
+                                        .modifier(RoomCountRoll(count: count))
+                                }
                             }
                             .font(.caption.weight(.semibold))
                             .padding(.horizontal, 8)
@@ -1776,7 +1852,8 @@ private struct RoomReactionBar: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(!canReact || chip.type == "disregard")
-                        .accessibilityLabel("\(chip.label), \(chip.count)\(chip.isMine ? ", yours" : "")")
+                        .accessibilityLabel(chip.accessibilityLabel)
+                        .accessibilityIdentifier("pocket.room.reaction.\(sequenceId).\(chip.type)")
                     }
                     ForEach(Array(reactions.emojiChips.enumerated()), id: \.element.id) { index, chip in
                         Button {
@@ -1786,6 +1863,7 @@ private struct RoomReactionBar: View {
                                 Text(chip.emoji)
                                     .font(.subheadline)
                                 Text("\(chip.count)").monospacedDigit()
+                                    .modifier(RoomCountRoll(count: chip.count))
                             }
                             .font(.caption.weight(.semibold))
                             .padding(.horizontal, 8)

@@ -57,24 +57,26 @@ public struct RoomProfileCardView: View {
     private let state: RoomProfileCardState
     private let onMessage: () -> Void
     private let onBlock: (() -> Void)?
+    /// See all, where the server counted more rooms than the card lists.
+    private let onSeeAllRooms: (() -> Void)?
     private let onClose: () -> Void
 
     /// The most shared rooms listed by name; the rest are counted.
-    static let roomsShown = 4
+    static let roomsShown = RoomProfileCardState.roomsShown
 
     public init(state: RoomProfileCardState, onMessage: @escaping () -> Void, onBlock: (() -> Void)? = nil,
-                onClose: @escaping () -> Void) {
+                onSeeAllRooms: (() -> Void)? = nil, onClose: @escaping () -> Void) {
         self.state = state
         self.onMessage = onMessage
         self.onBlock = onBlock
+        self.onSeeAllRooms = onSeeAllRooms
         self.onClose = onClose
     }
 
-    /// "Rooms you share" as listed: up to `roomsShown` names, then "and 3 more".
+    /// "Rooms you share" as listed when the phone has no count: up to `roomsShown` names, then "and 3 more".
     static func sharedLines(_ rooms: [String]) -> [String] {
-        let shown = Array(rooms.prefix(roomsShown))
-        let more = rooms.count - shown.count
-        return more > 0 ? shown + ["and \(more) more"] : shown
+        RoomProfileCardState(target: RoomProfileTarget(senderId: "", name: "", isAgent: false), sharedRooms: rooms,
+                             canMessage: false).sharedRoomLines
     }
 
     public var body: some View {
@@ -112,19 +114,31 @@ public struct RoomProfileCardView: View {
 
             if !state.sharedRooms.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(state.sharedRooms.count == 1 ? "Room you share" : "Rooms you share")
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(PocketPalette.textSecondary)
-                        .accessibilityAddTraits(.isHeader)
-                    ForEach(Array(Self.sharedLines(state.sharedRooms).enumerated()), id: \.offset) { _, line in
-                        Label(line, systemImage: "bubble.left.and.bubble.right")
-                            .font(.subheadline)
-                            .foregroundStyle(PocketPalette.textPrimary)
-                            .lineLimit(1)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(state.sharedRoomsHeader)
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(PocketPalette.textSecondary)
+                            .accessibilityAddTraits(.isHeader)
+                        ForEach(Array(state.sharedRoomLines.enumerated()), id: \.offset) { _, line in
+                            Label(line, systemImage: "bubble.left.and.bubble.right")
+                                .font(.subheadline)
+                                .foregroundStyle(PocketPalette.textPrimary)
+                                .lineLimit(1)
+                        }
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("pocket.profile.sharedRooms")
+                    if state.canSeeAllRooms, let onSeeAllRooms, let total = state.sharedRoomsTotal {
+                        Button(action: onSeeAllRooms) {
+                            Text("See all \(total)")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(PocketPalette.accent)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("See all \(total) rooms you share")
+                        .accessibilityIdentifier("pocket.profile.sharedRooms.all")
                     }
                 }
-                .accessibilityElement(children: .combine)
-                .accessibilityIdentifier("pocket.profile.sharedRooms")
             }
 
             VStack(spacing: 10) {

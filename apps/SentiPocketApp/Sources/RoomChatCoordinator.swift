@@ -54,6 +54,14 @@ final class RoomChatCoordinator: ObservableObject {
     // Replies and reactions (GET /actions projection), and the open thread.
     private let actionSender: (any RoomActionSending)?
     private var summaries: [Int64: RoomReactionSummary] = [:]
+    /// Messages ("<sequence>") and replies ("<sequence>:<reply id>") whose like or dislike is on its way to the API: a
+    /// tap there is ignored until it lands, so taps never stack (ticket ce169567: a like that showed nothing once
+    /// stacked to 10 likes and a dislike in 30 seconds).
+    private var reactionsInFlight: Set<String> = []
+    /// Your own likes and dislikes placed on each message (a tap ignored while one is on its way is not one): its row
+    /// pops the thumb and taps your hand for each, and taking one back is quiet (`RoomOwnTaps`). A refresh never changes
+    /// them, so a count that changes on its own only rolls.
+    private var ownTaps: [Int64: RoomOwnTaps] = [:]
     /// Who answered in threads, as of each one's newest reply: most agent and box output is replies, so they are
     /// offered for @ like anyone who posted.
     private var replyAuthors: [String: (name: String, isHuman: Bool, date: Date?)] = [:]
@@ -1146,23 +1154,62 @@ final class RoomChatCoordinator: ObservableObject {
         return notePinned(edits) || replaced
     }
 
+    /// Like, dislike, unlike, undislike or acknowledge a message. One like or dislike per person: a tap on your lit
+    /// thumb takes it back (the row sends "unlike"), and like and dislike are exclusive, so choosing one takes back the
+    /// other first. The tap shows at once; if the API does not take it, that is undone, and the refresh then shows the
+    /// server's truth. While a like or dislike is on its way, another tap on the same message is ignored.
     private func react(_ type: String, on sequenceId: Int64) {
         guard let actionSender, canReact, RoomActionRequest.reactionTypes.contains(type) else { return }
-        // Shown at once (display only: the refresh replaces it with the server's truth).
-        applyOptimisticReaction(type, on: sequenceId, actor: ownAuthorIds.sorted().first ?? "you")
+        let slot = String(sequenceId)
+        let isThumb = type != "ack"
+        if isThumb {
+            guard !reactionsInFlight.contains(slot) else { return }
+            reactionsInFlight.insert(slot)
+        }
+        // This tap went: shown with what it changes; a like or dislike placed pops its thumb and taps your hand.
+        ownTaps[sequenceId, default: RoomOwnTaps()].count(type)
+        let before = summaries[sequenceId]
+        let writes = Self.reactionWrites(type, liked: before?.likedByViewer == true,
+                                         disliked: before?.dislikedByViewer == true)
+        let actorName = ownAuthorIds.sorted().first ?? "you"
+        for write in writes { applyOptimisticReaction(write, on: sequenceId, actor: actorName) }
+        let shown = summaries[sequenceId]
+        // What it asked for was already so, so nothing was shown: it is still answered now, never at the next refresh.
+        if isThumb, shown == before { publish() }
         let sessionId = self.sessionId
         Task { [weak self] in
-            // Not sent while you are unknown; the refresh then just restores the server's truth.
+            var landed = false
+            // Not sent while you are unknown; what the tap showed is undone.
             if let actor = await self?.resolvedActorRef() {
                 do {
-                    try await actionSender.sendAction(.reaction(type, sessionId: sessionId, sequenceId: sequenceId, actor: actor))
+                    for write in writes {
+                        try await actionSender.sendAction(.reaction(write, sessionId: sessionId, sequenceId: sequenceId,
+                                                                    actor: actor))
+                    }
+                    landed = true
                 } catch RoomSendError.reauthenticationRequired {
                     self?.onReauthenticationRequired()
                 } catch {
-                    // Fall through: the refresh below restores the server's truth.
+                    // Undone below; the refresh then shows the server's truth.
                 }
             }
-            await self?.refreshActions(force: true)
+            guard let self else { return }
+            if isThumb { self.reactionsInFlight.remove(slot) }
+            if !landed, self.summaries[sequenceId] == shown {
+                self.summaries[sequenceId] = before
+                self.publish()
+            }
+            await self.refreshActions(force: true)
+        }
+    }
+
+    /// What one tap sends: the reaction itself, after taking back the opposite one you hold (like and dislike are
+    /// exclusive). An unlike, undislike or acknowledgement is sent as it is. A pure rule, callable from anywhere.
+    nonisolated static func reactionWrites(_ type: String, liked: Bool, disliked: Bool) -> [String] {
+        switch type {
+        case "like" where disliked: return ["undislike", "like"]
+        case "dislike" where liked: return ["unlike", "dislike"]
+        default: return [type]
         }
     }
 
@@ -1355,8 +1402,16 @@ final class RoomChatCoordinator: ObservableObject {
     /// A reaction on a reply in a thread (the API takes the reply as `targetActionId`); the thread then re-reads.
     private func reactToReply(_ type: String, on replyId: String, in sequenceId: Int64) {
         guard let actionSender, canReact, RoomActionRequest.reactionTypes.contains(type) else { return }
+        // As on a message: while a like or dislike of this reply is on its way, another tap on it is ignored.
+        let slot = "\(sequenceId):\(replyId)"
+        let isThumb = type != "ack"
+        if isThumb {
+            guard !reactionsInFlight.contains(slot) else { return }
+            reactionsInFlight.insert(slot)
+        }
         let sessionId = self.sessionId
         Task { [weak self] in
+            defer { if isThumb { self?.reactionsInFlight.remove(slot) } }
             guard let actor = await self?.resolvedActorRef() else { return }
             do {
                 try await actionSender.sendAction(.reaction(
@@ -2332,7 +2387,8 @@ final class RoomChatCoordinator: ObservableObject {
                     : nil,
                 work: work[message.sequenceId] ?? [],
                 isVoiceTurn: message.channel == "voice",
-                checkpointSummary: message.checkpointSummary
+                checkpointSummary: message.checkpointSummary,
+                ownTaps: ownTaps[message.sequenceId] ?? RoomOwnTaps()
             )
         }
         let threadInput = openThreadSequence.map { sequence in
