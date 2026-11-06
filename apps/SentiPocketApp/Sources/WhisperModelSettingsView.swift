@@ -6,11 +6,27 @@ import SwiftUI
 /// (`LiveDialVoice`).
 enum WhisperModelSettings {
     #if DEBUG
-    /// DEBUG offers it, unless `-PocketReleaseSettings` asks for Settings as a Release build draws them (screenshots).
-    static var offersModelFile: Bool { !ProcessInfo.processInfo.arguments.contains("-PocketReleaseSettings") }
+    static let isDebugBuild = true
     #else
-    static let offersModelFile = false
+    static let isDebugBuild = false
     #endif
+
+    static var offersModelFile: Bool {
+        offers(debug: isDebugBuild, arguments: ProcessInfo.processInfo.arguments)
+    }
+
+    /// DEBUG offers it, unless `-PocketReleaseSettings` asks for Settings as a Release build draws them (screenshots);
+    /// Release never does.
+    static func offers(debug: Bool, arguments: [String]) -> Bool {
+        debug && !arguments.contains("-PocketReleaseSettings")
+    }
+
+    /// The model file a call listens with: looked for only where it is offered, so Release never reads one (not even
+    /// one an older build left) and listens with Apple's on-device speech.
+    static func dialModelURL(offers: Bool = offersModelFile,
+                             resolve: () -> URL? = { WhisperModelLocator.resolve() }) -> URL? {
+        offers ? resolve() : nil
+    }
 }
 
 @MainActor
