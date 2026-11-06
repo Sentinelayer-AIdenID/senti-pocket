@@ -49,13 +49,29 @@ private final class QueueVoiceLine: VoiceLining, @unchecked Sendable {
         for sentence in sentences { ask(index)?.yield(.sentence(sentence)) }
         end(index)
     }
+
+    /// The server's answer that the line cannot answer (off, not yours, or resting).
+    func fail(_ index: Int, _ error: VoiceLineError) {
+        ask(index)?.finish(throwing: error)
+    }
+}
+
+/// The microphone could not be had.
+private struct MicrophoneBusy: LocalizedError {
+    var errorDescription: String? { "The microphone is busy." }
 }
 
 @MainActor
 private final class QueueListener: VoiceListening {
     var partial: (@MainActor (String) -> Void)?
     var said = ""
-    func start(partial: @escaping @MainActor (String) -> Void) async throws { said = ""; self.partial = partial }
+    /// Listening cannot start (another app has the microphone).
+    var failsToStart = false
+    func start(partial: @escaping @MainActor (String) -> Void) async throws {
+        if failsToStart { throw MicrophoneBusy() }
+        said = ""
+        self.partial = partial
+    }
     func say(_ text: String) { said = text; partial?(text) }
     func stop() async -> String { partial = nil; return said }
     func cancel() { partial = nil }
@@ -452,6 +468,128 @@ final class VoiceReplyQueueTests: XCTestCase {
         speaker.finish()
         await room.hangUp()
         XCTAssertEqual(header(of: reply, in: poster.transcript)?.contains("skipped"), false)
+    }
+
+    // MARK: - Nothing waits in silence
+
+    /// Answers are still read while muted. Muting after talking over a reply reads it; unmuting while it is read never
+    /// listens over it, and listening comes back after it.
+    func test_muting_after_talking_over_a_reply_reads_it_and_unmuting_never_listens_over_it() async {
+        let line = QueueVoiceLine(), listener = QueueListener(), speaker = QueueSpeaker(), poster = QueuePoster()
+        let room = call(line, listener, speaker, poster, handsFree: true)
+        let microphone = QueueMicrophone(room: room, clock: clock)
+        let reply = "Both builds passed review, and the release goes out at noon."
+        room.begin(rings: false)
+        await handsFreeTurn(room, listener, microphone, "What did I miss?")
+        await until("asked") { line.askCount == 1 }
+        clock.advance(2)
+        line.answer(0, "Two builds shipped.")
+        await says(speaker, 0, "Two builds shipped.")
+        speaker.finish()
+        await until("listening") { room.state.isListening && listener.partial != nil }
+        room.receive([post("r1", reply)])
+        await says(speaker, 1, Self.firstPerson)
+        speaker.finish()
+        await says(speaker, 2, reply)
+
+        room.send(.toggleTalk)
+        XCTAssertTrue(room.state.isListening, "talking over it")
+        room.send(.setMuted(true))
+        XCTAssertTrue(room.state.isMuted)
+        await says(speaker, 3, Self.firstPerson)
+        XCTAssertFalse(room.state.isListening, "muted, the reply you talked over is read")
+        speaker.finish()
+        await says(speaker, 4, reply)
+
+        room.send(.setMuted(false))
+        await settle()
+        XCTAssertEqual(room.state.speaker, "ada", "still read")
+        XCTAssertFalse(room.state.isListening, "unmuting never listens over a reply")
+        XCTAssertEqual(speaker.stops, 1, "only the talk-over stopped anything")
+        speaker.finish()
+        await until("listening once it is read") { room.state.isListening }
+        await room.hangUp()
+        XCTAssertFalse(poster.transcript.contains("skipped"), poster.transcript)
+    }
+
+    /// Talking over a reply when the microphone cannot be had: nothing listens, so the reply is read again.
+    func test_when_listening_cannot_start_the_reply_talked_over_is_read() async {
+        let line = QueueVoiceLine(), listener = QueueListener(), speaker = QueueSpeaker(), poster = QueuePoster()
+        let room = call(line, listener, speaker, poster, handsFree: false)
+        let reply = "The roof is done, and the porch starts Monday."
+        room.begin(rings: false)
+        await tapTurn(room, listener, "Any news?")
+        await until("asked") { line.askCount == 1 }
+        line.answer(0, "Some.")
+        await says(speaker, 0, "Some.")
+        speaker.finish()
+        room.receive([post("p1", reply)])
+        await says(speaker, 1, Self.firstPerson)
+        speaker.finish()
+        await says(speaker, 2, reply)
+
+        listener.failsToStart = true
+        room.send(.toggleTalk)
+        await says(speaker, 3, Self.firstPerson)
+        XCTAssertEqual(room.state.notice, "The microphone is busy.")
+        XCTAssertFalse(room.state.isListening)
+        speaker.finish()
+        await says(speaker, 4, reply)
+        await room.hangUp()
+    }
+
+    /// Hands-free, a spoken "add max" said over a reply reads the reply again before listening comes back.
+    func test_hands_free_a_spoken_add_said_over_a_reply_reads_it_before_listening() async {
+        let line = QueueVoiceLine(), listener = QueueListener(), speaker = QueueSpeaker(), poster = QueuePoster()
+        let clock = self.clock
+        let room = VoiceRoomCoordinator(sessionId: "room_reply_queue_\(UUID().uuidString)", with: ["ada"],
+                                        you: "mrrcarter", ownAuthorIds: ["human-mrrcarter"], listener: listener,
+                                        speaker: speaker, audio: QueueAudio(), addable: { ["ada", "max"] },
+                                        poster: poster, voiceLine: line, now: { clock.now },
+                                        sleep: { _ in try? await Task.sleep(nanoseconds: 1_000_000) })
+        let microphone = QueueMicrophone(room: room, clock: clock)
+        let reply = "The roof is done, and the porch starts Monday."
+        room.begin(rings: false)
+        await handsFreeTurn(room, listener, microphone, "Any news?")
+        await until("asked") { line.askCount == 1 }
+        clock.advance(2)
+        line.answer(0, "Some.")
+        await says(speaker, 0, "Some.")
+        speaker.finish()
+        await until("listening") { room.state.isListening && listener.partial != nil }
+        room.receive([post("p1", reply)])
+        await says(speaker, 1, Self.firstPerson)
+        speaker.finish()
+        await says(speaker, 2, reply)
+
+        room.send(.toggleTalk)
+        await handsFreeTurn(room, listener, microphone, "Add max to this call.")
+        await until("max is asked to join") { room.state.with.contains("max") }
+        await says(speaker, 3, "ada has the full update for you now, here it is.")
+        XCTAssertFalse(room.state.isListening, "the reply comes first, then listening")
+        XCTAssertEqual(line.askCount, 1, "a control, not a turn")
+        speaker.finish()
+        await says(speaker, 4, reply)
+        await room.hangUp()
+    }
+
+    /// A reply waiting on the line is read when the line answers that it cannot (off, not yours, or resting).
+    func test_a_reply_waiting_on_the_line_is_read_when_the_line_says_it_cannot_answer() async {
+        let errors: [VoiceLineError] = [.unavailable, .notAllowed, .rateLimited(retryAfter: 30)]
+        for error in errors {
+            let line = QueueVoiceLine(), listener = QueueListener(), speaker = QueueSpeaker(), poster = QueuePoster()
+            let room = call(line, listener, speaker, poster, handsFree: false)
+            room.begin(rings: false)
+            await tapTurn(room, listener, "Any news?")
+            await until("asked") { line.askCount == 1 }
+            room.receive([post("p1", "The roof is done.")])
+            await settle()
+            XCTAssertTrue(speaker.spoken.isEmpty, "\(error): waits while the line may answer")
+            line.fail(0, error)
+            await says(speaker, 0, "The roof is done.")
+            XCTAssertEqual(speaker.spoken.count, 1, "\(error): the line said nothing, so no handoff")
+            await room.hangUp()
+        }
     }
 
     // MARK: - What is never read is marked

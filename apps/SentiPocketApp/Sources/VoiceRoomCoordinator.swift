@@ -433,8 +433,12 @@ final class VoiceRoomCoordinator: ObservableObject {
             lastHeard = nil
             state.partial = ""
             state.phase = .ready
-        } else if state.isHandsFree, state.phase == .ready, readyIndex() == nil, !state.isRinging {
-            startListening()
+            // Answers are still read while muted: one waiting, or one you talked over, is read now.
+            speakIfReady()
+        } else if state.phase == .ready {
+            // Unmuted: what waits is read first, and hands-free listening comes back only once nothing is read.
+            speakIfReady()
+            if state.isHandsFree, state.phase == .ready, !state.isRinging { startListening() }
         }
     }
 
@@ -729,6 +733,8 @@ final class VoiceRoomCoordinator: ObservableObject {
                 self.state.phase = .ready
                 self.state.isHandsFree = false
                 self.state.notice = (error as? LocalizedError)?.errorDescription ?? "Listening could not start."
+                // What waited, or what you talked over to talk, is read now that nothing listens.
+                self.speakIfReady()
                 return
             }
             // The turn ended (or the call did) while listening was still starting: let go of the microphone.
