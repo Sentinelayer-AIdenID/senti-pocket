@@ -953,6 +953,47 @@ final class RoomCalendarTests: XCTestCase {
         XCTAssertEqual(fake.mints, 1, "the link made when it did not open is kept and opened again")
     }
 
+    /// Follow-up to #330: at the largest text size, in an iPhone SE's width, Subscribe's question (no link kept) wraps
+    /// its whole message at the full width, and each word of its title fits on a line. As a confirmation dialog it was a
+    /// narrow popover that cut the message off and broke "subscribe" in two. (The sheet as it presents, at AX5, is the
+    /// device test `test_the_link_questions_present_as_sheets_that_show_their_whole_message_at_ax5`.)
+    func test_the_new_link_question_wraps_its_whole_message_at_the_largest_text_size() throws {
+        try assertQuestionWrapsWhole(.newLink)
+    }
+
+    /// The same for Reset's question: as a confirmation dialog, its message stopped at "from the old" on an SE at AX5.
+    func test_the_reset_question_wraps_its_whole_message_at_the_largest_text_size() throws {
+        try assertQuestionWrapsWhole(.reset)
+    }
+
+    private func assertQuestionWrapsWhole(_ kind: CalendarLinkQuestion.Kind) throws {
+        let window = try HostedSummary.host(CalendarLinkQuestion(kind: kind, onConfirm: {})
+            .environment(\.dynamicTypeSize, .accessibility5))
+        defer { HostedSummary.close(window) }
+        let id = CalendarLinkQuestion.identifier(kind)
+        let text = CalendarLinkQuestion.message(kind)
+        let message = try XCTUnwrap(HostedSummary.wait(for: "\(id).message", in: window), "the question shows its message")
+        XCTAssertEqual(message.accessibilityLabel, text)
+
+        let ax5 = UITraitCollection(preferredContentSizeCategory: .accessibilityExtraExtraExtraLarge)
+        let body = UIFont.preferredFont(forTextStyle: .body, compatibleWith: ax5)
+        let frame = message.accessibilityFrame
+        let needed = (text as NSString).boundingRect(
+            with: CGSize(width: frame.width, height: .greatestFiniteMagnitude), options: [.usesLineFragmentOrigin],
+            attributes: [.font: body], context: nil).height
+        print("CALAX5 \(id) message \(frame) needs \(needed) window \(window.bounds)")
+        XCTAssertGreaterThanOrEqual(frame.height, needed - body.lineHeight / 2, "every line of the message is drawn: none cut")
+        XCTAssertLessThanOrEqual(frame.height, window.bounds.height, "the whole message fits on an SE's screen at once")
+        XCTAssertGreaterThanOrEqual(frame.width, window.bounds.width * 0.75, "the message runs at the full width")
+
+        let title = try XCTUnwrap(HostedSummary.element("\(id).title", in: window))
+        let titleFont = UIFont.systemFont(ofSize: UIFont.preferredFont(forTextStyle: .title3, compatibleWith: ax5).pointSize,
+                                          weight: .semibold)
+        let widest = CalendarLinkQuestion.title(kind).split(separator: " ")
+            .map { (String($0) as NSString).size(withAttributes: [.font: titleFont]).width }.max() ?? 0
+        XCTAssertLessThanOrEqual(widest, title.accessibilityFrame.width, "each word of the title fits on a line")
+    }
+
     // MARK: - Asking the server again (review P3, #330)
 
     /// While the routes answer 503 (or nothing), a room switch or a Settings open does not ask again at once: the next

@@ -200,7 +200,8 @@ final class CalendarCenter: ObservableObject {
     static let noPerson = "Couldn't check who's signed in. Check your connection and try again."
     static let newLinkWarning = "This makes a new subscribe link. "
         + "A calendar already using an older link stops updating."
-    static let resetWarning = "Apple Calendar stops updating from the old link, on every device that subscribed to it. "
+    /// Short enough to show whole on an iPhone SE at the largest text size (the longer one ran past its screen).
+    static let resetWarning = "Calendars on the old link stop updating, on every device. "
         + "You can subscribe again with the new one."
 }
 

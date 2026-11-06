@@ -149,6 +149,9 @@ final class RootPreviewMeter: @unchecked Sendable {
 
     func calendarEntryRan(offers: Bool) { calendarEntryOffers = offers }
 
+    /// Forgets what an earlier window's calendar entry said, so a test reads only its own root's entry.
+    func forgetCalendarEntry() { calendarEntryOffers = nil }
+
     private func ran(_ activity: CFRunLoopActivity) {
         let now = CFAbsoluteTimeGetCurrent()
         if activity == .afterWaiting {
