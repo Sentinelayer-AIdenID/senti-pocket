@@ -23,7 +23,7 @@ public enum RoomScrollTrace {
     public enum InjectedRetry: Sendable {
         /// The retry moves nothing either: the room gives up, and the arrow shows.
         case movesNothing
-        /// The retry lands above the end (ten rows up): it must not be taken for the reader leaving.
+        /// The retry lands far above the end (at the room's first row): it must not be taken for the reader leaving.
         case landsAbove
     }
 

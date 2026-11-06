@@ -329,7 +329,9 @@ final class RoomReaderStaysPutTests: XCTestCase {
     /// At the largest text size, forty tall reports arriving at once under a room of short rows, twice: the room never
     /// says the reader is at the bottom while the end has been out of view for longer than `strandedLimit` (a reader
     /// stranded mid-room with the arrow hidden; at 32cca3f the follows stopped 5,597 pt short and the room said so for
-    /// 7.6 s). Where the follows stop short, the arrow shows within that second, and it takes the reader to the end.
+    /// 7.6 s). Where the follows stop short, the arrow shows within that second, and its tap takes the reader down at
+    /// least a screen (to the end at the largest text size is (b)'s: here the list the arrow opens at the newest rows
+    /// can settle short of it by the rows' estimated heights, as on the Mac at 8962b6b).
     /// So that this always happens (in CI both batches reached the end), the room's placed follows and its one retry
     /// move nothing here (`RoomScrollTrace`'s DEBUG seam): every batch ends short, and the room must give up and show
     /// the arrow.
@@ -393,11 +395,16 @@ final class RoomReaderStaysPutTests: XCTestCase {
                                       "batch \(batch): the arrow shows within \(Self.strandedLimit) s")
             RoomScrollTrace.followMovesNothing = false
             RoomScrollTrace.injectedRetry = nil
+            let screen = list.bounds.height - list.adjustedContentInset.top - list.adjustedContentInset.bottom
             XCTAssertTrue(arrow.accessibilityActivate(), "batch \(batch): the arrow could be pressed")
-            wait("batch \(batch): the arrow took the reader to the end", seconds: 8) {
-                Self.list(in: window).map(Self.atBottom) ?? false
+            // Down at least a screen (the arrow can open a new list at the newest rows: measured from the end).
+            func belowNow() -> CGFloat {
+                Self.list(in: window).map { Self.bottomOffset(of: $0) - $0.contentOffset.y } ?? below
             }
-            XCTAssertTrue(Self.list(in: window).map(Self.atBottom) ?? false, "batch \(batch): at the end")
+            wait("batch \(batch): the arrow took the reader down a screen", seconds: 8) { below - belowNow() >= screen }
+            print("READER-STAYS-PUT tall-arrivals arrow batch=\(batch) after the tap: end-below=\(Int(belowNow()))")
+            XCTAssertGreaterThanOrEqual(below - belowNow(), screen, "batch \(batch): the arrow did not take the reader "
+                + "down a screen")
             pump(1)
             RoomScrollTrace.followMovesNothing = true
             RoomScrollTrace.injectedRetry = .movesNothing
@@ -407,9 +414,9 @@ final class RoomReaderStaysPutTests: XCTestCase {
 
     /// The room's one retry of a follow that moved nothing is the room's own scroll: where it lands is judged from
     /// there. In CI (`9f968e3`) the retry landed 754 pt up, the bottom's 120-point rule took that for the reader
-    /// leaving, and the room showed the arrow 6,911 pt short. Here the placed follows move nothing and the retry lands
-    /// ten rows above the end (`RoomScrollTrace`'s DEBUG seam): every "left" the room tells comes from its giving up,
-    /// none from the retry.
+    /// leaving, and the room showed the arrow 6,911 pt short. Here the placed follows move nothing and the retry lands at
+    /// the room's first row, far above (`RoomScrollTrace`'s DEBUG seam): every "left" the room tells comes from its
+    /// giving up, none from the retry.
     func test_the_rooms_own_retry_never_takes_the_reader_for_leaving() throws {
         try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
         RoomScrollTrace.followMovesNothing = true

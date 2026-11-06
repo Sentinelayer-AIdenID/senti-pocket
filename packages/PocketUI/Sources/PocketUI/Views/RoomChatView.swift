@@ -984,7 +984,7 @@ public struct RoomChatView: View {
             switch RoomScrollTrace.injectedRetry {
             case .none: proxy.scrollTo(last.id, anchor: .bottom)
             case .movesNothing: break
-            case .landsAbove: proxy.scrollTo(state.rows[max(0, state.rows.count - 10)].id, anchor: .bottom)
+            case .landsAbove: if let first = state.rows.first { proxy.scrollTo(first.id, anchor: .top) }
             }
             RoomNextFrame.run { RoomNextFrame.run { followLanded(from: now, proxy) } }
             return
