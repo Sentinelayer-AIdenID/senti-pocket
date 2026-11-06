@@ -68,6 +68,38 @@ enum RoomPreview {
         ProcessInfo.processInfo.arguments.contains("-PocketRoomLeaderboardSheetPreview")
     }
 
+    /// `-PocketRoomComposerTrayPreview` starts the room's composer with a photo and a PDF in its tray, uploading (they
+    /// never finish), to open before sending.
+    static var isComposerTrayRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-PocketRoomComposerTrayPreview")
+    }
+
+    /// The composer tray preview's files: a photo and a one-page PDF, made into the outbox as a picker would copy them.
+    static func composerTraySources() -> [RoomMediaSource] {
+        var sources: [RoomMediaSource] = []
+        if let folder = try? RoomMediaFiles.newFolder() {
+            let file = folder.appendingPathComponent("original.png")
+            let png = UIGraphicsImageRenderer(size: CGSize(width: 1200, height: 900)).pngData { context in
+                UIColor.systemTeal.setFill()
+                context.fill(CGRect(x: 0, y: 0, width: 1200, height: 900))
+                UIColor.white.setFill()
+                context.fill(CGRect(x: 120, y: 360, width: 960, height: 180))
+            }
+            if (try? png.write(to: file)) != nil { sources.append(RoomMediaSource(file: file, filename: "site.png")) }
+        }
+        if let folder = try? RoomMediaFiles.newFolder() {
+            let file = folder.appendingPathComponent("original.pdf")
+            let pdf = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 612, height: 792)).pdfData { context in
+                context.beginPage()
+                ("Site plan, first floor" as NSString).draw(at: CGPoint(x: 72, y: 72), withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 24, weight: .semibold)
+                ])
+            }
+            if (try? pdf.write(to: file)) != nil { sources.append(RoomMediaSource(file: file, filename: "plan.pdf")) }
+        }
+        return sources
+    }
+
     /// `-PocketRoomFilesPreview` adds two files posted as base64 parts in replies: one whose parts are all there and
     /// match its declared hash, and one with a part missing.
     static var isFilesRequested: Bool {
@@ -474,6 +506,24 @@ private struct RoomPreviewFiles: AttachmentFileFetching {
     func file(from url: URL, filename: String) async throws -> URL {
         throw AttachmentFetchError.failed
     }
+}
+
+/// The composer tray preview's uploads: they never finish, so its files stay in the tray to open, and nothing is sent.
+struct RoomPreviewUploader: RoomMediaUploading {
+    func initUpload(sessionId: String, request: RoomMediaInitRequest) async throws -> RoomMediaInitAnswer {
+        try await Task.sleep(nanoseconds: 3_600_000_000_000)
+        throw CancellationError()
+    }
+
+    func put(file: URL, to target: RoomMediaUploadTarget, progress: @escaping @Sendable (Int64, Int64) -> Void) async throws {}
+
+    func completeUpload(sessionId: String, attachmentId: String) async throws -> RoomMediaAttachment {
+        throw CancellationError()
+    }
+
+    func postMessage(sessionId: String, text: String, attachments: [RoomMediaAttachment], clientId: String) async throws {}
+
+    func deleteUpload(sessionId: String, attachmentId: String) async {}
 }
 
 /// Sample tickets for the Tickets tab preview.
