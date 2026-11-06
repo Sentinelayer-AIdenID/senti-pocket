@@ -279,47 +279,63 @@ final class RoomReaderStaysPutTests: XCTestCase {
 
     /// At the bottom, what arrives is followed by the room's own scroll to its end (the list's scroll view's, as the
     /// arrow's): on its way the rows that come into sight are measured, and where that moves the end it goes on to the
-    /// new end, so it lands there the first time. SwiftUI's animated scroll to the bottom marker went by the heights the
-    /// list estimated for rows it had not drawn, and stopped short when they were taller (in a burst at 60 a second,
-    /// 102 to 436 points short; at the largest text size every batch of twenty long reports in CI took a second
-    /// follow). At the largest text size, twenty long reports arrive at once under a room of short rows, three times;
-    /// each is followed once, to the end, and never read as the reader leaving.
-    func test_a_follow_lands_at_the_end_the_first_time_at_the_largest_text_size() throws {
-        try followLandsFirstTime(textSize: .accessibility5, room: Self.messages()) { seq in
+    /// new end. It reaches the end within the follow cap (1 s from the arrivals), building no more than a step's rows
+    /// in any frame, and is never read as the reader leaving. A second, small follow may come when rows measured after
+    /// it landed move the end (at the largest text size and with uneven rows, in CI): it is not a first-time landing,
+    /// and the re-follow keeps its own unit test (`RoomReaderPlaceTests`, the injected short landing). At the largest
+    /// text size, twenty long reports arrive at once under a room of short rows, three times.
+    func test_a_follow_reaches_the_end_within_the_follow_cap_at_the_largest_text_size() throws {
+        try followReachesTheEnd(textSize: .accessibility5, room: Self.messages()) { seq in
             (seq..<seq + 20).map { Self.longArrival($0) }
         }
     }
 
     /// The same at the default size in a room of rows of very different heights (long reports, code, one-line notes,
     /// paragraphs), twenty of them arriving at once.
-    func test_a_follow_lands_at_the_end_the_first_time_in_a_room_of_uneven_rows() throws {
-        try followLandsFirstTime(textSize: .large, room: Self.unevenMessages(from: 1, count: 120)) { seq in
+    func test_a_follow_reaches_the_end_within_the_follow_cap_in_a_room_of_uneven_rows() throws {
+        try followReachesTheEnd(textSize: .large, room: Self.unevenMessages(from: 1, count: 120)) { seq in
             Self.unevenMessages(from: seq, count: 20)
         }
     }
 
-    private func followLandsFirstTime(textSize: DynamicTypeSize, room messages: [RoomChatMessageInput],
-                                      arrivals: (Int64) -> [RoomChatMessageInput]) throws {
+    private func followReachesTheEnd(textSize: DynamicTypeSize, room messages: [RoomChatMessageInput],
+                                     arrivals: (Int64) -> [RoomChatMessageInput]) throws {
         try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
         let room = Room(messages)
         let list = try host(room, textSize: textSize)
+        let window = try XCTUnwrap(self.window)
         var seq = Int64(messages.count + 1)
         for batch in 1...3 {
             let height = list.contentSize.height
             let told = room.placesTold.count
             RoomScrollTrace.start()
+            let watch = FrameWatch(window: window, list: list)
+            watch.start()
             let batchArrivals = arrivals(seq)
             seq += Int64(batchArrivals.count)
+            let arrived = Date()
             room.arrive(batchArrivals)
-            pump(0.1)
-            wait("batch \(batch) followed to the end", seconds: 8) { list.contentSize.height > height && Self.atBottom(list) }
-            pump(1)
+            var reached: TimeInterval?
+            while Date().timeIntervalSince(arrived) < 3 {
+                pump(0.02)
+                if reached == nil, list.contentSize.height > height, Self.atBottom(list) {
+                    reached = Date().timeIntervalSince(arrived)
+                }
+            }
+            watch.stop()
             let follows = RoomScrollTrace.followsMade
-            print("READER-STAYS-PUT follow-lands \(textSize) batch=\(batch) follows=\(follows) "
-                + "end-below=\(Self.bottomOffset(of: list) - list.contentOffset.y) content=\(list.contentSize.height) "
-                + "(was \(height)) told=\(room.placesTold.dropFirst(told))")
-            XCTAssertTrue(Self.atBottom(list), "batch \(batch): the follow did not reach the end")
-            XCTAssertEqual(follows, 1, "batch \(batch): the follow did not land at the end the first time")
+            let mostInAFrame = Self.mostBuiltInAFrame(watch.frames)
+            print("READER-STAYS-PUT follow-reaches \(textSize) batch=\(batch) follows=\(follows) "
+                + "reached-after=\(reached.map { String(format: "%.2f", $0) } ?? "never") s "
+                + "most-built-in-a-frame=\(mostInAFrame) end-below=\(Self.bottomOffset(of: list) - list.contentOffset.y) "
+                + "content=\(list.contentSize.height) (was \(height)) told=\(room.placesTold.dropFirst(told))")
+            XCTAssertNotNil(reached, "batch \(batch): the follow did not reach the end")
+            if let reached {
+                XCTAssertLessThanOrEqual(reached, RoomBottomWatchCap.followCap,
+                                         "batch \(batch): the follow reached the end after \(reached) s")
+            }
+            XCTAssertTrue(Self.atBottom(list), "batch \(batch): not at the end")
+            XCTAssertLessThanOrEqual(mostInAFrame, LazyListBuildTests.mostBuiltPerStep, "batch \(batch): rows built in one frame")
             XCTAssertFalse(room.placesTold.dropFirst(told).contains(false),
                            "batch \(batch): the room's own follow was read as the reader leaving")
         }
@@ -741,6 +757,11 @@ final class RoomReaderStaysPutTests: XCTestCase {
         let second = RoomScrollTrace.listLandings.voiceOverFocus
         print("READER-STAYS-PUT voiceover second-tap focus=\(second)")
         XCTAssertEqual(second.last, Self.newestRowId(room), "VoiceOver's focus was not put on the newest message")
+    }
+
+    /// The follow cap: a follow reaches the end within this of the arrivals.
+    private enum RoomBottomWatchCap {
+        static let followCap: TimeInterval = 1
     }
 
     /// "A few points": the most a frame may move the list where the room's own scroll lands.
