@@ -27,6 +27,11 @@ final class RoomReaderStaysPutTests: XCTestCase {
         private(set) var atBottom = true
         /// Every place the room was told (`readerAtBottom`), in order, as told.
         private(set) var placesTold: [Bool] = []
+        /// As the coordinator does from up a long history: with more than `RoomChatCoordinator.rowsKeptForTheJumpDown`
+        /// messages the arrow keeps only the newest (`keepLatestForJumpDown`), and the room opens again at them.
+        var trimsForJumpDown = false {
+            didSet { publish() }
+        }
         static let own: Set<String> = ["human-reader"]
 
         init(_ inputs: [RoomChatMessageInput]) {
@@ -36,6 +41,12 @@ final class RoomReaderStaysPutTests: XCTestCase {
         }
 
         func send(_ intent: RoomChatIntent) {
+            if case .keepLatestForJumpDown = intent, trimsForJumpDown {
+                inputs = Array(inputs.suffix(RoomChatCoordinator.rowsKeptForTheJumpDown))
+                atBottom = false
+                publish()
+                return
+            }
             guard case .readerAtBottom(let value) = intent else { return }
             placesTold.append(value)
             guard value != atBottom else { return }
@@ -67,6 +78,7 @@ final class RoomReaderStaysPutTests: XCTestCase {
                 messages: inputs,
                 ownAuthorIds: Self.own,
                 unreadCount: unread,
+                jumpDownKeepsLatest: trimsForJumpDown && inputs.count > RoomChatCoordinator.rowsKeptForTheJumpDown,
                 connection: .live,
                 pending: pending,
                 composer: RoomComposerState(canPost: true, disabledReason: nil)
@@ -331,6 +343,7 @@ final class RoomReaderStaysPutTests: XCTestCase {
         }
         var endedShort = 0
         let room = Room(Self.messages())
+        room.trimsForJumpDown = true
         let window = try HostedSummary.host(Host(room: room, textSize: .accessibility5))
         addTeardownBlock { HostedSummary.close(window) }
         wait("the room opened at its newest rows", seconds: 20) {
