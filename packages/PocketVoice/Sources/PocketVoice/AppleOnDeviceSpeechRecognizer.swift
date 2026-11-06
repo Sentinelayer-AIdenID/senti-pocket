@@ -98,14 +98,41 @@ public actor AppleOnDeviceSpeechRecognizer: SpeechRecognizer {
         return speech
     }
 
-    /// Asks for Speech Recognition once; true only when it is allowed.
-    public static func requestAuthorization() async -> Bool {
+    /// Asks for Speech Recognition once; true only when it is allowed. An answer that doesn't come within `wait` seconds
+    /// (a call answered on a locked phone, where the question can't show yet) counts as no, so a call never waits on it.
+    public static func requestAuthorization(wait seconds: Double = 20) async -> Bool {
         let status = SFSpeechRecognizer.authorizationStatus()
         if status == .authorized { return true }
         guard status == .notDetermined else { return false }
+        let answer = AuthorizationAnswer()
         return await withCheckedContinuation { continuation in
-            SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0 == .authorized) }
+            answer.start(continuation)
+            SFSpeechRecognizer.requestAuthorization { answer.resume($0 == .authorized) }
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64(max(seconds, 0) * 1_000_000_000))
+                answer.resume(false)
+            }
         }
+    }
+}
+
+/// The permission question's answer, taken once: the person's, or no when it doesn't come in time.
+private final class AuthorizationAnswer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+
+    func start(_ continuation: CheckedContinuation<Bool, Never>) {
+        lock.lock()
+        self.continuation = continuation
+        lock.unlock()
+    }
+
+    func resume(_ allowed: Bool) {
+        lock.lock()
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(returning: allowed)
     }
 }
 
