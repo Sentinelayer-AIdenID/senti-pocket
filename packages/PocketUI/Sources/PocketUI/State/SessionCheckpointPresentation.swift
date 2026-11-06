@@ -100,7 +100,8 @@ public struct SessionCheckpointRowPresentation: Equatable, Identifiable, Sendabl
         self.summary = checkpoint.summary.pocketCheckpointNonblank
         self.kind = checkpoint.kind
         self.grade = checkpoint.grade
-        self.createdBy = checkpoint.createdBy.pocketCheckpointNonblank ?? "Unknown participant"
+        // As Activity names people: a name or login, else "A person"; an agent by its id. Never an id's hex.
+        self.createdBy = ActivityNaming().name(of: checkpoint.createdByAgentId, displayName: checkpoint.createdBy)
         self.createdAt = authorized.createdAt
         self.startSequence = checkpoint.startSequence
         self.endSequence = checkpoint.endSequence

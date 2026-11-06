@@ -982,6 +982,8 @@ private struct RoomMessageRowView: View {
     @State private var sideScrolls: [CGRect] = []
     /// A double tap opens the same options as a long press.
     @State private var showsOptions = false
+    /// When Copy last copied this row: its icon is a checkmark until `CopyConfirmation.seconds` after.
+    @State private var copiedAt: Date?
 
     var body: some View {
         RenderTrace.row(row.sequenceId)
@@ -1553,7 +1555,10 @@ private struct RoomMessageRowView: View {
             .filter { $0.kind != .thread || !options.contains { $0.kind == .reply } }
         return HStack(spacing: 18) {
             ForEach(shown) { option in
-                actionButton(option.kind == .thread ? "arrowshape.turn.up.left" : option.symbol, label: option.title) {
+                let copied = option.kind == .copy && copiedAt != nil
+                actionButton(copied ? "checkmark" : option.kind == .thread ? "arrowshape.turn.up.left" : option.symbol,
+                             label: copied ? CopyConfirmation.said : option.title,
+                             identifier: option.kind == .copy ? "pocket.room.copy" : nil) {
                     perform(option)
                 }
             }
@@ -1569,6 +1574,15 @@ private struct RoomMessageRowView: View {
             .accessibilityLabel("More actions")
         }
         .padding(.top, 2)
+        // The check goes back to Copy 1.5 seconds after the last copy: a copy in between starts the time again (a new
+        // `copiedAt` cancels this wait), and a row that comes back on screen late clears it at once.
+        .task(id: copiedAt) {
+            guard let at = copiedAt else { return }
+            let left = CopyConfirmation.seconds - Date().timeIntervalSince(at)
+            if left > 0 { try? await Task.sleep(nanoseconds: UInt64(left * 1_000_000_000)) }
+            guard !Task.isCancelled, copiedAt == at else { return }
+            copiedAt = nil
+        }
     }
 
     private static let actionRowKinds: [RoomRowOption.Kind] = [.copy, .listen, .like, .dislike, .emoji, .reply, .thread]
@@ -1588,12 +1602,15 @@ private struct RoomMessageRowView: View {
             onEdit(row)
         } else if option.kind == .copy {
             copyToPasteboard(row.text)
+            copiedAt = Date()
+            CopyConfirmation.confirm()
         } else if let intent = option.intent {
             send(intent)
         }
     }
 
-    private func actionButton(_ symbol: String, label: String, action: @escaping () -> Void) -> some View {
+    private func actionButton(_ symbol: String, label: String, identifier: String? = nil,
+                              action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.footnote)
@@ -1603,6 +1620,7 @@ private struct RoomMessageRowView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(label)
+        .accessibilityIdentifier(identifier ?? "")
     }
 
     /// The long-press menu, from the row's own options: a reply shown in the room acts on itself, never on the
@@ -1719,6 +1737,20 @@ private func emptyComposer(_ draft: Binding<String>, clears: @escaping (String) 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
             if clears(draft.wrappedValue) { draft.wrappedValue = "" }
         }
+    }
+}
+
+/// What a copy says it did (Carter, #62487): the Copy icon is a checkmark for 1.5 seconds, VoiceOver says "Copied" and
+/// a light tap is felt.
+enum CopyConfirmation {
+    static let seconds: TimeInterval = 1.5
+    static let said = "Copied"
+
+    static func confirm() {
+        #if os(iOS)
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        UIAccessibility.post(notification: .announcement, argument: said)
+        #endif
     }
 }
 

@@ -469,21 +469,21 @@ extension RootPreviewAPI: SessionTransport {
     static let servesActivity = ProcessInfo.processInfo.arguments.contains("-PocketRootActivity")
 
     /// A few of a room's events for Activity, as the server writes them: its own types, and one this app does not know
-    /// (it reads as an update). Made-up words only.
+    /// (it reads as an update). An agent gives itself a model's name, which Activity never shows. Made-up words only.
     static func activityEvents(sessionId: String) throws -> SessionEventForwardPage {
-        let rows: [(type: String, name: String, text: String?, minutes: Double)] = [
-            ("session_message", "Alex", "Can someone check the release notes before lunch?", 42),
-            ("agent_response", "review-agent", "The notes read well. Two links were old; I fixed them.", 38),
-            ("session_titled", "Alex", nil, 31),
-            ("room_event_reminder", "Senti", "Design review in 15 minutes.", 15),
-            ("file_lock", "build-agent", nil, 9)
+        let rows: [(type: String, id: String, name: String, text: String?, minutes: Double)] = [
+            ("session_message", "human-alex", "Alex", "Can someone check the release notes before lunch?", 42),
+            ("agent_response", "review-agent", "nimbus-large-2", "The notes read well. Two links were old; I fixed them.", 38),
+            ("session_titled", "human-alex", "Alex", nil, 31),
+            ("room_event_reminder", "senti", "Senti", "Design review in 15 minutes.", 15),
+            ("file_lock", "build-agent", "nimbus-large-2", nil, 9)
         ]
         let now = Date()
         let events: [[String: Any]] = rows.enumerated().map { index, row in
             let at = ISO8601DateFormatter().string(from: now.addingTimeInterval(-row.minutes * 60))
             var event: [String: Any] = [
                 "id": "preview-event-\(index)", "event": row.type, "agent": ["displayName": row.name],
-                "agentId": row.name, "agentModel": "", "payload": [String: Any](), "ts": at, "timestamp": at,
+                "agentId": row.id, "agentModel": "", "payload": [String: Any](), "ts": at, "timestamp": at,
                 "cursor": "c\(index)",
                 "sequenceId": 7_000 + index, "sessionId": sessionId, "source": "preview"
             ]
@@ -494,17 +494,20 @@ extension RootPreviewAPI: SessionTransport {
         return try JSONDecoder().decode(SessionEventForwardPage.self, from: data)
     }
 
-    /// A few of a room's actions for Activity, as the server writes them (one of a type this app does not know).
+    /// A few of a room's actions for Activity, as the server writes them (one of a type this app does not know). One
+    /// person has only a Google account's id, which Activity never shows.
     static func activityActions(sessionId: String) throws -> SessionActionPage {
-        let rows: [(type: String, actor: String, target: Int, minutes: Double)] = [
-            ("ack", "Alex", 7_001, 37), ("like", "Sam", 7_001, 36), ("view", "Sam", 7_000, 35),
-            ("working_on", "review-agent", 0, 30), ("escalate", "ops-agent", 7_003, 12)
+        let google = "human-g." + String(repeating: "0123456789abcdef", count: 2)
+        let rows: [(type: String, kind: String, actor: String, target: Int, minutes: Double)] = [
+            ("ack", "human", "human-alex", 7_001, 37), ("like", "human", google, 7_001, 36),
+            ("view", "human", google, 7_000, 35), ("working_on", "agent", "review-agent", 0, 30),
+            ("escalate", "agent", "ops-agent", 7_003, 12)
         ]
         let now = Date()
         let actions: [[String: Any]] = rows.enumerated().map { index, row in
             [
                 "id": "preview-action-\(index)", "sessionId": sessionId, "targetSequenceId": row.target,
-                "targetCursor": NSNull(), "targetActionId": NSNull(), "actionType": row.type, "actorKind": "human",
+                "targetCursor": NSNull(), "targetActionId": NSNull(), "actionType": row.type, "actorKind": row.kind,
                 "actorId": row.actor, "actorUserId": NSNull(), "actorRole": NSNull(), "note": NSNull(), "metadata": [String: Any](),
                 "idempotencyKey": "preview-\(index)",
                 "createdAt": ISO8601DateFormatter().string(from: now.addingTimeInterval(-row.minutes * 60))
@@ -759,5 +762,20 @@ private struct RootPreviewCreatingSender: RoomMessageSending, RoomActionSending,
         try? await Task.sleep(nanoseconds: 300_000_000)
         return "room-made-" + String(UUID().uuidString.prefix(8)).lowercased()
     }
+}
+
+/// With `-PocketRootCreates` a room can also talk: its bar shows Talk, as for anyone who isn't a viewer. Turns and the
+/// transcript go nowhere.
+extension RootPreviewCreatingSender: VoiceRoomPosting {
+    func postCallStarted(sessionId: String, text: String, clientId: String) async throws {}
+
+    func postVoiceTurn(sessionId: String, text: String, clientId: String) async throws {}
+
+    func uploadTranscript(sessionId: String, filename: String, markdown: String, clientId: String) async throws -> VoiceTranscriptAttachment {
+        VoiceTranscriptAttachment(attachmentId: "preview-transcript", filename: filename, kind: "text",
+                                  contentType: "text/markdown", sizeBytes: markdown.utf8.count, status: "ready")
+    }
+
+    func postCallEnded(sessionId: String, text: String, transcript: VoiceTranscriptAttachment?, clientId: String) async throws {}
 }
 #endif

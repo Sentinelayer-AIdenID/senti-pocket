@@ -1,3 +1,4 @@
+import PocketContracts
 import XCTest
 @testable import PocketUI
 
@@ -91,7 +92,9 @@ final class FriendlyWordsTests: XCTestCase {
         let events = ["session_message", "session_say", "agent_response", "human_relay", "session_titled",
                       "session_member_joined", "agent_admission_joined", "agent_admission_state_changed",
                       "session_branched_from", "session_branched_to", "room_event_reminder", "room_event_cancelled",
-                      "room_event_postponed", "agent_join", "agent_leave", "agent_complete", "agent_error"]
+                      "room_event_postponed", "agent_join", "agent_leave", "agent_complete", "agent_error",
+                      "session_message_edited", "session_attachment", "session_breakout_opened",
+                      "session_breakout_outcome", "session_checkpoint"]
         for (type, words) in actions.map({ ($0, ActivityWords.action($0)) }) + events.map({ ($0, ActivityWords.event($0)) }) {
             XCTAssertNotEqual(words, "Update", "\(type) is one of the server's own and has its words")
             XCTAssertNil(words.rangeOfCharacter(from: CharacterSet(charactersIn: "_#0123456789")), "\(type): \(words)")
@@ -118,5 +121,120 @@ final class FriendlyWordsTests: XCTestCase {
             XCTAssertFalse(line.localizedCaseInsensitiveContains("session"), line)
             XCTAssertFalse(line.localizedCaseInsensitiveContains("authorized"), line)
         }
+    }
+
+    /// The chat list, Activity and Saved summaries say how long ago the same way.
+    func test_how_long_ago_reads_just_now_or_minutes_ago_never_now_ago() {
+        XCTAssertEqual(AgoText.words(now.addingTimeInterval(-20), now: now), "just now")
+        XCTAssertEqual(AgoText.words(now.addingTimeInterval(-5 * 60), now: now), "5m ago")
+        XCTAssertEqual(AgoText.words(now.addingTimeInterval(-42 * 60 - 12), now: now), "42m ago")
+        XCTAssertEqual(AgoText.words(now.addingTimeInterval(-3 * 3_600), now: now), "3h ago")
+        XCTAssertEqual(AgoText.words(now.addingTimeInterval(-2 * 86_400), now: now), "2d ago")
+        for seconds in [0.0, 30, 59, 60, 3_600, 90_000] {
+            let words = AgoText.words(now.addingTimeInterval(-seconds), now: now)
+            XCTAssertFalse(words.contains("now ago"), words)
+        }
+        XCTAssertEqual(ChatListWords.noActivity, "No activity yet")
+    }
+
+    // MARK: Who did it, in Activity
+
+    /// Activity names who wrote or did something as the chat does: "You"; a person by name, else their GitHub login,
+    /// else "A person"; an agent by its id, never the name it gives itself (here a model's). Never an account's hex
+    /// or "human-". The people, agents and ids are made up.
+    func test_activity_names_people_and_agents_never_by_a_hex_id_or_a_models_name() throws {
+        let hex = "0123456789abcdef0123456789abcdef"
+        func event(_ id: String, _ agent: String, _ name: String?) -> String {
+            let shown = name.map { #"{"displayName":"\#($0)"}"# } ?? "{}"
+            return #"{"id":"\#(id)","event":"session_message","agent":\#(shown),"agentId":"\#(agent)","agentModel":"m","#
+                + #""payload":{"text":"hi"},"ts":"2026-11-06T09:00:00Z","timestamp":"2026-11-06T09:00:00Z","cursor":"c","#
+                + #""sequenceId":\#(id.count * 7),"sessionId":"room-1","source":"phone"}"#
+        }
+        func action(_ id: String, _ kind: String, _ actor: String) -> String {
+            #"{"id":"\#(id)","sessionId":"room-1","targetSequenceId":7,"targetCursor":null,"targetActionId":null,"#
+                + #""actionType":"ack","actorKind":"\#(kind)","actorId":"\#(actor)","actorUserId":null,"actorRole":null,"#
+                + #""note":null,"metadata":{},"idempotencyKey":"k-\#(id)","createdAt":"2026-11-06T09:01:00Z"}"#
+        }
+        let events = try JSONDecoder().decode(SessionEventForwardPage.self, from: Data(("{\"events\":[" + [
+            event("e1", "build-agent", "nimbus-large-2"),
+            event("e22", "human-ada", "Ada Lovelace"),
+            event("e333", "human-g.\(hex)", nil),
+            event("e4444", "human-alex", "Alex"),
+        ].joined(separator: ",") + "]}").utf8))
+        let actions = try JSONDecoder().decode(SessionActionPage.self, from: Data((
+            #"{"sessionId":"room-1","count":5,"projection":{},"actions":["# + [
+                action("a1", "human", "human-ada"),
+                action("a2", "human", "human-g.\(hex)"),
+                action("a3", "human", "human-octo-reader"),
+                action("a4", "human", "alex"),
+                action("a5", "agent", "review-agent"),
+            ].joined(separator: ",") + "]}").utf8))
+        let state = SessionActivityPresentationState(sessionId: "room-1", eventPage: events, actionPage: actions,
+                                                     provenance: .network(lastUpdated: now),
+                                                     naming: ActivityNaming(you: ["human-alex"]))
+        XCTAssertNil(state.failure)
+        XCTAssertEqual(state.events.map(\.author), ["build-agent", "Ada Lovelace", "A person", "You"])
+        XCTAssertEqual(state.actions.map(\.actor), ["Ada Lovelace", "A person", "octo-reader", "You", "review-agent"])
+        for name in state.events.map(\.author) + state.actions.map(\.actor) {
+            XCTAssertFalse(name.localizedCaseInsensitiveContains("human-"), name)
+            XCTAssertFalse(name.contains("0123456789"), name)
+            XCTAssertFalse(name.contains("nimbus"), name)
+        }
+        // With no one signed in, nobody is "You".
+        let anyone = SessionActivityPresentationState(sessionId: "room-1", eventPage: events, actionPage: actions,
+                                                      provenance: .network(lastUpdated: now))
+        XCTAssertEqual(anyone.events.last?.author, "Alex")
+        XCTAssertEqual(anyone.actions[3].actor, "Alex", "a person's action goes by the name their messages carry")
+    }
+
+    // MARK: The second review's words (follow-ups to #349)
+
+    /// Edited messages, files, side chats and checkpoints say what they are in Activity, never a bare "Update".
+    func test_activity_describes_edits_files_side_chats_and_checkpoints() {
+        XCTAssertEqual(ActivityWords.event("session_message_edited"), "Message edited")
+        XCTAssertEqual(ActivityWords.event("session_attachment"), "File shared")
+        XCTAssertEqual(ActivityWords.event("session_breakout_opened"), "Side chat opened")
+        XCTAssertEqual(ActivityWords.event("session_breakout_outcome"), "Side chat result")
+        XCTAssertEqual(ActivityWords.event("session_checkpoint"), "Checkpoint saved", "the web's words (#760)")
+    }
+
+    /// What the chat list, Activity and Saved summaries say when they cannot load: chats, never sessions or
+    /// authorization.
+    func test_failures_say_chats_never_sessions_or_authorization() {
+        let failures: [SessionLoadFailure] = [.reauthenticationRequired, .accessDenied, .offlineNoCache, .network,
+                                              .invalidData, .service]
+        for failure in failures {
+            for words in [failure.title, failure.detail] {
+                for jargon in ["session", "authoriz", "protected", "cached", "data"] {
+                    XCTAssertFalse(words.localizedCaseInsensitiveContains(jargon), "\(failure): \(words)")
+                }
+            }
+        }
+        XCTAssertEqual(SessionLoadFailure.service.title, "Chats unavailable")
+    }
+
+    /// Who is here, in the web's words (#760): here now, away, left, stopped.
+    func test_presence_says_the_webs_words() {
+        XCTAssertEqual(RoomRoster.Status.allCases.map(\.label), ["Here now", "Away", "Left", "Stopped"])
+    }
+
+    /// "Saved by" names a person as Activity does, never by an account's hex; an agent by its id.
+    func test_saved_by_never_shows_an_id() throws {
+        let hex = "0123456789abcdef0123456789abcdef"
+        func checkpoint(_ id: String, by name: String, agent: String) -> String {
+            #"{"checkpointId":"\#(id)","sessionId":"room-1","kind":"manual_checkpoint","title":"Notes","#
+                + #""summary":"Agreed.","startSequence":1,"endSequence":2,"tokenRange":null,"createdBy":"\#(name)","#
+                + #""createdByAgentId":"\#(agent)","eventSequence":3,"cursor":"c3","createdAt":"2026-11-06T09:00:00Z","#
+                + #""summarySections":{},"grade":"A-","gradeScore":91,"gradeVersion":"v1","gradeReasons":[]}"#
+        }
+        let page = try JSONDecoder().decode(SessionCheckpointListPage.self, from: Data(("{\"checkpoints\":[" + [
+            checkpoint("cp-1", by: "g.\(hex)", agent: "human-g.\(hex)"),
+            checkpoint("cp-2", by: "octo-reader", agent: "human-octo-reader"),
+            checkpoint("cp-3", by: "nimbus-large-2", agent: "review-agent"),
+        ].joined(separator: ",") + "],\"count\":3}").utf8))
+        let state = SessionCheckpointListPresentationState(sessionId: "room-1", page: page,
+                                                          provenance: .network(lastUpdated: now))
+        XCTAssertNil(state.failure)
+        XCTAssertEqual(state.rows.map(\.createdBy), ["A person", "octo-reader", "review-agent"])
     }
 }

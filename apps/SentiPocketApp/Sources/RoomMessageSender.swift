@@ -115,6 +115,18 @@ final class HTTPRoomMessageSender: RoomMessageSending, @unchecked Sendable {
 /// Who is signed in, from `GET /api/v1/auth/me`: the GitHub username the API authors your messages under
 /// (`human-<username>`), for "is this my message" and "am I mentioned", and who you are in action keys.
 struct SignedInAccount: Equatable, Sendable {
+    /// Every id the room writes you under, for Activity's "You": your author id, the GitHub login, the account id and
+    /// a Google account's `g.<account>`.
+    var activityIds: Set<String> {
+        var ids: Set<String> = [authorId, actorRef]
+        if let login { ids.insert(login) }
+        if let accountId {
+            ids.insert(accountId)
+            ids.insert("g." + accountId.replacingOccurrences(of: "-", with: ""))
+        }
+        return ids
+    }
+
     /// The author id the API writes your messages under: `human-<GitHub username, else account id>`, normalized
     /// as the API does (`_normalize_human_sender`).
     let authorId: String

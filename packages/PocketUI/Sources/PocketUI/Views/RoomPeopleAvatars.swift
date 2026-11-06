@@ -341,23 +341,33 @@ struct RoomOnlineCountPill: View {
             Circle()
                 .fill(online != "0" && online != "?" ? PocketPalette.verified : PocketPalette.textSecondary)
                 .frame(width: 7, height: 7)
-            Text(online)
-                .font(.caption.weight(.bold))
-                .monospacedDigit()
-                .foregroundStyle(PocketPalette.textPrimary)
-                .contentTransition(.numericText())
-                // The capsule is 22 points tall and the room keeps only the ring's height clear above its first line:
-                // at the largest text sizes the digits stay inside the capsule rather than spill over "Start of the
-                // room" (Carter's IMG_7606). VoiceOver reads the count from the label.
-                .dynamicTypeSize(...DynamicTypeSize.xLarge)
+            RoomCountPillDigits.text(online)
         }
         .padding(.horizontal, 8)
-        .frame(height: 22)
+        .frame(height: RoomCountPillDigits.height)
         .background(Capsule().fill(PocketPalette.raised))
         .overlay(Capsule().strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
         .shadow(color: .black.opacity(0.35), radius: 3, y: 2)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(online == "?" ? "Who is here is unavailable" : "\(online) active")
+    }
+}
+
+/// The count on the ring's pill, and the pill's height (public for the hosted test that sizes the digits at the largest
+/// text size: a UI test sees the ring as one element and cannot see digits spill).
+public enum RoomCountPillDigits {
+    public static let height: CGFloat = 22
+
+    /// The pill is 22 points tall and the room keeps only the ring's height clear above its first line: at the largest
+    /// text sizes the digits stay inside the pill rather than spill over "Start of the room" (Carter's IMG_7606).
+    /// VoiceOver reads the count from the pill's label.
+    public static func text(_ online: String) -> some View {
+        Text(online)
+            .font(.caption.weight(.bold))
+            .monospacedDigit()
+            .foregroundStyle(PocketPalette.textPrimary)
+            .contentTransition(.numericText())
+            .dynamicTypeSize(...DynamicTypeSize.xLarge)
     }
 }
 

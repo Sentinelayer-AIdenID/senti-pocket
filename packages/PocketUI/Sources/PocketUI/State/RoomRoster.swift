@@ -17,12 +17,13 @@ public struct RoomRoster: Equatable, Sendable {
 
         public static func < (lhs: Status, rhs: Status) -> Bool { lhs.rawValue < rhs.rawValue }
 
+        /// The web's words for the same states (sentinelayer-web #760), so both say the same.
         public var label: String {
             switch self {
-            case .here: return "Here"
-            case .idle: return "Idle"
-            case .gone: return "Gone"
-            case .ended: return "Ended"
+            case .here: return "Here now"
+            case .idle: return "Away"
+            case .gone: return "Left"
+            case .ended: return "Stopped"
             }
         }
     }

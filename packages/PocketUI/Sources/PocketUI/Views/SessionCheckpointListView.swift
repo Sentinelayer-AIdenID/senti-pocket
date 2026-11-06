@@ -3,12 +3,12 @@ import SwiftUI
 
 public struct SessionCheckpointListView: View {
     /// Saved summaries, once "Room checkpoints" (Carter, 2026-11-06), in plain words that keep what each line
-    /// promises: with a signing service, a summary's signature is checked before any of it shows; without one, it is
-    /// shown as saved and never called checked (#266).
+    /// promises: with a signing service, opening a summary checks its signature before showing it (the list itself
+    /// shows titles and summaries as saved); without one, it is shown as saved and never called checked (#266).
     static let exactCheckpointOpenHint =
         "Checks this summary's signature before showing any of it."
     static let trustBoundaryMessage =
-        "You see these summaries because you're in this chat. Each one's signature is checked before any of it is shown."
+        "You see these summaries because you're in this chat. Opening one checks its signature before showing it."
     /// While this build verifies nothing, the list says what opening one does (#266).
     static let serverCheckpointOpenHint =
         "Opens this summary as it was saved. It isn't signed yet."
@@ -213,12 +213,11 @@ private struct SessionCheckpointRow: View {
         Text("Saved by \(row.createdBy)")
     }
 
+    /// When it was saved: "3h ago", "just now"; nothing rather than the server's text when the phone cannot read it.
     @ViewBuilder
     private var timestamp: some View {
         if let date = row.createdAt.date {
-            Text(date, style: .relative)
-        } else {
-            Text(verbatim: row.createdAt.raw)
+            AgoText(date: date)
         }
     }
 }

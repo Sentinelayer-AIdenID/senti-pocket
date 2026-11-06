@@ -440,6 +440,7 @@ struct AuthenticatedRootView: View {
         )
         let details = SelectedSessionDetailCoordinator(
             transport: services.sessions,
+            identity: services.identity,
             // The signing gateway is not deployed and Release pins no signing key yet: checkpoints
             // open as the server holds them until it is.
             opensVerifiedCheckpoints: PocketGatewayTrust.verifiesBundles,
@@ -964,8 +965,8 @@ struct AuthenticatedRootView: View {
                 }
         }
         .accessibilityLabel(notifications.unreadCount > 0
-            ? "Rooms and settings, \(notifications.unreadCount) unread notifications"
-            : "Rooms and settings")
+            ? "Chats and settings, \(notifications.unreadCount) unread notifications"
+            : "Chats and settings")
         .accessibilityIdentifier("pocket.drawer.open")
     }
 
@@ -1216,9 +1217,9 @@ private struct SelectedSessionPocketView: View {
         } else {
             NavigationStack {
                 StatusView(
-                    title: "Choose a session",
+                    title: PocketIdleWords.title,
                     systemImage: "rectangle.stack",
-                    message: "Select an authorized session before asking Senti or posting as yourself."
+                    message: PocketIdleWords.message
                 )
                 .navigationTitle("Pocket")
             }
@@ -1635,3 +1636,10 @@ private struct StatusView: View {
     RootView()
 }
 #endif
+
+/// The Pocket sheet with no chat open, in plain words (ticket 693f0cc5): it said "Choose a session" and "an
+/// authorized session".
+enum PocketIdleWords {
+    static let title = "Choose a chat"
+    static let message = "Open a chat first, then ask Senti or post as yourself."
+}

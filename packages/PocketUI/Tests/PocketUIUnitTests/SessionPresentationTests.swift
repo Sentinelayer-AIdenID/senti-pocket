@@ -62,7 +62,7 @@ final class SessionPresentationTests: XCTestCase {
         XCTAssertEqual(state.rows.count, 1)
         XCTAssertEqual(state.rows[0].sessionId, "room-1")
         XCTAssertEqual(state.rows[0].id.rawValue, "room-1")
-        XCTAssertEqual(state.rows[0].title, "Untitled session")
+        XCTAssertEqual(state.rows[0].title, "Untitled chat")
         XCTAssertEqual(state.rows[0].summary, "Current work")
         XCTAssertEqual(state.rows[0].statusLabel, "Active")
         XCTAssertEqual(state.rows[0].lastActivity?.raw, "2026-07-18T10:36:34Z")
@@ -117,7 +117,7 @@ final class SessionPresentationTests: XCTestCase {
 
         XCTAssertNil(state.failure)
         XCTAssertEqual(state.events.map(\.sequenceId), [230141])
-        XCTAssertEqual(state.events.first?.author, "Relay")
+        XCTAssertEqual(state.events.first?.author, "claude-pocket-relay", "an agent by its id, never the name it gives itself")
         XCTAssertEqual(state.events.first?.text, "hello")
         XCTAssertEqual(state.actions.first?.id.actionId, "act-1")
         XCTAssertEqual(state.actions.first?.targetSequenceId, 230141)
