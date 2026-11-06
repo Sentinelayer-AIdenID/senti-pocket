@@ -92,7 +92,9 @@ final class FriendlyWordsTests: XCTestCase {
         let events = ["session_message", "session_say", "agent_response", "human_relay", "session_titled",
                       "session_member_joined", "agent_admission_joined", "agent_admission_state_changed",
                       "session_branched_from", "session_branched_to", "room_event_reminder", "room_event_cancelled",
-                      "room_event_postponed", "agent_join", "agent_leave", "agent_complete", "agent_error"]
+                      "room_event_postponed", "agent_join", "agent_leave", "agent_complete", "agent_error",
+                      "session_message_edited", "session_attachment", "session_breakout_opened",
+                      "session_breakout_outcome", "session_checkpoint"]
         for (type, words) in actions.map({ ($0, ActivityWords.action($0)) }) + events.map({ ($0, ActivityWords.event($0)) }) {
             XCTAssertNotEqual(words, "Update", "\(type) is one of the server's own and has its words")
             XCTAssertNil(words.rangeOfCharacter(from: CharacterSet(charactersIn: "_#0123456789")), "\(type): \(words)")
@@ -183,5 +185,56 @@ final class FriendlyWordsTests: XCTestCase {
                                                       provenance: .network(lastUpdated: now))
         XCTAssertEqual(anyone.events.last?.author, "Alex")
         XCTAssertEqual(anyone.actions[3].actor, "Alex", "a person's action goes by the name their messages carry")
+    }
+
+    // MARK: The second review's words (follow-ups to #349)
+
+    /// Edited messages, files, side chats and checkpoints say what they are in Activity, never a bare "Update".
+    func test_activity_describes_edits_files_side_chats_and_checkpoints() {
+        XCTAssertEqual(ActivityWords.event("session_message_edited"), "Message edited")
+        XCTAssertEqual(ActivityWords.event("session_attachment"), "File shared")
+        XCTAssertEqual(ActivityWords.event("session_breakout_opened"), "Side chat opened")
+        XCTAssertEqual(ActivityWords.event("session_breakout_outcome"), "Side chat result")
+        XCTAssertEqual(ActivityWords.event("session_checkpoint"), "Checkpoint saved", "the web's words (#760)")
+    }
+
+    /// What the chat list, Activity and Saved summaries say when they cannot load: chats, never sessions or
+    /// authorization.
+    func test_failures_say_chats_never_sessions_or_authorization() {
+        let failures: [SessionLoadFailure] = [.reauthenticationRequired, .accessDenied, .offlineNoCache, .network,
+                                              .invalidData, .service]
+        for failure in failures {
+            for words in [failure.title, failure.detail] {
+                for jargon in ["session", "authoriz", "protected", "cached", "data"] {
+                    XCTAssertFalse(words.localizedCaseInsensitiveContains(jargon), "\(failure): \(words)")
+                }
+            }
+        }
+        XCTAssertEqual(SessionLoadFailure.service.title, "Chats unavailable")
+    }
+
+    /// Who is here, in the web's words (#760): here now, away, left, stopped.
+    func test_presence_says_the_webs_words() {
+        XCTAssertEqual(RoomRoster.Status.allCases.map(\.label), ["Here now", "Away", "Left", "Stopped"])
+    }
+
+    /// "Saved by" names a person as Activity does, never by an account's hex; an agent by its id.
+    func test_saved_by_never_shows_an_id() throws {
+        let hex = "0123456789abcdef0123456789abcdef"
+        func checkpoint(_ id: String, by name: String, agent: String) -> String {
+            #"{"checkpointId":"\#(id)","sessionId":"room-1","kind":"manual_checkpoint","title":"Notes","#
+                + #""summary":"Agreed.","startSequence":1,"endSequence":2,"tokenRange":null,"createdBy":"\#(name)","#
+                + #""createdByAgentId":"\#(agent)","eventSequence":3,"cursor":"c3","createdAt":"2026-11-06T09:00:00Z","#
+                + #""summarySections":{},"grade":"A-","gradeScore":91,"gradeVersion":"v1","gradeReasons":[]}"#
+        }
+        let page = try JSONDecoder().decode(SessionCheckpointListPage.self, from: Data(("{\"checkpoints\":[" + [
+            checkpoint("cp-1", by: "g.\(hex)", agent: "human-g.\(hex)"),
+            checkpoint("cp-2", by: "octo-reader", agent: "human-octo-reader"),
+            checkpoint("cp-3", by: "nimbus-large-2", agent: "review-agent"),
+        ].joined(separator: ",") + "],\"count\":3}").utf8))
+        let state = SessionCheckpointListPresentationState(sessionId: "room-1", page: page,
+                                                          provenance: .network(lastUpdated: now))
+        XCTAssertNil(state.failure)
+        XCTAssertEqual(state.rows.map(\.createdBy), ["A person", "octo-reader", "review-agent"])
     }
 }

@@ -763,4 +763,19 @@ private struct RootPreviewCreatingSender: RoomMessageSending, RoomActionSending,
         return "room-made-" + String(UUID().uuidString.prefix(8)).lowercased()
     }
 }
+
+/// With `-PocketRootCreates` a room can also talk: its bar shows Talk, as for anyone who isn't a viewer. Turns and the
+/// transcript go nowhere.
+extension RootPreviewCreatingSender: VoiceRoomPosting {
+    func postCallStarted(sessionId: String, text: String, clientId: String) async throws {}
+
+    func postVoiceTurn(sessionId: String, text: String, clientId: String) async throws {}
+
+    func uploadTranscript(sessionId: String, filename: String, markdown: String, clientId: String) async throws -> VoiceTranscriptAttachment {
+        VoiceTranscriptAttachment(attachmentId: "preview-transcript", filename: filename, kind: "text",
+                                  contentType: "text/markdown", sizeBytes: markdown.utf8.count, status: "ready")
+    }
+
+    func postCallEnded(sessionId: String, text: String, transcript: VoiceTranscriptAttachment?, clientId: String) async throws {}
+}
 #endif

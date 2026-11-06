@@ -206,4 +206,17 @@ final class FriendlyWordsHostedTests: XCTestCase {
             }
         }
     }
+
+    // MARK: The ring's count
+
+    /// The count on the ring's pill stays inside the pill at every text size, the largest too: digits taller than the
+    /// pill spill over "Start of the room", which a UI test cannot see (it reads the ring as one element).
+    func test_the_rings_count_stays_inside_its_pill_at_the_largest_text_size() {
+        for size in [DynamicTypeSize.large, .xxxLarge, .accessibility3, .accessibility5] {
+            let digits = UIHostingController(rootView: RoomCountPillDigits.text("88").environment(\.dynamicTypeSize, size))
+            let fitted = digits.sizeThatFits(in: CGSize(width: 300, height: 300))
+            XCTAssertGreaterThan(fitted.height, 0, "\(size): the digits drew")
+            XCTAssertLessThanOrEqual(fitted.height, RoomCountPillDigits.height, "\(size): the digits spill out of the pill")
+        }
+    }
 }

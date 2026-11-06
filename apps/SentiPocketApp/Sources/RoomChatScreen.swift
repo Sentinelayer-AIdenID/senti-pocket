@@ -763,8 +763,8 @@ struct RoomChatScreen: View {
                         Label("Talk", systemImage: "waveform")
                     }
                     .disabled(voiceRoom != nil)
-                    // A plain name for VoiceOver (Carter, 2026-11-06): "Voice", "Room info", "More".
-                    .accessibilityLabel("Voice")
+                    // The word it shows is the word VoiceOver and Voice Control use (Carter, 2026-11-06).
+                    .accessibilityLabel("Talk")
                     .accessibilityIdentifier("pocket.room.talk")
                 }
             }

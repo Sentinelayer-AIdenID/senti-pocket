@@ -3,9 +3,9 @@ import XCTest
 
 /// Plain words on the first screens a new person meets (Carter, 2026-11-06, ticket 693f0cc5), on the root preview's
 /// made-up rooms, which have no boxes: the list is Chats, the side panel says New chat and Search chats; a room's bar
-/// reads "Room info" (and "Voice" where it can talk); Room info starts with the people and says nothing about boxes; the
+/// reads "Room info" and "Talk"; Room info starts with the people and says nothing about boxes; the
 /// ring of who is here never covers the start of the room, at the default text size or the largest; the speech model is
-/// only under Settings' Advanced; and Activity says what happened, with no server numbers or tokens.
+/// only under Settings' Advanced; and Activity says what happened and who did it, with no server numbers, tokens or ids.
 final class FriendlyWordsUITests: XCTestCase {
     private static let largestText = ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
 
@@ -81,8 +81,10 @@ final class FriendlyWordsUITests: XCTestCase {
         let info = app.buttons["pocket.room.flight"]
         XCTAssertTrue(info.waitForExistence(timeout: 20), app.navigationBars.debugDescription)
         XCTAssertEqual(info.label, "Room info")
+        // The preview's rooms can talk (-PocketRootCreates): the button is there, and says what it shows.
         let talk = app.buttons["pocket.room.talk"]
-        if talk.exists { XCTAssertEqual(talk.label, "Voice") }
+        XCTAssertTrue(talk.waitForExistence(timeout: 10), "no Talk in the bar: \(app.navigationBars.debugDescription)")
+        XCTAssertEqual(talk.label, "Talk")
         info.tap()
         let panel = app.descendants(matching: .any)["pocket.flight"]
         XCTAssertTrue(panel.waitForExistence(timeout: 20))
@@ -130,9 +132,14 @@ final class FriendlyWordsUITests: XCTestCase {
         let read = words(in: app)
         XCTAssertTrue(read.contains { $0.contains("Acknowledged") }, "\(read)")
         XCTAssertTrue(read.contains { $0.contains("Update") }, "a type the app does not know reads as an update: \(read)")
+        XCTAssertTrue(read.contains { $0.contains("A person") }, "a person known only by a Google account's id: \(read)")
+        XCTAssertTrue(read.contains { $0.contains("review-agent") }, "an agent by its id: \(read)")
         for word in read {
             XCTAssertNil(word.range(of: #"#\d"#, options: .regularExpression), "a server number: \(word)")
             XCTAssertFalse(word.contains("_"), "a server token: \(word)")
+            XCTAssertFalse(word.localizedCaseInsensitiveContains("human-"), "an id: \(word)")
+            XCTAssertNil(word.range(of: "[0-9a-f]{12,}", options: [.regularExpression, .caseInsensitive]), "an id's hex: \(word)")
+            XCTAssertFalse(word.contains("nimbus"), "the name an agent gives itself: \(word)")
         }
         XCTAssertEqual(app.buttons["Saved summaries"].label, "Saved summaries")
     }

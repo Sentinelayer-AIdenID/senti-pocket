@@ -965,8 +965,8 @@ struct AuthenticatedRootView: View {
                 }
         }
         .accessibilityLabel(notifications.unreadCount > 0
-            ? "Rooms and settings, \(notifications.unreadCount) unread notifications"
-            : "Rooms and settings")
+            ? "Chats and settings, \(notifications.unreadCount) unread notifications"
+            : "Chats and settings")
         .accessibilityIdentifier("pocket.drawer.open")
     }
 
@@ -1217,9 +1217,9 @@ private struct SelectedSessionPocketView: View {
         } else {
             NavigationStack {
                 StatusView(
-                    title: "Choose a session",
+                    title: "Choose a chat",
                     systemImage: "rectangle.stack",
-                    message: "Select an authorized session before asking Senti or posting as yourself."
+                    message: "Open a chat first, then ask Senti or post as yourself."
                 )
                 .navigationTitle("Pocket")
             }

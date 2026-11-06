@@ -63,7 +63,7 @@ final class VerifiedCheckpointBriefingTests: XCTestCase {
         )
         XCTAssertEqual(
             SessionCheckpointListView.trustBoundaryMessage,
-            "You see these summaries because you're in this chat. Each one's signature is checked before any of it is shown."
+            "You see these summaries because you're in this chat. Opening one checks its signature before showing it."
         )
     }
     #endif

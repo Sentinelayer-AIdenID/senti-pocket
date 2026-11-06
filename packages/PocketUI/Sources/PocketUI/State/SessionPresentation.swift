@@ -20,28 +20,28 @@ public enum SessionLoadFailure: Equatable, Sendable {
     public var title: String {
         switch self {
         case .reauthenticationRequired: return "Sign in again"
-        case .accessDenied: return "Access denied"
-        case .offlineNoCache: return "Nothing available offline"
+        case .accessDenied: return "Can't open this chat"
+        case .offlineNoCache: return "Nothing saved on this phone"
         case .network: return "Connection unavailable"
-        case .invalidData: return "Session data unavailable"
-        case .service: return "Sessions unavailable"
+        case .invalidData: return "Couldn't show this"
+        case .service: return "Chats unavailable"
         }
     }
 
     public var detail: String {
         switch self {
         case .reauthenticationRequired:
-            return "Your Senti authorization is no longer valid. Sign in again before loading protected sessions."
+            return "You've been signed out. Sign in again to see your chats."
         case .accessDenied:
-            return "This account is not authorized to open that session. No protected cached content is shown."
+            return "This account can't open that chat, so nothing from it is shown."
         case .offlineNoCache:
-            return "Connect to Senti once to make authorized session data available on this device."
+            return "Connect once, and your chats stay on this phone for when you're offline."
         case .network:
             return "Check your connection and try again."
         case .invalidData:
-            return "Senti returned session data that this app could not safely present."
+            return "Senti sent something this app couldn't show safely."
         case .service:
-            return "Senti could not load sessions right now."
+            return "Senti couldn't load your chats right now. Try again soon."
         }
     }
 
@@ -454,6 +454,11 @@ enum ActivityWords {
         "session_message": "Message",
         "session_say": "Message",
         "human_relay": "Message",
+        "session_message_edited": "Message edited",
+        "session_attachment": "File shared",
+        "session_breakout_opened": "Side chat opened",
+        "session_breakout_outcome": "Side chat result",
+        "session_checkpoint": "Checkpoint saved",
         "agent_response": "Answer",
         "session_titled": "Chat renamed",
         "session_member_joined": "Someone joined",
