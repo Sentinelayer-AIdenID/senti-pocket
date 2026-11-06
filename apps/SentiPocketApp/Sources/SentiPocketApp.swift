@@ -387,9 +387,16 @@ func endAllEditing() {
 final class SidePanelState: ObservableObject {
     @Published var isOpen = false
 
-    /// Opens the panel, editing ended first (`endAllEditing`).
+    /// What ends editing before the panel opens: `endAllEditing` in the app; a test gives its own, to see it run first.
+    private let endEditing: @MainActor () -> Void
+
+    init(endEditing: @escaping @MainActor () -> Void = endAllEditing) {
+        self.endEditing = endEditing
+    }
+
+    /// Opens the panel, editing ended first, so the keyboard starts going down before the panel's spring.
     func open() {
-        endAllEditing()
+        endEditing()
         isOpen = true
     }
 
