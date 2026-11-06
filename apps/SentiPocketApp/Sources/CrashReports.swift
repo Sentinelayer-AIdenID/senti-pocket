@@ -188,14 +188,6 @@ enum CrashReportText {
     /// Well under a room message's limit.
     static let maximumLength = 12_000
 
-    /// One message id per set of reports, whatever their order: a send that got there but was never confirmed is kept
-    /// once by the room when the same reports are sent again.
-    static func clientId(for reports: [CrashReport]) -> String {
-        let key = reports.map(\.id).sorted().joined(separator: ",")
-        let digest = SHA256.hash(data: Data(key.utf8)).prefix(16).map { String(format: "%02x", $0) }.joined()
-        return "crash-" + digest
-    }
-
     static func message(_ reports: [CrashReport]) -> String {
         let newestFirst = reports.sorted { $0.at > $1.at }
         var text = newestFirst.count == 1
@@ -371,8 +363,8 @@ struct LastRun: Codable, Equatable {
 }
 
 /// Catches what ends the app: iOS's crash and hang records (MetricKit, handed over at the next launch) and a run that
-/// ended on screen without one. Each new report is offered once, after the app opens, to send to the team in the
-/// person's own reports room (`CrashReportOffer`), never in a room anyone else is in.
+/// ended on screen without one. Each new report is offered once, after the app opens, to send to the team through the
+/// API (`CrashReportOffer`), never into a room.
 @MainActor
 final class CrashReporter: NSObject, ObservableObject, MXMetricManagerSubscriber {
     static let shared = CrashReporter(

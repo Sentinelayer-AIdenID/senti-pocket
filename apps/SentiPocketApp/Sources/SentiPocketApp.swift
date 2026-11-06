@@ -241,8 +241,8 @@ struct RootServices {
     var registersPush = true
     /// The calendar and its Apple Calendar link, shown once the server answers their routes; nil (a preview) hides it.
     var calendar: (any RoomCalendarServing & CalendarFeedServing)?
-    /// Where crash reports go when the person sends them: their own reports room. Nil (a preview) offers nothing.
-    var reportRooms: (any ReportRoomAPI)?
+    /// Where crash reports go when the person sends them: the team, through the API. Nil (a preview) offers nothing.
+    var crashReports: (any CrashReportSending)?
 
     /// The Senti API as you.
     static func live() -> RootServices {
@@ -290,7 +290,7 @@ struct RootServices {
             readMarker: HTTPRoomReadMarker(apiBaseURL: apiURL),
             calendar: HTTPRoomCalendarClient(apiBaseURL: apiURL, urlSession: CalendarHTTP.session,
                                              tokenProvider: { SessionTokenStore.load() }),
-            reportRooms: HTTPReportRooms(sender: sender, transport: transport)
+            crashReports: HTTPCrashReports(apiBaseURL: apiURL)
         )
     }
 }
@@ -403,7 +403,7 @@ struct AuthenticatedRootView: View {
     private let ticketExtras: any RoomTicketExtrasReading
     private let accountIdentity: any AccountIdentityProviding
     /// Where crash reports go when the person sends them (`CrashReportOffer`).
-    private let reportRooms: (any ReportRoomAPI)?
+    private let crashReports: (any CrashReportSending)?
     private let roomReceipts: any RoomReceiptsClient
     private let roomSearch: any RoomSearching
     /// How far you have read each room, told to the server as you read, for the unread badges.
@@ -536,7 +536,7 @@ struct AuthenticatedRootView: View {
         self.ticketLeases = services.ticketLeases
         self.ticketExtras = services.ticketExtras
         self.accountIdentity = services.identity
-        self.reportRooms = services.reportRooms
+        self.crashReports = services.crashReports
         self.roomReceipts = services.receipts
         self.roomSearch = services.search
         self.roomReadMarker = services.readMarker
@@ -630,8 +630,8 @@ struct AuthenticatedRootView: View {
         .pocketCanvas()
         // The logo at launch, while your rooms load underneath (Carter, #55287).
         .overlay { LaunchSplash(isReady: roomListSettled) }
-        // Crash reports are offered here, once a launch, for the whole app: to the team, in the person's own room.
-        .background { CrashReportOffer(api: reportRooms, identity: accountIdentity) }
+        // Crash reports are offered here, once a launch, for the whole app, to send to the team.
+        .background { CrashReportOffer(api: crashReports) }
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: drawerOpen)
         // Opening the side panel reads what it shows that was not read lately: the bell, Waiting on you, whether folders
         // and direct messages are on, and your folders, so no count is older than `panelFreshness`. The rooms are read

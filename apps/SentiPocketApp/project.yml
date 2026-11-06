@@ -88,9 +88,6 @@ targets:
         # Optional: the Flight record's service, also an explicit HTTPS origin from the build. Without it the Flight
         # record shows the room's agents and no boxes.
         SENTI_MINT_URL: "$(SENTI_MINT_URL)"
-        # Optional: the team's account (a GitHub login) that crash reports are shared with, set when an archive is made
-        # and never in the source. Without it a report stays in the person's own reports room and nobody is asked in.
-        SENTI_SUPPORT_MEMBER: "$(SENTI_SUPPORT_MEMBER)"
         # Emoji reactions in rooms stay hidden until this is true, as on the web (`RoomEmojiReactions`).
         SentiEmojiReactions: false
         # Sign in with Apple (`AppleSignInSetting`): on now that the API route is live and the app's entitlements carry

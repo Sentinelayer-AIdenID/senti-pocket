@@ -87,12 +87,10 @@ final class SignInCoordinator: ObservableObject {
 
     /// What belongs to the person who was signed in and must not cross a sign-out, a refused credential (another
     /// account may sign in next, as after an account deletion revokes the session) or a launch with no credential:
-    /// confirmed write intents, the calendar's subscribe link kept in the Keychain, and the room crash reports go to.
-    nonisolated static func clearPersonalState(calendarLinks: any CalendarLinkKeeping = CalendarLinkVault.live,
-                                               reportRooms: any ReportRoomKeeping = ReportRoomStore.live) {
+    /// confirmed write intents, and the calendar's subscribe link kept in the Keychain.
+    nonisolated static func clearPersonalState(calendarLinks: any CalendarLinkKeeping = CalendarLinkVault.live) {
         OutboxStore.clear()
         calendarLinks.forgetAll()
-        reportRooms.forgetAll()
     }
 
     /// Whether the sign-in screen offers Sign in with Apple.
