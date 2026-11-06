@@ -290,31 +290,46 @@ final class ChatMarkdownQuoteDepthLayoutTests: XCTestCase {
     private struct CountedBlocks: View {
         let blocks: [ChatMarkdownBlock]
 
+        /// As the view shows them: a run from a deeper quote is its header (`levels`) and then its blocks, straight in
+        /// the quote's stack.
+        private static func rows(_ blocks: [ChatMarkdownBlock]) -> [(header: Int?, block: ChatMarkdownBlock?)] {
+            blocks.flatMap { block -> [(header: Int?, block: ChatMarkdownBlock?)] in
+                guard case .deeperQuote(let levels, let inner) = block else { return [(nil, block)] }
+                return [(levels, nil)] + rows(inner)
+            }
+        }
+
         var body: some View {
             VStack(alignment: .leading, spacing: 6) {
-                ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                    switch block {
-                    case .quote(let inner):
-                        ChatQuoteFrame { CountingLayout { CountedBlocks(blocks: inner) } }
-                    case .deeperQuote(let levels, let inner):
+                ForEach(Array(Self.rows(blocks).enumerated()), id: \.offset) { _, row in
+                    if let levels = row.header {
                         HeaderCountingLayout { Text(ChatMarkdown.deeperQuoteHeader(levels: levels)).font(.caption) }
-                        CountedBlocks(blocks: inner)
-                    case .list(_, _, let items):
-                        VStack(alignment: .leading, spacing: 3) {
-                            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                                    Text("•")
-                                    Text(item.text)
-                                }
-                                .padding(.leading, CGFloat(item.depth) * 16)
-                            }
-                        }
-                    case .paragraph(let text):
-                        CountingLayout { Text(text) }
-                    default:
-                        Text("…")
+                    } else if let block = row.block {
+                        Self.blockView(block)
                     }
                 }
+            }
+        }
+
+        @ViewBuilder
+        private static func blockView(_ block: ChatMarkdownBlock) -> some View {
+            switch block {
+            case .quote(let inner):
+                ChatQuoteFrame { CountingLayout { CountedBlocks(blocks: inner) } }
+            case .list(_, _, let items):
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Text("•")
+                            Text(item.text)
+                        }
+                        .padding(.leading, CGFloat(item.depth) * 16)
+                    }
+                }
+            case .paragraph(let text):
+                CountingLayout { Text(text) }
+            default:
+                Text("…")
             }
         }
     }
