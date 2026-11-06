@@ -6,7 +6,8 @@ import SwiftUI
 /// (`LiveDialVoice`).
 enum WhisperModelSettings {
     #if DEBUG
-    static let offersModelFile = true
+    /// DEBUG offers it, unless `-PocketReleaseSettings` asks for Settings as a Release build draws them (screenshots).
+    static var offersModelFile: Bool { !ProcessInfo.processInfo.arguments.contains("-PocketReleaseSettings") }
     #else
     static let offersModelFile = false
     #endif
