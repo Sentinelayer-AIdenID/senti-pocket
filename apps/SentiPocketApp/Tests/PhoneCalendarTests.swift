@@ -2,6 +2,7 @@ import EventKit
 import Foundation
 import PocketSyncClient
 import SwiftUI
+import UIKit
 import XCTest
 @testable import SentiPocketApp
 
@@ -127,6 +128,17 @@ final class PhoneCalendarTests: XCTestCase {
     private func calendarCenter(_ phone: PhoneCalendarCenter, feedOn: Bool = false) -> CalendarCenter {
         CalendarCenter(client: NoRoomEvents(), feed: feedOn ? FeedOn() as any CalendarFeedServing : CalendarOff(),
                        vault: NoKeptLink(), person: { "acct-1" }, openURL: { _ in true }, phone: phone)
+    }
+
+    /// Waits for an element while letting the main actor run: a button's action starts a Task on the main actor, and
+    /// a run loop pumped inside this test's own main-actor job never runs it (`HostedSummary.wait` would only time out).
+    private func settle(until identifier: String, in window: UIWindow, timeout: TimeInterval = 15) async -> NSObject? {
+        let end = Date().addingTimeInterval(timeout)
+        while Date() < end {
+            if let found = HostedSummary.element(identifier, in: window) { return found }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return nil
     }
 
     /// Opened, with the flag on, and connected.
@@ -383,8 +395,8 @@ final class PhoneCalendarTests: XCTestCase {
         let connect = try XCTUnwrap(HostedSummary.wait(for: "pocket.calendar.connect", in: window),
                                     "Connect is on the calendar screen")
         XCTAssertTrue(connect.accessibilityActivate())
-        XCTAssertNotNil(HostedSummary.wait(for: "pocket.calendar.share", in: window),
-                        "then the agents switch, on the same screen")
+        let share = await settle(until: "pocket.calendar.share", in: window)
+        XCTAssertNotNil(share, "then the agents switch, on the same screen")
         XCTAssertEqual(store.asks, 1)
         XCTAssertTrue(client.puts.isEmpty, "connecting sends nothing")
     }
@@ -400,13 +412,16 @@ final class PhoneCalendarTests: XCTestCase {
         let room = CalendarBoard(scope: .room(sessionId: "room-1", title: "Site", canAdd: true), client: NoRoomEvents(),
                                  calendar: newYork, now: { [unowned self] in self.clock })
         let window = try HostedSummary.host(NavigationStack { CalendarScreen(board: room, calendar: calendar) })
-        defer { HostedSummary.close(window) }
+        defer {
+            window.rootViewController?.presentedViewController?.dismiss(animated: false)
+            HostedSummary.close(window)
+        }
         let sync = try XCTUnwrap(HostedSummary.wait(for: "pocket.calendar.sync", in: window),
                                  "Sync is on the calendar screen")
         XCTAssertEqual(sync.accessibilityLabel, "Sync to my other calendars")
         XCTAssertTrue(sync.accessibilityActivate())
-        XCTAssertNotNil(HostedSummary.wait(for: "settings.calendar.newLink.title", in: window),
-                        "with no link kept it asks first, as Settings' Subscribe does")
+        let question = await settle(until: "settings.calendar.newLink.title", in: window)
+        XCTAssertNotNil(question, "with no link kept it asks first, as Settings' Subscribe does")
     }
 }
 
