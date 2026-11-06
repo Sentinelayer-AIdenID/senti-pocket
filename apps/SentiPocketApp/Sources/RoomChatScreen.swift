@@ -149,7 +149,6 @@ struct RoomChatScreen: View {
     @State private var appliedRouteLinks = false
     /// The times the app closed unexpectedly, offered once each to send to this room.
     @ObservedObject private var crashes = CrashReporter.shared
-    @ObservedObject private var readingSource = ReadAloudSource.shared
     @State private var offersCrashReports = false
     /// A box's console, shown in the app.
     @State private var consolePage: InAppPage?
@@ -415,6 +414,13 @@ struct RoomChatScreen: View {
             endedBoxes: endedBoxes,
             now: Date()
         )
+    }
+
+    /// The Listen bar for this room's readings.
+    private func readAloudBar(place: String) -> ReadAloudBarSlot {
+        ReadAloudBarSlot(reader: reader, place: place, shows: { [inVoiceRoom = voiceRoom != nil, sessionId = route.sessionId] source in
+            !inVoiceRoom && (source == nil || source == sessionId)
+        }, onShowMessage: showReadingMessage)
     }
 
     /// The message being read, brought into view (Carter, #55229); a reply opens its thread.
@@ -753,6 +759,11 @@ struct RoomChatScreen: View {
                 .accessibilityHidden(true)
                 .modifier(mediaPresenters(isActive: true))
         })
+        // The Listen bar, at the top while this room's message is read (a voice room speaks on its own); a thread shows it
+        // at its own top, so reading a reply keeps the thread open and in view (Carter, #62471). Reading from another
+        // room, the app's own bar shows instead.
+        .safeAreaInset(edge: .top, spacing: 0) { readAloudBar(place: "room") }
+        .environment(\.roomReadAloudBar, RoomReadAloudBarHost { readAloudBar(place: "thread") })
         // A direct message: whom it is with, the room you share, and for an agent whether it may use this chat there.
         .safeAreaInset(edge: .top, spacing: 0) {
             if let info = route.direct {
@@ -978,17 +989,6 @@ struct RoomChatScreen: View {
             }
         }
         .animation(.spring(response: 0.32, dampingFraction: 0.9), value: showsArtifacts)
-        .overlay(alignment: .bottom) {
-            // The Listen player: above the composer while this room's message is read (a voice room speaks on its
-            // own). Reading from another room, the app's own player shows instead, over every screen.
-            if voiceRoom == nil, let playback = reader.playback,
-               readingSource.sessionId == nil || readingSource.sessionId == route.sessionId {
-                ReadAloudPlayer(reader: reader, playback: playback, onShowMessage: showReadingMessage)
-                    .padding(.bottom, 72)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-        }
-        .animation(.spring(response: 0.3, dampingFraction: 0.9), value: reader.playback == nil)
         // Tick one agent or several, or call everyone as a meeting.
         .sheet(isPresented: $choosesVoicePartner) {
             VoiceCallPicker(partners: voicePartners, onCall: { agents in
