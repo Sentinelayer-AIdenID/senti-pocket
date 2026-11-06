@@ -51,6 +51,15 @@ final class ChatMarkdownQuoteDepthTests: XCTestCase {
         ])
     }
 
+    /// Past four, marks are counted as the quote parser reads them a level at a time: any spaces before a ">", at most
+    /// one after it.
+    func test_a_deeper_line_counts_its_marks_however_they_are_spaced() {
+        XCTAssertEqual(ChatMarkdown.parse("> > > > Four deep.\n> > > > >   >  x\n> > > > >>>y"), [
+            .quote([.quote([.quote([.quote([.paragraph("Four deep."), .deeperQuote(levels: 2, text: "x"),
+                                            .deeperQuote(levels: 3, text: "y")])])])])
+        ])
+    }
+
     func test_a_deeper_line_shows_one_arrow_and_how_much_deeper_and_says_it_in_words() {
         XCTAssertEqual(ChatMarkdown.deeperQuoteMark(levels: 1), "↳")
         XCTAssertEqual(ChatMarkdown.deeperQuoteMark(levels: 8), "↳ (8 levels deeper)")
