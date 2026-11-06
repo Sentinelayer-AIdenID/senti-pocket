@@ -115,29 +115,40 @@ final class RoomEstimatesRoomTests: XCTestCase {
         XCTFail("timed out waiting for: \(description)")
     }
 
-    private static func history(askedBy: String) -> [RoomMessage] {
-        [
+    /// Your message (1), someone else's (2), then the estimate's card events: asked on message 1 unless `source` says
+    /// otherwise, ready at 3, and posted again with each later status.
+    private static func history(askedBy: String, source: Int64? = 1,
+                                later: [(seq: Int64, status: RoomEstimateStatus)] = []) -> [RoomMessage] {
+        let messages: [RoomMessage] = [
             RoomMessage(id: "e1", sequenceId: 1, kind: .message, authorId: "human-alex", authorName: "alex",
                         isHuman: true, text: goal, timestamp: "2026-11-06T21:30:00Z"),
             RoomMessage(id: "e2", sequenceId: 2, kind: .message, authorId: "human-griff", authorName: "griff",
-                        isHuman: true, text: "Can we also add gift cards?", timestamp: "2026-11-06T21:31:00Z"),
-            RoomMessage(id: "e3", sequenceId: 3, kind: .estimateCard, authorId: "senti", authorName: "senti",
-                        isHuman: false, text: "", timestamp: "2026-11-06T21:32:00Z",
-                        eventType: RoomEstimateSummary.eventType,
-                        estimate: RoomEstimateSummary(
-                            estimateId: estimateId, status: .ready, suggested: "boxes_judge", askedBy: askedBy,
-                            sourceSequenceId: 1,
-                            options: [
-                                RoomEstimateOptionSummary(id: "boxes_judge", label: "Senti boxes + Claude judge",
-                                                          lowUsd: 6, highUsd: 14, judgeBilling: .plan),
-                                RoomEstimateOptionSummary(id: "frontier_alone", label: "A frontier coder alone",
-                                                          judgeBilling: RoomEstimateBilling.none)
-                            ]))
+                        isHuman: true, text: "Can we also add gift cards?", timestamp: "2026-11-06T21:31:00Z")
         ]
+        let events: [(seq: Int64, status: RoomEstimateStatus)] = [(seq: 3, status: .ready)] + later
+        let cards = events.map { event -> RoomMessage in
+            card(seq: event.seq, status: event.status, askedBy: askedBy, source: source)
+        }
+        return messages + cards
+    }
+
+    /// One `session_estimate_card` event for the estimate.
+    private static func card(seq: Int64, status: RoomEstimateStatus, askedBy: String, source: Int64?) -> RoomMessage {
+        let options = [
+            RoomEstimateOptionSummary(id: "boxes_judge", label: "Senti boxes + Claude judge", lowUsd: 6, highUsd: 14,
+                                      judgeBilling: .plan),
+            RoomEstimateOptionSummary(id: "frontier_alone", label: "A frontier coder alone",
+                                      judgeBilling: RoomEstimateBilling.none)
+        ]
+        let summary = RoomEstimateSummary(estimateId: estimateId, status: status, suggested: "boxes_judge",
+                                          askedBy: askedBy, sourceSequenceId: source, options: options)
+        return RoomMessage(id: "e\(seq)", sequenceId: seq, kind: .estimateCard, authorId: "senti", authorName: "senti",
+                           isHuman: false, text: "", timestamp: "2026-11-06T21:3\(seq):00Z",
+                           eventType: RoomEstimateSummary.eventType, estimate: summary)
     }
 
     private static func estimate(askedBy: String, percents: Bool = false, planNamed: Bool = true,
-                                 status: RoomEstimateStatus = .ready) -> RoomEstimate {
+                                 status: RoomEstimateStatus = .ready, pickedBy: String? = nil) -> RoomEstimate {
         RoomEstimate(
             estimateId: estimateId,
             goal: goal,
@@ -155,14 +166,16 @@ final class RoomEstimatesRoomTests: XCTestCase {
             suggested: "boxes_judge",
             status: status,
             askedBy: askedBy,
+            pickedOptionId: pickedBy == nil ? nil : "boxes_judge",
+            pickedBy: pickedBy,
             basisMeasuredAt: "2026-11-06",
             basisSources: ["pilot 3 tickets", "benchmark 20 tickets"]
         )
     }
 
     private func room(askedBy: String = "alex", role: String = "contributor", offered: Bool = true,
-                      estimator: FakeEstimator) -> (RoomChatCoordinator, EstimateRoom) {
-        let transport = EstimateRoom(history: Self.history(askedBy: askedBy),
+                      history: [RoomMessage]? = nil, estimator: FakeEstimator) -> (RoomChatCoordinator, EstimateRoom) {
+        let transport = EstimateRoom(history: history ?? Self.history(askedBy: askedBy),
                                      features: RoomFeatures(estimates: offered))
         let coordinator = RoomChatCoordinator(
             sessionId: "room_1",
@@ -200,6 +213,7 @@ final class RoomEstimatesRoomTests: XCTestCase {
         XCTAssertFalse(off.state.offersEstimates)
         XCTAssertTrue(off.state.estimates.isEmpty)
         XCTAssertFalse(rows(off).contains { $0.estimateId != nil }, "no card")
+        XCTAssertNil(off.state.estimateChip(on: 1), "no chip")
         XCTAssertEqual(rows(off).map(\.id), ["e1", "e2"])
         off.send(.requestEstimate(sequenceId: 1, goal: Self.goal))
         for _ in 0..<20 { await Task.yield() }
@@ -211,8 +225,61 @@ final class RoomEstimatesRoomTests: XCTestCase {
         on.resume()
         await waitUntil("the card") { self.card(on) != nil }
         XCTAssertTrue(on.state.offersEstimates)
-        XCTAssertTrue(rows(on).contains { $0.estimateId == Self.estimateId })
+        XCTAssertEqual(on.state.estimateChip(on: 1), "Estimate ready")
         on.pause()
+    }
+
+    // MARK: - Where the card shows
+
+    /// Asked on a message, the card is in that message's thread, and the message carries a chip that opens it; the
+    /// room itself does not show the card.
+    func test_a_card_asked_on_a_message_is_in_its_thread_and_the_message_carries_a_chip() async {
+        let estimator = FakeEstimator(Self.estimate(askedBy: "alex"))
+        let (coordinator, _) = room(estimator: estimator)
+        coordinator.resume()
+        await waitUntil("read") { self.card(coordinator)?.status == .ready }
+        XCTAssertFalse(rows(coordinator).contains { $0.estimateId != nil }, "not in the room itself")
+        XCTAssertEqual(coordinator.state.estimateChip(on: 1), "Estimate ready")
+        XCTAssertNil(coordinator.state.estimateChip(on: 2), "only on the message it was asked on")
+        XCTAssertEqual(coordinator.state.estimates(askedOn: 1).map(\.estimateId), [Self.estimateId])
+        coordinator.send(.openThread(sequenceId: 1))
+        await waitUntil("the thread") { coordinator.state.thread?.parent.sequenceId == 1 }
+        XCTAssertEqual(coordinator.state.estimates(askedOn: 1).first?.status, .ready, "the thread's card")
+        coordinator.pause()
+    }
+
+    /// Asked without a message, the card shows in the room itself, and no message carries a chip.
+    func test_a_card_asked_without_a_message_shows_in_the_room() async {
+        let estimator = FakeEstimator(Self.estimate(askedBy: "alex"))
+        let (coordinator, _) = room(history: Self.history(askedBy: "alex", source: nil), estimator: estimator)
+        coordinator.resume()
+        await waitUntil("read") { self.card(coordinator)?.status == .ready }
+        XCTAssertEqual(rows(coordinator).filter { $0.estimateId != nil }.map(\.id), ["e3"])
+        XCTAssertNil(coordinator.state.estimateChip(on: 1))
+        XCTAssertTrue(coordinator.state.estimates(askedOn: 1).isEmpty)
+        coordinator.pause()
+    }
+
+    /// A pick posts the card again: the latest stands, in place of the first, never beside it.
+    func test_a_card_posted_again_replaces_the_first() async {
+        let estimator = FakeEstimator(Self.estimate(askedBy: "alex", status: .picked, pickedBy: "griff"))
+        let history = Self.history(askedBy: "alex", source: nil, later: [(seq: 4, status: .picked)])
+        let (coordinator, _) = room(history: history, estimator: estimator)
+        coordinator.resume()
+        await waitUntil("read") { self.card(coordinator)?.pickedOptionId == "boxes_judge" }
+        XCTAssertEqual(rows(coordinator).filter { $0.estimateId != nil }.map(\.id), ["e4"], "one card, the latest")
+        XCTAssertEqual(card(coordinator)?.status,
+                       .picked(optionLabel: "Senti boxes + Claude judge", by: "griff", byYou: false))
+        XCTAssertEqual(card(coordinator)?.order, 4)
+        coordinator.pause()
+
+        let threaded = Self.history(askedBy: "alex", later: [(seq: 4, status: .picked)])
+        let (inThread, _) = room(history: threaded, estimator: estimator)
+        inThread.resume()
+        await waitUntil("read") { self.card(inThread)?.pickedOptionId == "boxes_judge" }
+        XCTAssertEqual(inThread.state.estimates(askedOn: 1).count, 1, "a thread never shows two cards for one estimate")
+        XCTAssertEqual(inThread.state.estimateChip(on: 1), "Estimate picked")
+        inThread.pause()
     }
 
     /// The card draws from the room's summary, then from the whole estimate; asking sends your message's words and the

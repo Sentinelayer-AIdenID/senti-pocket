@@ -1386,18 +1386,27 @@ final class RoomChatCoordinator: ObservableObject {
 
     static let estimateAsked = "Asked for an estimate. It shows here in about 20 seconds."
 
-    /// Each estimate card the room shows: from the whole estimate once read, and from the room's summary until then.
-    private func estimateCards() -> [String: RoomEstimateCard] {
-        guard offersEstimates else { return [:] }
-        var cards: [String: RoomEstimateCard] = [:]
-        for message in timeline.messages {
-            guard let summary = message.estimate, cards[summary.estimateId] == nil else { continue }
-            cards[summary.estimateId] = estimateCard(summary)
+    /// Each estimate's latest event in the room, by estimate id: a pick posts the estimate's card again, and the latest
+    /// one stands.
+    private static func latestEstimateEvents(_ messages: [RoomMessage]) -> [String: RoomMessage] {
+        var latest: [String: RoomMessage] = [:]
+        for message in messages {
+            guard let id = message.estimate?.estimateId else { continue }
+            if let seen = latest[id], seen.sequenceId > message.sequenceId { continue }
+            latest[id] = message
         }
-        return cards
+        return latest
     }
 
-    private func estimateCard(_ summary: RoomEstimateSummary) -> RoomEstimateCard {
+    /// Each estimate card the room shows: from the whole estimate once read, and from its latest event until then.
+    private func estimateCards() -> [String: RoomEstimateCard] {
+        guard offersEstimates else { return [:] }
+        return Self.latestEstimateEvents(timeline.messages).compactMapValues { message in
+            message.estimate.map { estimateCard($0, order: message.sequenceId) }
+        }
+    }
+
+    private func estimateCard(_ summary: RoomEstimateSummary, order: Int64) -> RoomEstimateCard {
         let id = summary.estimateId
         let record = estimateRecords[id]
         let askedBy = record?.askedBy ?? summary.askedBy
@@ -1416,7 +1425,14 @@ final class RoomChatCoordinator: ObservableObject {
         let pickedId = record?.pickedOptionId ?? local?.optionId
         let pickedBy = record?.pickedBy ?? local?.by
         let status: RoomEstimateCard.Status
-        switch record?.status ?? summary.status {
+        // A newer event (a pick, posted again) is newer than a read that still says ready, until the next read.
+        let current: RoomEstimateStatus
+        if record?.status == .ready, summary.status != .ready {
+            current = summary.status
+        } else {
+            current = record?.status ?? summary.status
+        }
+        switch current {
         case .picked:
             status = Self.picked(pickedId, by: pickedBy, byYou: local?.byYou == true, in: options, own: ownAuthorIds)
         case .ready where local != nil:
@@ -1444,7 +1460,9 @@ final class RoomChatCoordinator: ObservableObject {
             isBusy: estimateBusy.contains(id),
             notice: estimateNotices[id],
             planQuestion: record.flatMap { planQuestion(for: $0, askedBy: askedBy) },
-            pickedOptionId: pickedId
+            pickedOptionId: pickedId,
+            sourceSequenceId: summary.sourceSequenceId,
+            order: order
         )
     }
 
@@ -1482,7 +1500,7 @@ final class RoomChatCoordinator: ObservableObject {
                 kind == .chatgpt ? .plan(.chatgpt) : .plan(.claude)
             }
         case .perToken: billing = .perToken
-        case .none?: billing = RoomEstimateCard.Billing.none
+        case .some(RoomEstimateBilling.none): billing = RoomEstimateCard.Billing.none
         case nil: billing = nil
         }
         let showsPercent = option.judgeBilling == .plan && option.plan != nil
@@ -2886,9 +2904,16 @@ final class RoomChatCoordinator: ObservableObject {
         // the same photo a second time.
         let filesInMessages = Set(timeline.messages.lazy.filter { $0.eventType == "session_message" }
             .flatMap { $0.attachments.map(\.attachmentId) })
-        // An estimate's card shows only while the room offers estimates.
-        let shown = timeline.messages.filter {
-            !Self.isUploadNotice($0, shownIn: filesInMessages) && ($0.kind != .estimateCard || offersEstimates)
+        // An estimate's card shows only while the room offers estimates, once (its latest event: a pick replaces it in
+        // place), and in the room itself only when it was not asked on a message: that message's thread shows it, and
+        // the message a chip.
+        let latestEstimates = Self.latestEstimateEvents(timeline.messages)
+        let shown = timeline.messages.filter { message in
+            guard !Self.isUploadNotice(message, shownIn: filesInMessages) else { return false }
+            guard message.kind == .estimateCard else { return true }
+            guard offersEstimates, let summary = message.estimate,
+                  latestEstimates[summary.estimateId]?.id == message.id else { return false }
+            return summary.sourceSequenceId == nil
         }
         let inputs = shown.map { message -> RoomChatMessageInput in
             let date: Date?

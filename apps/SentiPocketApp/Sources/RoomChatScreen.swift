@@ -234,6 +234,7 @@ struct RoomChatScreen: View {
         blocks: BlockList? = nil,
         aiConsent: AIConsent? = nil,
         direct: RoomDirectContext? = nil,
+        estimator: (any RoomEstimating)? = nil,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         #if DEBUG
@@ -309,7 +310,7 @@ struct RoomChatScreen: View {
             // Senti never answers in a direct message: it is never shown typing there.
             isDirect: route.direct != nil,
             // Priced options before any work starts, as you; offered only where the room's read says so.
-            estimator: HTTPRoomEstimatesClient(
+            estimator: estimator ?? HTTPRoomEstimatesClient(
                 apiBaseURL: GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_API_URL", "SENTI_GATEWAY_URL"]),
                 urlSession: SentiHTTPTransportPolicy.protectedReadSession,
                 tokenProvider: { SessionTokenStore.load() }

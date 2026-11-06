@@ -15,6 +15,7 @@ enum RoomPreview {
         ProcessInfo.processInfo.arguments.contains("-PocketRoomPreview") || isTicketsRequested || isTicketLinkRequested
             || isAnchorRequested || isSearchRequested || isBlockedPeopleRequested || isProfileCardRequested
             || isDirectRequested || isSidePanelFoldersRequested || isDialConsentRequested
+            || RoomEstimatePreview.isRequested
     }
 
     /// `-PocketDialConsentPreview` opens Blocked people as a sheet, then a dial asks its AI question: it shows over the
@@ -145,6 +146,8 @@ enum RoomPreview {
             }
         } else if isSearchRequested {
             RoomSearchView(state: RoomPreviewSearch.sampleState) { _ in }
+        } else if RoomEstimatePreview.isRequested {
+            RoomEstimatePreview.rootView
         } else if isDialConsentRequested {
             roomRoot
                 .sheet(isPresented: .constant(true)) {

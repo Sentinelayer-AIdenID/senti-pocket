@@ -135,6 +135,25 @@ final class RoomEstimateCardTests: XCTestCase {
         XCTAssertNil(offers(mine, true, canPost: false), "not for someone who cannot post here")
     }
 
+    /// Asked on a message, a card belongs to that message's thread, and the message carries a chip saying where it
+    /// stands; one asked on no message is the room's own.
+    func test_a_card_asked_on_a_message_is_that_threads_and_the_message_gets_a_chip() {
+        let asked = RoomEstimateCard(estimateId: "e1", options: [], status: .ready, sourceSequenceId: 7, order: 9)
+        let older = RoomEstimateCard(estimateId: "e0", options: [], status: .expired, sourceSequenceId: 7, order: 8)
+        let roomOwn = RoomEstimateCard(estimateId: "e2", options: [], status: .ready, order: 10)
+        let state = RoomChatPresentationState(sessionId: "room", title: "Room", messages: [],
+                                              estimates: ["e1": asked, "e0": older, "e2": roomOwn])
+        XCTAssertEqual(state.estimates(askedOn: 7).map(\.estimateId), ["e0", "e1"], "oldest first")
+        XCTAssertEqual(state.estimateChip(on: 7), "Estimate ready", "the newest says where it stands")
+        XCTAssertNil(state.estimateChip(on: 8))
+        XCTAssertTrue(state.estimates(askedOn: 8).isEmpty)
+        let picked = RoomEstimateCard(estimateId: "e1", options: [],
+                                      status: .picked(optionLabel: "Boxes", by: "griff", byYou: false),
+                                      sourceSequenceId: 7, order: 11)
+        XCTAssertEqual(RoomChatPresentationState(sessionId: "room", title: "Room", messages: [],
+                                                 estimates: ["e1": picked]).estimateChip(on: 7), "Estimate picked")
+    }
+
     func test_the_estimate_intents_wait_for_the_ai_consent_but_the_plan_answer_does_not() {
         XCTAssertTrue(RoomChatIntent.requestEstimate(sequenceId: 1, goal: "x").isRoomWrite)
         XCTAssertTrue(RoomChatIntent.pickEstimate(estimateId: "e", optionId: "a").isRoomWrite)

@@ -133,7 +133,7 @@ public struct RoomEstimateCard: Equatable, Sendable {
                 return plan
             case .perToken:
                 return "Judge paid per token, in the cost"
-            case .none, nil:
+            case .some(Billing.none), nil:
                 return nil
             }
         }
@@ -163,10 +163,16 @@ public struct RoomEstimateCard: Equatable, Sendable {
     public let planQuestion: PlanQuestion?
     /// The option picked, once one is.
     public let pickedOptionId: String?
+    /// The message it was asked on: the card shows in that message's thread, and the message carries a chip. Nil shows
+    /// the card in the room itself.
+    public let sourceSequenceId: Int64?
+    /// Where its latest event sits in the room, for order.
+    public let order: Int64
 
     public init(estimateId: String, options: [Option], status: Status, basisLine: String? = nil, canPick: Bool = false,
                 canAskAgain: Bool = false, isBusy: Bool = false, notice: String? = nil,
-                planQuestion: PlanQuestion? = nil, pickedOptionId: String? = nil) {
+                planQuestion: PlanQuestion? = nil, pickedOptionId: String? = nil, sourceSequenceId: Int64? = nil,
+                order: Int64 = 0) {
         self.estimateId = estimateId
         self.options = options
         self.status = status
@@ -177,6 +183,18 @@ public struct RoomEstimateCard: Equatable, Sendable {
         self.notice = notice
         self.planQuestion = planQuestion
         self.pickedOptionId = pickedOptionId
+        self.sourceSequenceId = sourceSequenceId
+        self.order = order
+    }
+
+    /// The chip on the message it was asked on, which opens the thread the card is in.
+    public var chipText: String {
+        switch status {
+        case .loading, .ready: return "Estimate ready"
+        case .picked: return "Estimate picked"
+        case .expired: return "Estimate expired"
+        case .failed: return "Estimate failed"
+        }
     }
 
     /// Always on the card: it is a range from measured runs, not a price.
@@ -211,6 +229,18 @@ public struct RoomEstimateCard: Equatable, Sendable {
             return lowered.hasPrefix("human-") ? [lowered, String(lowered.dropFirst("human-".count))] : [lowered]
         })
         return own.contains(asker) || own.contains("human-" + asker)
+    }
+}
+
+extension RoomChatPresentationState {
+    /// The estimate cards asked on a message, oldest first: its thread shows them.
+    public func estimates(askedOn sequenceId: Int64) -> [RoomEstimateCard] {
+        estimates.values.filter { $0.sourceSequenceId == sequenceId }.sorted { $0.order < $1.order }
+    }
+
+    /// The chip on a message whose estimate is in its thread ("Estimate ready"); nil when none was asked on it.
+    public func estimateChip(on sequenceId: Int64) -> String? {
+        estimates(askedOn: sequenceId).last?.chipText
     }
 }
 
