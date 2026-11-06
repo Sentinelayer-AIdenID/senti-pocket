@@ -183,6 +183,18 @@ final class FriendlyWordsUITests: XCTestCase {
 
         app = launch(room: "mid", largest: largest, extra: ["-PocketRootActivity"])
         XCTAssertTrue(app.descendants(matching: .any)["pocket.room.composer"].waitForExistence(timeout: 60))
+        // Copy under the last message, before and right after a tap: the check shows for 1.5 seconds (Carter, #62487).
+        let copies = app.buttons.matching(identifier: "pocket.room.copy").allElementsBoundByIndex.filter(\.isHittable)
+        if let copy = copies.last {
+            shot("9-copy-before")
+            copy.tap()
+            Thread.sleep(forTimeInterval: 0.2)
+            let url = URL(fileURLWithPath: dir).appendingPathComponent("friendly-\(tag)-9-copy-after.png")
+            XCTAssertNoThrow(try XCUIScreen.main.screenshot().pngRepresentation.write(to: url))
+            XCTAssertEqual(copy.label, "Copied")
+            Thread.sleep(forTimeInterval: 2)
+            XCTAssertEqual(copy.label, "Copy text", "the check went back to Copy")
+        }
         app.buttons["pocket.room.flight"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["pocket.flight"].waitForExistence(timeout: 20))
         shot("4-room-info")

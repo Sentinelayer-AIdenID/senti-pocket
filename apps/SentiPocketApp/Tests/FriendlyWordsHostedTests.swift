@@ -218,6 +218,42 @@ final class FriendlyWordsHostedTests: XCTestCase {
         }
     }
 
+    // MARK: Copy
+
+    /// Copy turns into a checkmark that says "Copied" for 1.5 seconds, then back to Copy (Carter, #62487); a copy
+    /// within the 1.5 seconds starts them again, and no check stays. An agent's made-up message.
+    func test_copy_shows_a_check_for_a_moment_and_another_copy_starts_it_again() throws {
+        let message = RoomChatMessageInput(id: "evt-1", sequenceId: 1, kind: .message, authorId: "review-agent",
+                                           authorName: "review-agent", isHuman: false, text: "Ship the notes today.",
+                                           timestamp: "2026-11-06T09:00:00.000000+00:00")
+        let state = RoomChatPresentationState(sessionId: "room-copy", title: "Notes", messages: [message],
+                                              connection: .live)
+        let window = try HostedSummary.host(NavigationStack { RoomChatView(state: state) { _ in } })
+        defer { HostedSummary.close(window) }
+        func copyButton() -> NSObject? { HostedSummary.element("pocket.room.copy", in: window) }
+        guard let copy = HostedSummary.wait(for: "pocket.room.copy", in: window, label: "Copy text") else {
+            return XCTFail("no Copy under the message: \(HostedSummary.identifiers(in: window))")
+        }
+        UIPasteboard.general.string = ""
+        XCTAssertTrue(copy.accessibilityActivate())
+        XCTAssertNotNil(HostedSummary.wait(for: "pocket.room.copy", in: window, label: "Copied", timeout: 1),
+                        "Copy never turned into the check: \(String(describing: copyButton()?.accessibilityLabel))")
+        XCTAssertEqual(UIPasteboard.general.string, "Ship the notes today.")
+
+        // A second copy a second later starts the 1.5 seconds again: still the check at 2 seconds from the first.
+        HostedSummary.pump(1.0)
+        XCTAssertEqual(copyButton()?.accessibilityLabel, "Copied")
+        XCTAssertTrue(copyButton()?.accessibilityActivate() == true)
+        HostedSummary.pump(1.0)
+        XCTAssertEqual(copyButton()?.accessibilityLabel, "Copied", "a copy within the 1.5 seconds starts them again")
+
+        // Then back to Copy, and it stays.
+        XCTAssertNotNil(HostedSummary.wait(for: "pocket.room.copy", in: window, label: "Copy text", timeout: 2),
+                        "the check stayed: \(String(describing: copyButton()?.accessibilityLabel))")
+        HostedSummary.pump(1.0)
+        XCTAssertEqual(copyButton()?.accessibilityLabel, "Copy text")
+    }
+
     // MARK: The ring's count
 
     /// The count on the ring's pill stays inside the pill at every text size, the largest too: digits taller than the
