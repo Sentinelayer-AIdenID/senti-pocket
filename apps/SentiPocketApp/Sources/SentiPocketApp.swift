@@ -94,6 +94,9 @@ struct SentiPocketApp: App {
         #if !DEBUG
         Self.wire(signIn, to: dialHost, endPushes: { PushRegistrar.shared.signOut() })
         Self.wire(accountDeletion, to: dialHost)
+        // The deletion request removed this account's notification registrations on the server, and keeping the
+        // account brings none back: this phone registers again at once, not at its next return to the front.
+        accountDeletion.registerAgain = { Task { await PushRegistrar.shared.start() } }
         #endif
     }
 

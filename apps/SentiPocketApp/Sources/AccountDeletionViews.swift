@@ -1,6 +1,7 @@
 import SwiftUI
 
-/// The Settings row that opens the deletion sheet, shown only once the server says it offers deletion.
+/// The Settings row that opens the deletion screen, under Sign out. It shows unless the server says it does not offer
+/// deletion (404), so App Review always finds it.
 struct AccountDeletionRow: View {
     @ObservedObject var coordinator: AccountDeletionCoordinator
     let onSignOut: @MainActor () -> Void
@@ -9,7 +10,7 @@ struct AccountDeletionRow: View {
     var body: some View {
         if coordinator.isOffered {
             Button("Delete account", role: .destructive) {
-                coordinator.clearRequestFailure()
+                coordinator.resetRequest()
                 presentsSheet = true
             }
             .accessibilityIdentifier("settings.account.delete")
@@ -20,11 +21,13 @@ struct AccountDeletionRow: View {
     }
 }
 
-/// Says in plain words what deleting the account does, and asks twice before asking the server.
+/// Says in plain words what deleting the account does, and asks twice before asking the server: "Delete my account"
+/// only brings up the confirmation, and only the confirmation's own button sends the request.
 struct AccountDeletionSheet: View {
     @ObservedObject var coordinator: AccountDeletionCoordinator
     let onSignOut: @MainActor () -> Void
     @Environment(\.dismiss) private var dismiss
+    /// The confirmation on screen. The view's own: however iOS closes it, it never decides what is sent.
     @State private var confirms = false
 
     private var sending: Bool { coordinator.request == .sending }
@@ -32,26 +35,31 @@ struct AccountDeletionSheet: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    Text("Delete your account?")
+                VStack(alignment: .leading, spacing: 20) {
+                    Text(AccountDeletionCopy.sheetTitle)
                         .font(.title2.bold())
-                    ForEach(AccountDeletionCopy.consequences, id: \.self) { line in
-                        Label(line, systemImage: "circle.fill")
-                            .labelStyle(AccountDeletionBulletStyle())
-                    }
+                        .accessibilityAddTraits(.isHeader)
+                        .accessibilityIdentifier("account.delete.title")
+                    part(AccountDeletionCopy.rightAwayTitle, AccountDeletionCopy.rightAway, id: "right-away")
+                    part(AccountDeletionCopy.laterTitle, AccountDeletionCopy.later(graceDays: coordinator.graceDays),
+                         id: "later")
+                    part(AccountDeletionCopy.staysTitle, AccountDeletionCopy.stays, id: "stays")
+                    part(AccountDeletionCopy.keepTitle, AccountDeletionCopy.keep, id: "keep")
                     if case .failed(let message) = coordinator.request {
                         Text(message)
                             .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
                             .accessibilityIdentifier("account.delete.failure")
                     }
                     Button(role: .destructive) {
+                        coordinator.askToDelete()
                         confirms = true
                     } label: {
                         Group {
                             if sending {
                                 ProgressView()
                             } else {
-                                Text("Delete my account")
+                                Text(AccountDeletionCopy.deleteButton)
                             }
                         }
                         .frame(maxWidth: .infinity)
@@ -59,6 +67,8 @@ struct AccountDeletionSheet: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
                     .disabled(sending)
+                    .accessibilityLabel(AccountDeletionCopy.deleteButton)
+                    .accessibilityHint(AccountDeletionCopy.deleteHint)
                     .accessibilityIdentifier("account.delete.request")
                 }
                 .padding(24)
@@ -68,62 +78,74 @@ struct AccountDeletionSheet: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                         .disabled(sending)
+                        .accessibilityIdentifier("account.delete.cancel")
                 }
             }
         }
         .interactiveDismissDisabled(sending)
-        .alert("Delete your account?", isPresented: $confirms) {
-            Button("Delete", role: .destructive) {
-                Task { await coordinator.requestDeletion(signOut: onSignOut) }
+        .alert(AccountDeletionCopy.confirmTitle, isPresented: $confirms) {
+            Button(AccountDeletionCopy.deleteButton, role: .destructive) {
+                _ = coordinator.confirmDeletion(signOut: onSignOut)
             }
-            Button("Cancel", role: .cancel) {}
+            Button("Cancel", role: .cancel) {
+                coordinator.dismissConfirmation()
+            }
         } message: {
-            Text("You'll be signed out on every device now.")
+            Text(AccountDeletionCopy.confirmMessage(graceDays: coordinator.graceDays))
+        }
+    }
+
+    /// One part of what deleting does: its heading (a VoiceOver heading), then its words.
+    private func part(_ title: String, _ text: String, id: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.headline)
+                .accessibilityAddTraits(.isHeader)
+            Text(text)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("account.delete.\(id)")
         }
     }
 }
 
-/// A small dot before each line of the confirmation sheet.
-private struct AccountDeletionBulletStyle: LabelStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            configuration.icon
-                .font(.system(size: 6))
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
-            configuration.title
-        }
-    }
-}
-
-/// Shown over the sign-in screen once a deletion request went through: the date, and how to keep the account.
+/// Shown over the sign-in screen once a deletion request went through: the date, and how to keep the account. It
+/// scrolls when the largest text sizes make it taller than the screen.
 struct AccountDeletionScheduledView: View {
     let scheduled: AccountDeletionScheduled
     let onDone: @MainActor () -> Void
 
     var body: some View {
-        VStack(spacing: 16) {
-            Spacer()
-            Image(systemName: "calendar.badge.clock")
-                .font(.system(size: 52))
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
-            Text("Your account will be deleted")
-                .font(.title2.bold())
-                .multilineTextAlignment(.center)
-            Text(AccountDeletionCopy.scheduled(deleteAfter: scheduled.deleteAfter))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-            Spacer()
-            Button(action: onDone) {
-                Text("OK").frame(maxWidth: .infinity)
+        GeometryReader { proxy in
+            ScrollView {
+                VStack(spacing: 16) {
+                    Spacer(minLength: 0)
+                    Image(systemName: "calendar.badge.clock")
+                        .font(.system(size: 52))
+                        .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+                    Text(AccountDeletionCopy.scheduledTitle(deleteAfter: scheduled.deleteAfter))
+                        .font(.title2.bold())
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityAddTraits(.isHeader)
+                        .accessibilityIdentifier("account.scheduled.title")
+                    Text(AccountDeletionCopy.scheduledDetail(deleteAfter: scheduled.deleteAfter))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("account.scheduled.detail")
+                    Spacer(minLength: 0)
+                    Button(action: onDone) {
+                        Text("OK").frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .accessibilityIdentifier("account.scheduled.done")
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, minHeight: proxy.size.height)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .accessibilityIdentifier("account.scheduled.done")
         }
-        .padding(24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(uiColor: .systemBackground).ignoresSafeArea())
         .accessibilityAddTraits(.isModal)
     }
@@ -175,7 +197,8 @@ struct AccountDeletionPendingOverlay: View {
     }
 }
 
-/// Shown over the whole app while the account is scheduled for deletion.
+/// Shown over the whole app while the account is scheduled for deletion: the date, Keep my account until then, and
+/// Sign out. It scrolls when the largest text sizes make it taller than the screen.
 struct AccountDeletionPendingView: View {
     let notice: AccountDeletionPendingNotice
     let onKeepAccount: @MainActor () -> Void
@@ -184,52 +207,67 @@ struct AccountDeletionPendingView: View {
     private var keeping: Bool { notice.phase == .keeping }
 
     var body: some View {
-        VStack(spacing: 16) {
-            Spacer()
-            Image(systemName: "person.crop.circle.badge.xmark")
-                .font(.system(size: 52))
-                .foregroundStyle(.red)
-                .accessibilityHidden(true)
-            Text(notice.offersKeepAccount
-                 ? AccountDeletionCopy.pendingTitle(deleteAfter: notice.deleteAfter)
-                 : AccountDeletionCopy.deadlinePassedTitle)
-                .font(.title2.bold())
-                .multilineTextAlignment(.center)
-            Text(notice.offersKeepAccount ? AccountDeletionCopy.pendingDetail : AccountDeletionCopy.deadlinePassedDetail)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-            if case .failed(let message) = notice.phase {
-                Text(message)
-                    .foregroundStyle(.red)
-                    .multilineTextAlignment(.center)
-            }
-            Spacer()
-            if notice.offersKeepAccount {
-                Button(action: onKeepAccount) {
-                    Group {
-                        if keeping {
-                            ProgressView()
-                        } else {
-                            Text("Keep my account")
-                        }
+        GeometryReader { proxy in
+            ScrollView {
+                VStack(spacing: 16) {
+                    Spacer(minLength: 0)
+                    Image(systemName: "person.crop.circle.badge.xmark")
+                        .font(.system(size: 52))
+                        .foregroundStyle(.red)
+                        .accessibilityHidden(true)
+                    Text(notice.offersKeepAccount
+                         ? AccountDeletionCopy.pendingTitle(deleteAfter: notice.deleteAfter)
+                         : AccountDeletionCopy.deadlinePassedTitle)
+                        .font(.title2.bold())
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityAddTraits(.isHeader)
+                        .accessibilityIdentifier("account.pending.title")
+                    Text(notice.offersKeepAccount
+                         ? AccountDeletionCopy.pendingDetail
+                         : AccountDeletionCopy.deadlinePassedDetail)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("account.pending.detail")
+                    if case .failed(let message) = notice.phase {
+                        Text(message)
+                            .foregroundStyle(.red)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("account.pending.failure")
                     }
-                    .frame(maxWidth: .infinity)
+                    Spacer(minLength: 0)
+                    if notice.offersKeepAccount {
+                        Button(action: onKeepAccount) {
+                            Group {
+                                if keeping {
+                                    ProgressView()
+                                } else {
+                                    Text("Keep my account")
+                                }
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .disabled(keeping)
+                        .accessibilityLabel("Keep my account")
+                        .accessibilityHint("Stops the deletion.")
+                        .accessibilityIdentifier("account.pending.keep")
+                    }
+                    Button(action: onSignOut) {
+                        Text("Sign out").frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .disabled(keeping)
+                    .accessibilityIdentifier("account.pending.sign-out")
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .disabled(keeping)
-                .accessibilityIdentifier("account.pending.keep")
+                .padding(24)
+                .frame(maxWidth: .infinity, minHeight: proxy.size.height)
             }
-            Button(action: onSignOut) {
-                Text("Sign out").frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.large)
-            .disabled(keeping)
-            .accessibilityIdentifier("account.pending.sign-out")
         }
-        .padding(24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(uiColor: .systemBackground).ignoresSafeArea())
         .accessibilityAddTraits(.isModal)
     }
