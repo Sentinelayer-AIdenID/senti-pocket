@@ -17,7 +17,7 @@ private final class FakePhoneCalendar: PhoneCalendarStore {
     /// What asking iOS answers.
     var answer: PhoneCalendarAccess = .granted
     let sources: [PhoneCalendarSource]
-    let events: [PhoneCalendarItem]
+    var events: [PhoneCalendarItem]
     private(set) var asks = 0
     private var changed: (@MainActor () -> Void)?
 
@@ -51,7 +51,7 @@ private final class FakePhoneCalendar: PhoneCalendarStore {
 
     func calendars() -> [PhoneCalendarSource] { access == .granted ? sources : [] }
 
-    func items(from start: Date, to end: Date, calendars ids: Set<String>?) -> [PhoneCalendarItem] {
+    func items(from start: Date, to end: Date, calendars ids: Set<String>?) async -> [PhoneCalendarItem] {
         access == .granted ? events : []
     }
 
@@ -59,6 +59,15 @@ private final class FakePhoneCalendar: PhoneCalendarStore {
 
     /// The phone's calendar changed.
     func change() { changed?() }
+
+    /// The first event is renamed on the phone, and the phone says its calendar changed.
+    func rename(_ title: String) {
+        let first = events[0]
+        events[0] = PhoneCalendarItem(identifier: first.identifier, occurrenceStart: first.occurrenceStart,
+                                      calendarId: first.calendarId, calendarTitle: first.calendarTitle, title: title,
+                                      start: first.start, end: first.end, allDay: first.allDay, location: nil)
+        change()
+    }
 }
 
 /// The server: records each send and forget; a forget can be made to fail, and the flag to be off.
@@ -160,7 +169,8 @@ final class PhoneCalendarTests: XCTestCase {
         XCTAssertEqual(phone.available, true)
         XCTAssertEqual(phone.access, .granted)
         XCTAssertEqual(store.asks, 1)
-        XCTAssertEqual(phone.items(from: clock, to: clock.addingTimeInterval(7 * 86_400)).count, 4, "the events show")
+        let shown = await phone.items(from: clock, to: clock.addingTimeInterval(7 * 86_400))
+        XCTAssertEqual(shown.count, 4, "the events show")
         XCTAssertEqual(phone.calendars.map(\.title), ["Work", "Home", "Book club"])
 
         phone.setShared("cal-work", true)
@@ -169,7 +179,7 @@ final class PhoneCalendarTests: XCTestCase {
         await phone.appOpened()
         store.change()
         await phone.idle()
-        XCTAssertFalse(phone.sharesWithAgents, "off until she turns it on")
+        XCTAssertFalse(phone.sharesWithAgents, "off until the person turns it on")
         XCTAssertTrue(client.puts.isEmpty, "nothing is sent while the switch is off")
         XCTAssertEqual(client.deletes, 0)
         XCTAssertTrue(waits.isEmpty, "and nothing waits to be sent")
@@ -201,7 +211,7 @@ final class PhoneCalendarTests: XCTestCase {
         client.failForgets(true)
         await phone.setSharing(false)
         XCTAssertEqual(client.deletes, 2)
-        XCTAssertNotNil(phone.notice, "she is told it did not go")
+        XCTAssertNotNil(phone.notice, "the person is told it did not go")
 
         // On again before it has gone: the forget goes first, and nothing is sent while it fails.
         clock.addTimeInterval(120)
@@ -223,8 +233,8 @@ final class PhoneCalendarTests: XCTestCase {
 
     // MARK: - Only the picked calendars
 
-    /// Only the calendars she picked are sent, whatever the phone hands back; none picked sends nothing.
-    func test_calendars_she_did_not_pick_are_never_sent() async throws {
+    /// Only the calendars picked are sent, whatever the phone hands back; none picked sends nothing.
+    func test_calendars_not_picked_are_never_sent() async throws {
         let store = FakePhoneCalendar(start: clock)
         let client = FakeDeviceCalendar()
         let phone = await connected(store, client)
@@ -256,13 +266,13 @@ final class PhoneCalendarTests: XCTestCase {
         XCTAssertEqual(client.puts.count, 1)
 
         clock.addTimeInterval(10)
-        store.change()
+        store.rename("Design review, moved")
         await phone.idle()
         XCTAssertEqual(client.puts.count, 1, "a change 10 seconds on waits")
         XCTAssertEqual(waits.map { $0.delay }, [50], "until the minute is up")
 
         clock.addTimeInterval(49)
-        store.change()
+        store.rename("Design review, moved again")
         await phone.appOpened()
         await phone.idle()
         XCTAssertEqual(client.puts.count, 1)
@@ -275,11 +285,106 @@ final class PhoneCalendarTests: XCTestCase {
         XCTAssertEqual(Set(client.putKeys).count, 2, "each send its own key")
 
         clock.addTimeInterval(1)
-        store.change()
+        store.rename("Design review, once more")
         await phone.idle()
         XCTAssertEqual(client.puts.count, 2)
         XCTAssertEqual(waits.count, 2)
         XCTAssertEqual(waits[1].delay, 59, accuracy: 0.001)
+    }
+
+    // MARK: - Every way sharing stops reaches the server
+
+    /// Unticking the last calendar while sharing leaves nothing shared, so the server forgets what it has (it never
+    /// expires an upload, and the person's agents would go on reading it). Ticking one again sends it.
+    func test_unticking_the_last_calendar_forgets_what_was_shared() async {
+        let store = FakePhoneCalendar(start: clock)
+        let client = FakeDeviceCalendar()
+        let phone = await connected(store, client)
+        phone.setShared("cal-work", true)
+        await phone.setSharing(true)
+        await phone.idle()
+        XCTAssertEqual(client.puts.count, 1)
+
+        phone.setShared("cal-work", false)
+        await phone.idle()
+        XCTAssertEqual(client.deletes, 1, "the last calendar unticked: the server forgets")
+        XCTAssertEqual(client.puts.count, 1)
+        XCTAssertTrue(phone.sharesWithAgents, "the switch is as the person left it")
+
+        clock.addTimeInterval(120)
+        phone.setShared("cal-home", true)
+        await phone.idle()
+        XCTAssertEqual(client.puts.count, 2)
+        XCTAssertEqual(Set(client.puts.last?.events.map(\.calendar) ?? []), ["Home"])
+    }
+
+    /// Turning calendar access off in iOS Settings while sharing stops sharing and the server forgets, by itself, the
+    /// next time the app opens. While a forget has not gone, the switch stays in sight.
+    func test_turning_calendar_access_off_stops_sharing_and_the_server_forgets() async {
+        let store = FakePhoneCalendar(start: clock)
+        let client = FakeDeviceCalendar()
+        let phone = await connected(store, client)
+        phone.setShared("cal-work", true)
+        await phone.setSharing(true)
+        await phone.idle()
+        XCTAssertEqual(client.puts.count, 1)
+
+        client.failForgets(true)
+        store.access = .denied
+        clock.addTimeInterval(120)
+        await phone.appOpened()
+        await phone.idle()
+        XCTAssertEqual(client.deletes, 1, "access went: the server is told to forget")
+        XCTAssertFalse(phone.sharesWithAgents)
+        XCTAssertTrue(phone.forgetPending)
+        XCTAssertTrue(phone.showsSharing, "the switch stays in sight while the forget has not gone")
+
+        client.failForgets(false)
+        clock.addTimeInterval(120)
+        await phone.appOpened()
+        await phone.idle()
+        XCTAssertEqual(client.deletes, 2)
+        XCTAssertFalse(phone.forgetPending)
+        XCTAssertFalse(phone.showsSharing, "nothing shared, nothing to stop")
+        XCTAssertEqual(client.puts.count, 1, "nothing is sent without access")
+    }
+
+    /// A send whose body is the same as the last one the server took is not sent again.
+    func test_the_same_calendar_is_not_sent_twice() async {
+        let store = FakePhoneCalendar(start: clock)
+        let client = FakeDeviceCalendar()
+        let phone = await connected(store, client)
+        phone.setShared("cal-work", true)
+        await phone.setSharing(true)
+        await phone.idle()
+        clock.addTimeInterval(120)
+        await phone.appOpened()
+        await phone.idle()
+        XCTAssertEqual(client.puts.count, 1, "nothing changed: nothing sent")
+        clock.addTimeInterval(120)
+        store.rename("Design review, moved")
+        await phone.idle()
+        XCTAssertEqual(client.puts.count, 2)
+    }
+
+    /// The app makes one EventKit store, however often its root view is made (each pass of the App's body made one).
+    func test_the_app_makes_one_eventkit_store() {
+        let client = FakeDeviceCalendar()
+        let first = PhoneCalendarCenter.live(client: client, person: { "acct-1" })
+        let second = PhoneCalendarCenter.live(client: client, person: { "acct-1" })
+        _ = PhoneCalendarCenter.live(client: client, person: { "acct-1" })
+        XCTAssertFalse(first === second)
+        XCTAssertEqual(EventKitPhoneCalendar.made, 1)
+    }
+
+    /// A pick whose calendar is no longer on the phone is not counted.
+    func test_picks_of_calendars_gone_from_the_phone_are_not_counted() async {
+        let store = FakePhoneCalendar(start: clock)
+        let phone = await connected(store, FakeDeviceCalendar())
+        phone.setShared("cal-work", true)
+        phone.setShared("cal-gone", true)
+        XCTAssertEqual(phone.sharedCalendarIds.count, 2)
+        XCTAssertEqual(phone.pickedCount, 1)
     }
 
     // MARK: - What leaves the phone
@@ -322,7 +427,8 @@ final class PhoneCalendarTests: XCTestCase {
         XCTAssertEqual(phone.available, false)
         await phone.connect()
         XCTAssertEqual(store.asks, 0, "iOS is never asked while it is off")
-        XCTAssertTrue(phone.items(from: clock, to: clock.addingTimeInterval(86_400)).isEmpty)
+        let shown = await phone.items(from: clock, to: clock.addingTimeInterval(86_400))
+        XCTAssertTrue(shown.isEmpty)
         await phone.setSharing(true)
         await phone.idle()
         XCTAssertFalse(phone.sharesWithAgents)
@@ -368,6 +474,7 @@ final class PhoneCalendarTests: XCTestCase {
         let phone = await connected(store, client)
         let board = CalendarBoard(scope: .agenda(rooms: []), client: NoRoomEvents(), calendar: newYork,
                                   now: { [unowned self] in self.clock }, phone: phone)
+        await board.readPhone()
         let day = CalendarDay(clock.addingTimeInterval(2 * 3_600), in: newYork)
         XCTAssertEqual(board.phoneItems(on: day).map(\.title), ["Design review"])
         let cell = board.grid.cells.first { $0.day == day }

@@ -8,10 +8,12 @@ import UIKit
 // your calendar items can appear here and agents can have access to it"). Two separate things:
 // - Connect my calendar: with the person's leave (iOS calendar access), the phone's own events show in Pocket's own
 //   calendar (the one in Settings, never a room's), marked as from the phone, read-only. Showing sends nothing.
-// - Let my agents see my calendar: a switch, off until she turns it on, for the calendars she picks. On, the phone
-//   sends 7 days back to 30 ahead (title, start, end, all-day, place, calendar name; never notes, attendees or links)
-//   when the app opens and when the phone's calendar changes, at most once a minute. Off sends a DELETE and the server
-//   forgets them; a DELETE that did not go is sent again before anything else, and nothing is sent until it has gone.
+// - Let my agents see my calendar: a switch, off until the person turns it on, for the calendars they pick. On, the
+//   phone sends 7 days back to 30 ahead (title, start, end, all-day, place, calendar name; never notes, attendees or
+//   links) when the app opens and when the phone's calendar changes, at most once a minute, and never the same body
+//   twice. The server forgets everything (DELETE) whenever sharing stops: the switch turned off, the last calendar
+//   unticked, or calendar access turned off in iOS Settings. A DELETE that did not go is sent again before anything
+//   else, and nothing is sent until it has gone.
 // Both hide while the server's flag answers 404 (`DeviceCalendarServing`). The switch and the picks are the signed-in
 // account's own: another sign-in on the phone starts with the switch off.
 
@@ -91,17 +93,43 @@ protocol PhoneCalendarStore: AnyObject {
     /// Asks iOS for full access to read events (the system asks the person once); the access after.
     func requestAccess() async -> PhoneCalendarAccess
     func calendars() -> [PhoneCalendarSource]
-    /// The events between `start` and `end` in the calendars with these ids, or in every calendar for nil.
-    func items(from start: Date, to end: Date, calendars ids: Set<String>?) -> [PhoneCalendarItem]
-    /// `changed` runs whenever the phone's calendar changes.
+    /// The events between `start` and `end` in the calendars with these ids, or in every calendar for nil. Read off
+    /// the main thread.
+    func items(from start: Date, to end: Date, calendars ids: Set<String>?) async -> [PhoneCalendarItem]
+    /// `changed` runs whenever the phone's calendar changes, in place of any given before.
     func onChange(_ changed: @escaping @MainActor () -> Void)
 }
 
-/// The phone's calendar through EventKit.
+/// The phone's calendar through EventKit: one store for the whole app (`shared`). The app's root view is built again
+/// on every pass of the App's body, and each pass made a new store and a change observer that was never removed.
 @MainActor
 final class EventKitPhoneCalendar: PhoneCalendarStore {
+    static let shared = EventKitPhoneCalendar()
+    /// How many were ever made: one.
+    private(set) static var made = 0
+
+    /// Watches EventKit's change notification for as long as it lives, and stops when it goes.
+    private final class ChangeWatch {
+        private let token: NSObjectProtocol
+
+        init(store: EKEventStore, onChange: @escaping @Sendable () -> Void) {
+            token = NotificationCenter.default.addObserver(forName: .EKEventStoreChanged, object: store,
+                                                           queue: .main) { _ in onChange() }
+        }
+
+        deinit { NotificationCenter.default.removeObserver(token) }
+    }
+
     private let store = EKEventStore()
-    private var observer: NSObjectProtocol?
+    private var watch: ChangeWatch?
+    private var changed: (@MainActor () -> Void)?
+
+    private init() {
+        Self.made += 1
+        watch = ChangeWatch(store: store) { [weak self] in
+            Task { @MainActor in self?.changed?() }
+        }
+    }
 
     var access: PhoneCalendarAccess {
         let status = EKEventStore.authorizationStatus(for: .event)
@@ -137,25 +165,58 @@ final class EventKitPhoneCalendar: PhoneCalendarStore {
             .sorted { ($0.account, $0.title, $0.id) < ($1.account, $1.title, $1.id) }
     }
 
-    func items(from start: Date, to end: Date, calendars ids: Set<String>?) -> [PhoneCalendarItem] {
+    func items(from start: Date, to end: Date, calendars ids: Set<String>?) async -> [PhoneCalendarItem] {
         guard access == .granted, end > start else { return [] }
-        var chosen: [EKCalendar]?
-        if let ids {
-            let picked = store.calendars(for: .event).filter { ids.contains($0.calendarIdentifier) }
-            guard !picked.isEmpty else { return [] }
-            chosen = picked
-        }
-        let predicate = store.predicateForEvents(withStart: start, end: end, calendars: chosen)
-        return store.events(matching: predicate).compactMap(PhoneCalendarItem.init(event:))
+        let store = self.store
+        return await Task.detached(priority: .userInitiated) { () -> [PhoneCalendarItem] in
+            var chosen: [EKCalendar]?
+            if let ids {
+                let picked = store.calendars(for: .event).filter { ids.contains($0.calendarIdentifier) }
+                guard !picked.isEmpty else { return [] }
+                chosen = picked
+            }
+            let predicate = store.predicateForEvents(withStart: start, end: end, calendars: chosen)
+            return store.events(matching: predicate).compactMap(PhoneCalendarItem.init(event:))
+        }.value
     }
 
     func onChange(_ changed: @escaping @MainActor () -> Void) {
-        if let observer { NotificationCenter.default.removeObserver(observer) }
-        observer = NotificationCenter.default.addObserver(forName: .EKEventStoreChanged, object: store,
-                                                          queue: .main) { _ in
-            Task { @MainActor in changed() }
-        }
+        self.changed = changed
     }
+
+    #if DEBUG
+    /// The calendar preview's made-up event (`-PocketCalendarSeedEvent`), with notes and a link that must never leave
+    /// the phone. Any left by an earlier run is removed first. Needs calendar access; nil without it.
+    static let seedTitle = "Site visit (made up)"
+    private var seedIdentifier: String?
+    private var seedRenames = 0
+
+    func seedForPreview(now: Date) {
+        guard access == .granted, let calendar = store.defaultCalendarForNewEvents else { return }
+        let window = store.predicateForEvents(withStart: now.addingTimeInterval(-86_400 * 8),
+                                              end: now.addingTimeInterval(86_400 * 32), calendars: [calendar])
+        for old in store.events(matching: window) where old.title?.hasPrefix(Self.seedTitle) == true {
+            try? store.remove(old, span: .thisEvent, commit: true)
+        }
+        let event = EKEvent(eventStore: store)
+        event.calendar = calendar
+        event.title = Self.seedTitle
+        event.startDate = now.addingTimeInterval(3_600)
+        event.endDate = now.addingTimeInterval(7_200)
+        event.notes = "Bring the blue folder"
+        event.url = URL(string: "https://meet.example.test/room-7")
+        try? store.save(event, span: .thisEvent, commit: true)
+        seedIdentifier = event.eventIdentifier
+    }
+
+    /// Renames the made-up event, as an edit on the phone would: the phone's calendar changes.
+    func renameSeedForPreview() {
+        guard let seedIdentifier, let event = store.event(withIdentifier: seedIdentifier) else { return }
+        seedRenames += 1
+        event.title = "\(Self.seedTitle) \(seedRenames)"
+        try? store.save(event, span: .thisEvent, commit: true)
+    }
+    #endif
 }
 
 /// The phone's calendar in Pocket: whether it may show, the events it shows, and what is sent to the person's agents.
@@ -166,14 +227,17 @@ final class PhoneCalendarCenter: ObservableObject {
     @Published private(set) var access: PhoneCalendarAccess
     /// The phone's calendars, once Pocket may read them.
     @Published private(set) var calendars: [PhoneCalendarSource] = []
-    /// "Let my agents see my calendar": off until she turns it on.
+    /// "Let my agents see my calendar": off until the person turns it on.
     @Published private(set) var sharesWithAgents = false
-    /// The calendars she picked to share; none until she picks.
+    /// The calendars picked to share; none until some are picked.
     @Published private(set) var sharedCalendarIds: Set<String> = []
     /// What the last send or forget could not do, in words.
     @Published private(set) var notice: String?
     /// Moves on whenever the phone's calendar changes or is connected, so an open calendar reads it again.
     @Published private(set) var revision = 0
+    /// A forget that has not gone yet: sent again first, and nothing is sent until it has gone. While it waits, the
+    /// switch stays in sight, whatever iOS lets Pocket read.
+    @Published private(set) var forgetPending = false
 
     /// The least time between two sends.
     static let spacing: TimeInterval = 60
@@ -193,15 +257,17 @@ final class PhoneCalendarCenter: ObservableObject {
     private var personKey: String?
     private(set) var schedule = CalendarProbeSchedule()
     private var checking = false
+    private var listening = false
     private var lastSend: Date?
     private var sendWaiting = false
+    /// The body of the last send the server took: the same body is not sent again.
+    private var lastSentBody: Data?
     /// Sends and forgets run one after another, in the order asked: a forget never lands before a send asked first.
     private var queue: Task<Void, Never>?
-    /// A forget that has not gone yet: sent again first, and nothing is sent until it has gone.
-    private(set) var forgetPending = false
 
+    /// `calendar` is the phone's own, following a change of time zone.
     init(store: any PhoneCalendarStore, client: any DeviceCalendarServing, defaults: UserDefaults = .standard,
-         person: @escaping @MainActor () async -> String?, calendar: Calendar = .current,
+         person: @escaping @MainActor () async -> String?, calendar: Calendar = .autoupdatingCurrent,
          now: @escaping () -> Date = { Date() },
          later: @escaping @MainActor (TimeInterval, @escaping @MainActor () -> Void) -> Void = PhoneCalendarCenter.runLater) {
         self.store = store
@@ -212,7 +278,13 @@ final class PhoneCalendarCenter: ObservableObject {
         self.now = now
         self.later = later
         access = store.access
-        store.onChange { [weak self] in self?.phoneChanged() }
+    }
+
+    /// The app's own: on the one EventKit store. Making it again (each pass of the App's body does) makes no new
+    /// store, and only the center the app keeps listens to it (`appOpened`).
+    static func live(client: any DeviceCalendarServing,
+                     person: @escaping @MainActor () async -> String?) -> PhoneCalendarCenter {
+        PhoneCalendarCenter(store: EventKitPhoneCalendar.shared, client: client, person: person)
     }
 
     static func runLater(_ delay: TimeInterval, _ work: @escaping @MainActor () -> Void) {
@@ -225,13 +297,28 @@ final class PhoneCalendarCenter: ObservableObject {
     /// Showing the phone's events in Pocket's calendar: the flag is on and Pocket may read them.
     var shows: Bool { available == true && access == .granted }
 
-    /// The app came to the front: ask the flag when due, send a forget that did not go, and send when sharing.
+    /// The switch and the picks are in sight: Pocket may read the calendar, or sharing is on or still being forgotten
+    /// (calendar access turned off in iOS Settings must never hide the way to stop sharing).
+    var showsSharing: Bool { access == .granted || sharesWithAgents || forgetPending }
+
+    /// How many picked calendars are on the phone now: a pick whose calendar has gone is not counted.
+    var pickedCount: Int {
+        calendars.isEmpty ? sharedCalendarIds.count : sharedCalendarIds.intersection(calendars.map(\.id)).count
+    }
+
+    /// The app came to the front: ask the flag when due, stop sharing if calendar access went, send a forget that did
+    /// not go, and send when sharing.
     func appOpened() async {
+        listen()
         access = store.access
         guard await loadPerson() else { return }
         await checkAvailable()
         guard available == true else { return }
-        if access == .granted { calendars = store.calendars() }
+        if access == .granted {
+            calendars = store.calendars()
+        } else {
+            accessWent()
+        }
         if forgetPending { enqueue { await self.forget() } }
         requestSend()
     }
@@ -253,6 +340,7 @@ final class PhoneCalendarCenter: ObservableObject {
     /// "Connect my calendar": asks iOS for access. The phone's events then show in Pocket's calendar; nothing is sent.
     func connect() async {
         guard available == true else { return }
+        listen()
         access = await store.requestAccess()
         if access == .granted {
             calendars = store.calendars()
@@ -261,9 +349,9 @@ final class PhoneCalendarCenter: ObservableObject {
     }
 
     /// The phone's events between `start` and `end`, in every calendar on the phone, to show. Nothing is sent.
-    func items(from start: Date, to end: Date) -> [PhoneCalendarItem] {
+    func items(from start: Date, to end: Date) async -> [PhoneCalendarItem] {
         guard shows else { return [] }
-        return store.items(from: start, to: end, calendars: nil)
+        return await store.items(from: start, to: end, calendars: nil)
     }
 
     /// "Let my agents see my calendar". On sends the picked calendars (once picked); off sends the DELETE.
@@ -284,10 +372,18 @@ final class PhoneCalendarCenter: ObservableObject {
         }
     }
 
-    /// Picks a calendar to share, or takes it out: the next send carries only the picked ones.
+    /// Picks a calendar to share, or takes it out: the next send carries only the picked ones. Unticking the last one
+    /// while sharing leaves nothing shared, so the server forgets what it has.
     func setShared(_ calendarId: String, _ shared: Bool) {
         guard personKey != nil else { return }
+        let hadPicks = !sharedCalendarIds.isEmpty
         if shared { sharedCalendarIds.insert(calendarId) } else { sharedCalendarIds.remove(calendarId) }
+        if hadPicks, sharedCalendarIds.isEmpty, sharesWithAgents {
+            forgetPending = true
+            save()
+            enqueue { await self.forget() }
+            return
+        }
         save()
         requestSend()
     }
@@ -325,25 +421,46 @@ final class PhoneCalendarCenter: ObservableObject {
                                     timeZone: calendar.timeZone)
     }
 
-    // MARK: - Sending
-
-    private var canSend: Bool {
-        available == true && access == .granted && sharesWithAgents && !sharedCalendarIds.isEmpty && personKey != nil
-    }
-
-    private func phoneChanged() {
-        access = store.access
-        if access == .granted { calendars = store.calendars() }
-        revision += 1
-        requestSend()
-    }
-
     /// Waits until every send and forget asked so far has run.
     func idle() async {
         while let current = queue {
             await current.value
             if queue == current { return }
         }
+    }
+
+    // MARK: - Sending
+
+    private var canSend: Bool {
+        available == true && access == .granted && sharesWithAgents && !sharedCalendarIds.isEmpty && personKey != nil
+    }
+
+    /// Only the center the app keeps listens to the phone's calendar.
+    private func listen() {
+        guard !listening else { return }
+        listening = true
+        store.onChange { [weak self] in self?.phoneChanged() }
+    }
+
+    private func phoneChanged() {
+        access = store.access
+        if access == .granted {
+            calendars = store.calendars()
+        } else if personKey != nil {
+            accessWent()
+            if forgetPending { enqueue { await self.forget() } }
+        }
+        revision += 1
+        requestSend()
+    }
+
+    /// Calendar access went (turned off in iOS Settings, or reset) while sharing: sharing stops, and the server is to
+    /// forget what it has.
+    private func accessWent() {
+        guard sharesWithAgents else { return }
+        sharesWithAgents = false
+        forgetPending = true
+        save()
     }
 
     private func enqueue(_ work: @escaping @MainActor () async -> Void) {
@@ -361,10 +478,14 @@ final class PhoneCalendarCenter: ObservableObject {
             guard !forgetPending else { return }
         }
         let window = DeviceCalendarUpload.window(around: now(), in: calendar)
-        let upload = Self.upload(store.items(from: window.start, to: window.end, calendars: sharedCalendarIds),
-                                 shared: sharedCalendarIds, window: window, calendar: calendar)
+        let picked = sharedCalendarIds
+        let upload = Self.upload(await store.items(from: window.start, to: window.end, calendars: picked),
+                                 shared: picked, window: window, calendar: calendar)
+        let body = try? JSONSerialization.data(withJSONObject: upload.body, options: [.sortedKeys])
+        if let body, body == lastSentBody { return }
         do {
             _ = try await client.putDeviceEvents(upload, idempotencyKey: UUID().uuidString)
+            lastSentBody = body
             notice = nil
         } catch CalendarError.unavailable {
             wentAway()
@@ -378,6 +499,7 @@ final class PhoneCalendarCenter: ObservableObject {
         do {
             try await client.deleteDeviceEvents()
             forgetPending = false
+            lastSentBody = nil
             notice = nil
         } catch CalendarError.unavailable {
             // The flag is off: everything hides, and the forget goes once it is back.
@@ -408,6 +530,7 @@ final class PhoneCalendarCenter: ObservableObject {
         sharedCalendarIds = Set(key("calendars").flatMap(defaults.stringArray(forKey:)) ?? [])
         forgetPending = key("forget").map(defaults.bool(forKey:)) ?? false
         lastSend = nil
+        lastSentBody = nil
         return true
     }
 

@@ -343,7 +343,7 @@ final class CalendarBoard: ObservableObject {
         if let phone {
             layOutPhone()
             phoneWatch = phone.objectWillChange.sink { [weak self] _ in
-                Task { @MainActor in self?.layOutPhone() }
+                Task { @MainActor in await self?.readPhone() }
             }
         }
     }
@@ -384,10 +384,10 @@ final class CalendarBoard: ObservableObject {
         phoneByDay[day] ?? []
     }
 
-    /// Reads the phone's events for the month on screen and lays the month out again.
+    /// Reads the phone's events for the month on screen, off the main thread, and lays the month out again when they
+    /// come.
     func layOutPhone() {
-        readPhone()
-        buildGrid()
+        Task { await readPhone() }
     }
 
     /// A day before today takes no new event.
@@ -432,8 +432,9 @@ final class CalendarBoard: ObservableObject {
         month = CalendarDay(year: next.year, month: next.month, day: 1)
         let today = CalendarDay(now(), in: calendar)
         selected = (today.year, today.month) == (month.year, month.month) ? today : nil
-        readPhone()
+        phoneByDay = [:]
         buildGrid()
+        layOutPhone()
     }
 
     func select(_ day: CalendarDay) {
@@ -500,8 +501,9 @@ final class CalendarBoard: ObservableObject {
             let day = CalendarDay(saved.startsAt, in: calendar)
             if (day.year, day.month) != (month.year, month.month) {
                 month = CalendarDay(year: day.year, month: day.month, day: 1)
-                readPhone()
+                phoneByDay = [:]
                 buildGrid()
+                layOutPhone()
             }
             selected = day
         } catch CalendarError.unavailable {
@@ -547,11 +549,16 @@ final class CalendarBoard: ObservableObject {
         buildGrid()
     }
 
-    private func readPhone() {
+    /// The phone's events for the month on screen, by day, and the month laid out with them. Events read for a month
+    /// that is no longer on screen are dropped.
+    func readPhone() async {
         guard let phone, let start = month.start(in: calendar),
               let end = calendar.date(byAdding: .month, value: 1, to: start) else { return }
-        let items = phone.items(from: start, to: end).sorted { ($0.start, $0.id) < ($1.start, $1.id) }
+        let asked = month
+        let items = await phone.items(from: start, to: end).sorted { ($0.start, $0.id) < ($1.start, $1.id) }
+        guard asked == month else { return }
         phoneByDay = Dictionary(grouping: items) { CalendarDay($0.start, in: calendar) }
+        buildGrid()
     }
 
     private func buildGrid() {

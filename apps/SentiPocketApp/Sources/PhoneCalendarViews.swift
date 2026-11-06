@@ -3,7 +3,7 @@ import SwiftUI
 import UIKit
 
 // Connect my calendar (ticket 9583d41e): the phone's events in Pocket's own calendar, and Settings' switch that lets
-// the person's agents see the calendars she picks. See `PhoneCalendarCenter`.
+// the person's agents see the calendars they pick. See `PhoneCalendarCenter`.
 
 /// One of the phone's own events in Pocket's calendar: read-only, and marked as from the phone.
 struct PhoneEventRow: View {
@@ -132,7 +132,7 @@ struct PhoneCalendarCard: View {
 
     @ViewBuilder
     private var phoneRows: some View {
-        if phone.access == .notAsked {
+        if phone.access == .notAsked, !phone.showsSharing {
             Button {
                 Task { await phone.connect() }
             } label: {
@@ -142,30 +142,36 @@ struct PhoneCalendarCard: View {
             .buttonStyle(.borderedProminent)
             .accessibilityIdentifier("pocket.calendar.connect")
             note(Self.connectWords)
-        } else if phone.access.isRefused {
-            PhoneCalendarRefusedLine()
         } else {
-            Label(showsEventsHere ? "Your phone's calendars show here" : Self.elsewhereWords,
-                  systemImage: "iphone")
-                .font(.subheadline)
-                .fixedSize(horizontal: false, vertical: true)
-            Toggle(isOn: Binding(get: { phone.sharesWithAgents },
-                                 set: { on in Task { await phone.setSharing(on) } })) {
-                Text("Let my agents see my calendar")
-                    .font(.subheadline.weight(.semibold))
+            if phone.access == .granted {
+                Label(showsEventsHere ? "Your phone's calendars show here" : Self.elsewhereWords,
+                      systemImage: "iphone")
+                    .font(.subheadline)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if phone.access.isRefused {
+                PhoneCalendarRefusedLine()
             }
-            .accessibilityIdentifier("pocket.calendar.share")
-            if phone.sharesWithAgents {
-                NavigationLink {
-                    PhoneCalendarPicker(phone: phone)
-                } label: {
-                    LabeledContent("Calendars to share",
-                                   value: PhoneCalendarSettingsSection.picked(phone.sharedCalendarIds.count))
-                        .font(.subheadline)
+            // The switch stays in sight while sharing is on or being forgotten, whatever iOS lets Pocket read: the way
+            // to stop sharing never hides.
+            if phone.showsSharing {
+                Toggle(isOn: Binding(get: { phone.sharesWithAgents },
+                                     set: { on in Task { await phone.setSharing(on) } })) {
+                    Text("Let my agents see my calendar")
+                        .font(.subheadline.weight(.semibold))
                 }
-                .accessibilityIdentifier("pocket.calendar.calendars")
+                .accessibilityIdentifier("pocket.calendar.share")
+                if phone.sharesWithAgents {
+                    NavigationLink {
+                        PhoneCalendarPicker(phone: phone)
+                    } label: {
+                        LabeledContent("Calendars to share",
+                                       value: PhoneCalendarSettingsSection.picked(phone.pickedCount))
+                            .font(.subheadline)
+                    }
+                    .accessibilityIdentifier("pocket.calendar.calendars")
+                }
+                note(words)
             }
-            note(words)
         }
     }
 
@@ -173,7 +179,7 @@ struct PhoneCalendarCard: View {
         var words: [String] = []
         if let notice = phone.notice { words.append(notice) }
         words.append(PhoneCalendarSettingsSection.agentsWords)
-        if phone.sharesWithAgents, phone.sharedCalendarIds.isEmpty { words.append(PhoneCalendarSettingsSection.pickWords) }
+        if phone.sharesWithAgents, phone.pickedCount == 0 { words.append(PhoneCalendarSettingsSection.pickWords) }
         words.append(Self.accountsWords)
         return words.joined(separator: " ")
     }
@@ -198,28 +204,32 @@ struct PhoneCalendarSettingsSection: View {
     var body: some View {
         if phone.available == true {
             Section {
-                if phone.access == .notAsked {
+                if phone.access == .notAsked, !phone.showsSharing {
                     Button {
                         Task { await phone.connect() }
                     } label: {
                         Label("Connect my calendar", systemImage: "calendar.badge.plus")
                     }
                     .accessibilityIdentifier("settings.phoneCalendar.connect")
-                } else if phone.access.isRefused {
-                    PhoneCalendarRefusedLine()
                 } else {
-                    Toggle(isOn: Binding(get: { phone.sharesWithAgents },
-                                         set: { on in Task { await phone.setSharing(on) } })) {
-                        Text("Let my agents see my calendar")
+                    if phone.access.isRefused {
+                        PhoneCalendarRefusedLine()
                     }
-                    .accessibilityIdentifier("settings.phoneCalendar.share")
-                    if phone.sharesWithAgents {
-                        NavigationLink {
-                            PhoneCalendarPicker(phone: phone)
-                        } label: {
-                            LabeledContent("Calendars to share", value: Self.picked(phone.sharedCalendarIds.count))
+                    // In sight while sharing is on or being forgotten, whatever iOS lets Pocket read.
+                    if phone.showsSharing {
+                        Toggle(isOn: Binding(get: { phone.sharesWithAgents },
+                                             set: { on in Task { await phone.setSharing(on) } })) {
+                            Text("Let my agents see my calendar")
                         }
-                        .accessibilityIdentifier("settings.phoneCalendar.calendars")
+                        .accessibilityIdentifier("settings.phoneCalendar.share")
+                        if phone.sharesWithAgents {
+                            NavigationLink {
+                                PhoneCalendarPicker(phone: phone)
+                            } label: {
+                                LabeledContent("Calendars to share", value: Self.picked(phone.pickedCount))
+                            }
+                            .accessibilityIdentifier("settings.phoneCalendar.calendars")
+                        }
                     }
                 }
             } header: {
@@ -243,9 +253,9 @@ struct PhoneCalendarSettingsSection: View {
             words.append(Self.connectWords)
         case .granted:
             words.append(Self.agentsWords)
-            if phone.sharesWithAgents, phone.sharedCalendarIds.isEmpty { words.append(Self.pickWords) }
+            if phone.sharesWithAgents, phone.pickedCount == 0 { words.append(Self.pickWords) }
         default:
-            break
+            if phone.showsSharing { words.append(Self.agentsWords) }
         }
         return words.joined(separator: " ")
     }

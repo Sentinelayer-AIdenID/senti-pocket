@@ -518,8 +518,8 @@ struct AuthenticatedRootView: View {
             // The webcal link goes to the system (Apple Calendar's subscribe sheet), which says whether it opened.
             openURL: { await UIApplication.shared.open($0) },
             // The phone's own calendar (connect my calendar): its switch and picks are the signed-in account's.
-            phone: PhoneCalendarCenter(
-                store: EventKitPhoneCalendar(),
+            // One EventKit store for the app: this runs on every pass of the App's body.
+            phone: PhoneCalendarCenter.live(
                 client: (services.calendar as? any DeviceCalendarServing) ?? CalendarOff(),
                 person: { await identity.currentAccount().map { $0.accountId ?? $0.authorId } }
             ),
