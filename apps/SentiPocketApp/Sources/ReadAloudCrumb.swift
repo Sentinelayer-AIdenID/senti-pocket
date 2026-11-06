@@ -31,7 +31,8 @@ struct ReadAloudCrumb: Equatable {
     var step: String {
         var details = ["\(rows) rows", origin.rawValue]
         if let threadReplies {
-            details.append("thread open with \(threadReplies) \(threadReplies == 1 ? "reply" : "replies") \(threadDepth) deep")
+            let replies = "\(threadReplies) \(threadReplies == 1 ? "reply" : "replies")"
+            details.append("thread open with \(replies) \(threadDepth) deep")
         } else {
             details.append("no thread open")
         }
@@ -89,8 +90,8 @@ struct ReadAloudCrumb: Equatable {
         let images = chips.filter { $0.kind == .image }
         let sizes = images.compactMap { state.attachmentPreviews[$0.attachmentId].flatMap(pixelSize(of:)) }
         let largest = sizes.max { $0.width * $0.height < $1.width * $1.height }
-        return ReadAloudCrumb(origin: origin(of: id), rows: state.rows.count, threadReplies: state.thread?.replies.count,
-                              threadDepth: state.thread?.replies.map(\.depth).max() ?? 0,
+        return ReadAloudCrumb(origin: origin(of: id), rows: state.rows.count,
+                              threadReplies: state.thread?.replies.count, threadDepth: state.thread?.replies.map(\.depth).max() ?? 0,
                               textSize: Self.textSize(textSize), images: images.count, largestImage: largest,
                               readerChanges: readerChanges)
     }

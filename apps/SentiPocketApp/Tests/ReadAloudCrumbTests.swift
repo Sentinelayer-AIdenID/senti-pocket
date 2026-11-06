@@ -11,8 +11,9 @@ final class ReadAloudCrumbTests: XCTestCase {
     private static let secret = "Words nobody may see in a crash report"
 
     private static func png(width: Int, height: Int) -> Data {
-        let renderer = UIGraphicsImageRenderer(size: CGSize(width: width, height: height),
-                                               format: { let format = UIGraphicsImageRendererFormat(); format.scale = 1; return format }())
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: width, height: height), format: format)
         return renderer.pngData { context in
             UIColor.gray.setFill()
             context.fill(CGRect(x: 0, y: 0, width: width, height: height))
