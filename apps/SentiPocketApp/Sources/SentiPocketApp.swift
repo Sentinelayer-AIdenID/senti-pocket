@@ -423,6 +423,7 @@ struct SidePanelFrame<Panel: View, Room: View>: View {
     private let panel: Panel
     private let room: Room
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(state: SidePanelState, width: CGFloat, coveredOtherwise: Bool, refresh: UInt64,
          onOpen: @escaping @MainActor () -> Void, poll: @escaping @MainActor () -> Void, panel: Panel, room: Room) {
@@ -438,13 +439,21 @@ struct SidePanelFrame<Panel: View, Room: View>: View {
 
     var body: some View {
         ZStack(alignment: .leading) {
-            // The panel ends before the room card begins, so its right edge (unread counts, See all) is never under it.
-            panel
-                .frame(width: width - 14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .opacity(state.isOpen ? 1 : 0)
-                .allowsHitTesting(state.isOpen)
-                .accessibilityHidden(!state.isOpen)
+            // In the tree only while open, or fading out after a close (Carter's freeze of 11-06, #62485): a closed panel
+            // kept in the tree (faded out under the room) held its lazy list there, and a room put in place could set
+            // off a layout of all its rows that never settled. Out of the tree it is also out of reach of VoiceOver
+            // (ticket 066aca7a). It fades in and out under the sliding room as it faded before.
+            if state.isOpen {
+                // The panel ends before the room card begins, so its right edge (unread counts, See all) is never under
+                // it.
+                panel
+                    .frame(width: width - 14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    // While it fades out after a close, nothing in it answers a touch or VoiceOver.
+                    .allowsHitTesting(state.isOpen)
+                    .accessibilityHidden(!state.isOpen)
+                    .transition(.opacity)
+            }
             room
                 // A sheet or the side panel over the room: its moving parts rest (warden, #269).
                 .environment(\.roomIsCovered, state.isOpen || coveredOtherwise)
@@ -470,7 +479,9 @@ struct SidePanelFrame<Panel: View, Room: View>: View {
                 .scaleEffect(state.isOpen ? 0.9 : 1, anchor: .leading)
                 .offset(x: state.isOpen ? width : 0)
         }
-        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: state.isOpen)
+        // With Reduce Motion, a short fade in place of the spring.
+        .animation(reduceMotion ? .easeInOut(duration: 0.2) : .spring(response: 0.35, dampingFraction: 0.8),
+                   value: state.isOpen)
         .onChange(of: state.isOpen) { open in
             if open { onOpen() }
         }
