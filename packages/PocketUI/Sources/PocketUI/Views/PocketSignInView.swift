@@ -71,6 +71,15 @@ public struct PocketSignInView: View {
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
 
+                // Agreeing to the terms comes with signing in, said where you sign in.
+                Text(PocketHelp.signInAgreement)
+                    .font(.footnote)
+                    .foregroundStyle(PocketPalette.textSecondary)
+                    .tint(PocketPalette.accent)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("pocket.signin.terms")
+
                 PocketHelpLinks()
             }
             .padding(28)

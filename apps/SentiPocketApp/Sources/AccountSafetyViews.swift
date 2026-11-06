@@ -16,12 +16,21 @@ struct SupportContactRow: View {
     var body: some View {
         if let url = PocketSupport.mailURL {
             Link(destination: url) {
-                HStack {
-                    Label("Contact us", systemImage: "envelope")
-                    Spacer(minLength: 8)
-                    Text(PocketSupport.email)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                // Side by side where they fit; at large text sizes the address goes under the words, whole.
+                ViewThatFits(in: .horizontal) {
+                    HStack {
+                        Label("Contact us", systemImage: "envelope")
+                        Spacer(minLength: 8)
+                        Text(PocketSupport.email)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label("Contact us", systemImage: "envelope")
+                        Text(PocketSupport.email)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
             // The address can be copied, for a phone without Mail set up.
@@ -35,14 +44,20 @@ struct SupportContactRow: View {
             .accessibilityAction(named: "Copy address") { UIPasteboard.general.string = PocketSupport.email }
             .accessibilityIdentifier("settings.account.support")
         }
-        Link(destination: PocketHelp.termsURL) {
-            Label("Terms of Use", systemImage: "doc.text")
+        ForEach(PocketHelp.pages, id: \.id) { page in
+            Link(destination: page.url) {
+                Label(page.title, systemImage: Self.symbol(page.id))
+            }
+            .accessibilityIdentifier("settings.account." + page.id + "Page")
         }
-        .accessibilityIdentifier("settings.account.terms")
-        Link(destination: PocketHelp.privacyURL) {
-            Label("Privacy Policy", systemImage: "hand.raised.square")
+    }
+
+    private static func symbol(_ page: String) -> String {
+        switch page {
+        case "support": return "questionmark.circle"
+        case "terms": return "doc.text"
+        default: return "hand.raised.square"
         }
-        .accessibilityIdentifier("settings.account.privacy")
     }
 }
 

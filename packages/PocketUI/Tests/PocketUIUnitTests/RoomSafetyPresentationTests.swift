@@ -321,6 +321,24 @@ final class RoomSafetyPresentationTests: XCTestCase {
         XCTAssertEqual(shown?.replies, 1)
     }
 
+    /// Support, the terms and the privacy policy open their own pages on sentinelayer.com (web #732's routes).
+    func test_support_terms_and_privacy_open_their_pages() {
+        XCTAssertEqual(PocketHelp.pages.map(\.id), ["support", "terms", "privacy"])
+        XCTAssertEqual(PocketHelp.pages.map(\.url.absoluteString), ["https://sentinelayer.com/support",
+                                                                     "https://sentinelayer.com/terms",
+                                                                     "https://sentinelayer.com/privacy"])
+        XCTAssertEqual(PocketHelp.pages.map(\.title), ["Support", "Terms of Use", "Privacy Policy"])
+    }
+
+    /// Signing in agrees to the Terms of Use, said on the sign-in screen with the terms linked.
+    func test_sign_in_says_the_terms_are_agreed_to_with_their_link() {
+        let agreement = PocketHelp.signInAgreement
+        XCTAssertEqual(String(agreement.characters), "By signing in you agree to the Terms of Use.")
+        let linked = agreement.runs.compactMap { run in run.link.map { (String(agreement[run.range].characters), $0) } }
+        XCTAssertEqual(linked.map { $0.0 }, ["Terms of Use"])
+        XCTAssertEqual(linked.map { $0.1 }, [PocketHelp.termsURL])
+    }
+
     // MARK: - Direct messages and Activity
 
     private func directList() throws -> SessionListPresentationState {
