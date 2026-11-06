@@ -419,6 +419,41 @@ final class VoiceReplyQueueTests: XCTestCase {
         XCTAssertFalse(poster.transcript.contains("skipped"), "every reply was read in full in the end")
     }
 
+    /// Talking over a reply to bring someone in ("add max") is a control, not a turn: the reply you talked over picks
+    /// up again right after it, never left waiting for something else to happen. The call has two agents now, so the
+    /// handoff names the agent.
+    func test_talking_over_a_reply_to_add_an_agent_picks_the_reply_up_again() async {
+        let line = QueueVoiceLine(), listener = QueueListener(), speaker = QueueSpeaker(), poster = QueuePoster()
+        let clock = self.clock
+        let room = VoiceRoomCoordinator(sessionId: "room_reply_queue_\(UUID().uuidString)", with: ["ada"],
+                                        you: "mrrcarter", ownAuthorIds: ["human-mrrcarter"], listener: listener,
+                                        speaker: speaker, audio: QueueAudio(), addable: { ["ada", "max"] },
+                                        poster: poster, voiceLine: line, now: { clock.now },
+                                        sleep: { _ in try? await Task.sleep(nanoseconds: 1_000_000) })
+        room.send(.setHandsFree(false))
+        room.begin(rings: false)
+        await tapTurn(room, listener, "Any news?")
+        await until("asked") { line.askCount == 1 }
+        line.answer(0, "Some.")
+        await says(speaker, 0, "Some.")
+        speaker.finish()
+        let reply = "The roof is done, and the porch starts Monday."
+        room.receive([post("p1", reply)])
+        await says(speaker, 1, Self.firstPerson)
+        speaker.finish()
+        await says(speaker, 2, reply)
+
+        await tapTurn(room, listener, "Add max to this call.")
+        await until("max is asked to join") { room.state.with.contains("max") }
+        XCTAssertEqual(line.askCount, 1, "a control, not a turn for the voice line")
+        await says(speaker, 3, "ada has the full update for you now, here it is.")
+        speaker.finish()
+        await says(speaker, 4, reply)
+        speaker.finish()
+        await room.hangUp()
+        XCTAssertEqual(header(of: reply, in: poster.transcript)?.contains("skipped"), false)
+    }
+
     // MARK: - What is never read is marked
 
     /// A reply skipped with Skip, one talked over and never got back to, and one still waiting when the call ends are

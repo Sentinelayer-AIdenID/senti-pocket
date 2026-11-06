@@ -891,7 +891,9 @@ final class VoiceRoomCoordinator: ObservableObject {
                                              text: text, at: now()))
             readyAfterSending()
             add(agent)
-            if state.isHandsFree, state.phase == .ready, readyIndex() == nil { startListening() }
+            // What you talked over to say it, or what came in meanwhile, is read now; otherwise, hands-free listens.
+            speakIfReady()
+            if state.isHandsFree, state.phase == .ready { startListening() }
             return
         }
         let turn = VoiceRoomTurn(id: "you:\(UUID().uuidString.lowercased())", speaker: you, isYou: true, text: text,
