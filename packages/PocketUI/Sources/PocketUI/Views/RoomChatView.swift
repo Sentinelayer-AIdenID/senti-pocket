@@ -610,6 +610,8 @@ public struct RoomChatView: View {
             isPinned: state.isPinned(message),
             pinsFull: state.pinned.count >= state.pinLimit,
             breakouts: state.breakouts,
+            estimate: message.estimateId.flatMap { state.estimates[$0] },
+            offersEstimates: state.offersEstimates,
             attachmentPreviews: RoomMessageRowView.previews(of: message, in: state.attachmentPreviews),
             isReadingAloud: readingAloudId == message.readAloudId,
             isExpanded: expandedQuiet.contains(message.id),
@@ -1009,6 +1011,10 @@ private struct RoomMessageRowView: View {
     /// The room holds as many pins as it can: Pin waits until one is unpinned.
     var pinsFull = false
     var breakouts: [String: RoomBreakoutCard] = [:]
+    /// This row's estimate card, when it is one.
+    var estimate: RoomEstimateCard?
+    /// Your own message offers "Get an estimate".
+    var offersEstimates = false
     var attachmentPreviews: [String: Data] = [:]
     var isReadingAloud = false
     /// A background line opened in place.
@@ -1055,6 +1061,9 @@ private struct RoomMessageRowView: View {
                 send(.openBreakout(childSessionId: childSessionId))
             }
             .padding(.vertical, 6)
+        case .estimateCard:
+            RoomEstimateCardView(card: estimate, send: send)
+                .padding(.vertical, 6)
         case .breakoutOutcome(let outcome):
             RoomBreakoutOutcomeView(
                 outcome: outcome,
@@ -1652,7 +1661,8 @@ private struct RoomMessageRowView: View {
     /// This row's options, for its action row, its long-press menu and its double-tap options.
     private var rowOptions: [RoomRowOption] {
         row.options(canReply: canReply, canReact: canReact, canPin: canPin, isPinned: isPinned, pinsFull: pinsFull,
-                    canEdit: canReply, canAddEmoji: canAddEmoji, canReport: canReport, canBlock: canBlock)
+                    canEdit: canReply, canAddEmoji: canAddEmoji, canReport: canReport, canBlock: canBlock,
+                    offersEstimates: offersEstimates)
     }
 
     private func perform(_ option: RoomRowOption) {
@@ -4066,6 +4076,7 @@ extension RoomMessageRowView: Equatable {
             && lhs.threadSummary == rhs.threadSummary && lhs.isReadingSummary == rhs.isReadingSummary
             && lhs.isMinimized == rhs.isMinimized && lhs.canReport == rhs.canReport && lhs.canBlock == rhs.canBlock
             && lhs.asksAIConsent == rhs.asksAIConsent
+            && lhs.estimate == rhs.estimate && lhs.offersEstimates == rhs.offersEstimates
     }
 
     /// The previews of this row's own attachments: another row's preview arriving leaves it as it is.

@@ -18,6 +18,8 @@ public enum RoomMessageKind: String, Equatable, Sendable {
     case breakoutOpened
     /// A breakout's published outcome (`session_breakout_outcome`); see `breakout`.
     case breakoutOutcome
+    /// An estimate's card (`session_estimate_card`); see `estimate`.
+    case estimateCard
 }
 
 public struct RoomMessage: Equatable, Identifiable, Sendable {
@@ -49,6 +51,8 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
     public let addressed: RoomAddressed?
     /// The box its author runs in, from the author record (`RoomAgentBox`).
     public let authorBox: RoomAgentBox?
+    /// The estimate an `.estimateCard` row shows, as its event sums it up.
+    public let estimate: RoomEstimateSummary?
 
     public init(
         id: String,
@@ -69,7 +73,8 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         channel: String? = nil,
         checkpointSummary: String? = nil,
         addressed: RoomAddressed? = nil,
-        authorBox: RoomAgentBox? = nil
+        authorBox: RoomAgentBox? = nil,
+        estimate: RoomEstimateSummary? = nil
     ) {
         self.id = id
         self.sequenceId = sequenceId
@@ -90,6 +95,7 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         self.checkpointSummary = checkpointSummary
         self.addressed = addressed
         self.authorBox = authorBox
+        self.estimate = estimate
     }
 
     /// Projects one wire event. Returns nil for events a room does not display (control, presence, edit
@@ -108,6 +114,7 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         case "session_member_joined": kind = .memberJoined
         case "session_breakout_opened": kind = .breakoutOpened
         case "session_breakout_outcome": kind = .breakoutOutcome
+        case RoomEstimateSummary.eventType: kind = .estimateCard
         default: return nil
         }
         let payload = json["payload"] ?? .null
@@ -134,6 +141,8 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
             text = ""
         case .breakoutOutcome:
             text = payload["text"]?.stringValue ?? ""
+        case .estimateCard:
+            text = ""
         }
         if kind == .message && text.trimmed.isEmpty { return nil }
         let breakout: RoomBreakoutEvent?
@@ -145,6 +154,9 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         default:
             breakout = nil
         }
+        // An estimate card without a readable summary is not shown.
+        let estimate = kind == .estimateCard ? RoomEstimateSummary(payload: payload) : nil
+        if kind == .estimateCard, estimate == nil { return nil }
 
         self.id = id
         self.sequenceId = sequenceId
@@ -175,6 +187,7 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         self.eventType = event
         self.addressed = kind == .message ? RoomAddressed(in: payload) : nil
         self.authorBox = RoomAgentBox.author(of: json)
+        self.estimate = estimate
     }
 
     /// The message as it reads now, from a `session_message_edited` envelope (`session-message-edit:v1`). The
