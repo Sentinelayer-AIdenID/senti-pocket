@@ -271,6 +271,9 @@ final class RootPreviewAPI: @unchecked Sendable {
     /// The room open at launch, where messages arrive.
     let openRoomId: String?
     private var calls: [String: Int] = [:]
+    private var holding = false
+    private var held: [CheckedContinuation<Void, Never>] = []
+    private var inFlight = 0
 
     init(postsPerSecond: Double, onePage: Bool, openRoomId: String?) {
         self.postsPerSecond = postsPerSecond
@@ -285,7 +288,41 @@ final class RootPreviewAPI: @unchecked Sendable {
     /// All the reads above, together: a hosted test waits until this stops moving.
     var totalCalls: Int { lock.withLock { calls.values.reduce(0, +) } }
 
-    private func count(_ name: String) { lock.withLock { calls[name, default: 0] += 1 } }
+    /// From now on each read is counted as it is asked for and then held: its answer is given only at
+    /// `releaseAnswers()`. A hosted test holds them while it measures, so no answer lands in what it measures.
+    func holdAnswers() { lock.withLock { holding = true } }
+
+    /// Gives every held read its answer, and holds no more.
+    func releaseAnswers() {
+        let waiting = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+            holding = false
+            defer { held = [] }
+            return held
+        }
+        waiting.forEach { $0.resume() }
+    }
+
+    /// Reads asked for and not yet answered, and how many of them are held.
+    var readsInFlight: (all: Int, held: Int) { lock.withLock { (inFlight, held.count) } }
+
+    /// A read asked for: counted, then, while answers are held, waiting for `releaseAnswers()`. The read calls
+    /// `answered()` as it returns.
+    private func asked(_ name: String) async {
+        lock.withLock {
+            calls[name, default: 0] += 1
+            inFlight += 1
+        }
+        await withCheckedContinuation { (waiter: CheckedContinuation<Void, Never>) in
+            let waits = lock.withLock { () -> Bool in
+                guard holding else { return false }
+                held.append(waiter)
+                return true
+            }
+            if !waits { waiter.resume() }
+        }
+    }
+
+    private func answered() { lock.withLock { inFlight -= 1 } }
 
     var services: RootServices {
         let sender = RootPreviewSender()
@@ -426,7 +463,8 @@ final class RootPreviewAPI: @unchecked Sendable {
 
 extension RootPreviewAPI: SessionTransport {
     func listSessions(includeArchived: Bool, limit: Int, cursor: String?) async throws -> SessionListPage {
-        count("rooms")
+        await asked("rooms")
+        defer { answered() }
         let start = Int(cursor ?? "0") ?? 0
         let size = onePage ? Self.rooms.count : limit
         let page = Array(Self.rooms.dropFirst(start).prefix(size))
@@ -457,7 +495,8 @@ extension RootPreviewAPI: SessionTransport {
 
 extension RootPreviewAPI: RoomTransport {
     func roomEventsBefore(sessionId: String, beforeSequence: Int64?, limit: Int) async throws -> RoomEventPage {
-        count("history")
+        await asked("history")
+        defer { answered() }
         try? await Task.sleep(nanoseconds: 150_000_000)
         let all = allMessages(sessionId).filter { $0.sequenceId < (beforeSequence ?? .max) }
         let page = Array(all.suffix(limit))
@@ -492,7 +531,8 @@ extension RootPreviewAPI: RoomTransport {
     }
 
     func roomActions(sessionId: String, targetSequenceId: Int64?, limit: Int) async throws -> RoomActionsPage {
-        count("actions")
+        await asked("actions")
+        defer { answered() }
         let messages = history(sessionId)
         guard let newest = messages.last?.sequenceId else { return RoomActionsPage() }
         if let targetSequenceId {
@@ -541,7 +581,8 @@ extension RootPreviewAPI: RoomTicketsTransport, RoomAdmissionsTransport, RoomSea
 
 extension RootPreviewAPI: NotificationsTransport, NotificationReadMarking, WaitingTransport, CallLogTransport {
     func notifications() async throws -> SentiNotificationsPage {
-        count("bell")
+        await asked("bell")
+        defer { answered() }
         var words = RootPreviewWords(seed: 33)
         let rooms = Self.rooms.filter { $0.direct == nil }
         return SentiNotificationsPage(notifications: (0..<40).map { index in
@@ -555,7 +596,8 @@ extension RootPreviewAPI: NotificationsTransport, NotificationReadMarking, Waiti
     func markRead(id: String) async throws {}
 
     func waiting(limit: Int) async throws -> SentiWaitingPage {
-        count("waiting")
+        await asked("waiting")
+        defer { answered() }
         var words = RootPreviewWords(seed: 44)
         let items = (0..<6).map { index -> SentiWaitingItem in
             let room = Self.rooms[index * 3]
@@ -589,14 +631,16 @@ extension RootPreviewAPI: DirectMessaging, RoomFoldersServing {
     func setMemoryShare(_ sessionId: String, roomId: String, enabled: Bool) async throws -> [DirectMemoryShare] { [] }
 
     func directMessageSettings() async throws -> DirectMessagesAllowance? {
-        count("dmSettings")
+        await asked("dmSettings")
+        defer { answered() }
         return .sharedRooms
     }
 
     func setDirectMessageSettings(_ allowance: DirectMessagesAllowance) async throws -> DirectMessagesAllowance? { allowance }
 
     func folders() async throws -> [RoomFolder] {
-        count("folders")
+        await asked("folders")
+        defer { answered() }
         return Self.folders
     }
 
@@ -643,7 +687,8 @@ extension RootPreviewAPI: RoomReceiptsClient, RoomReadMarking {
     func recordViews(sessionId: String, targets: [RoomViewTarget]) async throws {}
 
     func views(sessionId: String, targets: [RoomViewTarget]) async throws -> [RoomViewSummary] {
-        count("views")
+        await asked("views")
+        defer { answered() }
         // Each viewer saw each message once, at launch: a read again finds what it found before.
         let seen = stamp(started)
         return targets.map { target in
@@ -656,7 +701,8 @@ extension RootPreviewAPI: RoomReceiptsClient, RoomReadMarking {
     func publishPresence(sessionId: String, active: Bool, clientInstanceId: String) async throws -> Int? { 90 }
 
     func presence(sessionId: String) async throws -> RoomPresence {
-        count("presence")
+        await asked("presence")
+        defer { answered() }
         return RoomPresence(isAvailable: true,
                             participants: [RoomPresentParticipant(id: Self.me, isHuman: true, displayName: "Alex")]
                                 + Self.agents.prefix(4).map { RoomPresentParticipant(id: $0, isHuman: false) },
