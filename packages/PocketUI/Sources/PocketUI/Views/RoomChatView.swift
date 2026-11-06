@@ -510,6 +510,7 @@ public struct RoomChatView: View {
                 .foregroundStyle(PocketPalette.textSecondary)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 12)
+                .accessibilityIdentifier("pocket.room.start")
         }
     }
 

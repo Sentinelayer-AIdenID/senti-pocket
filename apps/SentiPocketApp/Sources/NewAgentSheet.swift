@@ -263,7 +263,7 @@ struct NewAgentSheet: View {
             Section {
                 Label("\(started.agentName) is starting in a new chat.", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.teal)
-                Text("It will post a short plan in the new chat, “\(chat.title)”. Its box shows in that chat's Flight record.")
+                Text("It will post a short plan in the new chat, “\(chat.title)”. Its box shows in that chat's Room info.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 Button {
@@ -279,7 +279,7 @@ struct NewAgentSheet: View {
             Section {
                 Label("\(started.agentName) is starting on its own machine.", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.teal)
-                Text("It will post a short plan in the room. Its box shows in the Flight record.")
+                Text("It will post a short plan in the room. Its box shows in Room info.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }

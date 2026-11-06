@@ -115,7 +115,7 @@ struct NewRoomSheet: View {
                     Text("What is it for?")
                 }
                 Section {
-                    TextField(kind == .general ? "Room name" : "\(kind.name) room", text: $name)
+                    TextField(kind == .general ? "Chat name" : "\(kind.name) room", text: $name)
                         .submitLabel(.done)
                         .accessibilityIdentifier("pocket.newRoom.name")
                 } header: {
@@ -129,7 +129,7 @@ struct NewRoomSheet: View {
                     }
                 }
             }
-            .navigationTitle("New room")
+            .navigationTitle("New chat")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -157,11 +157,11 @@ struct NewRoomSheet: View {
             let sessionId = try await creator.create(title: title, kind: kind)
             onCreated(sessionId, title)
         } catch RoomSendError.reauthenticationRequired {
-            problem = "Sign in again to make a room."
+            problem = "Sign in again to start a chat."
         } catch RoomSendError.notAllowed {
-            problem = "This account can't make rooms right now."
+            problem = "This account can't start chats right now."
         } catch {
-            problem = "The room couldn't be made. Check your connection and try again."
+            problem = "The chat couldn't be started. Check your connection and try again."
         }
     }
 }

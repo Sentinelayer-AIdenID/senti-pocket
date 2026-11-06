@@ -306,7 +306,8 @@ public struct SessionEventRowPresentation: Equatable, Identifiable, Sendable {
         self.timestamp = ParsedSessionTimestamp(event.ts)
     }
 
-    public var eventTypeLabel: String { eventType.pocketTokenLabel }
+    /// What happened, in plain words (never the server's token): "Message", "Chat renamed", or "Update".
+    public var eventTypeLabel: String { ActivityWords.event(eventType) }
 }
 
 public struct SessionActionRowPresentation: Equatable, Identifiable, Sendable {
@@ -343,9 +344,67 @@ public struct SessionActionRowPresentation: Equatable, Identifiable, Sendable {
         self.createdAt = ParsedSessionTimestamp(action.createdAt)
     }
 
-    public var actionTypeLabel: String { actionType.pocketTokenLabel }
+    /// What someone did, in plain words (never the server's token): "Liked", "Seen", or "Update".
+    public var actionTypeLabel: String { ActivityWords.action(actionType) }
+    /// What it was on, without the server's numbers.
     public var targetLabel: String {
-        targetSequenceId == 0 ? "Session-level" : "Target #\(targetSequenceId)"
+        targetSequenceId == 0 ? "On the chat" : "On a message"
+    }
+}
+
+/// Activity in plain words (Carter, 2026-11-06: every activity line reviewed for people who are not technical). The
+/// server's event and action types (sentinelayer-api: session events, and the message actions its route accepts) are
+/// said as what happened; anything else is an "Update", never the server's token.
+enum ActivityWords {
+    static let update = "Update"
+
+    private static let events: [String: String] = [
+        "session_message": "Message",
+        "session_say": "Message",
+        "human_relay": "Message",
+        "agent_response": "Answer",
+        "session_titled": "Chat renamed",
+        "session_member_joined": "Someone joined",
+        "agent_admission_joined": "An agent joined",
+        "agent_join": "An agent joined",
+        "agent_joined": "An agent joined",
+        "agent_admission_state_changed": "An agent's access changed",
+        "agent_leave": "An agent left",
+        "agent_complete": "An agent finished",
+        "agent_error": "An agent hit a problem",
+        "session_branched_from": "Side chat",
+        "session_branched_to": "Side chat",
+        "room_event_reminder": "Reminder",
+        "room_event_cancelled": "Event cancelled",
+        "room_event_postponed": "Event moved",
+        "recap": "Summary",
+        "session_recap": "Summary",
+        "context_briefing": "Summary"
+    ]
+
+    private static let actions: [String: String] = [
+        "ack": "Acknowledged",
+        "working_on": "Working on it",
+        "reply": "Replied",
+        "comment": "Replied",
+        "like": "Liked",
+        "unlike": "Took back a like",
+        "dislike": "Disliked",
+        "undislike": "Took back a dislike",
+        "disregard": "Disregarded",
+        "view": "Seen",
+        "pin": "Pinned",
+        "unpin": "Unpinned",
+        "react": "Reacted",
+        "unreact": "Took back a reaction"
+    ]
+
+    static func event(_ type: String) -> String {
+        events[type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()] ?? update
+    }
+
+    static func action(_ type: String) -> String {
+        actions[type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()] ?? update
     }
 }
 
