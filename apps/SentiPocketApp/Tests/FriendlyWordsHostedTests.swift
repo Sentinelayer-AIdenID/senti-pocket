@@ -1,8 +1,18 @@
+import PocketSyncClient
 import PocketUI
 import SwiftUI
 import UIKit
 import XCTest
 @testable import SentiPocketApp
+
+/// A mint that refuses every read the same way.
+private final class RefusingMint: MintReading, @unchecked Sendable {
+    let error: MintError
+    init(_ error: MintError) { self.error = error }
+    func roomLives(sessionId: String) async throws -> [MintLife] { throw error }
+    func roomSnapshot(sessionId: String) async throws -> MintRoomLives { throw error }
+    func flight(lifeId: String) async throws -> MintFlightRecord { throw error }
+}
 
 /// The words a new person meets, hosted in a window and read the way VoiceOver reads them (Carter, 2026-11-06, ticket
 /// 693f0cc5): Room info with no box words for a person without boxes, people first, "last seen just now"; and the
@@ -64,5 +74,20 @@ final class FriendlyWordsHostedTests: XCTestCase {
         }
         XCTAssertTrue(read.contains { $0.contains(WhisperModelSettingsView.crashTitle) }, "\(read)")
         XCTAssertFalse(read.contains { $0.localizedCaseInsensitiveContains("crash") }, "\(read)")
+    }
+
+    /// A 403 on the box reads is most people's case: Room info keeps nothing to say about it. Another failure is kept,
+    /// but said only to a person who has had boxes in the room.
+    func test_a_refused_box_read_is_said_to_nobody_and_a_failed_one_only_to_people_with_boxes() async {
+        let refused = FlightRecordCoordinator(sessionId: "room", mint: RefusingMint(.forbidden), sleep: { _ in },
+                                              now: { Date() })
+        await refused.refresh()
+        XCTAssertNil(refused.state.failure, "\"This account cannot see the room's boxes.\" for a person without boxes")
+
+        let failed = FlightRecordCoordinator(sessionId: "room", mint: RefusingMint(.unavailable), sleep: { _ in },
+                                             now: { Date() })
+        await failed.refresh()
+        XCTAssertNotNil(failed.state.failure)
+        XCTAssertNil(failed.state.shownFailure, "a box failure said to a person who never had boxes here")
     }
 }
