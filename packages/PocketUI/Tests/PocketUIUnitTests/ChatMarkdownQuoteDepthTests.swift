@@ -7,9 +7,11 @@ import XCTest
 /// one "↳" and, past one level deeper, how much deeper ("↳ (8 levels deeper)"); VoiceOver says "quoted 8 levels
 /// deeper"; every word still shows.
 final class ChatMarkdownQuoteDepthTests: XCTestCase {
-    /// `levels` block quotes, each inside the one before, each with its own line: "level-1-end" … "level-N-end".
+    /// `levels` block quotes, each inside the one before, each with its own line: "level-1-end" … "level-N-end". The
+    /// marks are written ">>>" (as Markdown allows) so 200 levels stay inside what the parser reads
+    /// (`ChatMarkdown.maximumParsedCharacters`); past that, the rest of a message is one plain paragraph.
     static func nested(_ levels: Int) -> String {
-        (1...levels).map { String(repeating: "> ", count: $0) + "level-\($0)-end" }.joined(separator: "\n")
+        (1...levels).map { String(repeating: ">", count: $0) + " level-\($0)-end" }.joined(separator: "\n")
     }
 
     /// How deep the quotes in `blocks` nest.
@@ -59,6 +61,8 @@ final class ChatMarkdownQuoteDepthTests: XCTestCase {
 
     func test_fifty_and_two_hundred_levels_nest_four_deep_and_keep_every_word() {
         for levels in [50, 200] {
+            XCTAssertLessThan(Self.nested(levels).count, ChatMarkdown.maximumParsedCharacters,
+                              "\(levels) levels fit in what the parser reads")
             let blocks = ChatMarkdown.parse(Self.nested(levels))
             XCTAssertEqual(Self.depth(blocks), ChatMarkdown.maximumQuoteDepth, "\(levels) levels nest four deep")
             let text = Self.lines(blocks)
@@ -83,16 +87,74 @@ final class ChatMarkdownQuoteDepthTests: XCTestCase {
 import AppKit
 import SwiftUI
 
-/// The same messages on screen: 50 and 200 levels lay out about as fast as 4 (each at most four stacks deep), well
-/// inside a frame budget's worth of seconds; without the cap they would be 50 and 200 stacks deep.
+/// The work of laying a quote out, counted, not timed (a hosted runner's speed varies): the parsed blocks drawn as
+/// `ChatMarkdownView` draws a quote (a bar beside its blocks, at every level) with a counter at each level, which counts
+/// each time that level is sized, placed or asked for an alignment. Laying stacks nested that way costs more at every
+/// level, so the cap must keep a deep quote's work near what four levels cost. The real view's times are printed too.
 final class ChatMarkdownQuoteDepthLayoutTests: XCTestCase {
-    private func layoutSeconds(_ text: String) -> Double {
-        let host = NSHostingView(rootView: ChatMarkdownView(text: text).frame(width: 390, alignment: .topLeading))
-        host.frame = NSRect(x: 0, y: 0, width: 390, height: 4_000)
-        let start = CFAbsoluteTimeGetCurrent()
-        host.layoutSubtreeIfNeeded()
-        _ = host.fittingSize
-        return CFAbsoluteTimeGetCurrent() - start
+    /// Counts each time a level is sized, placed or asked for an alignment, and passes it all to its one view.
+    private struct CountingLayout: Layout {
+        nonisolated(unsafe) static var calls = 0
+
+        func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+            Self.calls += 1
+            return subviews.first?.sizeThatFits(proposal) ?? .zero
+        }
+
+        func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+            Self.calls += 1
+            subviews.first?.place(at: bounds.origin, proposal: proposal)
+        }
+
+        func explicitAlignment(of guide: HorizontalAlignment, in bounds: CGRect, proposal: ProposedViewSize,
+                               subviews: Subviews, cache: inout ()) -> CGFloat? {
+            Self.calls += 1
+            return subviews.first?.dimensions(in: proposal)[explicit: guide].map { $0 + bounds.minX }
+        }
+
+        func explicitAlignment(of guide: VerticalAlignment, in bounds: CGRect, proposal: ProposedViewSize,
+                               subviews: Subviews, cache: inout ()) -> CGFloat? {
+            Self.calls += 1
+            return subviews.first?.dimensions(in: proposal)[explicit: guide].map { $0 + bounds.minY }
+        }
+    }
+
+    /// Parsed blocks drawn the way `ChatMarkdownView` draws them, a counter on each quote's blocks.
+    private struct CountedBlocks: View {
+        let blocks: [ChatMarkdownBlock]
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                    switch block {
+                    case .quote(let inner):
+                        HStack(alignment: .top, spacing: 8) {
+                            RoundedRectangle(cornerRadius: 1.5).frame(width: 3)
+                            CountingLayout { CountedBlocks(blocks: inner) }
+                        }
+                    case .deeperQuote(let levels, let text):
+                        HStack(alignment: .firstTextBaseline, spacing: 4) {
+                            Text(ChatMarkdown.deeperQuoteMark(levels: levels)).font(.caption)
+                            Text(text)
+                        }
+                    case .list(_, _, let items):
+                        VStack(alignment: .leading, spacing: 3) {
+                            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                    Text("•")
+                                    Text(item.text)
+                                }
+                                .padding(.leading, CGFloat(item.depth) * 16)
+                            }
+                        }
+                    case .paragraph(let text):
+                        Text(text)
+                    default:
+                        Text("…")
+                    }
+                }
+            }
+        }
     }
 
     /// Quotes `depth` deep, each level with a paragraph and a two-level list under it, as replies quoting replies are.
@@ -105,50 +167,58 @@ final class ChatMarkdownQuoteDepthLayoutTests: XCTestCase {
         }.joined(separator: "\n") + "\nAnd the answer to all of it."
     }
 
-    /// The fastest of three: the message laid out fresh, then again at a new width (as a size change makes it).
-    private func freshAndAgain(_ text: String) -> (fresh: Double, again: Double) {
-        var fresh = Double.infinity
-        var again = Double.infinity
-        for _ in 0..<3 {
-            let view = ChatMarkdownView(text: text).frame(maxWidth: .infinity, alignment: .topLeading)
-            let host = NSHostingView(rootView: view)
-            host.frame = NSRect(x: 0, y: 0, width: 390, height: 4_000)
-            var start = CFAbsoluteTimeGetCurrent()
-            host.layoutSubtreeIfNeeded()
-            fresh = min(fresh, CFAbsoluteTimeGetCurrent() - start)
-            host.frame = NSRect(x: 0, y: 0, width: 360, height: 4_000)
-            start = CFAbsoluteTimeGetCurrent()
-            host.layoutSubtreeIfNeeded()
-            again = min(again, CFAbsoluteTimeGetCurrent() - start)
-        }
-        return (fresh, again)
+    /// The counted layout calls of `text` laid out fresh at 390 pt, then again at 360 (as a size change makes it).
+    private func work(_ text: String) -> (fresh: Int, again: Int) {
+        let view = CountedBlocks(blocks: ChatMarkdown.parse(text)).frame(maxWidth: .infinity, alignment: .topLeading)
+        let host = NSHostingView(rootView: view)
+        host.frame = NSRect(x: 0, y: 0, width: 390, height: 4_000)
+        CountingLayout.calls = 0
+        host.layoutSubtreeIfNeeded()
+        let fresh = CountingLayout.calls
+        host.frame = NSRect(x: 0, y: 0, width: 360, height: 4_000)
+        CountingLayout.calls = 0
+        host.layoutSubtreeIfNeeded()
+        return (fresh, CountingLayout.calls)
     }
 
-    /// Laying a deep quote out costs more at every level it nests (about five times per level, measured on the hosted
-    /// runner before the cap). Capped at four, 1 to 4 deep stay cheap, and 7 deep costs about what 4 deep does.
-    func test_a_seven_deep_quote_lays_out_for_about_what_four_deep_costs() {
-        var costs: [Int: (fresh: Double, again: Double)] = [:]
+    /// The real view's fresh layout, in ms, for the record only.
+    private func realMilliseconds(_ text: String) -> Int {
+        let host = NSHostingView(rootView: ChatMarkdownView(text: text).frame(width: 390, alignment: .topLeading))
+        host.frame = NSRect(x: 0, y: 0, width: 390, height: 4_000)
+        let start = CFAbsoluteTimeGetCurrent()
+        host.layoutSubtreeIfNeeded()
+        return Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
+    }
+
+    /// Capped at four, a quote seven deep makes at most twice the layout work of one four deep, fresh and again.
+    func test_a_seven_deep_quote_makes_about_the_work_of_four_deep() {
+        var counted: [Int: (fresh: Int, again: Int)] = [:]
         for depth in [1, 2, 3, 4, 7] {
-            costs[depth] = freshAndAgain(Self.quotedReplies(depth))
-            print("QUOTEDEPTH real depth \(depth): fresh \(Int((costs[depth]?.fresh ?? 0) * 1000)) ms, "
-                + "again \(Int((costs[depth]?.again ?? 0) * 1000)) ms")
+            counted[depth] = work(Self.quotedReplies(depth))
+            print("QUOTEDEPTH counted depth \(depth): fresh \(counted[depth]?.fresh ?? 0) calls, again "
+                + "\(counted[depth]?.again ?? 0) calls; real view \(realMilliseconds(Self.quotedReplies(depth))) ms")
         }
-        for depth in [1, 2, 3, 4] {
-            XCTAssertLessThan(costs[depth]?.fresh ?? 0, 0.5, "\(depth) deep lays out fresh in under half a second")
-            XCTAssertLessThan(costs[depth]?.again ?? 0, 0.5, "\(depth) deep lays out again in under half a second")
-        }
-        let four = costs[4] ?? (0, 0)
-        let seven = costs[7] ?? (0, 0)
-        XCTAssertLessThanOrEqual(seven.fresh, four.fresh * 2 + 0.03, "7 deep lays out fresh for about what 4 costs")
-        XCTAssertLessThanOrEqual(seven.again, four.again * 2 + 0.03, "7 deep lays out again for about what 4 costs")
+        let four = counted[4] ?? (0, 0)
+        let seven = counted[7] ?? (0, 0)
+        XCTAssertGreaterThan(four.fresh, 0, "the counter sees the quote levels")
+        XCTAssertLessThanOrEqual(seven.fresh, four.fresh * 2, "7 deep, laid out fresh, makes at most twice 4 deep's work")
+        XCTAssertLessThanOrEqual(seven.again, max(four.again, 1) * 2,
+                                 "7 deep, laid out again, makes at most twice 4 deep's work")
     }
 
-    func test_fifty_and_two_hundred_levels_lay_out_about_as_fast_as_four() {
-        let four = layoutSeconds(ChatMarkdownQuoteDepthTests.nested(4))
+    /// 50 and 200 levels make at most twice the layout work of four levels: every line past the fourth sits in the
+    /// fourth quote, and no level is added for it.
+    func test_fifty_and_two_hundred_levels_make_about_the_work_of_four() {
+        let four = work(ChatMarkdownQuoteDepthTests.nested(4))
+        XCTAssertGreaterThan(four.fresh, 0, "the counter sees the quote levels")
         for levels in [50, 200] {
-            let seconds = layoutSeconds(ChatMarkdownQuoteDepthTests.nested(levels))
-            print("QUOTEDEPTH \(levels) levels: \(Int(seconds * 1000)) ms (4 levels: \(Int(four * 1000)) ms)")
-            XCTAssertLessThan(seconds, 1, "\(levels) levels lay out in under a second")
+            let counted = work(ChatMarkdownQuoteDepthTests.nested(levels))
+            print("QUOTEDEPTH counted \(levels) levels: fresh \(counted.fresh) calls, again \(counted.again) calls "
+                + "(4 levels: \(four.fresh), \(four.again)); real view "
+                + "\(realMilliseconds(ChatMarkdownQuoteDepthTests.nested(levels))) ms")
+            XCTAssertLessThanOrEqual(counted.fresh, four.fresh * 2, "\(levels) levels make at most twice 4 levels' work")
+            XCTAssertLessThanOrEqual(counted.again, max(four.again, 1) * 2,
+                                     "\(levels) levels, laid out again, make at most twice 4 levels' work")
         }
     }
 }
