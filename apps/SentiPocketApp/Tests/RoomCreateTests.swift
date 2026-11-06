@@ -132,6 +132,49 @@ final class RoomCreateTests: XCTestCase {
         XCTAssertNil(json(body)["roomType"])
     }
 
+    /// The API's codes come before its status: a sign-in the API asks for again is that, not "not allowed".
+    func test_the_apis_codes_come_before_its_status() async {
+        let start = RoomStart.template(id: "sample-a")
+        CreateURLProtocol.reset(status: 403,
+                                answer: #"{"error": {"code": "SIGNED_IN_SESSION_REQUIRED", "message": "x"}}"#)
+        do {
+            _ = try await sender().create(title: "x", start: start)
+            XCTFail("a refused create")
+        } catch {
+            XCTAssertEqual(error as? RoomSendError, .reauthenticationRequired)
+        }
+        CreateURLProtocol.reset(status: 422, answer: #"{"error": {"code": "TEMPLATE_NOT_FOUND", "message": "x"}}"#)
+        do {
+            _ = try await sender().create(title: "x", start: start)
+            XCTFail("a refused create")
+        } catch {
+            XCTAssertEqual(error as? RoomCreateError, .templateNotFound)
+        }
+        CreateURLProtocol.reset(status: 422, answer: #"{"detail": {"error": {"code": "ROOM_TYPE_WITH_TEMPLATE"}}}"#)
+        do {
+            _ = try await sender().create(title: "x", start: start)
+            XCTFail("a refused create")
+        } catch {
+            XCTAssertEqual(error as? RoomCreateError, .roomTypeWithTemplate)
+        }
+    }
+
+    func test_each_refusal_is_said_in_plain_words() {
+        let template = RoomStart.template(id: "sample-a")
+        XCTAssertEqual(NewRoomSheet.problem(for: RoomCreateError.templateNotFound, start: template),
+                       "That way to start isn't offered any more. Go back and pick another.")
+        XCTAssertEqual(NewRoomSheet.problem(for: RoomCreateError.roomTypeWithTemplate, start: template),
+                       "That way to start couldn't be used. Go back and start the chat Blank.")
+        XCTAssertEqual(NewRoomSheet.problem(for: RoomSendError.reauthenticationRequired, start: .kind(.general)),
+                       "Sign in again to start a chat.")
+        XCTAssertEqual(NewRoomSheet.problem(for: RoomSendError.notAllowed, start: .kind(.general)),
+                       "This account can't start chats right now.")
+        XCTAssertEqual(NewRoomSheet.problem(for: RoomSendError.rejected, start: template),
+                       "That way to start isn't offered right now. Go back and pick another.")
+        XCTAssertEqual(NewRoomSheet.problem(for: RoomSendError.rejected, start: .kind(.study)),
+                       "The chat couldn't be started. Check your connection and try again.")
+    }
+
     func test_start_with_is_blank_first_then_the_servers_in_its_order_and_none_offered_keeps_the_kinds() {
         let a = RoomTemplate(id: "sample-a", name: "Sample A")
         let b = RoomTemplate(id: "sample-b", name: "Sample B")

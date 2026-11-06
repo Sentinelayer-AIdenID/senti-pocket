@@ -724,6 +724,15 @@ extension HTTPRoomMessageSender {
             throw RoomSendError.retryable(retryAfterSeconds: nil)
         }
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        // The API's own codes first: each says one thing, whatever the status.
+        if !(200..<300).contains(status) {
+            switch HTTPRoomTicketWriter.errorCode(try? JSONDecoder().decode(JSONValue.self, from: data)) {
+            case "SIGNED_IN_SESSION_REQUIRED": throw RoomSendError.reauthenticationRequired
+            case "TEMPLATE_NOT_FOUND": throw RoomCreateError.templateNotFound
+            case "ROOM_TYPE_WITH_TEMPLATE": throw RoomCreateError.roomTypeWithTemplate
+            default: break
+            }
+        }
         switch status {
         case 200..<300:
             let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]

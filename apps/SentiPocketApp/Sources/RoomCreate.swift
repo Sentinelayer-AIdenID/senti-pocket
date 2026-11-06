@@ -51,6 +51,14 @@ enum RoomStart: Equatable, Sendable {
     case template(id: String)
 }
 
+/// Why a chat started from one of the server's ways to start was refused, by the API's code.
+enum RoomCreateError: Error, Equatable {
+    /// `TEMPLATE_NOT_FOUND`: that way to start is not offered (any more).
+    case templateNotFound
+    /// `ROOM_TYPE_WITH_TEMPLATE`: a type was sent beside the way to start.
+    case roomTypeWithTemplate
+}
+
 /// Making a room from the phone.
 protocol RoomCreating: Sendable {
     /// The new room's id.
@@ -345,19 +353,32 @@ struct NewRoomSheet: View {
         do {
             let sessionId = try await creator.create(title: title, start: start)
             onCreated(sessionId, title)
-        } catch RoomSendError.reauthenticationRequired {
-            problem = "Sign in again to start a chat."
-        } catch RoomSendError.notAllowed {
-            problem = "This account can't start chats right now."
-        } catch RoomSendError.rejected {
-            // A refused way to start was most likely taken off the server's list since the sheet opened.
-            if case .template = start {
-                problem = "That way to start isn't offered right now. Go back and pick another."
-            } else {
-                problem = "The chat couldn't be started. Check your connection and try again."
-            }
         } catch {
-            problem = "The chat couldn't be started. Check your connection and try again."
+            problem = Self.problem(for: error, start: start)
+        }
+    }
+
+    /// What a refused create says, in plain words: the API's code first, then what the refusal was.
+    static func problem(for error: Error, start: RoomStart) -> String {
+        switch error as? RoomCreateError {
+        case .templateNotFound?:
+            return "That way to start isn't offered any more. Go back and pick another."
+        case .roomTypeWithTemplate?:
+            return "That way to start couldn't be used. Go back and start the chat Blank."
+        case nil:
+            break
+        }
+        switch error as? RoomSendError {
+        case .reauthenticationRequired?:
+            return "Sign in again to start a chat."
+        case .notAllowed?:
+            return "This account can't start chats right now."
+        case .rejected?:
+            // A refused way to start was most likely taken off the server's list since the sheet opened.
+            if case .template = start { return "That way to start isn't offered right now. Go back and pick another." }
+            return "The chat couldn't be started. Check your connection and try again."
+        default:
+            return "The chat couldn't be started. Check your connection and try again."
         }
     }
 }
