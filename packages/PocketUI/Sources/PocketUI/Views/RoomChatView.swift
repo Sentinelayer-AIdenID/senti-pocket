@@ -724,6 +724,7 @@ public struct RoomChatView: View {
         let watching = bottomWatch.listScrolling
         guard bottomWatch.scrollListToEnd(animated: animated) else { return false }
         bottomWatch.ownScroll.start(at: ProcessInfo.processInfo.systemUptime)
+        bottomWatch.ownScrolls += 1
         if !watching { RoomNextFrame.run { watchListScroll(proxy) } }
         return true
     }
@@ -741,17 +742,18 @@ public struct RoomChatView: View {
         case .moving:
             break
         case .landed:
-            // Put exactly where the bottom marker rests, by UIKit only. A SwiftUI scroll after UIKit's that moved the
-            // list built every row of the room in one frame: the scroll to the marker at landing moving it the last 7
-            // or 8 points (376 and 362 of 404, run 42118520117), and again easing it 8 to 10 points (373 to 403, run
-            // 42128071391). What moves the list after the landing is counted (`watchAfterLanding`), and the tests hold
-            // it to nothing.
+            // Put exactly where the bottom marker rests by UIKit, then SwiftUI's own scroll to the marker, which finds
+            // the list there and moves nothing: SwiftUI's own place is then the list's (after UIKit's scroll alone, the
+            // accessibility tree held no message at all: VoiceOver would find nothing). A SwiftUI scroll after UIKit's
+            // that moved the list built every row of the room in one frame (376 and 362 of 404, run 42118520117): what
+            // moves the list after the landing is counted (`watchAfterLanding`), and the tests hold it to nothing.
             guard bottomWatch.isActive, heldAnchor == nil else {
                 RoomNextFrame.run { recheckPlace(proxy) }
                 return
             }
             let snap = bottomWatch.placeListAtEnd() ?? 0
             RoomScrollTrace.listLanded(snap: snap, at: bottomWatch.listOffset ?? 0, contentEnd: bottomWatch.listContentEnd ?? 0)
+            proxy.scrollTo(Self.bottomId, anchor: .bottom)
             settleOwnScroll()
             watchAfterLanding()
             RoomNextFrame.run {
@@ -773,10 +775,12 @@ public struct RoomChatView: View {
     /// it is added up (`RoomScrollTrace.listSettled`): the tests hold it to nothing.
     private func watchAfterLanding() {
         guard var last = bottomWatch.listOffset else { return }
+        let scroll = bottomWatch.ownScrolls
         var frames = 0
         var moved: CGFloat = 0
         func tick() {
-            guard bottomWatch.isActive, !bottomWatch.listScrolling, let now = bottomWatch.listOffset else { return }
+            // Not once the room scrolls again (an arrival's follow is not a drift).
+            guard bottomWatch.isActive, bottomWatch.ownScrolls == scroll, let now = bottomWatch.listOffset else { return }
             moved += abs(now - last)
             last = now
             frames += 1
@@ -1101,6 +1105,7 @@ public struct RoomChatView: View {
                 let before = bottomWatch.reading
                 if !RoomScrollTrace.followMovesNothing {
                     bottomWatch.ownScroll.start(at: ProcessInfo.processInfo.systemUptime)
+                    bottomWatch.ownScrolls += 1
                     // By UIKit where the list is known; SwiftUI's scroll to the marker only where it is not.
                     if bottomWatch.placeListAtEnd() == nil { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
                     settleOwnScroll()
@@ -1471,9 +1476,11 @@ private final class RoomBottomWatch {
     /// padding end, which a scroll view inside a row would not.
     private func restingEnd(of list: UIScrollView) -> CGFloat? {
         guard let probe = listProbe, list.window != nil, probe.isDescendant(of: list) else { return nil }
-        let stackEnd = probe.convert(probe.bounds, to: list).maxY
-        guard abs(stackEnd + RoomChatView.listEndPadding - list.contentSize.height) <= 2 else { return nil }
-        return max(-list.adjustedContentInset.top, stackEnd - list.bounds.height + list.adjustedContentInset.bottom)
+        // The content's very end less the list's padding below the bottom marker: where every landing landed and stayed
+        // in CI (run 42139750440), and where SwiftUI's scroll to the marker puts the list.
+        let end = list.contentSize.height - RoomChatView.listEndPadding - list.bounds.height
+            + list.adjustedContentInset.bottom
+        return max(-list.adjustedContentInset.top, end)
     }
     #endif
 
@@ -1484,8 +1491,10 @@ private final class RoomBottomWatch {
         return tracker.see(reading, readerMoving: readerMoving,
                            ownScroll: ownScroll.exempts(at: ProcessInfo.processInfo.systemUptime))
     }
-    /// The room's own scroll to its end and the moment after it (`RoomReaderPlace.OwnScroll`).
+    /// The room's own scroll to its end and the moment after it (`RoomReaderPlace.OwnScroll`), and how many the room
+    /// has started.
     var ownScroll = RoomReaderPlace.OwnScroll()
+    var ownScrolls = 0
     /// The reader is dragging the list, or it is coasting from their drag (iOS 18 and later).
     var readerMoving = false
     /// A reading is to be taken on the next frame; what the last one taken showed.

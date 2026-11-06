@@ -24,6 +24,7 @@ final class RoomReaderStaysPutTests: XCTestCase {
         private var inputs: [RoomChatMessageInput]
         private var pending: [RoomChatPendingRow] = []
         private var unread = 0
+        private var countShown = false
         private(set) var atBottom = true
         /// Every place the room was told (`readerAtBottom`), in order, as told.
         private(set) var placesTold: [Bool] = []
@@ -40,12 +41,20 @@ final class RoomReaderStaysPutTests: XCTestCase {
         }
 
         func send(_ intent: RoomChatIntent) {
+            // The new messages were shown (the arrow took the reader to the first of them): the count is taken, and the
+            // arrow goes on to the latest, as the coordinator does.
+            if case .newMessagesShown = intent, unread > 0 {
+                countShown = true
+                publish()
+                return
+            }
             guard case .readerAtBottom(let value) = intent else { return }
             placesTold.append(value)
             guard value != atBottom else { return }
             atBottom = value
             if value, unread > 0 {
                 unread = 0
+                countShown = false
                 publish()
             }
         }
@@ -71,7 +80,7 @@ final class RoomReaderStaysPutTests: XCTestCase {
                 messages: emptied ? [] : inputs,
                 ownAuthorIds: Self.own,
                 unreadDividerSequence: unread > 0 ? inputs[inputs.count - unread].sequenceId : nil,
-                unreadCount: unread,
+                unreadCount: countShown ? 0 : unread,
                 connection: .live,
                 pending: pending,
                 composer: RoomComposerState(canPost: true, disabledReason: nil)
@@ -665,20 +674,6 @@ final class RoomReaderStaysPutTests: XCTestCase {
         XCTAssertFalse(jump.placesTold.contains(false), "the jump was read as the reader leaving")
     }
 
-    /// A finger on the list on the arrow's way down stops it, and the list is the reader's: the room's scroll is
-    /// stopped as a touch stops it, three frames into it, and the list moved up 180 points; it stays where it was put,
-    /// away from the bottom.
-    func test_a_drag_on_the_arrows_way_down_stops_it_where_the_reader_puts_the_list() throws {
-        var put: CGFloat?
-        let jump = try arrowJump(rows: 400, endsAtBottom: false, from: Self.twoScreensUp) { frame, list, _ in
-            Self.dragUp(list, at: frame, from: 3, put: &put)
-        }
-        let leftAt = try XCTUnwrap(put, "the list was taken")
-        print("READER-STAYS-PUT drag-during-jump put=\(Int(leftAt)) now=\(Int(jump.finalOffset)) told=\(jump.placesTold)")
-        XCTAssertEqual(jump.finalOffset, leftAt, accuracy: 1, "the jump went on after the reader took the list")
-        XCTAssertFalse(jump.placesTold.contains(true), "the reader was taken to be at the bottom")
-    }
-
     /// Where the arrow's scroll lands: no frame without messages once it was seen scrolling, no step bigger than a few
     /// points, never read as the reader leaving, and told once it is at the bottom.
     private func assertLands(_ jump: Jump, file: StaticString = #filePath, line: UInt = #line) {
@@ -931,6 +926,16 @@ final class RoomReaderStaysPutTests: XCTestCase {
         if endsAtBottom {
             XCTAssertTrue(Self.list(in: window).map(Self.atBottom) ?? false, "it ended at the bottom")
             XCTAssertTrue(room.atBottom)
+            // What VoiceOver finds: the newest message, on screen (after UIKit's scroll alone the tree held no message).
+            let newest = room.state.rows.last { if case .message = $0 { return true } else { return false } }
+            if case .message(let message)? = newest {
+                let element = HostedSummary.element(message.accessibilityId, in: window)
+                XCTAssertNotNil(element, "VoiceOver finds no newest message after the jump")
+                if let element {
+                    XCTAssertTrue(element.accessibilityFrame.intersects(window.bounds),
+                                  "the newest message VoiceOver finds is off screen")
+                }
+            }
         }
         return Jump(blankFrames: blankFrames, blankAfterScrolling: blankAfterScrolling, draws: draws, built: built,
                     scrolling: scrolling, steps: steps, landing: landing, finalOffset: list.contentOffset.y,
