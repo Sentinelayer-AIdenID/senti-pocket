@@ -42,7 +42,28 @@ final class JumpToLatestTests: XCTestCase {
             XCTAssertTrue(arrow.accessibilityActivate(), "jump \(jump): the arrow takes the tap")
             pump(3)
             let after = try XCTUnwrap(window.flatMap { Self.list(in: $0) }, "the room's list after the jump")
-            let shown = Self.messagesOnScreen(in: try XCTUnwrap(window))
+            let screen = try XCTUnwrap(window)
+            func probe(_ step: String) -> String {
+                let all = Self.messageFrames(in: screen)
+                let ys = all.map { Int($0.frame.minY) }
+                return "\(step)=\(Self.messagesOnScreen(in: screen).count)/\(all.count)"
+                    + "[\(ys.min() ?? 0)..\(ys.max() ?? 0)]"
+            }
+            var steps = [probe("now")]
+            pump(0.05)
+            steps.append(probe("turn"))
+            UIAccessibility.post(notification: .layoutChanged, argument: nil)
+            pump(0.3)
+            steps.append(probe("posted-nil"))
+            if let newest = Self.messageFrames(in: screen).max(by: { $0.sequence < $1.sequence }) {
+                UIAccessibility.post(notification: .layoutChanged, argument: newest.node)
+                pump(0.3)
+                steps.append(probe("posted-newest-\(newest.sequence)"))
+            }
+            pump(1)
+            steps.append(probe("after-1s"))
+            print("JUMP \(jump) a11y " + steps.joined(separator: " "))
+            let shown = Self.messagesOnScreen(in: screen)
             print("JUMP \(jump): offset \(Int(after.contentOffset.y)) height \(Int(after.contentSize.height)) "
                 + "viewport \(Int(after.bounds.height)) messages on screen \(shown.count) "
                 + "(\(shown.min() ?? 0)..\(shown.max() ?? 0)) rows \(room.state.rows.count)")
@@ -109,6 +130,18 @@ final class JumpToLatestTests: XCTestCase {
     }
 
     /// The sequence ids of the messages an accessibility client finds on the window's screen.
+    /// Every message element the tree holds, wherever its frame is: its sequence, frame and node.
+    private static func messageFrames(in window: UIWindow) -> [(sequence: Int, frame: CGRect, node: NSObject)] {
+        var found: [(sequence: Int, frame: CGRect, node: NSObject)] = []
+        visit(window) { node, identifier in
+            guard identifier.hasPrefix("pocket.room.message."),
+                  let sequence = Int(identifier.dropFirst("pocket.room.message.".count)) else { return false }
+            found.append((sequence, node.accessibilityFrame, node))
+            return false
+        }
+        return found
+    }
+
     private static func messagesOnScreen(in window: UIWindow) -> [Int] {
         var shown: [Int] = []
         visit(window) { node, identifier in
