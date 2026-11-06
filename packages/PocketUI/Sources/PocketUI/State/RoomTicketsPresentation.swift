@@ -203,7 +203,7 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
         step.map { RoomTicketStepStrip(index: $0.index, count: $0.count, name: $0.name) }
     }
 
-    /// Why a ticket stopped, in plain words, the same as the web's (warden, 11-05).
+    /// Why a ticket stopped, in plain words, the same as the web's, when no one is named (warden, 11-05).
     public static let stallReasons = [
         "holder_lease_expired": "the person working on it went quiet",
         "waiting_on_assignee": "waiting on whoever it's assigned to",
@@ -213,9 +213,9 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
         "no_activity": "no activity"
     ]
 
-    /// The small print under the strip, once the ticket has stopped moving: "Stalled since 2:10 PM · waiting on review
-    /// · check alex". Whom to check is the one it waits on, else the one who last held it, by name, never by raw id.
-    /// Nil while it moves. A time today reads as its time, an earlier one with its date.
+    /// The small print under the strip, once the ticket has stopped moving: since when, then why, as a sentence with
+    /// the person in it ("Stalled since 2:10 PM · waiting on review by alex"). Nil while it moves. A time today reads as
+    /// its time, an earlier one with its date.
     public func stallNote(now: Date = Date(), timeZone: TimeZone = .current, locale: Locale = .current,
                           viewerId: String? = nil, names: [String: String] = [:]) -> String? {
         stallParts(now: now, timeZone: timeZone, locale: locale, viewerId: viewerId, names: names)?
@@ -223,7 +223,7 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
     }
 
     /// What VoiceOver says for the strip: "Step 2 of 5, in review" (or "Not started, 5 steps"), then the small print:
-    /// "Step 2 of 5, in review. Stalled since 2:10 PM, waiting on review, check alex".
+    /// "Step 2 of 5, in review. Stalled since 2:10 PM, waiting on review by alex".
     public func stepAccessibilityLabel(now: Date = Date(), timeZone: TimeZone = .current, locale: Locale = .current,
                                        viewerId: String? = nil, names: [String: String] = [:]) -> String? {
         guard let base = stepStrip?.accessibilityLabel else { return nil }
@@ -236,11 +236,46 @@ public struct RoomTicketRow: Equatable, Identifiable, Sendable {
                             names: [String: String]) -> [String]? {
         guard let step, let since = step.stalledSince else { return nil }
         var parts = ["Stalled since \(Self.moment(since, now: now, timeZone: timeZone, locale: locale))"]
-        if let words = step.stalledReason.flatMap({ Self.stallReasons[$0] }) { parts.append(words) }
-        if let who = step.waitingOn ?? step.lastHolder {
-            parts.append("check \(Self.actorLabel(who, viewerId: viewerId, names: names))")
-        }
+        if let reason = Self.stallSentence(step, viewerId: viewerId, names: names) { parts.append(reason) }
         return parts
+    }
+
+    /// Why it stopped, with whom it concerns named the way the room names them (never a raw id), and "you" when that
+    /// is the viewer (warden, 11-05, as on the web, #753):
+    /// - `holder_lease_expired`: "alex, who was working on it, went quiet" (the last holder);
+    /// - `waiting_on_assignee`: "waiting on alex, who it's assigned to", or "waiting on you";
+    /// - `waiting_on_review`: "waiting on review by alex";
+    /// - `waiting_on_owner`: "waiting on the owner, alex", or "waiting on you, the owner";
+    /// - `blocked`, `no_activity`: as they are, with no one named.
+    /// The waiting reasons name the one it waits on. Without a name each reads as the web's plain words; without a
+    /// reason, it is "waiting on alex", else "last held by alex", else nothing.
+    static func stallSentence(_ step: RoomTicketInput.Step, viewerId: String?, names: [String: String]) -> String? {
+        func person(_ id: String?) -> (name: String, isViewer: Bool)? {
+            guard let id else { return nil }
+            let isViewer = viewerId.map { !$0.isEmpty && $0.lowercased() == id.lowercased() } ?? false
+            return (actorLabel(id, viewerId: viewerId, names: names), isViewer)
+        }
+        guard let reason = step.stalledReason else {
+            if let waiting = person(step.waitingOn) { return "waiting on \(waiting.name)" }
+            return person(step.lastHolder).map { "last held by \($0.name)" }
+        }
+        let plain = stallReasons[reason]
+        switch reason {
+        case "holder_lease_expired":
+            guard let holder = person(step.lastHolder) else { return plain }
+            return holder.isViewer ? "you went quiet while working on it"
+                : "\(holder.name), who was working on it, went quiet"
+        case "waiting_on_assignee":
+            guard let assignee = person(step.waitingOn) else { return plain }
+            return assignee.isViewer ? "waiting on you" : "waiting on \(assignee.name), who it's assigned to"
+        case "waiting_on_review":
+            return person(step.waitingOn).map { "waiting on review by \($0.name)" } ?? plain
+        case "waiting_on_owner":
+            guard let owner = person(step.waitingOn) else { return plain }
+            return owner.isViewer ? "waiting on you, the owner" : "waiting on the owner, \(owner.name)"
+        default:
+            return plain
+        }
     }
 
     private static func moment(_ date: Date, now: Date, timeZone: TimeZone, locale: Locale) -> String {

@@ -266,14 +266,32 @@ final class RoomTicketStepsTests: XCTestCase {
         XCTAssertNil(absent.stepAccessibilityLabel(now: now, timeZone: eastern, locale: english))
     }
 
-    /// "Stalled since {date} · {reason in plain words} · check {name}", the reasons in the web's words.
-    func test_the_small_print_says_since_when_why_and_whom_to_check() {
+    /// "Stalled since {date} · {why}", why as a sentence with the person in it (warden, 11-05, as on the web, #753).
+    func test_the_small_print_says_since_when_and_why_with_the_person_in_it() {
+        func stalled(_ reason: String?, lastHolder: String? = nil, waitingOn: String? = nil) -> String? {
+            note(RoomTicketInput.Step(index: 2, count: 5, name: "in_review", stalledSince: since, stalledReason: reason,
+                                      lastHolder: lastHolder, waitingOn: waitingOn))
+        }
         XCTAssertNil(note(RoomTicketInput.Step(index: 2, count: 5, name: "in_review", stalledReason: "waiting_on_review",
                                                waitingOn: "human-alex")),
                      "a ticket that has not stopped has no small print")
-        XCTAssertEqual(note(RoomTicketInput.Step(index: 2, count: 5, name: "in_review", stalledSince: since,
-                                                 stalledReason: "waiting_on_review", waitingOn: "human-alex")),
-                       "Stalled since 2:10 PM · waiting on review · check alex")
+        XCTAssertEqual(stalled("waiting_on_review", waitingOn: "human-alex"),
+                       "Stalled since 2:10 PM · waiting on review by alex")
+        XCTAssertEqual(stalled("holder_lease_expired", lastHolder: "human-alex"),
+                       "Stalled since 2:10 PM · alex, who was working on it, went quiet")
+        XCTAssertEqual(stalled("holder_lease_expired", lastHolder: "human-alex", waitingOn: "human-dana"),
+                       "Stalled since 2:10 PM · alex, who was working on it, went quiet",
+                       "the one who went quiet is the last holder")
+        XCTAssertEqual(stalled("waiting_on_owner", waitingOn: "human-alex"),
+                       "Stalled since 2:10 PM · waiting on the owner, alex")
+        XCTAssertEqual(stalled("waiting_on_assignee", lastHolder: "human-dana", waitingOn: "human-alex"),
+                       "Stalled since 2:10 PM · waiting on alex, who it's assigned to",
+                       "the waiting reasons name the one it waits on")
+        XCTAssertEqual(stalled("blocked", lastHolder: "human-dana", waitingOn: "human-alex"),
+                       "Stalled since 2:10 PM · blocked", "no one is named where no one applies")
+        XCTAssertEqual(stalled("no_activity", lastHolder: "human-dana"), "Stalled since 2:10 PM · no activity")
+
+        // No one to name: the web's plain words.
         let words = [
             "holder_lease_expired": "the person working on it went quiet",
             "waiting_on_assignee": "waiting on whoever it's assigned to",
@@ -284,36 +302,48 @@ final class RoomTicketStepsTests: XCTestCase {
         ]
         XCTAssertEqual(RoomTicketRow.stallReasons, words)
         for (reason, plainWords) in words {
-            XCTAssertEqual(note(RoomTicketInput.Step(index: 1, count: 5, name: "taken", stalledSince: since,
-                                                     stalledReason: reason)),
-                           "Stalled since 2:10 PM · \(plainWords)", reason)
+            XCTAssertEqual(stalled(reason), "Stalled since 2:10 PM · \(plainWords)", reason)
         }
-        XCTAssertEqual(note(RoomTicketInput.Step(index: 1, count: 5, name: "taken", stalledSince: since)),
-                       "Stalled since 2:10 PM")
+        // No reason: whom it waits on, else who last held it, else the time alone.
+        XCTAssertEqual(stalled(nil, lastHolder: "human-dana", waitingOn: "human-alex"),
+                       "Stalled since 2:10 PM · waiting on alex")
+        XCTAssertEqual(stalled(nil, lastHolder: "human-dana"), "Stalled since 2:10 PM · last held by dana")
+        XCTAssertEqual(stalled(nil), "Stalled since 2:10 PM")
+
         let earlier = Date(timeIntervalSince1970: 1_793_733_000)   // 2:10 PM in New York on 11-03
         let older = note(RoomTicketInput.Step(index: 1, count: 5, name: "taken", stalledSince: earlier))
         XCTAssertTrue(older?.hasPrefix("Stalled since Nov 3") == true, "an earlier day says its date: \(older ?? "nil")")
         XCTAssertTrue(older?.contains("2:10 PM") == true)
     }
 
-    /// Whom to check: the one it waits on, else the one who last held it, by the room's name for them, never a raw id.
-    func test_whom_to_check_is_named_never_a_raw_id() {
-        func check(lastHolder: String? = nil, waitingOn: String? = nil, viewerId: String? = nil,
-                   names: [String: String] = [:]) -> String? {
-            note(RoomTicketInput.Step(index: 3, count: 5, name: "merged", stalledSince: since, stalledReason: "blocked",
+    /// The person is named the way the room names them, never by a raw id, and the viewer is "you", said naturally.
+    func test_the_person_is_named_never_a_raw_id_and_the_viewer_is_you() {
+        func stalled(_ reason: String, lastHolder: String? = nil, waitingOn: String? = nil,
+                     names: [String: String] = [:]) -> String? {
+            note(RoomTicketInput.Step(index: 3, count: 5, name: "merged", stalledSince: since, stalledReason: reason,
                                       lastHolder: lastHolder, waitingOn: waitingOn),
-                 viewerId: viewerId, names: names)
+                 viewerId: "human-carter", names: names)
         }
-        XCTAssertEqual(check(lastHolder: "forge-box-7", waitingOn: "human-alex"),
-                       "Stalled since 2:10 PM · blocked · check alex", "the one it waits on comes first")
-        XCTAssertEqual(check(lastHolder: "forge-box-7"), "Stalled since 2:10 PM · blocked · check forge-box-7",
-                       "else the one who last held it")
         let person = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
-        XCTAssertEqual(check(waitingOn: person), "Stalled since 2:10 PM · blocked · check a person",
-                       "a user id is never shown")
-        XCTAssertEqual(check(waitingOn: person, names: [person: "Dana"]), "Stalled since 2:10 PM · blocked · check Dana")
-        XCTAssertEqual(check(waitingOn: "human-carter", viewerId: "human-carter"),
-                       "Stalled since 2:10 PM · blocked · check you")
+        XCTAssertEqual(stalled("waiting_on_review", waitingOn: person),
+                       "Stalled since 2:10 PM · waiting on review by a person", "a user id is never shown")
+        XCTAssertEqual(stalled("waiting_on_review", waitingOn: person, names: [person: "Dana"]),
+                       "Stalled since 2:10 PM · waiting on review by Dana")
+        XCTAssertEqual(stalled("holder_lease_expired", lastHolder: "forge-box-7"),
+                       "Stalled since 2:10 PM · forge-box-7, who was working on it, went quiet")
+
+        XCTAssertEqual(stalled("waiting_on_review", waitingOn: "human-carter"),
+                       "Stalled since 2:10 PM · waiting on review by you")
+        XCTAssertEqual(stalled("waiting_on_assignee", waitingOn: "human-carter"), "Stalled since 2:10 PM · waiting on you")
+        XCTAssertEqual(stalled("waiting_on_owner", waitingOn: "HUMAN-CARTER"),
+                       "Stalled since 2:10 PM · waiting on you, the owner")
+        XCTAssertEqual(stalled("holder_lease_expired", lastHolder: "human-carter"),
+                       "Stalled since 2:10 PM · you went quiet while working on it")
+        for reason in RoomTicketRow.stallReasons.keys {
+            let text = stalled(reason, lastHolder: "human-carter", waitingOn: "human-carter") ?? ""
+            XCTAssertFalse(text.contains("check"), "\(reason): \(text)")
+            XCTAssertFalse(text.contains("human-"), "\(reason): \(text)")
+        }
     }
 
     func test_voiceover_reads_the_step_then_the_small_print() {
@@ -323,12 +353,12 @@ final class RoomTicketStepsTests: XCTestCase {
         let stalled = RoomTicketInput.Step(index: 2, count: 5, name: "in_review", stalledSince: since,
                                            stalledReason: "waiting_on_review", waitingOn: "human-alex")
         XCTAssertEqual(plain(row(stalled).stepAccessibilityLabel(now: now, timeZone: eastern, locale: english)),
-                       "Step 2 of 5, in review. Stalled since 2:10 PM, waiting on review, check alex")
+                       "Step 2 of 5, in review. Stalled since 2:10 PM, waiting on review by alex")
         let notStarted = RoomTicketInput.Step(index: 0, count: 5, name: "not_started", stalledSince: since,
                                               stalledReason: "waiting_on_assignee", waitingOn: "build-agent")
         XCTAssertEqual(plain(row(notStarted, status: "assigned")
                                 .stepAccessibilityLabel(now: now, timeZone: eastern, locale: english)),
-                       "Not started, 5 steps. Stalled since 2:10 PM, waiting on whoever it's assigned to, check build-agent")
+                       "Not started, 5 steps. Stalled since 2:10 PM, waiting on build-agent, who it's assigned to")
     }
 
     func test_without_the_servers_step_a_ticket_shows_its_status_alone_and_no_percentage() {
