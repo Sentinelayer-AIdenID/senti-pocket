@@ -60,4 +60,22 @@ struct PocketCountBadge: View {
         }
     }
 }
+
+/// How long ago, in the side panel's words, kept current each minute: "just now" within the minute (never "now ago"),
+/// else "5m ago", "3h ago", "2d ago". In place of iOS's ticking relative time ("42 min, 12 sec"), which reads like a
+/// timer (Carter, 2026-11-06, ticket 693f0cc5). It takes the font and colour of the text around it.
+struct AgoText: View {
+    let date: Date
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 60)) { context in
+            Text(Self.words(date, now: context.date))
+        }
+    }
+
+    static func words(_ date: Date, now: Date = Date()) -> String {
+        let age = PocketSidePanel.compactAge(of: date, now: now)
+        return age == "now" ? "just now" : "\(age) ago"
+    }
+}
 #endif

@@ -120,13 +120,15 @@ final class FriendlyWordsTests: XCTestCase {
         }
     }
 
-    func test_a_chats_last_activity_reads_just_now_or_minutes_ago_never_now_ago() {
-        XCTAssertEqual(ChatListWords.lastActive(now.addingTimeInterval(-20), now: now), "just now")
-        XCTAssertEqual(ChatListWords.lastActive(now.addingTimeInterval(-5 * 60), now: now), "5m ago")
-        XCTAssertEqual(ChatListWords.lastActive(now.addingTimeInterval(-3 * 3_600), now: now), "3h ago")
-        XCTAssertEqual(ChatListWords.lastActive(now.addingTimeInterval(-2 * 86_400), now: now), "2d ago")
+    /// The chat list, Activity and Saved summaries say how long ago the same way.
+    func test_how_long_ago_reads_just_now_or_minutes_ago_never_now_ago() {
+        XCTAssertEqual(AgoText.words(now.addingTimeInterval(-20), now: now), "just now")
+        XCTAssertEqual(AgoText.words(now.addingTimeInterval(-5 * 60), now: now), "5m ago")
+        XCTAssertEqual(AgoText.words(now.addingTimeInterval(-42 * 60 - 12), now: now), "42m ago")
+        XCTAssertEqual(AgoText.words(now.addingTimeInterval(-3 * 3_600), now: now), "3h ago")
+        XCTAssertEqual(AgoText.words(now.addingTimeInterval(-2 * 86_400), now: now), "2d ago")
         for seconds in [0.0, 30, 59, 60, 3_600, 90_000] {
-            let words = ChatListWords.lastActive(now.addingTimeInterval(-seconds), now: now)
+            let words = AgoText.words(now.addingTimeInterval(-seconds), now: now)
             XCTAssertFalse(words.contains("now ago"), words)
         }
         XCTAssertEqual(ChatListWords.noActivity, "No activity yet")

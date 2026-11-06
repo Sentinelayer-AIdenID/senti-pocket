@@ -186,15 +186,14 @@ private struct ActionRow: View {
     }
 }
 
+/// When it happened: "42m ago", "just now". A time the phone cannot read shows nothing rather than the server's text.
 private struct TimestampText: View {
     let timestamp: ParsedSessionTimestamp
 
     var body: some View {
         Group {
             if let date = timestamp.date {
-                Text(date, style: .relative)
-            } else {
-                Text(verbatim: timestamp.raw)
+                AgoText(date: date)
             }
         }
         .font(.caption)

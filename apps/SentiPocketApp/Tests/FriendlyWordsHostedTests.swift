@@ -146,4 +146,64 @@ final class FriendlyWordsHostedTests: XCTestCase {
             XCTAssertNil(server.firstMatch(in: label, range: all), "a count, role, status or kind on the chat list: \(label)")
         }
     }
+
+    // MARK: How long ago
+
+    /// Activity and Saved summaries, hosted, say how long ago in words ("42m ago", "3h ago"), never iOS's ticking
+    /// "42 min, 12 sec". The room, its people and its words are made up.
+    func test_activity_and_saved_summaries_say_how_long_ago_never_a_ticking_time() throws {
+        let iso = ISO8601DateFormatter()
+        let fortyTwoMinutesAgo = iso.string(from: Date().addingTimeInterval(-42 * 60 - 12))
+        let thirtyEightMinutesAgo = iso.string(from: Date().addingTimeInterval(-38 * 60 - 12))
+        let threeHoursAgo = iso.string(from: Date().addingTimeInterval(-3 * 3_600 - 12))
+        let decoder = JSONDecoder()
+        let events = try decoder.decode(SessionEventForwardPage.self, from: Data("""
+        {"events":[{"id":"ev-1","event":"session_message","agent":{"displayName":"Ada"},
+        "agentId":"human-ada","agentModel":"","payload":{"text":"Can someone check the notes?"},
+        "ts":"\(fortyTwoMinutesAgo)","timestamp":"\(fortyTwoMinutesAgo)","cursor":"c1",
+        "sequenceId":7,"sessionId":"room-1","source":"phone"}]}
+        """.utf8))
+        let actions = try decoder.decode(SessionActionPage.self, from: Data("""
+        {"sessionId":"room-1","count":1,"projection":{},"actions":[{"id":"act-1",
+        "sessionId":"room-1","targetSequenceId":7,"targetCursor":null,"targetActionId":null,
+        "actionType":"ack","actorKind":"human","actorId":"ada","actorUserId":null,"actorRole":"owner",
+        "note":"Read it","metadata":{},"idempotencyKey":"idem-1","createdAt":"\(thirtyEightMinutesAgo)"}]}
+        """.utf8))
+        let checkpoints = try decoder.decode(SessionCheckpointListPage.self, from: Data("""
+        {"checkpoints":[{"checkpointId":"cp-1","sessionId":"room-1","kind":"manual_checkpoint",
+        "title":"Sunday summary","summary":"Ada and the agents agreed the notes.","startSequence":1,
+        "endSequence":7,"tokenRange":null,"createdBy":"ada","createdByAgentId":"human-ada","eventSequence":8,
+        "cursor":"c8","createdAt":"\(threeHoursAgo)","summarySections":{},"grade":"A-","gradeScore":91,
+        "gradeVersion":"v1","gradeReasons":[]}],"count":1}
+        """.utf8))
+        let activity = SessionActivityPresentationState(sessionId: "room-1", eventPage: events, actionPage: actions,
+                                                        provenance: .network(lastUpdated: Date()))
+        let saved = SessionCheckpointListPresentationState(sessionId: "room-1", page: checkpoints,
+                                                          provenance: .network(lastUpdated: Date()))
+        XCTAssertNil(activity.failure)
+        XCTAssertNil(saved.failure)
+        // iOS's ticking time: "42 min, 12 sec", "3 hr, 1 min".
+        let ticking = try NSRegularExpression(pattern: #"\b\d+ (sec|min|hr|hrs)\b"#)
+        let screens: [(String, AnyView, [String])] = [
+            ("Activity", AnyView(SessionActivityView(state: activity) { _ in }), ["42m ago", "38m ago"]),
+            ("Saved summaries", AnyView(SessionCheckpointListView(state: saved) { _ in }), ["3h ago"]),
+        ]
+        for (screen, view, wanted) in screens {
+            let window = try HostedSummary.host(view, height: 1_200)
+            var read: [String] = []
+            let end = Date().addingTimeInterval(15)
+            repeat {
+                HostedSummary.pump(0.1)
+                read = HostedSummary.elements(in: window).compactMap(\.accessibilityLabel).filter { !$0.isEmpty }
+            } while Date() < end && !(wanted.allSatisfy { words in read.contains { $0.contains(words) } })
+            HostedSummary.close(window)
+            for words in wanted {
+                XCTAssertTrue(read.contains { $0.contains(words) }, "\(screen) does not say \(words): \(read)")
+            }
+            for label in read {
+                XCTAssertNil(ticking.firstMatch(in: label, range: NSRange(label.startIndex..., in: label)),
+                             "\(screen) shows a ticking time: \(label)")
+            }
+        }
+    }
 }

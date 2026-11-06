@@ -178,17 +178,15 @@ private struct SessionRow: View {
             .fixedSize(horizontal: false, vertical: true)
     }
 
-    /// "5m ago", or "just now" within the minute, kept current each minute. A time the phone cannot read shows
-    /// nothing rather than the server's text.
+    /// "5m ago", or "just now" within the minute. A time the phone cannot read shows nothing rather than the
+    /// server's text.
     @ViewBuilder
     private var lastActive: some View {
         if let date = row.lastActivity?.date {
-            TimelineView(.periodic(from: .now, by: 60)) { context in
-                Text(ChatListWords.lastActive(date, now: context.date))
-            }
-            .font(.caption)
-            .foregroundStyle(PocketPalette.textSecondary)
-            .fixedSize()
+            AgoText(date: date)
+                .font(.caption)
+                .foregroundStyle(PocketPalette.textSecondary)
+                .fixedSize()
         } else if row.lastActivity == nil {
             Text(ChatListWords.noActivity)
                 .font(.caption)
@@ -256,13 +254,6 @@ enum ChatListWords {
     static let loadingDetail = "Getting your chats."
     static let notConnected = "Not connected"
     static let noActivity = "No activity yet"
-
-    /// When a chat was last active, in the side panel's words: "just now" within the minute (never "now ago"),
-    /// else "5m ago", "3h ago", "2d ago".
-    static func lastActive(_ date: Date, now: Date = Date()) -> String {
-        let age = PocketSidePanel.compactAge(of: date, now: now)
-        return age == "now" ? "just now" : "\(age) ago"
-    }
 
     static func emptyTitle(_ provenance: SessionPresentationProvenance) -> String {
         switch provenance {

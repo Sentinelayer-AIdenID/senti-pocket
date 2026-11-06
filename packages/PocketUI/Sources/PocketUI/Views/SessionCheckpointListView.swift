@@ -213,12 +213,11 @@ private struct SessionCheckpointRow: View {
         Text("Saved by \(row.createdBy)")
     }
 
+    /// When it was saved: "3h ago", "just now"; nothing rather than the server's text when the phone cannot read it.
     @ViewBuilder
     private var timestamp: some View {
         if let date = row.createdAt.date {
-            Text(date, style: .relative)
-        } else {
-            Text(verbatim: row.createdAt.raw)
+            AgoText(date: date)
         }
     }
 }
