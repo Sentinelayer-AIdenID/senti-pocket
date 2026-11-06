@@ -83,6 +83,12 @@ public enum ChatMarkdown {
     /// paste cannot stall the main thread.
     public static let maximumParsedCharacters = 32_000
 
+    /// The deepest block quotes nest, here as on the web. Each level is a stack inside a stack on screen, and laying out
+    /// stacks nested that way takes longer at every level: a message of 50 ">" could stop any phone that showed it. A
+    /// quote deeper than this is not nested again: its lines go in the deepest quote, each led by one "↳" for every
+    /// level it was deeper, so all of its text still shows.
+    public static let maximumQuoteDepth = 4
+
     public static func parse(_ source: String) -> [ChatMarkdownBlock] {
         var text = source.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
         var overflow: String?
@@ -133,7 +139,8 @@ public enum ChatMarkdown {
         return text.replacingOccurrences(of: "<br>", with: " ")
     }
 
-    private static func parseLines(_ lines: [String]) -> [ChatMarkdownBlock] {
+    /// `quoteDepth`: how many block quotes `lines` are inside.
+    private static func parseLines(_ lines: [String], quoteDepth: Int = 0) -> [ChatMarkdownBlock] {
         var blocks: [ChatMarkdownBlock] = []
         var paragraph: [String] = []
         var index = 0
@@ -185,6 +192,20 @@ public enum ChatMarkdown {
                 continue
             }
 
+            if trimmed.hasPrefix(">"), quoteDepth >= maximumQuoteDepth {
+                // Already in the deepest quote: a deeper line is a line of its own here, marked by how much deeper.
+                flushParagraph()
+                var deeper = 0
+                var rest = Substring(trimmed)
+                while rest.hasPrefix(">") {
+                    deeper += 1
+                    rest = rest.dropFirst().drop { $0 == " " }
+                }
+                if !rest.isEmpty { blocks.append(.paragraph(String(repeating: "↳", count: deeper) + " " + rest)) }
+                index += 1
+                continue
+            }
+
             if trimmed.hasPrefix(">") {
                 flushParagraph()
                 var quoted: [String] = []
@@ -196,7 +217,7 @@ public enum ChatMarkdown {
                     quoted.append(inner)
                     index += 1
                 }
-                blocks.append(.quote(parseLines(quoted)))
+                blocks.append(.quote(parseLines(quoted, quoteDepth: quoteDepth + 1)))
                 continue
             }
 
