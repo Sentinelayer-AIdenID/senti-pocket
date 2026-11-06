@@ -117,9 +117,13 @@ final class FlightRecordCoordinator: ObservableObject {
             // A build without the Flight record's service shows the room's agents only.
             failure = nil
         } catch MintError.forbidden {
-            failure = "This account cannot see the room's boxes."
+            // An account that cannot see the room's boxes is most people: Room info shows them the room's people and
+            // agents and says nothing about boxes (Carter, 2026-11-06: "This account cannot see the room's boxes."
+            // was the first thing a new account read).
+            failure = nil
         } catch {
-            if lives.isEmpty { failure = "The flight record could not load. It retries every 30 seconds." }
+            // Shown only to a person who has seen boxes in this room (FlightRecordState.shownFailure).
+            if lives.isEmpty { failure = "Couldn't load the boxes. Trying again every 30 seconds." }
         }
         publish()
         await withTaskGroup(of: (String, MintFlightRecord?).self) { group in

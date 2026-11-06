@@ -123,12 +123,14 @@ public struct RoomPresentParticipant: Equatable, Sendable {
     public let workingUntilMs: Int64?
     /// The agent runs in a box.
     public let isBox: Bool
+    /// Which box, and its place in it, for a box member (`RoomAgentBox`).
+    public let boxMember: RoomAgentBox?
     /// A person's posting handle: their posts are `human-<login>`.
     public let login: String?
 
     public init(id: String, isHuman: Bool, displayName: String? = nil, isIdle: Bool = false, lastSeen: String? = nil,
                 lab: String? = nil, isWorking: Bool = false, workingUntilMs: Int64? = nil, isBox: Bool = false,
-                login: String? = nil) {
+                login: String? = nil, boxMember: RoomAgentBox? = nil) {
         self.id = id
         self.isHuman = isHuman
         self.displayName = displayName
@@ -139,6 +141,7 @@ public struct RoomPresentParticipant: Equatable, Sendable {
         self.workingUntilMs = workingUntilMs
         self.isBox = isBox
         self.login = login
+        self.boxMember = boxMember
     }
 
     init?(json: JSONValue) {
@@ -155,7 +158,8 @@ public struct RoomPresentParticipant: Equatable, Sendable {
             isWorking: json["working"]?.boolValue ?? false,
             workingUntilMs: json["workingUntilMs"]?.intValue,
             isBox: json["box"]?.boolValue ?? false,
-            login: json["login"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 }
+            login: json["login"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 },
+            boxMember: RoomAgentBox(entry: json)
         )
     }
 }

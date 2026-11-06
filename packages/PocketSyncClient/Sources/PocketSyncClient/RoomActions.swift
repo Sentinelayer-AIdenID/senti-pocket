@@ -21,6 +21,10 @@ public struct RoomReply: Equatable, Identifiable, Sendable {
     /// Its photos and files, in the shape a message's take (sentinelayer-api #1135). An API that stores none, and a
     /// reply from before it, carries none.
     public let attachments: [RoomAttachment]
+    /// Who it was addressed to, as the server decided when it was written (`RoomAddressed`), as a message's.
+    public let addressed: RoomAddressed?
+    /// The box its author runs in, from the author record (`RoomAgentBox`).
+    public let authorBox: RoomAgentBox?
 
     public init(
         id: String,
@@ -31,7 +35,9 @@ public struct RoomReply: Equatable, Identifiable, Sendable {
         createdAt: String,
         revision: Int64 = 1,
         isEdited: Bool = false,
-        attachments: [RoomAttachment] = []
+        attachments: [RoomAttachment] = [],
+        addressed: RoomAddressed? = nil,
+        authorBox: RoomAgentBox? = nil
     ) {
         self.id = id
         self.targetSequenceId = targetSequenceId
@@ -43,6 +49,8 @@ public struct RoomReply: Equatable, Identifiable, Sendable {
         self.revision = revision
         self.isEdited = isEdited
         self.attachments = attachments
+        self.addressed = addressed
+        self.authorBox = authorBox
     }
 
     /// A reply action, or nil. It says something, or carries a photo or file; a reply with neither is not shown.
@@ -67,7 +75,9 @@ public struct RoomReply: Equatable, Identifiable, Sendable {
             createdAt: json["createdAt"]?.stringValue ?? "",
             revision: json["messageRevision"]?.intValue ?? 1,
             isEdited: json["editedAt"]?.stringValue.map { !$0.isEmpty } ?? false,
-            attachments: attachments
+            attachments: attachments,
+            addressed: RoomAddressed(in: json),
+            authorBox: RoomAgentBox.actor(of: json)
         )
     }
 }
