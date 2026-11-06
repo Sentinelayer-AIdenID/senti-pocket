@@ -1,4 +1,3 @@
-import Combine
 import Foundation
 import PocketSyncClient
 import PocketUI
@@ -145,19 +144,36 @@ final class SentiTypingTests: XCTestCase {
         XCTAssertEqual(room.state.composingAgents, [], "Senti's lease ran out too")
     }
 
-    /// Each set carries each lease's new expiry; the room redraws only when who is typing changes.
+    /// Each set carries each lease's new expiry; the room builds its state again only when who is typing changes.
     func test_a_set_with_the_same_agents_redraws_nothing() {
         let room = room()
-        var redraws = 0
-        let watch = room.$state.dropFirst().sink { _ in redraws += 1 }
         room.handle(typing([("senti", 45)]))
-        XCTAssertEqual(redraws, 1)
+        let built = room.statesBuilt
+        XCTAssertEqual(room.state.composingAgents, ["senti"])
         clock.advance(5)
         room.handle(typing([("senti", 38)]))
-        XCTAssertEqual(redraws, 1, "Senti still typing, with a new expiry: nothing to redraw")
+        XCTAssertEqual(room.statesBuilt, built, "Senti still typing, with a new expiry: nothing to build")
         room.handle(typing([("senti", 38), ("build-agent", 45)]))
-        XCTAssertEqual(redraws, 2, "another agent began")
-        withExtendedLifetime(watch) {}
+        XCTAssertEqual(room.statesBuilt, built + 1, "another agent began")
+        XCTAssertEqual(room.state.composingAgents, ["build-agent", "senti"])
+    }
+
+    /// A redraw for something else (a message) leaves out a line whose lease has just run out, before the timer has
+    /// taken it away. When the next set has that agent typing again, its line shows again.
+    func test_a_set_brings_back_a_line_a_redraw_already_left_out() {
+        let room = room()
+        room.handle(typing([("senti", 10)]))
+        clock.advance(10.1)
+        room.handle(.message(reply(from: "build-agent")))
+        XCTAssertEqual(room.state.composingAgents, [], "its lease ran out: the redraw left it out")
+        room.handle(typing([("senti", 45)]))
+        XCTAssertEqual(room.state.composingAgents, ["senti"], "Senti typing again shows again")
+        // The older single-agent frame, the same way.
+        clock.advance(45.1)
+        room.handle(.message(reply(from: "build-agent")))
+        XCTAssertEqual(room.state.composingAgents, [])
+        room.handle(.composing(agentId: "senti", targetSequenceId: 7))
+        XCTAssertEqual(room.state.composingAgents, ["senti"])
     }
 
     /// Senti does not answer in a direct message, so it is never shown typing there; another agent still is.

@@ -192,6 +192,9 @@ final class RoomChatCoordinator: ObservableObject {
     private var lastAppliedSequence: Int64 = 0
     private var nextBeforeSequence: Int64?
     private var connection: RoomConnectionState = .connecting
+    /// How many times the room has built its state (`publish()`), for the tests: a build that changes nothing is
+    /// never written, so the state alone cannot show it.
+    private(set) var statesBuilt = 0
     /// Who is preparing a reply, and until when: each lease's own expiry, so a line never outlasts it.
     private var composing: [String: Date] = [:]
     /// Wakes when the soonest lease expires, to take its line away even if no other frame comes.
@@ -2083,7 +2086,7 @@ final class RoomChatCoordinator: ObservableObject {
                 if !wasLive { publish() }
                 return false
             }
-            let isNew = composing[agentId] == nil
+            let isNew = !state.composingAgents.contains(agentId)
             composing[agentId] = now().addingTimeInterval(Self.composingLifetime)
             if isNew || !wasLive { publish() }
             scheduleComposingExpiry()
@@ -2098,8 +2101,9 @@ final class RoomChatCoordinator: ObservableObject {
                                           now().addingTimeInterval(lease.secondsLeft))
             }
             next = next.filter { $0.value > now() }
-            // The room redraws only when who is typing changes, not for each lease's new expiry.
-            let changed = Set(next.keys) != Set(composing.keys)
+            // The room redraws only when who is shown typing changes, not for each lease's new expiry. Against what is
+            // shown, not `composing`: that can still hold a spent lease a redraw has already left out.
+            let changed = next.keys.sorted() != state.composingAgents
             composing = next
             if changed || !wasLive { publish() }
             scheduleComposingExpiry()
@@ -2349,6 +2353,7 @@ final class RoomChatCoordinator: ObservableObject {
             publishesWhenShown = true
             return
         }
+        statesBuilt += 1
         forgetRemovedAttachments()
         // What is shown of a pinned message comes from here, so the newest revision the loaded rows hold is kept
         // first: a board shown at a newer revision (in a window loaded around it, say) never goes back to an older
