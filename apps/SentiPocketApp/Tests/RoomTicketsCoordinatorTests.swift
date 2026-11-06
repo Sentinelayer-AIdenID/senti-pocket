@@ -62,12 +62,14 @@ final class RoomTicketsCoordinatorTests: XCTestCase {
         estimated.progress = RoomTicketProgress(value: 0.45, basis: "b", at: "a")
         var notStarted = ticket("n", status: "assigned")
         notStarted.step = RoomTicketStep(index: 0, count: 4, name: nil)
+        // Ids strictly ascending, as the API pages them: the board refuses a snapshot out of order.
         let transport = ScriptedTicketsTransport(
-            snapshots: [.success(RoomTicketSnapshotPage(items: [stepped, estimated, notStarted], hasMore: false, cursor: 1))]
+            snapshots: [.success(RoomTicketSnapshotPage(items: [estimated, notStarted, stepped], hasMore: false, cursor: 1))]
         )
         let coordinator = makeCoordinator(transport)
         await coordinator.refresh()
         let rows = Dictionary(uniqueKeysWithValues: coordinator.state.rows.map { ($0.id, $0) })
+        XCTAssertEqual(Set(rows.keys), ["e", "n", "s"], "the board loaded: every ticket has a row")
         XCTAssertEqual(rows["s"]?.step, RoomTicketInput.Step(
             index: 2, count: 4, name: "In review", stalledSince: Date(timeIntervalSince1970: 1_793_905_800),
             stalledReason: "Box X was stopped", waitingOn: "your OK of the shots"
