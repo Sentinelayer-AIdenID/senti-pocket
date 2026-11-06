@@ -95,6 +95,54 @@ final class ChatMarkdownQuoteDepthLayoutTests: XCTestCase {
         return CFAbsoluteTimeGetCurrent() - start
     }
 
+    /// Quotes `depth` deep, each level with a paragraph and a two-level list under it, as replies quoting replies are.
+    private static func quotedReplies(_ depth: Int) -> String {
+        (0..<depth).flatMap { level -> [String] in
+            let prefix = String(repeating: "> ", count: level)
+            return [prefix + "Level \(level + 1): what the reply before said, long enough to wrap onto a second line.",
+                    prefix, prefix + "- a point it made, also long enough to wrap onto a second line",
+                    prefix + "  - and a point under that one", prefix]
+        }.joined(separator: "\n") + "\nAnd the answer to all of it."
+    }
+
+    /// The fastest of three: the message laid out fresh, then again at a new width (as a size change makes it).
+    private func freshAndAgain(_ text: String) -> (fresh: Double, again: Double) {
+        var fresh = Double.infinity
+        var again = Double.infinity
+        for _ in 0..<3 {
+            let view = ChatMarkdownView(text: text).frame(maxWidth: .infinity, alignment: .topLeading)
+            let host = NSHostingView(rootView: view)
+            host.frame = NSRect(x: 0, y: 0, width: 390, height: 4_000)
+            var start = CFAbsoluteTimeGetCurrent()
+            host.layoutSubtreeIfNeeded()
+            fresh = min(fresh, CFAbsoluteTimeGetCurrent() - start)
+            host.frame = NSRect(x: 0, y: 0, width: 360, height: 4_000)
+            start = CFAbsoluteTimeGetCurrent()
+            host.layoutSubtreeIfNeeded()
+            again = min(again, CFAbsoluteTimeGetCurrent() - start)
+        }
+        return (fresh, again)
+    }
+
+    /// Laying a deep quote out costs more at every level it nests (about five times per level, measured on the hosted
+    /// runner before the cap). Capped at four, 1 to 4 deep stay cheap, and 7 deep costs about what 4 deep does.
+    func test_a_seven_deep_quote_lays_out_for_about_what_four_deep_costs() {
+        var costs: [Int: (fresh: Double, again: Double)] = [:]
+        for depth in [1, 2, 3, 4, 7] {
+            costs[depth] = freshAndAgain(Self.quotedReplies(depth))
+            print("QUOTEDEPTH real depth \(depth): fresh \(Int((costs[depth]?.fresh ?? 0) * 1000)) ms, "
+                + "again \(Int((costs[depth]?.again ?? 0) * 1000)) ms")
+        }
+        for depth in [1, 2, 3, 4] {
+            XCTAssertLessThan(costs[depth]?.fresh ?? 0, 0.5, "\(depth) deep lays out fresh in under half a second")
+            XCTAssertLessThan(costs[depth]?.again ?? 0, 0.5, "\(depth) deep lays out again in under half a second")
+        }
+        let four = costs[4] ?? (0, 0)
+        let seven = costs[7] ?? (0, 0)
+        XCTAssertLessThanOrEqual(seven.fresh, four.fresh * 2 + 0.03, "7 deep lays out fresh for about what 4 costs")
+        XCTAssertLessThanOrEqual(seven.again, four.again * 2 + 0.03, "7 deep lays out again for about what 4 costs")
+    }
+
     func test_fifty_and_two_hundred_levels_lay_out_about_as_fast_as_four() {
         let four = layoutSeconds(ChatMarkdownQuoteDepthTests.nested(4))
         for levels in [50, 200] {
