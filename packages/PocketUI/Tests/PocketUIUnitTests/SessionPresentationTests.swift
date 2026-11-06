@@ -117,7 +117,7 @@ final class SessionPresentationTests: XCTestCase {
 
         XCTAssertNil(state.failure)
         XCTAssertEqual(state.events.map(\.sequenceId), [230141])
-        XCTAssertEqual(state.events.first?.author, "Relay")
+        XCTAssertEqual(state.events.first?.author, "claude-pocket-relay", "an agent by its id, never the name it gives itself")
         XCTAssertEqual(state.events.first?.text, "hello")
         XCTAssertEqual(state.actions.first?.id.actionId, "act-1")
         XCTAssertEqual(state.actions.first?.targetSequenceId, 230141)

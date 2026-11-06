@@ -87,6 +87,8 @@ final class SelectedSessionDetailCoordinator: ObservableObject {
         let eventPage: SessionEventForwardPage
         let actionPage: SessionActionPage
         let loadedAt: Date
+        /// Who "You" is in these rows: the account that read them.
+        let naming: ActivityNaming
     }
 
     private struct CheckpointSnapshot {
@@ -100,6 +102,8 @@ final class SelectedSessionDetailCoordinator: ObservableObject {
     }
 
     private let transport: any SessionTransport
+    /// Who you are, so Activity says "You" for what you did; nil names you as anyone else.
+    private let identity: (any AccountIdentityProviding)?
     private let clock: @Sendable () -> Date
     private let onReauthenticationRequired: @MainActor () -> Void
     private let onSelectionRevoked: @MainActor (String) -> Void
@@ -121,6 +125,7 @@ final class SelectedSessionDetailCoordinator: ObservableObject {
 
     init(
         transport: any SessionTransport,
+        identity: (any AccountIdentityProviding)? = nil,
         clock: @escaping @Sendable () -> Date = { Date() },
         opensVerifiedCheckpoints: Bool = true,
         onReauthenticationRequired: @escaping @MainActor () -> Void = {},
@@ -128,6 +133,7 @@ final class SelectedSessionDetailCoordinator: ObservableObject {
         onOpenCheckpoint: @escaping @MainActor (ExactCheckpointTarget) -> Void = { _ in }
     ) {
         self.transport = transport
+        self.identity = identity
         self.clock = clock
         self.opensVerifiedCheckpoints = opensVerifiedCheckpoints
         self.onReauthenticationRequired = onReauthenticationRequired
@@ -328,6 +334,7 @@ final class SelectedSessionDetailCoordinator: ObservableObject {
 
     private func startActivityRequest(_ token: RequestToken) -> Task<Void, Never> {
         let transport = transport
+        let identity = identity
         let clock = clock
         let task = Task { @MainActor [weak self] in
             do {
@@ -344,10 +351,12 @@ final class SelectedSessionDetailCoordinator: ObservableObject {
                     limit: 200
                 )
                 let (eventPage, actionPage) = try await (eventRequest, actionRequest)
+                let you = await identity?.currentAccount()?.activityIds ?? []
                 let snapshot = ActivitySnapshot(
                     eventPage: eventPage,
                     actionPage: actionPage,
-                    loadedAt: clock()
+                    loadedAt: clock(),
+                    naming: ActivityNaming(you: you)
                 )
                 guard let self, self.canApply(token) else { return }
                 self.applyActivity(snapshot, token: token)
@@ -623,7 +632,8 @@ final class SelectedSessionDetailCoordinator: ObservableObject {
             actionPage: snapshot.actionPage,
             provenance: provenance,
             isRefreshing: isRefreshing,
-            failure: failure
+            failure: failure,
+            naming: snapshot.naming
         )
     }
 

@@ -224,7 +224,8 @@ public struct SessionActivityPresentationState: Equatable, Sendable {
         actionPage: SessionActionPage,
         provenance: SessionPresentationProvenance,
         isRefreshing: Bool = false,
-        failure: SessionLoadFailure? = nil
+        failure: SessionLoadFailure? = nil,
+        naming: ActivityNaming = ActivityNaming()
     ) {
         let eventSessionsMatch = eventPage.events.allSatisfy {
             OpaqueUTF8Identity.matches($0.sessionId, sessionId)
@@ -264,8 +265,14 @@ public struct SessionActivityPresentationState: Equatable, Sendable {
             return
         }
 
-        self.events = eventPage.events.map(SessionEventRowPresentation.init)
-        self.actions = actionPage.actions.map(SessionActionRowPresentation.init)
+        // A person's own messages carry the name the server keeps for them: their actions here go by it too.
+        var spoken: [String: String] = [:]
+        for event in eventPage.events where event.agentId.lowercased().hasPrefix("human-") {
+            if let name = event.agent["displayName"]?.stringValue { spoken[event.agentId] = name }
+        }
+        let named = naming.adding(names: spoken)
+        self.events = eventPage.events.map { SessionEventRowPresentation($0, naming: named) }
+        self.actions = actionPage.actions.map { SessionActionRowPresentation($0, naming: named) }
         self.failure = failure
     }
 }
@@ -294,14 +301,13 @@ public struct SessionEventRowPresentation: Equatable, Identifiable, Sendable {
     public let text: String?
     public let timestamp: ParsedSessionTimestamp
 
-    fileprivate init(_ event: SessionEventDTO) {
+    fileprivate init(_ event: SessionEventDTO, naming: ActivityNaming) {
         self.id = ID(sessionId: event.sessionId, eventId: event.id)
         self.sessionId = event.sessionId
         self.sequenceId = event.sequenceId
         self.eventType = event.event
-        self.author = event.agent["displayName"]?.stringValue.pocketNonblank
-            ?? event.agentId.pocketNonblank
-            ?? "Unknown participant"
+        // As the chat names its authors: an agent by its id, a person by name (ActivityNaming).
+        self.author = naming.name(of: event.agentId, displayName: event.agent["displayName"]?.stringValue)
         self.text = event.payload["text"]?.stringValue.pocketNonblank
         self.timestamp = ParsedSessionTimestamp(event.ts)
     }
@@ -334,12 +340,12 @@ public struct SessionActionRowPresentation: Equatable, Identifiable, Sendable {
     public let note: String?
     public let createdAt: ParsedSessionTimestamp
 
-    fileprivate init(_ action: SessionActionDTO) {
+    fileprivate init(_ action: SessionActionDTO, naming: ActivityNaming) {
         self.id = ID(sessionId: action.sessionId, actionId: action.id)
         self.sessionId = action.sessionId
         self.targetSequenceId = action.targetSequenceId
         self.actionType = action.actionType
-        self.actor = action.actorId.pocketNonblank ?? "Unknown participant"
+        self.actor = naming.name(of: action.actorId, isHuman: action.actorKind.lowercased() == "human")
         self.note = action.note.pocketNonblank
         self.createdAt = ParsedSessionTimestamp(action.createdAt)
     }
@@ -349,6 +355,92 @@ public struct SessionActionRowPresentation: Equatable, Identifiable, Sendable {
     /// What it was on, without the server's numbers.
     public var targetLabel: String {
         targetSequenceId == 0 ? "On the chat" : "On a message"
+    }
+}
+
+/// Who did something in Activity, named as the chat names people (ticket 693f0cc5): "You"; a person by the name the
+/// room gives them, else their GitHub login, else "A person"; an agent by its id, never the name it gives itself (usually
+/// a model's, and an agent can set it to anything). Never an account's hex or "human-".
+public struct ActivityNaming: Equatable, Sendable {
+    public static let you = "You"
+    public static let somePerson = "A person"
+    public static let someAgent = "An agent"
+
+    /// Your ids, as the room writes them ("human-<login>", "human-g.<account>", the login, the account id).
+    private let yourKeys: Set<String>
+    /// The room's names for people, by id.
+    private let names: [String: String]
+
+    public init(you: Set<String> = [], names: [String: String] = [:]) {
+        self.yourKeys = Set(you.compactMap(Self.key))
+        var byKey: [String: String] = [:]
+        for (id, name) in names {
+            guard let key = Self.key(id), let name = Self.plainName(name), byKey[key] == nil else { continue }
+            byKey[key] = name
+        }
+        self.names = byKey
+    }
+
+    /// The same naming, with names for people this one has none for (the room's names win).
+    func adding(names more: [String: String]) -> ActivityNaming {
+        var merged = names
+        for (id, name) in more {
+            guard let key = Self.key(id), let name = Self.plainName(name), merged[key] == nil else { continue }
+            merged[key] = name
+        }
+        return ActivityNaming(keys: yourKeys, names: merged)
+    }
+
+    private init(keys: Set<String>, names: [String: String]) {
+        self.yourKeys = keys
+        self.names = names
+    }
+
+    /// The name for whoever wrote or did something. A `human-` id is a person whatever else is said (agents can never
+    /// claim the prefix); `displayName` counts only for a person.
+    public func name(of id: String, isHuman: Bool = false, displayName: String? = nil) -> String {
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowered = trimmed.lowercased()
+        guard isHuman || lowered.hasPrefix("human-") || lowered == "human" else {
+            return trimmed.isEmpty || Self.looksLikeAnId(trimmed) ? Self.someAgent : trimmed
+        }
+        let key = Self.key(trimmed)
+        if let key, yourKeys.contains(key) { return Self.you }
+        if let key, let name = names[key] { return name }
+        if let name = Self.plainName(displayName) { return name }
+        if let login = Self.login(trimmed) { return login }
+        return Self.somePerson
+    }
+
+    /// One person under all the ids the room writes them with: "human-ada" and "ada" are the same key.
+    static func key(_ id: String) -> String? {
+        let lowered = id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let bare = lowered.hasPrefix("human-") ? String(lowered.dropFirst("human-".count)) : lowered
+        return bare.isEmpty || bare == "human" ? nil : bare
+    }
+
+    /// A GitHub login reads as itself; a Google account (`g.<hex>`) or any id-like text is no name.
+    private static func login(_ id: String) -> String? {
+        let bare = id.lowercased().hasPrefix("human-") ? String(id.dropFirst("human-".count)) : id
+        guard !bare.isEmpty, bare.lowercased() != "human", !bare.lowercased().hasPrefix("g."),
+              !bare.contains(where: \.isWhitespace), !looksLikeAnId(bare) else { return nil }
+        return bare
+    }
+
+    /// A name a person can be called by: not blank, not "human", not an id.
+    static func plainName(_ name: String?) -> String? {
+        guard let name = name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty,
+              name.lowercased() != "human", !name.lowercased().hasPrefix("human-"), !looksLikeAnId(name) else { return nil }
+        return name
+    }
+
+    /// Text holding an id's hex: a run of six or more hex characters with digits and letters both (a UUID's parts,
+    /// an account's hex). Words ("added", "faced") and numbers ("2026") are not ids.
+    static func looksLikeAnId(_ text: String) -> Bool {
+        text.lowercased().split(whereSeparator: { !($0.isLetter || $0.isNumber) }).contains { part in
+            part.count >= 6 && part.allSatisfy(\.isHexDigit)
+                && part.contains(where: \.isNumber) && part.contains(where: { $0.isLetter })
+        }
     }
 }
 

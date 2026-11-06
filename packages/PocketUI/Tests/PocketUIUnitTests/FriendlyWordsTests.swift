@@ -1,3 +1,4 @@
+import PocketContracts
 import XCTest
 @testable import PocketUI
 
@@ -132,5 +133,55 @@ final class FriendlyWordsTests: XCTestCase {
             XCTAssertFalse(words.contains("now ago"), words)
         }
         XCTAssertEqual(ChatListWords.noActivity, "No activity yet")
+    }
+
+    // MARK: Who did it, in Activity
+
+    /// Activity names who wrote or did something as the chat does: "You"; a person by name, else their GitHub login,
+    /// else "A person"; an agent by its id, never the name it gives itself (here a model's). Never an account's hex
+    /// or "human-". The people, agents and ids are made up.
+    func test_activity_names_people_and_agents_never_by_a_hex_id_or_a_models_name() throws {
+        let hex = "0123456789abcdef0123456789abcdef"
+        func event(_ id: String, _ agent: String, _ name: String?) -> String {
+            let shown = name.map { #"{"displayName":"\#($0)"}"# } ?? "{}"
+            return #"{"id":"\#(id)","event":"session_message","agent":\#(shown),"agentId":"\#(agent)","agentModel":"m","#
+                + #""payload":{"text":"hi"},"ts":"2026-11-06T09:00:00Z","timestamp":"2026-11-06T09:00:00Z","cursor":"c","#
+                + #""sequenceId":\#(id.count * 7),"sessionId":"room-1","source":"phone"}"#
+        }
+        func action(_ id: String, _ kind: String, _ actor: String) -> String {
+            #"{"id":"\#(id)","sessionId":"room-1","targetSequenceId":7,"targetCursor":null,"targetActionId":null,"#
+                + #""actionType":"ack","actorKind":"\#(kind)","actorId":"\#(actor)","actorUserId":null,"actorRole":null,"#
+                + #""note":null,"metadata":{},"idempotencyKey":"k-\#(id)","createdAt":"2026-11-06T09:01:00Z"}"#
+        }
+        let events = try JSONDecoder().decode(SessionEventForwardPage.self, from: Data(("{\"events\":[" + [
+            event("e1", "build-agent", "nimbus-large-2"),
+            event("e22", "human-ada", "Ada Lovelace"),
+            event("e333", "human-g.\(hex)", nil),
+            event("e4444", "human-alex", "Alex"),
+        ].joined(separator: ",") + "]}").utf8))
+        let actions = try JSONDecoder().decode(SessionActionPage.self, from: Data((
+            #"{"sessionId":"room-1","count":5,"projection":{},"actions":["# + [
+                action("a1", "human", "human-ada"),
+                action("a2", "human", "human-g.\(hex)"),
+                action("a3", "human", "human-octo-reader"),
+                action("a4", "human", "alex"),
+                action("a5", "agent", "review-agent"),
+            ].joined(separator: ",") + "]}").utf8))
+        let state = SessionActivityPresentationState(sessionId: "room-1", eventPage: events, actionPage: actions,
+                                                     provenance: .network(lastUpdated: now),
+                                                     naming: ActivityNaming(you: ["human-alex"]))
+        XCTAssertNil(state.failure)
+        XCTAssertEqual(state.events.map(\.author), ["build-agent", "Ada Lovelace", "A person", "You"])
+        XCTAssertEqual(state.actions.map(\.actor), ["Ada Lovelace", "A person", "octo-reader", "You", "review-agent"])
+        for name in state.events.map(\.author) + state.actions.map(\.actor) {
+            XCTAssertFalse(name.localizedCaseInsensitiveContains("human-"), name)
+            XCTAssertFalse(name.contains("0123456789"), name)
+            XCTAssertFalse(name.contains("nimbus"), name)
+        }
+        // With no one signed in, nobody is "You".
+        let anyone = SessionActivityPresentationState(sessionId: "room-1", eventPage: events, actionPage: actions,
+                                                      provenance: .network(lastUpdated: now))
+        XCTAssertEqual(anyone.events.last?.author, "Alex")
+        XCTAssertEqual(anyone.actions[3].actor, "Alex", "a person's action goes by the name their messages carry")
     }
 }
