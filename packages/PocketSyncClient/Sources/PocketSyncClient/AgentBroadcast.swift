@@ -72,17 +72,21 @@ public struct RoomAgentBox: Equatable, Hashable, Sendable {
 }
 
 /// What a room offers, from its read (`GET /api/v1/sessions/{id}`): `@any` only when `features.agentBroadcast` is
-/// true. Absent, or anything but true, is off.
+/// true, and estimates only when it says so (`RoomEstimates.swift`). Absent, or anything but true, is off.
 public struct RoomFeatures: Decodable, Equatable, Sendable {
     public let agentBroadcast: Bool
+    /// "Get an estimate" on your own messages, and the estimate cards.
+    public let estimates: Bool
 
-    public init(agentBroadcast: Bool = false) {
+    public init(agentBroadcast: Bool = false, estimates: Bool = false) {
         self.agentBroadcast = agentBroadcast
+        self.estimates = estimates
     }
 
     public init(from decoder: Decoder) throws {
         let room = try decoder.singleValueContainer().decode(JSONValue.self)
-        self.init(agentBroadcast: room["features"]?["agentBroadcast"]?.boolValue == true)
+        self.init(agentBroadcast: room["features"]?["agentBroadcast"]?.boolValue == true,
+                  estimates: Self.offersEstimates(room))
     }
 }
 

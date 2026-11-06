@@ -152,6 +152,7 @@ public struct RoomChatView: View {
                     previews: state.attachmentPreviews,
                     mediaHost: sheetMediaHost,
                     draftKey: state.draftKey,
+                    estimates: state.estimates(askedOn: thread.parent.sequenceId),
                     send: send,
                     draft: threadDraft(thread.parent.sequenceId)
                 )
@@ -610,6 +611,10 @@ public struct RoomChatView: View {
             isPinned: state.isPinned(message),
             pinsFull: state.pinned.count >= state.pinLimit,
             breakouts: state.breakouts,
+            estimate: message.estimateId.flatMap { state.estimates[$0] },
+            offersEstimates: state.offersEstimates,
+            // On the message itself, never on a reply shown in the room (it shares the message's sequence).
+            estimateChip: message.isInlineReply ? nil : state.estimateChip(on: message.sequenceId),
             attachmentPreviews: RoomMessageRowView.previews(of: message, in: state.attachmentPreviews),
             isReadingAloud: readingAloudId == message.readAloudId,
             isExpanded: expandedQuiet.contains(message.id),
@@ -1009,6 +1014,12 @@ private struct RoomMessageRowView: View {
     /// The room holds as many pins as it can: Pin waits until one is unpinned.
     var pinsFull = false
     var breakouts: [String: RoomBreakoutCard] = [:]
+    /// This row's estimate card, when it is one.
+    var estimate: RoomEstimateCard?
+    /// Your own message offers "Get an estimate".
+    var offersEstimates = false
+    /// "Estimate ready": an estimate asked on this message is in its thread; the chip opens it.
+    var estimateChip: String?
     var attachmentPreviews: [String: Data] = [:]
     var isReadingAloud = false
     /// A background line opened in place.
@@ -1055,6 +1066,9 @@ private struct RoomMessageRowView: View {
                 send(.openBreakout(childSessionId: childSessionId))
             }
             .padding(.vertical, 6)
+        case .estimateCard:
+            RoomEstimateCardView(card: estimate, send: send)
+                .padding(.vertical, 6)
         case .breakoutOutcome(let outcome):
             RoomBreakoutOutcomeView(
                 outcome: outcome,
@@ -1414,6 +1428,21 @@ private struct RoomMessageRowView: View {
                 .accessibilityLabel(line)
                 .accessibilityIdentifier("pocket.room.addressed.\(row.sequenceId)")
         }
+        if let chip = estimateChip {
+            Button {
+                send(.openThread(sequenceId: row.sequenceId))
+            } label: {
+                Label(chip, systemImage: "dollarsign.circle")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(PocketPalette.accent)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(PocketPalette.inset, in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Opens the thread with the estimate")
+            .accessibilityIdentifier("pocket.room.estimateChip.\(row.sequenceId)")
+        }
         if row.repeats > 1, let stack = row.repeatStack {
             Button {
                 send(.toggleRepeats(stack: stack))
@@ -1652,7 +1681,8 @@ private struct RoomMessageRowView: View {
     /// This row's options, for its action row, its long-press menu and its double-tap options.
     private var rowOptions: [RoomRowOption] {
         row.options(canReply: canReply, canReact: canReact, canPin: canPin, isPinned: isPinned, pinsFull: pinsFull,
-                    canEdit: canReply, canAddEmoji: canAddEmoji, canReport: canReport, canBlock: canBlock)
+                    canEdit: canReply, canAddEmoji: canAddEmoji, canReport: canReport, canBlock: canBlock,
+                    offersEstimates: offersEstimates)
     }
 
     private func perform(_ option: RoomRowOption) {
@@ -2132,6 +2162,8 @@ private struct RoomThreadSheet: View {
     /// The room's saved-text key for this account: the reply being written is kept on the phone under it
     /// (`RoomReplyDrafts`); nil keeps none.
     var draftKey: String?
+    /// The estimates asked on the parent: their cards show here, under it.
+    var estimates: [RoomEstimateCard] = []
     let send: (RoomChatIntent) -> Void
     @Binding var draft: String
     /// A sent reply's text stays saved until the server has it (the coordinator lets it go then); typing meanwhile is
@@ -2274,6 +2306,9 @@ private struct RoomThreadSheet: View {
                     .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                     ForEach(thread.parent.files) { card in
                         RoomFileCardView(card: card, showsParts: showsFileParts) { showsFileParts.toggle() }
+                    }
+                    ForEach(estimates, id: \.estimateId) { card in
+                        RoomEstimateCardView(card: card, send: send)
                     }
 
                     if thread.isLoading && thread.replies.isEmpty {
@@ -4066,6 +4101,8 @@ extension RoomMessageRowView: Equatable {
             && lhs.threadSummary == rhs.threadSummary && lhs.isReadingSummary == rhs.isReadingSummary
             && lhs.isMinimized == rhs.isMinimized && lhs.canReport == rhs.canReport && lhs.canBlock == rhs.canBlock
             && lhs.asksAIConsent == rhs.asksAIConsent
+            && lhs.estimate == rhs.estimate && lhs.offersEstimates == rhs.offersEstimates
+            && lhs.estimateChip == rhs.estimateChip
     }
 
     /// The previews of this row's own attachments: another row's preview arriving leaves it as it is.

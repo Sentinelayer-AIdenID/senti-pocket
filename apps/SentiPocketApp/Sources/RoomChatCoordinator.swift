@@ -255,6 +255,24 @@ final class RoomChatCoordinator: ObservableObject {
     private var members: [RoomMember] = []
     /// The room takes `@any` (its read says `features.agentBroadcast`): offered in the picker only once it has said so.
     private var offersAny = false
+
+    // Estimates (ticket bc6c291f): priced options before any work starts, in a room whose read offers them.
+    private let estimator: (any RoomEstimating)?
+    /// The room offers estimates (`features.estimates`): until it says so, there is no button and no card.
+    private var offersEstimates = false
+    /// This account's role in the room: owners and admins pick any estimate here, anyone else only their own.
+    private let estimateRole: String?
+    /// Whole estimates read, by id.
+    private var estimateRecords: [String: RoomEstimate] = [:]
+    private var estimateReads: Set<String> = []
+    /// Picks and asks on their way, by estimate id.
+    private var estimateBusy: Set<String> = []
+    /// A pick made here or found made first, until the estimate's read says so too.
+    private var estimatePicks: [String: (optionId: String?, by: String?, byYou: Bool)] = [:]
+    /// What just happened to a card, by estimate id.
+    private var estimateNotices: [String: String] = [:]
+    /// Where the plan question is marked asked, so it is asked once per account.
+    private let estimatePlanDefaults: UserDefaults
     /// The room's member directory (every member may read it), read once per open, for @-mentions.
     private let directory: (any RoomTicketExtrasReading)?
     private var directoryPeople: [RoomDirectoryMember] = []
@@ -311,8 +329,13 @@ final class RoomChatCoordinator: ObservableObject {
         blocks: BlockList? = nil,
         aiConsent: AIConsent? = nil,
         isDirect: Bool = false,
+        estimator: (any RoomEstimating)? = nil,
+        estimatePlanDefaults: UserDefaults = .standard,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
+        self.estimator = estimator
+        self.estimatePlanDefaults = estimatePlanDefaults
+        self.estimateRole = membershipRole?.lowercased()
         self.emojiReactions = emojiReactions
         self.reporter = reporter
         self.blocks = blocks
@@ -446,6 +469,7 @@ final class RoomChatCoordinator: ObservableObject {
             self.startLive(current)
             await self.refreshActions(force: true)
             await self.refreshBreakouts()
+            await self.readEstimates()
             await self.refreshMembers()
             await self.readMemberDirectory()
         })
@@ -596,6 +620,14 @@ final class RoomChatCoordinator: ObservableObject {
             guard reporter != nil else { return }
             report = RoomReportState(target: target)
             publish()
+        case .requestEstimate(let sequenceId, let goal):
+            requestEstimate(goal, on: sequenceId)
+        case .pickEstimate(let estimateId, let optionId):
+            pickEstimate(estimateId, option: optionId)
+        case .askEstimateAgain(let estimateId):
+            askEstimateAgain(estimateId)
+        case .answerEstimatePlan(let estimateId, let plan):
+            answerEstimatePlan(estimateId, plan: plan)
         case .sendReport(let reason, let note):
             sendReport(reason: reason, note: note)
         case .closeReport:
@@ -1141,10 +1173,13 @@ final class RoomChatCoordinator: ObservableObject {
     /// only by a room that said so.
     func readFeatures() async {
         guard sender != nil, !failureIsTerminal,
-              let features = try? await transport.roomFeatures(sessionId: sessionId),
-              features.agentBroadcast != offersAny else { return }
+              let features = try? await transport.roomFeatures(sessionId: sessionId) else { return }
+        let estimates = features.estimates && estimator != nil
+        guard features.agentBroadcast != offersAny || estimates != offersEstimates else { return }
         offersAny = features.agentBroadcast
+        offersEstimates = estimates
         publish()
+        await readEstimates()
     }
 
     /// Re-reads the room's people (owners and admins only). A failed read keeps the list already loaded.
@@ -1192,6 +1227,301 @@ final class RoomChatCoordinator: ObservableObject {
         }
         for breakout in page.items { breakouts[breakout.childSessionId] = breakout }
         publish()
+    }
+
+    // MARK: - Estimates
+
+    /// Reads the whole of each estimate the room shows a card for: once, and again while it waits for a pick, so a
+    /// pick made elsewhere shows. A failed read keeps the card as the room's summary drew it.
+    func readEstimates() async {
+        guard offersEstimates, !failureIsTerminal else { return }
+        var ids: [String] = []
+        for message in timeline.messages {
+            guard let id = message.estimate?.estimateId, !ids.contains(id) else { continue }
+            if let record = estimateRecords[id], record.status != .ready { continue }
+            ids.append(id)
+        }
+        for id in ids { await readEstimate(id) }
+    }
+
+    private func readEstimate(_ estimateId: String) async {
+        guard let estimator, !estimateReads.contains(estimateId) else { return }
+        estimateReads.insert(estimateId)
+        defer { estimateReads.remove(estimateId) }
+        do {
+            let read = try await estimator.estimate(sessionId: sessionId, estimateId: estimateId)
+            var changed = read != estimateRecords[estimateId]
+            estimateRecords[estimateId] = read
+            // Once the read says who picked, what was shown before it is no longer needed.
+            if read.status != .ready, estimatePicks.removeValue(forKey: estimateId) != nil { changed = true }
+            if changed { publish() }
+        } catch RoomEstimateError.reauthenticationRequired {
+            onReauthenticationRequired()
+        } catch {
+            // Kept as it was: the next read tries again.
+        }
+    }
+
+    /// Asks for an estimate of what your own message asks for. Its card comes as a room event, under the message.
+    private func requestEstimate(_ goal: String, on sequenceId: Int64) {
+        guard offersEstimates, let estimator,
+              timeline.messages.contains(where: {
+                  $0.sequenceId == sequenceId && ownAuthorIds.contains($0.authorId.lowercased())
+              }) else { return }
+        let sessionId = self.sessionId
+        notice = Self.estimateAsked
+        publish()
+        Task { [weak self] in
+            do {
+                try await estimator.requestEstimate(sessionId: sessionId, goal: goal, sourceSequenceId: sequenceId)
+            } catch {
+                self?.estimateFailed(error, estimateId: nil)
+            }
+        }
+    }
+
+    /// Picks an option: the work starts with it. Only whoever asked, or the room's owners and admins, can; someone who
+    /// picked first wins, and the card says who.
+    private func pickEstimate(_ estimateId: String, option optionId: String) {
+        guard offersEstimates, let estimator, let card = estimateCards()[estimateId], card.canPick,
+              card.options.contains(where: { $0.id == optionId }), !estimateBusy.contains(estimateId) else { return }
+        estimateBusy.insert(estimateId)
+        estimateNotices[estimateId] = nil
+        publish()
+        let sessionId = self.sessionId
+        Task { [weak self] in
+            let outcome: Result<RoomEstimatePick, Error>
+            do {
+                outcome = .success(try await estimator.pick(sessionId: sessionId, estimateId: estimateId,
+                                                            optionId: optionId))
+            } catch {
+                outcome = .failure(error)
+            }
+            guard let self else { return }
+            self.estimateBusy.remove(estimateId)
+            switch outcome {
+            case .success(.started):
+                self.estimatePicks[estimateId] = (optionId: optionId, by: nil, byYou: true)
+                self.publish()
+            case .success(.alreadyPicked(let firstOption, let by)):
+                // Not yours: the first pick stands, and the card shows it.
+                self.estimatePicks[estimateId] = (optionId: firstOption, by: by, byYou: false)
+                self.estimateNotices[estimateId] = by.map { "\($0) picked first." } ?? "Someone picked first."
+                self.publish()
+            case .failure(let error):
+                self.estimateFailed(error, estimateId: estimateId)
+            }
+            await self.readEstimate(estimateId)
+        }
+    }
+
+    /// Asks again, with the same goal, for an estimate that expired or failed.
+    private func askEstimateAgain(_ estimateId: String) {
+        guard offersEstimates, let estimator, let card = estimateCards()[estimateId], card.canAskAgain,
+              !estimateBusy.contains(estimateId), let goal = estimateRecords[estimateId]?.goal, !goal.isEmpty else {
+            return
+        }
+        let source = timeline.messages.first { $0.estimate?.estimateId == estimateId }?.estimate?.sourceSequenceId
+        estimateBusy.insert(estimateId)
+        estimateNotices[estimateId] = nil
+        publish()
+        let sessionId = self.sessionId
+        Task { [weak self] in
+            do {
+                try await estimator.requestEstimate(sessionId: sessionId, goal: goal, sourceSequenceId: source)
+                self?.estimateBusy.remove(estimateId)
+                self?.estimateNotices[estimateId] = Self.estimateAsked
+                self?.publish()
+            } catch {
+                self?.estimateBusy.remove(estimateId)
+                self?.estimateFailed(error, estimateId: estimateId)
+            }
+        }
+    }
+
+    /// Your answer to the card's plan question, asked once: saved to your account, so the estimate can show the share
+    /// of your weekly limit. "Not now" saves nothing, and the card keeps showing tokens.
+    private func answerEstimatePlan(_ estimateId: String, plan: String?) {
+        guard let question = estimateCards()[estimateId]?.planQuestion,
+              let kind = RoomEstimatePlanKind(rawValue: question.kind.rawValue) else { return }
+        estimatePlanDefaults.set(true, forKey: estimatePlanKey(kind))
+        publish()
+        guard let plan, let estimator, let answer = RoomEstimatePlanAnswer(kind: kind, plan: plan) else { return }
+        Task { [weak self] in
+            do {
+                try await estimator.savePlan(answer)
+                await self?.readEstimate(estimateId)
+            } catch {
+                self?.estimateFailed(error, estimateId: estimateId)
+            }
+        }
+    }
+
+    private func estimatePlanKey(_ kind: RoomEstimatePlanKind) -> String {
+        "pocket.estimate.planAsked.\(kind.rawValue).\(outboxAccount ?? ownAuthorIds.sorted().first ?? "")"
+    }
+
+    private func estimateFailed(_ error: Error, estimateId: String?) {
+        let words: String
+        switch error as? RoomEstimateError {
+        case .reauthenticationRequired?:
+            onReauthenticationRequired()
+            return
+        case .rateLimited?:
+            words = "You've asked for as many estimates as an hour allows. Try again later."
+        case .notAllowed?:
+            words = "Only whoever asked, or the room's owners and admins, can do that."
+        case .unavailable?:
+            words = "Estimates are not on in this room."
+        default:
+            words = "That didn't go through. Try again."
+        }
+        if let estimateId {
+            estimateNotices[estimateId] = words
+        } else {
+            notice = words
+        }
+        publish()
+    }
+
+    static let estimateAsked = "Asked for an estimate. It shows here in about 20 seconds."
+
+    /// Each estimate's latest event in the room, by estimate id: a pick posts the estimate's card again, and the latest
+    /// one stands.
+    private static func latestEstimateEvents(_ messages: [RoomMessage]) -> [String: RoomMessage] {
+        var latest: [String: RoomMessage] = [:]
+        for message in messages {
+            guard let id = message.estimate?.estimateId else { continue }
+            if let seen = latest[id], seen.sequenceId > message.sequenceId { continue }
+            latest[id] = message
+        }
+        return latest
+    }
+
+    /// Each estimate card the room shows: from the whole estimate once read, and from its latest event until then.
+    private func estimateCards() -> [String: RoomEstimateCard] {
+        guard offersEstimates else { return [:] }
+        return Self.latestEstimateEvents(timeline.messages).compactMapValues { message in
+            message.estimate.map { estimateCard($0, order: message.sequenceId) }
+        }
+    }
+
+    private func estimateCard(_ summary: RoomEstimateSummary, order: Int64) -> RoomEstimateCard {
+        let id = summary.estimateId
+        let record = estimateRecords[id]
+        let askedBy = record?.askedBy ?? summary.askedBy
+        let suggested = record?.suggested ?? summary.suggested
+        let options: [RoomEstimateCard.Option]
+        if let record {
+            options = record.options.map { Self.estimateOption($0, suggested: suggested) }
+        } else {
+            // Only what the room's summary says until the read: no judge line, no time, no pick.
+            options = summary.options.map { option in
+                RoomEstimateCard.Option(id: option.id, label: option.label, lowUsd: option.lowUsd,
+                                        highUsd: option.highUsd, isSuggested: option.id == suggested)
+            }
+        }
+        let local = estimatePicks[id]
+        let pickedId = record?.pickedOptionId ?? local?.optionId
+        let pickedBy = record?.pickedBy ?? local?.by
+        let status: RoomEstimateCard.Status
+        // A newer event (a pick, posted again) is newer than a read that still says ready, until the next read.
+        let current: RoomEstimateStatus
+        if record?.status == .ready, summary.status != .ready {
+            current = summary.status
+        } else {
+            current = record?.status ?? summary.status
+        }
+        switch current {
+        case .picked:
+            status = Self.picked(pickedId, by: pickedBy, byYou: local?.byYou == true, in: options, own: ownAuthorIds)
+        case .ready where local != nil:
+            status = Self.picked(pickedId, by: pickedBy, byYou: local?.byYou == true, in: options, own: ownAuthorIds)
+        case .ready:
+            status = record == nil ? .loading : .ready
+        case .expired:
+            status = .expired
+        case .failed:
+            status = .failed(reason: record?.failureReason ?? "")
+        }
+        let mayPick = RoomEstimateCard.mayPick(askedBy: askedBy, ownHandles: ownAuthorIds, role: estimateRole)
+        let ended: Bool
+        switch status {
+        case .expired, .failed: ended = true
+        default: ended = false
+        }
+        return RoomEstimateCard(
+            estimateId: id,
+            options: options,
+            status: status,
+            basisLine: record.flatMap { RoomEstimateCard.basisLine(sources: $0.basisSources, measuredAt: $0.basisMeasuredAt) },
+            canPick: mayPick && estimator != nil,
+            canAskAgain: ended && mayPick && estimator != nil && record?.goal.isEmpty == false,
+            isBusy: estimateBusy.contains(id),
+            notice: estimateNotices[id],
+            planQuestion: record.flatMap { planQuestion(for: $0, askedBy: askedBy) },
+            pickedOptionId: pickedId,
+            sourceSequenceId: summary.sourceSequenceId,
+            order: order
+        )
+    }
+
+    /// The card's plan question: asked of whoever asked, once, while a plan-billed judge can only show tokens.
+    private func planQuestion(for record: RoomEstimate, askedBy: String?) -> RoomEstimateCard.PlanQuestion? {
+        guard record.status == .ready,
+              RoomEstimateCard.mayPick(askedBy: askedBy, ownHandles: ownAuthorIds, role: nil) else { return nil }
+        for option in record.options {
+            guard let kind = option.planKind, option.weeklyLimitPercentLow == nil || option.weeklyLimitPercentHigh == nil,
+                  !estimatePlanDefaults.bool(forKey: estimatePlanKey(kind)) else { continue }
+            return RoomEstimateCard.PlanQuestion(
+                kind: kind == .chatgpt ? .chatgpt : .claude,
+                choices: RoomEstimatePlanAnswer.choices(for: kind).map {
+                    RoomEstimateCard.PlanQuestion.Choice(value: $0.value, title: $0.title)
+                }
+            )
+        }
+        return nil
+    }
+
+    private static func picked(_ optionId: String?, by: String?, byYou: Bool, in options: [RoomEstimateCard.Option],
+                               own: Set<String>) -> RoomEstimateCard.Status {
+        let label = options.first { $0.id == optionId }?.label ?? "an option"
+        let yours = byYou || RoomEstimateCard.mayPick(askedBy: by, ownHandles: own, role: nil)
+        return .picked(optionLabel: label, by: by ?? "Someone", byYou: yours)
+    }
+
+    /// One option, as the card shows it. The share of a weekly limit is shown only for a judge billed to a plan the
+    /// estimate names; any other judge shows what it costs.
+    private static func estimateOption(_ option: RoomEstimate.Option, suggested: String?) -> RoomEstimateCard.Option {
+        let billing: RoomEstimateCard.Billing?
+        switch option.judgeBilling {
+        case .plan:
+            billing = option.planKind.map { kind -> RoomEstimateCard.Billing in
+                kind == .chatgpt ? .plan(.chatgpt) : .plan(.claude)
+            }
+        case .perToken: billing = .perToken
+        case .some(RoomEstimateBilling.none): billing = RoomEstimateCard.Billing.none
+        case nil: billing = nil
+        }
+        let showsPercent = option.judgeBilling == .plan && option.plan != nil
+        return RoomEstimateCard.Option(
+            id: option.id,
+            label: option.label,
+            lowUsd: option.lowUsd,
+            highUsd: option.highUsd,
+            unpricedTickets: option.unpricedTickets,
+            billing: billing,
+            judgeTokensLow: option.judgeTokensLow,
+            judgeTokensHigh: option.judgeTokensHigh,
+            weeklyLimitPercentLow: showsPercent ? option.weeklyLimitPercentLow : nil,
+            weeklyLimitPercentHigh: showsPercent ? option.weeklyLimitPercentHigh : nil,
+            lowMinutes: option.lowMinutes,
+            highMinutes: option.highMinutes,
+            expectedRounds: option.expectedRounds,
+            maxRounds: option.maxRounds,
+            caveats: option.caveats,
+            isSuggested: option.id == suggested
+        )
     }
 
     /// A breakout card arrived for a room this phone has not described yet: read its descriptor now.
@@ -2216,6 +2546,7 @@ final class RoomChatCoordinator: ObservableObject {
             await catchUp(current)
             await refreshActions(force: true)
             await refreshBreakouts()
+            await readEstimates()
             await refreshMembers()
             pruneComposing()
         }
@@ -2235,6 +2566,7 @@ final class RoomChatCoordinator: ObservableObject {
             pursueFocus()
             Task { [weak self] in await self?.refreshActions() }
             refreshBreakoutsIfNeeded(for: [message])
+            if message.kind == .estimateCard { Task { [weak self] in await self?.readEstimates() } }
             return true
         case .edited(let message, let sequenceId):
             connection = .live
@@ -2572,7 +2904,17 @@ final class RoomChatCoordinator: ObservableObject {
         // the same photo a second time.
         let filesInMessages = Set(timeline.messages.lazy.filter { $0.eventType == "session_message" }
             .flatMap { $0.attachments.map(\.attachmentId) })
-        let shown = timeline.messages.filter { !Self.isUploadNotice($0, shownIn: filesInMessages) }
+        // An estimate's card shows only while the room offers estimates, once (its latest event: a pick replaces it in
+        // place), and in the room itself only when it was not asked on a message: that message's thread shows it, and
+        // the message a chip.
+        let latestEstimates = Self.latestEstimateEvents(timeline.messages)
+        let shown = timeline.messages.filter { message in
+            guard !Self.isUploadNotice(message, shownIn: filesInMessages) else { return false }
+            guard message.kind == .estimateCard else { return true }
+            guard offersEstimates, let summary = message.estimate,
+                  latestEstimates[summary.estimateId]?.id == message.id else { return false }
+            return summary.sourceSequenceId == nil
+        }
         let inputs = shown.map { message -> RoomChatMessageInput in
             let date: Date?
             if let cached = dateCache[message.id] {
@@ -2684,6 +3026,8 @@ final class RoomChatCoordinator: ObservableObject {
             focusSequenceId: focusTarget,
             mentionCandidates: mentionCandidates(),
             breakouts: breakouts.mapValues(Self.card),
+            estimates: estimateCards(),
+            offersEstimates: offersEstimates && sender != nil && postingRefusedReason == nil,
             attachmentPreviews: previews,
             presence: presenceState,
             pinned: pins,
@@ -3064,6 +3408,8 @@ final class RoomChatCoordinator: ObservableObject {
         case .memberJoined: return .memberJoined
         case .breakoutOpened:
             return .breakoutOpened(childSessionId: message.breakout?.childSessionId ?? "")
+        case .estimateCard:
+            return .estimateCard(estimateId: message.estimate?.estimateId ?? "")
         case .breakoutOutcome:
             guard let breakout = message.breakout, let outcome = breakout.outcome else { return .message }
             return .breakoutOutcome(RoomBreakoutOutcomeCard(

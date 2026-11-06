@@ -202,14 +202,16 @@ extension RoomChatIntent {
     public var isRoomWrite: Bool {
         switch self {
         case .sendMessage, .retrySend, .react, .sendReply, .sendReplyToReply, .reactToReply, .setEmojiReaction,
-             .setPinned, .renameRoom, .editMessage, .editReply:
+             .setPinned, .renameRoom, .editMessage, .editReply,
+             // An estimate is written by a model from what you said, and a pick starts work with it.
+             .requestEstimate, .pickEstimate, .askEstimateAgain:
             return true
         case .dismissNotice, .loadOlder, .loadNewer, .jumpToLatest, .openTickets, .openSearch, .readerAtBottom,
              .bottomFlapHeld, .sendTapped, .retry, .jumpToMessage, .discardSend, .openThread, .closeThread,
              .openLeaderboard, .closeLeaderboard, .focusHandled, .openBreakout, .openAttachment, .shareAttachment,
              .readAloud, .stopReadingAloud, .attachmentAppeared, .messageOnScreen, .replyOnScreen, .toggleRepeats,
              .peopleOpened, .openInvite, .keepLatestForJumpDown, .openReport, .sendReport, .closeReport, .block,
-             .revealBlocked, .allowAIAgents, .declineAIAgents:
+             .revealBlocked, .allowAIAgents, .declineAIAgents, .answerEstimatePlan:
             return false
         }
     }

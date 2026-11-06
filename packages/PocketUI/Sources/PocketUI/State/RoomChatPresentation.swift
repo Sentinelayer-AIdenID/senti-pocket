@@ -15,6 +15,8 @@ public struct RoomChatMessageInput: Equatable, Sendable {
         case breakoutOpened(childSessionId: String)
         /// A breakout's published outcome.
         case breakoutOutcome(RoomBreakoutOutcomeCard)
+        /// An estimate's card; it comes from `RoomChatPresentationState.estimates`.
+        case estimateCard(estimateId: String)
     }
 
     public let id: String
@@ -667,6 +669,10 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     public let mentionCandidates: [MentionCandidate]
     /// Breakout cards by child room id, as this viewer may see them.
     public let breakouts: [String: RoomBreakoutCard]
+    /// Estimate cards by estimate id.
+    public let estimates: [String: RoomEstimateCard]
+    /// The room offers "Get an estimate" on your own messages (its read says so).
+    public let offersEstimates: Bool
     /// Small image previews by attachment id, loaded as their messages come into view.
     public let attachmentPreviews: [String: Data]
     /// Who is here now; nil until the room has asked.
@@ -742,6 +748,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         focusSequenceId: Int64? = nil,
         mentionCandidates: [MentionCandidate] = [],
         breakouts: [String: RoomBreakoutCard] = [:],
+        estimates: [String: RoomEstimateCard] = [:],
+        offersEstimates: Bool = false,
         attachmentPreviews: [String: Data] = [:],
         presence: RoomChatPresence? = nil,
         pinned: [RoomChatPinned] = [],
@@ -796,6 +804,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         self.focusSequenceId = protectedFailure ? nil : focusSequenceId
         self.mentionCandidates = protectedFailure ? [] : mentionCandidates
         self.breakouts = protectedFailure ? [:] : breakouts
+        self.estimates = protectedFailure ? [:] : estimates
+        self.offersEstimates = protectedFailure ? false : offersEstimates
         self.attachmentPreviews = protectedFailure ? [:] : attachmentPreviews
         self.presence = protectedFailure ? nil : presence
         self.pinned = protectedFailure ? [] : pinned
@@ -1546,7 +1556,7 @@ public enum CheckpointText {
 /// One option in a row's long-press menu, and what it asks the room for.
 public struct RoomRowOption: Equatable, Identifiable, Sendable {
     public enum Kind: String, Sendable {
-        case reply, thread, listen, like, dislike, acknowledge, emoji, pin, edit, copy, report, block
+        case reply, thread, listen, like, dislike, acknowledge, emoji, pin, edit, estimate, copy, report, block
     }
 
     public let kind: Kind
@@ -1562,6 +1572,12 @@ public struct RoomRowOption: Equatable, Identifiable, Sendable {
 }
 
 extension RoomChatMessageRow {
+    /// The estimate this row's card shows, when it is an estimate's card.
+    public var estimateId: String? {
+        if case .estimateCard(let estimateId) = kind { return estimateId }
+        return nil
+    }
+
     /// What reads this row aloud. A reply shown in the room is read as itself, never as the message it answers.
     public var readAloudId: String {
         inlineReplyId.map(RoomReadAloud.reply) ?? RoomReadAloud.message(sequenceId)
@@ -1611,7 +1627,7 @@ extension RoomChatMessageRow {
     /// else's message or reply ends with Report and Block (App Store guideline 1.2).
     public func options(canReply: Bool, canReact: Bool, canPin: Bool, isPinned: Bool, pinsFull: Bool,
                         canEdit: Bool = false, canAddEmoji: Bool = false, canReport: Bool = false,
-                        canBlock: Bool = false) -> [RoomRowOption] {
+                        canBlock: Bool = false, offersEstimates: Bool = false) -> [RoomRowOption] {
         var options: [RoomRowOption] = []
         if canReply {
             // Written right in the room's box, and it goes to the thread (Carter, #55074): the view starts it.
@@ -1653,6 +1669,12 @@ extension RoomChatMessageRow {
         // Your own words can be edited (the view asks for the new text).
         if canEdit, isOwn, kind == .message {
             options.append(RoomRowOption(kind: .edit, title: "Edit", symbol: "pencil", intent: nil))
+        }
+        // Your own message, in a room that offers estimates: what it asks for, priced before any work starts.
+        if offersEstimates, canEdit, isOwn, kind == .message, !isInlineReply,
+           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            options.append(RoomRowOption(kind: .estimate, title: "Get an estimate", symbol: "dollarsign.circle",
+                                         intent: .requestEstimate(sequenceId: sequenceId, goal: text)))
         }
         options.append(RoomRowOption(kind: .copy, title: "Copy text", symbol: "doc.on.doc", intent: nil))
         if canReport, let target = reportTarget {
@@ -1769,6 +1791,14 @@ public enum RoomChatIntent: Equatable, Sendable {
     case keepLatestForJumpDown
     /// Open the report sheet for someone else's message or reply.
     case openReport(RoomReportTarget)
+    /// Ask for an estimate of what your own message asks for (`goal`, its text).
+    case requestEstimate(sequenceId: Int64, goal: String)
+    /// Pick one of an estimate's options: the work starts with it.
+    case pickEstimate(estimateId: String, optionId: String)
+    /// Ask again for an estimate that expired or failed, with the same goal.
+    case askEstimateAgain(estimateId: String)
+    /// Your answer to the card's plan question (nil: not now). Asked once.
+    case answerEstimatePlan(estimateId: String, plan: String?)
     /// Send the open report.
     case sendReport(reason: RoomReportReason, note: String)
     case closeReport
