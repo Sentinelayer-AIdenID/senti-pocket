@@ -74,7 +74,9 @@ final class SharedRoomsTests: XCTestCase {
         let none = try JSONDecoder().decode(SharedRoomsPage.self, from: Data(#"{"rooms":[],"total":0,"nextCursor":null}"#.utf8))
         XCTAssertEqual(none, SharedRoomsPage(rooms: [], total: 0))
         let short = try JSONDecoder().decode(SharedRoomsPage.self, from: Data(#"{"rooms":[{"sessionId":"r"}]}"#.utf8))
-        XCTAssertEqual(short.total, 1, "never fewer in all than on the page")
+        XCTAssertNil(short.total, "no total from the server is no count, never the page's length")
+        let low = try JSONDecoder().decode(SharedRoomsPage.self, from: Data(#"{"rooms":[{"sessionId":"r"},{"sessionId":"s"}],"total":1}"#.utf8))
+        XCTAssertEqual(low.total, 2, "never fewer in all than on the page")
     }
 
     func test_the_read_names_whom_and_pages_on_with_the_apis_cursor() async throws {

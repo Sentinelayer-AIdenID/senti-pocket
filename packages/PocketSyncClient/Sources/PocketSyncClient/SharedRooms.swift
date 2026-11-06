@@ -31,14 +31,15 @@ public struct SharedRoom: Decodable, Equatable, Sendable {
 /// A page of the rooms you share with someone, newest first.
 public struct SharedRoomsPage: Decodable, Equatable, Sendable {
     public let rooms: [SharedRoom]
-    /// How many rooms you share in all, not just this page.
-    public let total: Int
+    /// How many rooms you share in all, not just this page, as the server counted them; nil when it did not say (the
+    /// card then shows no number: a page's own length is not the count).
+    public let total: Int?
     /// Where the next page starts; nil on the last page.
     public let nextCursor: String?
 
     public init(rooms: [SharedRoom], total: Int? = nil, nextCursor: String? = nil) {
         self.rooms = rooms
-        self.total = max(total ?? rooms.count, rooms.count)
+        self.total = total.map { max($0, rooms.count) }
         self.nextCursor = nextCursor
     }
 

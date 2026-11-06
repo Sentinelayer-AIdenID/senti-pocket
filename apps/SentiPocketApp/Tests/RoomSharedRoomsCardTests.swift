@@ -102,7 +102,7 @@ final class RoomSharedRoomsCardTests: XCTestCase {
             XCTAssertFalse(answered, "\(failure)")
             XCTAssertEqual(model.state.sharedRooms, ["Design review"], "\(failure)")
             XCTAssertNil(model.state.sharedRoomsTotal, "\(failure)")
-            XCTAssertEqual(model.state.sharedRoomsHeader, "Room you share")
+            XCTAssertEqual(model.state.sharedRoomsHeader, "In this room", "no false \"1 room\"")
             XCTAssertFalse(model.state.canSeeAllRooms)
         }
         let none = card(Self.person)
@@ -110,6 +110,22 @@ final class RoomSharedRoomsCardTests: XCTestCase {
         XCTAssertFalse(answered)
         XCTAssertEqual(none.state.sharedRooms, ["Design review"])
         XCTAssertNil(none.state.sharedRoomsTotal)
+    }
+
+    /// An answer without a total shows the rooms with no number (a page's own length is not the count).
+    func test_an_answer_without_a_total_shows_no_number() async {
+        struct NoTotal: SharedRoomsReading {
+            func sharedRooms(with principal: String, cursor: String?, limit: Int) async throws -> SharedRoomsPage {
+                SharedRoomsPage(rooms: (1...4).reversed().map { SharedRoom(sessionId: "room-\($0)", title: "Room \($0)") })
+            }
+        }
+        let model = card(Self.agent)
+        let answered = await model.loadSharedRooms(NoTotal())
+        XCTAssertTrue(answered)
+        XCTAssertEqual(model.state.sharedRoomLines, ["Room 4", "Room 3", "Room 2", "Room 1"])
+        XCTAssertNil(model.state.sharedRoomsTotal)
+        XCTAssertEqual(model.state.sharedRoomsHeader, "Rooms you share", "no number")
+        XCTAssertFalse(model.state.canSeeAllRooms)
     }
 
     /// A public room's stand-in name names no account: nothing is asked for it.

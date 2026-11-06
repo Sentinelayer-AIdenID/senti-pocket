@@ -170,7 +170,7 @@ final class DirectMessagesPresentationTests: XCTestCase {
     func test_the_cards_rooms_you_share_with_and_without_the_servers_count() {
         let who = RoomProfileTarget(senderId: "review-agent", name: "review-agent", isAgent: true)
         let here = RoomProfileCardState(target: who, sharedRooms: ["Design review"], canMessage: false)
-        XCTAssertEqual(here.sharedRoomsHeader, "Room you share")
+        XCTAssertEqual(here.sharedRoomsHeader, "In this room", "no count from the server: never a false one")
         XCTAssertEqual(here.sharedRoomLines, ["Design review"])
         XCTAssertFalse(here.canSeeAllRooms)
 
@@ -185,7 +185,7 @@ final class DirectMessagesPresentationTests: XCTestCase {
         XCTAssertFalse(three.canSeeAllRooms, "all of them are on the card")
 
         let one = here.with(sharedRooms: ["Design review"], total: 1)
-        XCTAssertEqual(one.sharedRoomsHeader, "Room you share", "one room needs no count")
+        XCTAssertEqual(one.sharedRoomsHeader, "Room you share", "the server says one: one, and no count")
         XCTAssertFalse(one.canSeeAllRooms)
 
         let known = here.with(sharedRooms: ["A", "B", "C", "D", "E", "F"], total: nil)

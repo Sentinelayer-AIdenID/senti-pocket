@@ -140,12 +140,14 @@ public struct RoomProfileCardState: Equatable, Sendable {
         self.phase = phase
     }
 
-    /// "Rooms you share · 12" when the server counted them; "Room you share" or "Rooms you share" when it did not.
+    /// What the rooms are called, honestly: "Rooms you share · 12" when the server counted them, "Room you share" only
+    /// when it says one. Without its count: "In this room" for the room the card was opened from alone (it may well not
+    /// be the only one, and Carter read "Room you share" as one), else "Rooms you share", with no number.
     public var sharedRoomsHeader: String {
-        let count = sharedRoomsTotal ?? sharedRooms.count
-        let noun = count == 1 ? "Room you share" : "Rooms you share"
-        guard let total = sharedRoomsTotal, total > 1 else { return noun }
-        return "\(noun) · \(total)"
+        guard let total = sharedRoomsTotal else {
+            return sharedRooms.count == 1 ? "In this room" : "Rooms you share"
+        }
+        return total == 1 ? "Room you share" : "Rooms you share · \(total)"
     }
 
     /// The rooms the card lists: the newest few by name. With a count from the server, See all lists the rest; without
