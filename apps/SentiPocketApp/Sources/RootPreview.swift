@@ -84,6 +84,14 @@ enum RootPreview {
     /// Puts a room on screen in a root hosted in a test, as a tap on it in the side panel does.
     static func requestRoom(_ sessionId: String) { roomSubject.send(sessionId) }
 
+    private static let allRoomsSubject = PassthroughSubject<Void, Never>()
+
+    /// The side panel's All rooms in a root hosted in a test (`requestAllRooms`).
+    static var allRoomsRequests: AnyPublisher<Void, Never> { allRoomsSubject.eraseToAnyPublisher() }
+
+    /// Puts your rooms in place of the room on screen in a root hosted in a test, as the side panel's All rooms does.
+    static func requestAllRooms() { allRoomsSubject.send() }
+
     /// What the main thread did between two signals, for profiles of the root (`RootPreviewMeter`).
     static let meter = RootPreviewMeter()
 
@@ -140,6 +148,12 @@ final class RootPreviewMeter: @unchecked Sendable {
     }
 
     func rootBodyRan() { rootBodies += 1 }
+
+    /// Told as the root puts a room in place of the one on screen (nil: your rooms), at that moment: a hosted test
+    /// sees what came before it (editing ended first).
+    var onRoomPutInPlace: ((String?) -> Void)?
+
+    func roomPutInPlace(_ sessionId: String?) { onRoomPutInPlace?(sessionId) }
 
     /// Room screens made (`RoomChatScreen.init`, which reads the Keychain) and room screen bodies run, so far.
     private(set) var roomScreens = 0

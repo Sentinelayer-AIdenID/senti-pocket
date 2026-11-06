@@ -979,6 +979,8 @@ private struct RoomMessageRowView: View {
     /// Where the row's own sideways scrolls sit (a strip of photos), in the row's space: a drag that starts on one
     /// scrolls it and is never a swipe to reply (#336: dragging a strip back to its first photo opened a reply).
     @State private var sideScrolls: [CGRect] = []
+    /// A drag from the screen's left edge that opens the side panel: never a swipe to reply (Carter, 11-06).
+    @Environment(\.roomEdgeClaim) private var edgeClaim
     /// A double tap opens the same options as a long press.
     @State private var showsOptions = false
 
@@ -1152,10 +1154,11 @@ private struct RoomMessageRowView: View {
             DragGesture(minimumDistance: 24, coordinateSpace: .named(RoomRowSideScrolls.space))
                 .onChanged { value in
                     // Only a mostly sideways drag to the right: a scroll is never taken for a swipe, nor a drag that
-                    // starts on a strip of photos (it scrolls the strip).
-                    guard value.translation.width > 0,
-                          abs(value.translation.width) > abs(value.translation.height) * 1.8,
-                          !sideScrolls.contains(where: { $0.contains(value.startLocation) }) else { return }
+                    // starts on a strip of photos (it scrolls the strip), nor one from the screen's left edge (it
+                    // opens the side panel, which takes it at 8 pt, before this one starts at 24).
+                    guard RoomRowSwipe.tracks(translation: value.translation, start: value.startLocation,
+                                              sideScrolls: sideScrolls,
+                                              edgeClaimed: edgeClaim?.isClaimed == true) else { return }
                     swipe = min(value.translation.width, Self.swipeToReply + 24)
                 }
                 .onEnded { _ in

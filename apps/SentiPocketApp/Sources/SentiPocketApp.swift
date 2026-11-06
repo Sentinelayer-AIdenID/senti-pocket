@@ -386,8 +386,12 @@ func endAllEditing() {
 @MainActor
 final class SidePanelState: ObservableObject {
     @Published var isOpen = false
+    /// A drag from the left edge that is opening the panel: the room's rows read it, and leave the drag to the edge
+    /// (`RoomEdgeClaim`).
+    let edgeClaim = RoomEdgeClaim()
 
-    /// What ends editing before the panel opens: `endAllEditing` in the app; a test gives its own, to see it run first.
+    /// What ends editing before the panel opens or another room is put in place: `endAllEditing` in the app; a test
+    /// gives its own, to see it run first.
     private let endEditing: @MainActor () -> Void
 
     init(endEditing: @escaping @MainActor () -> Void = endAllEditing) {
@@ -403,6 +407,70 @@ final class SidePanelState: ObservableObject {
     func close() {
         if isOpen { isOpen = false }
     }
+
+    /// Puts another room, or your rooms, in place of the one on screen: editing ended first (the room's composer goes
+    /// with it, so the keyboard starts going down before), then `change`, then the panel closed.
+    func switchRoom(_ change: () -> Void) {
+        endEditing()
+        change()
+        close()
+    }
+
+    /// A drag on the room, at its first move. One from the left edge (`SidePanelEdgeDrag.claims`), with the panel
+    /// closed and nothing over the room, is the edge's: editing ends then, before the room starts following the finger,
+    /// and the room's rows leave the drag alone. Returns whether it is the edge's.
+    func beginEdgeDrag(start: CGPoint, translation: CGSize, allowed: Bool) -> Bool {
+        guard !isOpen, SidePanelEdgeDrag.claims(start: start, translation: translation, allowed: allowed) else {
+            return false
+        }
+        endEditing()
+        edgeClaim.isClaimed = true
+        return true
+    }
+
+    /// The edge's drag let go: far enough along, or flung, and the panel opens as its button opens it (`open`);
+    /// otherwise it stays closed. Either way the rows have their swipe back.
+    func endEdgeDrag(translation: CGFloat, predicted: CGFloat, width: CGFloat) {
+        guard edgeClaim.isClaimed else { return }
+        edgeClaim.isClaimed = false
+        if SidePanelEdgeDrag.opens(translation: translation, predicted: predicted, width: width) { open() }
+    }
+
+    /// A drag that stopped without being let go (the system took the touch): the rows have their swipe back.
+    func dropEdgeDrag() {
+        edgeClaim.isClaimed = false
+    }
+}
+
+/// The drag from the left edge that opens the side panel (Carter, 11-06): one that starts within `zone` of the screen's
+/// left edge and goes right, more sideways than up or down. Anywhere else a drag is the room's, as before: its scroll,
+/// and a row's swipe to reply.
+enum SidePanelEdgeDrag {
+    /// How near the screen's left edge a drag must start.
+    static let zone: CGFloat = 20
+
+    /// Whether a drag from the edge may open the panel at all: not while it is open, not under a sheet (a full-screen
+    /// photo and the call's screen are over the room too: they take the touch first), not with a room pushed on the
+    /// one on screen (the system's own drag from the edge goes back), and not with VoiceOver on (its users have the
+    /// button).
+    static func allowed(open: Bool, covered: Bool, roomPushed: Bool, voiceOver: Bool) -> Bool {
+        !open && !covered && !roomPushed && !voiceOver
+    }
+
+    /// Whether a drag, at its first move, is the edge's.
+    static func claims(start: CGPoint, translation: CGSize, allowed: Bool) -> Bool {
+        allowed && start.x <= zone && translation.width > 0 && translation.width > abs(translation.height)
+    }
+
+    /// How far the room has followed the finger: from resting (0) to open (`width`).
+    static func offset(_ translation: CGFloat, width: CGFloat) -> CGFloat {
+        min(max(translation, 0), width)
+    }
+
+    /// Letting go opens the panel past a third of the way, or flung past half of it.
+    static func opens(translation: CGFloat, predicted: CGFloat, width: CGFloat) -> Bool {
+        translation > width / 3 || predicted > width / 2
+    }
 }
 
 /// The side panel underneath, and the room on top as a card pushed aside while the panel is open (Carter #55006). It
@@ -415,6 +483,8 @@ struct SidePanelFrame<Panel: View, Room: View>: View {
     private let width: CGFloat
     /// A sheet over the room: with the open panel, what tells the room it is covered.
     private let coveredOtherwise: Bool
+    /// A room pushed on the one on screen: the system's drag from the left edge goes back, so the panel's does not open.
+    private let roomPushed: Bool
     /// The open panel's read of its rooms: at once, then every `refresh` nanoseconds, with the app in front.
     private let refresh: UInt64
     /// The reads the panel's open asks for (what it shows that was not read lately).
@@ -423,12 +493,23 @@ struct SidePanelFrame<Panel: View, Room: View>: View {
     private let panel: Panel
     private let room: Room
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
+    /// A drag on the room, from its first move: whether it is the edge's, and how far the room follows it. Back to
+    /// nothing when the drag ends, however it ends.
+    @GestureState(resetTransaction: Transaction(animation: .spring(response: 0.35, dampingFraction: 0.8)))
+    private var edge = EdgeFollow()
 
-    init(state: SidePanelState, width: CGFloat, coveredOtherwise: Bool, refresh: UInt64,
+    private struct EdgeFollow: Equatable {
+        var decided = false
+        var offset: CGFloat?
+    }
+
+    init(state: SidePanelState, width: CGFloat, coveredOtherwise: Bool, roomPushed: Bool, refresh: UInt64,
          onOpen: @escaping @MainActor () -> Void, poll: @escaping @MainActor () -> Void, panel: Panel, room: Room) {
         _state = ObservedObject(wrappedValue: state)
         self.width = width
         self.coveredOtherwise = coveredOtherwise
+        self.roomPushed = roomPushed
         self.refresh = refresh
         self.onOpen = onOpen
         self.poll = poll
@@ -437,17 +518,23 @@ struct SidePanelFrame<Panel: View, Room: View>: View {
     }
 
     var body: some View {
+        // How far open the panel shows, 0 to 1: open, or as far as a drag from the left edge has brought the room.
+        let shown = state.isOpen ? 1 : (edge.offset ?? 0) / width
+        let edgeAllowed = SidePanelEdgeDrag.allowed(open: state.isOpen, covered: coveredOtherwise,
+                                                    roomPushed: roomPushed, voiceOver: voiceOver)
         ZStack(alignment: .leading) {
             // The panel ends before the room card begins, so its right edge (unread counts, See all) is never under it.
             panel
                 .frame(width: width - 14)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .opacity(state.isOpen ? 1 : 0)
+                .opacity(Double(shown))
                 .allowsHitTesting(state.isOpen)
                 .accessibilityHidden(!state.isOpen)
             room
                 // A sheet or the side panel over the room: its moving parts rest (warden, #269).
                 .environment(\.roomIsCovered, state.isOpen || coveredOtherwise)
+                // A drag the left edge has taken is never a row's swipe to reply.
+                .environment(\.roomEdgeClaim, state.edgeClaim)
                 // The room moves right, a little smaller, its corners rounded into a card; a tap or a swipe on it
                 // closes.
                 .overlay {
@@ -462,17 +549,24 @@ struct SidePanelFrame<Panel: View, Room: View>: View {
                             .transition(.opacity)
                     }
                 }
-                .clipShape(RoundedRectangle(cornerRadius: state.isOpen ? 28 : 0, style: .continuous))
-                .shadow(color: .black.opacity(state.isOpen ? 0.28 : 0), radius: 20, x: -6)
+                .clipShape(RoundedRectangle(cornerRadius: 28 * shown, style: .continuous))
+                .shadow(color: .black.opacity(Double(0.28 * shown)), radius: 20, x: -6)
                 // Only drawn differently, never laid out again: toggling the safe area here changed the room's height
                 // on every frame of the spring, and a room with a long history loaded re-measured all of its rows each
-                // time (Carter, 10-30 14:22: frozen after tapping the menu with 238 rows loaded).
-                .scaleEffect(state.isOpen ? 0.9 : 1, anchor: .leading)
-                .offset(x: state.isOpen ? width : 0)
+                // time (Carter, 10-30 14:22: frozen after tapping the menu with 238 rows loaded). Following a drag from
+                // the edge is the same: drawn, never laid out.
+                .scaleEffect(1 - 0.1 * shown, anchor: .leading)
+                .offset(x: width * shown)
+                // Simultaneous, so a drag anywhere else stays the room's: its scroll, and its rows' swipe to reply.
+                .simultaneousGesture(edgeDrag(allowed: edgeAllowed), including: edgeAllowed ? .all : .subviews)
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: state.isOpen)
         .onChange(of: state.isOpen) { open in
             if open { onOpen() }
+        }
+        // A drag that ended without being let go (the system took the touch) gives the rows their swipe back.
+        .onChange(of: edge.decided) { decided in
+            if !decided { state.dropEdgeDrag() }
         }
         // While the side panel stays open its rooms keep up: a message that arrives in another room shows its unread
         // badge without closing and opening the panel again (Carter, #61188). Only with the app in front, as the bell's
@@ -488,6 +582,26 @@ struct SidePanelFrame<Panel: View, Room: View>: View {
                 poll()
             }
         }
+    }
+
+    /// A drag from the left edge opens the panel, the room following the finger (Carter, 11-06). At its first move the
+    /// panel's state decides whether the drag is the edge's, and ends editing if it is; let go, the state opens the
+    /// panel as its button does, or the room springs back. In the screen's space, as the room moves under the finger.
+    private func edgeDrag(allowed: Bool) -> some Gesture {
+        DragGesture(minimumDistance: 8, coordinateSpace: .global)
+            .updating($edge) { value, edge, _ in
+                if !edge.decided {
+                    edge.decided = true
+                    if state.beginEdgeDrag(start: value.startLocation, translation: value.translation, allowed: allowed) {
+                        edge.offset = 0
+                    }
+                }
+                if edge.offset != nil { edge.offset = SidePanelEdgeDrag.offset(value.translation.width, width: width) }
+            }
+            .onEnded { value in
+                state.endEdgeDrag(translation: value.translation.width, predicted: value.predictedEndTranslation.width,
+                                  width: width)
+            }
     }
 }
 
@@ -533,8 +647,8 @@ struct AuthenticatedRootView: View {
     @State private var currentRoom: RoomRoute?
     @State private var roomPath: [RoomRoute] = []
     /// Whether the side panel is open: kept, not watched (`SidePanelFrame` watches it), so its open and close never draw
-    /// the root.
-    @State private var panelState = SidePanelState()
+    /// the root. It also ends editing before the panel opens and before another room is put in place.
+    @State private var panelState: SidePanelState
     /// The room screens on screen (`RoomScreenSlot`); the same store for the root's life.
     @State private var roomScreens = RoomScreenSlots()
     /// How often the open side panel reads the rooms again, in nanoseconds.
@@ -582,8 +696,10 @@ struct AuthenticatedRootView: View {
         services: RootServices = .live(),
         onSignOut: @escaping @MainActor () -> Void,
         onReauthenticationRequired: @escaping @MainActor @Sendable (UInt64) -> Void,
-        onSessionSelectionChanged: @escaping @MainActor (UInt64, String?) -> Void = { _, _ in }
+        onSessionSelectionChanged: @escaping @MainActor (UInt64, String?) -> Void = { _, _ in },
+        endEditing: @escaping @MainActor () -> Void = endAllEditing
     ) {
+        _panelState = State(initialValue: SidePanelState(endEditing: endEditing))
         let guardedReauthentication: @MainActor @Sendable () -> Void = {
             onReauthenticationRequired(authenticationEpoch)
         }
@@ -723,6 +839,7 @@ struct AuthenticatedRootView: View {
             state: panelState,
             width: Self.drawerWidth,
             coveredOtherwise: coveredBySheet,
+            roomPushed: !roomPath.isEmpty,
             refresh: Self.openDrawerRefresh,
             // Opening the side panel reads what it shows that was not read lately: the bell, Waiting on you, whether
             // folders and direct messages are on, and your folders, so no count is older than `panelFreshness`. The
@@ -747,8 +864,9 @@ struct AuthenticatedRootView: View {
         .onReceive(RootPreview.drawerRequests) { open in
             if open { panelState.open() } else { panelState.close() }
         }
-        // A room picked as the side panel picks one, for a hosted test.
+        // A room picked as the side panel picks one, and its All rooms, for a hosted test.
         .onReceive(RootPreview.roomRequests) { sessionId in show(roomRoute(for: sessionId)) }
+        .onReceive(RootPreview.allRoomsRequests) { _ in showAllRooms() }
         .onAppear {
             guard RootPreview.isRequested else { return }
             let meter = RootPreview.meter
@@ -1007,15 +1125,31 @@ struct AuthenticatedRootView: View {
     /// selection Pocket and Activity follow in step, and remembers it for the next launch.
     @MainActor
     private func show(_ route: RoomRoute) {
-        endAllEditing()
-        pendingOpen = nil
-        if !UTF8ExactIdentity.matches(sessions.selectedSessionId, route.sessionId) {
-            sessions.send(.selectSession(sessionId: route.sessionId))
+        // Editing ends first, through the side panel's own step: the room's composer goes with the room.
+        panelState.switchRoom {
+            pendingOpen = nil
+            if !UTF8ExactIdentity.matches(sessions.selectedSessionId, route.sessionId) {
+                sessions.send(.selectSession(sessionId: route.sessionId))
+            }
+            roomPath = []
+            currentRoom = RoomRoute.keepingOpenRoom(currentRoom, for: route)
+            lastRoomId = route.sessionId
+            #if DEBUG
+            RootPreview.meter.roomPutInPlace(route.sessionId)
+            #endif
         }
-        roomPath = []
-        currentRoom = RoomRoute.keepingOpenRoom(currentRoom, for: route)
-        lastRoomId = route.sessionId
-        closeDrawer()
+    }
+
+    /// Your rooms in place of the room on screen (the side panel's All rooms), editing ended first in the same way.
+    @MainActor
+    private func showAllRooms() {
+        panelState.switchRoom {
+            roomPath = []
+            currentRoom = nil
+            #if DEBUG
+            RootPreview.meter.roomPutInPlace(nil)
+            #endif
+        }
     }
 
     private func roomRoute(for sessionId: String) -> RoomRoute {
@@ -1076,12 +1210,7 @@ struct AuthenticatedRootView: View {
             accountName: accountName,
             theme: theme,
             onSelectRoom: { sessionId in show(roomRoute(for: sessionId)) },
-            onAllRooms: {
-                endAllEditing()
-                roomPath = []
-                currentRoom = nil
-                closeDrawer()
-            },
+            onAllRooms: { showAllRooms() },
             onNotifications: {
                 closeDrawer()
                 presentsNotifications = true
