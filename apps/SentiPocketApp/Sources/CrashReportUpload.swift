@@ -15,6 +15,14 @@ struct CrashReportPayload: Encodable, Equatable {
     static let frameLength = 160
     static let stepCount = 20
     static let stepLength = 120
+    static let binaryCount = 16
+    static let binaryNameLength = 64
+
+    /// A binary the frames are in, by name and build UUID, so the team can symbolicate them.
+    struct Binary: Encodable, Equatable {
+        let name: String
+        let uuid: String
+    }
 
     let kind: String
     let build: String
@@ -24,13 +32,15 @@ struct CrashReportPayload: Encodable, Equatable {
     let headline: String
     let frames: [String]
     let lastSteps: [String]
+    /// Left out when the report names none the API would take.
+    let binaries: [Binary]?
 
     init(_ report: CrashReport) {
-        // The API knows crashes and hangs. A run that ended on screen with no crash of its own is sent as a crash, and
-        // its headline says so.
+        // The API knows crashes and hangs. A run that ended on screen with no crash of its own (most often the main
+        // thread stuck, then the system ended it) is sent as a hang, and its headline says what happened.
         switch report.kind {
-        case .crash, .closed: kind = "crash"
-        case .hang: kind = "hang"
+        case .crash: kind = "crash"
+        case .hang, .closed: kind = "hang"
         }
         build = Self.cut(report.build, to: Self.fieldLength)
         os = Self.cut(report.system, to: Self.fieldLength)
@@ -41,6 +51,25 @@ struct CrashReportPayload: Encodable, Equatable {
         frames = report.frames.prefix(Self.frameCount).map { Self.cut($0, to: Self.frameLength) }
         // The newest steps, each by its kind and counts only.
         lastSteps = report.trail.suffix(Self.stepCount).map { Self.cut(CrashStepScrub.step($0), to: Self.stepLength) }
+        let named = Self.binaries(report.binaries)
+        binaries = named.isEmpty ? nil : named
+    }
+
+    /// The report's "name UUID" pairs the API takes: a name of at most 64 of [A-Za-z0-9._+-] and a strict UUID, the
+    /// first 16, once each. Any other pair is left out.
+    static func binaries(_ listed: [String]) -> [Binary] {
+        var kept: [Binary] = []
+        for pair in listed {
+            guard let space = pair.lastIndex(of: " ") else { continue }
+            let binary = Binary(name: String(pair[..<space]), uuid: String(pair[pair.index(after: space)...]))
+            guard binary.name.range(of: #"^[A-Za-z0-9._+-]{1,64}$"#, options: .regularExpression) != nil,
+                  binary.uuid.range(of: #"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"#,
+                                    options: .regularExpression) != nil,
+                  !kept.contains(binary) else { continue }
+            kept.append(binary)
+            if kept.count == binaryCount { break }
+        }
+        return kept
     }
 
     /// At most `length` code points (Python's `len`, as the API counts), never splitting one.

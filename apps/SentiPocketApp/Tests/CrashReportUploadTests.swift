@@ -140,11 +140,39 @@ final class CrashReportUploadTests: XCTestCase {
         XCTAssertEqual(Set(object.keys), ["kind", "build", "os", "device", "occurredAt", "headline", "frames", "lastSteps"],
                        "the API's keys and no others: it refuses the rest")
 
-        let closed = CrashReportPayload(report("closed", minutesAgo: 1, kind: .closed, reason: "On screen, then gone."))
-        XCTAssertEqual(closed.kind, "crash", "the API knows crashes and hangs")
-        XCTAssertEqual(closed.headline, "Closed while open: On screen, then gone.")
+        XCTAssertNil(payload.binaries, "no binaries listed: none sent, and the key left out")
         XCTAssertEqual(CrashReportPayload.cut(String(repeating: "\u{1F1FA}\u{1F1F8}", count: 150), to: 200).unicodeScalars.count,
                        200, "counted in code points, as the API counts")
+    }
+
+    /// The API knows crashes and hangs: a run closed while open (the main thread stuck, then the system ended it) goes as
+    /// a hang and its headline says so; a crash stays a crash.
+    func test_each_kind_goes_as_the_api_names_it() {
+        XCTAssertEqual(CrashReportPayload(report("crash", minutesAgo: 1, kind: .crash)).kind, "crash")
+        XCTAssertEqual(CrashReportPayload(report("hang", minutesAgo: 1, kind: .hang)).kind, "hang")
+        let closed = CrashReportPayload(report("closed", minutesAgo: 1, kind: .closed, reason: "On screen, then gone."))
+        XCTAssertEqual(closed.kind, "hang")
+        XCTAssertEqual(closed.headline, "Closed while open: On screen, then gone.")
+    }
+
+    /// The binaries the frames are in go with them, so the team can symbolicate the frames: name and UUID, as the API
+    /// takes them, the first 16.
+    func test_the_binaries_go_with_the_frames() throws {
+        let uuid = { (index: Int) in String(format: "00000000-0000-4000-8000-%012d", index) }
+        var listed = ["SentiPocketApp \(uuid(1))", "? \(uuid(2))", "bad name! \(uuid(3))", "UIKitCore not-a-uuid",
+                      "SentiPocketApp \(uuid(1))", String(repeating: "n", count: 65) + " \(uuid(4))"]
+        listed += (5...30).map { "libsystem_\($0).dylib \(uuid($0))" }
+        var crash = report("binaries", minutesAgo: 1)
+        crash.binaries = listed
+        let payload = CrashReportPayload(crash)
+        let binaries = try XCTUnwrap(payload.binaries)
+        XCTAssertEqual(binaries.count, 16, "the first 16 the API takes")
+        XCTAssertEqual(binaries.first, CrashReportPayload.Binary(name: "SentiPocketApp", uuid: uuid(1)))
+        XCTAssertEqual(binaries[1], CrashReportPayload.Binary(name: "libsystem_5.dylib", uuid: uuid(5)),
+                       "a name outside the API's characters or over 64, a UUID that is not one, and a repeat are left out")
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(payload)) as? [String: Any])
+        let first = try XCTUnwrap((object["binaries"] as? [[String: String]])?.first)
+        XCTAssertEqual(first, ["name": "SentiPocketApp", "uuid": uuid(1)])
     }
 
     /// Review, #352: no room's id or title, no message's number or text, no person's name or address, ever.
