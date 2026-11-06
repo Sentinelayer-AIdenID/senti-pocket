@@ -306,6 +306,8 @@ struct RoomChatScreen: View {
             reporter: sender as? any RoomReporting,
             blocks: blocks,
             aiConsent: aiConsent,
+            // Senti never answers in a direct message: it is never shown typing there.
+            isDirect: route.direct != nil,
             onReauthenticationRequired: onReauthenticationRequired
         ))
         // Files go up through the room's own sender (init, complete, the message) and straight to storage for the

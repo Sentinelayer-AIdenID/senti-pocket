@@ -21,6 +21,8 @@ public struct RoomChatView: View {
     @Environment(\.roomProfileOpener) private var profileOpener
     /// The pickers and viewers a thread opens over itself.
     @Environment(\.roomSheetMediaHost) private var sheetMediaHost
+    /// Where the typing line is said: VoiceOver.
+    @Environment(\.roomAnnouncer) private var announcer
     @State private var readerAtBottom = true
     /// The reader's place as the bottom marker reports it, settled outside layout, and whether the room is on screen
     /// to take it (see `RoomBottomSettle`). A reference, so keeping it never redraws the room.
@@ -459,6 +461,14 @@ public struct RoomChatView: View {
             .onChange(of: state.attachmentPreviews.count) { _ in
                 if let heldAnchor { proxy.scrollTo(heldAnchor, anchor: .center) } else { keepAtBottomIfThere(proxy) }
             }
+            // The typing line comes or goes under the last message: the reader at the bottom stays there and sees it
+            // whole, and is still at the bottom when the reply comes in under it.
+            .onChange(of: state.composingAgents) { _ in keepAtBottomIfThere(proxy) }
+            // VoiceOver hears the line once, when it shows and when its words change: never because its row was built
+            // again (scrolled back to, or the list made anew).
+            .onChange(of: shownComposingWords) { words in
+                if !words.isEmpty { announcer.say(words) }
+            }
             .onChange(of: state.lastMessageId) { _ in
                 if !didInitialScroll {
                     scrollToInitialPosition(proxy)
@@ -873,6 +883,11 @@ public struct RoomChatView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
             if highlightedRowId == target.id { highlightedRowId = nil }
         }
+    }
+
+    /// The typing line's words while it shows, or none.
+    private var shownComposingWords: String {
+        state.canLoadNewer ? "" : RoomComposingWords.line(state.composingAgents)
     }
 
     /// Decided now, before layout can scroll the bottom marker out of view; scrolled after layout settles.
@@ -3413,20 +3428,38 @@ private struct RoomComposingLine: View {
     let agents: [String]
 
     var body: some View {
-        Text(label)
+        // Said to VoiceOver by the room (`shownComposingWords`), not here: a row in a lazy list appears again each
+        // time it is scrolled back to.
+        Text(RoomComposingWords.line(agents))
             .font(.caption)
             .foregroundStyle(PocketPalette.textSecondary)
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
             .accessibilityIdentifier("pocket.room.composing")
     }
+}
 
-    private var label: String {
-        switch agents.count {
-        case 1: return "\(agents[0]) is preparing a reply…"
-        case 2: return "\(agents[0]) and \(agents[1]) are preparing replies…"
-        default: return "\(agents.count) agents are preparing replies…"
-        }
+/// Says the room's typing line to VoiceOver. A test sets its own to hear what is said.
+public struct RoomAnnouncer {
+    public let say: @MainActor (String) -> Void
+
+    public init(say: @escaping @MainActor (String) -> Void) {
+        self.say = say
+    }
+
+    /// VoiceOver, when it is running.
+    public static let voiceOver = RoomAnnouncer { RoomComposingWords.announce($0) }
+}
+
+private struct RoomAnnouncerKey: EnvironmentKey {
+    static let defaultValue = RoomAnnouncer.voiceOver
+}
+
+public extension EnvironmentValues {
+    /// Where the room's typing line is said (`RoomAnnouncer.voiceOver` unless set).
+    var roomAnnouncer: RoomAnnouncer {
+        get { self[RoomAnnouncerKey.self] }
+        set { self[RoomAnnouncerKey.self] = newValue }
     }
 }
 
