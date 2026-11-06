@@ -18,13 +18,16 @@ private final class FeatureRoom: RoomTransport, @unchecked Sendable {
     private var gate: CheckedContinuation<Void, Never>?
     private var held: Bool
     private var reads = 0
+    /// How long the room's history takes to answer: presence can come in first, as on a slow runner.
+    private let historyDelay: UInt64
 
     init(history: [RoomMessage], answer: Result<RoomFeatures, Error>, held: Bool = false,
-         actions: RoomActionsPage = RoomActionsPage()) {
+         actions: RoomActionsPage = RoomActionsPage(), historyDelaySeconds: Double = 0) {
         self.history = history
         self.actions = actions
         self.answer = answer
         self.held = held
+        self.historyDelay = UInt64(historyDelaySeconds * 1_000_000_000)
     }
 
     func featureReads() -> Int {
@@ -44,7 +47,8 @@ private final class FeatureRoom: RoomTransport, @unchecked Sendable {
     }
 
     func roomEventsBefore(sessionId: String, beforeSequence: Int64?, limit: Int) async throws -> RoomEventPage {
-        RoomEventPage(messages: beforeSequence == nil ? history : [])
+        if beforeSequence == nil, historyDelay > 0 { try? await Task.sleep(nanoseconds: historyDelay) }
+        return RoomEventPage(messages: beforeSequence == nil ? history : [])
     }
 
     func roomEventsAfter(sessionId: String, fromSequence: Int64, limit: Int) async throws -> RoomEventPage {
@@ -227,7 +231,8 @@ final class AgentBroadcastRoomTests: XCTestCase {
         coordinator.pause()
     }
 
-    /// Agents in a box (presence's `boxMember`) are grouped under their box in the picker; the rest are not.
+    /// Agents in a box (presence's `boxMember`) are grouped under their box in the picker; the rest are not. The room's
+    /// history answers after presence here (as on a slow runner, ticket in the PR): the list is read once both are in.
     func test_agents_in_a_box_are_grouped_from_presence() async {
         let presence = RoomPresence(
             isAvailable: true,
@@ -240,10 +245,14 @@ final class AgentBroadcastRoomTests: XCTestCase {
             ],
             humansOnline: 0, agentsOnline: 3, ttlSeconds: 90
         )
-        let coordinator = room(FeatureRoom(history: Self.history, answer: .success(RoomFeatures())), presence: presence)
+        let coordinator = room(FeatureRoom(history: Self.history, answer: .success(RoomFeatures()),
+                                           historyDelaySeconds: 0.3), presence: presence)
         coordinator.resume()
-        await waitUntil("box members offered") {
-            coordinator.state.mentionCandidates.contains { $0.handle == "senti-3f2a9c01-1" }
+        // Presence's agents and the agent who posted (from the history) both offered, the history loaded.
+        await waitUntil("the box members and the room's history offered") {
+            let handles = coordinator.state.mentionCandidates.map(\.handle)
+            return !coordinator.state.isLoadingInitial && handles.contains("build-agent")
+                && handles.contains("senti-3f2a9c01-1") && handles.contains("senti-3f2a9c01-2")
         }
         let agents = coordinator.state.mentionCandidates.filter { !$0.isHuman }
         XCTAssertEqual(agents.map(\.handle), ["build-agent", "review-agent", "senti-3f2a9c01-1", "senti-3f2a9c01-2"])
