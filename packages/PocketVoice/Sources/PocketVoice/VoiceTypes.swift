@@ -2,9 +2,15 @@ import Foundation
 import PocketContracts
 
 public protocol SpeechRecognizer: Sendable {
+    /// It reads a model file `prepareModel(at:)` is given (Whisper); false for one that brings its own (Apple's).
+    var needsModelFile: Bool { get }
     func prepareModel(at modelURL: URL) async throws -> SpeechModelMetrics
     func transcribe(_ request: TranscriptionRequest) async throws -> TranscriptionResult
     func cancel() async
+}
+
+extension SpeechRecognizer {
+    public var needsModelFile: Bool { true }
 }
 
 public protocol SpeechSynthesizer: Sendable {
@@ -234,6 +240,8 @@ public enum VoiceError: Error, Equatable, Sendable {
     case noSpeech
     case transcriptionFailed(Int32)
     case microphonePermissionDenied
+    case speechPermissionDenied
+    case onDeviceRecognitionUnavailable
     case audioSessionFailed(String)
     /// A call or briefing holds the audio session, so reading aloud does not start.
     case audioSessionBusy
@@ -256,6 +264,8 @@ extension VoiceError: LocalizedError {
         case .noSpeech: return "No speech was recognized"
         case .transcriptionFailed(let code): return "whisper.cpp transcription failed with code \(code)"
         case .microphonePermissionDenied: return "Microphone permission was denied"
+        case .speechPermissionDenied: return "Speech Recognition permission was denied"
+        case .onDeviceRecognitionUnavailable: return "On-device speech recognition is unavailable"
         case .audioSessionFailed(let reason): return "Audio session failed: \(reason)"
         case .audioSessionBusy: return "A call or briefing is using the audio"
         case .synthesisFailed(let reason): return "Speech synthesis failed: \(reason)"

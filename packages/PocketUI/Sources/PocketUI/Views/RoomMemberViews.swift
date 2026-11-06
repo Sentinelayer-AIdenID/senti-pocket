@@ -17,6 +17,8 @@ public struct RoomMemberSheetView: View {
     private let onLoadMore: () -> Void
     private let onRetry: () -> Void
     private let onOpenFlight: (() -> Void)?
+    /// See all on the card's "Rooms you share".
+    private let onSeeAllRooms: (() -> Void)?
 
     /// The most of a box's steps shown here; its Flight record has them all.
     static let stepsShown = 5
@@ -24,7 +26,8 @@ public struct RoomMemberSheetView: View {
     public init(card: RoomProfileCardState, messages: RoomMemberMessagesState, box: FlightRecordState.Box? = nil,
                 onMessage: @escaping () -> Void, onBlock: ((Int64) -> Void)? = nil, onClose: @escaping () -> Void,
                 onOpenMessage: @escaping (Int64) -> Void, onLoadMore: @escaping () -> Void,
-                onRetry: @escaping () -> Void, onOpenFlight: (() -> Void)? = nil) {
+                onRetry: @escaping () -> Void, onOpenFlight: (() -> Void)? = nil,
+                onSeeAllRooms: (() -> Void)? = nil) {
         self.card = card
         self.messages = messages
         self.box = box
@@ -35,13 +38,14 @@ public struct RoomMemberSheetView: View {
         self.onLoadMore = onLoadMore
         self.onRetry = onRetry
         self.onOpenFlight = onOpenFlight
+        self.onSeeAllRooms = onSeeAllRooms
     }
 
     public var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 RoomProfileCardView(state: card, onMessage: onMessage, onBlock: messages.blockAction(onBlock),
-                                    onClose: onClose)
+                                    onSeeAllRooms: onSeeAllRooms, onClose: onClose)
                 if let line = messages.connectionLine {
                     Label(line, systemImage: connectionSymbol)
                         .font(.subheadline)

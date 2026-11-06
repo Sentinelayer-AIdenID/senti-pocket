@@ -1,14 +1,31 @@
 import Foundation
 import SwiftUI
 
+/// The on-device speech model file (Whisper, chosen from Files) is a developer's path: a DEBUG build offers it, and a
+/// Release build shows nothing of it and never asks for a file. Calls listen with Apple's on-device speech without it
+/// (`LiveDialVoice`).
+enum WhisperModelSettings {
+    #if DEBUG
+    /// DEBUG offers it, unless `-PocketReleaseSettings` asks for Settings as a Release build draws them (screenshots).
+    static var offersModelFile: Bool { !ProcessInfo.processInfo.arguments.contains("-PocketReleaseSettings") }
+    #else
+    static let offersModelFile = false
+    #endif
+}
+
 @MainActor
 struct WhisperModelSettingsView: View {
     @ObservedObject var coordinator: WhisperModelProvisioningCoordinator
+    /// The signed-in account's blocks and AI consent, under Account.
+    let blocks: BlockList?
+    let aiConsent: AIConsent?
     /// Direct messages' "Who can message me", where they are on.
     let directMessages: DirectMessagesCenter?
     /// The calendar rows, where the calendar is on.
     let calendar: CalendarSettingsContext?
     let onSignOut: (@MainActor () -> Void)?
+    /// The model file's sections, picker and notices (`WhisperModelSettings.offersModelFile`).
+    let offersModelFile: Bool
 
     @Environment(\.dismiss) private var dismiss
     @State private var presentsPicker = false
@@ -18,11 +35,17 @@ struct WhisperModelSettingsView: View {
 
     init(
         coordinator: WhisperModelProvisioningCoordinator,
+        blocks: BlockList? = nil,
+        aiConsent: AIConsent? = nil,
         directMessages: DirectMessagesCenter? = nil,
         calendar: CalendarSettingsContext? = nil,
-        onSignOut: (@MainActor () -> Void)? = nil
+        onSignOut: (@MainActor () -> Void)? = nil,
+        offersModelFile: Bool = WhisperModelSettings.offersModelFile
     ) {
         _coordinator = ObservedObject(wrappedValue: coordinator)
+        self.offersModelFile = offersModelFile
+        self.blocks = blocks
+        self.aiConsent = aiConsent
         self.directMessages = directMessages
         self.calendar = calendar
         self.onSignOut = onSignOut
@@ -40,7 +63,11 @@ struct WhisperModelSettingsView: View {
                     CalendarSettingsSection(context: calendar)
                 }
                 crashSection
-                advancedSection
+                // The speech model's sections sit under Advanced, and only where the model file is offered (DEBUG):
+                // a Release build shows nothing of it, not even the way to it.
+                if offersModelFile {
+                    advancedSection
+                }
                 accountSection
             }
             .navigationTitle("Settings")
@@ -282,6 +309,7 @@ struct WhisperModelSettingsView: View {
     private var accountSection: some View {
         if let onSignOut {
             Section("Account") {
+                AccountSafetyRows(blocks: blocks, aiConsent: aiConsent)
                 Button("Sign out on this device", role: .destructive) {
                     dismiss()
                     onSignOut()
@@ -368,9 +396,10 @@ struct WhisperModelSettingsView: View {
         }
     }
 
+    /// Only where the model file is offered: a Release build never shows its notices.
     private var noticeIsPresented: Binding<Bool> {
         Binding(
-            get: { coordinator.state.notice != nil },
+            get: { offersModelFile && coordinator.state.notice != nil },
             set: { isPresented in
                 if !isPresented {
                     coordinator.dismissNotice()

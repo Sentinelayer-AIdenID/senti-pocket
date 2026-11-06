@@ -187,12 +187,25 @@ struct RoomChatScreen: View {
     private let onReauthenticationRequired: @MainActor () -> Void
     /// The room was renamed here: the room list reads the new name.
     private let onRenamed: @MainActor () -> Void
+    /// This account's OK for what it shares to reach the room's AI agents. The room's box and threads ask in place;
+    /// a call, a ticket's answer and a crash report ask here.
+    private let aiConsent: AIConsent?
+    /// What waits on that answer.
+    @State private var consentHeld: AIConsentHeld?
+    /// A problem report from the summary sheet, waiting on that answer there.
+    @State private var summaryConsentHeld: AIConsentHeld?
+    /// Who this account blocked, for room search.
+    private let blocks: BlockList?
     /// Direct messages, where they are on: avatars open profile cards, and a direct message gets its switch.
     private let directContext: RoomDirectContext?
     /// The profile open over the room.
     @State private var profileTarget: RoomProfileTarget?
+    /// Block, asked from a profile card once the card has gone.
+    @State private var blockingFromCard: RoomBlockTarget?
     /// Someone's messages in the room, for their profile (`GET /events/by-author`).
     private let authorMessages: (any RoomAuthorMessagesReading)?
+    /// The rooms you share with someone, for their card.
+    private let sharedRooms: (any SharedRoomsReading)?
 
     init(
         route: RoomRoute,
@@ -218,6 +231,8 @@ struct RoomChatScreen: View {
         onRenamed: @escaping @MainActor () -> Void = {},
         savedSummary: String? = nil,
         onRead: @escaping @MainActor (_ sessionId: String, _ through: Int64, _ caughtUp: Bool) -> Void = { _, _, _ in },
+        blocks: BlockList? = nil,
+        aiConsent: AIConsent? = nil,
         direct: RoomDirectContext? = nil,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
@@ -225,8 +240,11 @@ struct RoomChatScreen: View {
         RootPreview.meter.roomScreenMade()
         #endif
         self.route = route
+        self.aiConsent = aiConsent
+        self.blocks = blocks
         self.directContext = direct
         self.authorMessages = transport as? any RoomAuthorMessagesReading
+        self.sharedRooms = transport as? any SharedRoomsReading
         self.reader = reader
         self.search = search
         self.ticketsTransport = ticketsTransport
@@ -284,6 +302,10 @@ struct RoomChatScreen: View {
             outboxAccount: RoomSendOutbox.account(token: SessionTokenStore.load()),
             // Off unless this build turns them on (the `SentiEmojiReactions` Info.plist key).
             emojiReactions: RoomEmojiReactions.isEnabled,
+            // Report and Block (App Store guideline 1.2): reports go through the room's own sender, as you.
+            reporter: sender as? any RoomReporting,
+            blocks: blocks,
+            aiConsent: aiConsent,
             onReauthenticationRequired: onReauthenticationRequired
         ))
         // Files go up through the room's own sender (init, complete, the message) and straight to storage for the
@@ -295,13 +317,15 @@ struct RoomChatScreen: View {
             ? nil
             : (sender as? HTTPRoomMessageSender).map { HTTPRoomMediaUploader(api: $0.bound(toAccount: account)) }
         _media = StateObject(wrappedValue: RoomMediaUploadCoordinator.forRoom(route.sessionId, account: account,
-                                                                              uploader: mediaUploader) {
+                                                                              uploader: mediaUploader,
+                                                                              aiConsent: aiConsent) {
             RoomMediaUploadCoordinator(
                 sessionId: route.sessionId,
                 account: account,
                 uploader: mediaUploader,
                 canUseCamera: UIImagePickerController.isSourceTypeAvailable(.camera),
-                canPaste: { UIPasteboard.general.hasImages }
+                canPaste: { UIPasteboard.general.hasImages },
+                aiConsent: aiConsent
             )
         })
         _artifacts = StateObject(wrappedValue: RoomArtifactsCoordinator(sessionId: route.sessionId, transport: transport))
@@ -480,6 +504,8 @@ struct RoomChatScreen: View {
             // A turn names the call only when the server said its voice line reads call briefs.
             ringCallId: call?.details?.briefsVoiceLine == true ? call?.doorbell.callId : nil,
             about: call?.details?.reason,
+            // Asked before the call starts (`afterAIConsent`); without it the call posts nothing.
+            mayShareWithAgents: { [aiConsent] in aiConsent?.isGiven ?? true },
             onEnded: { endVoiceRoom() },
             onRecordFailed: { [weak coordinator] failure in coordinator?.show(notice: failure) }
         )
@@ -543,7 +569,34 @@ struct RoomChatScreen: View {
               let partner = call.partner else { return }
         answeredCall = call
         CrashReporter.shared.note("call answered")
-        startVoiceRoom(with: [partner], answering: call)
+        // An agent's call answered before this account said OK: nothing is said to it until you do, and Not now ends
+        // the call.
+        afterAIConsent({
+            guard RoomCallDesk.shared.isLive(call.uuid) else {
+                answeredCall = nil
+                return
+            }
+            startVoiceRoom(with: [partner], answering: call)
+        }, onDecline: {
+            RoomCallDesk.shared.voiceRoomEnded(call)
+            answeredCall = nil
+        })
+    }
+
+    /// Runs `action` once this account has said OK to sharing with AI (App Store guideline 5.1.2(i)), asking first if it
+    /// has not, whatever the room. Asked `after` a moment when something else is leaving the screen (an alert).
+    private func afterAIConsent(after: TimeInterval = 0, _ action: @escaping () -> Void,
+                                onDecline: @escaping () -> Void = {}) {
+        guard let aiConsent, aiConsent.asks else {
+            action()
+            return
+        }
+        let held = AIConsentHeld(action, onDecline: onDecline)
+        if after > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + after) { consentHeld = held }
+        } else {
+            consentHeld = held
+        }
     }
 
     /// Contributors and above file and change tickets (the API's `min_role="contributor"`). An unknown role offers
@@ -598,6 +651,14 @@ struct RoomChatScreen: View {
             return false
         }
         return RoomProfile.opens(senderId: target.senderId, ownAuthorIds: opener.ownAuthorIds)
+    }
+
+    /// Block on someone's card: where the app has blocks, once the room knows who you are, and never on yourself, the
+    /// room's own voices or someone already blocked (`RoomMemberBlock.offers`).
+    private func profileOffersBlock(_ target: RoomProfileTarget, alreadyBlocked: Bool) -> Bool {
+        guard blocks != nil, let opener = profileOpener else { return false }
+        return RoomMemberBlock.offers(senderId: target.senderId, ownAuthorIds: opener.ownAuthorIds,
+                                      alreadyBlocked: alreadyBlocked)
     }
 
     /// The box an agent's profile is about, while it runs: its live steps come from the Flight record.
@@ -662,7 +723,8 @@ struct RoomChatScreen: View {
             } else if intent == .stopReadingAloud {
                 reader.stop()
             } else if intent == .openInvite {
-                showsInvite = true
+                // An invite writes to the room too: the first write asks.
+                afterAIConsent { showsInvite = true }
             } else if intent == .peopleOpened {
                 // Which boxes still run, so the people list shows them as here or ended.
                 Task { await flight.refresh() }
@@ -695,19 +757,28 @@ struct RoomChatScreen: View {
         }
         .sheet(item: $profileTarget) { target in
             let box = profileBox(target)
+            let blocked = blocks?.isBlocked(target.senderId) == true
             RoomProfileSheet(
                 target: target,
                 roomId: route.sessionId,
                 sharedRoom: profileSharedRoom,
-                canMessage: profileOffersMessage(target),
+                // Never to someone you blocked.
+                canMessage: profileOffersMessage(target) && !blocked,
                 context: directContext,
+                sharedRooms: sharedRooms,
                 messages: authorMessages,
                 box: box,
-                // Block comes with the room's block flow (#312); until then the card has none. Whichever of the two
-                // lands second wires it here: `isBlocked:` from the room's blocks, and `onBlock:` only where
-                // `RoomMemberBlock.offers` allows it (with `profileOpener`'s own ids), blocking with the message it is
-                // handed (`RoomBlockTarget(actorId:name:sequenceId:)`), never by their id alone.
-                onBlock: nil,
+                // Someone you blocked: their messages are not listed.
+                isBlocked: blocked,
+                // Block as from a message, with the one the card hands over (the newest of theirs), never by their id
+                // alone; asked once the card has gone, so the question is never dropped.
+                onBlock: profileOffersBlock(target, alreadyBlocked: blocked) ? { sequence in
+                    profileTarget = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        blockingFromCard = RoomBlockTarget(actorId: target.senderId, name: target.name,
+                                                           sequenceId: sequence)
+                    }
+                } : nil,
                 onOpenMessage: { sequence in
                     profileTarget = nil
                     // Once the sheet has gone, the room brings the message into view by its own focus path.
@@ -737,6 +808,7 @@ struct RoomChatScreen: View {
                 flight.stop()
             }
         }
+        .roomBlockConfirmation($blockingFromCard) { coordinator.send($0) }
         .toolbar {
             // New agent (Carter: "I don't think I see a new agent button on mobile, put that"), beside the title as on
             // the web, for owners and admins the mint admits. The first of the room's buttons: iOS keeps the title whole
@@ -745,7 +817,8 @@ struct RoomChatScreen: View {
             if newAgentOffer.isOffered {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
-                        showsNewAgent = true
+                        // Starting an agent writes to the room: the first write asks.
+                        afterAIConsent { showsNewAgent = true }
                     } label: {
                         Label("New agent", systemImage: "cpu")
                     }
@@ -756,9 +829,12 @@ struct RoomChatScreen: View {
             if voicePoster != nil {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
-                        choosesVoicePartner = true
-                        // Which boxes still run, so the picker offers no box that ended.
-                        Task { await flight.refresh() }
+                        // A call shares what you say with the agents: the first one asks first.
+                        afterAIConsent {
+                            choosesVoicePartner = true
+                            // Which boxes still run, so the picker offers no box that ended.
+                            Task { await flight.refresh() }
+                        }
                     } label: {
                         Label("Talk", systemImage: "waveform")
                     }
@@ -913,11 +989,14 @@ struct RoomChatScreen: View {
             })
             .presentationDetents([.medium, .large])
         }
+        .aiConsentPrompt($consentHeld) { coordinator.send(.allowAIAgents) }
         .onDisappear {
             if let voiceRoom { Task { await voiceRoom.hangUp() } }
             coordinator.onFeedback = nil
         }
         .onAppear {
+            // A message with files asks its AI question here, as a text does.
+            media.askAIConsent = { held in consentHeld = held }
             // The room on screen sounds and vibrates, except during a voice room, which speaks instead.
             coordinator.onFeedback = { event in
                 guard voiceRoom == nil else { return }
@@ -963,7 +1042,15 @@ struct RoomChatScreen: View {
                 RoomSummarySheet(sessionId: route.sessionId, roomTitle: coordinator.state.title,
                                  generator: makesSummary ? summaryGenerator : nil, saved: savedSummary,
                                  reader: reader, onClose: { showsSummary = false },
-                                 onReport: coordinator.state.composer.canPost ? { coordinator.send(.sendMessage(text: $0)) } : nil)
+                                 onReport: coordinator.state.composer.canPost ? { text in
+                                     // Asked here, over the summary, before the report goes to the room.
+                                     if aiConsent?.asks == true {
+                                         summaryConsentHeld = AIConsentHeld { coordinator.send(.sendMessage(text: text)) }
+                                     } else {
+                                         coordinator.send(.sendMessage(text: text))
+                                     }
+                                 } : nil)
+                .aiConsentPrompt($summaryConsentHeld) { coordinator.send(.allowAIAgents) }
             }
         }
         .onChange(of: showsSummary) { open in
@@ -990,6 +1077,7 @@ struct RoomChatScreen: View {
                         extras: ticketExtras,
                         mint: writesTickets ? agentMint : nil,
                         startsFiling: ticketsStartFiling,
+                        aiConsent: aiConsent,
                         onOpenMessage: { sequence in
                             // The sheet closes first, then the room goes to the message.
                             showsTickets = false
@@ -1045,6 +1133,7 @@ struct RoomChatScreen: View {
                     searcher: search,
                     artifacts: artifacts,
                     people: { searchPeople },
+                    isBlocked: { [blocks] in blocks?.isBlocked($0) ?? false },
                     onReauthenticationRequired: onReauthenticationRequired,
                     onOpen: { sequenceId in coordinator.focus(on: sequenceId) },
                     // A ticket opens over the room once the search has closed; other links follow the room's rules.
@@ -1076,7 +1165,11 @@ struct RoomChatScreen: View {
                 // Once the alert has gone, as a typed send waits a turn: the alert leaving and the new row are never
                 // laid out in one update. Handled only once the room has it: a lost send offers it again next time.
                 DispatchQueue.main.async {
-                    coordinator.sendCrashReport(CrashReportText.message(reports)) { crashes.markHandled(reports) }
+                    // Posted to the room, so its agents read it too: the first send there asks first. Not now leaves
+                    // the reports to be offered again.
+                    afterAIConsent(after: 0.4) {
+                        coordinator.sendCrashReport(CrashReportText.message(reports)) { crashes.markHandled(reports) }
+                    }
                 }
             }
             Button("Not now", role: .cancel) { crashes.markHandled(crashes.unhandled) }
@@ -1108,6 +1201,7 @@ struct RoomChatScreen: View {
                     assignRoster: ticketAssignRoster,
                     extras: ticketExtras,
                     mint: writesTickets ? agentMint : nil,
+                    aiConsent: aiConsent,
                     onOpenMessage: { sequence in focus(on: sequence) },
                     onReauthenticationRequired: onReauthenticationRequired
                 )
@@ -1155,7 +1249,13 @@ struct RoomChatScreen: View {
         }
         // Hung up on the phone's own call screen: the voice room ends with it.
         .onReceive(callDesk.$hungUp) { uuid in
-            guard let uuid, answeredCall?.uuid == uuid, let voiceRoom else { return }
+            guard let uuid, answeredCall?.uuid == uuid else { return }
+            guard let voiceRoom else {
+                // Hung up while the AI question was still asked: the question goes with the call.
+                consentHeld = nil
+                answeredCall = nil
+                return
+            }
             Task { await voiceRoom.hangUp() }
         }
     }
@@ -1342,6 +1442,7 @@ private struct RoomSearchSheet: View {
         searcher: any RoomSearching,
         artifacts: RoomArtifactsCoordinator,
         people: @escaping @MainActor () -> [RoomSearchPerson],
+        isBlocked: @escaping @MainActor (String) -> Bool,
         onReauthenticationRequired: @escaping @MainActor () -> Void,
         onOpen: @escaping (Int64) -> Void,
         onOpenURL: @escaping (URL) -> Void
@@ -1351,6 +1452,7 @@ private struct RoomSearchSheet: View {
             searcher: searcher,
             people: people,
             artifacts: { [weak artifacts] in (artifacts?.artifacts ?? [], artifacts?.isLoading ?? false) },
+            isBlocked: isBlocked,
             onReauthenticationRequired: onReauthenticationRequired
         ))
         _artifacts = ObservedObject(wrappedValue: artifacts)
