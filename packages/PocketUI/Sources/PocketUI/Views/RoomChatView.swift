@@ -1764,7 +1764,9 @@ private struct RoomReactionBar: View {
                         } label: {
                             HStack(spacing: 4) {
                                 Image(systemName: chip.isMine ? chip.symbol + ".fill" : chip.symbol)
-                                Text("\(chip.count)").monospacedDigit()
+                                if let count = chip.shownCount {
+                                    Text("\(count)").monospacedDigit()
+                                }
                             }
                             .font(.caption.weight(.semibold))
                             .padding(.horizontal, 8)

@@ -81,4 +81,15 @@ final class RoomChatReactionsTests: XCTestCase {
         let problem = state.thread?.replyLengthProblem(for: String(repeating: "a", count: 4_001))
         XCTAssertTrue(problem?.hasPrefix("Too long to send: ") == true, problem ?? "nil")
     }
+
+    /// Ticket ce169567: a like or dislike shows its number only when two or more reacted; one is the thumb itself, lit
+    /// when it is yours. Other chips keep theirs.
+    func test_a_thumb_shows_its_count_only_from_two() {
+        XCTAssertNil(RoomChatReactions.Chip(type: "like", count: 1, isMine: true).shownCount)
+        XCTAssertNil(RoomChatReactions.Chip(type: "like", count: 1, isMine: false).shownCount)
+        XCTAssertNil(RoomChatReactions.Chip(type: "dislike", count: 1, isMine: true).shownCount)
+        XCTAssertEqual(RoomChatReactions.Chip(type: "like", count: 2, isMine: true).shownCount, 2)
+        XCTAssertEqual(RoomChatReactions.Chip(type: "dislike", count: 7, isMine: false).shownCount, 7)
+        XCTAssertEqual(RoomChatReactions.Chip(type: "ack", count: 1, isMine: false).shownCount, 1)
+    }
 }

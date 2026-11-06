@@ -126,6 +126,12 @@ public struct RoomChatReactions: Equatable, Sendable {
             }
         }
 
+        /// The number beside a like or dislike: only when two or more reacted (one is the thumb itself, lit when it is
+        /// yours). Other chips always show theirs.
+        public var shownCount: Int? {
+            (type == "like" || type == "dislike") && count < 2 ? nil : count
+        }
+
         public var label: String {
             switch type {
             case "ack": return "Ack"
