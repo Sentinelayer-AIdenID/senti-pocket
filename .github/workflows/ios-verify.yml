@@ -98,9 +98,10 @@ jobs:
           python3 scripts/ios/verify_unsigned_release.py preflight
           --repository-root "$GITHUB_WORKSPACE"
       - name: Known-flaky split guard and time box (ticket 9d7d62f1, ends 2026-11-13)
-        # Two known flaky room-list checks (b508c37d, 96166f35) run in the known-flaky-room-list job below, which
-        # reports without gating, until the blank-room fix merges or 2026-11-13. This step fails the gating job if they
-        # come back into a gating test, if their class holds anything else, or after that date while the split is here.
+        # Two known flaky room-list checks (b508c37d, 96166f35) run in a step after the gating tests that reports
+        # without gating, until the blank-room fix merges or 2026-11-13. This step fails the gating job if they come
+        # back into a gating test, if their class holds anything else, if that step stops being after the gating tests
+        # or starts gating, or after that date while the split is still here.
         run: |
           python3 scripts/ios/tests/known_flaky_guard_test.py
           python3 scripts/ios/known_flaky_guard.py
@@ -395,68 +396,22 @@ jobs:
           -resultBundlePath "$RUNNER_TEMP/SentiPocketAppTests.xcresult"
           CODE_SIGNING_ALLOWED=NO
           test
-      - name: Upload XCTest result bundle
+      - name: Known flaky room-list checks (not gating, ticket 9d7d62f1)
+        # The b508c37d at-rest arrival check with its paired follow-back, and the 96166f35 held-message check, fail
+        # often on PRs that do not touch the room list. Until their fix they run here, after the gating tests and
+        # even when those fail, and report their row counts to the job summary without gating. The gating tests above
+        # skip their class; the guard step keeps this step as it is. Ends when the blank-room fix merges or on
+        # 2026-11-13, whichever comes first.
         if: always()
-        uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874 # v4.4.0
-        with:
-          name: SentiPocketAppTests-xcresult
-          path: ${{ runner.temp }}/SentiPocketAppTests.xcresult
-          if-no-files-found: ignore
-
-  known-flaky-room-list:
-    # Ticket 9d7d62f1 (warden, 2026-11-05): the b508c37d at-rest arrival check with its paired follow-back, and the
-    # 96166f35 held-message check, fail often on PRs that do not touch the room list. Until their fix they run here,
-    # on every PR, and report with their counts without gating; the gating job skips their class, and its guard keeps
-    # the class to these checks. Ends when the blank-room fix merges or on 2026-11-13, whichever comes first.
-    name: Known flaky room-list checks (not gating, ticket 9d7d62f1)
-    runs-on: macos-26
-    timeout-minutes: 45
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Verify source release inputs before tool execution
-        run: >-
-          python3 scripts/ios/verify_unsigned_release.py preflight
-          --repository-root "$GITHUB_WORKSPACE"
-      - name: Install XcodeGen
-        # Pinned release, verified against its published SHA-256 before it runs (not an unversioned Homebrew
-        # formula), so the project generator is the same reviewed binary on every run.
-        env:
-          XCODEGEN_VERSION: "2.46.0"
-          XCODEGEN_SHA256: "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806"
-        run: |
-          set -euo pipefail
-          archive="$RUNNER_TEMP/xcodegen-$XCODEGEN_VERSION.zip"
-          url="https://github.com/yonaskolb/XcodeGen/releases/download/$XCODEGEN_VERSION/xcodegen.zip"
-          curl -fsSL --retry 3 -o "$archive" "$url"
-          echo "$XCODEGEN_SHA256  $archive" | shasum -a 256 -c -
-          unzip -q "$archive" -d "$RUNNER_TEMP/xcodegen-dist"
-          "$RUNNER_TEMP/xcodegen-dist/xcodegen/bin/xcodegen" --version | grep -F "$XCODEGEN_VERSION"
-          echo "$RUNNER_TEMP/xcodegen-dist/xcodegen/bin" >> "$GITHUB_PATH"
-      - name: Generate project
-        working-directory: apps/SentiPocketApp
-        run: xcodegen generate
-      - name: Select available iPhone simulator
-        id: simulator
-        shell: bash
-        run: |
-          device_id="$(xcrun simctl list devices available -j | python3 -c '
-          import json, sys
-          payload = json.load(sys.stdin)
-          for devices in payload.get("devices", {}).values():
-              for device in devices:
-                  if device.get("isAvailable") and device.get("name", "").startswith("iPhone"):
-                      print(device["udid"])
-                      raise SystemExit(0)
-          raise SystemExit("no available iPhone simulator")
-          ')"
-          echo "device_id=$device_id" >> "$GITHUB_OUTPUT"
-      - name: Run the known flaky room-list checks
+        continue-on-error: true
+        timeout-minutes: 10
         shell: bash
         env:
           DEVICE_ID: ${{ steps.simulator.outputs.device_id }}
         run: |
           set -o pipefail
+          log="$RUNNER_TEMP/known-flaky-room-list.log"
+          status=0
           xcodebuild \
             -project apps/SentiPocketApp/SentiPocketApp.xcodeproj \
             -scheme SentiPocketApp \
@@ -466,28 +421,20 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/DerivedData" \
             -resultBundlePath "$RUNNER_TEMP/KnownFlakyRoomList.xcresult" \
             CODE_SIGNING_ALLOWED=NO \
-            test 2>&1 | tee "$RUNNER_TEMP/known-flaky-room-list.log"
-      - name: Print the counts
-        if: always()
-        shell: bash
-        run: |
-          log="$RUNNER_TEMP/known-flaky-room-list.log"
+            test 2>&1 | tee "$log" || status=$?
           {
-            echo "### Known flaky room-list checks (not gating, ticket 9d7d62f1)"
+            echo "### Known flaky room-list checks (not gating, ticket 9d7d62f1): exit $status"
             echo
             echo '```'
-            if [ -f "$log" ]; then
-              grep -aE "LAZYLIST |Test Case '.*LazyListKnownFlakyTests.*' (passed|failed)|error: .*known-flaky|Executed [0-9]+ test" "$log" \
-                | sed -E 's/^.*(LAZYLIST )/\1/' || echo "no counts in the log"
-            else
-              echo "no log: the checks did not run"
-            fi
+            grep -aE "LAZYLIST |Test Case '.*' (passed|failed)|error: .*known-flaky|Executed [0-9]+ test" "$log" \
+              | sed -E 's/^.*(LAZYLIST )/\1/' || echo "no counts in the log"
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Upload the known flaky checks' result bundle
+          exit "$status"
+      - name: Upload XCTest result bundle
         if: always()
         uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874 # v4.4.0
         with:
-          name: KnownFlakyRoomList-xcresult
-          path: ${{ runner.temp }}/KnownFlakyRoomList.xcresult
+          name: SentiPocketAppTests-xcresult
+          path: ${{ runner.temp }}/SentiPocketAppTests.xcresult
           if-no-files-found: ignore

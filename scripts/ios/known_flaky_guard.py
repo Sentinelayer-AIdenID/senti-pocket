@@ -2,14 +2,16 @@
 """Guard for the temporary split of known flaky room-list checks out of the gating job (ticket 9d7d62f1).
 
 Warden, 2026-11-05: the b508c37d at-rest arrival check (with its paired follow-back) and the 96166f35 held-message
-check fail often on PRs that do not touch the room list. Until their fix they run in LazyListKnownFlakyTests, in a job
-of their own that reports without gating. This guard runs in the gating job and fails it when:
+check fail often on PRs that do not touch the room list. Until their fix they run in LazyListKnownFlakyTests, in a
+step after the gating tests that reports without gating. This guard runs in the gating job and fails it when:
 
 - it is past 2026-11-13 and the split is still here (the time box);
 - a known flaky check (its marker, or its assertion) shows up in a gating test, or one has left its class;
 - the class holds a test beyond its allow-list, or a test reaches it another way (an extension, or a test in the
   base class it inherits from);
-- the workflow no longer skips the class in the gating job, or no longer runs it alone, without gating, in its own job.
+- the gating tests no longer skip the class, or its step is no longer after them, run even when they fail
+  (`if: always()`), kept from gating (`continue-on-error: true`), held to 10 minutes, and aimed at the class alone; or
+  anything else in the workflow runs the class.
 
 Usage: known_flaky_guard.py [--root REPO] [--today YYYY-MM-DD]   (today defaults to the UTC date)
 """
@@ -30,7 +32,7 @@ BASE_CLASS = "LazyListTestCase"
 BASE_FILE = TESTS / f"{BASE_CLASS}.swift"
 WORKFLOW = pathlib.PurePosixPath(".github/workflows/ios-verify.yml")
 GATING_JOB = "hosted-app-tests"
-FLAKY_JOB = "known-flaky-room-list"
+GATING_STEP = "Run hosted unit tests"
 
 # The only tests the non-gating class may hold.
 ALLOWED_TESTS = {
@@ -60,11 +62,23 @@ def job_block(workflow: str, job: str) -> str | None:
     return match.group("body") if match else None
 
 
+def steps(job: str) -> list[str]:
+    """A job's steps, in order: each from its `      - ` line to the next."""
+    found = re.split(r"^(?=      - )", job.split("    steps:\n", 1)[-1], flags=re.MULTILINE)
+    return [step for step in found if step.startswith("      - ")]
+
+
+def key(step: str, name: str) -> str | None:
+    """A step's own key (eight-space indent), as written."""
+    match = re.search(rf"^        {re.escape(name)}:[ \t]*(.*?)[ \t]*$", step, re.MULTILINE)
+    return match.group(1) if match else None
+
+
 def check(root: pathlib.Path, today: dt.date) -> list[str]:
     problems: list[str] = []
     flaky = read(root, FLAKY_FILE)
     if flaky is None:
-        return [f"{FLAKY_FILE} is gone but the guard still runs: end the split whole (the job, this guard, the skip, "
+        return [f"{FLAKY_FILE} is gone but the guard still runs: end the split whole (the step, this guard, the skip, "
                 f"and the checks back into LazyListBuildTests), ticket {TICKET}"]
 
     # 1. The time box.
@@ -116,23 +130,42 @@ def check(root: pathlib.Path, today: dt.date) -> list[str]:
         if re.search(rf":\s*{FLAKY_CLASS}\b", text):
             problems.append(f"{relative} subclasses {FLAKY_CLASS}")
 
-    # 4. The workflow: the gating job skips the class; its own job runs only it, without gating.
-    workflow = read(root, WORKFLOW)
-    gating = job_block(workflow, GATING_JOB) if workflow else None
-    own = job_block(workflow, FLAKY_JOB) if workflow else None
+    # 4. The workflow: the gating tests skip the class, and one step after them runs it alone, without gating.
+    workflow = read(root, WORKFLOW) or ""
     skip = f"-skip-testing:SentiPocketAppTests/{FLAKY_CLASS}"
     only = f"-only-testing:SentiPocketAppTests/{FLAKY_CLASS}"
-    if gating is None or skip not in gating:
-        problems.append(f"the gating job {GATING_JOB} does not skip {FLAKY_CLASS} ({skip})")
-    if gating is not None and FLAKY_CLASS in gating.replace(skip, ""):
-        problems.append(f"the gating job {GATING_JOB} names {FLAKY_CLASS} other than to skip it")
-    if own is None:
-        problems.append(f"no {FLAKY_JOB} job runs {FLAKY_CLASS}")
+    gating_job = job_block(workflow, GATING_JOB)
+    job_steps = steps(gating_job) if gating_job else []
+    names = [key(step.replace("      - ", "        ", 1), "name") for step in job_steps]
+    gating_at = names.index(GATING_STEP) if GATING_STEP in names else None
+    runs = [n for n, step in enumerate(job_steps) if only in step]
+    if gating_at is None or skip not in job_steps[gating_at]:
+        problems.append(f'the gating step "{GATING_STEP}" does not skip {FLAKY_CLASS} ({skip})')
+    if len(runs) != 1:
+        problems.append(f"{len(runs)} steps of {GATING_JOB} run {FLAKY_CLASS}, not exactly one")
     else:
-        if not re.search(r"^    continue-on-error:\s*true\s*$", own, re.MULTILINE):
-            problems.append(f"the {FLAKY_JOB} job must not gate (continue-on-error: true)")
-        if only not in own or re.findall(r"-only-testing:\S+", own) != [only]:
-            problems.append(f"the {FLAKY_JOB} job must run {FLAKY_CLASS} alone ({only})")
+        at = runs[0]
+        step = job_steps[at]
+        if gating_at is None or at <= gating_at:
+            problems.append(f'the {FLAKY_CLASS} step must come after "{GATING_STEP}"')
+        if key(step, "if") != "always()":
+            problems.append(f"the {FLAKY_CLASS} step must run even when the gating tests fail (if: always())")
+        if key(step, "continue-on-error") != "true":
+            problems.append(f"the {FLAKY_CLASS} step must not gate (continue-on-error: true)")
+        if key(step, "timeout-minutes") != "10":
+            problems.append(f"the {FLAKY_CLASS} step must stop after 10 minutes (timeout-minutes: 10)")
+        if re.findall(r"-only-testing:\S+", step) != [only]:
+            problems.append(f"the {FLAKY_CLASS} step must run that class alone, with one target ({only})")
+        if "GITHUB_STEP_SUMMARY" not in step:
+            problems.append(f"the {FLAKY_CLASS} step must put its counts in the job summary")
+    # Nothing else in the workflow runs the class, or names it but to skip it in the gating step.
+    elsewhere = workflow
+    for n in runs[:1]:
+        elsewhere = elsewhere.replace(job_steps[n], "", 1)
+    if gating_at is not None:
+        elsewhere = elsewhere.replace(job_steps[gating_at], job_steps[gating_at].replace(skip, "", 1), 1)
+    if FLAKY_CLASS in elsewhere:
+        problems.append(f"the workflow names {FLAKY_CLASS} outside its step and the gating step's skip")
     return problems
 
 
@@ -148,8 +181,8 @@ def main(argv: list[str] | None = None) -> int:
     if problems:
         return 1
     print(f"known-flaky guard: OK. {FLAKY_CLASS} holds only {sorted(ALLOWED_TESTS)}; no gating test makes its "
-          f"checks; the gating job skips it and {FLAKY_JOB} runs it without gating. Ends {ENDS.isoformat()} "
-          f"(ticket {TICKET}).")
+          f"checks; the gating tests skip it and one step after them runs it alone, always, without gating, for at "
+          f"most 10 minutes. Ends {ENDS.isoformat()} (ticket {TICKET}).")
     return 0
 
 

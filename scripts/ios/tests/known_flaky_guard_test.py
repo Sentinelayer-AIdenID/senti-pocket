@@ -99,19 +99,46 @@ class KnownFlakyGuardTests(unittest.TestCase):
         self.edit(FLAKY, " [known-flaky 96166f35]", "")
         self.assertFailsWith("holds 0 checks marked [known-flaky 96166f35], not 1")
 
-    def test_the_gating_job_running_the_class_fails(self) -> None:
+    def test_the_gating_tests_running_the_class_fails(self) -> None:
         self.edit(WORKFLOW, "          -skip-testing:SentiPocketAppTests/LazyListKnownFlakyTests\n", "")
-        self.assertFailsWith("does not skip LazyListKnownFlakyTests")
+        self.assertFailsWith('the gating step "Run hosted unit tests" does not skip LazyListKnownFlakyTests')
 
-    def test_the_known_flaky_job_gating_fails(self) -> None:
-        self.edit(WORKFLOW, "    continue-on-error: true\n", "")
+    def test_the_known_flaky_step_before_the_gating_tests_fails(self) -> None:
+        path = self.root / WORKFLOW
+        text = path.read_text(encoding="utf-8")
+        start = text.index("      - name: Known flaky room-list checks")
+        end = text.index("      - name: Upload XCTest result bundle")
+        step = text[start:end]
+        text = text[:start] + text[end:]
+        gating = text.index("      - name: Run hosted unit tests")
+        path.write_text(text[:gating] + step + text[gating:], encoding="utf-8")
+        self.assertFailsWith('the LazyListKnownFlakyTests step must come after "Run hosted unit tests"')
+
+    def test_the_known_flaky_step_skipped_when_the_gating_tests_fail_fails(self) -> None:
+        self.edit(WORKFLOW, "        if: always()\n        continue-on-error: true\n", "        continue-on-error: true\n")
+        self.assertFailsWith("must run even when the gating tests fail (if: always())")
+
+    def test_the_known_flaky_step_gating_fails(self) -> None:
+        self.edit(WORKFLOW, "        continue-on-error: true\n", "")
         self.assertFailsWith("must not gate (continue-on-error: true)")
 
-    def test_the_known_flaky_job_running_more_than_the_class_fails(self) -> None:
+    def test_the_known_flaky_step_without_its_timeout_fails(self) -> None:
+        self.edit(WORKFLOW, "        timeout-minutes: 10\n", "        timeout-minutes: 30\n")
+        self.assertFailsWith("must stop after 10 minutes (timeout-minutes: 10)")
+
+    def test_the_known_flaky_step_running_more_than_the_class_fails(self) -> None:
         self.edit(WORKFLOW, "            -only-testing:SentiPocketAppTests/LazyListKnownFlakyTests \\\n",
                   "            -only-testing:SentiPocketAppTests/LazyListKnownFlakyTests \\\n"
                   "            -only-testing:SentiPocketAppTests/LazyListBuildTests \\\n")
-        self.assertFailsWith("must run LazyListKnownFlakyTests alone")
+        self.assertFailsWith("must run that class alone, with one target")
+
+    def test_another_job_running_the_class_fails(self) -> None:
+        path = self.root / WORKFLOW
+        path.write_text(path.read_text(encoding="utf-8") + (
+            "\n  known-flaky-again:\n    runs-on: macos-26\n    steps:\n      - name: Again\n"
+            "        run: xcodebuild -only-testing:SentiPocketAppTests/LazyListKnownFlakyTests test\n"),
+            encoding="utf-8")
+        self.assertFailsWith("the workflow names LazyListKnownFlakyTests outside its step")
 
     def test_after_the_thirteenth_the_split_fails_with_the_ticket(self) -> None:
         self.assertEqual(self.problems(dt.date(2026, 11, 13)), [], "the last day still passes")

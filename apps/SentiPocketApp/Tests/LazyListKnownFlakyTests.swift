@@ -5,8 +5,8 @@ import UIKit
 import XCTest
 @testable import SentiPocketApp
 
-/// Three room-list checks that fail often on PRs that do not touch the room list. Until their fix, they run here, in
-/// their own CI job that reports and prints its counts without gating (ticket 9d7d62f1, warden 2026-11-05):
+/// Three room-list checks that fail often on PRs that do not touch the room list. Until their fix, they run here, in a
+/// CI step after the gating tests that reports and prints its counts without gating (ticket 9d7d62f1, warden 11-05):
 /// - b508c37d: at rest, another arrival builds only the rows on screen, and an arrival three screens up follows back
 ///   to the room's bottom;
 /// - 96166f35: a held message stays in view as messages arrive below it.
