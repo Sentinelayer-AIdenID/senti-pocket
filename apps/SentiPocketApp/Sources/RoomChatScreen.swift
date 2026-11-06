@@ -685,6 +685,45 @@ struct RoomChatScreen: View {
         #endif
     }
 
+    /// What a tap in the room asks for, and the same from a hosted test (`RootPreview.requestRoom`, DEBUG).
+    private func handle(_ intent: RoomChatIntent) {
+        if case .bottomFlapHeld(let rows, let longest) = intent {
+            // The room's bottom marker flapped and the reader's place was held still:
+            // one line for the freeze recorder, with what may have kept it moving, never what the room says.
+            CrashReporter.shared.note("bottom marker flapped, held \(Int(RoomBottomSettle.holdTime)) s (\(rows) rows, "
+                + "longest message \(longest) chars, voice room \(voiceRoom == nil ? "off" : "on"))")
+            return
+        }
+        CrashReporter.shared.note(intent, rows: coordinator.state.rows.count)
+        if case .openBreakout(let childSessionId) = intent {
+            openBreakout(childSessionId)
+        } else if case .openTickets(let filing) = intent {
+            ticketsStartFiling = filing
+            showsTickets = true
+        } else if intent == .openSearch {
+            showsSearch = true
+        } else if case .openAttachment(let attachmentId) = intent {
+            openAttachment(attachmentId)
+        } else if case .shareAttachment(let attachmentId) = intent {
+            shareAttachment(attachmentId)
+        } else if case .readAloud(let id, let text) = intent {
+            ReadAloudSource.shared.reading(in: route.sessionId)
+            if reader.read(id: id, markdown: text, title: readAloudTitle(for: id)) == .unavailable {
+                listenProblem = "A call or briefing is using the audio. Listen when it ends."
+            }
+        } else if intent == .stopReadingAloud {
+            reader.stop()
+        } else if intent == .openInvite {
+            // An invite writes to the room too: the first write asks.
+            afterAIConsent { showsInvite = true }
+        } else if intent == .peopleOpened {
+            // Which boxes still run, so the people list shows them as here or ended.
+            Task { await flight.refresh() }
+        } else {
+            coordinator.send(intent)
+        }
+    }
+
     var body: some View {
         #if DEBUG
         let _ = RootPreview.meter.roomScreenBodyRan()
@@ -698,43 +737,11 @@ struct RoomChatScreen: View {
             ),
             roster: roster,
             media: media.canUpload && coordinator.state.composer.canPost ? media.board : nil
-        ) { intent in
-            if case .bottomFlapHeld(let rows, let longest) = intent {
-                // The room's bottom marker flapped and the reader's place was held still:
-                // one line for the freeze recorder, with what may have kept it moving, never what the room says.
-                CrashReporter.shared.note("bottom marker flapped, held \(Int(RoomBottomSettle.holdTime)) s (\(rows) rows, "
-                    + "longest message \(longest) chars, voice room \(voiceRoom == nil ? "off" : "on"))")
-                return
-            }
-            CrashReporter.shared.note(intent, rows: coordinator.state.rows.count)
-            if case .openBreakout(let childSessionId) = intent {
-                openBreakout(childSessionId)
-            } else if case .openTickets(let filing) = intent {
-                ticketsStartFiling = filing
-                showsTickets = true
-            } else if intent == .openSearch {
-                showsSearch = true
-            } else if case .openAttachment(let attachmentId) = intent {
-                openAttachment(attachmentId)
-            } else if case .shareAttachment(let attachmentId) = intent {
-                shareAttachment(attachmentId)
-            } else if case .readAloud(let id, let text) = intent {
-                ReadAloudSource.shared.reading(in: route.sessionId)
-                if reader.read(id: id, markdown: text, title: readAloudTitle(for: id)) == .unavailable {
-                    listenProblem = "A call or briefing is using the audio. Listen when it ends."
-                }
-            } else if intent == .stopReadingAloud {
-                reader.stop()
-            } else if intent == .openInvite {
-                // An invite writes to the room too: the first write asks.
-                afterAIConsent { showsInvite = true }
-            } else if intent == .peopleOpened {
-                // Which boxes still run, so the people list shows them as here or ended.
-                Task { await flight.refresh() }
-            } else {
-                coordinator.send(intent)
-            }
-        }
+        ) { intent in handle(intent) }
+        #if DEBUG
+        // A hosted test asks the room on screen for what a tap would.
+        .onReceive(RootPreview.roomRequests) { intent in handle(intent) }
+        #endif
         // A sheet, the side panel or a call's window covers the room: its moving parts (the presence ring) rest
         // underneath (#265, #269). The app's cover passes through as it is, read only by what rests.
         .transformEnvironment(\.roomIsCovered) { [coversItself] covered in covered = covered || coversItself }

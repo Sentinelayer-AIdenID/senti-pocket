@@ -81,6 +81,11 @@ enum RootPreview {
     /// Opens or closes the side panel of a root hosted in a test, as the signals do in the preview.
     static func requestDrawer(_ open: Bool) { drawerSubject.send(open) }
 
+    /// What a hosted test asks of the room on screen, as a tap there would (`RoomChatScreen.handle`).
+    static let roomRequests = PassthroughSubject<RoomChatIntent, Never>()
+
+    static func requestRoom(_ intent: RoomChatIntent) { roomRequests.send(intent) }
+
     /// What the main thread did between two signals, for profiles of the root (`RootPreviewMeter`).
     static let meter = RootPreviewMeter()
 
