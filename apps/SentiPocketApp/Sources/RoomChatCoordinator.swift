@@ -407,6 +407,9 @@ final class RoomChatCoordinator: ObservableObject {
         aiConsent?.$givenAt.dropFirst().sink { [weak self] _ in
             Task { @MainActor in self?.publish() }
         }.store(in: &safetyWatch)
+        #if DEBUG
+        RootPreview.meter.roomCoordinatorMade(self)
+        #endif
     }
 
     // MARK: - Lifecycle
