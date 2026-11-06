@@ -1405,6 +1405,15 @@ private struct RoomMessageRowView: View {
 
     @ViewBuilder
     private func footer(showsAttachments: Bool) -> some View {
+        // Who the server chose for an @any in it, or that nobody was free: a line of its own, which VoiceOver reads
+        // after the message.
+        if let line = row.addressedLine {
+            Text(line)
+                .font(.caption2)
+                .foregroundStyle(PocketPalette.textSecondary)
+                .accessibilityLabel(line)
+                .accessibilityIdentifier("pocket.room.addressed.\(row.sequenceId)")
+        }
         if row.repeats > 1, let stack = row.repeatStack {
             Button {
                 send(.toggleRepeats(stack: stack))
@@ -2366,32 +2375,43 @@ private struct RoomThreadSheet: View {
                         .padding(.horizontal, 16)
                         .padding(.top, 8)
                     }
+                    // Read once: each row looks at the one before it for its box's label.
+                    let suggestions = self.suggestions
                     if !suggestions.isEmpty {
                         ScrollView {
                             LazyVStack(alignment: .leading, spacing: 0) {
-                                ForEach(suggestions) { candidate in
-                                    Button {
-                                        draft = MentionSuggester.apply(candidate, to: draft, at: editOffset ?? draft.count)
-                                    } label: {
-                                        HStack(spacing: 10) {
-                                            Image(systemName: candidate.isAll ? "person.3.fill" : (candidate.isHuman ? "person.crop.circle.fill" : "cpu"))
-                                                .foregroundStyle(candidate.isHuman || candidate.isAll ? PocketPalette.accent : PocketPalette.listening)
-                                                .frame(width: 26)
-                                            Text(candidate.isAll ? "@all" : "@\(candidate.handle)")
-                                                .font(.subheadline.weight(.semibold))
-                                            Text(candidate.isAll ? "Everyone in the room" : candidate.displayName)
-                                                .font(.caption)
-                                                .foregroundStyle(PocketPalette.textSecondary)
-                                                .lineLimit(1)
-                                            Spacer(minLength: 0)
+                                ForEach(Array(suggestions.enumerated()), id: \.element.id) { index, candidate in
+                                    VStack(alignment: .leading, spacing: 0) {
+                                        if let group = MentionSuggester.groupStarting(at: index, in: suggestions) {
+                                            MentionGroupHeader(group: group)
                                         }
-                                        .padding(.horizontal, 14)
-                                        .padding(.vertical, 7)
-                                        .contentShape(Rectangle())
+                                        Button {
+                                            draft = MentionSuggester.apply(candidate, to: draft,
+                                                                           at: editOffset ?? draft.count)
+                                        } label: {
+                                            HStack(spacing: 10) {
+                                                Image(systemName: candidate.symbol)
+                                                    .foregroundStyle(
+                                                        candidate.isHuman || candidate.isAll || candidate.isAny
+                                                            ? PocketPalette.accent : PocketPalette.listening
+                                                    )
+                                                    .frame(width: 26)
+                                                Text(candidate.isAll ? "@all" : "@\(candidate.handle)")
+                                                    .font(.subheadline.weight(.semibold))
+                                                Text(candidate.isAll ? "Everyone in the room" : candidate.displayName)
+                                                    .font(.caption)
+                                                    .foregroundStyle(PocketPalette.textSecondary)
+                                                    .lineLimit(1)
+                                                Spacer(minLength: 0)
+                                            }
+                                            .padding(.horizontal, 14)
+                                            .padding(.vertical, 7)
+                                            .contentShape(Rectangle())
+                                        }
+                                        .buttonStyle(.plain)
+                                        .accessibilityLabel(candidate.spokenChoice)
+                                        .accessibilityIdentifier("pocket.thread.mention.\(candidate.handle)")
                                     }
-                                    .buttonStyle(.plain)
-                                    .accessibilityLabel(candidate.isAll ? "Mention everyone" : "Mention \(candidate.displayName), @\(candidate.handle)")
-                                    .accessibilityIdentifier("pocket.thread.mention.\(candidate.handle)")
                                 }
                             }
                         }
@@ -2497,6 +2517,14 @@ private struct RoomThreadSheet: View {
             }
             if !reply.attachments.isEmpty {
                 RoomAttachmentsView(chips: reply.attachments, previews: previews, send: send)
+            }
+            // Who the server chose for an @any in it, or that nobody was free, as under a message.
+            if let line = reply.addressedLine {
+                Text(line)
+                    .font(.caption2)
+                    .foregroundStyle(PocketPalette.textSecondary)
+                    .accessibilityLabel(line)
+                    .accessibilityIdentifier("pocket.thread.addressed.\(reply.id)")
             }
             if let views = reply.views {
                 RoomViewedLine(views: views)
@@ -2956,33 +2984,40 @@ private struct RoomComposerBar: View {
                 // Everyone who matches, people first: a list that scrolls, not a handful of chips.
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(suggestions) { candidate in
-                            Button {
-                                draft = MentionSuggester.apply(candidate, to: draft, at: editOffset ?? draft.count)
-                            } label: {
-                                HStack(spacing: 10) {
-                                    Image(systemName: candidate.isAll ? "person.3.fill" : (candidate.isHuman ? "person.crop.circle.fill" : "cpu"))
-                                        .font(.body)
-                                        .foregroundStyle(candidate.isHuman || candidate.isAll ? PocketPalette.accent : PocketPalette.listening)
-                                        .frame(width: 26)
-                                    VStack(alignment: .leading, spacing: 1) {
-                                        Text(candidate.isAll ? "@all" : "@\(candidate.handle)")
-                                            .font(.subheadline.weight(.semibold))
-                                            .foregroundStyle(PocketPalette.textPrimary)
-                                        Text(candidate.isAll ? "Everyone in the room" : candidate.displayName)
-                                            .font(.caption)
-                                            .foregroundStyle(PocketPalette.textSecondary)
-                                            .lineLimit(1)
-                                    }
-                                    Spacer(minLength: 0)
+                        // One view per row: a box's label goes in with its first agent.
+                        ForEach(Array(suggestions.enumerated()), id: \.element.id) { index, candidate in
+                            VStack(alignment: .leading, spacing: 0) {
+                                if let group = MentionSuggester.groupStarting(at: index, in: suggestions) {
+                                    MentionGroupHeader(group: group)
                                 }
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 7)
-                                .contentShape(Rectangle())
+                                Button {
+                                    draft = MentionSuggester.apply(candidate, to: draft, at: editOffset ?? draft.count)
+                                } label: {
+                                    HStack(spacing: 10) {
+                                        Image(systemName: candidate.symbol)
+                                            .font(.body)
+                                            .foregroundStyle(candidate.isHuman || candidate.isAll || candidate.isAny
+                                                ? PocketPalette.accent : PocketPalette.listening)
+                                            .frame(width: 26)
+                                        VStack(alignment: .leading, spacing: 1) {
+                                            Text(candidate.isAll ? "@all" : "@\(candidate.handle)")
+                                                .font(.subheadline.weight(.semibold))
+                                                .foregroundStyle(PocketPalette.textPrimary)
+                                            Text(candidate.isAll ? "Everyone in the room" : candidate.displayName)
+                                                .font(.caption)
+                                                .foregroundStyle(PocketPalette.textSecondary)
+                                                .lineLimit(1)
+                                        }
+                                        Spacer(minLength: 0)
+                                    }
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 7)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel(candidate.spokenChoice)
+                                .accessibilityIdentifier("pocket.room.mention.\(candidate.handle)")
                             }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel(candidate.isAll ? "Mention everyone" : "Mention \(candidate.displayName), @\(candidate.handle)")
-                            .accessibilityIdentifier("pocket.room.mention.\(candidate.handle)")
                         }
                     }
                 }
@@ -4041,6 +4076,21 @@ extension RoomMessageRowView: Equatable {
             if let data = previews[chip.attachmentId] { own[chip.attachmentId] = data }
         }
         return own
+    }
+}
+/// The label over a box's agents in the @-mention picker ("Box 3f2a").
+struct MentionGroupHeader: View {
+    let group: MentionGroup
+
+    var body: some View {
+        Text(group.label)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(PocketPalette.textSecondary)
+            .padding(.horizontal, 14)
+            .padding(.top, 8)
+            .padding(.bottom, 2)
+            .accessibilityAddTraits(.isHeader)
+            .accessibilityIdentifier("pocket.mention.group.\(group.id)")
     }
 }
 #endif
