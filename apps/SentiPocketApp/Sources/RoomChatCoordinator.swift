@@ -343,6 +343,9 @@ final class RoomChatCoordinator: ObservableObject {
                 onChange: { [weak self] in self?.publish() }
             )
         }
+        #if DEBUG
+        RootPreview.meter.roomCoordinatorMade(self)
+        #endif
     }
 
     // MARK: - Lifecycle

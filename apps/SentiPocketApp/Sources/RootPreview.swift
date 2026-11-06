@@ -76,6 +76,14 @@ enum RootPreview {
     /// Opens or closes the side panel of a root hosted in a test, as the signals do in the preview.
     static func requestDrawer(_ open: Bool) { drawerSubject.send(open) }
 
+    private static let roomSubject = PassthroughSubject<String, Never>()
+
+    /// Rooms picked in a root hosted in a test, as the side panel's rooms are tapped (`requestRoom`).
+    static var roomRequests: AnyPublisher<String, Never> { roomSubject.eraseToAnyPublisher() }
+
+    /// Puts a room on screen in a root hosted in a test, as a tap on it in the side panel does.
+    static func requestRoom(_ sessionId: String) { roomSubject.send(sessionId) }
+
     /// What the main thread did between two signals, for profiles of the root (`RootPreviewMeter`).
     static let meter = RootPreviewMeter()
 
@@ -142,6 +150,20 @@ final class RootPreviewMeter: @unchecked Sendable {
     func roomScreenMade() { roomScreens += 1 }
 
     func roomScreenBodyRan() { roomScreenBodies += 1 }
+
+    private struct WeakRoom {
+        weak var room: RoomChatCoordinator?
+    }
+
+    private var rooms: [WeakRoom] = []
+
+    /// A room's coordinator made (held weakly): `liveRooms` says how many are still there.
+    func roomCoordinatorMade(_ room: RoomChatCoordinator) {
+        rooms = rooms.filter { $0.room != nil } + [WeakRoom(room: room)]
+    }
+
+    /// Room coordinators made and not gone yet: a room put in another's place lets the other go.
+    var liveRooms: Int { rooms.filter { $0.room != nil }.count }
 
     /// Whether the room's calendar entry offered Calendar the last time its body ran (nil before it ran): it watches
     /// the calendar itself, so an answer that turns the calendar on reaches it without the root drawing again.
