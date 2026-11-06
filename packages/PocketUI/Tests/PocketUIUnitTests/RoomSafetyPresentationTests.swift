@@ -334,11 +334,11 @@ final class RoomSafetyPresentationTests: XCTestCase {
     func test_activity_shows_a_blocked_persons_messages_and_replies_as_one_line() throws {
         let events = try JSONDecoder().decode(SessionEventForwardPage.self, from: Data("""
         {"events":[{"id":"ev-1","event":"session_message","agent":{"displayName":"sam"},
-        "agentId":"Human-Sam","agentModel":null,"payload":{"text":"Something unkind"},
+        "agentId":"Human-Sam","agentModel":"app","payload":{"text":"Something unkind"},
         "ts":"2026-11-06T10:35:00Z","timestamp":"2026-11-06T10:35:00Z","cursor":"c1",
         "sequenceId":2,"sessionId":"room-1","source":"app"},
         {"id":"ev-2","event":"session_message","agent":{"displayName":"ada"},
-        "agentId":"human-ada","agentModel":null,"payload":{"text":"Build 319 is green"},
+        "agentId":"human-ada","agentModel":"app","payload":{"text":"Build 319 is green"},
         "ts":"2026-11-06T10:36:00Z","timestamp":"2026-11-06T10:36:00Z","cursor":"c2",
         "sequenceId":3,"sessionId":"room-1","source":"app"}]}
         """.utf8))
