@@ -1,6 +1,6 @@
 #if canImport(SwiftUI)
 import SwiftUI
-import PocketContracts   // ParsedSessionTimestamp (SessionAtlasTypes) — used in timestamp(_:)
+import PocketContracts   // ParsedSessionTimestamp (SessionAtlasTypes): a row's last activity
 
 public struct SessionListView: View {
     private let state: SessionListPresentationState
@@ -135,25 +135,26 @@ public struct SessionListView: View {
     }
 }
 
+/// A chat's row says what a new person needs: its name, when it was last active, what is unread, and its summary.
+/// Never its id, the server's status, its role, its kind or its counts (Carter, 2026-11-06, ticket 693f0cc5).
 private struct SessionRow: View {
     let row: SessionRowPresentation
-    /// At the largest text sizes when and who go on their own line, under the role.
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            // The unread badge sits on the right of the name's line, as Discord shows it.
+        VStack(alignment: .leading, spacing: 8) {
+            // When it was last active and the unread badge sit on the right of the name's line, as Messages and
+            // Discord show them; under the name when large text leaves no room.
             ViewThatFits(in: .horizontal) {
                 HStack(alignment: .firstTextBaseline) {
                     title
                     Spacer(minLength: 10)
-                    status
+                    lastActive
                     PocketCountBadge(count: row.activity.unread)
                 }
                 VStack(alignment: .leading, spacing: 5) {
                     title
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        status
+                        lastActive
                         PocketCountBadge(count: row.activity.unread)
                     }
                 }
@@ -165,45 +166,6 @@ private struct SessionRow: View {
                     .foregroundStyle(PocketPalette.textSecondary)
                     .lineLimit(3)
             }
-
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 14) {
-                    countLabels
-                }
-                VStack(alignment: .leading, spacing: 5) {
-                    countLabels
-                }
-            }
-            .font(.caption)
-            .foregroundStyle(PocketPalette.textSecondary)
-
-            // When it was last active, then who is in it now.
-            Group {
-                if dynamicTypeSize.isAccessibilitySize {
-                    VStack(alignment: .leading, spacing: 4) {
-                        roleAndKind
-                        HStack(spacing: 6) {
-                            timestamp(row.lastActivity)
-                            RoomOnlineCounts(activity: row.activity)
-                        }
-                    }
-                } else {
-                    HStack(spacing: 6) {
-                        roleAndKind
-                        Spacer(minLength: 8)
-                        timestamp(row.lastActivity)
-                        RoomOnlineCounts(activity: row.activity)
-                    }
-                }
-            }
-            .font(.caption)
-            .foregroundStyle(PocketPalette.textSecondary)
-
-            Text(verbatim: row.sessionId)
-                .font(.caption2.monospaced())
-                .foregroundStyle(PocketPalette.textSecondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
         }
         .padding(.vertical, 7)
         .contentShape(Rectangle())
@@ -216,35 +178,22 @@ private struct SessionRow: View {
             .fixedSize(horizontal: false, vertical: true)
     }
 
-    private var status: some View {
-        Text(row.statusLabel)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(PocketPalette.accent)
-    }
-
-    private var roleAndKind: some View {
-        HStack(spacing: 4) {
-            Text(row.membershipRoleLabel)
-            if let kind = row.roomTypeLabel {
-                Text("· \(kind)")
+    /// "5m ago", or "just now" within the minute, kept current each minute. A time the phone cannot read shows
+    /// nothing rather than the server's text.
+    @ViewBuilder
+    private var lastActive: some View {
+        if let date = row.lastActivity?.date {
+            TimelineView(.periodic(from: .now, by: 60)) { context in
+                Text(ChatListWords.lastActive(date, now: context.date))
             }
-        }
-    }
-
-    @ViewBuilder
-    private var countLabels: some View {
-        Label("\(row.agentCount) agents", systemImage: "person.2")
-        Label("\(row.eventCount) events", systemImage: "text.bubble")
-    }
-
-    @ViewBuilder
-    private func timestamp(_ timestamp: ParsedSessionTimestamp?) -> some View {
-        if let date = timestamp?.date {
-            Text(date, style: .relative)
-        } else if let raw = timestamp?.raw {
-            Text(verbatim: raw)
-        } else {
-            Text("No activity yet")
+            .font(.caption)
+            .foregroundStyle(PocketPalette.textSecondary)
+            .fixedSize()
+        } else if row.lastActivity == nil {
+            Text(ChatListWords.noActivity)
+                .font(.caption)
+                .foregroundStyle(PocketPalette.textSecondary)
+                .fixedSize()
         }
     }
 }
@@ -306,6 +255,14 @@ enum ChatListWords {
     static let loading = "Loading chats"
     static let loadingDetail = "Getting your chats."
     static let notConnected = "Not connected"
+    static let noActivity = "No activity yet"
+
+    /// When a chat was last active, in the side panel's words: "just now" within the minute (never "now ago"),
+    /// else "5m ago", "3h ago", "2d ago".
+    static func lastActive(_ date: Date, now: Date = Date()) -> String {
+        let age = PocketSidePanel.compactAge(of: date, now: now)
+        return age == "now" ? "just now" : "\(age) ago"
+    }
 
     static func emptyTitle(_ provenance: SessionPresentationProvenance) -> String {
         switch provenance {

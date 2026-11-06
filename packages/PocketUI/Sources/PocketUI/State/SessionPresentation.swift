@@ -170,7 +170,7 @@ public struct SessionRowPresentation: Equatable, Identifiable, Sendable {
         self.counterpart = session.isDirect ? session.counterpart : nil
         self.originRoomId = session.isDirect ? session.originRoomId : nil
         self.folderId = session.isDirect ? nil : session.folderId
-        self.title = self.counterpart?.displayName ?? session.title.pocketNonblank ?? "Untitled session"
+        self.title = self.counterpart?.displayName ?? session.title.pocketNonblank ?? "Untitled chat"
         // The room's saved summary: the server's prose as written, or an older server's five labelled parts read
         // into sentences.
         self.summary = session.summaryText.pocketNonblank.map(SummaryProse.saved).pocketNonblank

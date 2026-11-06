@@ -1,3 +1,4 @@
+import PocketContracts
 import PocketSyncClient
 import PocketUI
 import SwiftUI
@@ -89,5 +90,60 @@ final class FriendlyWordsHostedTests: XCTestCase {
         await failed.refresh()
         XCTAssertNotNil(failed.state.failure)
         XCTAssertNil(failed.state.shownFailure, "a box failure said to a person who never had boxes here")
+    }
+
+    // MARK: The chat list's rows
+
+    /// Every row of the chat list, hosted and read the way VoiceOver reads it, says the chat's name, when it was last
+    /// active and what is unread, with its summary: never its id (a UUID, or a short hex id), the server's status, a
+    /// role, a kind or a count. The chats are made up: one owned, busy, of a kind, with people online and unread; one
+    /// joined, untitled and new.
+    func test_a_chat_row_says_its_name_when_and_unread_never_an_id_a_role_or_counts() throws {
+        let uuid = "3f2a9c4e-1b7d-4e8a-9f60-2c5d8e7a1b34"
+        let shortHex = "a74f14cd09"
+        let fiveMinutesAgo = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-5 * 60 - 10))
+        let page = try JSONDecoder().decode(SessionListPage.self, from: Data("""
+        {"sessions":[
+          {"sessionId":"\(uuid)","status":"active","archiveStatus":"active","visibility":"private",
+           "membershipRole":"owner","title":"Design review","summaryText":"Ada checked the new screens.",
+           "agentCount":5,"eventCount":1000,"totalCostUsd":0,"lastActivityAt":"\(fiveMinutesAgo)","roomType":"research",
+           "online":{"humans":2,"agents":5},"unread":{"count":2,"firstUnreadSequenceId":40},"kind":"room"},
+          {"sessionId":"\(shortHex)","status":"active","archiveStatus":"active","visibility":"private",
+           "membershipRole":"contributor","title":null,"agentCount":0,"eventCount":0,"totalCostUsd":0,"kind":"room"}
+        ],"count":2,"include_archived":false,"next_cursor":null,"has_more":false}
+        """.utf8))
+        let state = SessionListPresentationState(page: page, provenance: .network(lastUpdated: Date()))
+        XCTAssertEqual(state.rows.map(\.sessionId), [uuid, shortHex])
+        let window = try HostedSummary.host(SessionListView(state: state) { _ in }, height: 1_200)
+        defer { HostedSummary.close(window) }
+
+        // Read once both rows are drawn: the second row's words are the last to come.
+        var read: [String] = []
+        let end = Date().addingTimeInterval(15)
+        repeat {
+            HostedSummary.pump(0.1)
+            read = HostedSummary.elements(in: window)
+                .flatMap { [$0.accessibilityLabel, $0.accessibilityValue] }
+                .compactMap { $0 }
+                .filter { !$0.isEmpty }
+        } while Date() < end && !(read.contains { $0.contains("Design review") } && read.contains { $0.contains("Untitled chat") })
+        for words in ["Design review", "Ada checked the new screens.", "5m ago", "2 unread", "Untitled chat",
+                      "No activity yet"] {
+            XCTAssertTrue(read.contains { $0.contains(words) }, "a row does not say \(words): \(read)")
+        }
+
+        let ids = try NSRegularExpression(pattern: "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                                          options: .caseInsensitive)
+        // Six or more hex characters, digits and letters both: an id, never a word ("added") or a number ("1000").
+        let hex = try NSRegularExpression(pattern: #"\b(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{6,}\b"#,
+                                          options: .caseInsensitive)
+        let server = try NSRegularExpression(pattern: #"\b(events?|agents?|owner|contributor|active|research)\b"#,
+                                             options: .caseInsensitive)
+        for label in read {
+            let all = NSRange(label.startIndex..., in: label)
+            XCTAssertNil(ids.firstMatch(in: label, range: all), "an id on the chat list: \(label)")
+            XCTAssertNil(hex.firstMatch(in: label, range: all), "hex on the chat list: \(label)")
+            XCTAssertNil(server.firstMatch(in: label, range: all), "a count, role, status or kind on the chat list: \(label)")
+        }
     }
 }

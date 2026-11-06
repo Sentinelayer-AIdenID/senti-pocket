@@ -62,7 +62,7 @@ final class SessionPresentationTests: XCTestCase {
         XCTAssertEqual(state.rows.count, 1)
         XCTAssertEqual(state.rows[0].sessionId, "room-1")
         XCTAssertEqual(state.rows[0].id.rawValue, "room-1")
-        XCTAssertEqual(state.rows[0].title, "Untitled session")
+        XCTAssertEqual(state.rows[0].title, "Untitled chat")
         XCTAssertEqual(state.rows[0].summary, "Current work")
         XCTAssertEqual(state.rows[0].statusLabel, "Active")
         XCTAssertEqual(state.rows[0].lastActivity?.raw, "2026-07-18T10:36:34Z")
