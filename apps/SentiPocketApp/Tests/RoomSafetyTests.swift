@@ -264,6 +264,36 @@ private final class RecordingSummarizer: ThreadSummarizing, @unchecked Sendable 
     }
 }
 
+/// A thread summarizer that holds each summary until the test lets it go, and answers with the lines it was given, so
+/// a summary on screen says whose words it was written from.
+private final class HeldSummarizer: ThreadSummarizing, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _threads: [[String]] = []
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+    var threads: [[String]] { lock.withLock { _threads } }
+    /// Summaries being written, held.
+    var held: Int { lock.withLock { waiting.count } }
+
+    func summarize(thread lines: [String]) async -> String? {
+        await withCheckedContinuation { continuation in
+            lock.withLock {
+                _threads.append(lines)
+                waiting.append(continuation)
+            }
+        }
+        return lines.joined(separator: " ")
+    }
+
+    /// Every held summary lands.
+    func release() {
+        let released = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+            defer { waiting.removeAll() }
+            return waiting
+        }
+        released.forEach { $0.resume() }
+    }
+}
+
 /// Room search that finds `results` for any words.
 private struct FoundSearch: RoomSearching {
     let results: [RoomSearchResult]
@@ -1049,6 +1079,46 @@ final class RoomSafetyTests: XCTestCase {
         XCTAssertFalse(again.contains("Opening words"), "nor the message of theirs the thread answers")
         XCTAssertFalse(again.contains("Something unkind"))
         XCTAssertTrue(again.contains("Build 319 is green"))
+        room.pause()
+    }
+
+    func test_a_summary_still_being_written_when_someone_is_blocked_is_dropped_and_written_without_them() async {
+        let summarizer = HeldSummarizer()
+        defer { summarizer.release() }
+        let blocks = BlockList(account: "sub:a", store: temporaryStore(), client: nil)
+        let replies = [
+            RoomReply(id: "a1", targetSequenceId: 2, authorId: "review-agent", text: "Looking at it now",
+                      createdAt: "2026-11-03T18:00:05.000000+00:00"),
+            RoomReply(id: "a3", targetSequenceId: 2, authorId: "build-agent", text: "Build 319 is green",
+                      createdAt: "2026-11-03T18:00:07.000000+00:00"),
+            RoomReply(id: "a4", targetSequenceId: 2, authorId: "human-alex", text: "Thanks both",
+                      createdAt: "2026-11-03T18:00:08.000000+00:00")
+        ]
+        let room = RoomChatCoordinator(
+            sessionId: "room_1", title: "Room", transport: QuietRoom(replies: replies), summarizer: summarizer,
+            ownAuthorIds: ["human-me"],
+            sleep: { seconds in if seconds > 5 { try? await Task.sleep(nanoseconds: 3_600_000_000_000) } },
+            blocks: blocks, onReauthenticationRequired: {}
+        )
+        room.resume()
+        room.handle(.message(message(2, author: "human-pat", text: "Opening words")))
+        await waitUntil("a summary is being written") { summarizer.held == 1 }
+        XCTAssertTrue(summarizer.threads.joined().joined(separator: " ").contains("Opening words"))
+
+        // Pat is blocked while it is written, and the room takes the block in before it lands: the order a phone's
+        // model, which takes seconds, makes likely.
+        blocks.block(RoomBlockTarget(actorId: "human-pat", name: "pat"))
+        await waitUntil("the room took the block in") { room.blockChanges == 1 }
+        summarizer.release()
+        await waitUntil("written again") { summarizer.threads.count == 2 && summarizer.held == 1 }
+        XCTAssertNil(room.state.threadSummaries[2], "the summary written from Pat's words never shows")
+        XCTAssertFalse(summarizer.threads.last?.joined(separator: " ").contains("Opening words") ?? true)
+
+        summarizer.release()
+        await waitUntil("the new summary shows") { room.state.threadSummaries[2] != nil }
+        let shown = room.state.threadSummaries[2]?.prose ?? ""
+        XCTAssertFalse(shown.contains("Opening words"), "nor in the summary that replaces it")
+        XCTAssertTrue(shown.contains("Build 319 is green"))
         room.pause()
     }
 
