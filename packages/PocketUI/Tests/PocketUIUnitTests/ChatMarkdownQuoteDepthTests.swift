@@ -319,10 +319,11 @@ final class ChatMarkdownQuoteDepthLayoutTests: XCTestCase {
         }
     }
 
-    /// Quotes `depth` deep, each level with a paragraph and a two-level list under it, as replies quoting replies are.
-    private static func quotedReplies(_ depth: Int) -> String {
+    /// Quotes `depth` deep, each level with a paragraph and a two-level list under it, as replies quoting replies are;
+    /// with `deepest`, every level no deeper than that: the same paragraphs and lists, only less deep.
+    private static func quotedReplies(_ depth: Int, deepest: Int = .max) -> String {
         (0..<depth).flatMap { level -> [String] in
-            let prefix = String(repeating: "> ", count: level)
+            let prefix = String(repeating: "> ", count: min(level, deepest))
             return [prefix + "Level \(level + 1): what the reply before said, long enough to wrap onto a second line.",
                     prefix, prefix + "- a point it made, also long enough to wrap onto a second line",
                     prefix + "  - and a point under that one", prefix]
@@ -377,21 +378,27 @@ final class ChatMarkdownQuoteDepthLayoutTests: XCTestCase {
         return Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
     }
 
-    /// Capped at four, a quote seven deep makes at most twice the layout work of one four deep, fresh and again.
-    func test_a_seven_deep_quote_makes_about_the_work_of_four_deep() {
-        var counted: [Int: Counted] = [:]
+    /// Capped at four, a quote seven deep makes at most twice the work of the same paragraphs and lists four deep, fresh
+    /// and again, all of its work counted, its runs' headers included. This once compared 7 deep with 4 deep and left the
+    /// headers out: 4 deep holds less, and the headers are work.
+    func test_a_seven_deep_quote_makes_at_most_twice_the_work_of_the_same_replies_four_deep() {
         for depth in [1, 2, 3, 4, 7] {
-            counted[depth] = work(Self.quotedReplies(depth))
-            print("QUOTEDEPTH counted depth \(depth): fresh \(counted[depth]?.fresh ?? 0) calls, again "
-                + "\(counted[depth]?.again ?? 0) calls, headers \(counted[depth]?.headers ?? 0) calls; real view "
+            let counted = work(Self.quotedReplies(depth))
+            print("QUOTEDEPTH counted depth \(depth): fresh \(counted.fresh) calls, again \(counted.again) calls, headers "
+                + "fresh \(counted.headersFresh), again \(counted.headersAgain); real view "
                 + "\(realMilliseconds(Self.quotedReplies(depth))) ms")
         }
-        let four = counted[4] ?? Counted()
-        let seven = counted[7] ?? Counted()
-        XCTAssertGreaterThan(four.fresh, 0, "the counter sees the quote levels")
-        XCTAssertLessThanOrEqual(seven.fresh, four.fresh * 2, "7 deep, laid out fresh, makes at most twice 4 deep's work")
-        XCTAssertLessThanOrEqual(seven.again, max(four.again, 1) * 2,
-                                 "7 deep, laid out again, makes at most twice 4 deep's work")
+        let seven = work(Self.quotedReplies(7))
+        let sameFourDeep = work(Self.quotedReplies(7, deepest: 4))
+        print("QUOTEDEPTH counted 7 deep, headers included: fresh \(seven.allFresh), again \(seven.allAgain); the same "
+            + "replies four deep: fresh \(sameFourDeep.allFresh), again \(sameFourDeep.allAgain); fresh "
+            + "\(Self.ratio(seven.allFresh, sameFourDeep.allFresh)) ×, again "
+            + "\(Self.ratio(seven.allAgain, sameFourDeep.allAgain)) ×")
+        XCTAssertGreaterThan(sameFourDeep.fresh, 0, "the counter sees the quote levels")
+        XCTAssertLessThanOrEqual(seven.allFresh, sameFourDeep.allFresh * 2, "7 deep, fresh: "
+            + "\(Self.ratio(seven.allFresh, sameFourDeep.allFresh)) × the same replies four deep (at most 2 ×)")
+        XCTAssertLessThanOrEqual(seven.allAgain, sameFourDeep.allAgain * 2, "7 deep, again: "
+            + "\(Self.ratio(seven.allAgain, sameFourDeep.allAgain)) × the same replies four deep (at most 2 ×)")
     }
 
     /// `lines` paragraphs inside quotes `levels` deep.
