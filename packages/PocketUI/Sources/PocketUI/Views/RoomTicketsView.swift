@@ -86,6 +86,7 @@ public struct RoomTicketsView: View {
                         writeStatus: state.ticketWriteStatus[row.id],
                         assignChoices: state.assignChoices,
                         viewerId: state.viewerId,
+                        viewerSenderId: state.viewerSenderId,
                         names: state.personNames,
                         comments: state.comments[row.id],
                         canComment: state.canFileTickets,
@@ -95,7 +96,8 @@ public struct RoomTicketsView: View {
                         send: send
                     )
                 } label: {
-                    RoomTicketRowView(row: row, viewerId: state.viewerId, names: state.personNames)
+                    RoomTicketRowView(row: row, viewerId: state.viewerId, viewerSenderId: state.viewerSenderId,
+                                      names: state.personNames)
                 }
                 .accessibilityIdentifier("pocket.tickets.row.\(row.id)")
             }
@@ -135,8 +137,10 @@ public struct RoomTicketsView: View {
 
 private struct RoomTicketRowView: View {
     let row: RoomTicketRow
-    /// Who is reading, and the room's people by user id: a person is named, never shown by user id.
+    /// Who is reading (by user id and by their own sender id), and the room's people: a person is named, never shown by
+    /// an id.
     var viewerId: String?
+    var viewerSenderId: String?
     var names: [String: String] = [:]
 
     var body: some View {
@@ -177,28 +181,79 @@ private struct RoomTicketRowView: View {
                         .foregroundStyle(PocketPalette.textSecondary)
                 }
             }
-            // Being worked on: how far along, and who holds it (Carter, #55238).
-            if let progress = row.barProgress {
+            // Where it is, as the server reads it: a strip of named steps, never a percentage (Carter, 11-05). Without the
+            // server's step (an older server) the status above says it all.
+            if let strip = row.stepStrip {
                 VStack(alignment: .leading, spacing: 3) {
-                    ProgressView(value: progress)
-                        .progressViewStyle(.linear)
-                        .tint(RoomTicketPalette.status(row.status))
+                    RoomTicketStepStripView(strip: strip, tint: RoomTicketPalette.status(row.status))
                     let holder = row.lease.flatMap { $0.isLive ? $0.holder : nil }
-                    let parts = [holder.map { "Held by \(RoomTicketRow.actorLabel($0, viewerId: viewerId, names: names))" }, row.estimateBasis]
-                        .compactMap { $0 }
-                    if !parts.isEmpty {
-                        Text(parts.joined(separator: " · "))
+                    if let holder {
+                        let who = RoomTicketRow.actorLabel(holder, viewerId: viewerId, viewerSenderId: viewerSenderId,
+                                                           names: names)
+                        Text("Held by \(who)")
                             .font(.caption2)
                             .foregroundStyle(PocketPalette.textSecondary)
                             .lineLimit(2)
                     }
+                    if let note = row.stallNote(viewerId: viewerId, viewerSenderId: viewerSenderId, names: names) {
+                        Text(note)
+                            .font(.caption2)
+                            .foregroundStyle(PocketPalette.warning)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("pocket.tickets.row.stalled")
+                    }
                 }
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("\(Int(progress * 100)) percent along")
-                .accessibilityIdentifier("pocket.tickets.row.progress")
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(
+                    row.stepAccessibilityLabel(viewerId: viewerId, viewerSenderId: viewerSenderId, names: names) ?? row.statusLabel
+                )
+                .accessibilityIdentifier("pocket.tickets.row.step")
             }
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// A ticket's steps as a strip: one segment per step, those done filled, the current one filled and named, those ahead
+/// empty; before the first step all are empty and it says "Not started". At the accessibility text sizes the name goes
+/// under the strip.
+private struct RoomTicketStepStripView: View {
+    let strip: RoomTicketStepStrip
+    let tint: Color
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    var body: some View {
+        let segments = Array(strip.segments.enumerated())
+        let bar = HStack(spacing: 3) {
+            ForEach(segments, id: \.offset) { _, segment in
+                Capsule()
+                    .fill(color(segment))
+                    .frame(height: segment == .current ? 6 : 5)
+                    .frame(maxWidth: .infinity)
+            }
+        }
+        let name = Text(strip.label)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(strip.isStarted ? tint : PocketPalette.textSecondary)
+        if typeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: 4) {
+                bar
+                name
+            }
+        } else {
+            HStack(spacing: 8) {
+                bar.frame(maxWidth: 160)
+                name.lineLimit(1)
+            }
+        }
+    }
+
+    private func color(_ segment: RoomTicketStepStrip.Segment) -> Color {
+        switch segment {
+        case .done: return tint.opacity(0.55)
+        case .current: return tint
+        case .ahead: return PocketPalette.inset
+        }
     }
 }
 
@@ -212,6 +267,7 @@ public struct RoomTicketDetailView: View {
     var writeStatus: String?
     var assignChoices: [RoomTicketAssignChoice] = []
     var viewerId: String?
+    var viewerSenderId: String?
     var names: [String: String] = [:]
     var comments: [RoomTicketCommentRow]?
     var canComment = false
@@ -235,6 +291,7 @@ public struct RoomTicketDetailView: View {
         writeStatus: String? = nil,
         assignChoices: [RoomTicketAssignChoice] = [],
         viewerId: String? = nil,
+        viewerSenderId: String? = nil,
         names: [String: String] = [:],
         comments: [RoomTicketCommentRow]? = nil,
         canComment: Bool = false,
@@ -252,6 +309,7 @@ public struct RoomTicketDetailView: View {
         self.writeStatus = writeStatus
         self.assignChoices = assignChoices
         self.viewerId = viewerId
+        self.viewerSenderId = viewerSenderId
         self.names = names
         self.comments = comments
         self.canComment = canComment
@@ -327,11 +385,7 @@ public struct RoomTicketDetailView: View {
 
     /// The lease, in words that cannot be misread: who holds it and until when, or that it lapsed.
     private var leaseLine: String? {
-        guard let lease = row.lease else { return nil }
-        let who = RoomTicketRow.actorLabel(lease.holder, viewerId: viewerId, names: names)
-        guard lease.isLive else { return "Lease expired · was \(who)" }
-        guard let until = lease.expiresAt else { return "Held by \(who)" }
-        return "Held by \(who) until \(until.formatted(date: .omitted, time: .shortened))"
+        row.leaseLine(viewerId: viewerId, viewerSenderId: viewerSenderId, names: names)
     }
 
     @ViewBuilder

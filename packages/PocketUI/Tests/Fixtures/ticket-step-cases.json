@@ -1,0 +1,568 @@
+{
+  "about": "Why a stalled ticket stopped, as the web and the phone both say it (web #753, senti-pocket #338). Each case is a step with stalledSince set, its stalledReason (null: none sent), waitingOn and lastHolder (actor ids, as API #1167 sends them), and the viewer looking at it (their account id and the room sender id /me returns); expected is the sentence after 'Stalled since <time> · ', or null for no sentence. Who is named: a lapsed lease names lastHolder; the waiting_on_* reasons name waitingOn (in review, #1167 sends the room's owner); blocked and no_activity name nobody; with no reason, 'waiting on <waitingOn>', else 'last held by <lastHolder>'. The viewer is 'you' only when the id is their senderId or their account (human-g.<account hex>), never by a username: a Google account's username can be someone else's login. A person is never shown by id: an actor id reads as the room's name for it (names, keyed by actor id), a human-<login> without one as the login, an agent as its id. A person the room does not name is left out of the sentence: the reason's plain words, 'waiting on the person it's assigned to' for an assignee, and no sentence at all with no reason. A field absent from a case is not sent at all. Every id is made up.",
+  "names": {
+    "human-g.0000000000004000800000000000aaaa": "Priya"
+  },
+  "cases": [
+    {
+      "reason": null,
+      "about": "nobody named",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": null,
+      "lastHolder": null,
+      "expected": null
+    },
+    {
+      "reason": null,
+      "about": "a person waited on, by login",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "human-alex",
+      "lastHolder": null,
+      "expected": "waiting on alex"
+    },
+    {
+      "reason": null,
+      "about": "a named account last held it",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": null,
+      "lastHolder": "human-g.0000000000004000800000000000aaaa",
+      "expected": "last held by Priya"
+    },
+    {
+      "reason": null,
+      "about": "both: an agent waited on, a person last held it",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "build-agent",
+      "lastHolder": "human-alex",
+      "expected": "waiting on build-agent"
+    },
+    {
+      "reason": null,
+      "about": "the viewer waited on, by sender id",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "human-sam",
+      "lastHolder": null,
+      "expected": "waiting on you"
+    },
+    {
+      "reason": null,
+      "about": "the viewer last held it, by account",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": null,
+      "lastHolder": "human-g.000000000000400080000000000000cc",
+      "expected": "last held by you"
+    },
+    {
+      "reason": null,
+      "about": "an unnamed account, in both",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "human-g.000000000000400080000000000000bb",
+      "lastHolder": "human-g.000000000000400080000000000000bb",
+      "expected": null
+    },
+    {
+      "reason": "holder_lease_expired",
+      "about": "nobody named",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": null,
+      "lastHolder": null,
+      "expected": "the person working on it went quiet"
+    },
+    {
+      "reason": "holder_lease_expired",
+      "about": "a person waited on, by login",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "human-alex",
+      "lastHolder": null,
+      "expected": "the person working on it went quiet"
+    },
+    {
+      "reason": "holder_lease_expired",
+      "about": "a named account last held it",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": null,
+      "lastHolder": "human-g.0000000000004000800000000000aaaa",
+      "expected": "Priya, who was working on it, went quiet"
+    },
+    {
+      "reason": "holder_lease_expired",
+      "about": "both: an agent waited on, a person last held it",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "build-agent",
+      "lastHolder": "human-alex",
+      "expected": "alex, who was working on it, went quiet"
+    },
+    {
+      "reason": "holder_lease_expired",
+      "about": "the viewer waited on, by sender id",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "human-sam",
+      "lastHolder": null,
+      "expected": "the person working on it went quiet"
+    },
+    {
+      "reason": "holder_lease_expired",
+      "about": "the viewer last held it, by account",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": null,
+      "lastHolder": "human-g.000000000000400080000000000000cc",
+      "expected": "you went quiet while working on it"
+    },
+    {
+      "reason": "holder_lease_expired",
+      "about": "an unnamed account, in both",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "human-g.000000000000400080000000000000bb",
+      "lastHolder": "human-g.000000000000400080000000000000bb",
+      "expected": "the person working on it went quiet"
+    },
+    {
+      "reason": "waiting_on_assignee",
+      "about": "nobody named",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": null,
+      "lastHolder": null,
+      "expected": "waiting on whoever it's assigned to"
+    },
+    {
+      "reason": "waiting_on_assignee",
+      "about": "a person waited on, by login",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "human-alex",
+      "lastHolder": null,
+      "expected": "waiting on alex, who it's assigned to"
+    },
+    {
+      "reason": "waiting_on_assignee",
+      "about": "a named account last held it",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": null,
+      "lastHolder": "human-g.0000000000004000800000000000aaaa",
+      "expected": "waiting on whoever it's assigned to"
+    },
+    {
+      "reason": "waiting_on_assignee",
+      "about": "both: an agent waited on, a person last held it",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "build-agent",
+      "lastHolder": "human-alex",
+      "expected": "waiting on build-agent, who it's assigned to"
+    },
+    {
+      "reason": "waiting_on_assignee",
+      "about": "the viewer waited on, by sender id",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "human-sam",
+      "lastHolder": null,
+      "expected": "waiting on you"
+    },
+    {
+      "reason": "waiting_on_assignee",
+      "about": "the viewer last held it, by account",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": null,
+      "lastHolder": "human-g.000000000000400080000000000000cc",
+      "expected": "waiting on whoever it's assigned to"
+    },
+    {
+      "reason": "waiting_on_assignee",
+      "about": "an unnamed account, in both",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "human-g.000000000000400080000000000000bb",
+      "lastHolder": "human-g.000000000000400080000000000000bb",
+      "expected": "waiting on the person it's assigned to"
+    },
+    {
+      "reason": "waiting_on_review",
+      "about": "nobody named",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": null,
+      "lastHolder": null,
+      "expected": "waiting on review"
+    },
+    {
+      "reason": "waiting_on_review",
+      "about": "a person waited on, by login",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "human-alex",
+      "lastHolder": null,
+      "expected": "waiting on review by alex"
+    },
+    {
+      "reason": "waiting_on_review",
+      "about": "a named account last held it",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": null,
+      "lastHolder": "human-g.0000000000004000800000000000aaaa",
+      "expected": "waiting on review"
+    },
+    {
+      "reason": "waiting_on_review",
+      "about": "both: an agent waited on, a person last held it",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "build-agent",
+      "lastHolder": "human-alex",
+      "expected": "waiting on review by build-agent"
+    },
+    {
+      "reason": "waiting_on_review",
+      "about": "the viewer waited on, by sender id",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "human-sam",
+      "lastHolder": null,
+      "expected": "waiting on review by you"
+    },
+    {
+      "reason": "waiting_on_review",
+      "about": "the viewer last held it, by account",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": null,
+      "lastHolder": "human-g.000000000000400080000000000000cc",
+      "expected": "waiting on review"
+    },
+    {
+      "reason": "waiting_on_review",
+      "about": "an unnamed account, in both",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "human-g.000000000000400080000000000000bb",
+      "lastHolder": "human-g.000000000000400080000000000000bb",
+      "expected": "waiting on review"
+    },
+    {
+      "reason": "waiting_on_owner",
+      "about": "nobody named",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": null,
+      "lastHolder": null,
+      "expected": "waiting on the owner"
+    },
+    {
+      "reason": "waiting_on_owner",
+      "about": "a person waited on, by login",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "human-alex",
+      "lastHolder": null,
+      "expected": "waiting on the owner, alex"
+    },
+    {
+      "reason": "waiting_on_owner",
+      "about": "a named account last held it",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": null,
+      "lastHolder": "human-g.0000000000004000800000000000aaaa",
+      "expected": "waiting on the owner"
+    },
+    {
+      "reason": "waiting_on_owner",
+      "about": "both: an agent waited on, a person last held it",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "build-agent",
+      "lastHolder": "human-alex",
+      "expected": "waiting on the owner, build-agent"
+    },
+    {
+      "reason": "waiting_on_owner",
+      "about": "the viewer waited on, by sender id",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "human-sam",
+      "lastHolder": null,
+      "expected": "waiting on you, the owner"
+    },
+    {
+      "reason": "waiting_on_owner",
+      "about": "the viewer last held it, by account",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": null,
+      "lastHolder": "human-g.000000000000400080000000000000cc",
+      "expected": "waiting on the owner"
+    },
+    {
+      "reason": "waiting_on_owner",
+      "about": "an unnamed account, in both",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "human-g.000000000000400080000000000000bb",
+      "lastHolder": "human-g.000000000000400080000000000000bb",
+      "expected": "waiting on the owner"
+    },
+    {
+      "reason": "blocked",
+      "about": "nobody named",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": null,
+      "lastHolder": null,
+      "expected": "blocked"
+    },
+    {
+      "reason": "blocked",
+      "about": "a person waited on, by login",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "human-alex",
+      "lastHolder": null,
+      "expected": "blocked"
+    },
+    {
+      "reason": "blocked",
+      "about": "a named account last held it",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": null,
+      "lastHolder": "human-g.0000000000004000800000000000aaaa",
+      "expected": "blocked"
+    },
+    {
+      "reason": "blocked",
+      "about": "both: an agent waited on, a person last held it",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "build-agent",
+      "lastHolder": "human-alex",
+      "expected": "blocked"
+    },
+    {
+      "reason": "blocked",
+      "about": "the viewer waited on, by sender id",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "human-sam",
+      "lastHolder": null,
+      "expected": "blocked"
+    },
+    {
+      "reason": "blocked",
+      "about": "the viewer last held it, by account",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": null,
+      "lastHolder": "human-g.000000000000400080000000000000cc",
+      "expected": "blocked"
+    },
+    {
+      "reason": "blocked",
+      "about": "an unnamed account, in both",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "human-g.000000000000400080000000000000bb",
+      "lastHolder": "human-g.000000000000400080000000000000bb",
+      "expected": "blocked"
+    },
+    {
+      "reason": "no_activity",
+      "about": "nobody named",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": null,
+      "lastHolder": null,
+      "expected": "no activity"
+    },
+    {
+      "reason": "no_activity",
+      "about": "a person waited on, by login",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "human-alex",
+      "lastHolder": null,
+      "expected": "no activity"
+    },
+    {
+      "reason": "no_activity",
+      "about": "a named account last held it",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": null,
+      "lastHolder": "human-g.0000000000004000800000000000aaaa",
+      "expected": "no activity"
+    },
+    {
+      "reason": "no_activity",
+      "about": "both: an agent waited on, a person last held it",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "build-agent",
+      "lastHolder": "human-alex",
+      "expected": "no activity"
+    },
+    {
+      "reason": "no_activity",
+      "about": "the viewer waited on, by sender id",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "human-sam",
+      "lastHolder": null,
+      "expected": "no activity"
+    },
+    {
+      "reason": "no_activity",
+      "about": "the viewer last held it, by account",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": null,
+      "lastHolder": "human-g.000000000000400080000000000000cc",
+      "expected": "no activity"
+    },
+    {
+      "reason": "no_activity",
+      "about": "an unnamed account, in both",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "waitingOn": "human-g.000000000000400080000000000000bb",
+      "lastHolder": "human-g.000000000000400080000000000000bb",
+      "expected": "no activity"
+    },
+    {
+      "reason": "waiting_on_review",
+      "about": "waitingOn not sent at all; the submitter last held it",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000cc",
+        "senderId": "human-sam"
+      },
+      "lastHolder": "human-alex",
+      "expected": "waiting on review"
+    },
+    {
+      "reason": "waiting_on_owner",
+      "about": "a Google viewer whose username is another person's login, on that person's ticket",
+      "viewer": {
+        "accountId": "00000000-0000-4000-8000-0000000000dd",
+        "senderId": "human-g.000000000000400080000000000000dd",
+        "githubUsername": "alex"
+      },
+      "waitingOn": "human-alex",
+      "expected": "waiting on the owner, alex"
+    }
+  ]
+}

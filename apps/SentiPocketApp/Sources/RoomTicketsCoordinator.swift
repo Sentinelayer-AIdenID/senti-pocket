@@ -584,6 +584,24 @@ final class RoomTicketsCoordinator: ObservableObject {
         publish()
     }
 
+    /// The room's names for its people, for ticket lines: by lowercased user id, their display name, else their login;
+    /// and by `human-<login>`, their display name. Someone with neither has no entry, so tickets leave them unnamed
+    /// rather than show an id.
+    static func ticketNames(_ people: [RoomDirectoryMember]) -> [String: String] {
+        var names: [String: String] = [:]
+        for member in people {
+            let display = member.displayName.flatMap { $0.isEmpty ? nil : $0 }
+            let login = member.githubLogin.flatMap { $0.isEmpty ? nil : $0 }
+            if let name = display ?? login, names[member.userId.lowercased()] == nil {
+                names[member.userId.lowercased()] = name
+            }
+            if let display, let login, names["human-" + login.lowercased()] == nil {
+                names["human-" + login.lowercased()] = display
+            }
+        }
+        return names
+    }
+
     private func publish() {
         forgetEndedLeases()
         let tickets = (board?.tickets.values).map(Array.init) ?? []
@@ -609,8 +627,18 @@ final class RoomTicketsCoordinator: ObservableObject {
                             expiresAt: lease.expiresAt.flatMap { ParsedSessionTimestamp($0).date }
                         )
                     },
-                    estimate: ticket.progress?.value,
-                    estimateBasis: ticket.progress?.basis
+                    // Where it is, as the server reads it; the old progress estimate is never shown.
+                    step: ticket.step.map { step in
+                        RoomTicketInput.Step(
+                            index: step.index,
+                            count: step.count,
+                            name: step.name.rawValue,
+                            stalledSince: step.stalledSince.flatMap { ParsedSessionTimestamp($0).date },
+                            stalledReason: step.stalledReason?.rawValue,
+                            lastHolder: step.lastHolder,
+                            waitingOn: step.waitingOn
+                        )
+                    }
                 )
             },
             showsArchived: showsArchived,
@@ -628,9 +656,10 @@ final class RoomTicketsCoordinator: ObservableObject {
             ticketWriteStatus: ticketWriteStatus,
             filedCount: filedCount,
             viewerLogin: account?.login,
+            viewerSenderId: account?.senderId,
             rosterAgentIds: assignRoster,
             people: people.map { RoomTicketAssignChoice(id: $0.userId, label: $0.label) },
-            personNames: Dictionary(people.map { ($0.userId, $0.name) }, uniquingKeysWith: { first, _ in first }),
+            personNames: Self.ticketNames(people),
             comments: comments.mapValues { list in
                 list.map { RoomTicketCommentRow(id: $0.id, authorId: $0.actorId, body: $0.body, createdAt: $0.createdAt) }
             },
@@ -781,6 +810,7 @@ struct RoomTicketLinkScreen: View {
                 writeStatus: state.ticketWriteStatus[row.id],
                 assignChoices: state.assignChoices,
                 viewerId: state.viewerId,
+                viewerSenderId: state.viewerSenderId,
                 names: state.personNames,
                 comments: state.comments[row.id],
                 canComment: state.canFileTickets,

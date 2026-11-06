@@ -126,8 +126,12 @@ struct SignedInAccount: Equatable, Sendable {
     let accountId: String?
     /// The GitHub username as written, when the account has one.
     let login: String?
+    /// The sender id the API writes this person's messages under, as it says (`sender_id` from /auth/me:
+    /// `human-<verified GitHub login>`, else `human-g.<account hex>`). Nil from an API that does not send it. The one
+    /// to say "you" by: a Google signup's login is its email's local part, which can be someone else's GitHub login.
+    let senderId: String?
 
-    init?(githubUsername: String?, accountId: String?) {
+    init?(githubUsername: String?, accountId: String?, senderId: String? = nil) {
         let username = (githubUsername ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let id = (accountId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let source = username.isEmpty ? id : username
@@ -143,6 +147,8 @@ struct SignedInAccount: Equatable, Sendable {
         actorRef = ref
         self.accountId = id.isEmpty ? nil : id.lowercased()
         login = username.isEmpty ? nil : username
+        let server = (senderId ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        self.senderId = server.hasPrefix("human-") && server.count > "human-".count ? server : nil
     }
 }
 
@@ -181,7 +187,8 @@ final class HTTPAccountIdentity: AccountIdentityProviding, @unchecked Sendable {
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }
-        return SignedInAccount(githubUsername: object["github_username"] as? String, accountId: object["id"] as? String)
+        return SignedInAccount(githubUsername: object["github_username"] as? String, accountId: object["id"] as? String,
+                               senderId: object["sender_id"] as? String)
     }
 }
 
