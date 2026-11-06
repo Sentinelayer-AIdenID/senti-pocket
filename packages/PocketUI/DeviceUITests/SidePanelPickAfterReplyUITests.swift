@@ -6,9 +6,11 @@ import XCTest
 /// panel about 3 s later, another room picked from it, then back to the first room; the main thread stopped as that
 /// room went in and never came back. On the build Mac (path f, from fresh launches) it hung 2 of 5 times on master, at
 /// the panel's open, and 2 of 6 at M3 as that room went in, with the closed side panel still in the view tree; at M3
-/// with the panel left out of the tree while closed, 0 of 15. On the app's `-PocketRootPreview` data with replies shown in the room (`-PocketRootInlineReplies`), three rounds of it:
-/// after each switch nothing reads the screen for 15 s, then a read must answer within a second; and once the panel
-/// is closed, nothing of it is left in the accessibility tree (ticket 066aca7a).
+/// with the panel left out of the tree while closed, 0 of 15. On the app's `-PocketRootPreview` data with replies
+/// shown in the room (`-PocketRootInlineReplies`), and this account's AI consent already given as on Carter's phone
+/// (`-PocketRootAIConsentGiven`, so the send is not asked first), three rounds of it: after each switch nothing reads
+/// the screen for 15 s, then a read must answer within a second; and once the panel is closed, nothing of it is left
+/// in the accessibility tree (ticket 066aca7a).
 final class SidePanelPickAfterReplyUITests: XCTestCase {
     override func setUp() {
         continueAfterFailure = false
@@ -16,7 +18,8 @@ final class SidePanelPickAfterReplyUITests: XCTestCase {
 
     func test_a_reply_to_a_reply_then_another_room_and_back_never_freezes() throws {
         let app = XCUIApplication()
-        app.launchArguments = ["-PocketRootPreview", "-PocketRootRoom", "mid", "-PocketRootInlineReplies"]
+        app.launchArguments = ["-PocketRootPreview", "-PocketRootRoom", "mid", "-PocketRootInlineReplies",
+                               "-PocketRootAIConsentGiven"]
         app.launch()
         XCTAssertTrue(screen(app).waitForExistence(timeout: 90), "the room opened")
         pause(4)

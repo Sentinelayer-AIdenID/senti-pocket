@@ -533,7 +533,12 @@ struct AuthenticatedRootView: View {
         let account = RoomSendOutbox.account(token: SessionTokenStore.load())
         _blocks = StateObject(wrappedValue: BlockList(account: account, store: .standard,
                                                       client: services.blocks(account)))
-        _aiConsent = StateObject(wrappedValue: AIConsent(account: account))
+        let aiConsent = AIConsent(account: account)
+        #if DEBUG
+        // The root preview's tests of what follows a send start as a phone that said OK before (DEBUG only).
+        if RootPreview.startsWithAIConsentGiven() { aiConsent.grant() }
+        #endif
+        _aiConsent = StateObject(wrappedValue: aiConsent)
         _callLog = StateObject(wrappedValue: CallLogCoordinator(
             transport: services.callLog,
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }

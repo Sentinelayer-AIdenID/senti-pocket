@@ -20,8 +20,16 @@ import PocketUI
 ///   pages the list by 50).
 /// - `-PocketRootInlineReplies`: every message with replies shows its newest reply in the room, as a row to answer in
 ///   place (a reply to a reply, from the room's box).
+/// - `-PocketRootAIConsentGiven`: this account has already said OK to sharing with AI, so a first send is not asked
+///   first (for a test of what follows a send, as on a phone that said OK before). Without it the preview asks.
 enum RootPreview {
     static var isRequested: Bool { ProcessInfo.processInfo.arguments.contains("-PocketRootPreview") }
+
+    /// `-PocketRootAIConsentGiven`, honored in the root preview only: without `-PocketRootPreview` it does nothing. This
+    /// whole file is DEBUG only, so a Release build has neither the flag nor this check.
+    static func startsWithAIConsentGiven(_ arguments: [String] = ProcessInfo.processInfo.arguments) -> Bool {
+        arguments.contains("-PocketRootPreview") && arguments.contains("-PocketRootAIConsentGiven")
+    }
 
     static func argument(_ name: String) -> String? {
         let arguments = ProcessInfo.processInfo.arguments
