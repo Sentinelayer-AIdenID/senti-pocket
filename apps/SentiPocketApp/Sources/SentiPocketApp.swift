@@ -449,7 +449,6 @@ struct SidePanelFrame<Panel: View, Room: View>: View {
                 panel
                     .frame(width: width - 14)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    // While it fades out after a close, nothing in it answers a touch or VoiceOver.
                     .allowsHitTesting(state.isOpen)
                     .accessibilityHidden(!state.isOpen)
                     .transition(.opacity)
