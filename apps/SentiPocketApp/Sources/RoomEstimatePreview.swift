@@ -3,6 +3,7 @@ import Foundation
 import SwiftUI
 import PocketSyncClient
 import PocketUI
+import PocketVoice
 
 /// DEBUG-only: `-PocketEstimatePreview` opens a room whose read offers estimates, with an estimate card in each state
 /// for screenshots (light, dark and the largest text size are the simulator's own settings):
