@@ -976,6 +976,9 @@ private struct RoomMessageRowView: View {
     var send: (RoomChatIntent) -> Void = { _ in }
     /// How far the row follows a swipe to the right (swipe to reply, as in Messages).
     @State private var swipe: CGFloat = 0
+    /// Where the row's own sideways scrolls sit (a strip of photos), in the row's space: a drag that starts on one
+    /// scrolls it and is never a swipe to reply (#336: dragging a strip back to its first photo opened a reply).
+    @State private var sideScrolls: [CGRect] = []
     /// A double tap opens the same options as a long press.
     @State private var showsOptions = false
 
@@ -1145,11 +1148,14 @@ private struct RoomMessageRowView: View {
                 .accessibilityHidden(true)
         }
         .simultaneousGesture(
-            DragGesture(minimumDistance: 24, coordinateSpace: .local)
+            // In the row's own named space, the one its sideways scrolls are measured in.
+            DragGesture(minimumDistance: 24, coordinateSpace: .named(RoomRowSideScrolls.space))
                 .onChanged { value in
-                    // Only a mostly sideways drag to the right: a scroll is never taken for a swipe.
+                    // Only a mostly sideways drag to the right: a scroll is never taken for a swipe, nor a drag that
+                    // starts on a strip of photos (it scrolls the strip).
                     guard value.translation.width > 0,
-                          abs(value.translation.width) > abs(value.translation.height) * 1.8 else { return }
+                          abs(value.translation.width) > abs(value.translation.height) * 1.8,
+                          !sideScrolls.contains(where: { $0.contains(value.startLocation) }) else { return }
                     swipe = min(value.translation.width, Self.swipeToReply + 24)
                 }
                 .onEnded { _ in
@@ -1157,6 +1163,12 @@ private struct RoomMessageRowView: View {
                     withAnimation(.spring(response: 0.28, dampingFraction: 0.8)) { swipe = 0 }
                 }
         )
+        // The row's own space, named on the row around its swipe and its strips; their frames are kept in the row's
+        // own state, set only when they change.
+        .coordinateSpace(name: RoomRowSideScrolls.space)
+        .onPreferenceChange(RoomRowSideScrolls.self) { areas in
+            if sideScrolls != areas { sideScrolls = areas }
+        }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(row.accessibilityId)
         .accessibilityAction(named: canReply ? "Reply" : "Open thread") { reply() }

@@ -74,6 +74,12 @@ enum RoomPreview {
         ProcessInfo.processInfo.arguments.contains("-PocketRoomFilesPreview")
     }
 
+    /// `-PocketRoomStripPreview` adds a last message with twelve photos, and one reply to it with twelve more: two strips
+    /// to drag sideways, one in a room row and one in a thread reply.
+    static var isStripRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-PocketRoomStripPreview")
+    }
+
     @MainActor
     @ViewBuilder
     static var rootView: some View {
@@ -773,8 +779,31 @@ private struct RoomPreviewTransport: RoomTransport {
     private var allHistory: [RoomMessage] {
         if directScenario { return Self.directHistory }
         let files = RoomPreview.isFilesRequested ? Self.fileRoots : []
-        return (anchorScenario ? Self.earlier + Self.history : Self.history) + files
+        let strip = RoomPreview.isStripRequested ? [Self.stripRoot] : []
+        return (anchorScenario ? Self.earlier + Self.history : Self.history) + files + strip
     }
+
+    /// Twelve photos, named `<prefix>-1.jpg` to `<prefix>-12.jpg`.
+    private static func photos(_ prefix: String) -> [RoomAttachment] {
+        (1...12).map {
+            RoomAttachment(attachmentId: "preview-\(prefix)-\($0)", filename: "\(prefix)-\($0).jpg", kind: .image,
+                           contentType: "image/jpeg", sizeBytes: 240_000, summaryStatus: "ready")
+        }
+    }
+
+    /// The strip preview's message: the room's last, with twelve photos.
+    private static let stripRoot: RoomMessage = {
+        let base = row(126, "review-agent", minutesAgo: 1, "Twelve photos from the site walk.")
+        return RoomMessage(id: base.id, sequenceId: base.sequenceId, kind: base.kind, authorId: base.authorId,
+                           authorName: base.authorName, isHuman: base.isHuman, text: base.text,
+                           timestamp: base.timestamp, attachments: photos("site"))
+    }()
+
+    /// Its one reply, by build-agent, with twelve more.
+    private static let stripReply = RoomReply(id: "strip-reply", targetSequenceId: 126, authorId: "build-agent",
+                                              text: "Twelve more from the other side.",
+                                              createdAt: ISO8601DateFormatter().string(from: base.addingTimeInterval(-30)),
+                                              attachments: photos("side"))
 
     /// The files' messages: each says what its replies hold.
     private static let fileRoots = [
@@ -828,6 +857,7 @@ private struct RoomPreviewTransport: RoomTransport {
     func roomActions(sessionId: String, targetSequenceId: Int64?, limit: Int) async throws -> RoomActionsPage {
         if directScenario { return RoomActionsPage() }
         if targetSequenceId == 111 { return RoomActionsPage(replies: Self.threadReplies) }
+        if targetSequenceId == 126, RoomPreview.isStripRequested { return RoomActionsPage(replies: [Self.stripReply]) }
         let files = RoomPreview.isFilesRequested ? Self.fileParts : []
         if let targetSequenceId, targetSequenceId == 124 || targetSequenceId == 125 {
             return RoomActionsPage(replies: files.filter { $0.targetSequenceId == targetSequenceId })
@@ -853,7 +883,10 @@ private struct RoomPreviewTransport: RoomTransport {
                 actorsByType: ["ack": ["review-agent"]],
                 activeOwners: ["review-agent"]
             )
-        ], replies: files, pinned: (RoomPreview.isLeaderboardRequested
+        ].merging(RoomPreview.isStripRequested
+                  ? [126: RoomReactionSummary(targetSequenceId: 126, counts: ["reply": 1], replyTotal: 1,
+                                              latestReplies: [Self.stripReply])]
+                  : [:]) { first, _ in first }, replies: files, pinned: (RoomPreview.isLeaderboardRequested
                     ? [RoomPinnedMessage(id: "preview-pin-board", targetSequenceId: Self.leaderboard.sequenceId,
                                          pinnedBy: "board-keeper")]
                     : []) + [
