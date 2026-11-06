@@ -31,21 +31,28 @@ struct RoomComposerFileView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // Remove sits in a bar pinned under the file, not in the toolbar's bottom bar: there a device kept its
+            // identifier but read only "Remove" to VoiceOver, never which file.
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                Button(role: .destructive, action: onRemove) {
+                    Label("Remove", systemImage: "trash")
+                        .labelStyle(.titleAndIcon)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel("Remove \(item.filename)")
+                .accessibilityHint("Takes it out of this message")
+                .accessibilityIdentifier("pocket.room.media.viewer.remove")
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+                .background(.bar)
+            }
             .navigationTitle(item.filename)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done", action: onClose)
                         .accessibilityIdentifier("pocket.room.media.viewer.done")
-                }
-                ToolbarItem(placement: .bottomBar) {
-                    Button(role: .destructive, action: onRemove) {
-                        Label("Remove", systemImage: "trash")
-                            .labelStyle(.titleAndIcon)
-                    }
-                    .accessibilityLabel("Remove \(item.filename)")
-                    .accessibilityHint("Takes it out of this message")
-                    .accessibilityIdentifier("pocket.room.media.viewer.remove")
                 }
             }
         }
