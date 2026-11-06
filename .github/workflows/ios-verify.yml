@@ -399,10 +399,11 @@ jobs:
       - name: Known flaky room-list checks (not gating, ticket 9d7d62f1)
         # The b508c37d at-rest arrival check with its paired follow-back, and the 96166f35 held-message check, fail
         # often on PRs that do not touch the room list. Until their fix they run here, after the gating tests and
-        # even when those fail, and report their row counts to the job summary without gating. The gating tests above
+        # even when those fail (not when the run is cancelled), and report their row counts to the job summary
+        # without gating. The gating tests above
         # skip their class; the guard step keeps this step as it is. Ends when the blank-room fix merges or on
         # 2026-11-13, whichever comes first.
-        if: always()
+        if: ${{ !cancelled() }}
         continue-on-error: true
         timeout-minutes: 10
         shell: bash

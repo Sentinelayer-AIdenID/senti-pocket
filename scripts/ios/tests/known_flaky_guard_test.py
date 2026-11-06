@@ -76,7 +76,40 @@ class KnownFlakyGuardTests(unittest.TestCase):
 
     def test_the_marker_in_a_gating_test_fails(self) -> None:
         self.edit(GATING, "// MARK: - The room\n", "// MARK: - The room\n    // [known-flaky b508c37d]\n")
-        self.assertFailsWith("LazyListBuildTests.swift holds [known-flaky b508c37d]")
+        self.assertFailsWith("LazyListBuildTests.swift holds a [known-flaky …] marker")
+
+    def test_any_marker_in_a_gating_test_fails(self) -> None:
+        self.edit(GATING, "// MARK: - The room\n", "// MARK: - The room\n    // [known-flaky 0000aaaa]\n")
+        self.assertFailsWith("LazyListBuildTests.swift holds a [known-flaky …] marker")
+
+    def test_another_marker_in_the_class_fails(self) -> None:
+        self.edit(FLAKY, " [known-flaky 96166f35]", " [known-flaky 96166f35] [known-flaky 0000aaaa]")
+        self.assertFailsWith("holds 4 [known-flaky …] markers, not 3")
+
+    def test_a_gating_check_moved_into_an_allowed_test_without_a_marker_fails(self) -> None:
+        """Warden's HOLD on #340: the reviewer moved "at the message, far up the room" from the gating test into the
+        held-message test, unmarked, and the guard stayed green. Now the class's inventory of checks catches it."""
+        moved = '        XCTAssertGreaterThan(away, 3 * scroll.bounds.height, "at the message, far up the room")\n'
+        self.edit(GATING, moved, "")
+        self.edit(FLAKY, "        let held = scroll.contentOffset.y\n",
+                  "        let away = Self.bottomOffset(of: scroll) - scroll.contentOffset.y\n" + moved
+                  + "        let held = scroll.contentOffset.y\n")
+        self.assertFailsWith("LazyListKnownFlakyTests holds 6 XCTAssert/XCTFail calls, not 5: a check moved in or out")
+
+    def test_an_unwrap_moved_into_the_class_fails(self) -> None:
+        self.edit(FLAKY, "        let held = scroll.contentOffset.y\n",
+                  "        _ = try XCTUnwrap(room.state.rows.first)\n        let held = scroll.contentOffset.y\n")
+        self.assertFailsWith("LazyListKnownFlakyTests holds 3 XCTUnwrap calls, not 2")
+
+    def test_a_step_in_the_class_checking_a_bound_fails(self) -> None:
+        self.edit(FLAKY, 'step("an arrival", rows: rows, list: .roomRow, most: nil)',
+                  'step("an arrival", rows: rows, list: .roomRow, most: 80)')
+        self.assertFailsWith('a step in LazyListKnownFlakyTests checks a bound ("an arrival"')
+
+    def test_a_step_in_the_class_with_the_default_bound_fails(self) -> None:
+        self.edit(FLAKY, 'step("drawn again, nothing changed", rows: rows, list: .roomRow, most: nil)',
+                  'step("drawn again, nothing changed", rows: rows, list: .roomRow)')
+        self.assertFailsWith('a step in LazyListKnownFlakyTests checks a bound ("drawn again, nothing changed"')
 
     def test_the_follow_back_check_back_in_a_gating_test_fails(self) -> None:
         self.edit(GATING, "            // Whether it followed back to its bottom is checked in LazyListKnownFlakyTests",
@@ -115,8 +148,28 @@ class KnownFlakyGuardTests(unittest.TestCase):
         self.assertFailsWith('the LazyListKnownFlakyTests step must come after "Run hosted unit tests"')
 
     def test_the_known_flaky_step_skipped_when_the_gating_tests_fail_fails(self) -> None:
-        self.edit(WORKFLOW, "        if: always()\n        continue-on-error: true\n", "        continue-on-error: true\n")
-        self.assertFailsWith("must run even when the gating tests fail (if: always())")
+        self.edit(WORKFLOW, "        if: ${{ !cancelled() }}\n        continue-on-error: true\n",
+                  "        continue-on-error: true\n")
+        self.assertFailsWith("must run even when the gating tests fail, and not when the run is cancelled")
+
+    def test_the_known_flaky_step_running_on_a_cancelled_run_fails(self) -> None:
+        self.edit(WORKFLOW, "        if: ${{ !cancelled() }}\n", "        if: always()\n")
+        self.assertFailsWith("(if: ${{ !cancelled() }})")
+
+    def test_a_skip_that_is_not_the_class_token_fails(self) -> None:
+        self.edit(WORKFLOW, "          -skip-testing:SentiPocketAppTests/LazyListKnownFlakyTests\n",
+                  "          -skip-testing:SentiPocketAppTests/LazyListKnownFlakyTestsOld\n")
+        self.assertFailsWith('the gating step "Run hosted unit tests" does not skip LazyListKnownFlakyTests')
+
+    def test_the_guard_run_with_a_date_fails(self) -> None:
+        self.edit(WORKFLOW, "          python3 scripts/ios/known_flaky_guard.py\n",
+                  "          python3 scripts/ios/known_flaky_guard.py --today 2026-11-01\n")
+        self.assertFailsWith("the guard step must run exactly")
+
+    def test_the_guard_step_not_gating_fails(self) -> None:
+        name = "      - name: Known-flaky split guard and time box (ticket 9d7d62f1, ends 2026-11-13)\n"
+        self.edit(WORKFLOW, name, name + "        continue-on-error: true\n")
+        self.assertFailsWith("the guard step must gate, with no continue-on-error:")
 
     def test_the_known_flaky_step_gating_fails(self) -> None:
         self.edit(WORKFLOW, "        continue-on-error: true\n", "")
