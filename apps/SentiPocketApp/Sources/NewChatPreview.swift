@@ -13,36 +13,82 @@ enum NewChatPreview {
 
     static var stage: String { RootPreview.argument("-PocketNewChatStage") ?? "start" }
 
-    /// The contract's seed (its ids, order, room types and starter agents). Names, symbols and summaries are stand-ins
-    /// made from the ids and the starter agents until the API's own list can be read; the server's list replaces all
-    /// of it in the app.
-    static let templates: [RoomTemplate] = {
-        let assistant = (id: "pa01-personal-assistant", name: "Personal Assistant",
-                         symbol: "person.crop.circle.badge.checkmark")
-        let launch = (id: "cpg03-launch-coord", name: "Launch Coordinator", symbol: "checklist")
-        func startingWith(_ agent: (id: String, name: String, symbol: String), _ id: String,
-                          _ name: String) -> RoomTemplate {
-            RoomTemplate(id: id, name: name, symbol: agent.symbol, summary: "Starts with \(agent.name).",
-                         starterAgents: [agent.id])
-        }
-        return [
-            RoomTemplate(id: "personal-assistant", name: "Personal assistant", symbol: assistant.symbol,
-                         summary: "Starts with \(assistant.name).", starterAgents: [assistant.id],
-                         firstMessage: "Stand-in for the line Senti opens with; the server's own replaces it."),
-            startingWith(assistant, "plan-a-trip", "Plan a trip"),
-            startingWith(assistant, "budget-and-bills", "Budget and bills"),
-            startingWith(assistant, "job-search", "Job search"),
-            startingWith(launch, "side-project", "Side project"),
-            startingWith(assistant, "family-and-home", "Family and home"),
-            RoomTemplate(id: "study", name: "Study", symbol: RoomKind.study.symbol, summary: RoomKind.study.detail,
-                         roomType: "study"),
-            RoomTemplate(id: "research", name: "Research", symbol: RoomKind.research.symbol,
-                         summary: RoomKind.research.detail, roomType: "research"),
-            RoomTemplate(id: "conference", name: "Conference", symbol: RoomKind.conference.symbol,
-                         summary: RoomKind.conference.detail, roomType: "conference",
-                         starterAgents: [launch.id]),
-        ]
-    }()
+    /// The catalog's ways to start, in its order (sentinelayer-api `src/data/agent_catalog/catalog.json`), word
+    /// for word; the server's own list replaces them in the app.
+    static let templates: [RoomTemplate] = [
+        RoomTemplate(id: "personal-assistant",
+                     name: "Personal assistant",
+                     symbol: "person.crop.circle",
+                     summary: "Your week, your lists and your follow-ups in one private room.",
+                     roomType: "general",
+                     starterAgents: ["pa01-personal-assistant"],
+                     firstMessage: "I can plan your week, keep your lists and remind you what to follow up on. What "
+                         + "is on your plate?"),
+        RoomTemplate(id: "plan-a-trip",
+                     name: "Plan a trip",
+                     symbol: "airplane",
+                     summary: "Dates, a day-by-day plan and a packing list for your next trip.",
+                     roomType: "general",
+                     starterAgents: ["pa01-personal-assistant"],
+                     firstMessage: "I can help you pick dates, build a day-by-day plan and keep a packing list. "
+                         + "Where are you headed?"),
+        RoomTemplate(id: "budget-and-bills",
+                     name: "Budget and bills",
+                     symbol: "dollarsign.circle",
+                     summary: "Your bills, due dates and a simple monthly budget, with reminders.",
+                     roomType: "general",
+                     starterAgents: ["pa01-personal-assistant"],
+                     firstMessage: "Tell me your bills and when they are due, and I will keep the list, set "
+                         + "reminders and help you plan a monthly budget."),
+        RoomTemplate(id: "job-search",
+                     name: "Job search",
+                     symbol: "briefcase",
+                     summary: "Track applications, get ready for interviews and never miss a follow-up.",
+                     roomType: "general",
+                     starterAgents: ["pa01-personal-assistant"],
+                     firstMessage: "I can track your applications, help you get ready for interviews and remind you "
+                         + "to follow up. What kind of job are you after?"),
+        RoomTemplate(id: "side-project",
+                     name: "Side project",
+                     symbol: "hammer",
+                     summary: "Turn an idea into steps, owners and a clear next move.",
+                     roomType: "general",
+                     starterAgents: ["cpg03-launch-coord"],
+                     firstMessage: "I can turn your idea into steps, keep track of who does what and point out what "
+                         + "is blocking you. What are you building?"),
+        RoomTemplate(id: "family-and-home",
+                     name: "Family and home",
+                     symbol: "house",
+                     summary: "The family calendar, shopping and chore lists, and reminders in one place.",
+                     roomType: "general",
+                     starterAgents: ["pa01-personal-assistant"],
+                     firstMessage: "I can keep the family calendar, the shopping and chore lists, and reminders in "
+                         + "one place. What is coming up this week?"),
+        RoomTemplate(id: "study",
+                     name: "Study",
+                     symbol: "book",
+                     summary: "Learn a topic step by step and keep track of what you still need to understand.",
+                     roomType: "study",
+                     starterAgents: [],
+                     firstMessage: "I can explain a topic step by step, quiz you and keep a list of the questions "
+                         + "you still have. What are you studying?"),
+        RoomTemplate(id: "research",
+                     name: "Research",
+                     symbol: "magnifyingglass",
+                     summary: "Gather sources, compare what they say and keep your findings in one list.",
+                     roomType: "research",
+                     starterAgents: [],
+                     firstMessage: "I can gather sources, compare what they say and keep a list of findings with "
+                         + "where each one came from. What do you want to find out?"),
+        RoomTemplate(id: "conference",
+                     name: "Conference",
+                     symbol: "person.3",
+                     summary: "Meetings with notes, action items and owners.",
+                     roomType: "conference",
+                     starterAgents: ["cpg03-launch-coord"],
+                     firstMessage: "I can take notes, pull out the action items with an owner for each and write a "
+                         + "short recap. What is the meeting about?"),
+    ]
 
     @MainActor
     static var rootView: some View {
@@ -54,7 +100,7 @@ enum NewChatPreview {
     }
 }
 
-/// Makes nothing: the preview's Create only says it would.
+/// Makes no chat: Create in the preview answers with a made-up id.
 private struct PreviewCreator: RoomCreating {
     func create(title: String, start: RoomStart) async throws -> String { "preview-chat" }
 }
