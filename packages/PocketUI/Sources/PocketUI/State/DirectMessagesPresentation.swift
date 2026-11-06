@@ -109,6 +109,16 @@ public extension EnvironmentValues {
 
 /// A profile card: who, the rooms you share, and what you can do.
 public struct RoomProfileCardState: Equatable, Sendable {
+    /// Where the card's rooms came from.
+    public enum SharedRoomsSource: Equatable, Sendable {
+        /// Only the room the card was opened from: no server has said which rooms you share.
+        case thisRoom
+        /// The server's list of the rooms you share (`GET /me/shared-rooms`), with its count when it gave one.
+        case server
+        /// An open direct message's list of the rooms you share, which has no count.
+        case directMessage
+    }
+
     public enum Phase: Equatable, Sendable {
         case idle
         /// The direct message is being opened.
@@ -123,6 +133,8 @@ public struct RoomProfileCardState: Equatable, Sendable {
     public let sharedRooms: [String]
     /// How many rooms you share in all, when the server said; nil when the phone does not know (then no count shows).
     public let sharedRoomsTotal: Int?
+    /// Where `sharedRooms` came from.
+    public let sharedRoomsSource: SharedRoomsSource
     public let canMessage: Bool
     public let canBlock: Bool
     public let phase: Phase
@@ -130,23 +142,25 @@ public struct RoomProfileCardState: Equatable, Sendable {
     /// The most shared rooms the card lists by name; the rest are counted, or listed by See all.
     public static let roomsShown = 4
 
-    public init(target: RoomProfileTarget, sharedRooms: [String], sharedRoomsTotal: Int? = nil, canMessage: Bool,
-                canBlock: Bool = false, phase: Phase = .idle) {
+    public init(target: RoomProfileTarget, sharedRooms: [String], sharedRoomsTotal: Int? = nil,
+                sharedRoomsSource: SharedRoomsSource = .thisRoom, canMessage: Bool, canBlock: Bool = false,
+                phase: Phase = .idle) {
         self.target = target
         self.sharedRooms = sharedRooms
         self.sharedRoomsTotal = sharedRoomsTotal.map { max($0, sharedRooms.count) }
+        self.sharedRoomsSource = sharedRoomsSource
         self.canMessage = canMessage
         self.canBlock = canBlock
         self.phase = phase
     }
 
-    /// What the rooms are called, honestly: "Rooms you share · 12" when the server counted them, "Room you share" only
-    /// when it says one. Without its count: "In this room" for the room the card was opened from alone (it may well not
-    /// be the only one, and Carter read "Room you share" as one), else "Rooms you share", with no number.
+    /// What the rooms are called, honestly, by where they came from: "In this room" for the room the card was opened
+    /// from, when no server has said (it may well not be the only one, and Carter read "Room you share" as one);
+    /// "Rooms you share · 12" with the server's count, "Room you share" only when it says one; "Rooms you share", with
+    /// no number, for a list without a count.
     public var sharedRoomsHeader: String {
-        guard let total = sharedRoomsTotal else {
-            return sharedRooms.count == 1 ? "In this room" : "Rooms you share"
-        }
+        if sharedRoomsSource == .thisRoom { return "In this room" }
+        guard let total = sharedRoomsTotal else { return "Rooms you share" }
         return total == 1 ? "Room you share" : "Rooms you share · \(total)"
     }
 
@@ -164,10 +178,10 @@ public struct RoomProfileCardState: Equatable, Sendable {
         (sharedRoomsTotal ?? 0) > min(sharedRooms.count, Self.roomsShown)
     }
 
-    /// The same card with the rooms you share as the server listed them, newest first, and how many in all.
-    public func with(sharedRooms: [String], total: Int?) -> RoomProfileCardState {
-        RoomProfileCardState(target: target, sharedRooms: sharedRooms, sharedRoomsTotal: total, canMessage: canMessage,
-                             canBlock: canBlock, phase: phase)
+    /// The same card with the rooms you share as `source` listed them, newest first, and how many in all.
+    public func with(sharedRooms: [String], total: Int?, from source: SharedRoomsSource) -> RoomProfileCardState {
+        RoomProfileCardState(target: target, sharedRooms: sharedRooms, sharedRoomsTotal: total,
+                             sharedRoomsSource: source, canMessage: canMessage, canBlock: canBlock, phase: phase)
     }
 
     /// What every refusal reads as: the server answers blocked, off and unknown alike, and so does the card.

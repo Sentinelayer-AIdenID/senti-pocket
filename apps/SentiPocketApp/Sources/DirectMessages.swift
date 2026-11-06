@@ -204,7 +204,7 @@ final class RoomProfileModel: ObservableObject {
               let page = try? await reader.sharedRooms(with: state.target.senderId, cursor: nil,
                                                        limit: RoomProfileCardState.roomsShown),
               !page.rooms.isEmpty else { return false }
-        state = state.with(sharedRooms: page.rooms.map(\.title), total: page.total)
+        state = state.with(sharedRooms: page.rooms.map(\.title), total: page.total, from: .server)
         return true
     }
 
@@ -212,7 +212,7 @@ final class RoomProfileModel: ObservableObject {
     func loadSharedRooms(_ context: RoomDirectContext) async {
         guard let existing = context.existing(state.target.senderId),
               let dm = try? await context.center.client.directMessage(existing), !dm.mutualRooms.isEmpty else { return }
-        state = state.with(sharedRooms: dm.mutualRooms.map(\.title), total: nil)
+        state = state.with(sharedRooms: dm.mutualRooms.map(\.title), total: nil, from: .directMessage)
     }
 
     /// Message: opens the direct message from `roomId`; returns it, or says why not on the card.
@@ -233,7 +233,8 @@ final class RoomProfileModel: ObservableObject {
 
     private func set(_ phase: RoomProfileCardState.Phase) {
         state = RoomProfileCardState(target: state.target, sharedRooms: state.sharedRooms,
-                                     sharedRoomsTotal: state.sharedRoomsTotal, canMessage: canMessage,
+                                     sharedRoomsTotal: state.sharedRoomsTotal,
+                                     sharedRoomsSource: state.sharedRoomsSource, canMessage: canMessage,
                                      canBlock: canBlock, phase: phase)
     }
 }
