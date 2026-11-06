@@ -9,6 +9,9 @@ public enum ChatMarkdownBlock: Equatable, Sendable {
     case heading(level: Int, text: String)
     case list(ordered: Bool, start: Int, items: [ChatMarkdownListItem])
     case quote([ChatMarkdownBlock])
+    /// A line of a quote deeper than `ChatMarkdown.maximumQuoteDepth`, shown in the deepest quote: `levels` is how many
+    /// levels deeper it was.
+    case deeperQuote(levels: Int, text: String)
     case code(language: String?, text: String)
     case rule
     case table(ChatMarkdownTable)
@@ -85,9 +88,19 @@ public enum ChatMarkdown {
 
     /// The deepest block quotes nest, here as on the web. Each level is a stack inside a stack on screen, and laying out
     /// stacks nested that way takes longer at every level: a message of 50 ">" could stop any phone that showed it. A
-    /// quote deeper than this is not nested again: its lines go in the deepest quote, each led by one "↳" for every
-    /// level it was deeper, so all of its text still shows.
+    /// quote deeper than this is not nested again: each of its lines goes in the deepest quote as a `deeperQuote`, with
+    /// how many levels deeper it was, so all of its text still shows.
     public static let maximumQuoteDepth = 4
+
+    /// What leads a line from a deeper quote: one arrow, and how much deeper when it is more than one level.
+    public static func deeperQuoteMark(levels: Int) -> String {
+        levels > 1 ? "↳ (\(levels) levels deeper)" : "↳"
+    }
+
+    /// What VoiceOver says for that mark.
+    public static func deeperQuoteLabel(levels: Int) -> String {
+        "quoted \(levels) \(levels == 1 ? "level" : "levels") deeper"
+    }
 
     public static func parse(_ source: String) -> [ChatMarkdownBlock] {
         var text = source.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
@@ -201,7 +214,7 @@ public enum ChatMarkdown {
                     deeper += 1
                     rest = rest.dropFirst().drop { $0 == " " }
                 }
-                if !rest.isEmpty { blocks.append(.paragraph(String(repeating: "↳", count: deeper) + " " + rest)) }
+                if !rest.isEmpty { blocks.append(.deeperQuote(levels: deeper, text: String(rest))) }
                 index += 1
                 continue
             }
