@@ -57,6 +57,7 @@ final class SessionHTTPTransportTests: XCTestCase {
     private func makeTransport(
         origin: URL? = URL(string: "https://api.example.test")!,
         token: @escaping @Sendable () -> String? = { "session-token" },
+        onAccountDeletionPending: @escaping @Sendable () -> Void = {},
         handler: @escaping (URLRequest) -> (HTTPURLResponse, Data)
     ) -> HTTPSessionTransport {
         SessionTransportURLProtocol.reset(handler: handler)
@@ -65,7 +66,8 @@ final class SessionHTTPTransportTests: XCTestCase {
         return HTTPSessionTransport(
             apiBaseURL: origin,
             urlSession: URLSession(configuration: configuration),
-            tokenProvider: token
+            tokenProvider: token,
+            onAccountDeletionPending: onAccountDeletionPending
         )
     }
 
@@ -291,6 +293,85 @@ final class SessionHTTPTransportTests: XCTestCase {
                 try await transport.listSessions(includeArchived: false, limit: 50, cursor: nil)
             }
         }
+    }
+
+    func test_a_read_refused_because_the_account_is_scheduled_for_deletion_is_reported_and_still_denied() async {
+        let reported = LockedCounter()
+        let transport = makeTransport(onAccountDeletionPending: { reported.increment() }) { request in
+            (self.http(request, status: 403), Data(#"{"error":{"code":"ACCOUNT_DELETION_PENDING","message":"x"}}"#.utf8))
+        }
+        await expect(.accessDenied) {
+            try await transport.listSessions(includeArchived: false, limit: 50, cursor: nil)
+        }
+        XCTAssertEqual(reported.value, 1)
+    }
+
+    func test_only_the_deletion_pending_code_on_a_403_is_reported() async {
+        let answers: [(Int, String)] = [
+            (403, #"{"error":{"code":"FORBIDDEN"}}"#),
+            (403, #"{"error":{"code":"account_deletion_pending"}}"#),
+            (403, #"{"error":{"code":"ACCOUNT_DELETION_PENDING_X"}}"#),
+            (403, #"{"code":"ACCOUNT_DELETION_PENDING"}"#),
+            (403, #"{"error":"ACCOUNT_DELETION_PENDING"}"#),
+            (403, "not json"),
+            (403, ""),
+            (401, #"{"error":{"code":"ACCOUNT_DELETION_PENDING"}}"#),
+            (404, #"{"error":{"code":"ACCOUNT_DELETION_PENDING"}}"#)
+        ]
+        for (status, body) in answers {
+            let reported = LockedCounter()
+            let transport = makeTransport(onAccountDeletionPending: { reported.increment() }) { request in
+                (self.http(request, status: status), Data(body.utf8))
+            }
+            _ = try? await transport.listEvents(sessionId: "room_1", after: nil, fromSequence: nil, limit: 50)
+            XCTAssertEqual(reported.value, 0, "\(status) \(body)")
+        }
+    }
+
+    /// The server ends a scheduled-for-deletion account's room streams; the reconnect is refused with the code.
+    func test_a_room_stream_refused_because_the_account_is_scheduled_for_deletion_is_reported_and_denied() async {
+        let answers: [(String, Int)] = [
+            (#"{"error":{"code":"ACCOUNT_DELETION_PENDING","message":"x"}}"#, 1),
+            (#"{"error":{"code":"FORBIDDEN"}}"#, 0),
+            ("", 0)
+        ]
+        for (body, expected) in answers {
+            let reported = LockedCounter()
+            let transport = makeTransport(onAccountDeletionPending: { reported.increment() }) { request in
+                (self.http(request, status: 403), Data(body.utf8))
+            }
+            var ends: [RoomStreamEnd] = []
+            for await event in transport.roomStream(sessionId: "room_1", fromSequence: nil) {
+                if case .ended(let end) = event { ends.append(end) }
+            }
+            XCTAssertEqual(ends, [.accessDenied], body)
+            XCTAssertEqual(reported.value, expected, body)
+        }
+    }
+
+    func test_a_deletion_pending_refusal_for_a_bearer_replaced_in_flight_is_not_reported() async {
+        let reported = LockedCounter()
+        let token = LockedToken("principal-a")
+        let transport = makeTransport(token: { token.value }, onAccountDeletionPending: { reported.increment() }) { request in
+            token.set("principal-b")
+            return (self.http(request, status: 403), Data(#"{"error":{"code":"ACCOUNT_DELETION_PENDING"}}"#.utf8))
+        }
+        await expect(.cancelled) {
+            try await transport.listSessions(includeArchived: false, limit: 50, cursor: nil)
+        }
+        XCTAssertEqual(reported.value, 0)
+    }
+
+    func test_the_deletion_pending_refusal_matches_only_its_exact_code_on_a_403() {
+        let pending = Data(#"{"error":{"code":"ACCOUNT_DELETION_PENDING"}}"#.utf8)
+        XCTAssertTrue(AccountDeletionPendingRefusal.matches(statusCode: 403, body: pending))
+        XCTAssertFalse(AccountDeletionPendingRefusal.matches(statusCode: 401, body: pending))
+        XCTAssertFalse(AccountDeletionPendingRefusal.matches(statusCode: 409, body: pending))
+        XCTAssertFalse(AccountDeletionPendingRefusal.matches(
+            statusCode: 403, body: Data(#"{"error":{"code":"FORBIDDEN"}}"#.utf8)))
+        XCTAssertFalse(AccountDeletionPendingRefusal.matches(
+            statusCode: 403, body: Data(#"{"error":{"code":" ACCOUNT_DELETION_PENDING"}}"#.utf8)))
+        XCTAssertFalse(AccountDeletionPendingRefusal.matches(statusCode: 403, body: Data()))
     }
 
     func test_not_found_taxonomy_preserves_session_existence_boundary_only() async {

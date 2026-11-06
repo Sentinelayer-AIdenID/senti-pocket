@@ -57,6 +57,20 @@ public enum SessionTransportError: LocalizedError, Equatable, Sendable {
     }
 }
 
+/// The one refusal the API sends while the person's account is scheduled for deletion:
+/// `403 {"error": {"code": "ACCOUNT_DELETION_PENDING"}}`. Any other 403 is an ordinary refusal.
+public enum AccountDeletionPendingRefusal {
+    public static let code = "ACCOUNT_DELETION_PENDING"
+
+    public static func matches(statusCode: Int, body: Data) -> Bool {
+        guard statusCode == 403,
+              let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let error = object["error"] as? [String: Any],
+              let code = error["code"] as? String else { return false }
+        return code == Self.code
+    }
+}
+
 /// Read-only session API seam. Mutation/reaction/reply flows remain governed elsewhere.
 public protocol SessionTransport: Sendable {
     func listSessions(includeArchived: Bool, limit: Int, cursor: String?) async throws -> SessionListPage
@@ -90,6 +104,8 @@ public final class HTTPSessionTransport: SessionTransport, @unchecked Sendable {
     private let urlSession: URLSession
     private let streamingURLSession: URLSession
     private let tokenProvider: @Sendable () -> String?
+    /// Told when a read is refused because the account is scheduled for deletion; the read still fails as denied.
+    let onAccountDeletionPending: @Sendable () -> Void
 
     /// `streamingSession` carries the long-lived room stream. It needs a long resource timeout (the server keeps a
     /// stream open for hours) and an idle timeout above the server's 15-second keep-alive ticks; it defaults to
@@ -98,12 +114,14 @@ public final class HTTPSessionTransport: SessionTransport, @unchecked Sendable {
         apiBaseURL: URL?,
         urlSession: URLSession,
         streamingSession: URLSession? = nil,
-        tokenProvider: @escaping @Sendable () -> String?
+        tokenProvider: @escaping @Sendable () -> String?,
+        onAccountDeletionPending: @escaping @Sendable () -> Void = {}
     ) {
         self.apiBaseURL = Self.validOrigin(apiBaseURL)
         self.urlSession = urlSession
         self.streamingURLSession = streamingSession ?? urlSession
         self.tokenProvider = tokenProvider
+        self.onAccountDeletionPending = onAccountDeletionPending
     }
 
     var streamingSession: URLSession { streamingURLSession }
@@ -316,6 +334,9 @@ public final class HTTPSessionTransport: SessionTransport, @unchecked Sendable {
         case 401:
             throw SessionTransportError.reauthenticationRequired
         case 403:
+            if AccountDeletionPendingRefusal.matches(statusCode: http.statusCode, body: data) {
+                onAccountDeletionPending()
+            }
             // Preserve the membership boundary: callers do not distinguish inaccessible from absent sessions.
             throw SessionTransportError.accessDenied
         case 404 where hideNotFound:

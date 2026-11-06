@@ -33,6 +33,12 @@ struct SentiPocketApp: App {
     /// unreachable until a REAL token is stored (warden gate #1). DEBUG stays on the fixture flow (no real auth).
     @StateObject private var signIn = SignInCoordinator(login: SentiPocketApp.makeLogin(),
                                                         appleLogin: SentiPocketApp.makeAppleLogin())
+    /// Outlives each sign-in, so the date a deletion was scheduled for shows over the sign-in screen. Kept, not
+    /// watched: the views that show its state watch it (the notice, the Settings row, the scheduled date), so its
+    /// answers draw them and never the app's root.
+    @State private var accountDeletion = AccountDeletionCoordinator(client: HTTPAccountDeletionClient(
+        apiBaseURL: GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_API_URL", "SENTI_GATEWAY_URL"])
+    ))
     #endif
 
     var body: some Scene {
@@ -87,7 +93,29 @@ struct SentiPocketApp: App {
     private func wireRegistrarToLogin() {
         #if !DEBUG
         Self.wire(signIn, to: dialHost, endPushes: { PushRegistrar.shared.signOut() })
+        Self.wire(accountDeletion, to: dialHost)
+        // The deletion request removed this account's notification registrations on the server, and keeping the
+        // account brings none back: this phone registers again at once, not at its next return to the front.
+        accountDeletion.registerAgain = { Task { await PushRegistrar.shared.start() } }
         #endif
+    }
+
+    /// A deletion request ends this phone's call ringing first, the same way sign-out does, because the server's 202
+    /// revokes the token that removal needs. If the request does not go through, calls ring again for the same room.
+    @MainActor
+    static func wire(_ deletion: AccountDeletionCoordinator, to host: DialHost) {
+        var ringingSession: String?
+        deletion.beginCallRingRevoke = {
+            ringingSession = host.selectedSession
+            try host.beginSignOut()
+        }
+        deletion.finishCallRingRevoke = {
+            try await host.prepareForSignOut()
+        }
+        deletion.rearmCallRing = {
+            host.onLoginCompleted()
+            host.selectSession(ringingSession)
+        }
     }
 
     /// The release wiring above, separate so a test runs it with a test host.
@@ -120,6 +148,8 @@ struct SentiPocketApp: App {
         #if DEBUG
         if RoomCalendarPreview.isRequested {
             RoomCalendarPreview.rootView
+        } else if AccountDeletionPreview.isRequested {
+            AccountDeletionPreview.rootView(whisperModel: whisperModel, incomingLinks: incomingLinks)
         } else if RootPreview.isRequested {
             RootPreview.rootView(whisperModel: whisperModel, incomingLinks: incomingLinks)
         } else if AgentChatPreview.isRequested {
@@ -137,6 +167,11 @@ struct SentiPocketApp: App {
                 authenticationEpoch: signIn.authenticationEpoch,
                 whisperModelCoordinator: whisperModel,
                 incomingLinks: incomingLinks,
+                // A read refused because the account is scheduled for deletion brings up its notice.
+                services: .live(onAccountDeletionPending: { [accountDeletion] in
+                    Task { @MainActor in accountDeletion.pendingReported() }
+                }),
+                accountDeletion: accountDeletion,
                 onSignOut: {
                     // This phone stops getting the person's notifications before the sign-in goes.
                     PushRegistrar.shared.signOut()
@@ -161,6 +196,11 @@ struct SentiPocketApp: App {
                 authenticationEpoch: signIn.authenticationEpoch,
                 whisperModelCoordinator: whisperModel,
                 incomingLinks: incomingLinks,
+                // A read refused because the account is scheduled for deletion brings up its notice.
+                services: .live(onAccountDeletionPending: { [accountDeletion] in
+                    Task { @MainActor in accountDeletion.pendingReported() }
+                }),
+                accountDeletion: accountDeletion,
                 onSignOut: {
                     // This phone stops getting the person's notifications before the sign-in goes.
                     PushRegistrar.shared.signOut()
@@ -178,6 +218,8 @@ struct SentiPocketApp: App {
             #endif
         } else {
             PocketSignInView(phase: signIn.phase, offersApple: signIn.offersApple, send: signIn.send)
+                // After a deletion request went through, its date stays on screen while this phone signs out.
+                .overlay { AccountDeletionScheduledOverlay(coordinator: accountDeletion) }
         }
         #endif
     }
@@ -242,14 +284,16 @@ struct RootServices {
     /// The calendar and its Apple Calendar link, shown once the server answers their routes; nil (a preview) hides it.
     var calendar: (any RoomCalendarServing & CalendarFeedServing)?
 
-    /// The Senti API as you.
-    static func live() -> RootServices {
+    /// The Senti API as you. `onAccountDeletionPending` hears a read refused because the account is scheduled for
+    /// deletion (the read still fails as denied).
+    static func live(onAccountDeletionPending: @escaping @Sendable () -> Void = {}) -> RootServices {
         let apiURL = GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_API_URL", "SENTI_GATEWAY_URL"])
         let transport = HTTPSessionTransport(
             apiBaseURL: apiURL,
             urlSession: SentiHTTPTransportPolicy.protectedReadSession,
             streamingSession: SentiHTTPTransportPolicy.roomStreamSession,
-            tokenProvider: { SessionTokenStore.load() }
+            tokenProvider: { SessionTokenStore.load() },
+            onAccountDeletionPending: onAccountDeletionPending
         )
         // Typed room messages go straight to the Senti API as you, like the web; the gateway's confirm-and-receipt
         // flow stays for AI-drafted writes (the Pocket tab and voice replies).
@@ -363,6 +407,10 @@ struct AuthenticatedRootView: View {
     @Environment(\.scenePhase) private var rootScenePhase
     @ObservedObject private var whisperModelCoordinator: WhisperModelProvisioningCoordinator
     @ObservedObject private var incomingLinks: IncomingLinkInbox
+    /// The Settings row to delete the account, and the notice while a deletion is scheduled; nil (a preview) shows
+    /// neither. Kept, not watched, as the calendar is: the notice and the row watch it, so its answers draw them and
+    /// never the root (each draw of the root can make the room screen under it again).
+    private let accountDeletion: AccountDeletionCoordinator?
     @State private var presentsNewRoom = false
     @State private var presentsSettings = false
     /// The room on screen, the root of the stack; nil shows your rooms. Breakouts push onto `roomPath`.
@@ -414,6 +462,7 @@ struct AuthenticatedRootView: View {
         whisperModelCoordinator: WhisperModelProvisioningCoordinator,
         incomingLinks: IncomingLinkInbox,
         services: RootServices = .live(),
+        accountDeletion: AccountDeletionCoordinator? = nil,
         onSignOut: @escaping @MainActor () -> Void,
         onReauthenticationRequired: @escaping @MainActor @Sendable (UInt64) -> Void,
         onSessionSelectionChanged: @escaping @MainActor (UInt64, String?) -> Void = { _, _ in }
@@ -521,6 +570,7 @@ struct AuthenticatedRootView: View {
         ))
         _whisperModelCoordinator = ObservedObject(wrappedValue: whisperModelCoordinator)
         _incomingLinks = ObservedObject(wrappedValue: incomingLinks)
+        self.accountDeletion = accountDeletion
         self.roomTransport = services.room
         self.ticketsTransport = services.tickets
         self.admissionsTransport = services.admissions
@@ -622,6 +672,17 @@ struct AuthenticatedRootView: View {
             .offset(x: drawerOpen ? Self.drawerWidth : 0)
         }
         .pocketCanvas()
+        // While the account is scheduled for deletion, its notice is all there is.
+        .overlay {
+            if let accountDeletion {
+                AccountDeletionPendingOverlay(
+                    coordinator: accountDeletion,
+                    onShown: closeForDeletionNotice,
+                    onContinue: resumeAfterKeepingAccount,
+                    onSignOut: onSignOut
+                )
+            }
+        }
         // The logo at launch, while your rooms load underneath (Carter, #55287).
         .overlay { LaunchSplash(isReady: roomListSettled) }
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: drawerOpen)
@@ -768,7 +829,8 @@ struct AuthenticatedRootView: View {
                 onSignOut: {
                     presentsSettings = false
                     onSignOut()
-                }
+                },
+                accountDeletion: accountDeletion
             )
         }
         .modifier(RoomFolderSheets(center: roomFolders))
@@ -823,6 +885,8 @@ struct AuthenticatedRootView: View {
             }
             if registersPush { Task { await PushRegistrar.shared.start() } }
             openPendingLinkIfReady()
+            // Whether this account can be deleted here, and whether a deletion is already scheduled.
+            accountDeletion?.start()
         }
         .onDisappear {
             InAppBanner.shared.isHosted = false
@@ -839,6 +903,28 @@ struct AuthenticatedRootView: View {
     @MainActor
     private func invalidateProtectedAuthentication() {
         revocationRelay.invalidateAuthentication()
+    }
+
+    /// Puts away every sheet and the side panel, so the deletion notice is all that shows.
+    @MainActor
+    private func closeForDeletionNotice() {
+        presentsNotifications = false
+        presentsCallLog = false
+        presentsWaiting = false
+        presentsSettings = false
+        presentsNewRoom = false
+        presentsPocket = false
+        presentsActivity = false
+        if roomFolders.sheet != nil { roomFolders.sheet = nil }
+        closeDrawer()
+    }
+
+    /// The account was kept: the reads the notice covered are made again.
+    @MainActor
+    private func resumeAfterKeepingAccount() {
+        sessions.send(.refreshSessions)
+        Task { await notifications.refresh(force: true) }
+        Task { await waiting.refresh() }
     }
 
     /// Opens a Senti link in the app: the room, at the message it names, with its ticket or agent requests on top.
@@ -1009,6 +1095,7 @@ struct AuthenticatedRootView: View {
                 presentsSettings = true
                 Task { await directMessages.refresh() }
                 Task { await calendar.refresh(probeRoom: calendarProbeRoom) }
+                accountDeletion?.refresh()
             },
             onNewRoom: roomSender is any RoomCreating ? {
                 closeDrawer()

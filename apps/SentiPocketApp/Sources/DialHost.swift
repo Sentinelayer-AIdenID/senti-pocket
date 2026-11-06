@@ -318,6 +318,9 @@ final class DialHost: ObservableObject {
         authenticated = false
     }
 
+    /// The session calls are bound to, if any.
+    var selectedSession: String? { selectedSessionId }
+
     /// Bind PushKit registration and dial hydration to the exact session selected from SessionListCoordinator's
     /// current authorized row allowlist. Nil or a selection change cancels the old in-flight flow and registrar.
     func selectSession(_ sessionId: String?) {
