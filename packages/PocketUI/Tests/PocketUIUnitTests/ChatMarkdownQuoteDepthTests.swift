@@ -231,6 +231,23 @@ final class ChatMarkdownQuoteDepthLayoutTests: XCTestCase {
                                  "four times the lines make about four times the work")
     }
 
+    /// For the record (printed, not bounded: time varies by runner): the real view laid out fresh at 200 levels, and
+    /// at the most text the parser reads, all of it four quotes deep, once as short paragraphs and once as lines from
+    /// deeper quotes (each its own line in the fourth quote).
+    func test_print_the_real_view_at_two_hundred_levels_and_at_the_most_the_parser_reads() {
+        func filled(_ line: String) -> String {
+            let count = (ChatMarkdown.maximumParsedCharacters - 1) / (line.count + 1)
+            return Array(repeating: line, count: count).joined(separator: "\n")
+        }
+        let paragraphs = filled(">>>> x\n>>>>")
+        let deeper = filled(">>>>>>>> x")
+        XCTAssertLessThanOrEqual(paragraphs.count, ChatMarkdown.maximumParsedCharacters)
+        XCTAssertLessThanOrEqual(deeper.count, ChatMarkdown.maximumParsedCharacters)
+        print("QUOTEDEPTH real view 200 levels: \(realMilliseconds(ChatMarkdownQuoteDepthTests.nested(200))) ms; "
+            + "\(paragraphs.count) chars of short paragraphs four deep: \(realMilliseconds(paragraphs)) ms; "
+            + "\(deeper.count) chars of deeper lines: \(realMilliseconds(deeper)) ms")
+    }
+
     /// 50 and 200 levels make at most twice the layout work of four levels: every line past the fourth sits in the
     /// fourth quote, and no level is added for it.
     func test_fifty_and_two_hundred_levels_make_about_the_work_of_four() {
