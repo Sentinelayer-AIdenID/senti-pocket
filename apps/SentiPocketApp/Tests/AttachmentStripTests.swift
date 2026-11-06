@@ -14,7 +14,13 @@ final class AttachmentStripTests: XCTestCase {
         context.fill(CGRect(x: 0, y: 0, width: 40, height: 30))
     }
 
-    private func room(photos: Int) -> RoomChatPresentationState {
+    /// A wide photo, four times as wide as tall: scaled to fill a square, it spills furthest past it.
+    private static let panorama: Data = UIGraphicsImageRenderer(size: CGSize(width: 400, height: 100)).pngData { context in
+        UIColor.systemOrange.setFill()
+        context.fill(CGRect(x: 0, y: 0, width: 400, height: 100))
+    }
+
+    private func room(photos: Int, preview: Data = AttachmentStripTests.png) -> RoomChatPresentationState {
         let chips = (1...photos).map {
             RoomAttachmentChip(attachmentId: "att-\($0)", filename: "photo-\($0).jpg", kind: .image)
         }
@@ -22,13 +28,13 @@ final class AttachmentStripTests: XCTestCase {
                                            authorName: "review-agent", isHuman: false, text: "Photos from the site.",
                                            timestamp: "2026-11-05T12:00:00.000000+00:00", attachments: chips)
         var previews: [String: Data] = [:]
-        for chip in chips { previews[chip.attachmentId] = Self.png }
+        for chip in chips { previews[chip.attachmentId] = preview }
         return RoomChatPresentationState(sessionId: "room-strip", title: "Site", messages: [message], connection: .live,
                                          attachmentPreviews: previews)
     }
 
-    private func host(photos: Int) throws -> UIWindow {
-        let state = room(photos: photos)
+    private func host(photos: Int, preview: Data = AttachmentStripTests.png) throws -> UIWindow {
+        let state = room(photos: photos, preview: preview)
         return try HostedSummary.host(NavigationStack { RoomChatView(state: state) { _ in } })
     }
 
@@ -68,6 +74,25 @@ final class AttachmentStripTests: XCTestCase {
             assertSideBySide(photos)
             XCTAssertEqual(photos.map(\.accessibilityLabel), (1...count).map { "photo-\($0).jpg, \($0) of \(count)" })
             HostedSummary.close(window)
+        }
+    }
+
+    /// Each thumbnail's tap and VoiceOver area is its own square: wide photos do not reach into their neighbours' (they
+    /// did, scaled to fill: a tap near a photo's right edge could open the next one).
+    func test_neighbouring_thumbnails_tap_areas_do_not_overlap_even_for_wide_photos() throws {
+        let window = try host(photos: 3, preview: Self.panorama)
+        defer { HostedSummary.close(window) }
+        XCTAssertNotNil(HostedSummary.wait(for: "pocket.room.attachment.strip.photo", in: window), "the photos show in a strip")
+        HostedSummary.pump(0.5)
+        let photos = stripPhotos(in: window)
+        XCTAssertEqual(photos.count, 3)
+        for photo in photos {
+            XCTAssertEqual(photo.accessibilityFrame.width, photo.accessibilityFrame.height, accuracy: 1,
+                           "a thumbnail's area is its square, nothing spilling past it")
+        }
+        for (left, right) in zip(photos, photos.dropFirst()) {
+            XCTAssertFalse(left.accessibilityFrame.intersects(right.accessibilityFrame),
+                           "neighbouring thumbnails' tap areas do not overlap")
         }
     }
 
