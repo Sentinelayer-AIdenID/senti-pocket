@@ -41,6 +41,8 @@ final class FriendlyWordsUITests: XCTestCase {
         for word in words(in: app) {
             XCTAssertFalse(word.localizedCaseInsensitiveContains("session"), "the list still says sessions: \(word)")
         }
+        let drawer = app.buttons["pocket.drawer.open"]
+        XCTAssertTrue(drawer.label.hasPrefix("Chats and settings"), "the side panel button to VoiceOver: \(drawer.label)")
         openSidePanel(app)
         let newChat = app.buttons["pocket.drawer.newRoom"]
         XCTAssertTrue(newChat.exists)

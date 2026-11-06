@@ -207,6 +207,17 @@ final class FriendlyWordsHostedTests: XCTestCase {
         }
     }
 
+    // MARK: The Pocket sheet
+
+    /// With no chat open the Pocket sheet says chat, never session or authorization.
+    func test_the_pocket_sheet_with_no_chat_open_says_chat() {
+        XCTAssertEqual(PocketIdleWords.title, "Choose a chat")
+        for words in [PocketIdleWords.title, PocketIdleWords.message] {
+            XCTAssertFalse(words.localizedCaseInsensitiveContains("session"), words)
+            XCTAssertFalse(words.localizedCaseInsensitiveContains("authoriz"), words)
+        }
+    }
+
     // MARK: The ring's count
 
     /// The count on the ring's pill stays inside the pill at every text size, the largest too: digits taller than the
