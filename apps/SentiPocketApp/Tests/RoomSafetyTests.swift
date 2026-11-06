@@ -1083,7 +1083,7 @@ final class RoomSafetyTests: XCTestCase {
     /// New room, New agent's chat, Invite (by name or by link) and Summarize send nothing without the signed-in
     /// account's consent, whatever the screen did; once it agrees, they go.
     func test_requests_that_share_with_ai_are_never_made_without_the_consent() async throws {
-        let consent = AIConsent(account: nil)
+        let consent = AIConsent(account: "sub:consent-test", defaults: temporaryDefaults())
         AIConsentAsker.shared.consent = consent
         defer { AIConsentAsker.shared.consent = nil }
         SafetyURLProtocol.reset(["POST /api/v1/sessions/room_1/members": (201, "{}")])

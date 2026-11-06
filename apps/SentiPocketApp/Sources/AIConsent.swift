@@ -129,8 +129,11 @@ final class AIConsentAsker {
 
     /// The check under every write that shares with AI, read when its request is made: true while the signed-in account
     /// (`consent`, set by the signed-in screens) has not agreed. The screens ask first; this refuses what slips past them.
-    /// Nothing signed in to ask for (previews, tests of a request alone) refuses nothing.
-    var refusesWrites: Bool { consent?.asks ?? false }
+    /// No account to ask for (previews, a signed-out root, tests of a request alone) refuses nothing.
+    var refusesWrites: Bool {
+        guard let consent, consent.account != nil else { return false }
+        return consent.asks
+    }
 
     /// Resumes a wait once, whichever answer comes first, an answer given before the wait began included.
     @MainActor

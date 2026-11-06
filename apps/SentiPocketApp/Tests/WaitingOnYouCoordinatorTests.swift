@@ -121,7 +121,9 @@ final class WaitingOnYouCoordinatorTests: XCTestCase {
     /// The check under Waiting on you's answer: without the signed-in account's consent to share with AI nothing is
     /// posted; once it agrees, the same answer goes.
     func test_an_answer_is_never_posted_without_the_ai_consent() async {
-        let consent = AIConsent(account: nil)
+        let suite = "consent-\(UUID().uuidString)"
+        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        let consent = AIConsent(account: "sub:consent-test", defaults: UserDefaults(suiteName: suite)!)
         AIConsentAsker.shared.consent = consent
         defer { AIConsentAsker.shared.consent = nil }
         let sender = RecordingSender()

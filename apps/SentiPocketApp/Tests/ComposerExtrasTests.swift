@@ -120,7 +120,9 @@ final class ComposerExtrasTests: XCTestCase {
     /// The check under every ticket write: without the signed-in account's consent to share with AI the answer is not
     /// posted, whatever the screen did; once it agrees, it is.
     func test_a_ticket_write_is_never_sent_without_the_ai_consent() async {
-        let consent = AIConsent(account: nil)
+        let suite = "consent-\(UUID().uuidString)"
+        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        let consent = AIConsent(account: "sub:consent-test", defaults: UserDefaults(suiteName: suite)!)
         AIConsentAsker.shared.consent = consent
         defer { AIConsentAsker.shared.consent = nil }
         let ticket = RoomTicket(

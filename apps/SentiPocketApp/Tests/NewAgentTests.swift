@@ -163,7 +163,9 @@ final class NewAgentTests: XCTestCase {
     func test_an_agent_is_never_started_without_the_ai_consent() async throws {
         let ledger = temporaryLedger()
         defer { remove(ledger) }
-        let consent = AIConsent(account: nil)
+        let suite = "consent-\(UUID().uuidString)"
+        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        let consent = AIConsent(account: "sub:consent-test", defaults: UserDefaults(suiteName: suite)!)
         AIConsentAsker.shared.consent = consent
         defer { AIConsentAsker.shared.consent = nil }
         let mint = ScriptedMint(models: models)
