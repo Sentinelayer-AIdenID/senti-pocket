@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 
 /// Where the reader is in a room, read from the scroll view's own geometry (iOS 18 and later, `RoomChatView`).
 ///
