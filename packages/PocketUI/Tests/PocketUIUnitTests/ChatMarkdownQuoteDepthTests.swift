@@ -81,6 +81,57 @@ final class ChatMarkdownQuoteDepthTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - Code is never touched
+
+    /// A merge conflict, as code: lines that start with "<" and ">" that are not quote marks.
+    private static let conflict = ["<<<<<<< HEAD", "ours", "=======", "theirs", ">>>>>>> feature"]
+
+    private static func fenced(_ lines: [String], prefix: String = "") -> [String] {
+        (["```diff"] + lines + ["```"]).map { prefix + $0 }
+    }
+
+    /// The text of every code block in `blocks`, quotes included, in order.
+    private static func code(_ blocks: [ChatMarkdownBlock]) -> [String] {
+        blocks.flatMap { block -> [String] in
+            switch block {
+            case .code(_, let text): return [text]
+            case .quote(let inner): return code(inner)
+            default: return []
+            }
+        }
+    }
+
+    func test_code_at_the_top_level_comes_out_exactly_as_written() {
+        let blocks = ChatMarkdown.parse(Self.fenced(Self.conflict).joined(separator: "\n"))
+        XCTAssertEqual(Self.code(blocks), [Self.conflict.joined(separator: "\n")])
+    }
+
+    func test_code_in_a_quote_two_deep_comes_out_exactly_as_written() {
+        let blocks = ChatMarkdown.parse(Self.fenced(Self.conflict, prefix: "> > ").joined(separator: "\n"))
+        XCTAssertEqual(Self.depth(blocks), 2)
+        XCTAssertEqual(Self.code(blocks), [Self.conflict.joined(separator: "\n")])
+    }
+
+    func test_code_in_a_list_item_keeps_every_line_as_written() {
+        let text = (["- the merge:"] + Self.fenced(Self.conflict, prefix: "  ")).joined(separator: "\n")
+        XCTAssertEqual(Self.code(ChatMarkdown.parse(text)), [Self.conflict.map { "  " + $0 }.joined(separator: "\n")],
+                       "each line of the code exactly as written, its indent included")
+    }
+
+    /// Six deep, past the cap: the code is still one code block, in the fourth quote, marked two levels deeper, its
+    /// lines exactly as written after their quote's marks (the ">>>>>>> feature" line keeps its own ">").
+    func test_code_in_a_quote_six_deep_stays_a_code_block_exactly_as_written() {
+        let text = (["> > > > Four deep."] + Self.fenced(Self.conflict, prefix: String(repeating: "> ", count: 6)))
+            .joined(separator: "\n")
+        let blocks = ChatMarkdown.parse(text)
+        XCTAssertEqual(Self.depth(blocks), ChatMarkdown.maximumQuoteDepth)
+        XCTAssertEqual(Self.code(blocks), [Self.conflict.joined(separator: "\n")])
+        XCTAssertEqual(blocks, [.quote([.quote([.quote([.quote([
+            .paragraph("Four deep."), .deeperQuote(levels: 2, text: ""),
+            .code(language: "diff", text: Self.conflict.joined(separator: "\n"))
+        ])])])])])
+    }
 }
 
 #if canImport(AppKit) && canImport(SwiftUI)

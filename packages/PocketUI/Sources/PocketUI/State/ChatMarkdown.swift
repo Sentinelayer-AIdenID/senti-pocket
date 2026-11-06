@@ -207,14 +207,26 @@ public enum ChatMarkdown {
 
             if trimmed.hasPrefix(">"), quoteDepth >= maximumQuoteDepth {
                 // Already in the deepest quote: a deeper line is a line of its own here, marked by how much deeper.
+                // Only its own quote's marks are taken off (one ">" and one space for each level), never a ">" of its
+                // text; and a fenced block opened there stays a code block, its lines exactly as written after their
+                // quote's marks (a ">>>>>>> feature" line of a merge conflict included).
                 flushParagraph()
-                var deeper = 0
-                var rest = Substring(trimmed)
-                while rest.hasPrefix(">") {
-                    deeper += 1
-                    rest = rest.dropFirst().drop { $0 == " " }
+                let (deeper, rest) = quoteMarks(trimmed)
+                if let fence = codeFence(rest.trimmingCharacters(in: .whitespaces)) {
+                    var body: [String] = []
+                    index += 1
+                    while index < lines.count, let inner = dropQuoteMarks(lines[index], count: deeper) {
+                        let candidate = inner.trimmingCharacters(in: .whitespaces)
+                        index += 1
+                        let closes = candidate.hasPrefix(fence.marker) && candidate.allSatisfy { $0 == fence.marker.first }
+                        if closes { break }
+                        body.append(inner)
+                    }
+                    blocks.append(.deeperQuote(levels: deeper, text: ""))
+                    blocks.append(.code(language: fence.language, text: body.joined(separator: "\n")))
+                    continue
                 }
-                if !rest.isEmpty { blocks.append(.deeperQuote(levels: deeper, text: String(rest))) }
+                if !rest.isEmpty { blocks.append(.deeperQuote(levels: deeper, text: rest)) }
                 index += 1
                 continue
             }
@@ -258,6 +270,30 @@ public enum ChatMarkdown {
         }
         flushParagraph()
         return blocks
+    }
+
+    /// How many block-quote marks lead `line` (each a ">" and at most one space after it), and the rest.
+    private static func quoteMarks(_ line: String) -> (count: Int, rest: String) {
+        var count = 0
+        var rest = Substring(line)
+        while rest.hasPrefix(">") {
+            count += 1
+            rest = rest.dropFirst()
+            if rest.hasPrefix(" ") { rest = rest.dropFirst() }
+        }
+        return (count, String(rest))
+    }
+
+    /// `line` without its first `count` block-quote marks (up to three spaces may lead each), or nil when it has fewer.
+    private static func dropQuoteMarks(_ line: String, count: Int) -> String? {
+        var rest = Substring(line)
+        for _ in 0..<count {
+            let indent = rest.prefix { $0 == " " }
+            guard indent.count <= 3, rest.dropFirst(indent.count).hasPrefix(">") else { return nil }
+            rest = rest.dropFirst(indent.count + 1)
+            if rest.hasPrefix(" ") { rest = rest.dropFirst() }
+        }
+        return String(rest)
     }
 
     private static func codeFence(_ line: String) -> (marker: String, language: String?)? {
