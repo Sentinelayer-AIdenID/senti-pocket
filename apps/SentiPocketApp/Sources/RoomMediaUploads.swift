@@ -1,4 +1,5 @@
 import Foundation
+import PocketContracts
 import PocketSyncClient
 import PocketUI
 import UIKit
@@ -20,8 +21,29 @@ protocol RoomMediaUploading: Sendable {
     func put(file: URL, to target: RoomMediaUploadTarget, progress: @escaping @Sendable (Int64, Int64) -> Void) async throws
     func completeUpload(sessionId: String, attachmentId: String) async throws -> RoomMediaAttachment
     func postMessage(sessionId: String, text: String, attachments: [RoomMediaAttachment], clientId: String) async throws
+    /// Posts a reply in a thread naming its files (sentinelayer-api #1135), with what was typed (which may be nothing).
+    /// Never sends a reply with no words and no files.
+    func postReply(sessionId: String, to target: RoomMediaReplyTarget, text: String?, attachments: [RoomMediaAttachment],
+                   idempotencyKey: String) async throws -> RoomMediaReplyOutcome
     /// Takes back an upload that was never sent in a message. Best effort: an unsent upload also expires on its own.
     func deleteUpload(sessionId: String, attachmentId: String) async
+}
+
+extension RoomMediaUploading {
+    /// An uploader that cannot post replies takes no files on one: they wait for "Send as a new message".
+    func postReply(sessionId: String, to target: RoomMediaReplyTarget, text: String?, attachments: [RoomMediaAttachment],
+                   idempotencyKey: String) async throws -> RoomMediaReplyOutcome {
+        .filesNotTaken(replyPosted: false)
+    }
+}
+
+/// What the API did with a reply's photos and files.
+enum RoomMediaReplyOutcome: Equatable {
+    /// The reply is posted, carrying them.
+    case posted
+    /// The API took none: it refuses `attachments` on a reply (nothing posted), or (an API from before them) ignored
+    /// them and posted the reply with its words alone (`replyPosted`). The files can go as a new message.
+    case filesNotTaken(replyPosted: Bool)
 }
 
 /// The API half goes through the room's own authenticated sender; the bytes go through `RoomMediaPutSession`, which
@@ -51,6 +73,50 @@ struct HTTPRoomMediaUploader: RoomMediaUploading {
         _ = try await post(sessionId: sessionId, path: "human-message", key: clientId, body: [
             "text": text, "clientId": clientId, "attachments": attachments.map(\.reference)
         ])
+    }
+
+    /// `POST /api/v1/sessions/{id}/actions`, a `reply` carrying `attachments` (the message's reference shape), as the
+    /// web replies. The note is left out when nothing was typed: the API takes a reply of files alone, and refuses one
+    /// with neither (422), which is never sent. Refusals are the message route's own, read as a message's are.
+    func postReply(sessionId: String, to target: RoomMediaReplyTarget, text: String?, attachments: [RoomMediaAttachment],
+                   idempotencyKey: String) async throws -> RoomMediaReplyOutcome {
+        let note = (text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !note.isEmpty || !attachments.isEmpty, note.unicodeScalars.count <= RoomActionRequest.replyLimit,
+              target.sequenceId > 0 else {
+            throw RoomSendError.rejected
+        }
+        var body: [String: Any] = [
+            "actionType": "reply",
+            "targetSequenceId": target.sequenceId,
+            "attachments": attachments.map(\.reference),
+            "idempotencyKey": idempotencyKey
+        ]
+        if let reply = target.replyId { body["targetActionId"] = reply }
+        if !note.isEmpty { body["note"] = note }
+        let (data, http) = try await api.postAnswer(sessionId: sessionId, path: "actions", idempotencyKey: idempotencyKey,
+                                                    body: body)
+        switch http.statusCode {
+        case 200..<300:
+            // The API that takes them answers with the reply naming every one; an older API took the reply's words and
+            // dropped its files, and its answer names none.
+            let named = Set(((try? JSONDecoder().decode(JSONValue.self, from: data))?["action"]?["attachments"]?.arrayValue ?? [])
+                .compactMap { $0["attachmentId"]?.stringValue })
+            return attachments.allSatisfy({ named.contains($0.attachmentId) }) ? .posted : .filesNotTaken(replyPosted: true)
+        case 401: throw RoomSendError.reauthenticationRequired
+        case 422 where Self.refusesReplyFiles(data): return .filesNotTaken(replyPosted: false)
+        case 403, 404: throw RoomSendError.notAllowed
+        default: throw RoomMediaUploadError.refused(RoomMediaAPIRefusal(status: http.statusCode, body: data))
+        }
+    }
+
+    /// An API that does not know `attachments` on a reply and says so: its validation names the field as one it
+    /// forbids (a 422 `extra_forbidden` at `attachments`).
+    static func refusesReplyFiles(_ body: Data) -> Bool {
+        guard let details = (try? JSONDecoder().decode(JSONValue.self, from: body))?["detail"]?.arrayValue else { return false }
+        return details.contains { detail in
+            detail["type"]?.stringValue == "extra_forbidden"
+                && (detail["loc"]?.arrayValue ?? []).contains { $0.stringValue == "attachments" }
+        }
     }
 
     /// `DELETE /api/v1/sessions/{id}/attachments/{attachmentId}`: the uploader takes back an attachment no message has
@@ -230,10 +296,20 @@ final class RoomMediaUploadCoordinator: ObservableObject {
     var onPreviewReady: (@MainActor (_ attachmentId: String, _ data: Data) -> Void)?
     /// The message posted: read the room now.
     var onPosted: (@MainActor () -> Void)?
+    /// A reply with files posted, with its words: its thread and the room read it now (the card goes once they have),
+    /// and its saved words go.
+    var onReplyPosted: (@MainActor (RoomMediaReplyTarget, String?) async -> Void)?
+    /// A reply's words reached the room in a new message carrying its files ("Send as a new message"): their saved
+    /// draft in its thread goes.
+    var onReplyDraftSent: (@MainActor (RoomMediaReplyTarget, String) -> Void)?
+    /// Whether the API takes files on a reply, as the room's reads show; an answer that drops them says no.
+    var replyAttachments: RoomReplyAttachmentSupport = .unknown
     /// The sign-in was refused (it expired): the app asks for it again. The file keeps its place for a retry.
     var onReauthenticationRequired: (@MainActor () -> Void)?
 
     static let progressInterval: TimeInterval = 0.1
+    /// The room's own composer's tray (a thread's is its message's sequence, never 0).
+    static let roomTray: Int64 = 0
     /// How long a posted message waits for the room to show it before its card goes anyway.
     static let echoGrace: TimeInterval = 20
     /// What a file or message restored after the app was closed says until it is retried.
@@ -311,6 +387,15 @@ final class RoomMediaUploadCoordinator: ObservableObject {
         /// Its post was asked for and no refusal came back: whether it reached the room is not known until the room
         /// shows it. Discarded then, its files are never taken back on the server.
         var mayBePosted = false
+        /// A reply in a thread; nil for a message in the room.
+        var replyTo: RoomMediaReplyTarget?
+        /// The API took no files on this reply: they wait, and can go as a new message.
+        var filesRefusedInReply = false
+        /// The API took the reply without its files: its words went in it, so a new message carries the files alone.
+        var replyPosted = false
+        /// A new message carrying a reply's files and the words typed in its thread: once it posts, the thread's saved
+        /// draft of those words goes.
+        var draftOrigin: RoomMediaReplyTarget?
 
         var canRetry: Bool {
             if case .failed(_, let canRetry) = status { return canRetry }
@@ -329,7 +414,13 @@ final class RoomMediaUploadCoordinator: ObservableObject {
     private let discard: (RoomMediaSource) -> Void
     private let outboxRoot: URL
     private var items: [String: Item] = [:]
-    private var tray: [String] = []
+    /// Each composer's files waiting to be sent: the room's (`roomTray`) and each thread's, under its message's sequence.
+    /// A file picked in a thread never shows in, or goes with, the room's box, nor the other way round.
+    private var trays: [Int64: [String]] = [:]
+    /// Where the next picked files go: the composer whose attach sheet opened the picker.
+    private var pickerTray = RoomMediaUploadCoordinator.roomTray
+    /// Each thread's own board (its tray and its notices), made when the thread first shows.
+    private var threadBoards: [Int64: RoomMediaBoard] = [:]
     private var outgoing: [Outgoing] = []
     private var keepAliveToken: Int?
     private var keepAliveGeneration = 0
@@ -368,7 +459,8 @@ final class RoomMediaUploadCoordinator: ObservableObject {
         self.outboxRoot = outboxRoot
         self.board = RoomMediaBoard(perMessageLimit: RoomMediaRules.attachmentsPerMessage, canUseCamera: canUseCamera,
                                     canPaste: canPaste)
-        board.perform = { [weak self] intent in self?.perform(intent) }
+        board.perform = { [weak self] intent in self?.perform(intent, tray: Self.roomTray) }
+        board.threadBoard = { [weak self] sequenceId in self?.threadBoard(sequenceId) }
         // Going to the background with uploads on their way asks for time again (a grant that ran out is gone).
         _ = NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
@@ -380,6 +472,33 @@ final class RoomMediaUploadCoordinator: ObservableObject {
 
     /// Whether this room can take files from this phone.
     var canUpload: Bool { uploader != nil }
+
+    /// A thread's own board: its tray, its notices, and the cards on their way (the thread shows its own replies').
+    func threadBoard(_ sequenceId: Int64) -> RoomMediaBoard? {
+        guard sequenceId > 0 else { return nil }
+        if let existing = threadBoards[sequenceId] { return existing }
+        let made = RoomMediaBoard(perMessageLimit: RoomMediaRules.attachmentsPerMessage, canUseCamera: board.canUseCamera,
+                                  canPaste: board.canPaste)
+        made.perform = { [weak self] intent in self?.perform(intent, tray: sequenceId) }
+        threadBoards[sequenceId] = made
+        made.setTray(rows(inTray: sequenceId))
+        made.setOutgoing(outgoingRows())
+        return made
+    }
+
+    /// How many more files the composer that opened the picker can take.
+    var pickerRemaining: Int {
+        max(0, RoomMediaRules.attachmentsPerMessage - (trays[pickerTray]?.count ?? 0))
+    }
+
+    private func trayBoard(_ tray: Int64) -> RoomMediaBoard {
+        tray == Self.roomTray ? board : (threadBoards[tray] ?? board)
+    }
+
+    /// The tray a file waits in, if it waits in one.
+    private func trayHolding(_ id: String) -> Int64? {
+        trays.first { $0.value.contains(id) }?.key
+    }
 
     /// The room's posting rights as they are now: a viewer made a contributor can upload without relaunching.
     func updateUploader(_ uploader: (any RoomMediaUploading)?) {
@@ -429,7 +548,7 @@ final class RoomMediaUploadCoordinator: ObservableObject {
         }
         for message in outgoing { message.postTask?.cancel() }
         items = [:]
-        tray = []
+        trays = [:]
         outgoing = []
         publish()
     }
@@ -439,32 +558,47 @@ final class RoomMediaUploadCoordinator: ObservableObject {
     }
 
     func perform(_ intent: RoomMediaIntent) {
+        perform(intent, tray: Self.roomTray)
+    }
+
+    /// What a composer asked for, from its own tray: the room's, or a thread's.
+    func perform(_ intent: RoomMediaIntent, tray: Int64) {
         switch intent {
         case .choose(let source):
+            pickerTray = tray
             pickers.source = source
         case .remove(let itemId):
             removeFromTray(itemId)
         case .retryItem(let itemId):
             retryItem(itemId)
         case .send(let text):
-            send(text: text)
+            send(text: text, from: tray)
+        case .sendReply(let text, let target):
+            send(text: text, replyTo: target, from: tray)
+        case .sendAsMessage(let clientId):
+            sendAsMessage(clientId)
         case .retry(let clientId):
             retry(clientId)
         case .cancel(let clientId):
             cancel(clientId)
         case .dismissNotice:
-            board.setNotice(nil)
+            trayBoard(tray).setNotice(nil)
         }
     }
 
     // MARK: - Adding
 
-    /// Files picked for the next message. Each is checked at once (type, size, how many), shows in the tray, and
-    /// starts uploading.
+    /// Files picked for the next message or reply, in the tray of the composer that opened the picker.
     func add(_ sources: [RoomMediaSource]) {
+        add(sources, to: pickerTray)
+    }
+
+    /// Files picked for the next message (or a thread's next reply). Each is checked at once (type, size, how many),
+    /// shows in its composer's tray, and starts uploading.
+    func add(_ sources: [RoomMediaSource], to tray: Int64) {
         var refusals: [String] = []
         for source in sources {
-            guard tray.count < RoomMediaRules.attachmentsPerMessage else {
+            guard (trays[tray]?.count ?? 0) < RoomMediaRules.attachmentsPerMessage else {
                 refusals.append(RoomMediaRefusal.tooMany(limit: RoomMediaRules.attachmentsPerMessage).message)
                 discard(source)
                 continue
@@ -479,17 +613,17 @@ final class RoomMediaUploadCoordinator: ObservableObject {
             RoomMediaFiles.protect(source.file)
             let item = Item(id: makeId(), source: source, kind: kind, sizeBytes: size)
             items[item.id] = item
-            tray.append(item.id)
+            trays[tray, default: []].append(item.id)
             persist(item)
             start(item)
         }
-        board.setNotice(Self.notice(refusals))
+        trayBoard(tray).setNotice(Self.notice(refusals))
         publish()
     }
 
     /// Something picked that could not be added (a picker that could not read a file).
     func refuse(_ refusal: RoomMediaRefusal) {
-        board.setNotice(refusal.message)
+        trayBoard(pickerTray).setNotice(refusal.message)
     }
 
     /// Refused before anything is done: a type the room never takes, an empty file, or one too large. Photos the phone
@@ -614,12 +748,12 @@ final class RoomMediaUploadCoordinator: ObservableObject {
             postReadyMessages()
         } catch {
             guard !item.withdrawn, items[id] === item, !Task.isCancelled, !(error is CancellationError) else { return }
-            if let index = tray.firstIndex(of: id), let refusal = Self.refusal(for: error, filename: item.source.filename) {
+            if let tray = trayHolding(id), let refusal = Self.refusal(for: error, filename: item.source.filename) {
                 // Refused by the room's rules (too large once converted), or not a picture the phone could read or
                 // clean: out of the tray, with why.
-                tray.remove(at: index)
+                trays[tray]?.removeAll { $0 == id }
                 withdraw(item)
-                board.setNotice(refusal.message)
+                trayBoard(tray).setNotice(refusal.message)
                 publish()
                 return
             }
@@ -762,8 +896,8 @@ final class RoomMediaUploadCoordinator: ObservableObject {
     }
 
     private func removeFromTray(_ id: String) {
-        guard let index = tray.firstIndex(of: id), let item = items[id] else { return }
-        tray.remove(at: index)
+        guard let tray = trayHolding(id), let item = items[id] else { return }
+        trays[tray]?.removeAll { $0 == id }
         withdraw(item)
         publish()
     }
@@ -801,20 +935,29 @@ final class RoomMediaUploadCoordinator: ObservableObject {
 
     // MARK: - Sending
 
-    /// The tray becomes one message, shown at once; it posts once every file is stored.
-    private func send(text: String) {
-        guard !tray.isEmpty else { return }
+    /// What a reply's card says when its words are over a reply's limit.
+    static let replyTooLong = "Too long for a reply (the limit is 4,000 characters)."
+
+    /// A composer's tray becomes one message (or, `replyTo` set, one reply in that thread), shown at once; it posts
+    /// once every file is stored.
+    private func send(text: String, replyTo: RoomMediaReplyTarget? = nil, from tray: Int64) {
+        guard let itemIds = trays[tray], !itemIds.isEmpty else { return }
         let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let message = Outgoing(clientId: RoomChatCoordinator.makeClientId(), text: words.isEmpty ? nil : words,
-                               itemIds: tray, status: .uploading)
-        tray = []
+        var message = Outgoing(clientId: RoomChatCoordinator.makeClientId(), text: words.isEmpty ? nil : words,
+                               itemIds: itemIds, status: .uploading)
+        message.replyTo = replyTo
+        if replyTo != nil, words.unicodeScalars.count > RoomActionRequest.replyLimit {
+            // Kept whole (only a reply cannot carry it): Discard takes the files back.
+            message.status = .failed(reason: Self.replyTooLong, canRetry: false)
+        }
+        trays[tray] = nil
         outgoing.append(message)
         for id in message.itemIds {
             guard let item = items[id] else { continue }
             persist(item)
             if case .failed(_, true) = item.phase { start(item) }
         }
-        board.setNotice(nil)
+        trayBoard(tray).setNotice(nil)
         updateMessageProgress()
         publish()
         postReadyMessages()
@@ -859,6 +1002,10 @@ final class RoomMediaUploadCoordinator: ObservableObject {
 
     private func post(_ clientId: String) {
         guard let uploader, let message = outgoing.first(where: { $0.clientId == clientId }) else { return }
+        if let target = message.replyTo {
+            postReply(clientId, to: target, with: uploader)
+            return
+        }
         let parts = message.itemIds.compactMap { items[$0] }
         let references = parts.compactMap(\.stored)
         let text = message.text ?? RoomMediaOutgoingRow.defaultText(for: parts.map(\.kind))
@@ -871,6 +1018,8 @@ final class RoomMediaUploadCoordinator: ObservableObject {
                 try await uploader.postMessage(sessionId: sessionId, text: text, attachments: references, clientId: clientId)
                 guard let self else { return }
                 self.setStatus(clientId, .sent)
+                // The words typed in a thread went in this message: their saved draft there goes.
+                if let origin = message.draftOrigin, let words = message.text { self.onReplyDraftSent?(origin, words) }
                 // Recorded as posted: if the app closes before the room shows it, it is not offered again as unsent.
                 for id in message.itemIds { if let item = self.items[id] { self.persist(item) } }
                 self.onPosted?()
@@ -889,6 +1038,90 @@ final class RoomMediaUploadCoordinator: ObservableObject {
             }
         }
         if let index = outgoing.firstIndex(where: { $0.clientId == clientId }) { outgoing[index].postTask = task }
+    }
+
+    /// Posts a reply with its files: the words as typed (none is fine with files), under a key made once from its
+    /// client id, so a retry is the same reply. An API known to take no files on a reply is not asked: the card says so
+    /// at once, and its files can go as a new message. Nor is a reply of files alone posted until the room's reads
+    /// show the API takes files: an older API would keep it as an empty reply.
+    private func postReply(_ clientId: String, to target: RoomMediaReplyTarget, with uploader: any RoomMediaUploading) {
+        guard let message = outgoing.first(where: { $0.clientId == clientId }) else { return }
+        guard replyAttachments != .unsupported, message.text != nil || replyAttachments == .supported else {
+            refuseFilesInReply(clientId, replyPosted: false)
+            return
+        }
+        let parts = message.itemIds.compactMap { items[$0] }
+        let references = parts.compactMap(\.stored)
+        let sessionId = self.sessionId
+        let key = Self.replyKey(clientId)
+        if let index = outgoing.firstIndex(where: { $0.clientId == clientId }) { outgoing[index].mayBePosted = true }
+        for part in parts { persist(part) }
+        let task = Task { [weak self] in
+            do {
+                let outcome = try await uploader.postReply(sessionId: sessionId, to: target, text: message.text,
+                                                           attachments: references, idempotencyKey: key)
+                guard let self else { return }
+                guard outcome == .posted else {
+                    if case .filesNotTaken(let replyPosted) = outcome {
+                        self.replyAttachments = .unsupported
+                        self.refuseFilesInReply(clientId, replyPosted: replyPosted)
+                        // The API took the words: they are in the thread now, and their saved draft goes.
+                        if replyPosted { await self.onReplyPosted?(target, message.text) }
+                    }
+                    return
+                }
+                self.replyAttachments = .supported
+                self.setStatus(clientId, .sent)
+                for id in message.itemIds { if let item = self.items[id] { self.persist(item) } }
+                // The thread and the room read it; the card goes once they show it.
+                await self.onReplyPosted?(target, message.text)
+                self.finish(clientId)
+            } catch {
+                guard let self, !Task.isCancelled else { return }
+                self.noteReauthentication(error)
+                if Self.wasRefused(error), let index = self.outgoing.firstIndex(where: { $0.clientId == clientId }) {
+                    self.outgoing[index].mayBePosted = false
+                    for id in message.itemIds { if let item = self.items[id] { self.persist(item) } }
+                }
+                self.setStatus(clientId, .failed(reason: Self.reason(for: error), canRetry: Self.canRetry(error)))
+            }
+        }
+        if let index = outgoing.firstIndex(where: { $0.clientId == clientId }) { outgoing[index].postTask = task }
+    }
+
+    /// The reply's key: the same for every try of it.
+    static func replyKey(_ clientId: String) -> String { "reply-media:" + clientId }
+
+    /// The API took no files on this reply: they wait on the card with why, to go as a new message or be discarded
+    /// (never dropped without a word). Where the API took the reply itself, they are never taken back on the server: an
+    /// answer that named none of them cannot prove none is in it, and an unsent upload expires on its own.
+    private func refuseFilesInReply(_ clientId: String, replyPosted: Bool) {
+        guard let index = outgoing.firstIndex(where: { $0.clientId == clientId }) else { return }
+        outgoing[index].mayBePosted = replyPosted
+        outgoing[index].filesRefusedInReply = true
+        outgoing[index].replyPosted = replyPosted
+        outgoing[index].status = .failed(reason: RoomMediaOutgoingRow.replyFilesRefused, canRetry: false)
+        for id in outgoing[index].itemIds { if let item = items[id] { persist(item) } }
+        publish()
+    }
+
+    /// A reply whose files the API did not take goes as a new message: its files (and its words, unless they went in
+    /// the reply already) under a client id of its own.
+    private func sendAsMessage(_ clientId: String) {
+        guard let index = outgoing.firstIndex(where: { $0.clientId == clientId }), outgoing[index].filesRefusedInReply else {
+            return
+        }
+        let reply = outgoing[index]
+        var message = Outgoing(clientId: RoomChatCoordinator.makeClientId(), text: reply.replyPosted ? nil : reply.text,
+                               itemIds: reply.itemIds, status: .uploading)
+        message.mayBePosted = reply.mayBePosted
+        // Words that did not go in the reply go in the message: once it posts, the thread's saved draft of them goes.
+        if message.text != nil { message.draftOrigin = reply.replyTo }
+        outgoing[index] = message
+        for id in message.itemIds { if let item = items[id] { persist(item) } }
+        updateMessageProgress()
+        publish()
+        postReadyMessages()
     }
 
     private func setStatus(_ clientId: String, _ status: RoomMediaOutgoingRow.Status) {
@@ -975,6 +1208,7 @@ final class RoomMediaUploadCoordinator: ObservableObject {
         )
         entry.withdrawn = item.withdrawn ? true : nil
         entry.attachmentId = item.attachmentId == item.id ? nil : item.attachmentId
+        entry.tray = trayHolding(item.id).flatMap { $0 == Self.roomTray ? nil : $0 }
         if let prepared = item.prepared {
             entry.prepared = RoomMediaOutboxEntry.Prepared(
                 file: prepared.file.lastPathComponent, filename: prepared.filename,
@@ -996,7 +1230,14 @@ final class RoomMediaUploadCoordinator: ObservableObject {
            let position = message.itemIds.firstIndex(of: item.id) {
             entry.message = RoomMediaOutboxEntry.Message(clientId: message.clientId, text: message.text, position: position,
                                                          posted: message.status == .sent ? true : nil,
-                                                         postStarted: message.mayBePosted ? true : nil)
+                                                         postStarted: message.mayBePosted ? true : nil,
+                                                         replyTo: message.replyTo?.sequenceId,
+                                                         replyToReply: message.replyTo?.replyId,
+                                                         replyToName: message.replyTo?.name,
+                                                         filesRefused: message.filesRefusedInReply ? true : nil,
+                                                         replyPosted: message.replyPosted ? true : nil,
+                                                         draftThread: message.draftOrigin?.sequenceId,
+                                                         draftReply: message.draftOrigin?.replyId)
         }
         RoomMediaOutbox.write(entry, in: item.source.folder)
     }
@@ -1005,7 +1246,7 @@ final class RoomMediaUploadCoordinator: ObservableObject {
     /// rest in the tray. Each keeps its ids; nothing is sent until Retry (or Send).
     private func restore() {
         var messages: [String: (text: String?, parts: [(position: Int, id: String)], createdAt: Date,
-                                mayBePosted: Bool)] = [:]
+                                mayBePosted: Bool, replyTo: RoomMediaReplyTarget?, saved: RoomMediaOutboxEntry.Message)] = [:]
         for (folder, entry) in RoomMediaOutbox.entries(for: sessionId, account: account, root: outboxRoot) {
             if entry.withdrawn == true {
                 // Taken back just before the app closed: deleted on the server now, never shown again.
@@ -1056,13 +1297,20 @@ final class RoomMediaUploadCoordinator: ObservableObject {
             if item.waitsForSend, item.stored == nil { item.phase = .ready }
             items[item.id] = item
             if let message = entry.message {
+                // A reply goes back to its thread, never to the room as a message.
+                let replyTo = message.replyTo.flatMap { sequence -> RoomMediaReplyTarget? in
+                    sequence > 0 ? RoomMediaReplyTarget(sequenceId: sequence, replyId: message.replyToReply,
+                                                        name: message.replyToName ?? "") : nil
+                }
                 var group = messages[message.clientId]
-                    ?? (text: message.text, parts: [], createdAt: entry.createdAt, mayBePosted: false)
+                    ?? (text: message.text, parts: [], createdAt: entry.createdAt, mayBePosted: false, replyTo: replyTo,
+                        saved: message)
                 group.parts.append((position: message.position, id: item.id))
                 group.mayBePosted = group.mayBePosted || message.postStarted == true
                 messages[message.clientId] = group
-            } else if tray.count < RoomMediaRules.attachmentsPerMessage {
-                tray.append(item.id)
+            } else if (trays[entry.tray ?? Self.roomTray]?.count ?? 0) < RoomMediaRules.attachmentsPerMessage {
+                // Back in the tray it was picked into: the room's, or its thread's.
+                trays[entry.tray ?? Self.roomTray, default: []].append(item.id)
             } else {
                 items[item.id] = nil
             }
@@ -1073,6 +1321,17 @@ final class RoomMediaUploadCoordinator: ObservableObject {
             var restored = Outgoing(clientId: clientId, text: group.text, itemIds: ids,
                                     status: .failed(reason: Self.interruptedReason, canRetry: true))
             restored.mayBePosted = group.mayBePosted
+            restored.replyTo = group.replyTo
+            if group.saved.filesRefused == true {
+                // Still the card the API's answer made: its files can go as a new message, and words the API already
+                // took are never offered again (no Retry).
+                restored.filesRefusedInReply = true
+                restored.replyPosted = group.saved.replyPosted == true
+                restored.status = .failed(reason: RoomMediaOutgoingRow.replyFilesRefused, canRetry: false)
+            }
+            restored.draftOrigin = group.saved.draftThread.flatMap { sequence in
+                sequence > 0 ? RoomMediaReplyTarget(sequenceId: sequence, replyId: group.saved.draftReply, name: "") : nil
+            }
             outgoing.append(restored)
         }
         updateMessageProgress()
@@ -1098,13 +1357,28 @@ final class RoomMediaUploadCoordinator: ObservableObject {
     // MARK: - Showing
 
     private func publish() {
-        board.setTray(tray.compactMap { items[$0].map(Self.row) })
-        board.setOutgoing(outgoing.map { message in
-            RoomMediaOutgoingRow(id: message.clientId, text: message.text,
-                                 items: message.itemIds.compactMap { items[$0].map(Self.row) },
-                                 status: message.status, progress: message.progress)
-        })
+        let cards = outgoingRows()
+        board.setTray(rows(inTray: Self.roomTray))
+        board.setOutgoing(cards)
+        for (sequenceId, threadBoard) in threadBoards {
+            threadBoard.setTray(rows(inTray: sequenceId))
+            threadBoard.setOutgoing(cards)
+        }
         updateKeepAlive()
+    }
+
+    private func rows(inTray tray: Int64) -> [RoomMediaItemRow] {
+        (trays[tray] ?? []).compactMap { items[$0].map(Self.row) }
+    }
+
+    private func outgoingRows() -> [RoomMediaOutgoingRow] {
+        outgoing.map { message in
+            // Words the API already took show in the thread, not on the card: it sends the files alone.
+            RoomMediaOutgoingRow(id: message.clientId, text: message.replyPosted ? nil : message.text,
+                                 items: message.itemIds.compactMap { items[$0].map(Self.row) },
+                                 status: message.status, progress: message.progress,
+                                 replyTo: message.replyTo, offersSendAsMessage: message.filesRefusedInReply)
+        }
     }
 
     private static func row(_ item: Item) -> RoomMediaItemRow {

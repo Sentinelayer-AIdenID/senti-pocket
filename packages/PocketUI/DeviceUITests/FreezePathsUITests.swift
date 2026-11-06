@@ -1,0 +1,217 @@
+#if os(iOS) && canImport(XCTest)
+import CoreFoundation
+import UIKit
+import XCTest
+
+/// The four ways Carter's phone froze on build 2026110310, on the app's `-PocketRootPreview` data (made-up rooms; no
+/// network): the side panel opened and closed over a room; the app sent to the background and back with the panel open;
+/// after Jump to latest kept a room's newest 60 rows, a room opened from the panel; and a reply sent in a long room
+/// read far up, sent to, and trimmed for the jump down, with no panel at all. Each ends with a quiet spell in
+/// which nothing reads the screen, announced as `FREEZE-IDLE begin` and `FREEZE-IDLE end`, for the lane to sample the
+/// app's main thread: it must be asleep, not laying out. Then the screen must answer a read within a second.
+final class FreezePathsUITests: XCTestCase {
+    private static let openDrawer = "com.plexaura.sentipocket.preview.root.drawer.open"
+    private static let closeDrawer = "com.plexaura.sentipocket.preview.root.drawer.close"
+
+    override func setUp() {
+        continueAfterFailure = true
+    }
+
+    /// The side panel opened, closed, and opened again over a room of 100 rows.
+    func test_path1_side_panel_open_and_close() throws {
+        let app = launch(room: "mid")
+        Self.post(Self.openDrawer)
+        pause(2)
+        Self.post(Self.closeDrawer)
+        pause(2)
+        Self.post(Self.openDrawer)
+        pause(2)
+        idle(app, "path1")
+    }
+
+    /// The side panel open the whole time while the app goes to the background and back three times; the quiet spell
+    /// covers the panel's own read of the rooms 15 s after the last return.
+    func test_path2_background_and_back_with_the_panel_open() throws {
+        let app = launch(room: "mid")
+        Self.post(Self.openDrawer)
+        pause(3)
+        for _ in 1...3 {
+            XCUIDevice.shared.press(.home)
+            pause(5)
+            app.activate()
+            pause(3)
+        }
+        idle(app, "path2", seconds: 25)
+    }
+
+    /// Up a room to its first message, Jump to latest (the room keeps its newest 60 rows), then the side panel opened
+    /// and another room of 100 rows picked from it: the room before it closes.
+    func test_path3_room_opened_from_the_panel_after_a_jump_down_trim() throws {
+        let app = launch(room: "mid")
+        let screen = app.descendants(matching: .any)["pocket.room.screen"]
+        for _ in 0..<14 {
+            if app.descendants(matching: .any)["pocket.room.message.1"].exists { break }
+            screen.swipeDown(velocity: .fast)
+        }
+        let jump = app.descendants(matching: .any)["pocket.room.jumpToLatest"]
+        XCTAssertTrue(jump.waitForExistence(timeout: 10), "the arrow shows up the room")
+        jump.tap()
+        pause(3)
+        Self.post(Self.openDrawer)
+        let row = app.descendants(matching: .any)["pocket.drawer.room.room-long"]
+        // The panel's rooms are a lazy list: a room below the fold (at the largest text sizes, every room is) is made
+        // only once it is scrolled to, as a reader scrolls the panel to find it.
+        let drawer = app.descendants(matching: .any)["pocket.drawer"]
+        XCTAssertTrue(drawer.waitForExistence(timeout: 30), "the side panel opened")
+        let list = drawer.scrollViews.firstMatch
+        for _ in 0..<12 where !row.isHittable && list.exists {
+            list.swipeUp(velocity: .slow)
+        }
+        if !row.isHittable {
+            // At the largest text sizes the panel's own lines leave its room list little room: search for the room,
+            // as a reader does.
+            let search = app.descendants(matching: .any)["pocket.drawer.search"]
+            XCTAssertTrue(search.waitForExistence(timeout: 10), "the panel's search")
+            search.tap()
+            search.typeText("Long room")
+        }
+        XCTAssertTrue(row.waitForExistence(timeout: 10), "the room is in the side panel")
+        row.tap()
+        pause(2)
+        idle(app, "path3")
+    }
+
+    /// Up a long room until about 300 rows are loaded (each page loads as its top comes into view), Jump to latest (the
+    /// room keeps its newest 60 rows), then a reply to the newest message in view, from its menu, sent.
+    func test_path4_reply_in_a_long_room_after_a_jump_down_trim() throws {
+        // At the accessibility text sizes (the simulator's own setting) a screen holds a row or two: 25 rows up, as in
+        // the AX5 case below, rather than 300.
+        let large = UIApplication.shared.preferredContentSizeCategory.isAccessibilityCategory
+        replyAfterJumpDown(launch(room: "long"), upTo: large ? 975 : 705, path: "path4")
+    }
+
+    /// The order that hung at 30b4d3b: a message sent first (the keyboard up), then the long press on a message in view
+    /// above it, its menu, and the reply.
+    func test_path4_send_then_reply_from_the_menu() throws {
+        let large = UIApplication.shared.preferredContentSizeCategory.isAccessibilityCategory
+        replyAfterJumpDown(launch(room: "long"), upTo: large ? 975 : 705, path: "path4-send", sendFirst: true)
+    }
+
+    /// The same order with the app at the largest text size.
+    func test_path4_send_then_reply_from_the_menu_at_the_largest_text_size() throws {
+        let app = launch(room: "long", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL")
+        replyAfterJumpDown(app, upTo: 975, path: "path4-send-ax5", sendFirst: true)
+    }
+
+    /// Path 4 at the largest text size (AX5), where a row can be taller than the screen: up the room to its 975th
+    /// message, the jump down, and the long press that opens a message's menu for the reply. Without each row's
+    /// `.id`, that press set the room laying itself out without end here.
+    func test_path4_at_the_largest_text_size() throws {
+        let app = launch(room: "long", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL")
+        replyAfterJumpDown(app, upTo: 975, path: "path4-ax5")
+    }
+
+    private func replyAfterJumpDown(_ app: XCUIApplication, upTo sequence: Int, path: String, sendFirst: Bool = false) {
+        let screen = app.descendants(matching: .any)["pocket.room.screen"]
+        let far = app.descendants(matching: .any)["pocket.room.message.\(sequence)"]
+        // Up the room until the message is in view, within four minutes (each page of earlier messages loads as its top
+        // comes into view; a swipe and its check take about 3 s on the build Mac, and 300 rows take up to 80 swipes).
+        let deadline = Date().addingTimeInterval(240)
+        while !far.exists, Date() < deadline {
+            screen.swipeDown(velocity: .fast)
+        }
+        XCTAssertTrue(far.exists, "up the room to message \(sequence) within four minutes")
+        let jump = app.descendants(matching: .any)["pocket.room.jumpToLatest"]
+        XCTAssertTrue(jump.waitForExistence(timeout: 10), "the arrow shows up the room")
+        jump.tap()
+        pause(3)
+        if sendFirst {
+            send(app, "On it.")
+        }
+        // The newest message with some of it in view, pressed where it shows: at the largest text size a message can
+        // be taller than the screen (its middle off it), and the note just sent can fill what the keyboard leaves, so
+        // the room is moved down a little at a time (a short drag) until one shows.
+        let window = app.windows.firstMatch
+        let messages = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "pocket.room.message."))
+        var target: (element: XCUIElement, shown: CGRect)?
+        for attempt in 0..<8 {
+            var band = window.frame
+            let bar = app.navigationBars.firstMatch
+            if bar.exists { band = band.divided(atDistance: max(0, bar.frame.maxY - band.minY), from: .minYEdge).remainder }
+            let composer = app.descendants(matching: .any)["pocket.room.composer"]
+            if composer.exists { band.size.height = max(0, composer.frame.minY - 16 - band.minY) }
+            let all = messages.allElementsBoundByIndex
+            if let found = all.last(where: { $0.frame.intersection(band).height >= 40 }) {
+                target = (found, found.frame.intersection(band))
+                break
+            }
+            print("FREEZE-PRESS none in \(band) (try \(attempt)): \(all.suffix(3).map { "\($0.identifier) \($0.frame)" })")
+            let start = window.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: band.midX, dy: band.minY + 20))
+            start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: min(160, band.height - 30))),
+                        withVelocity: .slow, thenHoldForDuration: 0.2)
+            pause(1)
+        }
+        guard let target else {
+            return XCTFail("no message in view to press")
+        }
+        let message = target.element
+        let shown = target.shown
+        print("FREEZE-PRESS \(message.identifier) at \(Int(shown.midX)),\(Int(shown.midY))")
+        window.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: shown.midX - window.frame.minX, dy: shown.midY - window.frame.minY))
+            .press(forDuration: 1.2)
+        // The menu's Reply: the one that can be tapped (a row's own reply button under the menu cannot).
+        let replies = app.buttons.matching(NSPredicate(format: "label == %@", "Reply"))
+        XCTAssertTrue(replies.firstMatch.waitForExistence(timeout: 10), "the message's menu offers Reply")
+        guard let reply = replies.allElementsBoundByIndex.first(where: { $0.isHittable }) else {
+            return XCTFail("no Reply in the menu to tap")
+        }
+        reply.tap()
+        send(app, "A short reply now")
+        idle(app, path, seconds: 25)
+    }
+
+    // MARK: - Helpers
+
+    private func send(_ app: XCUIApplication, _ text: String) {
+        let composer = app.descendants(matching: .any)["pocket.room.composer"]
+        guard composer.waitForExistence(timeout: 10) else { return XCTFail("no composer") }
+        composer.tap()
+        composer.typeText(text)
+        app.descendants(matching: .any)["pocket.room.send"].tap()
+        pause(1)
+    }
+
+    /// Nothing reads the screen for `seconds` while the lane samples the main thread; then a read must answer in 1 s.
+    private func idle(_ app: XCUIApplication, _ path: String, seconds: TimeInterval = 20) {
+        print("FREEZE-IDLE begin \(path)")
+        pause(seconds)
+        print("FREEZE-IDLE end \(path)")
+        let start = Date()
+        _ = app.descendants(matching: .any)["pocket.room.screen"].exists
+        let read = Date().timeIntervalSince(start)
+        print(String(format: "FREEZE-READ %@ %.2f s", path, read))
+        XCTAssertEqual(app.state, .runningForeground, "\(path): the app is still in front")
+        XCTAssertLessThan(read, 1, "\(path): the screen answers within a second after the quiet spell")
+    }
+
+    private func launch(room: String, _ extra: String...) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments = ["-PocketRootPreview", "-PocketRootRoom", room, "-LogForEachSlowPath", "YES"] + extra
+        app.launch()
+        XCTAssertTrue(app.descendants(matching: .any)["pocket.room.screen"].waitForExistence(timeout: 90), "the room opened")
+        pause(5)
+        return app
+    }
+
+    private static func post(_ name: String) {
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                             CFNotificationName(name as CFString), nil, nil, true)
+    }
+
+    private func pause(_ seconds: TimeInterval) {
+        RunLoop.current.run(until: Date().addingTimeInterval(seconds))
+    }
+}
+#endif

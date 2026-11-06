@@ -4,6 +4,43 @@ import PocketSyncClient
 import PocketUI
 import PocketVoice
 
+/// When the room's running boxes are read again: with the room in sight and the app in front.
+struct RoomBoxPoll: Equatable {
+    let covered: Bool
+    let active: Bool
+    var runs: Bool { !covered && active }
+
+    /// How often, in nanoseconds.
+    static let interval: UInt64 = 60_000_000_000
+}
+
+/// Whether the app covers the room (the side panel, or a sheet over it), read here and only here: the room's coordinator
+/// keeps what arrives unshown while it is covered, and the room's boxes are read again only while it can be seen and the
+/// app is in front. The room's screen never reads it, so it and its rows draw nothing when the side panel opens.
+struct RoomCoverWatch: ViewModifier {
+    let coversItself: Bool
+    let coordinator: RoomChatCoordinator
+    let flight: FlightRecordCoordinator
+    @Environment(\.roomIsCovered) private var coveredFromOutside
+    @Environment(\.scenePhase) private var scenePhase
+
+    func body(content: Content) -> some View {
+        let poll = RoomBoxPoll(covered: coveredFromOutside || coversItself, active: scenePhase == .active)
+        return content
+            .onAppear { coordinator.isCovered = coveredFromOutside }
+            .onChange(of: coveredFromOutside) { covered in coordinator.isCovered = covered }
+            // The room's running boxes, for the ring and its count (their names only), kept fresh while the room can be
+            // seen (#269) and the app is in front.
+            .task(id: poll) {
+                guard poll.runs else { return }
+                while !Task.isCancelled {
+                    await flight.refreshBoxes()
+                    try? await Task.sleep(nanoseconds: RoomBoxPoll.interval)
+                }
+            }
+    }
+}
+
 /// Navigation value for an open room.
 struct RoomRoute: Hashable {
     let sessionId: String
@@ -12,6 +49,8 @@ struct RoomRoute: Hashable {
     var membershipRole: String = ""
     /// A message to open the room at (from a notification or link).
     var focusSequenceId: Int64?
+    /// A reply in that message's thread to open the thread at (a reply notification's `?reply=`).
+    var focusReplyId: String?
     /// A ticket to open over the room (a link's `?ticket=`, like the web's ticket drawer).
     var focusTicketId: String?
     /// Opens the room's agent requests (a link's `?admission=`), for owners and admins.
@@ -81,8 +120,6 @@ struct RoomChatScreen: View {
     @State private var showsArtifacts = false
     /// A voice conversation in this room, while one is open.
     @State private var voiceRoom: VoiceRoomCoordinator?
-    /// The app covers the room (a sheet or the side panel).
-    @Environment(\.roomIsCovered) private var coveredFromOutside
     /// The call's waveform: your microphone and the agent's words.
     @State private var voiceMeter = VoiceLevelMeter()
     @State private var choosesVoicePartner = false
@@ -161,10 +198,14 @@ struct RoomChatScreen: View {
     private let blocks: BlockList?
     /// Direct messages, where they are on: avatars open profile cards, and a direct message gets its switch.
     private let directContext: RoomDirectContext?
-    /// The profile card open over the room.
+    /// The profile open over the room.
     @State private var profileTarget: RoomProfileTarget?
     /// Block, asked from a profile card once the card has gone.
     @State private var blockingFromCard: RoomBlockTarget?
+    /// Someone's messages in the room, for their profile (`GET /events/by-author`).
+    private let authorMessages: (any RoomAuthorMessagesReading)?
+    /// The rooms you share with someone, for their card.
+    private let sharedRooms: (any SharedRoomsReading)?
 
     init(
         route: RoomRoute,
@@ -195,10 +236,15 @@ struct RoomChatScreen: View {
         direct: RoomDirectContext? = nil,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
+        #if DEBUG
+        RootPreview.meter.roomScreenMade()
+        #endif
         self.route = route
         self.aiConsent = aiConsent
         self.blocks = blocks
         self.directContext = direct
+        self.authorMessages = transport as? any RoomAuthorMessagesReading
+        self.sharedRooms = transport as? any SharedRoomsReading
         self.reader = reader
         self.search = search
         self.ticketsTransport = ticketsTransport
@@ -489,8 +535,9 @@ struct RoomChatScreen: View {
         room.begin(rings: call == nil)
     }
 
-    /// Something covers the room: a sheet or the side panel (from the app), or this room's call.
-    private var isCovered: Bool { coveredFromOutside || voiceRoom != nil || profileTarget != nil }
+    /// This room's own covers: its call, or a profile card. Whether the app covers it (a sheet or the side panel) is read
+    /// only by `RoomCoverWatch`, so this screen and its rows never draw again when the side panel opens or closes.
+    private var coversItself: Bool { voiceRoom != nil || profileTarget != nil }
 
     /// The called agent's lab as the room's presence reports it, for the call screen's logo; nil in a meeting.
     private func partnerLab(of room: VoiceRoomCoordinator) -> AgentLab? {
@@ -588,14 +635,36 @@ struct RoomChatScreen: View {
         OpenURLAction { url in handle(url) }
     }
 
-    /// Where direct messages are on and the room knows who you are, an avatar opens its card: never yours, never the
-    /// room's voice. Otherwise avatars are not buttons, and the online ring opens the people list as before.
+    /// Every avatar and name opens its owner's profile and messages (Carter, 11-04: "tap anyone"), in the room, on the
+    /// people ring and in the people list. Message is offered only where direct messages are on and reach them.
     private var profileOpener: RoomProfileOpener? {
-        RoomProfileOpener.forRoom(directMessagesOn: directContext != nil,
-                                  ownMentionHandles: coordinator.state.ownMentionHandles) { target in
+        RoomProfileOpener.members(ownMentionHandles: coordinator.state.ownMentionHandles) { target in
             CrashReporter.shared.note("profile card opened")
             profileTarget = target
         }
+    }
+
+    /// Message on someone's card: where direct messages are on, from a room (never from inside a direct message), once
+    /// the room knows who you are, and never to yourself or the room's own voices.
+    private func profileOffersMessage(_ target: RoomProfileTarget) -> Bool {
+        guard directContext != nil, route.cardsOfferMessage, let opener = profileOpener, !opener.ownAuthorIds.isEmpty else {
+            return false
+        }
+        return RoomProfile.opens(senderId: target.senderId, ownAuthorIds: opener.ownAuthorIds)
+    }
+
+    /// Block on someone's card: where the app has blocks, once the room knows who you are, and never on yourself, the
+    /// room's own voices or someone already blocked (`RoomMemberBlock.offers`).
+    private func profileOffersBlock(_ target: RoomProfileTarget, alreadyBlocked: Bool) -> Bool {
+        guard blocks != nil, let opener = profileOpener else { return false }
+        return RoomMemberBlock.offers(senderId: target.senderId, ownAuthorIds: opener.ownAuthorIds,
+                                      alreadyBlocked: alreadyBlocked)
+    }
+
+    /// The box an agent's profile is about, while it runs: its live steps come from the Flight record.
+    private func profileBox(_ target: RoomProfileTarget) -> FlightRecordState.Box? {
+        guard target.isAgent else { return nil }
+        return flight.state.boxes.first { $0.name.lowercased() == target.senderId.lowercased() }
     }
 
     /// The room the card names as shared before the server lists them: this room, or in a direct message the room it
@@ -614,6 +683,9 @@ struct RoomChatScreen: View {
     }
 
     var body: some View {
+        #if DEBUG
+        let _ = RootPreview.meter.roomScreenBodyRan()
+        #endif
         RoomChatView(
             state: coordinator.state,
             readingAloudId: reader.readingId,
@@ -661,9 +733,16 @@ struct RoomChatScreen: View {
             }
         }
         // A sheet, the side panel or a call's window covers the room: its moving parts (the presence ring) rest
-        // underneath (warden, #265, #269).
-        .environment(\.roomIsCovered, isCovered)
+        // underneath (#265, #269). The app's cover passes through as it is, read only by what rests.
+        .transformEnvironment(\.roomIsCovered) { [coversItself] covered in covered = covered || coversItself }
         .environment(\.roomProfileOpener, profileOpener)
+        // A thread opens its photos, files and pickers over itself.
+        .environment(\.roomSheetMediaHost, RoomSheetMediaHost {
+            Color.clear
+                .frame(width: 0, height: 0)
+                .accessibilityHidden(true)
+                .modifier(mediaPresenters(isActive: true))
+        })
         // A direct message: whom it is with, the room you share, and for an agent whether it may use this chat there.
         .safeAreaInset(edge: .top, spacing: 0) {
             if let info = route.direct {
@@ -677,24 +756,55 @@ struct RoomChatScreen: View {
             }
         }
         .sheet(item: $profileTarget) { target in
-            if let directContext {
-                RoomProfileSheet(
-                    target: target,
-                    roomId: route.sessionId,
-                    sharedRoom: profileSharedRoom,
-                    canMessage: route.cardsOfferMessage,
-                    context: directContext,
-                    // Block, asked as from a message once the card has gone: by their id, with no post.
-                    onBlock: blocks == nil ? nil : RoomBlockTarget.fromCard(
-                        target, alreadyBlocked: blocks?.isBlocked(target.senderId) == true
-                    ).map { block -> () -> Void in
-                        {
-                            profileTarget = nil
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { blockingFromCard = block }
-                        }
-                    },
-                    onClose: { profileTarget = nil }
-                )
+            let box = profileBox(target)
+            let blocked = blocks?.isBlocked(target.senderId) == true
+            RoomProfileSheet(
+                target: target,
+                roomId: route.sessionId,
+                sharedRoom: profileSharedRoom,
+                canMessage: profileOffersMessage(target),
+                context: directContext,
+                sharedRooms: sharedRooms,
+                messages: authorMessages,
+                box: box,
+                // Someone you blocked: their messages are not listed.
+                isBlocked: blocked,
+                // Block as from a message, with the one the card hands over (the newest of theirs), never by their id
+                // alone; asked once the card has gone, so the question is never dropped.
+                onBlock: profileOffersBlock(target, alreadyBlocked: blocked) ? { sequence in
+                    profileTarget = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        blockingFromCard = RoomBlockTarget(actorId: target.senderId, name: target.name,
+                                                           sequenceId: sequence)
+                    }
+                } : nil,
+                onOpenMessage: { sequence in
+                    profileTarget = nil
+                    // Once the sheet has gone, the room brings the message into view by its own focus path.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { focus(on: sequence) }
+                },
+                onOpenFlight: box == nil ? nil : {
+                    CrashReporter.shared.note("flight record opened")
+                    flight.setAgents(flightAgents)
+                    flight.setPeople(roster.members)
+                    showsFlight = true
+                    profileTarget = nil
+                },
+                onReauthenticationRequired: onReauthenticationRequired,
+                onClose: { profileTarget = nil }
+            )
+            // An agent's profile reads the room's boxes, so a box shows its live steps; the steps of the one it is
+            // about read often while it shows.
+            .onAppear {
+                guard target.isAgent else { return }
+                flight.start()
+                if let box { flight.expand(box.id) }
+            }
+            .onChange(of: box?.id) { id in flight.expand(id) }
+            .onDisappear {
+                guard target.isAgent, !showsFlight else { return }
+                flight.expand(nil)
+                flight.stop()
             }
         }
         .roomBlockConfirmation($blockingFromCard) { coordinator.send($0) }
@@ -1029,52 +1139,12 @@ struct RoomChatScreen: View {
                 )
             }
         }
-        .sheet(item: $attachmentPreview) { item in
-            AttachmentQuickLook(url: item.url)
-                .ignoresSafeArea()
-        }
-        .fullScreenCover(item: $mediaViewer) { item in
-            switch item {
-            case .image(let attachmentId, let filename, let preview):
-                RoomImageViewer(
-                    filename: filename,
-                    preview: preview,
-                    loadOriginal: { try await coordinator.prepareAttachment(attachmentId) },
-                    onClose: { mediaViewer = nil }
-                )
-            case .video(let attachmentId, let url):
-                RoomVideoViewer(
-                    url: url,
-                    // A link that stops working mid-play (it expired, or storage refused it) is asked for again.
-                    refresh: { try await coordinator.mediaLink(attachmentId, fresh: true).url },
-                    onClose: { mediaViewer = nil }
-                )
-            }
-        }
-        .sheet(item: $shareItem) { item in
-            RoomShareSheet(items: [item.url], deletesWhenDone: true)
-                .presentationDetents([.medium, .large])
-        }
-        // The photo, camera and file pickers, opened from the composer's attach sheet.
-        .background(
-            RoomMediaPickerHost(
-                requests: media.pickers,
-                remaining: { media.board.remainingSlots },
-                onPicked: { media.add($0) },
-                onRefused: { media.refuse($0) }
-            )
-        )
+        // Photos, videos and files opened from the room, and the pickers its composer opens; while a thread is open,
+        // the thread presents them over itself instead (`roomSheetMediaHost`).
+        .modifier(mediaPresenters(isActive: coordinator.state.thread == nil))
         .sheet(item: $consolePage) { page in
             SafariSheet(url: page.url)
                 .ignoresSafeArea()
-        }
-        .alert("Couldn't open the file", isPresented: Binding(
-            get: { attachmentProblem != nil },
-            set: { if !$0 { attachmentProblem = nil } }
-        )) {
-            Button("OK", role: .cancel) { attachmentProblem = nil }
-        } message: {
-            Text(attachmentProblem ?? "")
         }
         .alert("Can't read aloud now", isPresented: Binding(
             get: { listenProblem != nil },
@@ -1107,16 +1177,11 @@ struct RoomChatScreen: View {
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             offerCrashReports()
         }
-        .task(id: isCovered) {
-            // The room's running boxes, for the ring and its count, kept fresh while the room is open (the count once
-            // caught up only when the people list was opened): their names only, and only while the room
-            // can be seen (warden, #269).
-            guard !isCovered else { return }
-            while !Task.isCancelled {
-                await flight.refreshBoxes()
-                try? await Task.sleep(nanoseconds: 60_000_000_000)
-            }
+        // The mint's boxes for this room, as the Flight record reads them: the chat's own agent and the composer's hint.
+        .onChange(of: [Set(flight.state.boxes.map(\.name)), flight.state.endedBoxNames]) { boxes in
+            coordinator.setBoxes(running: boxes[0], ended: boxes[1])
         }
+        .modifier(RoomCoverWatch(coversItself: coversItself, coordinator: coordinator, flight: flight))
         .onChange(of: crashes.unhandled.count) { _ in offerCrashReports() }
         .onChange(of: coordinator.state.composer.canPost) { _ in offerCrashReports() }
         .sheet(item: $linkedTicket) { linked in
@@ -1146,6 +1211,10 @@ struct RoomChatScreen: View {
             applyRouteLinksOnce()
             #if DEBUG
             if RoomPreview.isLeaderboardSheetRequested { coordinator.send(.openLeaderboard) }
+            if RootPreview.isRequested {
+                RootPreview.meter.watch("room", coordinator)
+                RootPreview.meter.watch("roomFlight", flight)
+            }
             #endif
             takeAnsweredCall()
             connectMedia()
@@ -1200,11 +1269,14 @@ struct RoomChatScreen: View {
         offersCrashReports = true
     }
 
-    /// A link that opened this room may also name a ticket or the agent requests: open those once, over the room.
+    /// A link that opened this room may also name a reply, a ticket or the agent requests: open those once, over the
+    /// room. A reply opens its thread at it.
     private func applyRouteLinksOnce() {
         guard !appliedRouteLinks else { return }
         appliedRouteLinks = true
-        if let ticketId = route.focusTicketId, ticketsTransport != nil {
+        if let replyId = route.focusReplyId, let sequence = route.focusSequenceId {
+            coordinator.openThread(sequence, at: replyId)
+        } else if let ticketId = route.focusTicketId, ticketsTransport != nil {
             linkedTicket = LinkedTicket(id: ticketId)
         } else if route.opensAdmissions, decidesAdmissions {
             showsAdmissions = true
@@ -1218,8 +1290,31 @@ struct RoomChatScreen: View {
         let outgoing = media
         room.onOwnEcho = { [weak outgoing] clientIds in outgoing?.echoed(clientIds) }
         outgoing.onPosted = { [weak room] in room?.pullLatest() }
+        // A reply with files: posted only where the API takes them, and read back into its thread before its card goes.
+        room.onReplyAttachmentSupport = { [weak outgoing] support in outgoing?.replyAttachments = support }
+        outgoing.onReplyPosted = { [weak room] target, text in
+            await room?.replyPosted(to: target.sequenceId, answering: target.replyId, text: text)
+        }
+        // "Send as a new message" carried a reply's words: their saved draft in the thread goes once it posts.
+        outgoing.onReplyDraftSent = { [weak room] target, text in
+            room?.forgetReplyDraft(thread: target.sequenceId, answering: target.replyId, text: text)
+        }
         outgoing.onPreviewReady = { [weak room] attachmentId, data in room?.seedPreview(data, for: attachmentId) }
         outgoing.onReauthenticationRequired = onReauthenticationRequired
+    }
+
+    /// The viewers, the file preview, the share sheet, the pickers and the "Couldn't open the file" alert, presented
+    /// from the room or (`isActive` there) from a sheet over it.
+    private func mediaPresenters(isActive: Bool) -> RoomMediaPresenters {
+        RoomMediaPresenters(
+            isActive: isActive,
+            media: media,
+            coordinator: coordinator,
+            attachmentPreview: $attachmentPreview,
+            mediaViewer: $mediaViewer,
+            shareItem: $shareItem,
+            attachmentProblem: $attachmentProblem
+        )
     }
 
     /// A photo opens in the zoomable viewer (its preview at once), a video plays from its storage link, and any other
@@ -1400,4 +1495,70 @@ struct VoiceRoomHost: View {
 @MainActor
 private final class HeardLevel {
     weak var room: VoiceRoomCoordinator?
+}
+
+/// What a photo, video or file opens in, and the photo, camera and file pickers: presented by the room, or by a sheet
+/// over it (a thread), since the room under a sheet cannot present anything. Only the active one presents.
+private struct RoomMediaPresenters: ViewModifier {
+    let isActive: Bool
+    let media: RoomMediaUploadCoordinator
+    let coordinator: RoomChatCoordinator
+    @Binding var attachmentPreview: AttachmentPreviewItem?
+    @Binding var mediaViewer: RoomMediaViewerItem?
+    @Binding var shareItem: RoomShareItem?
+    @Binding var attachmentProblem: String?
+
+    /// The binding as this presenter sees it: nothing while it is not the active one.
+    private func gated<Item>(_ binding: Binding<Item?>) -> Binding<Item?> {
+        let isActive = self.isActive
+        return Binding(get: { isActive ? binding.wrappedValue : nil }, set: { binding.wrappedValue = $0 })
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .sheet(item: gated($attachmentPreview)) { item in
+                AttachmentQuickLook(url: item.url)
+                    .ignoresSafeArea()
+            }
+            .fullScreenCover(item: gated($mediaViewer)) { item in
+                switch item {
+                case .image(let attachmentId, let filename, let preview):
+                    RoomImageViewer(
+                        filename: filename,
+                        preview: preview,
+                        loadOriginal: { try await coordinator.prepareAttachment(attachmentId) },
+                        onClose: { mediaViewer = nil }
+                    )
+                case .video(let attachmentId, let url):
+                    RoomVideoViewer(
+                        url: url,
+                        // A link that stops working mid-play (it expired, or storage refused it) is asked for again.
+                        refresh: { try await coordinator.mediaLink(attachmentId, fresh: true).url },
+                        onClose: { mediaViewer = nil }
+                    )
+                }
+            }
+            .sheet(item: gated($shareItem)) { item in
+                RoomShareSheet(items: [item.url], deletesWhenDone: true)
+                    .presentationDetents([.medium, .large])
+            }
+            // The photo, camera and file pickers, opened from a composer's attach sheet.
+            .background(
+                RoomMediaPickerHost(
+                    requests: media.pickers,
+                    isActive: isActive,
+                    remaining: { media.pickerRemaining },
+                    onPicked: { media.add($0) },
+                    onRefused: { media.refuse($0) }
+                )
+            )
+            .alert("Couldn't open the file", isPresented: Binding(
+                get: { isActive && attachmentProblem != nil },
+                set: { if !$0 { attachmentProblem = nil } }
+            )) {
+                Button("OK", role: .cancel) { attachmentProblem = nil }
+            } message: {
+                Text(attachmentProblem ?? "")
+            }
+    }
 }

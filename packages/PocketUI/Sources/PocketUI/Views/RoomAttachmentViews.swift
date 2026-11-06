@@ -1,10 +1,61 @@
 #if canImport(SwiftUI)
 import SwiftUI
 
+/// The sideways scrolls inside a room row (a strip of photos), as frames in the row's own space: a drag that starts on
+/// one scrolls it, and the row's swipe to reply leaves it alone.
+struct RoomRowSideScrolls: PreferenceKey {
+    /// The row's coordinate space, named on the row.
+    static let space = "pocket.room.row"
+    static let defaultValue: [CGRect] = []
+
+    static func reduce(value: inout [CGRect], nextValue: () -> [CGRect]) {
+        value.append(contentsOf: nextValue())
+    }
+}
+
+extension View {
+    /// Marks this view as a sideways scroll inside a room row (see `RoomRowSideScrolls`).
+    func roomRowSideScroll() -> some View {
+        background {
+            GeometryReader { proxy in
+                Color.clear.preference(key: RoomRowSideScrolls.self,
+                                       value: [proxy.frame(in: .named(RoomRowSideScrolls.space))])
+            }
+        }
+    }
+}
+
+/// A strip of photos' frame, from the width its row gives it: as tall as `RoomStripMetrics` makes the strip at that
+/// width, and as wide as its photos when they fit (the whole width when they scroll). Its one view (a reader) is laid
+/// out at exactly that size and works the photos' side out again from it, so the photos and the frame agree in one
+/// layout pass.
+struct RoomStripFrame: Layout {
+    let count: Int
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let offered = proposal.width ?? .infinity
+        let width = offered.isFinite ? offered : RoomStripMetrics.idealWidth(count: count)
+        let metrics = RoomStripMetrics(count: count, width: width)
+        // A strip that fits is as wide as its photos, so your own message's photos still line up on the right; one
+        // that scrolls takes the whole width.
+        let gaps = RoomStripMetrics.spacing * CGFloat(max(count - 1, 0))
+        let used = metrics.mode == .fit ? CGFloat(count) * metrics.side + gaps : width
+        return CGSize(width: used, height: metrics.height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        for subview in subviews {
+            subview.place(at: bounds.origin, anchor: .topLeading, proposal: ProposedViewSize(bounds.size))
+        }
+    }
+}
+
 /// Files under a message. Photos show their preview, videos their poster frame with a play button, and other files a
 /// card with the name, size and type, and a Share button. Tapping opens a photo full size (zoomable), plays a video
 /// straight from storage, and previews any other file. A file taken back after it was sent shows only its name and
-/// "Attachment removed", and nothing opens it.
+/// "Attachment removed", and nothing opens it. Two or more photos show as one strip of smaller thumbnails, side by side,
+/// sized to the row: filling it when they all fit, scrolling sideways when they do not (`RoomAttachmentLayoutItem`,
+/// `RoomStripMetrics`).
 struct RoomAttachmentsView: View {
     let chips: [RoomAttachmentChip]
     let previews: [String: Data]
@@ -14,50 +65,140 @@ struct RoomAttachmentsView: View {
 
     var body: some View {
         VStack(alignment: alignment, spacing: 6) {
-            ForEach(chips) { chip in
-                if chip.isRemoved {
-                    removed(chip)
-                } else if chip.isVisual {
-                    Button {
-                        send(.openAttachment(attachmentId: chip.attachmentId))
-                    } label: {
-                        visual(chip)
-                    }
-                    .buttonStyle(.plain)
-                    .onAppear { send(.attachmentAppeared(attachmentId: chip.attachmentId)) }
-                    .accessibilityLabel(chip.accessibilityLabel)
-                    .accessibilityHint(chip.accessibilityHint)
-                    .accessibilityIdentifier(chip.kind == .video ? "pocket.room.attachment.video" : "pocket.room.attachment")
-                } else {
-                    HStack(spacing: 6) {
-                        Button {
-                            send(.openAttachment(attachmentId: chip.attachmentId))
-                        } label: {
-                            card(chip)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(chip.accessibilityLabel)
-                        .accessibilityHint(chip.accessibilityHint)
-                        .accessibilityIdentifier("pocket.room.attachment")
-                        Button {
-                            send(.shareAttachment(attachmentId: chip.attachmentId))
-                        } label: {
-                            Image(systemName: "square.and.arrow.up")
-                                .font(.body.weight(.semibold))
-                                .foregroundStyle(PocketPalette.accent)
-                                .frame(width: 40, height: 40)
-                                .background(PocketPalette.inset, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Share \(chip.filename)")
-                        .accessibilityHint("Save it to Files or send it to another app")
-                        .accessibilityIdentifier("pocket.room.attachment.share")
-                    }
-                    .frame(maxWidth: 320, alignment: .leading)
+            ForEach(RoomAttachmentLayoutItem.items(chips)) { item in
+                switch item {
+                case .strip(let photos):
+                    strip(photos)
+                case .single(let chip):
+                    single(chip)
                 }
             }
         }
         .padding(.top, 4)
+    }
+
+    /// Photos side by side, sized to the width the row gives them (`RoomStripMetrics`): filling it when they all fit,
+    /// in a sideways scroll otherwise. The width is read as the strip is laid out, in one pass: `RoomStripFrame` makes
+    /// the strip as tall as that width needs, and the reader inside it lays the photos out at that width. Nothing is
+    /// built to measure it. Each photo opens as one alone does. The strip's own horizontal scroll view sits inside the
+    /// message's one row.
+    private func strip(_ photos: [RoomAttachmentChip]) -> some View {
+        RoomStripFrame(count: photos.count) {
+            GeometryReader { proxy in
+                let metrics = RoomStripMetrics(count: photos.count, width: proxy.size.width)
+                if metrics.mode == .fit {
+                    HStack(spacing: RoomStripMetrics.spacing) {
+                        stripPhotos(photos, side: metrics.side)
+                    }
+                } else {
+                    scrollingStrip(photos, side: metrics.side)
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("pocket.room.attachment.strip")
+        .roomRowSideScroll()
+    }
+
+    /// The strip in a sideways scroll, on a lazy stack: only the photos in sight are built.
+    private func scrollingStrip(_ photos: [RoomAttachmentChip], side: CGFloat) -> some View {
+        ScrollView(.horizontal, showsIndicators: true) {
+            LazyHStack(spacing: RoomStripMetrics.spacing) {
+                stripPhotos(photos, side: side)
+            }
+            .padding(.bottom, RoomStripMetrics.indicator)
+        }
+        .frame(height: side + RoomStripMetrics.indicator)
+    }
+
+    private func stripPhotos(_ photos: [RoomAttachmentChip], side: CGFloat) -> some View {
+        ForEach(Array(photos.enumerated()), id: \.element.id) { index, chip in
+            let _ = RenderTrace.builtStripPhoto(index)
+            Button {
+                send(.openAttachment(attachmentId: chip.attachmentId))
+            } label: {
+                thumbnail(chip, side: side)
+            }
+            .buttonStyle(.plain)
+            .onAppear { send(.attachmentAppeared(attachmentId: chip.attachmentId)) }
+            .accessibilityLabel(RoomAttachmentLayoutItem.stripLabel(chip, index: index, count: photos.count))
+            .accessibilityHint(chip.accessibilityHint)
+            .accessibilityIdentifier("pocket.room.attachment.strip.photo")
+        }
+    }
+
+    /// A photo's thumbnail, filling its square; until its preview arrives, a placeholder of the same size. `.clipShape`
+    /// keeps the drawing inside the square; `.contentShape` makes the square, and only it, the tap and VoiceOver area
+    /// (without it, a wide photo filling its square reached into its neighbours' areas).
+    private func thumbnail(_ chip: RoomAttachmentChip, side: CGFloat) -> some View {
+        ZStack {
+            if let data = previews[chip.attachmentId], let image = RoomImageData.image(from: data) {
+                image
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                PocketPalette.inset
+                Image(systemName: "photo")
+                    .font(.title3)
+                    .foregroundStyle(PocketPalette.textSecondary)
+            }
+        }
+        .frame(width: side, height: side)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(alignment: .bottomTrailing) {
+            if chip.processingStatus == "dead_letter" {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(PocketPalette.danger)
+                    .padding(6)
+            }
+        }
+        .accessibilityHidden(true)
+    }
+
+    /// One file as before: a photo or a video's picture, a removed file, or a file's card with Share.
+    @ViewBuilder
+    private func single(_ chip: RoomAttachmentChip) -> some View {
+        if chip.isRemoved {
+            removed(chip)
+        } else if chip.isVisual {
+            Button {
+                send(.openAttachment(attachmentId: chip.attachmentId))
+            } label: {
+                visual(chip)
+            }
+            .buttonStyle(.plain)
+            .onAppear { send(.attachmentAppeared(attachmentId: chip.attachmentId)) }
+            .accessibilityLabel(chip.accessibilityLabel)
+            .accessibilityHint(chip.accessibilityHint)
+            .accessibilityIdentifier(chip.kind == .video ? "pocket.room.attachment.video" : "pocket.room.attachment")
+        } else {
+            HStack(spacing: 6) {
+                Button {
+                    send(.openAttachment(attachmentId: chip.attachmentId))
+                } label: {
+                    card(chip)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(chip.accessibilityLabel)
+                .accessibilityHint(chip.accessibilityHint)
+                .accessibilityIdentifier("pocket.room.attachment")
+                Button {
+                    send(.shareAttachment(attachmentId: chip.attachmentId))
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(PocketPalette.accent)
+                        .frame(width: 40, height: 40)
+                        .background(PocketPalette.inset, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Share \(chip.filename)")
+                .accessibilityHint("Save it to Files or send it to another app")
+                .accessibilityIdentifier("pocket.room.attachment.share")
+            }
+            .frame(maxWidth: 320, alignment: .leading)
+        }
     }
 
     /// A photo's preview, or a video's poster with a play button. Until the preview arrives, a placeholder of the

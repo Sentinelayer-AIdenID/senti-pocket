@@ -14,6 +14,7 @@ final class PersonalRoutesURLProtocol: URLProtocol {
         let authorization: String?
         let contentType: String?
         let body: JSONValue?
+        var idempotencyKey: String? = nil
     }
 
     private static let lock = NSLock()
@@ -64,7 +65,8 @@ final class PersonalRoutesURLProtocol: URLProtocol {
             path: request.url?.path ?? "",
             authorization: request.value(forHTTPHeaderField: "Authorization"),
             contentType: request.value(forHTTPHeaderField: "Content-Type"),
-            body: data.flatMap { $0.isEmpty ? nil : try? JSONDecoder().decode(JSONValue.self, from: $0) }
+            body: data.flatMap { $0.isEmpty ? nil : try? JSONDecoder().decode(JSONValue.self, from: $0) },
+            idempotencyKey: request.value(forHTTPHeaderField: "Idempotency-Key")
         )
         Self.lock.lock()
         Self.seen.append(item)

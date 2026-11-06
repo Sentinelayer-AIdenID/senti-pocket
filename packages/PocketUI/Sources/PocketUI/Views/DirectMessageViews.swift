@@ -20,10 +20,34 @@ struct RoomProfileAvatar: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("\(name)'s profile")
-            .accessibilityHint("Opens their card, to message them directly")
+            .accessibilityHint(opener.opensEveryone ? "Opens their profile and messages" : "Opens their card, to message them directly")
             .accessibilityIdentifier("pocket.room.avatar.\(senderId)")
         } else {
             RoomAvatar(name: name, isHuman: isHuman, size: size)
+        }
+    }
+}
+
+/// A message's author name: where profiles open, a tap opens their profile and messages, as their avatar does.
+struct RoomProfileName<Content: View>: View {
+    let senderId: String
+    let name: String
+    let isHuman: Bool
+    @ViewBuilder let label: () -> Content
+    @Environment(\.roomProfileOpener) private var opener
+
+    var body: some View {
+        if let opener, opener.opensEveryone, opener.opens(senderId) {
+            Button {
+                opener(RoomProfileTarget(senderId: senderId, name: name, isAgent: !isHuman))
+            } label: {
+                label()
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Opens their profile and messages")
+            .accessibilityIdentifier("pocket.room.name.\(senderId)")
+        } else {
+            label()
         }
     }
 }
@@ -33,24 +57,26 @@ public struct RoomProfileCardView: View {
     private let state: RoomProfileCardState
     private let onMessage: () -> Void
     private let onBlock: (() -> Void)?
+    /// See all, where the server counted more rooms than the card lists.
+    private let onSeeAllRooms: (() -> Void)?
     private let onClose: () -> Void
 
     /// The most shared rooms listed by name; the rest are counted.
-    static let roomsShown = 4
+    static let roomsShown = RoomProfileCardState.roomsShown
 
     public init(state: RoomProfileCardState, onMessage: @escaping () -> Void, onBlock: (() -> Void)? = nil,
-                onClose: @escaping () -> Void) {
+                onSeeAllRooms: (() -> Void)? = nil, onClose: @escaping () -> Void) {
         self.state = state
         self.onMessage = onMessage
         self.onBlock = onBlock
+        self.onSeeAllRooms = onSeeAllRooms
         self.onClose = onClose
     }
 
-    /// "Rooms you share" as listed: up to `roomsShown` names, then "and 3 more".
+    /// "Rooms you share" as listed when the phone has no count: up to `roomsShown` names, then "and 3 more".
     static func sharedLines(_ rooms: [String]) -> [String] {
-        let shown = Array(rooms.prefix(roomsShown))
-        let more = rooms.count - shown.count
-        return more > 0 ? shown + ["and \(more) more"] : shown
+        RoomProfileCardState(target: RoomProfileTarget(senderId: "", name: "", isAgent: false), sharedRooms: rooms,
+                             canMessage: false).sharedRoomLines
     }
 
     public var body: some View {
@@ -88,19 +114,31 @@ public struct RoomProfileCardView: View {
 
             if !state.sharedRooms.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(state.sharedRooms.count == 1 ? "Room you share" : "Rooms you share")
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(PocketPalette.textSecondary)
-                        .accessibilityAddTraits(.isHeader)
-                    ForEach(Array(Self.sharedLines(state.sharedRooms).enumerated()), id: \.offset) { _, line in
-                        Label(line, systemImage: "bubble.left.and.bubble.right")
-                            .font(.subheadline)
-                            .foregroundStyle(PocketPalette.textPrimary)
-                            .lineLimit(1)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(state.sharedRoomsHeader)
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(PocketPalette.textSecondary)
+                            .accessibilityAddTraits(.isHeader)
+                        ForEach(Array(state.sharedRoomLines.enumerated()), id: \.offset) { _, line in
+                            Label(line, systemImage: "bubble.left.and.bubble.right")
+                                .font(.subheadline)
+                                .foregroundStyle(PocketPalette.textPrimary)
+                                .lineLimit(1)
+                        }
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("pocket.profile.sharedRooms")
+                    if state.canSeeAllRooms, let onSeeAllRooms, let total = state.sharedRoomsTotal {
+                        Button(action: onSeeAllRooms) {
+                            Text("See all \(total)")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(PocketPalette.accent)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("See all \(total) rooms you share")
+                        .accessibilityIdentifier("pocket.profile.sharedRooms.all")
                     }
                 }
-                .accessibilityElement(children: .combine)
-                .accessibilityIdentifier("pocket.profile.sharedRooms")
             }
 
             VStack(spacing: 10) {
@@ -388,43 +426,29 @@ public struct DirectRoomHeaderView: View {
     }
 }
 
-/// A room's folder choices, in its long-press menu (the side panel and All rooms): move it to a folder (or a new one),
-/// or take it out of the one it is in.
+/// A room's folder choices, in its long-press menu (the side panel and All rooms): move it to a folder (a picker of your
+/// folders as a tree, where a new one can be made too), or take it out of the one it is in.
 public struct RoomFolderMenuItems: View {
     let roomId: String
-    let folderId: String?
-    let folders: [RoomFolderItem]
+    /// The folder it is in, when that is one of yours.
+    let filedIn: String?
     let send: (RoomFolderIntent) -> Void
 
-    public init(roomId: String, folderId: String?, folders: [RoomFolderItem], send: @escaping (RoomFolderIntent) -> Void) {
+    public init(roomId: String, filedIn: String?, send: @escaping (RoomFolderIntent) -> Void) {
         self.roomId = roomId
-        self.folderId = folderId
-        self.folders = folders
+        self.filedIn = filedIn
         self.send = send
     }
 
     public var body: some View {
-        let others = RoomFolderItem.ordered(folders).filter { $0.id != folderId }
-        Menu {
-            ForEach(others) { folder in
-                Button {
-                    send(.file(roomId: roomId, folderId: folder.id))
-                } label: {
-                    Label(folder.name, systemImage: "folder")
-                }
-            }
-            if !others.isEmpty { Divider() }
-            Button {
-                send(.create(fileRoomId: roomId))
-            } label: {
-                Label("New folder…", systemImage: "folder.badge.plus")
-            }
+        Button {
+            send(.pickFolder(roomId: roomId, folderId: filedIn))
         } label: {
-            Label("Move to folder", systemImage: "folder")
+            Label("Move to folder…", systemImage: "folder")
         }
-        if let folderId, folders.contains(where: { $0.id == folderId }) {
+        if let filedIn {
             Button {
-                send(.unfile(roomId: roomId, folderId: folderId))
+                send(.unfile(roomId: roomId, folderId: filedIn))
             } label: {
                 Label("Remove from folder", systemImage: "folder.badge.minus")
             }
@@ -432,19 +456,18 @@ public struct RoomFolderMenuItems: View {
     }
 }
 
-/// A room's long press with its folder choices, only where folders are on: with them off the room has no long-press
-/// menu at all, as before.
+/// A room's long press with its folder choices, only where folders are on (`send` not nil): with them off the room has
+/// no long-press menu at all, as before.
 struct RoomFolderContextMenu: ViewModifier {
     let roomId: String
-    let folderId: String?
-    let folders: [RoomFolderItem]?
+    let filedIn: String?
     let send: ((RoomFolderIntent) -> Void)?
 
     @ViewBuilder
     func body(content: Content) -> some View {
-        if let folders, let send {
+        if let send {
             content.contextMenu {
-                RoomFolderMenuItems(roomId: roomId, folderId: folderId, folders: folders, send: send)
+                RoomFolderMenuItems(roomId: roomId, filedIn: filedIn, send: send)
             }
         } else {
             content
@@ -456,6 +479,8 @@ struct RoomFolderContextMenu: ViewModifier {
 /// what the server said about it (a name already used) shows under it.
 public struct RoomFolderNameSheet: View {
     private let title: String
+    /// Where the new folder goes ("Inside Studio."), when not at the top level.
+    private let place: String?
     private let isNew: Bool
     private let folderCount: Int
     private let serverProblem: String?
@@ -465,9 +490,11 @@ public struct RoomFolderNameSheet: View {
     @State private var name: String
     @State private var edited = false
 
-    public init(title: String, initialName: String = "", isNew: Bool, folderCount: Int, serverProblem: String?,
-                isSaving: Bool, onSave: @escaping (String) -> Void, onCancel: @escaping () -> Void) {
+    public init(title: String, place: String? = nil, initialName: String = "", isNew: Bool, folderCount: Int,
+                serverProblem: String?, isSaving: Bool, onSave: @escaping (String) -> Void,
+                onCancel: @escaping () -> Void) {
         self.title = title
+        self.place = place
         self.isNew = isNew
         self.folderCount = folderCount
         self.serverProblem = serverProblem
@@ -490,6 +517,12 @@ public struct RoomFolderNameSheet: View {
                         .onSubmit { save() }
                         .onChange(of: name) { _ in edited = true }
                         .accessibilityIdentifier("pocket.folder.name")
+                } header: {
+                    if let place {
+                        Text(place)
+                            .textCase(nil)
+                            .accessibilityIdentifier("pocket.folder.place")
+                    }
                 } footer: {
                     VStack(alignment: .leading, spacing: 4) {
                         if case .problem(let text) = check, edited || isNew && folderCount >= RoomFolderName.maximumFolders {

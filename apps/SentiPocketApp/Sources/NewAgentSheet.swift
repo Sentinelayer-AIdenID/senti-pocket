@@ -10,24 +10,41 @@ enum NewAgentChat {
     /// How much of the job the title carries.
     static let jobExcerpt = 60
 
+    /// What the chat is called while the mint has still to name its agent: a start with no name and no job words that
+    /// can be a title. Renamed to the agent's name once the mint answers (`AgentStartModel`).
+    static let untitled = "Agent chat"
+
+    /// The chat's name, never "New agent" (Carter, #61655: a chat made for an agent is called what it is for):
     /// "<name> · <the job's first 60 characters>" on one line, within the room-title cap, counted in code points as on
-    /// the web; "New agent" for a name the mint will make, or one the API would refuse as a title.
-    static func title(agentName: String, job: String) -> String {
+    /// the web; the job's words alone when the mint will make the name; the name alone with no job words. Nil when
+    /// neither makes a title the API takes: the chat is `untitled` until the mint names its agent.
+    static func title(agentName: String, job: String) -> String? {
         let name = oneLine(agentName)
-        let excerpt = String(String.UnicodeScalarView(oneLine(job).unicodeScalars.prefix(jobExcerpt)))
+        let excerpt = String(String.UnicodeScalarView(withoutLeadingMarks(oneLine(job)).unicodeScalars.prefix(jobExcerpt)))
             .trimmingCharacters(in: .whitespaces)
-        let lead = name.isEmpty ? "New agent" : name
-        let full = excerpt.isEmpty ? lead : "\(lead) · \(excerpt)"
-        let capped = String(String.UnicodeScalarView(full.unicodeScalars.prefix(RoomTitle.maximumLength)))
-            .trimmingCharacters(in: .whitespaces)
-        if let cleaned = RoomTitle.cleaned(capped) { return cleaned }
-        return name.isEmpty ? "New agent" : title(agentName: "", job: job)
+        let candidates = [name.isEmpty || excerpt.isEmpty ? "" : "\(name) · \(excerpt)", excerpt, name]
+        for candidate in candidates where !candidate.isEmpty {
+            let capped = String(String.UnicodeScalarView(candidate.unicodeScalars.prefix(RoomTitle.maximumLength)))
+                .trimmingCharacters(in: .whitespaces)
+            if let cleaned = RoomTitle.cleaned(capped) { return cleaned }
+        }
+        return nil
     }
 
     /// Control characters out, and every run of white space one space (the web's `oneLine`).
     private static func oneLine(_ text: String) -> String {
         let scalars = text.unicodeScalars.map { $0.value < 32 || $0.value == 127 ? " " : $0 }
         return String(String.UnicodeScalarView(scalars)).split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+
+    /// A job written as Markdown ("- fix the build", "## Fix"): its words without the marks a room title may not
+    /// start with (`RoomTitle.cleaned`).
+    private static func withoutLeadingMarks(_ text: String) -> String {
+        var words = Substring(text)
+        while let first = words.first, "#>*-".contains(first) {
+            words = words.drop { "#>*-".contains($0) }.drop { $0 == " " }
+        }
+        return String(words)
     }
 }
 

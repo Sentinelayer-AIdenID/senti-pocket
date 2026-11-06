@@ -9,6 +9,8 @@ struct WhisperModelSettingsView: View {
     let aiConsent: AIConsent?
     /// Direct messages' "Who can message me", where they are on.
     let directMessages: DirectMessagesCenter?
+    /// The calendar rows, where the calendar is on.
+    let calendar: CalendarSettingsContext?
     let onSignOut: (@MainActor () -> Void)?
 
     @Environment(\.dismiss) private var dismiss
@@ -22,12 +24,14 @@ struct WhisperModelSettingsView: View {
         blocks: BlockList? = nil,
         aiConsent: AIConsent? = nil,
         directMessages: DirectMessagesCenter? = nil,
+        calendar: CalendarSettingsContext? = nil,
         onSignOut: (@MainActor () -> Void)? = nil
     ) {
         _coordinator = ObservedObject(wrappedValue: coordinator)
         self.blocks = blocks
         self.aiConsent = aiConsent
         self.directMessages = directMessages
+        self.calendar = calendar
         self.onSignOut = onSignOut
     }
 
@@ -38,6 +42,9 @@ struct WhisperModelSettingsView: View {
                 notificationsSection
                 if let directMessages {
                     DirectMessagesSettingsSection(center: directMessages)
+                }
+                if let calendar {
+                    CalendarSettingsSection(context: calendar)
                 }
                 crashSection
                 modelStatusSection

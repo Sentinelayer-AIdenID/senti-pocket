@@ -250,6 +250,8 @@ struct RoomActionRequest: Equatable, Sendable {
 
     static let replyLimit = 4_000
     static let reactionTypes: Set<String> = ["ack", "like", "dislike", "unlike", "undislike"]
+    /// Taking back a like or a dislike.
+    static let undoTypes: Set<String> = ["unlike", "undislike"]
     static let pinTypes: Set<String> = ["pin", "unpin"]
     static let emojiTypes: Set<String> = ["react", "unreact"]
 
@@ -396,6 +398,8 @@ final class HTTPRoomActionSender: RoomActionSending, @unchecked Sendable {
         }
         switch http.statusCode {
         case 200..<300: return
+        // Taking back a like or dislike that is not there (the API's REACTION_NOT_ACTIVE): it is not there, as asked.
+        case 409 where RoomActionRequest.undoTypes.contains(action.actionType): return
         case 401: throw RoomSendError.reauthenticationRequired
         case 403, 404: throw RoomSendError.notAllowed
         case 409, 425, 429, 500..<600:

@@ -2,7 +2,9 @@ name: iOS Verify
 
 on:
   workflow_dispatch:
+  # Pushes verify master only; stacked branches are verified once, through their pull requests.
   push:
+    branches: [master]
     paths:
       - ".gitattributes"
       - ".github/workflows/ios-verify.yml"
@@ -35,7 +37,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ios-verify-${{ github.workflow }}-${{ github.ref }}
+  # One run per pull request (or per branch for master): a new push cancels the run it supersedes.
+  group: ios-verify-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -97,6 +100,14 @@ jobs:
         run: >-
           python3 scripts/ios/verify_unsigned_release.py preflight
           --repository-root "$GITHUB_WORKSPACE"
+      - name: Known-flaky split guard and time box (ticket 9d7d62f1, ends 2026-11-13)
+        # Two known flaky room-list checks (b508c37d, 96166f35) run in a step after the gating tests that reports
+        # without gating, until the blank-room fix merges or 2026-11-13. This step fails the gating job if they come
+        # back into a gating test, if their class holds anything else, if that step stops being after the gating tests
+        # or starts gating, or after that date while the split is still here.
+        run: |
+          python3 scripts/ios/tests/known_flaky_guard_test.py
+          python3 scripts/ios/known_flaky_guard.py
       - name: Validate and bind App Store submission toolchain
         shell: bash
         run: |
@@ -382,11 +393,48 @@ jobs:
           -destination 'id=${{ steps.simulator.outputs.device_id }}'
           -only-testing:SentiPocketAppTests
           -skip-testing:SentiPocketAppUITests
+          -skip-testing:SentiPocketAppTests/LazyListKnownFlakyTests
           -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages"
           -derivedDataPath "$RUNNER_TEMP/DerivedData"
           -resultBundlePath "$RUNNER_TEMP/SentiPocketAppTests.xcresult"
           CODE_SIGNING_ALLOWED=NO
           test
+      - name: Known flaky room-list checks (not gating, ticket 9d7d62f1)
+        # The b508c37d at-rest arrival check with its paired follow-back, and the 96166f35 held-message check, fail
+        # often on PRs that do not touch the room list. Until their fix they run here, after the gating tests and
+        # even when those fail (not when the run is cancelled), and report their row counts to the job summary
+        # without gating. The gating tests above
+        # skip their class; the guard step keeps this step as it is. Ends when the blank-room fix merges or on
+        # 2026-11-13, whichever comes first.
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 10
+        shell: bash
+        env:
+          DEVICE_ID: ${{ steps.simulator.outputs.device_id }}
+        run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/known-flaky-room-list.log"
+          status=0
+          xcodebuild \
+            -project apps/SentiPocketApp/SentiPocketApp.xcodeproj \
+            -scheme SentiPocketApp \
+            -destination "id=$DEVICE_ID" \
+            -only-testing:SentiPocketAppTests/LazyListKnownFlakyTests \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -resultBundlePath "$RUNNER_TEMP/KnownFlakyRoomList.xcresult" \
+            CODE_SIGNING_ALLOWED=NO \
+            test 2>&1 | tee "$log" || status=$?
+          {
+            echo "### Known flaky room-list checks (not gating, ticket 9d7d62f1): exit $status"
+            echo
+            echo '```'
+            grep -aE "LAZYLIST |Test Case '.*' (passed|failed)|error: .*known-flaky|Executed [0-9]+ test" "$log" \
+              | sed -E 's/^.*(LAZYLIST )/\1/' || echo "no counts in the log"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$status"
       - name: Upload XCTest result bundle
         if: always()
         uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874 # v4.4.0

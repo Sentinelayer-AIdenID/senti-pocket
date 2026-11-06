@@ -58,6 +58,8 @@ extension HTTPRoomMessageSender: RoomCreating {
 /// and keeps one room per id for its owner.
 protocol AgentChatCreating: Sendable {
     func createAgentChat(sessionId: String, title: String, idempotencyKey: String) async throws
+    /// Names a chat made before the mint named its agent: its owner, who made it, renames it to the agent's name.
+    func nameAgentChat(sessionId: String, title: String) async throws
 }
 
 extension HTTPRoomMessageSender: AgentChatCreating {
@@ -66,6 +68,10 @@ extension HTTPRoomMessageSender: AgentChatCreating {
                                         sessionId: sessionId, idempotencyKey: idempotencyKey)
         // The agent is sent to the id kept with its start, so a chat made under any other is not the one.
         guard made == sessionId else { throw RoomSendError.rejected }
+    }
+
+    func nameAgentChat(sessionId: String, title: String) async throws {
+        _ = try await setTitle(sessionId: sessionId, title: title)
     }
 }
 

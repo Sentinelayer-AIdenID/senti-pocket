@@ -44,6 +44,19 @@ struct RoomMediaOutboxEntry: Codable, Equatable {
         /// Its post was asked for and no refusal came back: it may be in the room, so it is never taken back on the
         /// server if it is discarded.
         var postStarted: Bool?
+        /// A reply: the message whose thread it goes in (absent: a message in the room), the reply it answers, and
+        /// whom, so a retry after a relaunch posts it to that thread again.
+        var replyTo: Int64? = nil
+        var replyToReply: String? = nil
+        var replyToName: String? = nil
+        /// The API took no files on this reply: it comes back as that card ("Send as a new message"), never as Retry.
+        var filesRefused: Bool? = nil
+        /// And it took the reply's words: they are never sent again.
+        var replyPosted: Bool? = nil
+        /// A new message carrying a reply's files and words: the thread (and the reply it answered) whose saved draft
+        /// goes once it posts.
+        var draftThread: Int64? = nil
+        var draftReply: String? = nil
     }
 
     var version = 1
@@ -68,6 +81,8 @@ struct RoomMediaOutboxEntry: Codable, Equatable {
     var message: Message?
     /// Taken back by the person: deleted on the server at the next open, never restored.
     var withdrawn: Bool?
+    /// Waiting in a thread's tray (its message's sequence), not the room's: it goes back there.
+    var tray: Int64?
 }
 
 enum RoomMediaOutbox {

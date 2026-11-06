@@ -32,36 +32,54 @@ public enum RoomProfile {
         guard !id.isEmpty, !RoomChatQuiet.isRoomVoice(id), id != "human-" else { return false }
         return !ownAuthorIds.contains { $0.lowercased() == id }
     }
+
+    /// Whether `senderId` has a profile with their messages (Carter, 11-04: "tap anyone → all their messages"): anyone
+    /// with an id, you and the room's own voices included. Whether the card offers Message is `opens` alone.
+    public static func showsMember(senderId: String) -> Bool {
+        let id = senderId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return !id.isEmpty && id != "human-"
+    }
 }
 
 /// What tapping an avatar does in a room where profiles open (direct messages on). Put in the environment by the room
 /// screen; absent, avatars are not buttons and the online ring opens the people list as before.
 public struct RoomProfileOpener: Equatable {
     public let ownAuthorIds: Set<String>
+    /// Opens for everyone with an id (their profile and messages), not only for those a direct message can reach.
+    public let opensEveryone: Bool
     private let open: (RoomProfileTarget) -> Void
 
     /// Two openers for the same you are the same: the room screen makes a new one each time it draws, and every avatar
     /// reads it, so an opener that never compared equal would draw every avatar again with every message. Its action
     /// only sets the screen's own state, which every copy of the screen shares.
     public static func == (lhs: RoomProfileOpener, rhs: RoomProfileOpener) -> Bool {
-        lhs.ownAuthorIds == rhs.ownAuthorIds
+        lhs.ownAuthorIds == rhs.ownAuthorIds && lhs.opensEveryone == rhs.opensEveryone
     }
 
-    public init(ownAuthorIds: Set<String>, open: @escaping (RoomProfileTarget) -> Void) {
+    public init(ownAuthorIds: Set<String>, opensEveryone: Bool = false, open: @escaping (RoomProfileTarget) -> Void) {
         self.ownAuthorIds = ownAuthorIds
+        self.opensEveryone = opensEveryone
         self.open = open
     }
 
-    /// The card for `target`, unless it is yourself or the room's voice. Returns whether it opened.
+    /// The card for `target`, unless this opener does not open theirs. Returns whether it opened.
     @discardableResult
     public func callAsFunction(_ target: RoomProfileTarget) -> Bool {
-        guard RoomProfile.opens(senderId: target.senderId, ownAuthorIds: ownAuthorIds) else { return false }
+        guard opens(target.senderId) else { return false }
         open(target)
         return true
     }
 
     public func opens(_ senderId: String) -> Bool {
-        RoomProfile.opens(senderId: senderId, ownAuthorIds: ownAuthorIds)
+        opensEveryone ? RoomProfile.showsMember(senderId: senderId)
+            : RoomProfile.opens(senderId: senderId, ownAuthorIds: ownAuthorIds)
+    }
+
+    /// A room's opener for its member profiles: every avatar and name opens its owner's profile and messages, direct
+    /// messages on or not. Your own ids (`human-<handle>`) say where Message is never offered.
+    public static func members(ownMentionHandles: Set<String>, open: @escaping (RoomProfileTarget) -> Void) -> RoomProfileOpener {
+        RoomProfileOpener(ownAuthorIds: Set(ownMentionHandles.filter { $0 != "all" }.map { "human-\($0)" }),
+                          opensEveryone: true, open: open)
     }
 
     /// A room's opener: only where direct messages are on, and only once the room knows who you are (your mention
@@ -91,6 +109,16 @@ public extension EnvironmentValues {
 
 /// A profile card: who, the rooms you share, and what you can do.
 public struct RoomProfileCardState: Equatable, Sendable {
+    /// Where the card's rooms came from.
+    public enum SharedRoomsSource: Equatable, Sendable {
+        /// Only the room the card was opened from: no server has said which rooms you share.
+        case thisRoom
+        /// The server's list of the rooms you share (`GET /me/shared-rooms`), with its count when it gave one.
+        case server
+        /// An open direct message's list of the rooms you share, which has no count.
+        case directMessage
+    }
+
     public enum Phase: Equatable, Sendable {
         case idle
         /// The direct message is being opened.
@@ -100,25 +128,109 @@ public struct RoomProfileCardState: Equatable, Sendable {
     }
 
     public let target: RoomProfileTarget
-    /// Titles of the rooms you share, as far as the phone knows: the server's list once a direct message exists, else
-    /// the room you are in.
+    /// Titles of the rooms you share, as far as the phone knows: the server's list, newest first (`GET
+    /// /me/shared-rooms`, or a direct message's), else the room you are in.
     public let sharedRooms: [String]
+    /// How many rooms you share in all, when the server said; nil when the phone does not know (then no count shows).
+    public let sharedRoomsTotal: Int?
+    /// Where `sharedRooms` came from.
+    public let sharedRoomsSource: SharedRoomsSource
     public let canMessage: Bool
     public let canBlock: Bool
     public let phase: Phase
 
-    public init(target: RoomProfileTarget, sharedRooms: [String], canMessage: Bool, canBlock: Bool = false,
+    /// The most shared rooms the card lists by name; the rest are counted, or listed by See all.
+    public static let roomsShown = 4
+
+    public init(target: RoomProfileTarget, sharedRooms: [String], sharedRoomsTotal: Int? = nil,
+                sharedRoomsSource: SharedRoomsSource = .thisRoom, canMessage: Bool, canBlock: Bool = false,
                 phase: Phase = .idle) {
         self.target = target
         self.sharedRooms = sharedRooms
+        self.sharedRoomsTotal = sharedRoomsTotal.map { max($0, sharedRooms.count) }
+        self.sharedRoomsSource = sharedRoomsSource
         self.canMessage = canMessage
         self.canBlock = canBlock
         self.phase = phase
     }
 
+    /// What the rooms are called, honestly, by where they came from: "In this room" for the room the card was opened
+    /// from, when no server has said (it may well not be the only one, and Carter read "Room you share" as one);
+    /// "Rooms you share · 12" with the server's count, "Room you share" only when it says one; "Rooms you share", with
+    /// no number, for a list without a count.
+    public var sharedRoomsHeader: String {
+        if sharedRoomsSource == .thisRoom { return "In this room" }
+        guard let total = sharedRoomsTotal else { return "Rooms you share" }
+        return total == 1 ? "Room you share" : "Rooms you share · \(total)"
+    }
+
+    /// The rooms the card lists: the newest few by name. With a count from the server, See all lists the rest; without
+    /// one, "and 3 more" says how many more the phone knows of.
+    public var sharedRoomLines: [String] {
+        let shown = Array(sharedRooms.prefix(Self.roomsShown)).map { $0.isEmpty ? "Untitled room" : $0 }
+        guard sharedRoomsTotal == nil else { return shown }
+        let more = sharedRooms.count - shown.count
+        return more > 0 ? shown + ["and \(more) more"] : shown
+    }
+
+    /// See all: the server counted more rooms than the card lists.
+    public var canSeeAllRooms: Bool {
+        (sharedRoomsTotal ?? 0) > min(sharedRooms.count, Self.roomsShown)
+    }
+
+    /// The same card with the rooms you share as `source` listed them, newest first, and how many in all.
+    public func with(sharedRooms: [String], total: Int?, from source: SharedRoomsSource) -> RoomProfileCardState {
+        RoomProfileCardState(target: target, sharedRooms: sharedRooms, sharedRoomsTotal: total,
+                             sharedRoomsSource: source, canMessage: canMessage, canBlock: canBlock, phase: phase)
+    }
+
     /// What every refusal reads as: the server answers blocked, off and unknown alike, and so does the card.
     public static func refusal(name: String) -> String {
         "You can't message \(name) right now."
+    }
+}
+
+/// See all: every room you share with someone, newest first by their latest activity, a page at a time.
+public struct RoomSharedRoomsState: Equatable, Sendable {
+    public struct Row: Equatable, Identifiable, Sendable {
+        public let id: String
+        public let title: String
+        /// When they were last active in it, when the server said.
+        public let lastActive: Date?
+
+        public init(id: String, title: String, lastActive: Date?) {
+            self.id = id
+            self.title = title.isEmpty ? "Untitled room" : title
+            self.lastActive = lastActive
+        }
+    }
+
+    public enum Phase: Equatable, Sendable {
+        case idle
+        case loading
+        case failed(String)
+    }
+
+    /// Whom you share them with.
+    public let name: String
+    public let rows: [Row]
+    /// How many in all, once the server said.
+    public let total: Int?
+    public let phase: Phase
+    public let canLoadMore: Bool
+
+    public init(name: String, rows: [Row] = [], total: Int? = nil, phase: Phase = .idle, canLoadMore: Bool = true) {
+        self.name = name
+        self.rows = rows
+        self.total = total
+        self.phase = phase
+        self.canLoadMore = canLoadMore
+    }
+
+    /// "Rooms you share with review-agent · 12".
+    public var title: String {
+        guard let total else { return "Rooms you share with \(name)" }
+        return "Rooms you share with \(name) · \(total)"
     }
 }
 
