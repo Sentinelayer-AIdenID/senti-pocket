@@ -294,6 +294,41 @@ final class RoomReaderStaysPutUITests: XCTestCase {
         XCTAssertEqual(after.newestVisible(), Self.lastArrival, "the second tap goes to the latest")
     }
 
+    /// The largest text size for this app alone, whatever the simulator's own setting.
+    private static let largestText = ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
+
+    /// After the reader has dragged the list (three screens up), the burst arrives and the arrow's first tap opens the
+    /// list anew at the New messages line. That list is one the reader has not dragged: once the rows around the line
+    /// are measured, the line is placed again (`placeLineAgain`), and it ends in the top half with the first new
+    /// message in view. At the largest text size, where the first placement by the rows' estimated heights missed it
+    /// on the Mac (8962b6b, dark: messages 1099 to 1104 in view, the line not).
+    func test_after_a_drag_the_first_tap_places_the_line_again_once_its_rows_are_measured() throws {
+        let app = launch(kind: "arrivals", extra: Self.largestText)
+        scrollUp(app, screens: 3)
+        Self.beginBurst()
+        waitForBurst()
+        let arrow = app.descendants(matching: .any)["pocket.room.jumpToLatest"]
+        XCTAssertTrue(arrow.waitForExistence(timeout: 10), "the arrow is there")
+        arrow.tap()
+        let line = app.descendants(matching: .any)["pocket.room.unreadDivider"]
+        _ = line.waitForExistence(timeout: 10)
+        // The list's open, then the line placed again once its rows are measured (0.3 s on), then settled.
+        pause(2.5)
+        keep(XCUIScreen.main.screenshot(), as: "line-again-after-tap")
+        let screen = try XCTUnwrap(readScreen(app), "the app could be read")
+        let first = screen.messages[Self.firstArrival]
+        print("READER-STAYS-PUT line-again line=\(line.exists ? "\(Int(line.frame.minY))" : "absent") "
+            + "first=\(first.map { "\(Int($0.minY))" } ?? "absent") top=\(screen.topMessage()?.id ?? "none") "
+            + "band=\(Int(screen.top))...\(Int(screen.bottom))")
+        XCTAssertTrue(line.exists, "the New messages line is there")
+        if line.exists {
+            XCTAssertGreaterThanOrEqual(line.frame.minY, screen.top, "the line is in view")
+            XCTAssertLessThan(line.frame.minY, screen.top + (screen.bottom - screen.top) / 2, "in the top half")
+        }
+        let firstInView = first.map { $0.minY >= screen.top && $0.minY < screen.bottom } ?? false
+        XCTAssertTrue(firstInView, "the first message that arrived is in view, from its top")
+    }
+
     // MARK: - A slow coast a little way up
 
     /// At the bottom, the reader drags the list up slowly, about 50 points at 10 points a second (under half a point a
@@ -598,10 +633,11 @@ final class RoomReaderStaysPutUITests: XCTestCase {
 
     // MARK: - Driving the app
 
-    private func launch(kind: String = "mixed") -> XCUIApplication {
+    private func launch(kind: String = "mixed", extra: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
         // The burst waits for this test's signal; the long fallback only ends a run whose signal never arrived.
         app.launchArguments = ["-PocketRoomBurstPreview", "-PocketRoomBurstAfter", "600", "-PocketRoomBurstKind", kind]
+            + extra
         app.launch()
         XCTAssertTrue(app.descendants(matching: .any)[Self.newestHistory].waitForExistence(timeout: 90), "the room opened")
         // The open's scroll, receipts, reactions and the thread's reply land.
