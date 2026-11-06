@@ -401,6 +401,7 @@ public struct RoomChatView: View {
             .padding(.horizontal, 12)
             .padding(.bottom, 8)
         }
+        .accessibilityIdentifier("pocket.room.list")
         // Dragging the messages lowers the keyboard with the finger, as in Messages.
         .scrollDismissesKeyboard(.interactively)
         // Sending photos or files brings you to the bottom, where the message appears, like a typed one. Told by the
@@ -546,6 +547,7 @@ public struct RoomChatView: View {
                 .foregroundStyle(PocketPalette.textSecondary)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 12)
+                .accessibilityIdentifier("pocket.room.startOfRoom")
         }
     }
 
@@ -3785,39 +3787,69 @@ private struct RoomPinnedStrip: View {
     let onOpen: (Int64) -> Void
     let onUnpin: (Int64) -> Void
 
+    // The strip's height is worked out from its lines, scaled with the text size, never read from its layout: a height
+    // read from layout moved while the list bounced at its top, the list's frame followed it, and the list laid itself
+    // out without end (ticket 575678a1). Every line has a fixed limit, so the worked-out height always holds them.
+    /// One line of the header (caption), and of a chip's snippet (footnote) and pinner (caption2), a point over each
+    /// style's own line height.
+    @ScaledMetric(relativeTo: .caption) private var headerLine: CGFloat = 17
+    @ScaledMetric(relativeTo: .footnote) private var snippetLine: CGFloat = 19
+    @ScaledMetric(relativeTo: .caption2) private var pinnerLine: CGFloat = 14
+
+    static let snippetLines = 2
+    /// The leaderboard button's padding above and below its label.
+    static let buttonPadding: CGFloat = 5
+    static let chipPadding: CGFloat = 6
+    static let stripPadding: CGFloat = 6
+
+    /// A chip: its snippet (two lines kept), "Pinned by" (one line), and its padding.
+    private var chipHeight: CGFloat {
+        Self.chipPadding * 2 + snippetLine * CGFloat(Self.snippetLines) + 2 + pinnerLine
+    }
+
+    /// The header, as tall with or without the leaderboard button, so the strip never changes height with it.
+    private var headerHeight: CGFloat { headerLine + Self.buttonPadding * 2 }
+
+    /// The whole strip, padding included.
+    var height: CGFloat { Self.stripPadding * 2 + headerHeight + 6 + chipHeight }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Label("Pinned", systemImage: "pin.fill")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(PocketPalette.warning)
+                    .lineLimit(1)
                 Text("\(min(pinned.count, limit))/\(limit)")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(PocketPalette.textSecondary)
+                    .lineLimit(1)
                 Spacer(minLength: 8)
                 if let leaderboard {
                     leaderboardButton(leaderboard)
                 }
             }
+            .frame(height: headerHeight)
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
+                HStack(alignment: .top, spacing: 8) {
                     ForEach(pinned) { pin in
                         Button {
                             onOpen(pin.sequenceId)
                         } label: {
                             VStack(alignment: .leading, spacing: 2) {
-                                // One line each, as in a chat app's pinned bar: the chat keeps its room.
+                                // Two lines of the message at most, its space kept, so every chip is as tall.
                                 Text(pin.snippet)
                                     .font(.footnote)
                                     .foregroundStyle(PocketPalette.textPrimary)
-                                    .lineLimit(1)
+                                    .lineLimit(Self.snippetLines, reservesSpace: true)
                                 Text("Pinned by \(pin.pinnedBy)")
                                     .font(.caption2)
                                     .foregroundStyle(PocketPalette.textSecondary)
+                                    .lineLimit(1)
                             }
                             .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .frame(width: 220, alignment: .leading)
+                            .padding(.vertical, Self.chipPadding)
+                            .frame(width: 220, height: chipHeight, alignment: .topLeading)
                             .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                         }
                         .buttonStyle(.plain)
@@ -3835,10 +3867,11 @@ private struct RoomPinnedStrip: View {
                     }
                 }
             }
+            .frame(height: chipHeight)
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        // The chat scrolls under the strip, so it needs an opaque bar beneath its tint.
+        .padding(.vertical, Self.stripPadding)
+        .frame(height: height, alignment: .top)
         .background {
             ZStack {
                 Rectangle().fill(.bar)
@@ -3858,8 +3891,9 @@ private struct RoomPinnedStrip: View {
             Label("Leaderboard", systemImage: "trophy.fill")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(PocketPalette.warning)
+                .lineLimit(1)
                 .padding(.horizontal, 10)
-                .padding(.vertical, 5)
+                .padding(.vertical, Self.buttonPadding)
                 .background(PocketPalette.raised, in: Capsule())
                 .contentShape(Capsule())
         }

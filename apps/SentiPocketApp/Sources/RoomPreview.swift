@@ -66,6 +66,12 @@ enum RoomPreview {
         ProcessInfo.processInfo.arguments.contains("-PocketTicketsPreview")
     }
 
+    /// `-PocketRoomLongPinPreview` pins first a long message by someone with a long name, so the pinned strip can be
+    /// checked holding a long snippet and a long name whole.
+    static var isLongPinRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-PocketRoomLongPinPreview")
+    }
+
     /// `-PocketRoomLeaderboardPreview` adds a leaderboard to the room's pins, far up its history, so its Leaderboard
     /// button shows.
     static var isLeaderboardRequested: Bool {
@@ -944,6 +950,9 @@ private struct RoomPreviewTransport: RoomTransport {
                   : [:]) { first, _ in first }, replies: files, pinned: (RoomPreview.isLeaderboardRequested
                     ? [RoomPinnedMessage(id: "preview-pin-board", targetSequenceId: Self.leaderboard.sequenceId,
                                          pinnedBy: "board-keeper")]
+                    : []) + (RoomPreview.isLongPinRequested
+                    ? [RoomPinnedMessage(id: "preview-pin-long", targetSequenceId: 121,
+                                         pinnedBy: "human-alexandria-oyelaran-whitcombe-montgomery")]
                     : []) + [
             RoomPinnedMessage(id: "preview-pin-2", targetSequenceId: 120, pinnedBy: "human-alex"),
             RoomPinnedMessage(id: "preview-pin-1", targetSequenceId: 111, pinnedBy: "review-agent")
