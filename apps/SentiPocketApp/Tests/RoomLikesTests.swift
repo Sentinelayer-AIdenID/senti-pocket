@@ -304,10 +304,10 @@ final class RoomLikesCoordinatorTests: XCTestCase {
         coordinator.pause()
     }
 
-    /// Your own taps that go, and only those, pop the thumb tapped, and only a like or a dislike placed taps your hand
-    /// (Carter, 2026-11-06: "Likes and stuff still don't have animation"). A tap ignored while one is on its way, and a
-    /// refresh's new count, never do: that count only rolls.
-    func test_only_your_own_taps_that_go_pop_and_only_likes_and_dislikes_tap_your_hand() async {
+    /// A like or dislike you place, and only that, pops its thumb and taps your hand (Carter, 2026-11-06: "Likes and
+    /// stuff still don't have animation"). Taking one back is quiet, and so are a tap ignored while one is on its way
+    /// and a refresh's new count: those counts only roll.
+    func test_only_a_like_or_dislike_you_place_pops_and_taps_your_hand() async {
         let transport = LikeRoomTransport(history: [message(5)])
         let sender = LikeActionSender(holding: true)
         let coordinator = await opened(transport, sender)
@@ -334,9 +334,9 @@ final class RoomLikesCoordinatorTests: XCTestCase {
         XCTAssertEqual(taps(coordinator, 5), [1, 1, 2])
         await waitUntil("both sent and landed") { sender.requests().count == 3 && transport.actionReads() > reads }
 
-        // Taking it back pops its thumb, and never taps your hand.
+        // Taking it back is quiet: no bounce, and no tap of your hand.
         coordinator.send(.react(sequenceId: 5, type: "undislike"))
-        XCTAssertEqual(taps(coordinator, 5), [1, 2, 2])
+        XCTAssertEqual(taps(coordinator, 5), [1, 1, 2], "a take-back never pops or taps your hand")
         await waitUntil("the undislike sent") { sender.requests().count == 4 }
         coordinator.pause()
     }

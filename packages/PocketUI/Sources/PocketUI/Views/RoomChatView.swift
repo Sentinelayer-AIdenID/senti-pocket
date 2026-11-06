@@ -1594,7 +1594,7 @@ private struct RoomMessageRowView: View {
         }
     }
 
-    /// An action button. A thumb pops once for each of your own taps on it that went (`pops`).
+    /// An action button. A thumb pops once for each like or dislike of yours placed with it (`pops`).
     private func actionButton(_ symbol: String, label: String, pops: Int = 0,
                               action: @escaping () -> Void) -> some View {
         Button(action: action) {
@@ -1737,8 +1737,8 @@ private func copyToPasteboard(_ text: String) {
     #endif
 }
 
-/// A like or dislike thumb pops once for each of your own taps on it that went (`RoomOwnTaps`), never for a count
-/// that changed on its own. Not with Reduce Motion on; on iOS 16 the thumb only changes.
+/// A like or dislike thumb pops once for each like or dislike of yours placed (`RoomOwnTaps`): never for taking one
+/// back, never for a count that changed on its own. Not with Reduce Motion on; on iOS 16 the thumb only changes.
 private struct RoomThumbPop: ViewModifier {
     let pops: Int
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -1809,7 +1809,7 @@ private struct RoomReactionBar: View {
     let sequenceId: Int64
     let canReact: Bool
     var canAddEmoji = false
-    /// Your own taps here that went: the thumb you tapped pops (`RoomOwnTaps`).
+    /// Your own likes and dislikes placed here: their thumbs pop (`RoomOwnTaps`).
     var ownTaps = RoomOwnTaps()
     let onReact: (String) -> Void
     /// An emoji chip was tapped.

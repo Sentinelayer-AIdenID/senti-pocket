@@ -58,9 +58,9 @@ final class RoomChatCoordinator: ObservableObject {
     /// tap there is ignored until it lands, so taps never stack (ticket ce169567: a like that showed nothing once
     /// stacked to 10 likes and a dislike in 30 seconds).
     private var reactionsInFlight: Set<String> = []
-    /// Your own taps on each message's like and dislike that went (a tap ignored while one is on its way is not one):
-    /// its row pops the thumb tapped, and taps your hand for a like or dislike placed (`RoomOwnTaps`). A refresh never
-    /// changes them, so a count that changes on its own only rolls.
+    /// Your own likes and dislikes placed on each message (a tap ignored while one is on its way is not one): its row
+    /// pops the thumb and taps your hand for each, and taking one back is quiet (`RoomOwnTaps`). A refresh never changes
+    /// them, so a count that changes on its own only rolls.
     private var ownTaps: [Int64: RoomOwnTaps] = [:]
     /// Who answered in threads, as of each one's newest reply: most agent and box output is replies, so they are
     /// offered for @ like anyone who posted.
@@ -1163,7 +1163,7 @@ final class RoomChatCoordinator: ObservableObject {
             guard !reactionsInFlight.contains(slot) else { return }
             reactionsInFlight.insert(slot)
         }
-        // This tap went: shown with what it changes, its thumb pops, and a like or dislike taps your hand.
+        // This tap went: shown with what it changes; a like or dislike placed pops its thumb and taps your hand.
         ownTaps[sequenceId, default: RoomOwnTaps()].count(type)
         let before = summaries[sequenceId]
         let writes = Self.reactionWrites(type, liked: before?.likedByViewer == true,

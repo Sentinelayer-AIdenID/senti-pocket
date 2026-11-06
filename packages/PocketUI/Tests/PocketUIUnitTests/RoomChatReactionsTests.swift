@@ -103,18 +103,18 @@ final class RoomChatReactionsTests: XCTestCase {
         XCTAssertEqual(RoomChatReactions.Chip(type: "ack", count: 1, isMine: false).shownCount, 1)
     }
 
-    /// Each tap that went counts on the thumb it was made on, so that thumb pops; only a like or a dislike placed taps
-    /// your hand, never a take-back. An acknowledgement is not a thumb.
-    func test_your_own_taps_pop_their_thumb_and_only_likes_and_dislikes_tap_your_hand() {
+    /// A like or a dislike you place pops its own thumb and taps your hand; taking one back is quiet, and an
+    /// acknowledgement is not a thumb.
+    func test_a_like_or_dislike_you_place_pops_its_thumb_and_a_take_back_is_quiet() {
         var taps = RoomOwnTaps()
         XCTAssertEqual([taps.pops("like"), taps.pops("dislike"), taps.placed], [0, 0, 0])
         taps.count("like")
         XCTAssertEqual([taps.pops("like"), taps.pops("dislike"), taps.placed], [1, 0, 1])
         taps.count("unlike")
-        XCTAssertEqual([taps.pops("like"), taps.pops("dislike"), taps.placed], [2, 0, 1], "a take-back never taps")
+        XCTAssertEqual([taps.pops("like"), taps.pops("dislike"), taps.placed], [1, 0, 1], "a take-back is quiet")
         taps.count("dislike")
         taps.count("undislike")
         taps.count("ack")
-        XCTAssertEqual([taps.pops("like"), taps.pops("dislike"), taps.pops("ack"), taps.placed], [2, 2, 0, 2])
+        XCTAssertEqual([taps.pops("like"), taps.pops("dislike"), taps.pops("ack"), taps.placed], [1, 1, 0, 2])
     }
 }

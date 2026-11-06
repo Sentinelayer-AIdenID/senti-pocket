@@ -40,7 +40,7 @@ public struct RoomChatMessageInput: Equatable, Sendable {
     public let isVoiceTurn: Bool
     /// A checkpoint's summary.
     public let checkpointSummary: String?
-    /// Your own taps on this message's like and dislike that went (`RoomOwnTaps`).
+    /// Your own likes and dislikes placed on this message (`RoomOwnTaps`).
     public let ownTaps: RoomOwnTaps
 
     public init(
@@ -104,33 +104,28 @@ public struct RoomChatWorkLine: Equatable, Identifiable, Sendable {
     }
 }
 
-/// Your own taps on a message's like and dislike that went, counted so its row answers each one once, and only those
-/// (Carter, 2026-11-06: "Likes and stuff still don't have animation"): the thumb you tapped pops, and a like or a
-/// dislike placed (never a take-back) taps your hand. A tap ignored while one is on its way is not counted, and a
-/// refresh never changes them, so a count that changes on its own only rolls.
+/// Your own likes and dislikes placed on a message, counted so its row answers each one once, and only those (Carter,
+/// 2026-11-06: "Likes and stuff still don't have animation"): the thumb you tapped pops, and your hand gets a light tap.
+/// Taking one back is quiet: its count still rolls, but nothing pops or taps. A tap ignored while one is on its way is
+/// not counted, and a refresh never changes them, so a count that changes on its own only rolls.
 public struct RoomOwnTaps: Equatable, Sendable {
-    /// Taps on the like thumb: a like, or taking it back.
+    /// Likes you placed: the like thumb pops for each.
     public private(set) var like = 0
-    /// Taps on the dislike thumb.
+    /// Dislikes you placed: the dislike thumb pops for each.
     public private(set) var dislike = 0
-    /// Likes and dislikes placed, never a take-back: what taps your hand.
-    public private(set) var placed = 0
 
     public init() {}
 
-    /// Counts one tap that went, by what it asked for: like, unlike, dislike or undislike. An acknowledgement is not a
-    /// thumb.
+    /// What taps your hand: each like and dislike placed.
+    public var placed: Int { like + dislike }
+
+    /// Counts one tap that went, by what it asked for. Only a like or a dislike counts: taking one back (unlike,
+    /// undislike) is quiet, and an acknowledgement is not a thumb.
     public mutating func count(_ type: String) {
         switch type {
         case "like":
             like += 1
-            placed += 1
-        case "unlike":
-            like += 1
         case "dislike":
-            dislike += 1
-            placed += 1
-        case "undislike":
             dislike += 1
         default:
             break
@@ -313,7 +308,7 @@ public struct RoomChatMessageRow: Equatable, Identifiable, Sendable {
     /// False when this row continues a run by the same author within a few minutes, so the name is not repeated.
     public let showsHeader: Bool
     public let reactions: RoomChatReactions?
-    /// Your own taps on its like and dislike that went: what pops and what taps your hand.
+    /// Your own likes and dislikes placed on it: what pops and what taps your hand.
     public var ownTaps = RoomOwnTaps()
     public let attachments: [RoomAttachmentChip]
     public let views: RoomChatViews?
