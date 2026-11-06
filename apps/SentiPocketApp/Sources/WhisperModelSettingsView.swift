@@ -1,6 +1,17 @@
 import Foundation
 import SwiftUI
 
+/// The on-device speech model file (Whisper, chosen from Files) is a developer's path: a DEBUG build offers it, and a
+/// Release build shows nothing of it and never asks for a file. Calls listen with Apple's on-device speech without it
+/// (`LiveDialVoice`).
+enum WhisperModelSettings {
+    #if DEBUG
+    static let offersModelFile = true
+    #else
+    static let offersModelFile = false
+    #endif
+}
+
 @MainActor
 struct WhisperModelSettingsView: View {
     @ObservedObject var coordinator: WhisperModelProvisioningCoordinator
@@ -12,6 +23,8 @@ struct WhisperModelSettingsView: View {
     /// The calendar rows, where the calendar is on.
     let calendar: CalendarSettingsContext?
     let onSignOut: (@MainActor () -> Void)?
+    /// The model file's sections, picker and notices (`WhisperModelSettings.offersModelFile`).
+    let offersModelFile: Bool
 
     @Environment(\.dismiss) private var dismiss
     @State private var presentsPicker = false
@@ -25,9 +38,11 @@ struct WhisperModelSettingsView: View {
         aiConsent: AIConsent? = nil,
         directMessages: DirectMessagesCenter? = nil,
         calendar: CalendarSettingsContext? = nil,
-        onSignOut: (@MainActor () -> Void)? = nil
+        onSignOut: (@MainActor () -> Void)? = nil,
+        offersModelFile: Bool = WhisperModelSettings.offersModelFile
     ) {
         _coordinator = ObservedObject(wrappedValue: coordinator)
+        self.offersModelFile = offersModelFile
         self.blocks = blocks
         self.aiConsent = aiConsent
         self.directMessages = directMessages
@@ -47,8 +62,10 @@ struct WhisperModelSettingsView: View {
                     CalendarSettingsSection(context: calendar)
                 }
                 crashSection
-                modelStatusSection
-                modelActionsSection
+                if offersModelFile {
+                    modelStatusSection
+                    modelActionsSection
+                }
                 accountSection
             }
             .navigationTitle("Settings")
@@ -350,9 +367,10 @@ struct WhisperModelSettingsView: View {
         }
     }
 
+    /// Only where the model file is offered: a Release build never shows its notices.
     private var noticeIsPresented: Binding<Bool> {
         Binding(
-            get: { coordinator.state.notice != nil },
+            get: { offersModelFile && coordinator.state.notice != nil },
             set: { isPresented in
                 if !isPresented {
                     coordinator.dismissNotice()

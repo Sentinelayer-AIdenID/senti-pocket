@@ -19,8 +19,10 @@ import PocketSyncClient
 // FOOTGUN-SAFE (warden's load-bearing gate): the write-driving content is ONLY ever the HYDRATED RenderableRing —
 // the coordinator never receives IncomingDecisionCall, and `run` builds DialRequest from the hydrated ring's core,
 // so the unauthenticated push fields can't reach the write by construction. `modelURL` comes from
-// WhisperModelLocator.resolve() (option A, on-device Whisper); when the model isn't provisioned it resolves to nil
-// → listen() degrades to "" → the orchestrator briefs but can't capture — nothing posts (the same fail-safe as before).
+// WhisperModelLocator.resolve() (option A, on-device Whisper); when the model isn't provisioned (every Release build:
+// it never asks for the file) it resolves to nil and LiveDialVoice listens with Apple's on-device speech instead.
+// Where that can't hear (no permission, no on-device model) listen() degrades to "" → the orchestrator briefs but
+// can't capture — nothing posts (the same fail-safe as before).
 @MainActor
 final class DialHost: ObservableObject {
     /// CallKit/DialVoice is the exclusive audio owner from accepted ring through terminal teardown. Checkpoint
@@ -564,8 +566,8 @@ final class DialHost: ObservableObject {
     }
 
     /// Build + run the governed flow for a HYDRATED ring. DialRequest is built from the ring's core (authed), NEVER
-    /// the push. modelURL is resolved by WhisperModelLocator (App Support side-load / bundle); it nil-degrades
-    /// (brief-only, no capture) when the model isn't provisioned — so a missing model never blocks a dial.
+    /// the push. modelURL is resolved by WhisperModelLocator (App Support side-load / bundle); without it the call listens
+    /// with Apple's on-device speech (`LiveDialVoice.defaultRecognizer`), so a missing model never blocks a dial.
     static func run(
         _ ring: RenderableRing,
         gatewayURL: URL,

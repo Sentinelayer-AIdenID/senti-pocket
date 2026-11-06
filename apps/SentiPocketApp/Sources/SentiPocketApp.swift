@@ -38,7 +38,8 @@ struct SentiPocketApp: App {
     var body: some Scene {
         WindowGroup {
             rootView
-                .onAppear { whisperModel.start() }
+                // The model file is checked only where it is offered (DEBUG): Release never reads or asks for it.
+                .onAppear { if WhisperModelSettings.offersModelFile { whisperModel.start() } }
                 .onOpenURL { url in
                     LaunchUrgency.shared.raise()
                     _ = incomingLinks.receive(url)

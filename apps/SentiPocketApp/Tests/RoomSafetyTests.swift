@@ -1,6 +1,7 @@
 import Foundation
 import PocketSyncClient
 import PocketUI
+import UIKit
 import XCTest
 @testable import SentiPocketApp
 
@@ -1061,5 +1062,44 @@ final class RoomSafetyTests: XCTestCase {
     func test_the_support_contact_is_one_address() {
         XCTAssertEqual(PocketSupport.email, "help@plexaura.io")
         XCTAssertEqual(PocketSupport.mailURL?.absoluteString, "mailto:help@plexaura.io")
+    }
+
+    // MARK: Settings and the consent sheet, as drawn
+
+    /// Settings in a window tall enough to draw every row of its list.
+    private func settings(offersModelFile: Bool) throws -> UIWindow {
+        let window = try HostedSummary.host(WhisperModelSettingsView(
+            coordinator: WhisperModelProvisioningCoordinator(),
+            onSignOut: {},
+            offersModelFile: offersModelFile
+        ))
+        window.frame = CGRect(x: 0, y: 0, width: 390, height: 2400)
+        return window
+    }
+
+    /// A Release build offers no speech model file (`WhisperModelSettings.offersModelFile` is false outside DEBUG): no
+    /// section, no picker, nothing that asks for a file. Contact us is there either way, with the address.
+    func test_settings_without_the_model_file_offer_no_picker_and_show_contact_us() throws {
+        let release = try settings(offersModelFile: false)
+        let contact = HostedSummary.wait(for: "settings.account.support", in: release)
+        XCTAssertNotNil(contact)
+        XCTAssertTrue(contact?.accessibilityLabel?.contains("Contact us") == true, contact?.accessibilityLabel ?? "")
+        let drawn = HostedSummary.identifiers(in: release)
+        XCTAssertFalse(drawn.contains { $0.hasPrefix("settings.whisper.") }, "nothing of the model file: \(drawn)")
+        HostedSummary.close(release)
+
+        // The same check sees the picker where it is offered (DEBUG), so it can fail.
+        let debug = try settings(offersModelFile: true)
+        defer { HostedSummary.close(debug) }
+        XCTAssertNotNil(HostedSummary.wait(for: "settings.whisper.choose-file", in: debug))
+    }
+
+    /// The consent sheet's answers read Agree and Not now, under the notice.
+    func test_the_consent_sheet_answers_agree_or_not_now() throws {
+        let window = try HostedSummary.host(RoomAIConsentSheet(onAllow: {}, onNotNow: {}))
+        defer { HostedSummary.close(window) }
+        XCTAssertNotNil(HostedSummary.wait(for: "pocket.aiConsent.ok", in: window, label: "Agree"))
+        XCTAssertNotNil(HostedSummary.wait(for: "pocket.aiConsent.notNow", in: window, label: "Not now"))
+        XCTAssertNotNil(HostedSummary.wait(for: "pocket.aiConsent.notice", in: window, label: AIConsentText.notice))
     }
 }
