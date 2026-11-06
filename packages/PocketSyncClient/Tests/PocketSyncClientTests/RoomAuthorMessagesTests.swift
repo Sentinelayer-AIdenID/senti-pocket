@@ -104,6 +104,55 @@ final class RoomAuthorMessagesTests: XCTestCase {
         XCTAssertEqual(AuthorPageURLProtocol.captured().count, 2)
     }
 
+    /// Ticket 386081b1, the API's answer for an agent and for a person, as it is shaped (sentinelayer-api a199151c,
+    /// src/routes/sessions.py:6778: `events`, `count`, `nextBeforeSequence`, `hasMore`, `connection`), through the
+    /// phone's own transport: each comes back as their rows, with who wrote them.
+    func test_an_agents_page_and_a_persons_page_read_as_their_rows() async throws {
+        AuthorPageURLProtocol.reset(body: """
+        {"events":[
+          {"id":"e9","event":"session_message","sequenceId":62390,"ts":"2026-11-06T06:00:00Z","agentId":"build-agent",
+           "payload":{"text":"The build is up."}},
+          {"id":"e7","event":"session_message","sequenceId":62310,"ts":"2026-11-06T05:40:00Z","agentId":"build-agent",
+           "payload":{"text":"Starting the build."}}
+         ],"count":2,"nextBeforeSequence":62000,"hasMore":true,"connection":"box"}
+        """)
+        let agent = try await transport().roomMessages(by: "build-agent", sessionId: "room_1", beforeSequence: nil, limit: 20)
+        XCTAssertEqual(agent.messages.map(\.sequenceId), [62390, 62310])
+        XCTAssertEqual(agent.messages.map(\.authorId), ["build-agent", "build-agent"])
+        XCTAssertEqual(agent.messages.map(\.isHuman), [false, false], "an agent's rows")
+        XCTAssertEqual(agent.nextBeforeSequence, 62000)
+        XCTAssertEqual(agent.connection, .box)
+
+        AuthorPageURLProtocol.reset(body: """
+        {"events":[
+          {"id":"e8","event":"session_message","sequenceId":62392,"ts":"2026-11-06T06:04:00Z","agentId":"human-alex",
+           "payload":{"text":"Thanks."}}
+         ],"count":1,"nextBeforeSequence":null,"hasMore":false,"connection":null}
+        """)
+        let person = try await transport().roomMessages(by: "human-alex", sessionId: "room_1", beforeSequence: nil,
+                                                        limit: 20)
+        XCTAssertEqual(person.messages.map(\.sequenceId), [62392])
+        XCTAssertEqual(person.messages.map(\.authorId), ["human-alex"])
+        XCTAssertEqual(person.messages.map(\.isHuman), [true], "a person's rows")
+        XCTAssertNil(person.nextBeforeSequence, "the start of the room")
+        XCTAssertNil(person.connection)
+    }
+
+    /// Ticket 386081b1: while the server did not answer this read it gave 503 with an empty body, for an agent and
+    /// a person alike. That is an error the card offers to retry, never an empty page (which would read as "no
+    /// messages from them yet").
+    func test_an_empty_503_is_an_error_never_an_empty_page() async {
+        for author in ["build-agent", "human-alex"] {
+            AuthorPageURLProtocol.reset(status: 503, body: "")
+            do {
+                let page = try await transport().roomMessages(by: author, sessionId: "room_1", beforeSequence: nil, limit: 20)
+                XCTFail("\(author): a 503 read as a page of \(page.messages.count) messages")
+            } catch {
+                XCTAssertEqual(error as? SessionTransportError, .service(statusCode: 503), "\(author)")
+            }
+        }
+    }
+
     /// Exactly the API's rule for `author` (`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`): what it would refuse is never sent.
     func test_the_author_id_check_is_the_apis_own() {
         for good in ["agent-a1", "human-pat", "human-g.0123abcd", "human-public.9f2c", "a", "Ab:c.d_e-f",

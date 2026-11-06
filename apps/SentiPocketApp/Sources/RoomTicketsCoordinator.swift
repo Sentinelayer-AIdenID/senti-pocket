@@ -646,6 +646,9 @@ struct RoomTicketsScreen: View {
     @StateObject private var coordinator: RoomTicketsCoordinator
     private let onOpenMessage: (@MainActor (Int64) -> Void)?
     private let startsFiling: Bool
+    /// The first write to the room's tickets asks this account's OK to share with AI.
+    private let aiConsent: AIConsent?
+    @State private var consentHeld: AIConsentHeld?
 
     init(
         sessionId: String,
@@ -658,11 +661,13 @@ struct RoomTicketsScreen: View {
         extras: (any RoomTicketExtrasReading)? = nil,
         mint: (any MintStarting)? = nil,
         startsFiling: Bool = false,
+        aiConsent: AIConsent? = nil,
         onOpenMessage: (@MainActor (Int64) -> Void)? = nil,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.onOpenMessage = onOpenMessage
         self.startsFiling = startsFiling && writer != nil
+        self.aiConsent = aiConsent
         self.sessionId = sessionId
         self.mint = mint
         _coordinator = StateObject(wrappedValue: RoomTicketsCoordinator(
@@ -687,10 +692,13 @@ struct RoomTicketsScreen: View {
         RoomTicketsView(state: coordinator.state, startsFiling: startsFiling) { intent in
             if case .openSourceMessage(let sequence) = intent, let onOpenMessage {
                 onOpenMessage(sequence)
+            } else if intent.writesToTheRoom, aiConsent?.asks == true {
+                consentHeld = AIConsentHeld { coordinator.send(intent) }
             } else {
                 coordinator.send(intent)
             }
         }
+        .aiConsentPrompt($consentHeld) { aiConsent?.grant() }
         .onAppear { coordinator.start() }
         .onDisappear { coordinator.stop() }
         .sheet(item: $coordinator.agentTicket) { ticket in
@@ -709,6 +717,9 @@ struct RoomTicketLinkScreen: View {
     @StateObject private var coordinator: RoomTicketsCoordinator
     @Environment(\.dismiss) private var dismiss
     private let onOpenMessage: @MainActor (Int64) -> Void
+    /// The first write to the room's tickets asks this account's OK to share with AI.
+    private let aiConsent: AIConsent?
+    @State private var consentHeld: AIConsentHeld?
 
     init(
         sessionId: String,
@@ -721,10 +732,12 @@ struct RoomTicketLinkScreen: View {
         assignRoster: [String] = [],
         extras: (any RoomTicketExtrasReading)? = nil,
         mint: (any MintStarting)? = nil,
+        aiConsent: AIConsent? = nil,
         onOpenMessage: @escaping @MainActor (Int64) -> Void,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.onOpenMessage = onOpenMessage
+        self.aiConsent = aiConsent
         self.sessionId = sessionId
         self.mint = mint
         _coordinator = StateObject(wrappedValue: RoomTicketsCoordinator(
@@ -766,6 +779,7 @@ struct RoomTicketLinkScreen: View {
                 }
             }
         }
+        .aiConsentPrompt($consentHeld) { aiConsent?.grant() }
     }
 
     @ViewBuilder
@@ -790,6 +804,8 @@ struct RoomTicketLinkScreen: View {
             ) { intent in
                 if case .openSourceMessage(let sequence) = intent {
                     onOpenMessage(sequence)
+                } else if intent.writesToTheRoom, aiConsent?.asks == true {
+                    consentHeld = AIConsentHeld { coordinator.send(intent) }
                 } else {
                     coordinator.send(intent)
                 }
@@ -814,5 +830,19 @@ struct RoomTicketLinkScreen: View {
         }
         .padding()
         .navigationTitle("Ticket")
+    }
+}
+
+extension RoomTicketsIntent {
+    /// Writes to the room's tickets or chat (an answer, a ticket, a comment, an edit, a claim, an agent started): it waits
+    /// for this account's OK to share with AI, asked once. Reading never does.
+    var writesToTheRoom: Bool {
+        switch self {
+        case .answerDecision, .retryDecision, .fileTicket, .claim, .release, .assign, .edit, .comment, .retryComment,
+             .chatAboutIt, .startAgent:
+            return true
+        case .setShowsArchived, .search, .refresh, .openSourceMessage, .loadComments:
+            return false
+        }
     }
 }

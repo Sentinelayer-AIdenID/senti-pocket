@@ -201,6 +201,68 @@ class KnownFlakyGuardTests(unittest.TestCase):
         (self.root / FLAKY).unlink()
         self.assertFailsWith("end the split whole")
 
+    # Warden's evasions (11-06): ways to slip a gating check into the known flaky class that the counts above do not
+    # see. Each now fails, and only on the pin: every problem the guard finds is a pinned file that changed.
+    MOVED = '        XCTAssertGreaterThan(away, 3 * scroll.bounds.height, "at the message, far up the room")\n'
+    HELD = "        let held = scroll.contentOffset.y\n"
+    AWAY = "        let away = Self.bottomOffset(of: scroll) - scroll.contentOffset.y\n"
+
+    def assertOnlyThePinCatches(self) -> None:
+        problems = self.problems()
+        self.assertTrue(problems, "the evasion must fail the guard")
+        self.assertTrue(all(" changed (sha256 " in problem for problem in problems), problems)
+
+    def take_the_check_out_of_the_gating_test(self) -> None:
+        self.edit(GATING, self.MOVED, "")
+
+    def test_a_check_in_a_helper_of_the_base_class_fails_on_the_pin(self) -> None:
+        self.take_the_check_out_of_the_gating_test()
+        self.edit(BASE, "    func pump(", "    func expectFarUp(_ away: CGFloat, _ height: CGFloat) {\n"
+                  '        XCTAssertGreaterThan(away, 3 * height, "at the message, far up the room")\n'
+                  "    }\n\n    func pump(")
+        self.edit(FLAKY, self.HELD, self.AWAY + "        expectFarUp(away, scroll.bounds.height)\n" + self.HELD)
+        self.assertOnlyThePinCatches()
+
+    def test_a_check_spelled_with_backticks_fails_on_the_pin(self) -> None:
+        self.take_the_check_out_of_the_gating_test()
+        self.edit(FLAKY, self.HELD, self.AWAY + self.MOVED.replace("XCTAssertGreaterThan", "`XCTAssertGreaterThan`")
+                  + self.HELD)
+        self.assertOnlyThePinCatches()
+
+    def test_a_check_with_a_comment_before_its_parenthesis_fails_on_the_pin(self) -> None:
+        self.take_the_check_out_of_the_gating_test()
+        self.edit(FLAKY, self.HELD, self.AWAY + self.MOVED.replace("XCTAssertGreaterThan(", "XCTAssertGreaterThan/* */(")
+                  + self.HELD)
+        self.assertOnlyThePinCatches()
+
+    def test_an_idle_check_swapped_for_a_gating_one_fails_on_the_pin(self) -> None:
+        self.take_the_check_out_of_the_gating_test()
+        idle = "        XCTAssertTrue(quiet { [RenderTrace.builtCount(.roomRow), RenderTrace.snapshot().draws] })\n"
+        path = self.root / FLAKY
+        text = path.read_text(encoding="utf-8")
+        self.assertEqual(text.count(idle), 2)
+        first = text.index(idle)
+        text = text[:first] + text[first:].replace(self.HELD, self.AWAY + self.HELD, 1)
+        last = text.rindex(idle)
+        path.write_text(text[:last] + self.MOVED + text[last + len(idle):], encoding="utf-8")
+        self.assertOnlyThePinCatches()
+
+    def test_a_check_made_by_a_throw_fails_on_the_pin(self) -> None:
+        self.take_the_check_out_of_the_gating_test()
+        self.edit(FLAKY, self.HELD, self.AWAY + "        struct NotFarUp: Error {}\n"
+                  "        if away <= 3 * scroll.bounds.height { throw NotFarUp() }\n" + self.HELD)
+        self.assertOnlyThePinCatches()
+
+    def test_the_pinned_files_unchanged_pass_and_any_byte_fails(self) -> None:
+        self.assertEqual(self.problems(), [])
+        for relative in (BASE, GATING, FLAKY):
+            with self.subTest(str(relative)):
+                path = self.root / relative
+                original = path.read_bytes()
+                path.write_bytes(original + b"\n")
+                self.assertFailsWith(f"{relative.as_posix()} changed (sha256 ")
+                path.write_bytes(original)
+
     def test_the_command_line_exit_codes(self) -> None:
         self.assertEqual(guard.main(["--root", str(self.root), "--today", "2026-11-06"]), 0)
         self.assertEqual(guard.main(["--root", str(self.root), "--today", "2026-11-14"]), 1)

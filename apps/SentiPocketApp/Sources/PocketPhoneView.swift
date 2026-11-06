@@ -13,15 +13,21 @@ struct PocketPhoneView: View {
     @ObservedObject var reasoning: RealReasoningCoordinator
     @ObservedObject var write: PhoneWriteViewModel
     private let reasoningLifecycle: PocketPhoneReasoningLifecycle
+    /// This account's OK to share with AI, asked before a dictated message is drafted.
+    private let aiConsent: AIConsent
     @State private var draft: String = ""
+    /// A draft held for that OK.
+    @State private var consentHeld: AIConsentHeld?
 
     init(
         reasoning: RealReasoningCoordinator,
         write: PhoneWriteViewModel,
+        aiConsent: AIConsent,
         connectivityUpdates: ReasoningConnectivityUpdates = ReasoningConnectivityUpdates()
     ) {
         _reasoning = ObservedObject(wrappedValue: reasoning)
         _write = ObservedObject(wrappedValue: write)
+        self.aiConsent = aiConsent
         reasoningLifecycle = PocketPhoneReasoningLifecycle(
             reasoning: reasoning,
             makeUpdates: { connectivityUpdates.stream() }
@@ -35,6 +41,7 @@ struct PocketPhoneView: View {
                 writeSection
             }
             .navigationTitle("Senti Pocket")
+            .aiConsentPrompt($consentHeld) { aiConsent.grant() }
             .task(id: scenePhase) {
                 await reasoningLifecycle.run(isActive: scenePhase == .active)
             }
@@ -98,7 +105,9 @@ struct PocketPhoneView: View {
             switch write.state {
             case .composing:
                 TextField("Dictate a message…", text: $draft, axis: .vertical).lineLimit(1...4)
-                Button("Review & send") { write.draft(draft) }
+                Button("Review & send") {
+                    Self.review(draft, write: write, aiConsent: aiConsent) { consentHeld = AIConsentHeld($0) }
+                }
                     .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             case .confirming(let proposal):
                 confirmView(proposal)
@@ -124,6 +133,19 @@ struct PocketPhoneView: View {
                 Button("Back") { write.cancel() }
             }
         }
+    }
+
+    /// Review & send: what you dictate is posted into the room as you, where its AI agents read it, so it is drafted
+    /// only once this account has said OK to that (App Store guideline 5.1.2(i)), asked first with the rooms' question.
+    /// Not now leaves it in the box, unsent.
+    static func review(
+        _ draft: String,
+        write: PhoneWriteViewModel,
+        aiConsent: AIConsent,
+        ask: (_ proceed: @escaping () -> Void) -> Void
+    ) {
+        guard aiConsent.asks else { return write.draft(draft) }
+        ask { write.draft(draft) }
     }
 
     @ViewBuilder private func confirmView(_ proposal: ActionProposal) -> some View {

@@ -9,6 +9,10 @@ public enum ChatMarkdownBlock: Equatable, Sendable {
     case heading(level: Int, text: String)
     case list(ordered: Bool, start: Int, items: [ChatMarkdownListItem])
     case quote([ChatMarkdownBlock])
+    /// A run of lines from a quote deeper than `ChatMarkdown.maximumQuoteDepth`, all `levels` deeper, shown in the
+    /// deepest quote under one header that says how much deeper. Its blocks are parsed as any quote's are, so lists stay
+    /// lists and code stays code; they never hold a quote.
+    case deeperQuote(levels: Int, blocks: [ChatMarkdownBlock])
     case code(language: String?, text: String)
     case rule
     case table(ChatMarkdownTable)
@@ -83,6 +87,22 @@ public enum ChatMarkdown {
     /// paste cannot stall the main thread.
     public static let maximumParsedCharacters = 32_000
 
+    /// The deepest block quotes nest, here as on the web. Each level is a stack inside a stack on screen, and laying out
+    /// stacks nested that way takes longer at every level: a message of 50 ">" could stop any phone that showed it. A
+    /// quote deeper than this is not nested again: its lines go in the deepest quote as a `deeperQuote`, a run for each
+    /// stretch of lines equally deep, under a header saying how many levels deeper, so all of its text still shows.
+    public static let maximumQuoteDepth = 4
+
+    /// The header over a run of lines from a deeper quote: "↳ 1 level deeper", "↳ 2 levels deeper".
+    public static func deeperQuoteHeader(levels: Int) -> String {
+        "↳ \(levels) \(levels == 1 ? "level" : "levels") deeper"
+    }
+
+    /// What VoiceOver says for that header.
+    public static func deeperQuoteLabel(levels: Int) -> String {
+        "quoted \(levels) \(levels == 1 ? "level" : "levels") deeper"
+    }
+
     public static func parse(_ source: String) -> [ChatMarkdownBlock] {
         var text = source.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
         var overflow: String?
@@ -133,7 +153,8 @@ public enum ChatMarkdown {
         return text.replacingOccurrences(of: "<br>", with: " ")
     }
 
-    private static func parseLines(_ lines: [String]) -> [ChatMarkdownBlock] {
+    /// `quoteDepth`: how many block quotes `lines` are inside.
+    private static func parseLines(_ lines: [String], quoteDepth: Int = 0) -> [ChatMarkdownBlock] {
         var blocks: [ChatMarkdownBlock] = []
         var paragraph: [String] = []
         var index = 0
@@ -159,8 +180,7 @@ public enum ChatMarkdown {
                 var body: [String] = []
                 index += 1
                 while index < lines.count {
-                    let candidate = lines[index].trimmingCharacters(in: .whitespaces)
-                    if candidate.hasPrefix(fence.marker) && candidate.allSatisfy({ $0 == fence.marker.first }) {
+                    if closesFence(lines[index], marker: fence.marker) {
                         index += 1
                         break
                     }
@@ -185,6 +205,17 @@ public enum ChatMarkdown {
                 continue
             }
 
+            if trimmed.hasPrefix(">"), quoteDepth >= maximumQuoteDepth {
+                // Already in the deepest quote: deeper lines go here, a run for each stretch equally deep, each run
+                // parsed as blocks of its own under one header.
+                flushParagraph()
+                let run = deeperRun(lines, from: index)
+                let inner = parseLines(run.lines, quoteDepth: quoteDepth)
+                if !inner.isEmpty { blocks.append(.deeperQuote(levels: run.levels, blocks: inner)) }
+                index = run.next
+                continue
+            }
+
             if trimmed.hasPrefix(">") {
                 flushParagraph()
                 var quoted: [String] = []
@@ -196,7 +227,7 @@ public enum ChatMarkdown {
                     quoted.append(inner)
                     index += 1
                 }
-                blocks.append(.quote(parseLines(quoted)))
+                blocks.append(.quote(parseLines(quoted, quoteDepth: quoteDepth + 1)))
                 continue
             }
 
@@ -224,6 +255,67 @@ public enum ChatMarkdown {
         }
         flushParagraph()
         return blocks
+    }
+
+    /// The lines from `start` that are as many quote marks deeper as the first is: how many, those lines without those
+    /// marks, and the index after them. A fenced block opened among them keeps every line until it closes, each losing
+    /// exactly that many marks and nothing else, so a ">>>>>>> feature" line of a merge conflict comes out as written.
+    /// Outside a fence no line of the run is left starting with a quote mark, so parsing the run never nests a quote.
+    private static func deeperRun(_ lines: [String], from start: Int) -> (levels: Int, lines: [String], next: Int) {
+        let levels = quoteMarks(lines[start]).count
+        var run: [String] = []
+        var fence: String?
+        var index = start
+        while index < lines.count {
+            if let marker = fence {
+                guard let inner = dropQuoteMarks(lines[index], count: levels) else { break }
+                if closesFence(inner, marker: marker) { fence = nil }
+                run.append(inner)
+            } else {
+                let (count, rest) = quoteMarks(lines[index])
+                guard count == levels else { break }
+                if let opened = codeFence(rest.trimmingCharacters(in: .whitespaces)) { fence = opened.marker }
+                run.append(rest)
+            }
+            index += 1
+        }
+        return (levels, run, index)
+    }
+
+    /// Whether `line` closes a fenced block opened with `marker`.
+    private static func closesFence(_ line: String, marker: String) -> Bool {
+        let candidate = line.trimmingCharacters(in: .whitespaces)
+        return candidate.hasPrefix(marker) && candidate.allSatisfy { $0 == marker.first }
+    }
+
+    /// `line` without its first block-quote mark, read as the quote branch reads one: any spaces, a ">", and at most
+    /// one space after it. Nil when `line` doesn't start with one.
+    private static func dropQuoteMark(_ line: Substring) -> Substring? {
+        let mark = line.drop { $0.unicodeScalars.allSatisfy { scalar in CharacterSet.whitespaces.contains(scalar) } }
+        guard mark.hasPrefix(">") else { return nil }
+        let rest = mark.dropFirst()
+        return rest.hasPrefix(" ") ? rest.dropFirst() : rest
+    }
+
+    /// How many block-quote marks lead `line`, and the rest.
+    private static func quoteMarks(_ line: String) -> (count: Int, rest: String) {
+        var count = 0
+        var rest = Substring(line)
+        while let next = dropQuoteMark(rest) {
+            count += 1
+            rest = next
+        }
+        return (count, String(rest))
+    }
+
+    /// `line` without its first `count` block-quote marks, or nil when it has fewer.
+    private static func dropQuoteMarks(_ line: String, count: Int) -> String? {
+        var rest = Substring(line)
+        for _ in 0..<count {
+            guard let next = dropQuoteMark(rest) else { return nil }
+            rest = next
+        }
+        return String(rest)
     }
 
     private static func codeFence(_ line: String) -> (marker: String, language: String?)? {

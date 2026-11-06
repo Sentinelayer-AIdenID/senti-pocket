@@ -54,14 +54,61 @@ private struct TicketLinkRow: View {
     }
 }
 
+/// A block quote's frame: its blocks, set in from a bar drawn behind them. Behind them, not beside them in a stack: a
+/// stack holding the bar beside the blocks measured the blocks again and again, at every level of quote, so a quote's
+/// layout cost about five times more at each level it nested, for every line inside it. Padded, with the bar behind,
+/// each level measures its blocks once for each size it is asked about.
+struct ChatQuoteFrame<Content: View>: View {
+    let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        content
+            .padding(.leading, 11)
+            .background(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(PocketPalette.separator)
+                    .frame(width: 3)
+            }
+    }
+}
+
 private struct ChatMarkdownBlocksView: View {
     let blocks: [ChatMarkdownBlock]
     let ownHandles: Set<String>
 
+    /// One line of this stack: a block, or the header over a run from a deeper quote.
+    private enum Row {
+        case block(ChatMarkdownBlock)
+        case deeperQuoteHeader(levels: Int)
+    }
+
+    /// `blocks` as this stack shows them: a run from a deeper quote is its header and then its blocks, straight in this
+    /// stack, not in a stack of its own, so a run adds no level of layout.
+    private static func rows(_ blocks: [ChatMarkdownBlock]) -> [Row] {
+        blocks.flatMap { block -> [Row] in
+            guard case .deeperQuote(let levels, let inner) = block else { return [.block(block)] }
+            return [.deeperQuoteHeader(levels: levels)] + rows(inner)
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                blockView(block)
+            ForEach(Array(Self.rows(blocks).enumerated()), id: \.offset) { _, row in
+                switch row {
+                case .block(let block):
+                    blockView(block)
+                case .deeperQuoteHeader(let levels):
+                    // Lines from a quote deeper than the deepest shown: one small header on a line of its own saying
+                    // how much deeper, then their blocks as any quote's, the full width of the quote.
+                    Text(ChatMarkdown.deeperQuoteHeader(levels: levels))
+                        .font(.caption)
+                        .foregroundStyle(PocketPalette.textSecondary)
+                        .accessibilityLabel(ChatMarkdown.deeperQuoteLabel(levels: levels))
+                }
             }
         }
     }
@@ -105,10 +152,7 @@ private struct ChatMarkdownBlocksView: View {
                 }
             }
         case .quote(let inner):
-            HStack(alignment: .top, spacing: 8) {
-                RoundedRectangle(cornerRadius: 1.5)
-                    .fill(PocketPalette.separator)
-                    .frame(width: 3)
+            ChatQuoteFrame {
                 ChatMarkdownBlocksView(blocks: inner, ownHandles: ownHandles)
                     .foregroundStyle(PocketPalette.textSecondary)
             }
@@ -124,6 +168,9 @@ private struct ChatMarkdownBlocksView: View {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(PocketPalette.separator.opacity(0.6), lineWidth: 0.5)
             )
+        case .deeperQuote:
+            // Never reached: `rows(_:)` shows a run as its header and its blocks.
+            EmptyView()
         case .rule:
             Divider().padding(.vertical, 4)
         case .table(let table):
