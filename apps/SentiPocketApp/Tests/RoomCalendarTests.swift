@@ -953,42 +953,26 @@ final class RoomCalendarTests: XCTestCase {
         XCTAssertEqual(fake.mints, 1, "the link made when it did not open is kept and opened again")
     }
 
-    /// Follow-up to #330: at the largest text size on an iPhone SE, Subscribe's question (no link kept) shows its whole
-    /// message at once and at the sheet's full width, and each word of its title fits on a line. As a confirmation
-    /// dialog it was a narrow popover that cut the message off and broke "subscribe" in two.
-    func test_the_new_link_question_shows_its_whole_message_at_the_largest_text_size() async throws {
-        try await assertQuestionShowsWhole(.newLink)
+    /// Follow-up to #330: at the largest text size, in an iPhone SE's width, Subscribe's question (no link kept) wraps
+    /// its whole message at the full width, and each word of its title fits on a line. As a confirmation dialog it was a
+    /// narrow popover that cut the message off and broke "subscribe" in two. (The sheet as it presents, at AX5, is the
+    /// device test `test_the_link_questions_present_as_sheets_that_show_their_whole_message_at_ax5`.)
+    func test_the_new_link_question_wraps_its_whole_message_at_the_largest_text_size() throws {
+        try assertQuestionWrapsWhole(.newLink)
     }
 
     /// The same for Reset's question: as a confirmation dialog, its message stopped at "from the old" on an SE at AX5.
-    func test_the_reset_question_shows_its_whole_message_at_the_largest_text_size() async throws {
-        try await assertQuestionShowsWhole(.reset)
+    func test_the_reset_question_wraps_its_whole_message_at_the_largest_text_size() throws {
+        try assertQuestionWrapsWhole(.reset)
     }
 
-    private func assertQuestionShowsWhole(_ kind: CalendarLinkQuestion.Kind) async throws {
-        guard #available(iOS 17.0, *) else { throw XCTSkip("trait overrides need iOS 17") }
-        let center = makeCenter(FakeCalendar())
-        await center.refresh(probeRoom: "room-1")
-        XCTAssertTrue(center.showsSubscribe)
-        let window = try HostedSummary.host(Form {
-            CalendarSettingsSection(context: CalendarSettingsContext(center: center, rooms: []))
-        })
+    private func assertQuestionWrapsWhole(_ kind: CalendarLinkQuestion.Kind) throws {
+        let window = try HostedSummary.host(CalendarLinkQuestion(kind: kind, onConfirm: {})
+            .environment(\.dynamicTypeSize, .accessibility5))
         defer { HostedSummary.close(window) }
-        window.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge
-        let row = HostedSummary.wait(for: kind == .newLink ? "settings.calendar.subscribe" : "settings.calendar.reset",
-                                     in: window)
-        XCTAssertNotNil(row, "the calendar rows were drawn")
-        if kind == .newLink {
-            await center.subscribe()
-            XCTAssertTrue(center.confirmsNewLink, "no link kept: Subscribe asks first")
-        } else {
-            XCTAssertEqual(row?.accessibilityActivate(), true, "Reset was tapped")
-        }
         let id = CalendarLinkQuestion.identifier(kind)
         let text = CalendarLinkQuestion.message(kind)
-        let message = try XCTUnwrap(HostedSummary.wait(for: "\(id).message", in: window),
-                                    "the question shows its message in a sheet of its own")
-        HostedSummary.pump(1)
+        let message = try XCTUnwrap(HostedSummary.wait(for: "\(id).message", in: window), "the question shows its message")
         XCTAssertEqual(message.accessibilityLabel, text)
 
         let ax5 = UITraitCollection(preferredContentSizeCategory: .accessibilityExtraExtraExtraLarge)
@@ -997,12 +981,10 @@ final class RoomCalendarTests: XCTestCase {
         let needed = (text as NSString).boundingRect(
             with: CGSize(width: frame.width, height: .greatestFiniteMagnitude), options: [.usesLineFragmentOrigin],
             attributes: [.font: body], context: nil).height
-        let sheet = try XCTUnwrap(window.rootViewController?.presentedViewController?.view, "the question is a sheet")
-        let visible = sheet.convert(sheet.bounds, to: nil).intersection(window.bounds)
-        print("CALAX5 \(id) message \(frame) needs \(needed) visible \(visible) window \(window.bounds)")
+        print("CALAX5 \(id) message \(frame) needs \(needed) window \(window.bounds)")
         XCTAssertGreaterThanOrEqual(frame.height, needed - body.lineHeight / 2, "every line of the message is drawn: none cut")
-        XCTAssertLessThanOrEqual(frame.height, visible.height, "the whole message fits on the screen at once")
-        XCTAssertGreaterThanOrEqual(frame.width, visible.width * 0.75, "the message runs at the sheet's full width")
+        XCTAssertLessThanOrEqual(frame.height, window.bounds.height, "the whole message fits on an SE's screen at once")
+        XCTAssertGreaterThanOrEqual(frame.width, window.bounds.width * 0.75, "the message runs at the full width")
 
         let title = try XCTUnwrap(HostedSummary.element("\(id).title", in: window))
         let titleFont = UIFont.systemFont(ofSize: UIFont.preferredFont(forTextStyle: .title3, compatibleWith: ax5).pointSize,

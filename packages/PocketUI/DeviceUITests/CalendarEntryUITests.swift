@@ -61,6 +61,41 @@ final class CalendarEntryUITests: XCTestCase {
         shot("day-events")
     }
 
+    /// Follow-up to #330: at the largest text size, Subscribe (no link kept) and Reset each ask in a sheet whose message
+    /// can be seen whole on the screen at once (scrolled to it if need be). As confirmation dialogs they were narrow
+    /// popovers that showed a line or two of it.
+    func test_the_link_questions_present_as_sheets_that_show_their_whole_message_at_ax5() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-PocketCalendarPreview", "-PocketCalendarStage", "subscribe",
+                               "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
+        app.launch()
+        let screen = app.windows.firstMatch.frame
+        for (row, id) in [("settings.calendar.subscribe", "settings.calendar.newLink"),
+                          ("settings.calendar.reset", "settings.calendar.resetLink")] {
+            let button = app.buttons[row]
+            var swipes = 0
+            while !(button.exists && button.isHittable), swipes < 14 {
+                app.swipeUp(velocity: .slow)
+                swipes += 1
+            }
+            XCTAssertTrue(button.isHittable, "\(row) can be reached")
+            button.tap()
+            let message = app.staticTexts["\(id).message"]
+            XCTAssertTrue(message.waitForExistence(timeout: 10), "\(id): the question shows its message in a sheet")
+            var scrolls = 0
+            while message.exists, !screen.contains(message.frame), scrolls < 4 {
+                app.swipeUp(velocity: .slow)
+                scrolls += 1
+            }
+            print("CALAX5UI \(id) message \(message.frame) screen \(screen) scrolls \(scrolls)")
+            XCTAssertTrue(screen.contains(message.frame), "\(id): the whole message can be seen on the screen at once")
+            shot("question-\(id)-ax5")
+            let cancel = app.buttons["\(id).cancel"]
+            if cancel.exists { cancel.tap() }
+            sleep(1)
+        }
+    }
+
     /// Saves a screenshot where `CAL_SHOT_DIR` points (set by the runner), for the review evidence.
     private func shot(_ name: String) {
         guard let dir = ProcessInfo.processInfo.environment["CAL_SHOT_DIR"], !dir.isEmpty else { return }
