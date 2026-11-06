@@ -50,6 +50,26 @@ final class ComposerFileOpenUITests: XCTestCase {
         XCTAssertTrue(((composer.value as? String) ?? "").contains("Here are the plans"))
     }
 
+    /// The upload ring sits over the chip's middle while it uploads (the preview's uploads never finish): a tap on the
+    /// chip's centre still opens it.
+    func test_tapping_a_chips_centre_while_its_ring_shows_opens_it() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-PocketRoomPreview", "-PocketRoomComposerTrayPreview"]
+        app.launch()
+        let photo = app.buttons["Open site.png"]
+        XCTAssertTrue(photo.waitForExistence(timeout: 60), "the tray's photo is there")
+        let ring = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@ OR label == %@",
+                                                                         "Uploading", "Getting ready"))
+        XCTAssertTrue(ring.firstMatch.waitForExistence(timeout: 20), "its ring shows: it is still on its way")
+        print("COMPOSERFILE ring=\(ring.firstMatch.label) frame=\(ring.firstMatch.frame) chip=\(photo.frame)")
+        shot("ring-before-tap")
+        photo.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        let done = app.buttons["pocket.room.media.viewer.done"]
+        XCTAssertTrue(done.waitForExistence(timeout: 10), "a tap on the ring's middle opens the photo")
+        shot("ring-tap-opened")
+        done.tap()
+    }
+
     /// Saves a screenshot where `CAL_SHOT_DIR` points (set by the runner), for the review evidence.
     private func shot(_ name: String) {
         guard let dir = ProcessInfo.processInfo.environment["CAL_SHOT_DIR"], !dir.isEmpty else { return }

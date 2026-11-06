@@ -238,17 +238,21 @@ struct RoomMediaThumb: View {
             } else {
                 picture
             }
+            // The ring and the play mark sit over the picture: a tap goes through them to Open.
             switch item.phase {
             case .preparing:
                 RoomMediaRing(progress: item.progress, isPreparing: true, diameter: side > 70 ? 36 : 28)
+                    .allowsHitTesting(false)
             case .uploading:
                 RoomMediaRing(progress: item.progress, isPreparing: false, diameter: side > 70 ? 36 : 28)
+                    .allowsHitTesting(false)
             case .uploaded:
                 if item.kind == .video {
                     Image(systemName: "play.circle.fill")
                         .font(.system(size: side > 70 ? 30 : 22))
                         .foregroundStyle(Color.white, Color.black.opacity(0.45))
                         .accessibilityHidden(true)
+                        .allowsHitTesting(false)
                 }
             case .ready:
                 EmptyView()
