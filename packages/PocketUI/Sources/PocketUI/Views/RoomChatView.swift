@@ -978,6 +978,10 @@ private struct RoomMessageRowView: View {
     @State private var swipe: CGFloat = 0
     /// A double tap opens the same options as a long press.
     @State private var showsOptions = false
+    /// An action button's side and the room between two: 28 and 18 pt at the default text size, growing with it, so
+    /// an icon never spills out of its button (at the largest sizes they drew over each other, ticket 52065281).
+    @ScaledMetric(relativeTo: .footnote) private var actionSide: CGFloat = 28
+    @ScaledMetric(relativeTo: .footnote) private var actionSpacing: CGFloat = 18
 
     var body: some View {
         RenderTrace.row(row.sequenceId)
@@ -1510,24 +1514,44 @@ private struct RoomMessageRowView: View {
         .padding(.top, gapAbove)
     }
 
+    /// The name, then the time and the read ticks: on one line when they fit, else the name on a line of its own with
+    /// the time under it, so the name is cut only when it does not fit even alone (at the largest text sizes it was cut
+    /// to "revie…" beside the time, ticket 52065281).
     private var authorLine: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            // The name opens their profile and messages, as the avatar does.
-            RoomProfileName(senderId: row.authorId, name: row.authorName, isHuman: row.isHuman) {
-                Text(row.authorName)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(row.isHuman ? PocketPalette.accentStrong : PocketPalette.textPrimary)
-                    .lineLimit(1)
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                authorName
+                authorTime
+                Spacer(minLength: 0)
             }
-            if let date = row.date {
-                Text(date, style: .time)
-                    .font(.caption)
-                    .foregroundStyle(PocketPalette.textSecondary)
+            VStack(alignment: .leading, spacing: 2) {
+                authorName
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    authorTime
+                }
             }
-            if let views = row.views {
-                RoomReadTicks(views: views)
-            }
-            Spacer(minLength: 0)
+        }
+    }
+
+    /// The name opens their profile and messages, as the avatar does.
+    private var authorName: some View {
+        RoomProfileName(senderId: row.authorId, name: row.authorName, isHuman: row.isHuman) {
+            Text(row.authorName)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(row.isHuman ? PocketPalette.accentStrong : PocketPalette.textPrimary)
+                .lineLimit(1)
+        }
+    }
+
+    @ViewBuilder
+    private var authorTime: some View {
+        if let date = row.date {
+            Text(date, style: .time)
+                .font(.caption)
+                .foregroundStyle(PocketPalette.textSecondary)
+        }
+        if let views = row.views {
+            RoomReadTicks(views: views)
         }
     }
 
@@ -1538,24 +1562,34 @@ private struct RoomMessageRowView: View {
         // Reply when you can post, else the thread, never both.
         let shown = Self.actionRowKinds.compactMap { kind in options.first { $0.kind == kind } }
             .filter { $0.kind != .thread || !options.contains { $0.kind == .reply } }
-        return HStack(spacing: 18) {
-            ForEach(shown) { option in
-                actionButton(option.kind == .thread ? "arrowshape.turn.up.left" : option.symbol, label: option.title) {
-                    perform(option)
+        // Every button when they fit the row; else (a large text size, a narrow phone) the one More menu, which holds
+        // every option of the row, as the long press does.
+        return ViewThatFits(in: .horizontal) {
+            HStack(spacing: actionSpacing) {
+                ForEach(shown) { option in
+                    actionButton(option.kind == .thread ? "arrowshape.turn.up.left" : option.symbol, label: option.title) {
+                        perform(option)
+                    }
                 }
+                moreActions
             }
-            Menu {
-                messageMenu
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(PocketPalette.textSecondary)
-                    .frame(width: 28, height: 28)
-                    .contentShape(Rectangle())
-            }
-            .accessibilityLabel("More actions")
+            moreActions
         }
         .padding(.top, 2)
+    }
+
+    /// The More menu: every option of the row.
+    private var moreActions: some View {
+        Menu {
+            messageMenu
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(PocketPalette.textSecondary)
+                .frame(width: actionSide, height: actionSide)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel("More actions")
     }
 
     private static let actionRowKinds: [RoomRowOption.Kind] = [.copy, .listen, .like, .dislike, .emoji, .reply, .thread]
@@ -1585,7 +1619,7 @@ private struct RoomMessageRowView: View {
             Image(systemName: symbol)
                 .font(.footnote)
                 .foregroundStyle(PocketPalette.textSecondary)
-                .frame(width: 28, height: 28)
+                .frame(width: actionSide, height: actionSide)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
