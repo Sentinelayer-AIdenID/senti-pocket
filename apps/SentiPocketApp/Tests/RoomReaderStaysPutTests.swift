@@ -24,6 +24,11 @@ final class RoomReaderStaysPutTests: XCTestCase {
         private var inputs: [RoomChatMessageInput]
         private var pending: [RoomChatPendingRow] = []
         private var unread = 0
+        /// The New messages line: the first message that arrived while the reader was away (the coordinator's). Kept,
+        /// and the arrow's first tap honoured (`.newMessagesShown`, `.keepFromNewMessagesLine`), only where a test asks
+        /// (`keepsTheLine`): the other tests' arrow goes to the latest, as it always has here.
+        private(set) var line: Int64?
+        var keepsTheLine = false
         private(set) var atBottom = true
         /// Every place the room was told (`readerAtBottom`), in order, as told.
         private(set) var placesTold: [Bool] = []
@@ -47,6 +52,25 @@ final class RoomReaderStaysPutTests: XCTestCase {
                 publish()
                 return
             }
+            // The arrow's first tap: the count is taken, the line stays (`RoomChatCoordinator`, `.newMessagesShown`).
+            if case .newMessagesShown = intent {
+                if keepsTheLine, unread > 0 {
+                    unread = 0
+                    publish()
+                }
+                return
+            }
+            // From up a long history, the rows from a few above the line are kept (`keepFromTheNewMessagesLine`).
+            if case .keepFromNewMessagesLine = intent {
+                guard keepsTheLine, trimsForJumpDown, inputs.count > RoomChatCoordinator.rowsKeptForTheJumpDown,
+                      let line else { return }
+                let fromLine = inputs.count - (inputs.firstIndex { $0.sequenceId >= line } ?? 0)
+                let kept = max(RoomChatCoordinator.rowsKeptForTheJumpDown, fromLine + RoomChatCoordinator.rowsKeptAboveTheLine)
+                inputs = Array(inputs.suffix(kept))
+                atBottom = false
+                publish()
+                return
+            }
             guard case .readerAtBottom(let value) = intent else { return }
             placesTold.append(value)
             guard value != atBottom else { return }
@@ -59,7 +83,10 @@ final class RoomReaderStaysPutTests: XCTestCase {
 
         func arrive(_ more: [RoomChatMessageInput]) {
             inputs += more
-            if !atBottom { unread += more.count }
+            if !atBottom {
+                unread += more.count
+                if keepsTheLine, line == nil { line = more.first?.sequenceId }
+            }
             publish()
         }
 
@@ -78,6 +105,7 @@ final class RoomReaderStaysPutTests: XCTestCase {
                 messages: inputs,
                 ownAuthorIds: Self.own,
                 unreadCount: unread,
+                unreadDividerSequence: line,
                 jumpDownKeepsLatest: trimsForJumpDown && inputs.count > RoomChatCoordinator.rowsKeptForTheJumpDown,
                 connection: .live,
                 pending: pending,
@@ -421,6 +449,57 @@ final class RoomReaderStaysPutTests: XCTestCase {
     /// leaving, and the room showed the arrow 6,911 pt short. Here the placed follows move nothing and the retry lands at
     /// the room's first row, far above (`RoomScrollTrace`'s DEBUG seam): every "left" the room tells comes from its
     /// giving up, none from the retry.
+    /// The path that went blank on the Mac at `be112d8` (3 of 3 at the largest text size): up a long history, messages
+    /// arrive; the arrow's first tap takes the count, keeps the rows from a few above the New messages line, and opens
+    /// a new list there. The new list must show the room (not a list scrolled past its end, with nothing in view), with
+    /// the line in view in the top half, and must not be taken for the bottom while it shows the line.
+    func test_the_arrows_first_tap_from_up_a_long_history_opens_the_room_at_the_line() throws {
+        try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
+        let room = Room(Self.messages(count: 120))
+        room.keepsTheLine = true
+        room.trimsForJumpDown = true
+        let window = try HostedSummary.host(Host(room: room, textSize: .accessibility5))
+        addTeardownBlock { HostedSummary.close(window) }
+        wait("the room opened at its newest rows", seconds: 20) {
+            guard let list = Self.list(in: window), list.contentSize.height > list.bounds.height * 2 else { return false }
+            return Self.atBottom(list)
+        }
+        pump(0.5)
+        let list = try XCTUnwrap(Self.list(in: window), "the room's list")
+        let visible = list.bounds.height - list.adjustedContentInset.top - list.adjustedContentInset.bottom
+        list.setContentOffset(CGPoint(x: 0, y: max(0, Self.bottomOffset(of: list) - 3 * visible)), animated: false)
+        wait("the reader left the bottom", seconds: 3) { !room.atBottom }
+        XCTAssertFalse(room.atBottom, "up the room")
+        room.arrive((121..<151).map { Self.longArrival($0) })
+        pump(1)
+        XCTAssertEqual(room.line, 121, "the line is at the first that arrived")
+        let arrow = try XCTUnwrap(HostedSummary.wait(for: "pocket.room.jumpToLatest", in: window, timeout: 5),
+                                  "the arrow shows")
+        XCTAssertTrue(arrow.accessibilityActivate(), "the arrow could be pressed")
+        var lineTop: CGFloat?
+        var below: CGFloat = .nan
+        wait("the new list shows the room with the line in view", seconds: 8) {
+            guard let now = Self.list(in: window) else { return false }
+            below = Self.bottomOffset(of: now) - now.contentOffset.y
+            guard below > -visible, let marker = HostedSummary.element("pocket.room.unreadDivider", in: window) else {
+                return false
+            }
+            // Where the line is below the top of what can be read, in the window (the hosted window is the screen).
+            let band = now.convert(now.bounds, to: nil)
+            let top = marker.accessibilityFrame.minY - (band.minY + now.adjustedContentInset.top)
+            lineTop = top
+            return top >= 0 && top < visible / 2
+        }
+        print("READER-STAYS-PUT first-tap line-top=\(lineTop.map { "\(Int($0))" } ?? "absent") end-below=\(Int(below)) "
+            + "rows=\(room.state.rows.count) unread=\(room.unreadCount)")
+        XCTAssertGreaterThan(below, -visible, "the new list is not a screen past its end: the room shows")
+        let top = try XCTUnwrap(lineTop, "the New messages line is in view")
+        XCTAssertGreaterThanOrEqual(top, 0, "the line is in view, below the top")
+        XCTAssertLessThan(top, visible / 2, "the line is in the top half")
+        XCTAssertEqual(room.unreadCount, 0, "the count is taken")
+        XCTAssertFalse(room.atBottom, "showing the line is not the bottom")
+    }
+
     func test_the_rooms_own_retry_never_takes_the_reader_for_leaving() throws {
         try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
         RoomScrollTrace.followMovesNothing = true

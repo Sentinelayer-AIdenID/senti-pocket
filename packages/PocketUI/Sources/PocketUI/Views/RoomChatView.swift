@@ -517,6 +517,8 @@ public struct RoomChatView: View {
     /// trim to the newest rows, with the scroll still to come. A send no longer moves the room at all.
     private func reopenAtLatest(atLine: Bool = false) {
         reopensAtLine = atLine
+        // A list opened anew is one the reader has not dragged: its line is placed again once its rows are measured.
+        bottomWatch.readerScrolled = false
         heldAnchor = nil
         anchorBeforeOlderLoad = nil
         didInitialScroll = false
