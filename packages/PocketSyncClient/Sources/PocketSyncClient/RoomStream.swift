@@ -54,8 +54,12 @@ public enum RoomStreamFrame: Equatable, Sendable {
     case nonDisplayable(sequenceId: Int64)
     /// A message was edited: the message as it reads now, and the edit's own sequence for the resume point.
     case edited(RoomMessage, sequenceId: Int64)
-    /// `agent_composing` control: an agent is preparing a reply. Never enters the transcript.
+    /// `agent_composing` control in an older single-agent shape: an agent is preparing a reply. Never enters the
+    /// transcript.
     case composing(agentId: String, targetSequenceId: Int64?)
+    /// `agent_composing` control, `agent-composing:v1`: the room's typing leases now, the whole set, sent each time it
+    /// changes (an empty set ends them). A `degraded` frame carries none: nothing shows rather than a stale lease.
+    case composingSet([RoomComposingLease])
     /// Any other control frame (for example an observability tick).
     case control
     /// The server reported a stream error; the client reconnects with backoff.
@@ -71,6 +75,14 @@ public enum RoomStreamFrame: Equatable, Sendable {
             return .serverError(code: json["error"]?["code"]?.stringValue)
         case "control":
             if json["control"]?.stringValue == "agent_composing" {
+                if let active = json["active"]?.arrayValue {
+                    guard json["status"]?.stringValue != "degraded" else { return .composingSet([]) }
+                    let ttl = json["ttlSeconds"]?.intValue.map { max(1, min(Int($0), 300)) } ?? 45
+                    let serverNow = json["serverNowMs"]?.intValue
+                    return .composingSet(active.compactMap {
+                        RoomComposingLease(json: $0, serverNowMs: serverNow, ttlSeconds: ttl)
+                    })
+                }
                 let agentId = json["agentId"]?.stringValue ?? json["agent"]?["id"]?.stringValue ?? ""
                 return agentId.isEmpty ? .control : .composing(
                     agentId: agentId,
@@ -86,6 +98,33 @@ public enum RoomStreamFrame: Equatable, Sendable {
             }
             return nil
         }
+    }
+}
+
+/// One agent preparing a reply, from an `agent-composing:v1` frame.
+public struct RoomComposingLease: Equatable, Sendable {
+    public let agentId: String
+    /// The message it answers.
+    public let targetSequenceId: Int64?
+    /// How long the lease has left, by the server's clock: never more than the frame's `ttlSeconds`.
+    public let secondsLeft: TimeInterval
+
+    public init(agentId: String, targetSequenceId: Int64?, secondsLeft: TimeInterval) {
+        self.agentId = agentId
+        self.targetSequenceId = targetSequenceId
+        self.secondsLeft = secondsLeft
+    }
+
+    /// An agent id as the contract allows (`[a-z0-9][a-z0-9._-]{0,63}`); the time left is `expiresAtMs` less the
+    /// frame's `serverNowMs`, from nought to `ttlSeconds` (the whole TTL when either is missing).
+    init?(json: JSONValue, serverNowMs: Int64?, ttlSeconds: Int) {
+        guard let agentId = json["agentId"]?.stringValue,
+              agentId.range(of: #"^[a-z0-9][a-z0-9._-]{0,63}$"#, options: .regularExpression) != nil else { return nil }
+        var left = TimeInterval(ttlSeconds)
+        if let expires = json["expiresAtMs"]?.intValue, let serverNowMs {
+            left = min(max(TimeInterval(expires - serverNowMs) / 1_000, 0), TimeInterval(ttlSeconds))
+        }
+        self.init(agentId: agentId, targetSequenceId: json["targetSequenceId"]?.intValue, secondsLeft: left)
     }
 }
 

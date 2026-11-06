@@ -55,6 +55,36 @@ final class RoomStreamTests: XCTestCase {
         XCTAssertNil(RoomStreamFrame.decode("not json"))
     }
 
+    /// Ticket 40c57e0c: the frame the API sends (agent-composing:v1, as SessionComposingService writes it) is the
+    /// room's typing leases as a whole set. Senti's lease decodes with the time it has left by the server's clock; a
+    /// degraded or empty frame is no one typing; an agent id the contract does not allow is left out.
+    func test_the_apis_composing_frame_is_the_rooms_whole_typing_set() {
+        let frame = RoomStreamFrame.decode(
+            #"{"type":"control","control":"agent_composing","schema":"agent-composing:v1","status":"ok","# +
+            #""serverNowMs":1793980800000,"ttlSeconds":45,"active":[{"agentId":"senti","runId":"room_1-msg-7","# +
+            #""targetKind":"message","targetId":"7f2e4c4e-5f1a-4f55-9c7e-2b8d6f1d0a11","targetSequenceId":7,"# +
+            #""startedAtMs":1793980795000,"expiresAtMs":1793980840000},{"agentId":"Not An Id","runId":"r","# +
+            #""targetKind":"message","targetId":"7f2e4c4e-5f1a-4f55-9c7e-2b8d6f1d0a11","targetSequenceId":7,"# +
+            #""startedAtMs":1793980795000,"expiresAtMs":1793980840000}]}"#
+        )
+        XCTAssertEqual(frame, .composingSet([RoomComposingLease(agentId: "senti", targetSequenceId: 7, secondsLeft: 40)]))
+        XCTAssertEqual(
+            RoomStreamFrame.decode(#"{"type":"control","control":"agent_composing","schema":"agent-composing:v1","status":"ok","serverNowMs":1,"ttlSeconds":45,"active":[]}"#),
+            .composingSet([]), "an empty set: no one is typing"
+        )
+        XCTAssertEqual(
+            RoomStreamFrame.decode(#"{"type":"control","control":"agent_composing","schema":"agent-composing:v1","status":"degraded","serverNowMs":1,"ttlSeconds":45,"active":[]}"#),
+            .composingSet([]), "degraded: nothing shows rather than a stale lease"
+        )
+        let late = RoomStreamFrame.decode(
+            #"{"type":"control","control":"agent_composing","status":"ok","serverNowMs":1000,"ttlSeconds":45,"# +
+            #""active":[{"agentId":"senti","targetSequenceId":7,"expiresAtMs":999000}]}"#
+        )
+        XCTAssertEqual(late, .composingSet([RoomComposingLease(agentId: "senti", targetSequenceId: 7, secondsLeft: 45)]),
+                       "never longer than the frame's TTL")
+    }
+
+    // MARK: - Backoff
     // MARK: - Backoff
 
     func test_backoff_reconnects_at_once_after_a_productive_connection_and_doubles_otherwise() {

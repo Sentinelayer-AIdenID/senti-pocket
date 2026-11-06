@@ -287,6 +287,8 @@ struct RoomChatScreen: View {
             outboxAccount: RoomSendOutbox.account(token: SessionTokenStore.load()),
             // Off unless this build turns them on (the `SentiEmojiReactions` Info.plist key).
             emojiReactions: RoomEmojiReactions.isEnabled,
+            // Senti never answers in a direct message: it is never shown typing there.
+            isDirect: route.direct != nil,
             onReauthenticationRequired: onReauthenticationRequired
         ))
         // Files go up through the room's own sender (init, complete, the message) and straight to storage for the

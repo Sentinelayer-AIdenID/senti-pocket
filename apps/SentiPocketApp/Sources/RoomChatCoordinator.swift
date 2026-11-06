@@ -192,7 +192,12 @@ final class RoomChatCoordinator: ObservableObject {
     private var lastAppliedSequence: Int64 = 0
     private var nextBeforeSequence: Int64?
     private var connection: RoomConnectionState = .connecting
+    /// Who is preparing a reply, and until when: each lease's own expiry, so a line never outlasts it.
     private var composing: [String: Date] = [:]
+    /// Wakes when the soonest lease expires, to take its line away even if no other frame comes.
+    private var composingExpiry: Task<Void, Never>?
+    /// A direct message: Senti never answers in one, so it is never shown typing there.
+    private let isDirect: Bool
     /// The room's boxes as the mint lists them, by name: running, and ended (`setBoxes`).
     private var runningBoxNames: Set<String> = []
     private var endedBoxNames: Set<String> = []
@@ -241,6 +246,8 @@ final class RoomChatCoordinator: ObservableObject {
     /// Each side of a jump to an older message: this many messages up to it and this many events after it.
     static let windowPageSize = 50
     static let composingLifetime: TimeInterval = 20
+    /// Senti's agent id: it answers in rooms, never in a direct message.
+    static let senti = "senti"
     static let pollWhileLive: TimeInterval = 60
     /// A stream that stayed open this long and then closed was the server's periodic close, not a failure: the room
     /// reconnects at once and stays Live (Carter, #59940: "it keeps saying connecting"). A sooner close still backs off.
@@ -276,9 +283,11 @@ final class RoomChatCoordinator: ObservableObject {
         outbox: RoomSendOutbox? = nil,
         outboxAccount: String? = nil,
         emojiReactions: Bool = false,
+        isDirect: Bool = false,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.emojiReactions = emojiReactions
+        self.isDirect = isDirect
         self.outbox = outbox
         self.attachmentFetcher = attachmentFetcher
         self.previewStore = previewStore
@@ -2069,8 +2078,25 @@ final class RoomChatCoordinator: ObservableObject {
             return true
         case .composing(let agentId, _):
             connection = .live
-            composing[agentId] = now()
+            guard !(isDirect && agentId == Self.senti) else { return false }
+            composing[agentId] = now().addingTimeInterval(Self.composingLifetime)
             publish()
+            scheduleComposingExpiry()
+            return false
+        case .composingSet(let leases):
+            connection = .live
+            // The whole set each time: who is not in it has stopped. A reconnect sends it again, which replaces it.
+            var next: [String: Date] = [:]
+            for lease in leases where !(isDirect && lease.agentId == Self.senti) {
+                next[lease.agentId] = max(next[lease.agentId] ?? .distantPast,
+                                          now().addingTimeInterval(lease.secondsLeft))
+            }
+            next = next.filter { $0.value > now() }
+            if next != composing {
+                composing = next
+                publish()
+            }
+            scheduleComposingExpiry()
             return false
         case .control:
             if connection != .live {
@@ -2252,11 +2278,26 @@ final class RoomChatCoordinator: ObservableObject {
         }
     }
 
-    private func pruneComposing() {
-        let cutoff = now().addingTimeInterval(-Self.composingLifetime)
+    /// Takes away every line whose lease has expired.
+    func pruneComposing() {
         let before = composing.count
-        composing = composing.filter { $0.value > cutoff }
+        composing = composing.filter { $0.value > now() }
         if composing.count != before { publish() }
+    }
+
+    /// Wakes at the soonest expiry, so a line goes when its lease does, with no other frame needed.
+    private func scheduleComposingExpiry() {
+        composingExpiry?.cancel()
+        guard let soonest = composing.values.min() else { return }
+        let delay = max(soonest.timeIntervalSince(now()), 0) + 0.25
+        composingExpiry = Task { [weak self, sleep = self.sleep] in
+            await sleep(delay)
+            guard !Task.isCancelled, let self else { return }
+            let before = self.composing.count
+            self.pruneComposing()
+            // The next one only once this one has gone: a clock that has not moved never spins this.
+            if self.composing.count < before { self.scheduleComposingExpiry() }
+        }
     }
 
     private var failureIsTerminal: Bool {
@@ -2433,7 +2474,7 @@ final class RoomChatCoordinator: ObservableObject {
             jumpDownKeepsLatest: hasLoadedInitial && historyTooLongToJumpDown,
             connection: connection,
             composingAgents: composing
-                .filter { $0.value > now().addingTimeInterval(-Self.composingLifetime) }
+                .filter { $0.value > now() }
                 .keys
                 .sorted(),
             failure: failure,

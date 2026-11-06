@@ -3230,20 +3230,16 @@ private struct RoomComposingLine: View {
     let agents: [String]
 
     var body: some View {
+        let label = RoomComposingWords.line(agents)
         Text(label)
             .font(.caption)
             .foregroundStyle(PocketPalette.textSecondary)
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
             .accessibilityIdentifier("pocket.room.composing")
-    }
-
-    private var label: String {
-        switch agents.count {
-        case 1: return "\(agents[0]) is preparing a reply…"
-        case 2: return "\(agents[0]) and \(agents[1]) are preparing replies…"
-        default: return "\(agents.count) agents are preparing replies…"
-        }
+            // VoiceOver hears it once when it shows and when its words change, not at every redraw.
+            .onAppear { RoomComposingWords.announce(label) }
+            .onChange(of: label) { RoomComposingWords.announce($0) }
     }
 }
 
