@@ -147,7 +147,13 @@ final class ChatMarkdownQuoteDepthTests: XCTestCase {
                                "level \(level): how many levels deeper than four")
             }
             let runs = Self.runs(blocks)
-            XCTAssertEqual(runs.map(\.levels), Array(1...(levels - ChatMarkdown.maximumQuoteDepth)),
+            let pastTheCap = levels - ChatMarkdown.maximumQuoteDepth
+            guard pastTheCap > 0 else {
+                XCTFail("\(levels) levels, cap \(ChatMarkdown.maximumQuoteDepth): no level is past the cap, so the cap "
+                    + "can't be checked here")
+                continue
+            }
+            XCTAssertEqual(runs.map(\.levels), Array(1...pastTheCap),
                            "\(levels) levels: each level past four, a run of one line under its own header")
             XCTAssertFalse(runs.contains { Self.holdsQuote($0.blocks) }, "a run's blocks never hold a quote")
         }
