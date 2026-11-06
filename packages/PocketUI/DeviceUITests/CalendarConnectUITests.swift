@@ -5,7 +5,8 @@ import XCTest
 /// (calendar access is granted to the app, or taken back, by the runner around each test), with a made-up event that
 /// has notes and a link, and every request to the device-events routes recorded by the app's stand-in server
 /// (`-PocketCalendarStage connect`). The runner calls them in order: `test_1` to `test_3` with access granted; then,
-/// with access revoked, `test_4`; then, with access granted again, `test_5` and `test_6`.
+/// with access revoked, `test_4`; then, with access granted again, `test_5` and `test_6`. Losing access turns sharing
+/// off; regaining it never turns sharing on.
 final class CalendarConnectUITests: XCTestCase {
     private static let bodyKeys: Set<String> = ["source", "windowStart", "windowEnd", "events"]
     private static let eventKeys: Set<String> = ["id", "calendar", "title", "start", "end", "allDay", "location"]
@@ -166,26 +167,33 @@ final class CalendarConnectUITests: XCTestCase {
         app.terminate()
     }
 
-    /// 4. After the runner took calendar access back: a relaunch sends DELETE by itself, and the switch stays in sight,
-    /// on, so it can be turned off.
-    func test_4_after_access_was_taken_back_a_delete_goes_and_the_switch_stays() throws {
+    /// 4. After the runner took calendar access back: a relaunch turns sharing off and sends DELETE by itself, and the
+    /// switch stays in sight, off.
+    func test_4_after_access_was_taken_back_a_delete_goes_and_the_switch_stays_off() throws {
         let app = launch(fresh: false, seed: false)
         XCTAssertEqual(waitFor("DELETE", count: 1, timeout: 30).count, 1, "access went: the server forgets")
         let share = app.switches["pocket.calendar.share"]
         XCTAssertTrue(share.waitForExistence(timeout: 10), "the switch stays in sight\n\(app.debugDescription)")
-        XCTAssertEqual(share.value as? String, "1", "as the person set it")
+        XCTAssertEqual(share.value as? String, "0", "sharing is off")
         XCTAssertTrue(sent().filter { $0.method == "PUT" }.isEmpty, "nothing is sent without access")
         shot("4-access-taken-back")
         print("CALCONNECT test4 requests=\(sent().map { $0.method })")
         app.terminate()
     }
 
-    /// 5. Access granted again: sharing is on with a calendar picked, for the cold launches.
-    func test_5_sharing_is_on_again_for_the_cold_launches() throws {
-        let app = launch(fresh: true)
-        _ = shareTheSeedCalendar(app)
-        app.navigationBars.buttons.element(boundBy: 0).tap()
-        XCTAssertEqual(waitFor("PUT", count: 1, timeout: 20).count, 1)
+    /// 5. Access granted again: sharing stays off and nothing is sent, until the person turns it on; then it is sent.
+    /// Sharing is left on, for the cold launches.
+    func test_5_regaining_access_sends_nothing_until_the_switch_is_turned_on() throws {
+        let app = launch(fresh: false, seed: false)
+        let share = app.switches["pocket.calendar.share"]
+        XCTAssertTrue(share.waitForExistence(timeout: 60), "\(app.debugDescription)")
+        XCTAssertEqual(share.value as? String, "0", "access back: sharing stays off")
+        sleep(6)
+        XCTAssertTrue(sent().filter { $0.method == "PUT" }.isEmpty, "nothing is sent until the switch is on")
+        flip(share, to: "1")
+        XCTAssertEqual(waitFor("PUT", count: 1, timeout: 20).count, 1, "turned on: the picked calendar is sent")
+        shot("5-on-again")
+        print("CALCONNECT test5 requests=\(sent().map { $0.method })")
         app.terminate()
     }
 

@@ -12,8 +12,8 @@ import UIKit
 //   phone sends 7 days back to 30 ahead (title, start, end, all-day, place, calendar name; never notes, attendees or
 //   links) when the app opens and when the phone's calendar changes, at most once a minute, and never the same body
 //   twice. The server forgets everything (DELETE) whenever sharing stops: the switch turned off, the last calendar
-//   unticked, or calendar access turned off in iOS Settings (then once, with the switch left as the person set it, in
-//   sight, and sharing starts again by itself when access comes back). A DELETE that did not go is sent again before
+//   unticked, or calendar access turned off in iOS Settings (sharing turns off then, the switch stays in sight, off,
+//   and access coming back never turns it on again: the person does). A DELETE that did not go is sent again before
 //   anything else, and nothing is sent until it has gone.
 // Both hide while the server's flag answers 404 (`DeviceCalendarServing`). The switch and the picks are the signed-in
 // account's own: another sign-in on the phone starts with the switch off.
@@ -242,9 +242,9 @@ final class PhoneCalendarCenter: ObservableObject {
     /// A forget that has not gone yet: sent again first, and nothing is sent until it has gone. While it waits, the
     /// switch stays in sight, whatever iOS lets Pocket read.
     @Published private(set) var forgetPending = false
-    /// The server holds nothing of this person's: the last word it had was a DELETE (none sent since). With calendar
-    /// access gone, the server is told to forget once, not at every app open.
-    private(set) var serverForgot = false
+    /// Sharing was turned off because calendar access went: the switch stays in sight, off, until the person turns it
+    /// on again (which needs access back).
+    @Published private(set) var stoppedForAccess = false
 
     /// The least time between two sends.
     static let spacing: TimeInterval = 60
@@ -304,9 +304,9 @@ final class PhoneCalendarCenter: ObservableObject {
     /// Showing the phone's events in Pocket's calendar: the flag is on and Pocket may read them.
     var shows: Bool { available == true && access == .granted }
 
-    /// The switch and the picks are in sight: Pocket may read the calendar, or sharing is on or still being forgotten
-    /// (calendar access turned off in iOS Settings must never hide the way to stop sharing).
-    var showsSharing: Bool { access == .granted || sharesWithAgents || forgetPending }
+    /// The switch and the picks are in sight: Pocket may read the calendar, or sharing is on, still being forgotten, or
+    /// was turned off because calendar access went (that must never hide the switch).
+    var showsSharing: Bool { access == .granted || sharesWithAgents || forgetPending || stoppedForAccess }
 
     /// How many picked calendars are on the phone now: a pick whose calendar has gone is not counted.
     var pickedCount: Int {
@@ -367,6 +367,7 @@ final class PhoneCalendarCenter: ObservableObject {
         if on {
             guard access == .granted, !sharesWithAgents else { return }
             sharesWithAgents = true
+            stoppedForAccess = false
             save()
             requestSend()
         } else {
@@ -461,11 +462,13 @@ final class PhoneCalendarCenter: ObservableObject {
         requestSend()
     }
 
-    /// Calendar access went (turned off in iOS Settings, or reset) while sharing: the server is to forget what it has,
-    /// once. The switch stays as the person set it, in sight, so it can be turned off, and sharing starts again by
-    /// itself when access comes back.
+    /// Calendar access went (turned off in iOS Settings, or reset) while sharing: sharing turns off and the server is to
+    /// forget what it has (the one DELETE is kept across launches and sent again first). The switch stays in sight, off;
+    /// access coming back never turns it on again.
     private func accessWent() {
-        guard sharesWithAgents, !serverForgot, !forgetPending else { return }
+        guard sharesWithAgents else { return }
+        sharesWithAgents = false
+        stoppedForAccess = true
         forgetPending = true
         save()
     }
@@ -493,8 +496,6 @@ final class PhoneCalendarCenter: ObservableObject {
         do {
             _ = try await client.putDeviceEvents(upload, idempotencyKey: UUID().uuidString)
             lastSentBody = body
-            serverForgot = false
-            save()
             notice = nil
         } catch CalendarError.unavailable {
             wentAway()
@@ -508,7 +509,6 @@ final class PhoneCalendarCenter: ObservableObject {
         do {
             try await client.deleteDeviceEvents()
             forgetPending = false
-            serverForgot = true
             lastSentBody = nil
             notice = nil
         } catch CalendarError.unavailable {
@@ -539,7 +539,7 @@ final class PhoneCalendarCenter: ObservableObject {
         sharesWithAgents = key("shares").map(defaults.bool(forKey:)) ?? false
         sharedCalendarIds = Set(key("calendars").flatMap(defaults.stringArray(forKey:)) ?? [])
         forgetPending = key("forget").map(defaults.bool(forKey:)) ?? false
-        serverForgot = key("forgot").map(defaults.bool(forKey:)) ?? false
+        stoppedForAccess = key("stoppedForAccess").map(defaults.bool(forKey:)) ?? false
         lastSend = nil
         lastSentBody = nil
         return true
@@ -547,11 +547,11 @@ final class PhoneCalendarCenter: ObservableObject {
 
     private func save() {
         guard let shares = key("shares"), let picks = key("calendars"), let forget = key("forget"),
-              let forgot = key("forgot") else { return }
+              let stopped = key("stoppedForAccess") else { return }
         defaults.set(sharesWithAgents, forKey: shares)
         defaults.set(sharedCalendarIds.sorted(), forKey: picks)
         defaults.set(forgetPending, forKey: forget)
-        defaults.set(serverForgot, forKey: forgot)
+        defaults.set(stoppedForAccess, forKey: stopped)
     }
 }
 

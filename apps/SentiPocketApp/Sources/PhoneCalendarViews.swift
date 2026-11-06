@@ -178,10 +178,7 @@ struct PhoneCalendarCard: View {
     private var words: String {
         var words: [String] = []
         if let notice = phone.notice { words.append(notice) }
-        if phone.access != .granted, phone.sharesWithAgents {
-            words.append(PhoneCalendarSettingsSection.pausedWords)
-        }
-        words.append(PhoneCalendarSettingsSection.agentsWords)
+        words.append(PhoneCalendarSettingsSection.sharingWords(phone))
         if phone.sharesWithAgents, phone.pickedCount == 0 { words.append(PhoneCalendarSettingsSection.pickWords) }
         words.append(Self.accountsWords)
         return words.joined(separator: " ")
@@ -201,8 +198,16 @@ struct PhoneCalendarSettingsSection: View {
 
     static let agentsWords = "Your agents can see the titles and times of your shared calendars. Turn this off any time."
     static let pickWords = "Pick the calendars to share."
-    static let pausedWords = "Nothing is shared while Pocket can't see your calendar. Your agents see it again once "
-        + "Calendars is back on for Senti Pocket."
+    static let noAccessWords = "Pocket can't see your calendar right now. Nothing is shared."
+    static let turnOnWords = "Turn this on to let your agents see the calendars you pick."
+
+    /// What the switch says: nothing is shared while Pocket can't see the calendar; off, how to share; on, what the
+    /// agents see.
+    @MainActor
+    static func sharingWords(_ phone: PhoneCalendarCenter) -> String {
+        if phone.access != .granted { return noAccessWords }
+        return phone.sharesWithAgents ? agentsWords : turnOnWords
+    }
     static let connectWords = "Your phone's events show in your calendar here. Nothing is sent unless you turn on "
         + "Let my agents see my calendar."
 
@@ -257,11 +262,10 @@ struct PhoneCalendarSettingsSection: View {
         case .notAsked:
             words.append(Self.connectWords)
         case .granted:
-            words.append(Self.agentsWords)
+            words.append(Self.sharingWords(phone))
             if phone.sharesWithAgents, phone.pickedCount == 0 { words.append(Self.pickWords) }
         default:
-            if phone.sharesWithAgents { words.append(Self.pausedWords) }
-            if phone.showsSharing { words.append(Self.agentsWords) }
+            if phone.showsSharing { words.append(Self.noAccessWords) }
         }
         return words.joined(separator: " ")
     }
