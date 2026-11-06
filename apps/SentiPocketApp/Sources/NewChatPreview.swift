@@ -13,20 +13,36 @@ enum NewChatPreview {
 
     static var stage: String { RootPreview.argument("-PocketNewChatStage") ?? "start" }
 
-    /// Made up for screenshots; the server's own list replaces them in the app.
-    static let templates: [RoomTemplate] = [
-        RoomTemplate(id: "preview-week", name: "Plan my week", symbol: "calendar",
-                     summary: "Your week, your lists and your follow-ups in one place.",
-                     firstMessage: "Tell me what's coming up and I'll lay out your week, with time for what matters."),
-        RoomTemplate(id: "preview-study", name: "Study together", symbol: "book",
-                     summary: "Notes, explanations and practice questions with friends.", roomType: "study"),
-        RoomTemplate(id: "preview-research", name: "Research", symbol: "magnifyingglass",
-                     summary: "Sources, findings and a written answer you can check.", roomType: "research"),
-        RoomTemplate(id: "preview-meetings", name: "Meetings", symbol: "person.3",
-                     summary: "An agenda, live notes and the follow-ups.", roomType: "conference"),
-        RoomTemplate(id: "preview-trip", name: "Plan a trip", symbol: "airplane",
-                     summary: "Dates, places and a packing list everyone can see."),
-    ]
+    /// The contract's seed (its ids, order, room types and starter agents). Names, symbols and summaries are stand-ins
+    /// made from the ids and the starter agents until the API's own list can be read; the server's list replaces all
+    /// of it in the app.
+    static let templates: [RoomTemplate] = {
+        let assistant = (id: "pa01-personal-assistant", name: "Personal Assistant",
+                         symbol: "person.crop.circle.badge.checkmark")
+        let launch = (id: "cpg03-launch-coord", name: "Launch Coordinator", symbol: "checklist")
+        func startingWith(_ agent: (id: String, name: String, symbol: String), _ id: String,
+                          _ name: String) -> RoomTemplate {
+            RoomTemplate(id: id, name: name, symbol: agent.symbol, summary: "Starts with \(agent.name).",
+                         starterAgents: [agent.id])
+        }
+        return [
+            RoomTemplate(id: "personal-assistant", name: "Personal assistant", symbol: assistant.symbol,
+                         summary: "Starts with \(assistant.name).", starterAgents: [assistant.id],
+                         firstMessage: "Stand-in for the line Senti opens with; the server's own replaces it."),
+            startingWith(assistant, "plan-a-trip", "Plan a trip"),
+            startingWith(assistant, "budget-and-bills", "Budget and bills"),
+            startingWith(assistant, "job-search", "Job search"),
+            startingWith(launch, "side-project", "Side project"),
+            startingWith(assistant, "family-and-home", "Family and home"),
+            RoomTemplate(id: "study", name: "Study", symbol: RoomKind.study.symbol, summary: RoomKind.study.detail,
+                         roomType: "study"),
+            RoomTemplate(id: "research", name: "Research", symbol: RoomKind.research.symbol,
+                         summary: RoomKind.research.detail, roomType: "research"),
+            RoomTemplate(id: "conference", name: "Conference", symbol: RoomKind.conference.symbol,
+                         summary: RoomKind.conference.detail, roomType: "conference",
+                         starterAgents: [launch.id]),
+        ]
+    }()
 
     @MainActor
     static var rootView: some View {
