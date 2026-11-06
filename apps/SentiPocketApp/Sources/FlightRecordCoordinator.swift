@@ -9,6 +9,9 @@ import PocketUI
 @MainActor
 final class FlightRecordCoordinator: ObservableObject {
     @Published private(set) var state = FlightRecordState(isLoading: true)
+    /// A box's own account of its work (its narration), by lowercased name, read while its Working row is open in the
+    /// room: the row's steps between its notes.
+    @Published private(set) var boxSteps: [String: [RoomWorkSession.Step]] = [:]
 
     private let sessionId: String
     private let mint: any MintReading
@@ -133,6 +136,19 @@ final class FlightRecordCoordinator: ObservableObject {
         }
         flights = flights.filter { id, _ in lives.contains { $0.id == id } }
         publish()
+    }
+
+    /// Reads one box's record for its open Working row. The box is found among the room's running boxes; an agent
+    /// that is not one has no record, and nothing is read for it.
+    func readSteps(ofBox name: String) async {
+        let key = name.lowercased()
+        guard let life = lives.first(where: { $0.agentName.lowercased() == key }),
+              let record = try? await mint.flight(lifeId: life.id) else { return }
+        flights[life.id] = record
+        let steps = record.narration.enumerated().map { index, line in
+            RoomWorkSession.Step(id: "record-\(life.id)-\(index)", text: line.text, at: ParsedSessionTimestamp(line.at).date)
+        }
+        if boxSteps[key] != steps { boxSteps[key] = steps }
     }
 
     private func readFlight(_ lifeId: String) async {

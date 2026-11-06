@@ -12,6 +12,10 @@ final class AgentChatUITests: XCTestCase {
 
         let ring = app.descendants(matching: .any)["pocket.room.presence"]
         XCTAssertTrue(ring.waitForExistence(timeout: 30), "who is here shows")
+        // At the top of the room, where its first message is.
+        let list = app.scrollViews.firstMatch
+        for _ in 0..<3 { list.swipeDown() }
+        RunLoop.current.run(until: Date().addingTimeInterval(1.5))
         let first = app.descendants(matching: .any)["pocket.room.message.501"]
         XCTAssertTrue(first.waitForExistence(timeout: 10), "the first message shows")
         XCTAssertGreaterThanOrEqual(first.frame.minY, ring.frame.maxY - 0.5,

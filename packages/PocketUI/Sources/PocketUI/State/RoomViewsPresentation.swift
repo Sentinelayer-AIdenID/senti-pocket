@@ -15,11 +15,14 @@ public struct RoomChatViews: Equatable, Sendable {
     public let ticks: Ticks
     /// For the ticks: "Seen by A at 10:42 and B at 10:43", "Seen by N viewers" or "Not yet seen".
     public let seenBy: String
+    /// The agents who viewed it, by lowercased id: a message's "Seen" when the agent it is for has read it.
+    public let agentViewers: Set<String>
 
-    public init(line: String, ticks: Ticks, seenBy: String) {
+    public init(line: String, ticks: Ticks, seenBy: String, agentViewers: Set<String> = []) {
         self.line = line
         self.ticks = ticks
         self.seenBy = seenBy
+        self.agentViewers = agentViewers
     }
 
     /// Someone who viewed it: a person by account id, an agent by its id.
@@ -92,7 +95,8 @@ public struct RoomChatViews: Equatable, Sendable {
                 seenBy = "Seen by " + joined(parts)
             }
         }
-        return RoomChatViews(line: line, ticks: seen ? .seen : .sent, seenBy: seenBy)
+        return RoomChatViews(line: line, ticks: seen ? .seen : .sent, seenBy: seenBy,
+                             agentViewers: Set(viewers.filter { !$0.isHuman }.map { $0.actorId.lowercased() }))
     }
 
     /// "Viewed by A", "Viewed by A and B", "Viewed by A, B, C and 2 more", or the count when nobody is named.
