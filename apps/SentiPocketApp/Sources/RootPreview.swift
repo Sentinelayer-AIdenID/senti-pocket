@@ -18,6 +18,7 @@ import PocketUI
 ///   the room is in reach. Default `mid`.
 /// - `-PocketRootActivity`: the open room's Activity shows a few events and actions (the server's own types, and one
 ///   this app does not know); without it Activity is not served here, as before.
+/// - `-PocketRootCreates`: the preview can make a chat, so the side panel offers New chat; without it, as before.
 /// - `-PocketRootStream <posts per second>`: messages arriving in the open room (default none).
 /// - `-PocketRootOneListPage`: every room in the list's first page, so the side panel lists all of them (the API
 ///   pages the list by 50).
@@ -291,8 +292,16 @@ final class RootPreviewAPI: @unchecked Sendable {
 
     private func count(_ name: String) { lock.withLock { calls[name, default: 0] += 1 } }
 
+    /// Whether the preview can make a chat (`-PocketRootCreates`).
+    static let createsRooms = ProcessInfo.processInfo.arguments.contains("-PocketRootCreates")
+
     var services: RootServices {
-        let sender = RootPreviewSender()
+        let sender: any RoomMessageSending & RoomActionSending
+        if Self.createsRooms {
+            sender = RootPreviewCreatingSender()
+        } else {
+            sender = RootPreviewSender()
+        }
         return RootServices(
             sessions: self, room: self, tickets: self, admissions: self, search: self, notifications: self,
             notificationMarker: self, callLog: self, waiting: self, checkpoints: self, directMessages: self,
@@ -733,6 +742,22 @@ private struct RootPreviewSender: RoomMessageSending, RoomActionSending {
 
     func sendAction(_ action: RoomActionRequest) async throws {
         try? await Task.sleep(nanoseconds: 200_000_000)
+    }
+}
+
+/// The preview's sender that can also make a chat (`-PocketRootCreates`): the side panel offers New chat.
+private struct RootPreviewCreatingSender: RoomMessageSending, RoomActionSending, RoomCreating {
+    func sendHumanMessage(sessionId: String, text: String, clientId: String) async throws {
+        try? await Task.sleep(nanoseconds: 300_000_000)
+    }
+
+    func sendAction(_ action: RoomActionRequest) async throws {
+        try? await Task.sleep(nanoseconds: 200_000_000)
+    }
+
+    func create(title: String, kind: RoomKind) async throws -> String {
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        return "room-made-" + String(UUID().uuidString.prefix(8)).lowercased()
     }
 }
 #endif

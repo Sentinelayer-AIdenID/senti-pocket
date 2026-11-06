@@ -16,7 +16,9 @@ final class FriendlyWordsUITests: XCTestCase {
 
     private func launch(room: String = "none", largest: Bool = false, extra: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments = ["-PocketRootPreview", "-PocketRootRoom", room] + (largest ? Self.largestText : []) + extra
+        // -PocketRootCreates: the preview can make a chat, so the side panel offers New chat.
+        app.launchArguments = ["-PocketRootPreview", "-PocketRootCreates", "-PocketRootRoom", room]
+            + (largest ? Self.largestText : []) + extra
         app.launch()
         return app
     }
@@ -103,7 +105,7 @@ final class FriendlyWordsUITests: XCTestCase {
             XCTAssertTrue(app.descendants(matching: .any)["pocket.room.composer"].waitForExistence(timeout: 60))
             let start = app.staticTexts["pocket.room.start"]
             var swipes = 0
-            while !(start.exists && start.isHittable), swipes < 20 {
+            while !(start.exists && start.isHittable), swipes < 8 {
                 app.swipeDown(velocity: .fast)
                 swipes += 1
             }
@@ -170,12 +172,6 @@ final class FriendlyWordsUITests: XCTestCase {
         }
         app.terminate()
 
-        app = launch(room: "room-000", largest: largest)
-        XCTAssertTrue(app.descendants(matching: .any)["pocket.room.composer"].waitForExistence(timeout: 60))
-        for _ in 0..<12 { app.swipeDown(velocity: .fast) }
-        shot("3-room-top")
-        app.terminate()
-
         app = launch(room: "mid", largest: largest, extra: ["-PocketRootActivity"])
         XCTAssertTrue(app.descendants(matching: .any)["pocket.room.composer"].waitForExistence(timeout: 60))
         app.buttons["pocket.room.flight"].tap()
@@ -186,6 +182,19 @@ final class FriendlyWordsUITests: XCTestCase {
         app.buttons["pocket.drawer.activity"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["pocket.activity.screen"].waitForExistence(timeout: 20))
         shot("8-activity")
+        app.terminate()
+
+        // Last, as it is unchanged at the default size: the top of a room of 30 messages, a few swipes up. A slow
+        // swipe under load can then cost no other picture.
+        app = launch(room: "room-000", largest: largest)
+        XCTAssertTrue(app.descendants(matching: .any)["pocket.room.composer"].waitForExistence(timeout: 60))
+        let start = app.staticTexts["pocket.room.start"]
+        var up = 0
+        while !(start.exists && start.isHittable), up < 6 {
+            app.swipeDown(velocity: .fast)
+            up += 1
+        }
+        shot("3-room-top")
     }
 }
 #endif
