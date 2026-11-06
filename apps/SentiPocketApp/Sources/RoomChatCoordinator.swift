@@ -2077,13 +2077,19 @@ final class RoomChatCoordinator: ObservableObject {
             pursueFocus()
             return true
         case .composing(let agentId, _):
+            let wasLive = connection == .live
             connection = .live
-            guard !(isDirect && agentId == Self.senti) else { return false }
+            guard !(isDirect && agentId == Self.senti) else {
+                if !wasLive { publish() }
+                return false
+            }
+            let isNew = composing[agentId] == nil
             composing[agentId] = now().addingTimeInterval(Self.composingLifetime)
-            publish()
+            if isNew || !wasLive { publish() }
             scheduleComposingExpiry()
             return false
         case .composingSet(let leases):
+            let wasLive = connection == .live
             connection = .live
             // The whole set each time: who is not in it has stopped. A reconnect sends it again, which replaces it.
             var next: [String: Date] = [:]
@@ -2092,10 +2098,10 @@ final class RoomChatCoordinator: ObservableObject {
                                           now().addingTimeInterval(lease.secondsLeft))
             }
             next = next.filter { $0.value > now() }
-            if next != composing {
-                composing = next
-                publish()
-            }
+            // The room redraws only when who is typing changes, not for each lease's new expiry.
+            let changed = Set(next.keys) != Set(composing.keys)
+            composing = next
+            if changed || !wasLive { publish() }
             scheduleComposingExpiry()
             return false
         case .control:
@@ -2293,10 +2299,10 @@ final class RoomChatCoordinator: ObservableObject {
         composingExpiry = Task { [weak self, sleep = self.sleep] in
             await sleep(delay)
             guard !Task.isCancelled, let self else { return }
-            let before = self.composing.count
             self.pruneComposing()
-            // The next one only once this one has gone: a clock that has not moved never spins this.
-            if self.composing.count < before { self.scheduleComposingExpiry() }
+            // Again for whoever is still typing (a reply may have taken the soonest lease away before it expired).
+            // Only for a later expiry than this one: a clock that has not moved never spins this.
+            if let next = self.composing.values.min(), next > soonest { self.scheduleComposingExpiry() }
         }
     }
 

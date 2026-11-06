@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import PocketSyncClient
 import PocketUI
@@ -37,16 +38,26 @@ private final class TypingClock: @unchecked Sendable {
     func advance(_ seconds: TimeInterval) { lock.withLock { current.addTimeInterval(seconds) } }
 }
 
+/// The room's sleeps: by default a long one never ends within a test; in a room whose sleeps move the clock, each
+/// returns at once with the clock moved on by its length, as if that time had passed.
+private enum TypingSleep {
+    case realShortOnly
+    case movesTheClock
+}
+
 @MainActor
 final class SentiTypingTests: XCTestCase {
     private let clock = TypingClock()
 
-    private func room(isDirect: Bool = false) -> RoomChatCoordinator {
+    private func room(isDirect: Bool = false, sleeps: TypingSleep = .realShortOnly) -> RoomChatCoordinator {
         RoomChatCoordinator(
             sessionId: "room_1", title: "Room", transport: QuietRoom(), membershipRole: "owner",
             ownAuthorIds: ["human-alex"],
-            sleep: { seconds in
-                if seconds > 5 { try? await Task.sleep(nanoseconds: 3_600_000_000_000) }
+            sleep: { [clock] seconds in
+                switch sleeps {
+                case .movesTheClock: clock.advance(seconds)
+                case .realShortOnly: if seconds > 5 { try? await Task.sleep(nanoseconds: 3_600_000_000_000) }
+                }
             },
             now: { [clock] in clock.now },
             isDirect: isDirect,
@@ -61,6 +72,11 @@ final class SentiTypingTests: XCTestCase {
     private func reply(from author: String) -> RoomMessage {
         RoomMessage(id: "evt-8", sequenceId: 8, kind: .message, authorId: author, authorName: author, isHuman: false,
                     text: "Here is what I found.", timestamp: "2026-11-06T15:00:00.000000+00:00")
+    }
+
+    /// Lets the room's own tasks (its expiry timer) run.
+    private func settle() async {
+        for _ in 0..<5 { try? await Task.sleep(nanoseconds: 20_000_000) }
     }
 
     /// The set with Senti in it shows "Senti is typing…"; Senti's reply takes it away at once.
@@ -96,6 +112,52 @@ final class SentiTypingTests: XCTestCase {
         clock.advance(2)
         room.pruneComposing()
         XCTAssertEqual(room.state.composingAgents, [], "past its lease: gone")
+    }
+
+    /// One agent's reply ends only its own line: another still typing stays.
+    func test_one_agents_reply_leaves_another_agents_line() {
+        let room = room()
+        room.handle(typing([("senti", 45), ("build-agent", 45)]))
+        room.handle(.message(reply(from: "build-agent")))
+        XCTAssertEqual(room.state.composingAgents, ["senti"], "build-agent's reply leaves Senti typing")
+        XCTAssertEqual(RoomComposingWords.line(room.state.composingAgents), "Senti is typing…")
+    }
+
+    /// The room's own timer takes the line away when its lease runs out, with no other frame and nothing else asking.
+    func test_senti_typing_goes_by_itself_when_its_lease_runs_out() async {
+        let room = room(sleeps: .movesTheClock)
+        let start = clock.now
+        room.handle(typing([("senti", 30)]))
+        XCTAssertEqual(room.state.composingAgents, ["senti"])
+        await settle()
+        XCTAssertEqual(room.state.composingAgents, [], "its lease ran out")
+        XCTAssertGreaterThanOrEqual(clock.now.timeIntervalSince(start), 30, "and not before")
+    }
+
+    /// A reply takes the soonest lease away before it expires: the timer, set for it, still goes on to the next, so
+    /// Senti's line goes at its own expiry.
+    func test_after_a_reply_takes_the_soonest_line_the_next_still_goes_at_its_own_expiry() async {
+        let room = room(sleeps: .movesTheClock)
+        room.handle(typing([("build-agent", 10), ("senti", 30)]))
+        room.handle(.message(reply(from: "build-agent")))
+        XCTAssertEqual(room.state.composingAgents, ["senti"])
+        await settle()
+        XCTAssertEqual(room.state.composingAgents, [], "Senti's lease ran out too")
+    }
+
+    /// Each set carries each lease's new expiry; the room redraws only when who is typing changes.
+    func test_a_set_with_the_same_agents_redraws_nothing() {
+        let room = room()
+        var redraws = 0
+        let watch = room.$state.dropFirst().sink { _ in redraws += 1 }
+        room.handle(typing([("senti", 45)]))
+        XCTAssertEqual(redraws, 1)
+        clock.advance(5)
+        room.handle(typing([("senti", 38)]))
+        XCTAssertEqual(redraws, 1, "Senti still typing, with a new expiry: nothing to redraw")
+        room.handle(typing([("senti", 38), ("build-agent", 45)]))
+        XCTAssertEqual(redraws, 2, "another agent began")
+        withExtendedLifetime(watch) {}
     }
 
     /// Senti does not answer in a direct message, so it is never shown typing there; another agent still is.

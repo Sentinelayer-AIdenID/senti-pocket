@@ -58,7 +58,8 @@ public enum RoomStreamFrame: Equatable, Sendable {
     /// transcript.
     case composing(agentId: String, targetSequenceId: Int64?)
     /// `agent_composing` control, `agent-composing:v1`: the room's typing leases now, the whole set, sent each time it
-    /// changes (an empty set ends them). A `degraded` frame carries none: nothing shows rather than a stale lease.
+    /// changes (an empty set ends them). A frame that is not `ok` carries none: nothing shows rather than a stale
+    /// lease.
     case composingSet([RoomComposingLease])
     /// Any other control frame (for example an observability tick).
     case control
@@ -75,13 +76,8 @@ public enum RoomStreamFrame: Equatable, Sendable {
             return .serverError(code: json["error"]?["code"]?.stringValue)
         case "control":
             if json["control"]?.stringValue == "agent_composing" {
-                if let active = json["active"]?.arrayValue {
-                    guard json["status"]?.stringValue != "degraded" else { return .composingSet([]) }
-                    let ttl = json["ttlSeconds"]?.intValue.map { max(1, min(Int($0), 300)) } ?? 45
-                    let serverNow = json["serverNowMs"]?.intValue
-                    return .composingSet(active.compactMap {
-                        RoomComposingLease(json: $0, serverNowMs: serverNow, ttlSeconds: ttl)
-                    })
+                if json["active"] != nil {
+                    return .composingSet(RoomComposingLease.leases(in: json))
                 }
                 let agentId = json["agentId"]?.stringValue ?? json["agent"]?["id"]?.stringValue ?? ""
                 return agentId.isEmpty ? .control : .composing(
@@ -106,8 +102,13 @@ public struct RoomComposingLease: Equatable, Sendable {
     public let agentId: String
     /// The message it answers.
     public let targetSequenceId: Int64?
-    /// How long the lease has left, by the server's clock: never more than the frame's `ttlSeconds`.
+    /// How long the lease has left, by the server's clock: more than nought, never more than `longest`.
     public let secondsLeft: TimeInterval
+
+    /// The longest a lease shows, as on the web (the server's leases last 45 s).
+    public static let longest: TimeInterval = 45
+    /// The most leases a frame may carry: one with more is refused whole, as on the web.
+    static let mostPerFrame = 256
 
     public init(agentId: String, targetSequenceId: Int64?, secondsLeft: TimeInterval) {
         self.agentId = agentId
@@ -115,16 +116,41 @@ public struct RoomComposingLease: Equatable, Sendable {
         self.secondsLeft = secondsLeft
     }
 
-    /// An agent id as the contract allows (`[a-z0-9][a-z0-9._-]{0,63}`); the time left is `expiresAtMs` less the
-    /// frame's `serverNowMs`, from nought to `ttlSeconds` (the whole TTL when either is missing).
-    init?(json: JSONValue, serverNowMs: Int64?, ttlSeconds: Int) {
-        guard let agentId = json["agentId"]?.stringValue,
-              agentId.range(of: #"^[a-z0-9][a-z0-9._-]{0,63}$"#, options: .regularExpression) != nil else { return nil }
-        var left = TimeInterval(ttlSeconds)
-        if let expires = json["expiresAtMs"]?.intValue, let serverNowMs {
-            left = min(max(TimeInterval(expires - serverNowMs) / 1_000, 0), TimeInterval(ttlSeconds))
+    /// The leases in an `agent-composing:v1` frame, checked as the web checks them: none unless the frame's status is
+    /// `ok`, it carries `serverNowMs`, and `active` holds at most 256; each lease only with every field as the contract
+    /// has it, and only while it has time left.
+    static func leases(in frame: JSONValue) -> [RoomComposingLease] {
+        guard frame["status"]?.stringValue == "ok", let active = frame["active"]?.arrayValue,
+              active.count <= mostPerFrame, let serverNowMs = number(frame["serverNowMs"]) else { return [] }
+        return active.compactMap { RoomComposingLease(json: $0, serverNowMs: serverNowMs) }
+    }
+
+    /// The time left is `expiresAtMs` less the frame's `serverNowMs`, worked out in doubles (whole-number arithmetic
+    /// would trap on numbers near its limits), at most `longest`. A lease with none left is left out.
+    init?(json: JSONValue, serverNowMs: Double) {
+        guard let agentId = json["agentId"]?.stringValue, Self.matches(agentId, #"^[a-z0-9][a-z0-9._-]{0,63}\z"#),
+              let runId = json["runId"]?.stringValue, Self.matches(runId, #"^[A-Za-z0-9_-]{1,80}\z"#),
+              let kind = json["targetKind"]?.stringValue, kind == "message" || kind == "reply",
+              let targetId = json["targetId"]?.stringValue, Self.matches(targetId, #"^[0-9a-fA-F-]{36}\z"#),
+              let target = json["targetSequenceId"]?.intValue, (Int64(1)...9_007_199_254_740_991).contains(target),
+              Self.number(json["startedAtMs"]) != nil,
+              let expires = Self.number(json["expiresAtMs"]) else { return nil }
+        let left = min(Self.longest, (expires - serverNowMs) / 1_000)
+        guard left > 0 else { return nil }
+        self.init(agentId: agentId, targetSequenceId: target, secondsLeft: left)
+    }
+
+    /// A JSON number, whole or not, if it is finite.
+    private static func number(_ value: JSONValue?) -> Double? {
+        switch value {
+        case .int(let whole)?: return Double(whole)
+        case .double(let real)? where real.isFinite: return real
+        default: return nil
         }
-        self.init(agentId: agentId, targetSequenceId: json["targetSequenceId"]?.intValue, secondsLeft: left)
+    }
+
+    private static func matches(_ text: String, _ pattern: String) -> Bool {
+        text.range(of: pattern, options: .regularExpression) != nil
     }
 }
 
