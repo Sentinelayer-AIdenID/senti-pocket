@@ -37,17 +37,22 @@ final class ReadAloudCrumbTests: XCTestCase {
                                          attachmentPreviews: ["a1": png(width: 132, height: 286)])
     }
 
+    /// The room's rows, as the crumb counts them: the message and the day header over it.
+    func test_the_rooms_rows_are_its_message_and_its_day_header() {
+        XCTAssertEqual(Self.state(thread: false).rows.count, 2)
+    }
+
     func test_a_message_with_an_image_read_aloud_with_no_thread_open() {
         let crumb = ReadAloudCrumb.make(id: RoomReadAloud.message(1), state: Self.state(thread: false),
                                         textSize: .large, readerChanges: 0)
-        XCTAssertEqual(crumb.step, "readAloud (1 rows, message, no thread open, text size L, 1 image 132×286, "
+        XCTAssertEqual(crumb.step, "readAloud (2 rows, message, no thread open, text size L, 1 image 132×286, "
             + "reader changed 0 times in 10 s)")
     }
 
     func test_a_reply_read_aloud_in_an_open_thread_at_the_largest_text_size() {
         let crumb = ReadAloudCrumb.make(id: RoomReadAloud.reply("r2"), state: Self.state(thread: true),
                                         textSize: .accessibilityExtraExtraExtraLarge, readerChanges: 3)
-        XCTAssertEqual(crumb.step, "readAloud (1 rows, reply, thread open with 2 replies 1 deep, "
+        XCTAssertEqual(crumb.step, "readAloud (2 rows, reply, thread open with 2 replies 1 deep, "
             + "text size AccessibilityXXXL, reader changed 3 times in 10 s)")
     }
 
