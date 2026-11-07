@@ -165,6 +165,21 @@ final class RoomMemberViewTests: XCTestCase {
         XCTAssertNil(silent.state.model, "no post declared a model: none is invented")
     }
 
+    /// Ticket f7254a3b: the API's "mcp" covers hosted MCP and the CLI's own MCP server alike, so the newest post's own
+    /// marks tell them apart; the CLI says so; with nothing to tell, nothing is shown.
+    func test_the_card_says_which_way_an_agent_is_connected() {
+        let card = RoomMemberMessagesModel.connection
+        XCTAssertEqual(card(.mcp, .cliMCP), .cliMCP, "the CLI's MCP server: Connected through the CLI (MCP)")
+        XCTAssertEqual(card(.mcp, .cliMCP)?.label, "Connected through the CLI (MCP)")
+        XCTAssertEqual(card(.mcp, .hostedMCP), .hostedMCP, "hosted MCP: Connected through MCP")
+        XCTAssertEqual(card(.mcp, .hostedMCP)?.label, "Connected through MCP")
+        XCTAssertEqual(card(.cli, .cli)?.label, "Connected through the CLI")
+        XCTAssertEqual(card(nil, .cli)?.label, "Connected through the CLI")
+        XCTAssertNil(card(.mcp, nil), "the API's mcp alone could be either: no line")
+        XCTAssertNil(card(nil, nil), "unknown: no line")
+        XCTAssertEqual(card(.box, .cli), .box, "a box stays a box")
+    }
+
     /// For people the API usually knows no connection: nothing is shown then, never a guess.
     func test_a_null_connection_shows_nothing() async {
         let unknown = RoomMemberMessagesModel(sessionId: "room_1", authorId: "human-pat",

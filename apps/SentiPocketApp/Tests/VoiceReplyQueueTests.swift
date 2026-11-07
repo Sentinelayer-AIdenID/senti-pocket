@@ -4,8 +4,9 @@ import PocketUI
 import XCTest
 @testable import SentiPocketApp
 
-// A call the fast voice line answers first (Carter, 11-06): the agent's own replies are queued, never dropped, and read
-// in full after a short handoff in the same voice. Agents and words here are made up.
+// A call where each turn is answered once, by the agent's own reply (Carter, ticket 13ec2d12): replies are queued,
+// never dropped, and read in full, and while the agent writes its fast voice says at most a short bridge with nothing
+// of the answer in it. Agents and words here are made up.
 
 private final class QueueClock: @unchecked Sendable {
     private let lock = NSLock()
@@ -137,7 +138,8 @@ private struct QueueMicrophone {
 @MainActor
 final class VoiceReplyQueueTests: XCTestCase {
     private let clock = QueueClock()
-    private static let firstPerson = "I have the full update for you now, here it is."
+    private static let bridge = "One moment, ada is answering."
+    private static let noAnswer = "ada hasn't answered yet."
 
     private func until(_ what: String, _ condition: () -> Bool) async {
         for _ in 0..<1_000 {
@@ -187,6 +189,11 @@ final class VoiceReplyQueueTests: XCTestCase {
         microphone.quiet(for: VoiceRoomCoordinator.pauseAfterSentence + 0.1)
     }
 
+    /// Waits until `count` of your turns are in the call.
+    private func sent(_ room: VoiceRoomCoordinator, _ count: Int) async {
+        await until("\(count) turns sent") { room.state.turns.filter(\.isYou).count == count }
+    }
+
     /// Waits for the phone to start saying its `index`th thing (0 is the first), and checks it is `text`.
     private func says(_ speaker: QueueSpeaker, _ index: Int, _ text: String, line: UInt = #line) async {
         await until("thing \(index) said: \(text.prefix(40))") { speaker.spoken.count > index }
@@ -202,19 +209,17 @@ final class VoiceReplyQueueTests: XCTestCase {
 
     // MARK: - The 17:15 call, replayed
 
-    /// A real call, replayed with made-up words at its own pace (seconds after the agent's fast voice picked up). The
-    /// voice line answered all five turns, and the agent's own four replies landed 15 s, 18 s, 10 s and 4 s after the
-    /// line's answers; every one was kept as text and never heard. Now each is read in full, in order, after the
-    /// handoff: one that lands while the phone listens is read at once, one that lands while another is read follows
-    /// it in the same batch, and one that lands while the line is still talking waits for it. The person talks once
-    /// what is read is over, as they would have.
-    func test_a_call_where_the_voice_line_answered_every_turn_reads_all_four_replies_in_order_after_the_handoff() async {
+    /// A real call, replayed with made-up words (seconds after the agent's fast voice picked up). The voice line
+    /// answered every turn as the agent, and the agent's own replies landed 4 to 18 s later, so each turn was heard
+    /// twice: a paraphrase, then the real answer. Now the voice line is never asked for the agent's turns, and each
+    /// reply is read once, in order, in the agent's voice. While the agent writes, its fast voice says at most the
+    /// bridge, never before a reply that lands within a moment, and says plainly when nothing has come in 20 s. A turn
+    /// carried on gets one bridge, after the whole turn.
+    func test_the_17_15_call_hears_each_reply_once_with_at_most_a_bridge_before_it() async {
         let line = QueueVoiceLine(), listener = QueueListener(), speaker = QueueSpeaker(), poster = QueuePoster()
         let room = call(line, listener, speaker, poster, handsFree: true)
         let microphone = QueueMicrophone(room: room, clock: clock)
         let hello = "Hi, it's ada. Go ahead."
-        let a: [String] = ["Two things changed: the bridge drawings were approved and the paint order went in.",
-                 "One delivery slot moved to Friday, and a new slot is waiting for your pick."]
         let replies: [String] = [
             "Hi, ada here, good morning.",
             "Here is the whole picture. The drawings were approved by both reviewers and the paint order went in with "
@@ -228,19 +233,13 @@ final class VoiceReplyQueueTests: XCTestCase {
                 + "is on order to cover that, and we will try it for a week, only watching, before it controls "
                 + "anything. I will post the numbers from that week here when they are in.",
             "Got it, I asked for the call to stop skipping my replies. In short, the first lamps are on, night mode is "
-                + "off, and the second sensor comes before anything changes."
+                + "off, and the second sensor comes before anything changes.",
+            "Opening day is three weeks out. Several parts are done, some work is not confirmed yet, and a few blockers "
+                + "are still open. I'll post the current opening details in the room."
         ]
-        let early = "The last notes say the lights and the rails are still in progress."
-        let b: [String] = ["The last notes say the walkway lights are still being wired, and the test results are not in yet.",
-                 "I don't have more on the walkway in the room right now, so I'll post the details there."]
-        let c = "Got it, I'll say the lights update again more briefly and post the details in the room."
-        let d: [String] = ["I don't have an opening date in the room right now.",
-                 "Several parts are done, some work is not confirmed yet, and a few blockers are still open.",
-                 "I'll post the current opening details in the room."]
-        let e = "You're welcome. I'll keep the opening and lights details posted in the room."
         var next = 0
 
-        // 0 s: the ring is picked up by the agent's fast voice.
+        // 0 s: the ring is picked up by the agent's fast voice. 3 s later the agent's own hello lands, and is read.
         room.begin()
         for _ in 0..<200 where speaker.spoken.isEmpty {
             clock.advance(0.25)
@@ -249,125 +248,97 @@ final class VoiceReplyQueueTests: XCTestCase {
         await says(speaker, next, hello); next += 1
         clock.advance(2)
         speaker.finish()
-
-        // 10 s: your first turn. 13 s: the line's quick answer, two sentences.
-        clock.advance(6)
-        await handsFreeTurn(room, listener, microphone, "What did I miss this morning? I'm heading out for a run.")
-        await until("asked about turn 1") { line.askCount == 1 }
-        clock.advance(3)
-        line.answer(0, a[0], a[1])
-        await says(speaker, next, a[0]); next += 1
-        clock.advance(10)
-        speaker.finish()
-        await says(speaker, next, a[1]); next += 1
-        clock.advance(5)
-        speaker.finish()
-
-        // 28 s: the agent's first reply lands while the phone listens: the handoff, then the reply.
-        await until("listening after the line's answer") { room.state.isListening && listener.partial != nil }
-        room.receive([post("r1", replies[0])])
-        await says(speaker, next, Self.firstPerson); next += 1
-        XCTAssertEqual(speaker.spoken.last?.speaker, "ada", "the handoff is in the agent's voice")
-        XCTAssertEqual(room.state.speaker, "ada (voice)", "said by the voice line")
-        clock.advance(2.5)
-        speaker.finish()
+        await until("listening after the hello") { room.state.isListening && listener.partial != nil }
+        clock.advance(1)
+        room.receive([post("r0", replies[0])])
         await says(speaker, next, replies[0]); next += 1
-        // 31 s: the second lands while the first is read: it follows it, in the same batch.
-        clock.advance(0.5)
-        room.receive([post("r2", replies[1])])
-        clock.advance(2.5)
+        clock.advance(3)
         speaker.finish()
+
+        // Your first turn. Nothing has come 1.5 s after it, so the bridge; the reply lands 15 s after the turn.
+        clock.advance(4)
+        await handsFreeTurn(room, listener, microphone, "What did I miss this morning? I'm heading out for a run.")
+        await sent(room, 1)
+        clock.advance(VoiceRoomCoordinator.bridgeAfter + 0.1)
+        await says(speaker, next, Self.bridge); next += 1
+        XCTAssertEqual(speaker.spoken.last?.speaker, "ada", "the bridge is in the agent's voice")
+        XCTAssertEqual(room.state.speaker, "ada (voice)", "said by its fast voice")
+        clock.advance(2)
+        speaker.finish()
+        await until("listening after the bridge") { room.state.isListening && listener.partial != nil }
+        clock.advance(11.4)
+        room.receive([post("r1", replies[1])])
         await says(speaker, next, replies[1]); next += 1
         clock.advance(32)
         speaker.finish()
 
-        // Your second turn, carried on just after it went; the line's answer to its first part is dropped, and it is
-        // asked again with the whole turn.
+        // Your second turn, carried on just after it went: nothing for its first part, one bridge after the whole
+        // turn, and the reply 18 s after it.
         clock.advance(2)
         await handsFreeTurn(room, listener, microphone, "Sounds good. How is the other part going?", talking: 1.5)
-        await until("asked about turn 2") { line.askCount == 2 }
+        await sent(room, 2)
         await until("listening a moment after it") { room.state.isListening && listener.partial != nil }
-        microphone.loud(for: 0.5)
+        microphone.loud(for: 0.4)
         listener.say("The lights along the walkway?")
-        line.say(1, early)
-        await until("the early answer is in the transcript") { room.state.turns.contains { $0.text == early } }
         microphone.quiet(for: VoiceRoomCoordinator.pauseAfterSentence + 0.1)
-        await until("asked about the whole turn") { line.askCount == 3 }
+        await until("the turn is carried on") {
+            room.state.turns.last(where: \.isYou)?.text.hasSuffix("The lights along the walkway?") == true
+        }
+        XCTAssertEqual(speaker.spoken.count, next, "nothing for the first part")
+        clock.advance(VoiceRoomCoordinator.bridgeAfter + 0.1)
+        await says(speaker, next, Self.bridge); next += 1
         clock.advance(2)
-        line.say(2, b[0], b[1])
-        await says(speaker, next, b[0]); next += 1
-        clock.advance(9)
         speaker.finish()
-        await says(speaker, next, b[1]); next += 1
-        // The third reply lands while the line is still talking and its answer still streams: it waits for it.
-        clock.advance(1)
-        room.receive([post("r3", replies[2])])
-        await settle()
-        XCTAssertEqual(speaker.spoken.count, next, "nothing cuts in over the line")
-        line.end(2)
-        clock.advance(8)
-        speaker.finish()
-        await says(speaker, next, Self.firstPerson); next += 1
-        clock.advance(3)
-        speaker.finish()
+        await until("listening after the bridge") { room.state.isListening && listener.partial != nil }
+        clock.advance(14.4)
+        room.receive([post("r2", replies[2])])
         await says(speaker, next, replies[2]); next += 1
         clock.advance(36)
         speaker.finish()
 
-        // Your third turn and the line's answer.
+        // Your third turn: the reply lands a second after it, so nothing comes before it.
         clock.advance(2)
         await handsFreeTurn(room, listener, microphone,
                             "Okay. I saw you said more about the lights, but I did not get to hear it.", talking: 2)
-        await until("asked about turn 3") { line.askCount == 4 }
-        clock.advance(2)
-        line.answer(3, c)
-        await says(speaker, next, c); next += 1
-        clock.advance(5)
-        speaker.finish()
-
-        // Your fourth turn; the fourth reply lands 4 s into the line's three-sentence answer, and waits for all of it.
-        clock.advance(13)
-        await handsFreeTurn(room, listener, microphone, "How far are we from opening day?")
-        await until("asked about turn 4") { line.askCount == 5 }
+        await sent(room, 3)
         clock.advance(1)
-        line.answer(4, d[0], d[1], d[2])
-        await says(speaker, next, d[0]); next += 1
-        clock.advance(4)
-        room.receive([post("r4", replies[3])])
-        clock.advance(1)
-        speaker.finish()
-        await says(speaker, next, d[1]); next += 1
-        clock.advance(5)
-        speaker.finish()
-        await says(speaker, next, d[2]); next += 1
-        clock.advance(3)
-        speaker.finish()
-        await says(speaker, next, Self.firstPerson); next += 1
-        clock.advance(3)
-        speaker.finish()
+        room.receive([post("r3", replies[3])])
         await says(speaker, next, replies[3]); next += 1
         clock.advance(10)
         speaker.finish()
 
-        // Your last turn, and the line's answer.
-        clock.advance(5)
-        await handsFreeTurn(room, listener, microphone, "Thank you.", talking: 0.6)
-        await until("asked about turn 5") { line.askCount == 6 }
-        clock.advance(1)
-        line.answer(5, e)
-        await says(speaker, next, e); next += 1
-        clock.advance(4)
+        // Your fourth turn: nothing in 20 s, so the bridge and then that it has not answered; the reply comes after.
+        clock.advance(2)
+        await handsFreeTurn(room, listener, microphone, "How far are we from opening day?")
+        await sent(room, 4)
+        clock.advance(VoiceRoomCoordinator.bridgeAfter + 0.1)
+        await says(speaker, next, Self.bridge); next += 1
+        clock.advance(2)
+        speaker.finish()
+        await until("listening after the bridge") { room.state.isListening && listener.partial != nil }
+        clock.advance(17)
+        await says(speaker, next, Self.noAnswer); next += 1
+        XCTAssertEqual(speaker.spoken.last?.speaker, "ada")
+        clock.advance(2)
+        speaker.finish()
+        await until("listening again") { room.state.isListening && listener.partial != nil }
+        clock.advance(6)
+        room.receive([post("r4", replies[4])])
+        await says(speaker, next, replies[4]); next += 1
+        clock.advance(8)
         speaker.finish()
         XCTAssertEqual(speaker.stops, 0, "nothing was cut off")
         await room.hangUp()
 
-        XCTAssertEqual(speaker.texts.filter { replies.contains($0) }, replies, "all four replies, each once, in order")
-        XCTAssertEqual(speaker.texts, [hello, a[0], a[1], Self.firstPerson, replies[0], replies[1], b[0], b[1],
-                                       Self.firstPerson, replies[2], c, d[0], d[1], d[2], Self.firstPerson, replies[3], e])
+        XCTAssertEqual(line.askCount, 0, "the voice line is never asked for the agent's turns")
+        XCTAssertEqual(speaker.texts, [hello, replies[0], Self.bridge, replies[1], Self.bridge, replies[2], replies[3],
+                                       Self.bridge, Self.noAnswer, replies[4]])
+        XCTAssertEqual(speaker.texts.filter { replies.contains($0) }, replies, "every reply, each once, in order")
         XCTAssertTrue(speaker.spoken.filter { replies.contains($0.text) }.allSatisfy { $0.speaker == "ada" })
         let transcript = poster.transcript
         XCTAssertFalse(transcript.contains("not read"), transcript)
         XCTAssertFalse(transcript.contains("skipped"), transcript)
+        XCTAssertFalse(transcript.contains(Self.bridge), "what the fast voice says while the agent writes is not kept")
         for reply in replies {
             XCTAssertEqual(header(of: reply, in: transcript)?.hasPrefix("**ada** · "), true, reply)
             XCTAssertEqual(header(of: reply, in: transcript)?.contains(" · held"), false, reply)
@@ -377,8 +348,7 @@ final class VoiceReplyQueueTests: XCTestCase {
     // MARK: - Talking over a reply
 
     /// Talking over a reply pauses it, never drops it. While you talk nothing waiting is read, even what lands then;
-    /// the line answers your new turn first, and then the reply you talked over is introduced again and read in full,
-    /// with the ones after it, in order.
+    /// after your new turn the reply you talked over is read again in full, with the ones after it, in order.
     func test_talking_over_a_reply_pauses_it_and_it_is_read_in_full_after_your_turn() async {
         let line = QueueVoiceLine(), listener = QueueListener(), speaker = QueueSpeaker(), poster = QueuePoster()
         let room = call(line, listener, speaker, poster, handsFree: true)
@@ -389,16 +359,9 @@ final class VoiceReplyQueueTests: XCTestCase {
         room.begin(rings: false)
 
         await handsFreeTurn(room, listener, microphone, "What did I miss?")
-        await until("asked") { line.askCount == 1 }
-        clock.advance(2)
-        line.answer(0, "Two builds shipped.")
-        await says(speaker, 0, "Two builds shipped.")
-        speaker.finish()
-        await until("listening") { room.state.isListening && listener.partial != nil }
+        await sent(room, 1)
         room.receive([post("r1", r1), post("r2", r2)])
-        await says(speaker, 1, Self.firstPerson)
-        speaker.finish()
-        await says(speaker, 2, r1)
+        await says(speaker, 0, r1)
 
         // You talk over it.
         room.send(.toggleTalk)
@@ -409,35 +372,27 @@ final class VoiceReplyQueueTests: XCTestCase {
         room.receive([post("r3", r3)])
         await settle()
         XCTAssertTrue(room.state.isListening, "what lands while you talk over a reply waits for your turn")
-        XCTAssertEqual(speaker.spoken.count, 3, "nothing is read while you talk")
+        XCTAssertEqual(speaker.spoken.count, 1, "nothing is read while you talk")
         XCTAssertEqual(room.state.waiting, 3)
 
         microphone.loud(for: 0.6)
         listener.say("Wait, which builds?")
         microphone.quiet(for: VoiceRoomCoordinator.pauseAfterSentence + 0.1)
-        await until("asked about your new turn") { line.askCount == 2 }
-        clock.advance(2)
-        line.answer(1, "The phone and the web builds.")
-        await says(speaker, 3, "The phone and the web builds.")
+        await says(speaker, 1, r1)
         speaker.finish()
-        await says(speaker, 4, Self.firstPerson)
+        await says(speaker, 2, r2)
         speaker.finish()
-        await says(speaker, 5, r1)
-        speaker.finish()
-        await says(speaker, 6, r2)
-        speaker.finish()
-        await says(speaker, 7, r3)
+        await says(speaker, 3, r3)
         speaker.finish()
         await until("listening again") { room.state.isListening }
         await room.hangUp()
-        XCTAssertEqual(speaker.texts, ["Two builds shipped.", Self.firstPerson, r1, "The phone and the web builds.",
-                                       Self.firstPerson, r1, r2, r3])
+        XCTAssertEqual(speaker.texts, [r1, r1, r2, r3])
+        XCTAssertEqual(line.askCount, 0)
         XCTAssertFalse(poster.transcript.contains("skipped"), "every reply was read in full in the end")
     }
 
     /// Talking over a reply to bring someone in ("add max") is a control, not a turn: the reply you talked over picks
-    /// up again right after it, never left waiting for something else to happen. The call has two agents now, so the
-    /// handoff names the agent.
+    /// up again right after it, never left waiting for something else to happen.
     func test_talking_over_a_reply_to_add_an_agent_picks_the_reply_up_again() async {
         let line = QueueVoiceLine(), listener = QueueListener(), speaker = QueueSpeaker(), poster = QueuePoster()
         let clock = self.clock
@@ -449,24 +404,18 @@ final class VoiceReplyQueueTests: XCTestCase {
         room.send(.setHandsFree(false))
         room.begin(rings: false)
         await tapTurn(room, listener, "Any news?")
-        await until("asked") { line.askCount == 1 }
-        line.answer(0, "Some.")
-        await says(speaker, 0, "Some.")
-        speaker.finish()
+        await sent(room, 1)
         let reply = "The roof is done, and the porch starts Monday."
         room.receive([post("p1", reply)])
-        await says(speaker, 1, Self.firstPerson)
-        speaker.finish()
-        await says(speaker, 2, reply)
+        await says(speaker, 0, reply)
 
         await tapTurn(room, listener, "Add max to this call.")
         await until("max is asked to join") { room.state.with.contains("max") }
-        XCTAssertEqual(line.askCount, 1, "a control, not a turn for the voice line")
-        await says(speaker, 3, "ada has the full update for you now, here it is.")
-        speaker.finish()
-        await says(speaker, 4, reply)
+        XCTAssertEqual(line.askCount, 0, "a control, not a turn for the voice line")
+        await says(speaker, 1, reply)
         speaker.finish()
         await room.hangUp()
+        XCTAssertEqual(speaker.texts, [reply, reply], "picked up again, with nothing before it")
         XCTAssertEqual(header(of: reply, in: poster.transcript)?.contains("skipped"), false)
     }
 
@@ -481,25 +430,16 @@ final class VoiceReplyQueueTests: XCTestCase {
         let reply = "Both builds passed review, and the release goes out at noon."
         room.begin(rings: false)
         await handsFreeTurn(room, listener, microphone, "What did I miss?")
-        await until("asked") { line.askCount == 1 }
-        clock.advance(2)
-        line.answer(0, "Two builds shipped.")
-        await says(speaker, 0, "Two builds shipped.")
-        speaker.finish()
-        await until("listening") { room.state.isListening && listener.partial != nil }
+        await sent(room, 1)
         room.receive([post("r1", reply)])
-        await says(speaker, 1, Self.firstPerson)
-        speaker.finish()
-        await says(speaker, 2, reply)
+        await says(speaker, 0, reply)
 
         room.send(.toggleTalk)
         XCTAssertTrue(room.state.isListening, "talking over it")
         room.send(.setMuted(true))
         XCTAssertTrue(room.state.isMuted)
-        await says(speaker, 3, Self.firstPerson)
+        await says(speaker, 1, reply)
         XCTAssertFalse(room.state.isListening, "muted, the reply you talked over is read")
-        speaker.finish()
-        await says(speaker, 4, reply)
 
         room.send(.setMuted(false))
         await settle()
@@ -519,22 +459,15 @@ final class VoiceReplyQueueTests: XCTestCase {
         let reply = "The roof is done, and the porch starts Monday."
         room.begin(rings: false)
         await tapTurn(room, listener, "Any news?")
-        await until("asked") { line.askCount == 1 }
-        line.answer(0, "Some.")
-        await says(speaker, 0, "Some.")
-        speaker.finish()
+        await sent(room, 1)
         room.receive([post("p1", reply)])
-        await says(speaker, 1, Self.firstPerson)
-        speaker.finish()
-        await says(speaker, 2, reply)
+        await says(speaker, 0, reply)
 
         listener.failsToStart = true
         room.send(.toggleTalk)
-        await says(speaker, 3, Self.firstPerson)
+        await says(speaker, 1, reply)
         XCTAssertEqual(room.state.notice, "The microphone is busy.")
         XCTAssertFalse(room.state.isListening)
-        speaker.finish()
-        await says(speaker, 4, reply)
         await room.hangUp()
     }
 
@@ -551,43 +484,39 @@ final class VoiceReplyQueueTests: XCTestCase {
         let reply = "The roof is done, and the porch starts Monday."
         room.begin(rings: false)
         await handsFreeTurn(room, listener, microphone, "Any news?")
-        await until("asked") { line.askCount == 1 }
-        clock.advance(2)
-        line.answer(0, "Some.")
-        await says(speaker, 0, "Some.")
-        speaker.finish()
-        await until("listening") { room.state.isListening && listener.partial != nil }
+        await sent(room, 1)
         room.receive([post("p1", reply)])
-        await says(speaker, 1, Self.firstPerson)
-        speaker.finish()
-        await says(speaker, 2, reply)
+        await says(speaker, 0, reply)
 
         room.send(.toggleTalk)
         await handsFreeTurn(room, listener, microphone, "Add max to this call.")
         await until("max is asked to join") { room.state.with.contains("max") }
-        await says(speaker, 3, "ada has the full update for you now, here it is.")
+        await says(speaker, 1, reply)
         XCTAssertFalse(room.state.isListening, "the reply comes first, then listening")
-        XCTAssertEqual(line.askCount, 1, "a control, not a turn")
-        speaker.finish()
-        await says(speaker, 4, reply)
+        XCTAssertEqual(line.askCount, 0, "a control, not a turn")
         await room.hangUp()
     }
 
-    /// A reply waiting on the line is read when the line answers that it cannot (off, not yours, or resting).
-    func test_a_reply_waiting_on_the_line_is_read_when_the_line_says_it_cannot_answer() async {
+    /// A late answer waiting on the voice line's answer to a turn for Senti is read when the line answers that it
+    /// cannot (off, not yours, or resting).
+    func test_a_late_answer_waiting_on_the_line_is_read_when_the_line_says_it_cannot_answer() async {
         let errors: [VoiceLineError] = [.unavailable, .notAllowed, .rateLimited(retryAfter: 30)]
         for error in errors {
             let line = QueueVoiceLine(), listener = QueueListener(), speaker = QueueSpeaker(), poster = QueuePoster()
-            let room = call(line, listener, speaker, poster, handsFree: false)
+            let room = call(line, listener, speaker, poster, with: ["senti", "ada"], handsFree: false)
             room.begin(rings: false)
-            await tapTurn(room, listener, "Any news?")
-            await until("asked") { line.askCount == 1 }
+            await tapTurn(room, listener, "Ada, any news?")
+            await sent(room, 1)
+            await tapTurn(room, listener, "Senti, any news?")
+            await until("\(error): asked as Senti") { line.askCount == 1 }
+            XCTAssertEqual(line.agents, ["senti"], "\(error)")
             room.receive([post("p1", "The roof is done.")])
             await settle()
             XCTAssertTrue(speaker.spoken.isEmpty, "\(error): waits while the line may answer")
             line.fail(0, error)
             await says(speaker, 0, "The roof is done.")
-            XCTAssertEqual(speaker.spoken.count, 1, "\(error): the line said nothing, so no handoff")
+            await settle()
+            XCTAssertEqual(speaker.spoken.count, 1, "\(error): read once, with nothing before it")
             await room.hangUp()
         }
     }
@@ -605,18 +534,13 @@ final class VoiceReplyQueueTests: XCTestCase {
         let r4 = "The fourth reply, read in full."
         room.begin(rings: false)
         await tapTurn(room, listener, "What is new?")
-        await until("asked") { line.askCount == 1 }
-        line.answer(0, "A few things.")
-        await says(speaker, 0, "A few things.")
-        speaker.finish()
+        await sent(room, 1)
         room.receive([post("r4", r4), post("r1", r1), post("r2", r2)])
-        await says(speaker, 1, Self.firstPerson)
+        await says(speaker, 0, r4)
         speaker.finish()
-        await says(speaker, 2, r4)
-        speaker.finish()
-        await says(speaker, 3, r1)
+        await says(speaker, 1, r1)
         room.send(.skip)
-        await says(speaker, 4, r2)
+        await says(speaker, 2, r2)
         room.send(.toggleTalk)
         await until("listening over it") { listener.partial != nil }
         room.receive([post("r3", r3)])
@@ -646,44 +570,38 @@ final class VoiceReplyQueueTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(long.split(separator: " ").count, 95)
         room.begin(rings: false)
         await tapTurn(room, listener, "How is the garden?")
-        await until("asked") { line.askCount == 1 }
-        line.answer(0, "The beds are built.")
-        await says(speaker, 0, "The beds are built.")
-        speaker.finish()
+        await sent(room, 1)
         room.receive([post("long", long)])
-        await says(speaker, 1, Self.firstPerson)
-        speaker.finish()
-        await says(speaker, 2, long)
+        await says(speaker, 0, long)
         room.receive([post("after", "And the gate is fixed.")])
         await settle()
         XCTAssertEqual(speaker.stops, 0, "nothing cuts it off")
-        XCTAssertEqual(speaker.spoken.count, 3)
+        XCTAssertEqual(speaker.spoken.count, 1)
         speaker.finish()
-        await says(speaker, 3, "And the gate is fixed.")
+        await says(speaker, 1, "And the gate is fixed.")
         speaker.finish()
         await room.hangUp()
         XCTAssertEqual(header(of: long, in: poster.transcript)?.contains("skipped"), false)
     }
 
-    // MARK: - The handoff
+    // MARK: - The bridge
 
-    /// On a call with one agent the voice line is that agent speaking, so its handoff says "I". On a call with
-    /// several, it says whose update it is.
-    func test_the_handoff_is_first_person_with_one_agent_and_names_the_agent_with_several() async {
+    /// While the agent a turn is for writes, its fast voice says it is answering, by name, in that agent's voice: on a
+    /// call with one agent, and on a call with several, for the one the turn is for.
+    func test_the_bridge_names_the_agent_the_turn_is_for_in_its_own_voice() async {
         do {
             let line = QueueVoiceLine(), listener = QueueListener(), speaker = QueueSpeaker(), poster = QueuePoster()
             let room = call(line, listener, speaker, poster, handsFree: false)
             room.begin(rings: false)
             await tapTurn(room, listener, "Any news?")
-            await until("asked") { line.askCount == 1 }
-            line.answer(0, "Some.")
-            await says(speaker, 0, "Some.")
+            await sent(room, 1)
+            clock.advance(VoiceRoomCoordinator.bridgeAfter + 0.1)
+            await says(speaker, 0, "One moment, ada is answering.")
+            XCTAssertEqual(speaker.spoken[0].speaker, "ada")
             speaker.finish()
             room.receive([post("p1", "The roof is done.")])
-            await says(speaker, 1, "I have the full update for you now, here it is.")
-            XCTAssertEqual(speaker.spoken[1].speaker, "ada")
-            speaker.finish()
-            await says(speaker, 2, "The roof is done.")
+            await says(speaker, 1, "The roof is done.")
+            XCTAssertEqual(line.askCount, 0)
             await room.hangUp()
         }
         do {
@@ -693,17 +611,15 @@ final class VoiceReplyQueueTests: XCTestCase {
             room.receive([post("h1", "Ada here."), post("h2", "Max here.", from: "max")])
             await says(speaker, 0, "Ada here.")
             speaker.finish()
-            await tapTurn(room, listener, "Ada, what's next?")
-            await until("asked as Ada") { line.askCount == 1 }
-            XCTAssertEqual(line.agents, ["ada"])
-            line.answer(0, "The roof.")
-            await says(speaker, 1, "The roof.")
+            await tapTurn(room, listener, "Max, what's next?")
+            await sent(room, 1)
+            clock.advance(VoiceRoomCoordinator.bridgeAfter + 0.1)
+            await says(speaker, 1, "One moment, max is answering.")
+            XCTAssertEqual(speaker.spoken[1].speaker, "max", "in the voice of the agent the turn is for")
             speaker.finish()
-            room.receive([post("p1", "The roof, then the porch.")])
-            await says(speaker, 2, "ada has the full update for you now, here it is.")
-            XCTAssertEqual(speaker.spoken[2].speaker, "ada", "in the voice that answered")
-            speaker.finish()
-            await says(speaker, 3, "The roof, then the porch.")
+            room.receive([post("p1", "The roof, then the porch.", from: "max")])
+            await says(speaker, 2, "The roof, then the porch.")
+            XCTAssertEqual(line.askCount, 0)
             await room.hangUp()
         }
     }
@@ -711,7 +627,7 @@ final class VoiceReplyQueueTests: XCTestCase {
     // MARK: - The hello
 
     /// The agent's fast voice picks up with a hello. The agent's own hello in exactly those words is the one post not
-    /// read (it would say it twice); a hello in any other words is read, after the handoff.
+    /// read (it would say it twice); a hello in any other words is read, with nothing before it.
     func test_only_a_hello_in_the_same_words_as_the_fast_voices_is_not_read() async {
         let line = QueueVoiceLine(), listener = QueueListener(), speaker = QueueSpeaker(), poster = QueuePoster()
         let room = call(line, listener, speaker, poster, handsFree: false)
@@ -726,9 +642,7 @@ final class VoiceReplyQueueTests: XCTestCase {
         await settle()
         XCTAssertEqual(speaker.spoken.count, 1, "the same words are not said twice")
         room.receive([post("own", "Hi there, ada here. Good morning.")])
-        await says(speaker, 1, Self.firstPerson)
-        speaker.finish()
-        await says(speaker, 2, "Hi there, ada here. Good morning.")
+        await says(speaker, 1, "Hi there, ada here. Good morning.")
         speaker.finish()
         await room.hangUp()
         let transcript = poster.transcript

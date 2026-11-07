@@ -98,6 +98,20 @@ final class RoomChatCoordinator: ObservableObject {
     /// The reply the open thread was opened at (a reply notification), brought into view there.
     private var threadFocusReply: String?
     private var threadReplies: [RoomReply] = []
+    /// Each opening of a thread (and its closing) starts a new one: a read begun for an earlier one is dropped.
+    private var threadGeneration = 0
+    /// The open thread has been read once: later reads merge into what is loaded instead of replacing it.
+    private var threadRead = false
+    /// What reads the open thread's next page back (its oldest page's `nextCursor`); nil once it is read to its start.
+    private var threadOlderCursor: String?
+    private var threadLoadingOlder = false
+    /// The reply the thread was opened at is being looked for, page by page: the reader's own scrolling waits.
+    private var threadSearching = false
+    /// The reply the thread was opened at is further back than one search reads: the thread offers to go on.
+    private var threadFocusMissing = false
+    /// Older pages let the newest replies go (`threadHeld`): the replies held are further back than the newest, and the
+    /// thread offers its newest again.
+    private var threadNewerDropped = false
     private var threadLoading = false
     private var threadFailure: String?
     /// A reply you sent that its thread has not shown yet. Kept per thread, so closing the sheet keeps it. Its nonce
@@ -563,6 +577,7 @@ final class RoomChatCoordinator: ObservableObject {
             // Unsent replies stay with their thread and show again when it reopens.
             openThreadSequence = nil
             threadFocusReply = nil
+            resetThreadPages()
             threadReplies = []
             threadFailure = nil
             publish()
@@ -606,6 +621,16 @@ final class RoomChatCoordinator: ObservableObject {
             guard reporter != nil else { return }
             report = RoomReportState(target: target)
             publish()
+        case .loadOlderReplies(let sequenceId):
+            guard !threadSearching else { return }
+            Task { [weak self] in await self?.loadOlderReplies(sequenceId, limit: RoomChatCoordinator.threadPageSize) }
+        case .jumpToNewestReplies(let sequenceId):
+            guard openThreadSequence == sequenceId, threadNewerDropped else { return }
+            threadFocusReply = nil
+            openThread(sequenceId)
+        case .continueToReply(let sequenceId):
+            guard openThreadSequence == sequenceId, threadFocusMissing, !threadSearching else { return }
+            Task { [weak self] in await self?.findFocusedReply(sequenceId) }
         case .sendReport(let reason, let note):
             sendReport(reason: reason, note: note)
         case .closeReport:
@@ -1492,8 +1517,20 @@ final class RoomChatCoordinator: ObservableObject {
         onReplyAttachmentSupport?(support)
     }
 
+    /// The open thread's pages forgotten: it opens (or closes) and is read again from its newest page.
+    private func resetThreadPages() {
+        threadGeneration &+= 1
+        threadRead = false
+        threadOlderCursor = nil
+        threadLoadingOlder = false
+        threadSearching = false
+        threadFocusMissing = false
+        threadNewerDropped = false
+    }
+
     private func openThread(_ sequenceId: Int64) {
         if openThreadSequence != sequenceId { threadFocusReply = nil }
+        resetThreadPages()
         openThreadSequence = sequenceId
         threadReplies = summaries[sequenceId]?.latestReplies ?? []
         threadFailure = nil
@@ -1515,20 +1552,183 @@ final class RoomChatCoordinator: ObservableObject {
         }
     }
 
+    /// A thread's newest page of actions (its replies and their reactions); older ones load as the reader scrolls up.
+    /// A thread of any length opens on this, never whole: a thread may hold hundreds of thousands of replies (#62423).
+    static let threadPageSize = 100
+    /// A search for the reply a thread was opened at reads this many actions a page, and at most this many pages at
+    /// once: the API reads 120 a minute for each person and room. Further back, the thread offers to go on.
+    static let threadSearchPageSize = 500
+    static let threadSearchPages = 40
+    /// More arrived since the last read than its newest page holds: at most this many pages (of 500) are read back to
+    /// meet the replies loaded. Further apart, the newest pages stand alone and scrolling up reads on from them.
+    static let threadGapPages = 4
+    /// The most replies of one thread held at once. Every room update goes over all of them (rows, files, mentions), so
+    /// a search 20,000 replies back would make each arrival cost 20,000 rows: older pages past this let the newest go.
+    static let threadHeld = 1_000
+
+    /// Reads the open thread's newest page. The first read replaces the summary's few replies shown while it was on
+    /// its way; a later one (after a send, an edit or a reaction) merges into every page loaded, so the reader keeps
+    /// the older ones. A thread opened at a reply then reads back until that reply is loaded.
     private func loadThread(_ sequenceId: Int64) async {
+        let generation = threadGeneration
+        var firstRead = false
         do {
-            let page = try await transport.roomActions(sessionId: sessionId, targetSequenceId: sequenceId, limit: 500)
+            let page = try await transport.roomActions(sessionId: sessionId, targetSequenceId: sequenceId,
+                                                       limit: Self.threadPageSize, beforeCursor: nil)
             noteReplyAttachmentSupport(page.replyAttachments)
-            guard openThreadSequence == sequenceId else { return }
-            threadReplies = page.replies.filter { $0.targetSequenceId == sequenceId }
+            guard openThreadSequence == sequenceId, threadGeneration == generation else { return }
+            let newestPage = page.replies.filter { $0.targetSequenceId == sequenceId }
+            var newest = newestPage
+            if threadRead, threadNewerDropped {
+                // The replies held are further back than the newest (older pages let the newest go): they stay as they
+                // are, and "Newest replies" reads the newest again.
+            } else if threadRead {
+                // The newest page must meet what is loaded, or the replies between would never show: read back until
+                // it does.
+                let known = Set(threadReplies.map(\.id))
+                var cursor = page.nextCursor
+                var pages = 0
+                while !known.isEmpty, !newest.contains(where: { known.contains($0.id) }), let before = cursor,
+                      pages < Self.threadGapPages {
+                    let more = try await transport.roomActions(sessionId: sessionId, targetSequenceId: sequenceId,
+                                                               limit: Self.threadSearchPageSize, beforeCursor: before)
+                    guard openThreadSequence == sequenceId, threadGeneration == generation else { return }
+                    newest = Self.merged(more.replies.filter { $0.targetSequenceId == sequenceId }, newest)
+                    cursor = more.nextCursor
+                    pages += 1
+                }
+                if newest.contains(where: { known.contains($0.id) }) {
+                    // Read back past the oldest reply loaded: the page before is the one before the last page read.
+                    if let first = newest.first, let oldest = threadReplies.first,
+                       (first.createdAt, first.id) < (oldest.createdAt, oldest.id) {
+                        threadOlderCursor = cursor
+                    }
+                    threadReplies = Self.merged(threadReplies, newest)
+                } else {
+                    // Still apart (or nothing was loaded to meet): the newest page stands alone, and scrolling up reads
+                    // on from it. An older page on its way belongs to the replies dropped.
+                    threadReplies = newestPage
+                    threadOlderCursor = page.nextCursor
+                    threadGeneration &+= 1
+                    threadLoadingOlder = false
+                    threadSearching = false
+                }
+            } else {
+                threadReplies = newest
+                threadOlderCursor = page.nextCursor
+                threadRead = true
+                firstRead = true
+            }
             threadFailure = nil
-            noteReplyAuthors(threadReplies)
+            noteReplyAuthors(newest)
         } catch {
-            guard openThreadSequence == sequenceId else { return }
+            guard openThreadSequence == sequenceId, threadGeneration == generation else { return }
             threadFailure = "Replies could not be loaded. Pull to try again later."
         }
         threadLoading = false
         publish()
+        // Once, as the thread opens: a later read (a send, a reaction) never sets off another search.
+        if firstRead { await findFocusedReply(sequenceId) }
+    }
+
+    /// Reads the page before the oldest one loaded. False when there is none, one is already on its way, or it could
+    /// not be read. `quietly` (a search's pages) shows nothing until the search ends: the room is not drawn again for
+    /// each of up to 40 pages.
+    @discardableResult
+    private func loadOlderReplies(_ sequenceId: Int64, limit: Int, quietly: Bool = false) async -> Bool {
+        guard openThreadSequence == sequenceId, threadRead, let cursor = threadOlderCursor, !threadLoadingOlder else {
+            return false
+        }
+        let generation = threadGeneration
+        threadLoadingOlder = true
+        if !quietly { publish() }
+        do {
+            let page = try await transport.roomActions(sessionId: sessionId, targetSequenceId: sequenceId, limit: limit,
+                                                       beforeCursor: cursor)
+            guard openThreadSequence == sequenceId, threadGeneration == generation else { return false }
+            let older = page.replies.filter { $0.targetSequenceId == sequenceId }
+            threadReplies = Self.prepending(older, to: threadReplies)
+            if threadReplies.count > Self.threadHeld {
+                threadReplies.removeLast(threadReplies.count - Self.threadHeld)
+                threadNewerDropped = true
+            }
+            threadOlderCursor = page.nextCursor
+            noteReplyAuthors(older)
+            threadLoadingOlder = false
+            threadFailure = nil
+            // Scrolled up to the reply it was opened at: there is nothing left to jump to.
+            if threadFocusMissing, let focus = threadFocusReply, older.contains(where: { $0.id == focus }) {
+                threadFocusMissing = false
+            }
+            if !quietly { publish() }
+            return true
+        } catch {
+            guard openThreadSequence == sequenceId, threadGeneration == generation else { return false }
+            threadLoadingOlder = false
+            threadFailure = "Earlier replies could not be loaded. Try again in a moment."
+            publish()
+            return false
+        }
+    }
+
+    /// The reply the thread was opened at (a notification), when it is on an older page: reads back, a search page at a
+    /// time, until it is loaded or the thread's start, at most `threadSearchPages` pages. Past that, or when a page
+    /// could not be read, the thread stays at its newest page and offers "Jump to the reply", which reads on from
+    /// there. Read to its start without it, the thread says the reply is not there. Never silent.
+    private func findFocusedReply(_ sequenceId: Int64) async {
+        guard let focus = threadFocusReply, openThreadSequence == sequenceId, threadRead, !threadSearching else { return }
+        let generation = threadGeneration
+        func current() -> Bool {
+            openThreadSequence == sequenceId && threadGeneration == generation && threadFocusReply == focus
+        }
+        // The room left (or the app gone to the background) pauses it: the search stops there, and Jump goes on.
+        func roomOpen() -> Bool { !liveTasks.isEmpty }
+        func found() -> Bool { threadReplies.contains { $0.id == focus } }
+        guard !found() else {
+            if threadFocusMissing {
+                threadFocusMissing = false
+                publish()
+            }
+            return
+        }
+        threadSearching = true
+        publish()
+        var pages = 0
+        while current(), roomOpen(), !found(), threadOlderCursor != nil, pages < Self.threadSearchPages {
+            guard await loadOlderReplies(sequenceId, limit: Self.threadSearchPageSize, quietly: true) else { break }
+            pages += 1
+        }
+        if threadGeneration == generation { threadSearching = false }
+        guard current() else { return }
+        let isFound = found()
+        threadFocusMissing = !isFound && threadOlderCursor != nil
+        if !isFound, threadOlderCursor == nil {
+            threadFailure = "That reply is no longer in this thread."
+        }
+        publish()
+    }
+
+    /// A page read before the replies loaded, in front of them as it came (the API reads newest first, so a page before
+    /// is older than all loaded): nothing loaded is sorted again. A page that overlaps them is merged.
+    private static func prepending(_ older: [RoomReply], to known: [RoomReply]) -> [RoomReply] {
+        guard let last = older.last, let first = known.first,
+              (last.createdAt, last.id) < (first.createdAt, first.id) else { return merged(known, older) }
+        return older + known
+    }
+
+    /// One thread's replies from two reads, each once at its newest revision (a read of the same revision wins: it
+    /// carries the reply's latest reactions and views), oldest first as the thread shows them.
+    private static func merged(_ known: [RoomReply], _ read: [RoomReply]) -> [RoomReply] {
+        var byId: [String: RoomReply] = [:]
+        for reply in known {
+            if let seen = byId[reply.id], seen.revision >= reply.revision { continue }
+            byId[reply.id] = reply
+        }
+        for reply in read {
+            if let seen = byId[reply.id], seen.revision > reply.revision { continue }
+            byId[reply.id] = reply
+        }
+        return byId.values.sorted { ($0.createdAt, $0.id) < ($1.createdAt, $1.id) }
     }
 
     private func sendReply(_ raw: String, to sequenceId: Int64, toReply: String? = nil) {
@@ -2659,7 +2859,12 @@ final class RoomChatCoordinator: ObservableObject {
                 failureText: threadFailure,
                 canReply: actionSender != nil && postingRefusedReason == nil,
                 maximumReplyLength: RoomActionRequest.replyLimit,
-                focusReplyId: threadFocusReply
+                focusReplyId: threadFocusReply,
+                hasOlder: threadRead && threadOlderCursor != nil,
+                isLoadingOlder: threadLoadingOlder || threadSearching,
+                totalReplies: summaries[sequence]?.replyTotal,
+                focusMissing: threadFocusMissing,
+                hasNewer: threadNewerDropped
             )
         }
         let replyInputs = inlineReplyInputs()

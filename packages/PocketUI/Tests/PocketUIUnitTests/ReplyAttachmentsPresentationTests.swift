@@ -35,6 +35,31 @@ final class ReplyAttachmentsPresentationTests: XCTestCase {
         XCTAssertEqual(state.thread?.focusReplyId, "r1", "opened at the reply its notification named")
     }
 
+    /// A long thread shows a page of its replies: its title counts them all, it says older ones are there, and that
+    /// the reply it was opened at is further back.
+    func test_a_long_threads_page_counts_the_whole_thread_and_says_what_is_further_back() {
+        let replies = (1...3).map {
+            RoomChatReplyRow(id: "r\($0)", authorName: "pat", isHuman: true, isOwn: false, text: "reply \($0)", date: nil,
+                             isEdited: false)
+        }
+        let page = RoomChatPresentationState(
+            sessionId: "room", title: "Room", messages: [parent],
+            thread: RoomChatThreadInput(sequenceId: 7, replies: replies, canReply: true, focusReplyId: "r0",
+                                        hasOlder: true, isLoadingOlder: true, totalReplies: 120_000, focusMissing: true)
+        ).thread
+        XCTAssertEqual(page?.title, "120000 replies", "the whole thread, not the page loaded")
+        XCTAssertEqual(page?.hasOlder, true)
+        XCTAssertEqual(page?.isLoadingOlder, true)
+        XCTAssertEqual(page?.focusMissing, true)
+        let unknown = RoomChatPresentationState(
+            sessionId: "room", title: "Room", messages: [parent],
+            thread: RoomChatThreadInput(sequenceId: 7, replies: Array(replies.prefix(1)))
+        ).thread
+        XCTAssertEqual(unknown?.title, "1 reply", "the replies loaded, when the room has no count")
+        XCTAssertEqual(unknown?.hasOlder, false)
+        XCTAssertEqual(unknown?.focusMissing, false)
+    }
+
     func test_a_reply_bell_has_its_own_mark() {
         let row = NotificationRow(id: "n1", kind: "reply", title: "pat replied", body: "Photo", roomTitle: "Room",
                                   createdAt: "2026-11-04T10:00:00Z", isRead: false, canOpen: true)

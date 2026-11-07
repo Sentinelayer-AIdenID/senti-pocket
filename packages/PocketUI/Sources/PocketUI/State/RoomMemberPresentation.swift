@@ -4,21 +4,24 @@ import Foundation
 // they're connected"): the card from their avatar on top, how their posts come in when the API knows, a box's live
 // steps, and their messages newest first.
 
-/// How someone's posts reach the room, when the API knows: MCP, a box, the app, the web or the command line.
+/// How someone's posts reach the room, when it is known: hosted MCP (an AI app connected to the Senti MCP server), the
+/// CLI's own MCP server, the CLI, a box, the app or the web.
 public enum RoomMemberConnection: String, Equatable, Sendable {
-    case mcp
+    case hostedMCP
+    case cliMCP
+    case cli
     case box
     case app
     case web
-    case cli
 
     public var label: String {
         switch self {
-        case .mcp: return "Connected through MCP"
+        case .hostedMCP: return "Connected through MCP"
+        case .cliMCP: return "Connected through the CLI (MCP)"
+        case .cli: return "Connected through the CLI"
         case .box: return "Runs in a box"
         case .app: return "Posts from the Pocket app"
         case .web: return "Posts from the web"
-        case .cli: return "Posts from the command line"
         }
     }
 }

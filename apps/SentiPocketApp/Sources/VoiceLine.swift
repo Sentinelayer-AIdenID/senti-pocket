@@ -2,7 +2,8 @@ import Foundation
 
 /// The fast voice line (API #1062): a short spoken answer to a call turn, grounded in the room, streamed sentence by
 /// sentence in about a second instead of waiting for an agent to write one (each answer used to take 18 s). It
-/// speaks as "<agent> (voice)", never as the agent itself; the agent's own answer still comes in the room after.
+/// speaks as "<agent> (voice)", never as the agent itself. A call asks it only for a turn for Senti, whose posts a call
+/// never reads; any other agent's turn is answered by that agent's own post (`VoiceRoomCoordinator`).
 enum VoiceLineEvent: Equatable, Sendable {
     case sentence(String)
     case done(speaker: String)

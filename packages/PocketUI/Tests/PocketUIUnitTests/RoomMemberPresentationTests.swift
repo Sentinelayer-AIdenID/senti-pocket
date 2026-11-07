@@ -32,11 +32,13 @@ final class RoomMemberPresentationTests: XCTestCase {
 
     func test_a_connection_is_said_only_when_the_api_knows_it() {
         XCTAssertNil(RoomMemberMessagesState().connectionLine, "unknown shows nothing")
-        XCTAssertEqual(RoomMemberMessagesState(connection: .mcp).connectionLine, "Connected through MCP")
+        // Ticket f7254a3b: hosted MCP, the CLI's own MCP server and the CLI are told apart.
+        XCTAssertEqual(RoomMemberMessagesState(connection: .hostedMCP).connectionLine, "Connected through MCP")
+        XCTAssertEqual(RoomMemberMessagesState(connection: .cliMCP).connectionLine, "Connected through the CLI (MCP)")
+        XCTAssertEqual(RoomMemberMessagesState(connection: .cli).connectionLine, "Connected through the CLI")
         XCTAssertEqual(RoomMemberMessagesState(connection: .box).connectionLine, "Runs in a box")
         XCTAssertEqual(RoomMemberMessagesState(connection: .app).connectionLine, "Posts from the Pocket app")
         XCTAssertEqual(RoomMemberMessagesState(connection: .web).connectionLine, "Posts from the web")
-        XCTAssertEqual(RoomMemberMessagesState(connection: .cli).connectionLine, "Posts from the command line")
     }
 
     func test_what_the_list_says_when_it_has_no_rows() {

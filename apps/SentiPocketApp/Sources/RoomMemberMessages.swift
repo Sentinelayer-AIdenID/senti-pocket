@@ -95,6 +95,25 @@ final class RoomMemberMessagesModel: ObservableObject {
         }
     }
 
+    /// How their posts reach the room (ticket f7254a3b): what the API read, except that its "mcp" covers both hosted MCP
+    /// and the CLI's own MCP server (sentinelayer-api session_relay_service.py `_session_connection_label`). For "mcp" the
+    /// newest post's own marks tell them apart (`RoomPostClient`); with neither, nothing is shown, never a guess.
+    static func connection(api: RoomAuthorConnection?, newest: RoomPostClient?) -> RoomMemberConnection? {
+        switch api {
+        case .box: return .box
+        case .app: return .app
+        case .web: return .web
+        case .cli: return .cli
+        case .mcp, nil:
+            switch newest {
+            case .hostedMCP: return .hostedMCP
+            case .cliMCP: return .cliMCP
+            case .cli: return api == nil ? .cli : nil
+            case nil: return nil
+            }
+        }
+    }
+
     private func publish() {
         state = RoomMemberMessagesState(
             rows: messages.map {
@@ -105,7 +124,7 @@ final class RoomMemberMessagesModel: ObservableObject {
             phase: isLoading ? .loading : (failure.map { .failed($0) } ?? .idle),
             canLoadMore: !reachedStart,
             isPrivate: isPrivate,
-            connection: connection.flatMap { RoomMemberConnection(rawValue: $0.rawValue) },
+            connection: Self.connection(api: connection, newest: messages.first?.sentThrough),
             olderNeedsTap: olderNeedsTap,
             isBlocked: isBlocked
         )
