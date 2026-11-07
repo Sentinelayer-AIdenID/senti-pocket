@@ -13,17 +13,35 @@ import XCTest
 /// and opening the side panel draws none of the room's rows and reads only what the panel shows that is not fresh.
 @MainActor
 final class RootBackgroundWorkTests: XCTestCase {
-    private var window: UIWindow?
+    private var window: UIWindow? {
+        didSet { if let shown = window?.rootViewController { Self.shown.append(Shown(controller: shown, test: name)) } }
+    }
     private var watching: AnyCancellable?
 
-    /// Each test reads only its own root's calendar entry: a window left by an earlier test could still write it.
+    /// What each test of this class put in a window (a root, or a room), held weakly: once its test is over nothing may
+    /// keep it alive. One left alive hears the next test's signals (the side panel's open and a room picked in it are
+    /// static subjects every root hears) and its draws and rooms count in that test's (the meter counts every root's
+    /// draws, and every room's).
+    private static var shown: [Shown] = []
+
+    private struct Shown {
+        weak var controller: UIViewController?
+        var test = ""
+    }
+
     override func setUp() {
         super.setUp()
+        let alive = Self.shown.filter { $0.controller != nil }.map(\.test)
+        XCTAssertEqual(alive.count, 0, "nothing an earlier test showed is still alive; still alive from: \(alive)")
         RootPreview.meter.forgetCalendarEntry()
     }
 
+    /// Torn down for real: the window hidden and emptied. What it showed goes once the test's autorelease pool is drained,
+    /// after this; the next test's setUp checks that it went.
     override func tearDown() {
+        RootPreview.holdsRoomListReads = false
         window?.isHidden = true
+        window?.rootViewController = nil
         window = nil
         pump(0.4)
         UserDefaults.standard.removeObject(forKey: "pocket.lastRoomId")
@@ -147,11 +165,20 @@ final class RootBackgroundWorkTests: XCTestCase {
         let meter = RootPreview.meter
         let screens = meter.roomScreens
         let screenBodies = meter.roomScreenBodies
+        let rootBodies = meter.rootBodies
 
+        // The room list's poll lands at moments of its own, and a landing draws the root: while the side panel opens and
+        // closes, the answers to its reads are held (`holdsRoomListReads`; still asked for and counted), so what is
+        // measured is what the open and the close draw themselves.
+        RootPreview.holdsRoomListReads = true
+        defer { RootPreview.holdsRoomListReads = false }
         RootPreview.requestDrawer(true)
         pump(2)
         XCTAssertEqual(RenderTrace.snapshot().draws - draws, 0, "opening the side panel draws none of the room's rows")
         XCTAssertEqual(meter.roomScreens - screens, 0, "opening the side panel makes no new room screen")
+        // The panel's frame watches whether it is open (`SidePanelFrame`): the root, whose draws put the room screen in
+        // place, does not draw again.
+        XCTAssertEqual(meter.rootBodies - rootBodies, 0, "opening the side panel does not draw the root")
         // How often the room's screen ran its body is printed, not asserted: it reads environment values the panel's
         // cover passes through, and what costs (a new screen, its rows) is asserted above.
         print("BGAUDIT room screen bodies as the panel opened: \(meter.roomScreenBodies - screenBodies)")
@@ -166,6 +193,8 @@ final class RootBackgroundWorkTests: XCTestCase {
         pump(1.5)
         XCTAssertEqual(RenderTrace.snapshot().draws - draws, 0, "closing it draws none either")
         XCTAssertEqual(meter.roomScreens - screens, 0, "closing it makes no new room screen either")
+        XCTAssertEqual(meter.rootBodies - rootBodies, 0, "closing it does not draw the root either")
+        RootPreview.holdsRoomListReads = false
 
         RootPreview.requestDrawer(true)
         pump(2)
@@ -187,6 +216,49 @@ final class RootBackgroundWorkTests: XCTestCase {
         RootPreview.requestDrawer(false)
         pump(1)
         field.removeFromSuperview()
+    }
+
+    /// Carter's phone froze on 11-06 right after a room was picked in the side panel. A draw of the root that changes
+    /// nothing makes no room screen (`RoomScreenSlot`); a room picked in the panel makes exactly one, the new room's,
+    /// and the room it replaced is let go: once the screen settles, no two rooms are alive.
+    func test_picking_another_room_makes_one_room_screen_and_lets_the_other_go() throws {
+        let api = Self.api()
+        UserDefaults.standard.set(RootPreviewAPI.midRoom, forKey: "pocket.lastRoomId")
+        // The root observes its link inbox: a change announced there draws the root again and changes nothing else.
+        let links = IncomingLinkInbox()
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = UIHostingController(rootView: AuthenticatedRootView(
+            authenticationEpoch: 1,
+            whisperModelCoordinator: WhisperModelProvisioningCoordinator(),
+            incomingLinks: links,
+            services: api.services,
+            onSignOut: {},
+            onReauthenticationRequired: { _ in }
+        )
+        .environment(\.scenePhase, .active))
+        window.makeKeyAndVisible()
+        self.window = window
+        settleRoot(api) { links.objectWillChange.send() }
+        let meter = RootPreview.meter
+        let screens = meter.roomScreens
+        let rootBodies = meter.rootBodies
+        let liveRooms = meter.liveRooms
+
+        links.objectWillChange.send()
+        pump(1)
+        XCTAssertGreaterThan(meter.rootBodies - rootBodies, 0, "the root drew again")
+        XCTAssertEqual(meter.roomScreens - screens, 0, "a draw of the root that changes nothing makes no room screen")
+
+        RootPreview.requestDrawer(true)
+        pump(1)
+        RootPreview.pickRoom("room-000")
+        quiet { [RenderTrace.snapshot().draws, meter.roomScreens, api.totalCalls] }
+        XCTAssertEqual(meter.roomScreens - screens, 1, "picking another room makes one room screen, the new room's")
+        // The room it replaced goes once nothing holds it any more.
+        let end = Date().addingTimeInterval(10)
+        while Date() < end, meter.liveRooms > liveRooms { pump(0.2) }
+        XCTAssertEqual(meter.liveRooms, liveRooms, "the room it replaced is let go: no two rooms alive")
     }
 
     // MARK: - The calendar's changes leave the root and its room alone
