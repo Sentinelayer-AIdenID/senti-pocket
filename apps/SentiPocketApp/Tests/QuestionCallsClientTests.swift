@@ -1,5 +1,7 @@
 import Foundation
 import PocketContracts
+import SwiftUI
+import UIKit
 import XCTest
 @testable import SentiPocketApp
 
@@ -39,9 +41,18 @@ private final class QuestionToken: @unchecked Sendable {
 
 private actor QuestionPreferencesStub: QuestionCallPreferencesAPI {
     var value = false
+    var reads = 0
     var writes: [Bool] = []
     var failure: RoomCallsClient.Failure?
-    func preference() async throws -> Bool { value }
+    var readFailure: RoomCallsClient.Failure?
+    var holdRead = false
+    private var readWaiter: CheckedContinuation<Void, Never>?
+    func preference() async throws -> Bool {
+        reads += 1
+        if holdRead { await withCheckedContinuation { readWaiter = $0 } }
+        if let readFailure { throw readFailure }
+        return value
+    }
     func savePreference(_ enabled: Bool) async throws -> Bool {
         writes.append(enabled)
         if let failure { throw failure }
@@ -49,6 +60,14 @@ private actor QuestionPreferencesStub: QuestionCallPreferencesAPI {
         return value
     }
     func fail(_ failure: RoomCallsClient.Failure) { self.failure = failure }
+    func failRead(_ failure: RoomCallsClient.Failure?) { self.readFailure = failure }
+    func holdNextRead(value: Bool = false) { holdRead = true; self.value = value }
+    func isReadHeld() -> Bool { readWaiter != nil }
+    func releaseRead() {
+        holdRead = false
+        readWaiter?.resume()
+        readWaiter = nil
+    }
 }
 
 @MainActor
@@ -223,5 +242,371 @@ final class QuestionCallsClientTests: XCTestCase {
         XCTAssertEqual(writes, [true, false], "an uncertain write cannot be repeated by toggling")
         await preferences.load()
         XCTAssertTrue(preferences.enabled)
+    }
+
+    func test_flag_off_read_hides_the_setting_and_refuses_writes() async {
+        let client = makeClient { _ in (404, Data()) }
+        let preferences = QuestionCallPreferences(api: client)
+        await preferences.load()
+        XCTAssertTrue(preferences.unavailable)
+        XCTAssertFalse(preferences.loaded)
+        XCTAssertFalse(preferences.enabled)
+        XCTAssertNil(preferences.notice)
+        await preferences.save(true)
+        XCTAssertEqual(QuestionHTTPStub.sent.map(\.httpMethod), ["GET"])
+    }
+
+    func test_loading_remains_visible_and_cannot_write_until_enabled_read_is_confirmed() async {
+        let api = QuestionPreferencesStub()
+        await api.holdNextRead(value: true)
+        let preferences = QuestionCallPreferences(api: api)
+        let load = Task { await preferences.load() }
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if await api.isReadHeld() { break }
+            await Task.yield()
+        }
+        let held = await api.isReadHeld()
+        XCTAssertTrue(held)
+        XCTAssertTrue(preferences.working)
+        XCTAssertFalse(preferences.loaded)
+        XCTAssertFalse(preferences.enabled)
+        XCTAssertFalse(preferences.unavailable)
+        await preferences.save(true)
+        let writes = await api.writes
+        XCTAssertTrue(writes.isEmpty)
+        await api.releaseRead()
+        await load.value
+        XCTAssertFalse(preferences.working)
+        XCTAssertTrue(preferences.loaded)
+        XCTAssertTrue(preferences.enabled)
+        XCTAssertFalse(preferences.unavailable)
+        XCTAssertNil(preferences.notice)
+    }
+
+    func test_non404_read_failures_keep_a_visible_retry_without_claiming_a_setting() async {
+        for failure in [RoomCallsClient.Failure.unreachable, .unreadable, .refused(401), .refused(403), .refused(503)] {
+            let api = QuestionPreferencesStub()
+            await api.failRead(failure)
+            let preferences = QuestionCallPreferences(api: api)
+            await preferences.load()
+            XCTAssertFalse(preferences.unavailable, "only 404 hides the feature")
+            XCTAssertFalse(preferences.loaded)
+            XCTAssertFalse(preferences.enabled)
+            XCTAssertFalse(preferences.working)
+            XCTAssertNotNil(preferences.notice)
+            await preferences.save(true)
+            let writes = await api.writes
+            XCTAssertTrue(writes.isEmpty)
+            await api.failRead(nil)
+            await preferences.load()
+            XCTAssertTrue(preferences.loaded)
+            XCTAssertFalse(preferences.enabled)
+            XCTAssertFalse(preferences.unavailable)
+            XCTAssertNil(preferences.notice)
+        }
+    }
+
+    func test_flag_disabled_during_save_hides_the_section_and_drops_stale_opt_in() async {
+        let api = QuestionPreferencesStub()
+        let preferences = QuestionCallPreferences(api: api)
+        await preferences.load()
+        await preferences.save(true)
+        XCTAssertTrue(preferences.enabled)
+        await api.fail(.refused(404))
+        await preferences.save(false)
+        XCTAssertTrue(preferences.unavailable)
+        XCTAssertFalse(preferences.loaded)
+        XCTAssertFalse(preferences.enabled)
+        XCTAssertNil(preferences.notice)
+        await preferences.save(true)
+        let writes = await api.writes
+        XCTAssertEqual(writes, [true, false])
+    }
+
+    func test_a_new_successful_read_can_restore_an_available_setting() async {
+        let api = QuestionPreferencesStub()
+        let preferences = QuestionCallPreferences(api: api)
+        await api.failRead(.refused(404))
+        await preferences.load()
+        XCTAssertTrue(preferences.unavailable)
+        await api.failRead(nil)
+        await preferences.load()
+        XCTAssertFalse(preferences.unavailable)
+        XCTAssertTrue(preferences.loaded)
+        XCTAssertFalse(preferences.enabled)
+    }
+
+    func test_hosted_settings_removes_the_toggle_and_explanation_after404() async throws {
+        let api = QuestionPreferencesStub()
+        await api.holdNextRead()
+        let preferences = QuestionCallPreferences(api: api)
+        let window = try HostedSummary.host(WhisperModelSettingsView(
+            coordinator: WhisperModelProvisioningCoordinator(), onSignOut: {},
+            offersModelFile: false, questionCallPreferences: preferences
+        ), height: 2_400)
+        defer { HostedSummary.close(window) }
+        guard HostedSummary.wait(for: "settings.questionCalls.enabled", in: window) != nil else {
+            await api.releaseRead()
+            return XCTFail("the loading section never appeared")
+        }
+        XCTAssertFalse(preferences.loaded)
+        let before = QuestionSettingsAccessibility.snapshot(in: window)
+        XCTAssertNotNil(before.element("settings.questionCalls.enabled"))
+        XCTAssertNotNil(before.element("settings.account.sign-out"))
+        XCTAssertNotNil(before.element("settings.inapp.sounds"))
+        XCTAssertTrue(before.labels.contains("Question calls"))
+        XCTAssertTrue(before.labels.contains { $0.contains("Off until you enable it") })
+        attachSettingsAccessibility(before, name: "settings-before-question-404-ancestry")
+        attachSettingsImage(window, name: "settings-before-question-404")
+        await api.failRead(.refused(404))
+        await api.releaseRead()
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline && (preferences.working || QuestionSettingsAccessibility.snapshot(in: window).element("settings.questionCalls.enabled") != nil) {
+            await Task.yield()
+            HostedSummary.pump(0.02)
+        }
+        let after = QuestionSettingsAccessibility.snapshot(in: window)
+        attachSettingsAccessibility(after, name: "settings-after-question-404-ancestry")
+        attachSettingsImage(window, name: "settings-after-question-404")
+        XCTAssertTrue(preferences.unavailable)
+        XCTAssertNil(after.element("settings.questionCalls.enabled"))
+        XCTAssertNotNil(after.element("settings.account.sign-out"))
+        XCTAssertNotNil(after.element("settings.inapp.sounds"))
+        let labels = after.labels
+        XCTAssertFalse(labels.contains("Question calls"))
+        XCTAssertFalse(labels.contains { $0.contains("Off until you enable it") })
+        XCTAssertFalse(labels.contains("Read call preferences"))
+    }
+
+    func test_settings_accessibility_retains_active_offscreen_controls_and_explains_inactive_caches() throws {
+        let window = try HostedSummary.host(Text("Accessibility fixture"))
+        defer { HostedSummary.close(window) }
+        func label(_ identifier: String, in parent: UIView, y: CGFloat = 20) -> UILabel {
+            let view = UILabel(frame: CGRect(x: 20, y: y, width: 200, height: 40))
+            view.text = identifier
+            view.accessibilityIdentifier = identifier
+            parent.addSubview(view)
+            return view
+        }
+        let visible = label("fixture.visible", in: window)
+        let offscreen = label("fixture.offscreen", in: window, y: window.bounds.height + 100)
+        let hiddenParent = UIView(frame: window.bounds)
+        window.addSubview(hiddenParent)
+        let hidden = label("fixture.hidden", in: hiddenParent)
+        hiddenParent.isHidden = true
+        let axHiddenParent = UIView(frame: window.bounds)
+        window.addSubview(axHiddenParent)
+        let axHidden = label("fixture.ax-hidden", in: axHiddenParent)
+        axHiddenParent.accessibilityElementsHidden = true
+        let detached = label("fixture.detached", in: UIView())
+        let hiddenElement = UIAccessibilityElement(accessibilityContainer: hiddenParent)
+        hiddenElement.accessibilityIdentifier = "fixture.hidden-element"
+        hiddenParent.accessibilityElements = [hiddenElement]
+        let cached = UIView(frame: .zero)
+        window.addSubview(cached)
+        let offscreenElement = UIAccessibilityElement(accessibilityContainer: cached)
+        offscreenElement.accessibilityIdentifier = "fixture.offscreen-element"
+        offscreenElement.accessibilityFrame = CGRect(x: 20, y: window.bounds.height + 200, width: 100, height: 40)
+        // UIView references retain their actual view ancestry. Synthetic AX elements
+        // belong only to their declared container's array, including the hidden one.
+        cached.accessibilityElements = [visible, offscreen, hidden, axHidden, detached, offscreenElement]
+
+        XCTAssertTrue((hiddenElement.accessibilityContainer as? UIView) === hiddenParent)
+        XCTAssertTrue((offscreenElement.accessibilityContainer as? UIView) === cached)
+        attachSettingsAccessibility(QuestionSettingsAccessibility.snapshot(in: window),
+                                    name: "settings-fixture-after-cache-assignment-ancestry")
+        let snapshot = QuestionSettingsAccessibility.snapshot(in: window)
+        attachSettingsAccessibility(snapshot, name: "settings-fixture-declared-containers-ancestry")
+        XCTAssertTrue((hiddenElement.accessibilityContainer as? UIView) === hiddenParent)
+        XCTAssertTrue((offscreenElement.accessibilityContainer as? UIView) === cached)
+        for identifier in ["fixture.visible", "fixture.offscreen", "fixture.offscreen-element"] {
+            XCTAssertNotNil(snapshot.element(identifier), "active controls remain discoverable, including offscreen controls")
+        }
+        for identifier in ["fixture.hidden", "fixture.ax-hidden", "fixture.detached", "fixture.hidden-element"] {
+            XCTAssertNil(snapshot.element(identifier), "inactive fixture element: \(identifier)")
+        }
+        XCTAssertTrue(snapshot.diagnostics.contains("hidden UIView"))
+        XCTAssertTrue(snapshot.diagnostics.contains("detached UIView"))
+        XCTAssertTrue(snapshot.diagnostics.contains("accessibilityElementsHidden ancestor"))
+    }
+
+    func test_signed_out_settings_never_reads_and_a_new_signed_in_scope_reads_again() async throws {
+        let api = QuestionPreferencesStub()
+        let preferences = QuestionCallPreferences(api: api)
+        let coordinator = WhisperModelProvisioningCoordinator()
+        func settings(signedIn: Bool) -> WhisperModelSettingsView {
+            let signOut: (@MainActor () -> Void)?
+            if signedIn {
+                signOut = {}
+            } else {
+                signOut = nil
+            }
+            return WhisperModelSettingsView(coordinator: coordinator, onSignOut: signOut,
+                                            offersModelFile: false, questionCallPreferences: preferences)
+        }
+        let window = try HostedSummary.host(settings(signedIn: false), height: 2_400)
+        defer { HostedSummary.close(window) }
+        XCTAssertNotNil(HostedSummary.wait(for: "settings.inapp.sounds", in: window))
+        XCTAssertNil(HostedSummary.element("settings.questionCalls.enabled", in: window))
+        let none = await api.reads
+        XCTAssertEqual(none, 0)
+        let controller = try XCTUnwrap(window.rootViewController as? UIHostingController<WhisperModelSettingsView>)
+        for expectedReads in 1...2 {
+            controller.rootView = settings(signedIn: true)
+            XCTAssertNotNil(HostedSummary.wait(for: "settings.questionCalls.enabled", in: window))
+            let deadline = Date().addingTimeInterval(5)
+            while Date() < deadline {
+                let reads = await api.reads
+                if reads == expectedReads && preferences.loaded && !preferences.working { break }
+                await Task.yield()
+            }
+            let reads = await api.reads
+            XCTAssertEqual(reads, expectedReads, "each newly signed-in scope performs a fresh read")
+            XCTAssertTrue(preferences.loaded)
+            XCTAssertFalse(preferences.working)
+            controller.rootView = settings(signedIn: false)
+            let removalDeadline = Date().addingTimeInterval(5)
+            while Date() < removalDeadline && HostedSummary.element("settings.questionCalls.enabled", in: window) != nil {
+                await Task.yield()
+                HostedSummary.pump(0.02)
+            }
+            XCTAssertNil(HostedSummary.element("settings.questionCalls.enabled", in: window))
+            XCTAssertNotNil(HostedSummary.element("settings.inapp.sounds", in: window))
+        }
+    }
+
+    private func attachSettingsImage(_ window: UIWindow, name: String) {
+        let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        }
+        let attachment = XCTAttachment(image: image)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    private func attachSettingsAccessibility(_ snapshot: QuestionSettingsAccessibility.Snapshot, name: String) {
+        let attachment = XCTAttachment(string: snapshot.diagnostics)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+}
+
+/// Scoped to this acceptance case. UIKit may retain reusable views and AX objects after a Form removes a section.
+/// Keep unknown ownership and offscreen elements discoverable; exclude only public hidden/detached ancestry.
+/// The existing broad HostedSummary traversal remains unchanged for other suites.
+@MainActor
+private enum QuestionSettingsAccessibility {
+    @MainActor
+    struct Snapshot {
+        let objects: [NSObject]
+        let diagnostics: String
+        var labels: [String] { objects.compactMap(\.accessibilityLabel) }
+        func element(_ identifier: String) -> NSObject? {
+            objects.first { HostedSummary.identifier(of: $0) == identifier }
+        }
+    }
+
+    private struct Entry {
+        let object: NSObject
+        let path: [String]
+        let excludedBy: String?
+    }
+
+    static func snapshot(in window: UIWindow) -> Snapshot {
+        var queue = [Entry(object: window, path: [], excludedBy: nil)]
+        if let presented = window.rootViewController?.presentedViewController?.view {
+            queue.append(Entry(object: presented, path: [], excludedBy: nil))
+        }
+        var visited = Set<String>()
+        var active = Set<ObjectIdentifier>()
+        var objects: [NSObject] = []
+        var rows: [[String: Any]] = []
+        while !queue.isEmpty {
+            let entry = queue.removeFirst()
+            let chain = ancestry(of: entry.object)
+            let reason = exclusion(in: chain, window: window) ?? entry.excludedBy
+            let identity = String(describing: ObjectIdentifier(entry.object))
+            // An object cached under an inactive view can also have a legitimate active path.
+            guard visited.insert(identity + (reason == nil ? ":active" : ":inactive")).inserted else { continue }
+            if reason == nil, active.insert(ObjectIdentifier(entry.object)).inserted { objects.append(entry.object) }
+            rows.append([
+                "object": describe(entry.object, window: window),
+                "traversalAncestors": entry.path,
+                "publicAncestry": chain.map { describe($0, window: window) },
+                "includedViaThisPath": reason == nil,
+                "excludedBy": reason ?? "none: unknown ownership is retained",
+            ])
+            var children: [NSObject] = []
+            if let view = entry.object as? UIView { children.append(contentsOf: view.subviews) }
+            if let elements = entry.object.accessibilityElements { children.append(contentsOf: elements.compactMap { $0 as? NSObject }) }
+            let count = entry.object.accessibilityElementCount()
+            if count > 0, count != NSNotFound {
+                for index in 0..<count {
+                    if let child = entry.object.accessibilityElement(at: index) as? NSObject { children.append(child) }
+                }
+            }
+            let childReason = reason ?? (entry.object.accessibilityElementsHidden
+                ? "accessibilityElementsHidden ancestor \(identity)" : nil)
+            for child in children {
+                queue.append(Entry(object: child, path: entry.path + [identity], excludedBy: childReason))
+            }
+        }
+        do {
+            let data = try JSONSerialization.data(withJSONObject: rows, options: [.prettyPrinted, .sortedKeys])
+            return Snapshot(objects: objects, diagnostics: String(decoding: data, as: UTF8.self))
+        } catch {
+            XCTFail("Accessibility ancestry diagnostics could not be encoded: \(error)")
+            return Snapshot(objects: objects, diagnostics: "Diagnostic encoding failed: \(error)")
+        }
+    }
+
+    private static func ancestry(of object: NSObject) -> [NSObject] {
+        var result: [NSObject] = []
+        var current: NSObject? = object
+        var visited = Set<ObjectIdentifier>()
+        while let item = current, visited.insert(ObjectIdentifier(item)).inserted {
+            result.append(item)
+            if let view = item as? UIView { current = view.superview }
+            else if let element = item as? UIAccessibilityElement { current = element.accessibilityContainer as? NSObject }
+            else if item.responds(to: NSSelectorFromString("accessibilityContainer")) {
+                // The public UIAccessibilityElement property is also implemented by SwiftUI's AX objects.
+                current = item.value(forKey: "accessibilityContainer") as? NSObject
+            } else { current = nil }
+        }
+        return result
+    }
+
+    private static func exclusion(in chain: [NSObject], window: UIWindow) -> String? {
+        for (index, object) in chain.enumerated() {
+            let identity = String(describing: ObjectIdentifier(object))
+            if let view = object as? UIView {
+                if view.isHidden { return "hidden UIView \(identity)" }
+                if view !== window, view.window !== window { return "detached UIView \(identity)" }
+            }
+            if index > 0, object.accessibilityElementsHidden { return "accessibilityElementsHidden ancestor \(identity)" }
+        }
+        return nil
+    }
+
+    private static func describe(_ object: NSObject, window: UIWindow) -> [String: Any] {
+        var result: [String: Any] = [
+            "identity": String(describing: ObjectIdentifier(object)),
+            "class": NSStringFromClass(type(of: object)),
+            "identifier": HostedSummary.identifier(of: object) ?? "",
+            "label": object.accessibilityLabel ?? "",
+            "isAccessibilityElement": object.isAccessibilityElement,
+            "accessibilityElementsHidden": object.accessibilityElementsHidden,
+            "accessibilityFrame": NSCoder.string(for: object.accessibilityFrame),
+        ]
+        if let view = object as? UIView {
+            result["isHidden"] = view.isHidden
+            result["alpha"] = view.alpha
+            result["attachedToTestWindow"] = view === window || view.window === window
+            result["frame"] = NSCoder.string(for: view.frame)
+        }
+        return result
     }
 }
