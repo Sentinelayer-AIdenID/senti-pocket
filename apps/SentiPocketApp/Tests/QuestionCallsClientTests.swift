@@ -588,17 +588,18 @@ final class QuestionCallsClientTests: XCTestCase {
         let controller = try XCTUnwrap(window.rootViewController as? UIHostingController<WhisperModelSettingsView>)
         for expectedReads in 1...2 {
             controller.rootView = settings(signedIn: true)
-            XCTAssertNotNil(HostedSummary.wait(for: "settings.questionCalls.enabled", in: window))
             let deadline = Date().addingTimeInterval(5)
             while Date() < deadline {
                 let reads = await api.reads
                 if reads == expectedReads && preferences.loaded && !preferences.working { break }
                 await Task.yield()
+                HostedSummary.pump(0.02)
             }
             let reads = await api.reads
             XCTAssertEqual(reads, expectedReads, "each newly signed-in scope performs a fresh read")
             XCTAssertTrue(preferences.loaded)
             XCTAssertFalse(preferences.working)
+            XCTAssertNotNil(HostedSummary.wait(for: "settings.questionCalls.enabled", in: window))
             controller.rootView = settings(signedIn: false)
             let removalDeadline = Date().addingTimeInterval(5)
             while Date() < removalDeadline && HostedSummary.element("settings.questionCalls.enabled", in: window) != nil {
