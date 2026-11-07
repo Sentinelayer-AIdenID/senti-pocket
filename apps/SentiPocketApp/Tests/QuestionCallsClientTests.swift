@@ -374,7 +374,12 @@ final class QuestionCallsClientTests: XCTestCase {
         let preferences = QuestionCallPreferences(api: api)
         let coordinator = WhisperModelProvisioningCoordinator()
         func settings(signedIn: Bool) -> WhisperModelSettingsView {
-            let signOut: (@MainActor () -> Void)? = signedIn ? {} : nil
+            let signOut: (@MainActor () -> Void)?
+            if signedIn {
+                signOut = {}
+            } else {
+                signOut = nil
+            }
             return WhisperModelSettingsView(coordinator: coordinator, onSignOut: signOut,
                                             offersModelFile: false, questionCallPreferences: preferences)
         }
