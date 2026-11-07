@@ -39,6 +39,7 @@ final class RootBackgroundWorkTests: XCTestCase {
     /// Torn down for real: the window hidden and emptied. What it showed goes once the test's autorelease pool is drained,
     /// after this; the next test's setUp checks that it went.
     override func tearDown() {
+        RootPreview.holdsRoomListReads = false
         window?.isHidden = true
         window?.rootViewController = nil
         window = nil
@@ -166,6 +167,11 @@ final class RootBackgroundWorkTests: XCTestCase {
         let screenBodies = meter.roomScreenBodies
         let rootBodies = meter.rootBodies
 
+        // The room list's poll lands at moments of its own, and a landing draws the root: while the side panel opens and
+        // closes, the answers to its reads are held (`holdsRoomListReads`; still asked for and counted), so what is
+        // measured is what the open and the close draw themselves.
+        RootPreview.holdsRoomListReads = true
+        defer { RootPreview.holdsRoomListReads = false }
         RootPreview.requestDrawer(true)
         pump(2)
         XCTAssertEqual(RenderTrace.snapshot().draws - draws, 0, "opening the side panel draws none of the room's rows")
@@ -188,6 +194,7 @@ final class RootBackgroundWorkTests: XCTestCase {
         XCTAssertEqual(RenderTrace.snapshot().draws - draws, 0, "closing it draws none either")
         XCTAssertEqual(meter.roomScreens - screens, 0, "closing it makes no new room screen either")
         XCTAssertEqual(meter.rootBodies - rootBodies, 0, "closing it does not draw the root either")
+        RootPreview.holdsRoomListReads = false
 
         RootPreview.requestDrawer(true)
         pump(2)

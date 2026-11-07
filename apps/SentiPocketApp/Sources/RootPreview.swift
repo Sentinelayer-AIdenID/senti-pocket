@@ -110,6 +110,11 @@ enum RootPreview {
     /// Opens or closes the side panel of a root hosted in a test, as the signals do in the preview.
     static func requestDrawer(_ open: Bool) { drawerSubject.send(open) }
 
+    /// While set, the room list's reads are asked for and counted, but their answers are held until it is cleared: a
+    /// hosted test measures what the side panel's open and close draw themselves, apart from a poll landing in the same
+    /// moments.
+    static var holdsRoomListReads = false
+
     private static let roomPickSubject = PassthroughSubject<String, Never>()
 
     /// Rooms picked in a root hosted in a test, as the side panel's rooms are tapped (`pickRoom`).
@@ -520,6 +525,8 @@ final class RootPreviewAPI: @unchecked Sendable {
 extension RootPreviewAPI: SessionTransport {
     func listSessions(includeArchived: Bool, limit: Int, cursor: String?) async throws -> SessionListPage {
         count("rooms")
+        // Asked for and counted; its answer waits while a hosted test holds the room list's reads.
+        while RootPreview.holdsRoomListReads, !Task.isCancelled { try? await Task.sleep(nanoseconds: 50_000_000) }
         let start = Int(cursor ?? "0") ?? 0
         let size = onePage ? Self.rooms.count : limit
         let page = Array(Self.rooms.dropFirst(start).prefix(size))
