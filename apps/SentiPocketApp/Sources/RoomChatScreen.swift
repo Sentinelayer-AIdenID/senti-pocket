@@ -758,6 +758,7 @@ struct RoomChatScreen: View {
     var body: some View {
         #if DEBUG
         let _ = RootPreview.meter.roomScreenBodyRan()
+        let _ = RootPreview.meter.roomMarksReading(readingAloudId)
         #endif
         RoomChatView(
             state: coordinator.state,

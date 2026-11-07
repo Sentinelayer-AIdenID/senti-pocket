@@ -142,6 +142,7 @@ final class ReadAloudThreadTests: XCTestCase {
         wait("the room shows the bar", seconds: 10) { meter.readAloudBars["room"]?["bar"] != nil }
         pump(1.5)
         assertSamePlacements(placed, placements(in: window), "starting to read")
+        XCTAssertEqual(meter.roomReadingMark, RoomReadAloud.message(165), "the room marks the message read")
 
         // Pause and play, as the bar's button does: each changes what the reader says, as each sentence does.
         let bodies = meter.roomScreenBodies
@@ -161,6 +162,7 @@ final class ReadAloudThreadTests: XCTestCase {
         RootPreview.requestRoom(.stopReadingAloud)
         pump(1.5)
         assertSamePlacements(placed, placements(in: window), "stopping")
+        XCTAssertNil(meter.roomReadingMark, "the mark goes when the reading stops")
     }
 
     /// Reading goes on when you leave its room (Carter, 10-30): the room you open shows the bar over its top, and its

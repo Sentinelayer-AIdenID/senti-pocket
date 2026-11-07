@@ -195,6 +195,11 @@ final class RootPreviewMeter: @unchecked Sendable {
 
     func readAloudSlotBodyRan(_ place: String) { readAloudSlotBodies[place, default: 0] += 1 }
 
+    /// The message the room on screen last marked as being read (`RoomChatScreen.readingAloudId`), as its body ran.
+    private(set) var roomReadingMark: String?
+
+    func roomMarksReading(_ id: String?) { roomReadingMark = id }
+
     /// The root's reader (`AuthenticatedRootView.messageReader`), for the hosted tests that pause and play it.
     weak var reader: MessageReader?
 
