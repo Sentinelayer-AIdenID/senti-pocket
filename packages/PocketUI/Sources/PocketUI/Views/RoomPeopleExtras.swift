@@ -7,6 +7,9 @@ import SwiftUI
 /// requests).
 public struct RoomPeopleExtras: Equatable {
     let invite: (() -> AnyView)?
+    /// What Invite people's rows open (its share sheet, its AI-sharing question), presented from one view behind the
+    /// sheet's list: never from the rows, where each row would get a presenter of its own.
+    let presenters: (() -> AnyView)?
     let requests: (() -> AnyView)?
     /// Told which sections the sheet shows, in order ("invite", "members", "requests"), as it appears.
     let shown: (([String]) -> Void)?
@@ -14,9 +17,11 @@ public struct RoomPeopleExtras: Equatable {
     /// coming in once the room's read offers them).
     let revision: Int
 
-    public init(invite: (() -> AnyView)? = nil, requests: (() -> AnyView)? = nil, revision: Int = 0,
+    public init(invite: (() -> AnyView)? = nil, presenters: (() -> AnyView)? = nil, requests: (() -> AnyView)? = nil,
+                revision: Int = 0,
                 shown: (([String]) -> Void)? = nil) {
         self.invite = invite
+        self.presenters = presenters
         self.requests = requests
         self.revision = revision
         self.shown = shown

@@ -70,6 +70,100 @@ final class RoomPeopleSheetTests: XCTestCase {
         XCTAssertEqual(meter.peopleAgentStates[room], expected, "here already, yours to add, and someone else's")
     }
 
+    /// Review (#369): Invite people's share sheet and AI-sharing question are presented from one view behind People's
+    /// list, never from its rows, where each row would get a presenter of its own for the same sheet: one would show and
+    /// the others fail. Share invite link asks once, and the share sheet follows OK. (room-long, with the agents' rows: no
+    /// earlier test here leaves a root there.)
+    func test_share_invite_link_asks_once_and_the_share_sheet_follows_ok() throws {
+        Self.forgetAIConsent()
+        defer { Self.forgetAIConsent() }
+        let room = RootPreviewAPI.longRoom
+        try open(room, agentRequests: 0, addsAgents: true)
+        let meter = RootPreview.meter
+        pump(2)
+        RootPreview.requestPeople()
+        wait("People is up", seconds: 10) { meter.peopleSections[room] != nil }
+        pump(1)
+        XCTAssertEqual(meter.invitePresenters[room], 1, "one presenter for Invite people's sheets, never one per row")
+
+        RootPreview.requestShareLink()
+        var asked = Set<ObjectIdentifier>()
+        func watch(_ seconds: TimeInterval) {
+            let end = Date().addingTimeInterval(seconds)
+            while Date() < end {
+                pump(0.1)
+                consentSheets().forEach { asked.insert($0) }
+            }
+        }
+        watch(3)
+        XCTAssertEqual(asked.count, 1, "Share invite link asks once")
+        let ok = try XCTUnwrap(element("pocket.aiConsent.ok"), "the question's Agree")
+        XCTAssertTrue(ok.accessibilityActivate(), "Agree is a button")
+        wait("the share sheet follows Agree", seconds: 10) { self.presented.contains { $0 is UIActivityViewController } }
+        watch(2)
+        XCTAssertEqual(asked.count, 1, "and it is never asked again")
+        print("BGAUDIT invite share: presenters \(String(describing: meter.invitePresenters[room])), questions \(asked.count), "
+              + "share sheet \(presented.contains { $0 is UIActivityViewController })")
+        presented.last?.dismiss(animated: false)
+        pump(0.5)
+    }
+
+    /// The account's answer to the AI-sharing question, forgotten, so it is asked.
+    private static func forgetAIConsent() {
+        for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix("pocket.aiConsent.") {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+    }
+
+    /// What is presented over the root, from the bottom up.
+    private var presented: [UIViewController] {
+        var chain: [UIViewController] = []
+        var next = window?.rootViewController?.presentedViewController
+        while let controller = next {
+            chain.append(controller)
+            next = controller.presentedViewController
+        }
+        return chain
+    }
+
+    /// The AI-sharing questions on screen: each presented sheet holding its Agree.
+    private func consentSheets() -> [ObjectIdentifier] {
+        presented.filter { controller in
+            !controller.isBeingDismissed && Self.elements(in: controller.view).contains {
+                HostedSummary.identifier(of: $0) == "pocket.aiConsent.ok"
+            }
+        }.map(ObjectIdentifier.init)
+    }
+
+    private func element(_ wanted: String) -> NSObject? {
+        for controller in presented.reversed() {
+            if let found = Self.elements(in: controller.view).first(where: { HostedSummary.identifier(of: $0) == wanted }) {
+                return found
+            }
+        }
+        return nil
+    }
+
+    /// Every accessibility element under a view: its subviews, and the elements they hold.
+    private static func elements(in view: UIView) -> [NSObject] {
+        var found: [NSObject] = []
+        var queue: [Any] = [view]
+        var seen = Set<ObjectIdentifier>()
+        while !queue.isEmpty {
+            guard let object = queue.removeFirst() as? NSObject, seen.insert(ObjectIdentifier(object)).inserted else { continue }
+            found.append(object)
+            if let view = object as? UIView { queue.append(contentsOf: view.subviews) }
+            if let children = object.accessibilityElements { queue.append(contentsOf: children) }
+            let count = object.accessibilityElementCount()
+            if count > 0, count != NSNotFound {
+                for index in 0..<count {
+                    if let child = object.accessibilityElement(at: index) { queue.append(child) }
+                }
+            }
+        }
+        return found
+    }
+
     private func open(_ roomId: String, agentRequests: Int, addsAgents: Bool = false) throws {
         let api = RootPreviewAPI(postsPerSecond: 0, onePage: false, openRoomId: roomId, agentRequests: agentRequests,
                                  addsAgents: addsAgents)

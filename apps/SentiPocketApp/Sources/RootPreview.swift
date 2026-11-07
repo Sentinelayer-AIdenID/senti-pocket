@@ -64,6 +64,11 @@ enum RootPreview {
 
     static func requestPeople() { peopleRequests.send(()) }
 
+    /// What a hosted test asks of People's Invite people: Share invite link, as its row does.
+    static let shareLinkRequests = PassthroughSubject<Void, Never>()
+
+    static func requestShareLink() { shareLinkRequests.send(()) }
+
     static var offersCrashReport: Bool { ProcessInfo.processInfo.arguments.contains("-PocketRootCrashOffer") }
 
     /// The made-up report: a crash with a few steps and frames, nothing from a real run.
@@ -216,6 +221,8 @@ final class RootPreviewMeter: @unchecked Sendable {
     var peopleBadge: [String: Int] = [:]
     var peopleAgentsShown: [String: Bool] = [:]
     var peopleAgentStates: [String: [String: AgentContactRowState]] = [:]
+    /// How many presenters Invite people has on screen, by room (`RoomInvitePresenters`).
+    var invitePresenters: [String: Int] = [:]
 
     func forgetPeople() {
         peopleSections = [:]
@@ -223,6 +230,7 @@ final class RootPreviewMeter: @unchecked Sendable {
         peopleBadge = [:]
         peopleAgentsShown = [:]
         peopleAgentStates = [:]
+        invitePresenters = [:]
     }
 
     /// Where each read-aloud bar and its controls were last laid out, by place ("app", "room", "thread").

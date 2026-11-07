@@ -105,57 +105,37 @@ enum AIConsentGate {
     }
 }
 
-/// Invite people, at the top of People: share an invite link at once, or invite someone by email or GitHub username;
-/// and, where the room offers it, the agents you work with, each added in one tap.
-struct RoomInviteRows: View {
+/// What Invite people shows besides its rows: the link being made, what went wrong, the share sheet and the AI-sharing
+/// question. One per room screen, kept there; the rows read it, and its sheets are presented from one place only
+/// (`RoomInvitePresenters`, behind People's list), never from a row: in a list each row would get a presenter of its
+/// own for the same sheet, one would show and the others fail.
+@MainActor
+final class RoomInviteSharing: ObservableObject {
     let sessionId: String
-    let roomTitle: String
     let inviter: any RoomInviting
     let aiConsent: AIConsent?
-    /// The agents you work with, where the room's read says so (`features.addAgents`); nil hides them.
-    let agents: AgentContactsModel?
+    @Published var sharing: RoomShareItem?
+    @Published private(set) var making = false
+    @Published private(set) var problem: String?
+    @Published var consentHeld: AIConsentHeld?
 
-    @State private var sharing: RoomShareItem?
-    @State private var making = false
-    @State private var problem: String?
-    @State private var consentHeld: AIConsentHeld?
-
-    var body: some View {
-        Group {
-            Button {
-                afterConsent { Task { await shareLink() } }
-            } label: {
-                Label(making ? "Making the link…" : "Share invite link", systemImage: "square.and.arrow.up")
-            }
-            .disabled(making)
-            .accessibilityIdentifier("pocket.room.people.shareLink")
-            NavigationLink {
-                RoomInviteForm(sessionId: sessionId, roomTitle: roomTitle, inviter: inviter, aiConsent: aiConsent)
-            } label: {
-                Label("Invite by email or GitHub username", systemImage: "person.badge.plus")
-            }
-            .accessibilityIdentifier("pocket.room.people.inviteByName")
-            if let problem {
-                Text(problem).font(.footnote).foregroundStyle(.red)
-            }
-            if let agents {
-                RoomAgentContactRows(model: agents, afterConsent: afterConsent)
-            }
-        }
-        .sheet(item: $sharing) { item in RoomShareSheet(items: [item.url]) }
-        .aiConsentPrompt($consentHeld) { aiConsent?.grant() }
-        #if DEBUG
-        .onAppear { if agents == nil { RootPreview.meter.peopleAgentsShown[sessionId] = false } }
-        #endif
+    init(sessionId: String, inviter: any RoomInviting, aiConsent: AIConsent?) {
+        self.sessionId = sessionId
+        self.inviter = inviter
+        self.aiConsent = aiConsent
     }
 
     /// An invite writes to the room: the first write asks this account's OK to share with AI.
-    private func afterConsent(_ action: @escaping () -> Void) {
-        AIConsentGate.run(action, consent: aiConsent) { consentHeld = $0 }
+    func afterConsent(_ action: @escaping () -> Void) {
+        AIConsentGate.run(action, consent: aiConsent) { [weak self] held in self?.consentHeld = held }
     }
 
-    /// A link anyone signed in joins with, as a contributor, then the system's share sheet.
-    private func shareLink() async {
+    /// Share invite link: once it may, a link anyone signed in joins with, as a contributor, then the share sheet.
+    func shareLink() {
+        afterConsent { [weak self] in Task { await self?.makeLink() } }
+    }
+
+    private func makeLink() async {
         making = true
         problem = nil
         defer { making = false }
@@ -168,6 +148,62 @@ struct RoomInviteRows: View {
         } catch {
             problem = "The link couldn't be made. Check your connection and try again."
         }
+    }
+}
+
+/// Invite people's share sheet and AI-sharing question, presented from this one view behind People's list.
+struct RoomInvitePresenters: View {
+    @ObservedObject var sharing: RoomInviteSharing
+
+    var body: some View {
+        Color.clear
+            .accessibilityHidden(true)
+            .sheet(item: $sharing.sharing) { item in RoomShareSheet(items: [item.url]) }
+            .aiConsentPrompt($sharing.consentHeld) { sharing.aiConsent?.grant() }
+            #if DEBUG
+            // How many presenters Invite people has on screen, for the hosted test: one.
+            .onAppear { RootPreview.meter.invitePresenters[sharing.sessionId, default: 0] += 1 }
+            .onDisappear { RootPreview.meter.invitePresenters[sharing.sessionId, default: 0] -= 1 }
+            .onReceive(RootPreview.shareLinkRequests) { sharing.shareLink() }
+            #endif
+    }
+}
+
+/// Invite people, at the top of People: share an invite link at once, or invite someone by email or GitHub username;
+/// and, where the room offers it, the agents you work with, each added in one tap. Rows only: what they open is
+/// presented by `RoomInvitePresenters`.
+struct RoomInviteRows: View {
+    let roomTitle: String
+    @ObservedObject var sharing: RoomInviteSharing
+    /// The agents you work with, where the room's read says so (`features.addAgents`); nil hides them.
+    let agents: AgentContactsModel?
+
+    var body: some View {
+        Group {
+            Button {
+                sharing.shareLink()
+            } label: {
+                Label(sharing.making ? "Making the link…" : "Share invite link", systemImage: "square.and.arrow.up")
+            }
+            .disabled(sharing.making)
+            .accessibilityIdentifier("pocket.room.people.shareLink")
+            NavigationLink {
+                RoomInviteForm(sessionId: sharing.sessionId, roomTitle: roomTitle, inviter: sharing.inviter,
+                               aiConsent: sharing.aiConsent)
+            } label: {
+                Label("Invite by email or GitHub username", systemImage: "person.badge.plus")
+            }
+            .accessibilityIdentifier("pocket.room.people.inviteByName")
+            if let problem = sharing.problem {
+                Text(problem).font(.footnote).foregroundStyle(.red)
+            }
+            if let agents {
+                RoomAgentContactRows(model: agents, afterConsent: sharing.afterConsent)
+            }
+        }
+        #if DEBUG
+        .onAppear { if agents == nil { RootPreview.meter.peopleAgentsShown[sharing.sessionId] = false } }
+        #endif
     }
 }
 

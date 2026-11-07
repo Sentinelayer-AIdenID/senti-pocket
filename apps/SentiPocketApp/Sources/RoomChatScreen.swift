@@ -136,6 +136,8 @@ struct RoomChatScreen: View {
     @State private var admissions: AdmissionsCoordinator?
     /// The agents you work with, where the room's read says so (`features.addAgents`).
     @State private var agentContactsModel: AgentContactsModel?
+    /// Invite people's link, share sheet and AI-sharing question, kept, not watched (its rows and presenter watch it).
+    @State private var inviteSharing: RoomInviteSharing?
     /// The tickets screen opens straight into a new ticket (the composer's "File a ticket").
     @State private var ticketsStartFiling = false
     @State private var showsBreakouts = false
@@ -268,6 +270,10 @@ struct RoomChatScreen: View {
         self.summaryGenerator = sender as? any RoomSummaryGenerating
         self.savedSummary = savedSummary
         self.inviter = sender as? any RoomInviting
+        if let inviter = sender as? any RoomInviting {
+            _inviteSharing = State(initialValue: RoomInviteSharing(sessionId: route.sessionId, inviter: inviter,
+                                                                   aiConsent: aiConsent))
+        }
         self.ticketWriter = ticketWriter
         self.ticketLeases = ticketLeases
         self.ticketExtras = ticketExtras
@@ -650,13 +656,12 @@ struct RoomChatScreen: View {
     /// where the room offers them, and the agent requests.
     private var peopleExtras: RoomPeopleExtras {
         var invite: (() -> AnyView)?
-        if let inviter {
-            let sessionId = route.sessionId, title = coordinator.state.title, consent = aiConsent
+        var presenters: (() -> AnyView)?
+        if let sharing = inviteSharing {
+            let title = coordinator.state.title
             let agents = coordinator.addsAgents ? agentContactsModel : nil
-            invite = {
-                AnyView(RoomInviteRows(sessionId: sessionId, roomTitle: title, inviter: inviter, aiConsent: consent,
-                                       agents: agents))
-            }
+            invite = { AnyView(RoomInviteRows(roomTitle: title, sharing: sharing, agents: agents)) }
+            presenters = { AnyView(RoomInvitePresenters(sharing: sharing)) }
         }
         var requests: (() -> AnyView)?
         if let peopleRequests {
@@ -673,12 +678,13 @@ struct RoomChatScreen: View {
         // As People appears, for the hosted tests: its sections, and the requests row's words (that row sits at the
         // list's foot, made only once scrolled to).
         let sessionId = route.sessionId, counted = peopleRequests
-        return RoomPeopleExtras(invite: invite, requests: requests, revision: revision, shown: { sections in
+        return RoomPeopleExtras(invite: invite, presenters: presenters, requests: requests, revision: revision,
+                                shown: { sections in
             RootPreview.meter.peopleSections[sessionId] = sections
             if let counted { RootPreview.meter.peopleRequestsTitle[sessionId] = RoomRequestsTitle.text(count: counted.state.pending.count) }
         })
         #else
-        return RoomPeopleExtras(invite: invite, requests: requests, revision: revision)
+        return RoomPeopleExtras(invite: invite, presenters: presenters, requests: requests, revision: revision)
         #endif
     }
 

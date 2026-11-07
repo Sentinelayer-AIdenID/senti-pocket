@@ -3747,6 +3747,8 @@ private struct RoomPresenceSheet: View {
                     .accessibilityIdentifier("pocket.room.people.requests")
                 }
             }
+            // Invite people's sheets, presented from here once, never from its rows.
+            .background { if shownInvite != nil { extras?.presenters?() } }
             .navigationTitle("People")
             .navigationBarTitleDisplayModeInlineIfAvailable()
             .toolbar {
