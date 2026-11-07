@@ -92,8 +92,10 @@ final class RoomSearchHostedTests: XCTestCase {
             XCTAssertNotNil(HostedSummary.wait(for: "pocket.room.longMessage", in: window))
             model.focus = RoomSearchFocus(sequenceId: 1, query: "needle")
             model.needsJump = true
+            _ = try XCTUnwrap(HostedSummary.wait(for: "pocket.search.expanded.1", in: window),
+                             "the real message row must mount the selected Markdown renderer")
             let match = try XCTUnwrap(HostedSummary.wait(for: "pocket.search.match.1", in: window),
-                                     "the real message row must use the search renderer")
+                                     "the selected renderer must preserve its match child identifier; found: \(HostedSummary.identifiers(in: window))")
             let end = Date().addingTimeInterval(5)
             var visible = false
             while Date() < end {

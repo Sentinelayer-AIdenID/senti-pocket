@@ -10,6 +10,7 @@ struct RoomSearchMessageView: View {
 
     var body: some View {
         RoomSearchMarkdownView(text: text, ownHandles: ownHandles, focus: focus)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("pocket.search.expanded.\(focus.sequenceId)")
         .task(id: focus.id) {
             // The outer list first materializes the row. Then its inner match can be reached.
