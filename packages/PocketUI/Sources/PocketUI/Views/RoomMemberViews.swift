@@ -69,7 +69,8 @@ public struct RoomMemberSheetView: View {
 
     private var connectionSymbol: String {
         switch messages.connection {
-        case .mcp: return "point.3.connected.trianglepath.dotted"
+        case .hostedMCP: return "point.3.connected.trianglepath.dotted"
+        case .cliMCP: return "point.3.connected.trianglepath.dotted"
         case .box: return "shippingbox"
         case .app: return "iphone"
         case .web: return "globe"
