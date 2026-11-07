@@ -1202,6 +1202,20 @@ final class BigThreadTests: XCTestCase {
         return nil
     }
 
+    /// The numbers of the replies drawn inside the thread's viewport, top to bottom: what a failure says was on screen.
+    private static func repliesOnScreen(in list: UIScrollView, window: UIWindow) -> [Int] {
+        let viewport = list.convert(list.bounds.inset(by: list.adjustedContentInset), to: nil)
+        let shown = HostedSummary.elements(in: window).compactMap { element -> (Int, CGFloat)? in
+            let label = element.accessibilityLabel ?? ""
+            guard let range = label.range(of: "Reply "), element.accessibilityFrame.height > 0,
+                  viewport.intersects(element.accessibilityFrame),
+                  let number = Int(label[range.upperBound...].prefix { $0.isNumber }) else { return nil }
+            return (number, element.accessibilityFrame.minY)
+        }
+        var seen = Set<Int>()
+        return shown.sorted { $0.1 < $1.1 }.map { $0.0 }.filter { seen.insert($0).inserted }
+    }
+
     /// warden-2's plan on #392: reading on past 1,000 replies lets the oldest go (and the first reply shown, and the
     /// one the thread was opened at), and the reader stays on the reply they were at. One window, the real coordinator
     /// and the real view throughout, the later row asked by scrolling the thread down. The sixth page on is held once
@@ -1226,9 +1240,10 @@ final class BigThreadTests: XCTestCase {
             room.pause()
             HostedSummary.close(window)
         }
-        XCTAssertNotNil(HostedSummary.wait(for: "pocket.thread.composer", in: window), "the thread opens over the room")
-        guard pumpUntil("the thread is open at the reply", {
+        // This room has no way to send, so its thread has no reply box: the thread's own list says it is open.
+        guard pumpUntil("the thread is open at the reply, its list on screen", {
             room.state.thread?.isLoading == false && room.state.thread?.replies.count == 500
+                && Self.threadList(in: window).map { $0.contentSize.height > window.bounds.height } == true
         }) else { return }
         // The thread comes to rest where it opens, at the reply.
         HostedSummary.pump(1.0)
@@ -1272,9 +1287,19 @@ final class BigThreadTests: XCTestCase {
             if page == 6 {
                 XCTAssertEqual(room.state.thread?.replies.first?.id, Self.id(40_250), "the oldest 500 went")
             }
-            HostedSummary.pump(0.8)
-            let after = try XCTUnwrap(Self.replyFrame(last, in: list, window: window),
-                                      "page \(page) on landed: the reader is still at \(last)")
+            // The view keeps the reader's place with a scroll it makes once the page has landed.
+            var after: CGRect?
+            let kept = pumpUntil("page \(page) on landed: the reader is still at \(last)", seconds: 3) {
+                after = Self.replyFrame(last, in: list, window: window)
+                return after != nil
+            }
+            guard kept, let after else {
+                let held = (room.state.thread?.replies.first?.id ?? "-") + " to "
+                    + (room.state.thread?.replies.last?.id ?? "-")
+                XCTFail("page \(page) on landed: on screen \(Self.repliesOnScreen(in: list, window: window)); offset "
+                        + "\(Int(list.contentOffset.y)) of \(Int(list.contentSize.height)); the thread holds \(held)")
+                return
+            }
             XCTAssertGreaterThan(after.maxY, viewport.midY, "page \(page) on landed: \(last) still at the bottom")
 
             // Going on down reaches the next reply, never scrolling up first.
