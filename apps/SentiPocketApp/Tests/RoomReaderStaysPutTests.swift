@@ -81,6 +81,15 @@ final class RoomReaderStaysPutTests: XCTestCase {
             }
         }
 
+        /// Opened with the messages from `first` on unread: the room opens at the New messages line, away from the
+        /// bottom, as the coordinator opens it.
+        func opensAtLine(from first: Int64, unread count: Int) {
+            line = first
+            unread = count
+            atBottom = false
+            publish()
+        }
+
         func arrive(_ more: [RoomChatMessageInput]) {
             inputs += more
             if !atBottom {
@@ -476,6 +485,7 @@ final class RoomReaderStaysPutTests: XCTestCase {
         XCTAssertEqual(room.line, 121, "the line is at the first that arrived")
         let arrow = try XCTUnwrap(HostedSummary.wait(for: "pocket.room.jumpToLatest", in: window, timeout: 5),
                                   "the arrow shows")
+        let toldBeforeTap = room.placesTold.count
         XCTAssertTrue(arrow.accessibilityActivate(), "the arrow could be pressed")
         var lineTop: CGFloat?
         var below: CGFloat = .nan
@@ -499,6 +509,54 @@ final class RoomReaderStaysPutTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(top, 0, "the line is in view, below the top")
         XCTAssertLessThan(top, visible / 2, "the line is in the top half")
         XCTAssertEqual(room.unreadCount, 0, "the count is taken")
+        // The whole time, not an instant: from the tap on, the room never told the coordinator the reader is at the
+        // bottom (the coordinator marks the room read through its newest after 0.75 s there), and a second on it still
+        // has not, with the line still in the top half.
+        print("READER-STAYS-PUT first-tap told=\(Array(room.placesTold.dropFirst(toldBeforeTap)))")
+        XCTAssertFalse(room.placesTold.dropFirst(toldBeforeTap).contains(true),
+                       "showing the line, the room was told the reader is at the bottom")
+        pump(1)
+        let told = Array(room.placesTold.dropFirst(toldBeforeTap))
+        let later = Self.linePlace(in: window)
+        print("READER-STAYS-PUT first-tap a second on: line-top=\(later.map { "\(Int($0.top))" } ?? "absent") "
+            + "told=\(told)")
+        XCTAssertFalse(told.contains(true), "a second on, the room was told the reader is at the bottom")
+        let laterTop = try XCTUnwrap(later?.top, "a second on, the New messages line is in view")
+        XCTAssertGreaterThanOrEqual(laterTop, 0, "a second on, the line is in view, below the top")
+        XCTAssertLessThan(laterTop, visible / 2, "a second on, the line is in the top half")
+        XCTAssertFalse(room.atBottom, "showing the line is not the bottom")
+    }
+
+    /// A room opened with messages unread, not by the arrow: it opens at the New messages line, a new list that starts
+    /// at its own end until its scroll to the line lands (`RoomBottomWatch.landingAtLine`). From the open on, the room
+    /// never tells the coordinator the reader is at the bottom, and a second on the line is still in the top half.
+    func test_a_room_opened_at_its_new_messages_line_is_never_taken_for_the_bottom() throws {
+        try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
+        RoomScrollTrace.start()
+        let room = Room(Self.messages(count: 120) + (121..<151).map { Self.longArrival($0) })
+        room.keepsTheLine = true
+        room.opensAtLine(from: 121, unread: 30)
+        let window = try HostedSummary.host(Host(room: room, textSize: .accessibility5))
+        addTeardownBlock { HostedSummary.close(window) }
+        var first: (top: CGFloat, visible: CGFloat)?
+        wait("the room opened at the line, in the top half", seconds: 20) {
+            first = Self.linePlace(in: window)
+            guard let first else { return false }
+            return first.top >= 0 && first.top < first.visible / 2
+        }
+        print("READER-STAYS-PUT open-line line-top=\(first.map { "\(Int($0.top))" } ?? "absent") "
+            + "told=\(room.placesTold)")
+        for event in RoomScrollTrace.lineHoldEvents { print("READER-STAYS-PUT open-line line-hold \(event)") }
+        XCTAssertFalse(room.placesTold.contains(true),
+                       "opened at the line, the room was told the reader is at the bottom")
+        pump(1)
+        let later = Self.linePlace(in: window)
+        print("READER-STAYS-PUT open-line a second on: line-top=\(later.map { "\(Int($0.top))" } ?? "absent") "
+            + "told=\(room.placesTold)")
+        XCTAssertFalse(room.placesTold.contains(true), "a second on, the room was told the reader is at the bottom")
+        let laterPlace = try XCTUnwrap(later, "a second on, the New messages line is in view")
+        XCTAssertGreaterThanOrEqual(laterPlace.top, 0, "a second on, the line is in view, below the top")
+        XCTAssertLessThan(laterPlace.top, laterPlace.visible / 2, "a second on, the line is in the top half")
         XCTAssertFalse(room.atBottom, "showing the line is not the bottom")
     }
 
@@ -645,6 +703,16 @@ final class RoomReaderStaysPutTests: XCTestCase {
         let below = bottomOffset(of: scroll) - scroll.contentOffset.y
         let visible = scroll.bounds.height - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom
         return below < 24 && below > -visible
+    }
+
+    /// Where the New messages line is below the top of what can be read, in the window (the hosted window is the
+    /// screen), and the height that can be read; nil while the list or the line is not there.
+    private static func linePlace(in window: UIWindow) -> (top: CGFloat, visible: CGFloat)? {
+        guard let list = list(in: window),
+              let marker = HostedSummary.element("pocket.room.unreadDivider", in: window) else { return nil }
+        let band = list.convert(list.bounds, to: nil)
+        let visible = list.bounds.height - list.adjustedContentInset.top - list.adjustedContentInset.bottom
+        return (marker.accessibilityFrame.minY - (band.minY + list.adjustedContentInset.top), visible)
     }
 
     /// The room's list: the tallest scroll view in the window.

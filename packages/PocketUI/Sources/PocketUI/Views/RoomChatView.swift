@@ -577,7 +577,10 @@ public struct RoomChatView: View {
         anchorBeforeOlderLoad = nil
         didInitialScroll = false
         holdsOlderLoads = true
-        listEpoch += 1
+        let epoch = listEpoch + 1
+        listEpoch = epoch
+        // The new list starts at its own end: opened at the line, that is not the reader at the bottom until it lands.
+        bottomWatch.landingAtLine = atLine ? epoch : nil
     }
 
     @ViewBuilder
@@ -835,11 +838,15 @@ public struct RoomChatView: View {
         RoomScrollTrace.lineHold("open: \(position) (reopens at the line \(reopensAtLine), the line in the rows "
             + "\(state.rows.contains(.unreadDivider)), list \(listEpoch))")
         reopensAtLine = false
+        let epoch = listEpoch
+        let opensAtLine = position == .unreadLine
+        // Opened at the line, the list is still at its own end (`defaultScrollAnchor`) until the scroll to the line
+        // below lands: the end in view until then is where the list starts, not the reader at the bottom.
+        bottomWatch.landingAtLine = opensAtLine ? epoch : nil
         guard position == .latest || position == .unreadLine else { return }
         didInitialScroll = true
         // Say where the reader is now: the bottom marker may never render when the first scroll lands elsewhere,
         // and a reader who is not at the bottom must not be pulled down by the next message.
-        let opensAtLine = position == .unreadLine
         setReaderAtBottom(!opensAtLine)
         DispatchQueue.main.async {
             if opensAtLine {
@@ -853,7 +860,14 @@ public struct RoomChatView: View {
             if opensAtLine {
                 DispatchQueue.main.asyncAfter(deadline: .now() + Self.openLanding) {
                     placeLineAgain(proxy)
-                    DispatchQueue.main.async { recheckPlace(proxy) }
+                    DispatchQueue.main.async {
+                        // Landed: from here the end in view is the reader at the bottom (little below the line).
+                        if bottomWatch.landingAtLine == epoch {
+                            bottomWatch.landingAtLine = nil
+                            RoomScrollTrace.lineHold("landed (list \(epoch))")
+                        }
+                        recheckPlace(proxy)
+                    }
                 }
             }
         }
@@ -891,9 +905,9 @@ public struct RoomChatView: View {
             return
         }
         let height = bottomWatch.reading.map(RoomBottomWatch.height) ?? bottomWatch.lineHeldHeight
-        // At the bottom, the room follows what arrives there: this placement is skipped, not the hold. A new list
-        // starts at its end before its scroll to the line, so its first readings count the reader at the bottom; the
-        // next change in the room's height tries again.
+        // At the bottom, the room follows what arrives there: this placement is skipped, not the hold, and the next
+        // change in the room's height tries again. (A new list starts at its own end before its scroll to the line;
+        // until that open lands, `landingAtLine` keeps its end in view from counting as the bottom.)
         guard !bottomWatch.atBottom else {
             RoomScrollTrace.lineHold("skipped at the bottom (height \(Int(height)))")
             return
@@ -1139,8 +1153,8 @@ public struct RoomChatView: View {
         guard bottomWatch.isActive, bottomWatch.readsGeometry, let reading = bottomWatch.reading else { return }
         let moving = bottomWatch.readerMoving
         bottomWatch.takenSight = bottomWatch.tracker.see(reading, readerMoving: moving)
-        switch bottomWatch.tracker.read(reading, mayBeAtBottom: !state.canLoadNewer && heldAnchor == nil,
-                                        readerMoving: moving) {
+        let mayBeAtBottom = !state.canLoadNewer && heldAnchor == nil && bottomWatch.landingAtLine == nil
+        switch bottomWatch.tracker.read(reading, mayBeAtBottom: mayBeAtBottom, readerMoving: moving) {
         case .none:
             break
         case .endInView:
@@ -1218,6 +1232,9 @@ private final class RoomBottomWatch {
     var linePlacements = 0
     /// At most this many placements of one held line.
     static let lineHoldLimit = 30
+    /// The list (its `listEpoch`) opened at the New messages line, until that open lands (`RoomChatView.openLanding`):
+    /// a new list starts at its own end, and its end in view until then is not the reader at the bottom.
+    var landingAtLine: Int?
 
     /// The room's height as a reading gives it, less the insets and the height that can be read, which do not change
     /// as it scrolls: what moves when rows are measured or arrive.
