@@ -69,7 +69,7 @@ struct WhisperModelSettingsView: View {
             Form {
                 inAppSection
                 notificationsSection
-                if let questionPreferences, !questionPreferences.unavailable {
+                if let questionPreferences, questionPreferences.showsSection {
                     QuestionCallSettingsSection(preferences: questionPreferences)
                 }
                 if let directMessages {

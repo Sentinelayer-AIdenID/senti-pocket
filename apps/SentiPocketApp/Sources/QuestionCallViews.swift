@@ -96,6 +96,10 @@ final class QuestionCallPreferences: ObservableObject {
     @Published private(set) var notice: String?
     private let api: any QuestionCallPreferencesAPI
 
+    // The first read must answer before Settings offers this section. Keep an
+    // ordinary read/save error visible so its retry remains available.
+    var showsSection: Bool { !unavailable && (loaded || notice != nil) }
+
     init(api: any QuestionCallPreferencesAPI = RoomQuestionsClient()) { self.api = api }
 
     func load() async {
