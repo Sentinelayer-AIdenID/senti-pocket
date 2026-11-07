@@ -468,7 +468,9 @@ struct AuthenticatedRootView: View {
     /// The room opened last, reopened when the app starts (as the big assistant apps reopen your last chat).
     @AppStorage("pocket.lastRoomId") private var lastRoomId = ""
     @State private var restoredLastRoom = false
-    @AppStorage("pocket.theme") private var themeRaw = PocketThemePreference.system.rawValue
+    /// The theme, published only when it really changes: as `@AppStorage` it drew the root again on any UserDefaults
+    /// notice, a class registering its defaults included (`PocketThemeStore`, ticket cfb0383e).
+    @StateObject private var themeStore = PocketThemeStore()
     /// The app's one reader. Kept, not watched: its bar (`ReadAloudBarSlot`) watches it, so a reading draws the bar and
     /// never the root, whose every draw can make the room screen under it again (Carter, #62471: a thread being read
     /// from went away).
@@ -640,8 +642,8 @@ struct AuthenticatedRootView: View {
 
     private var theme: Binding<PocketThemePreference> {
         Binding(
-            get: { PocketThemePreference(rawValue: themeRaw) ?? .system },
-            set: { themeRaw = $0.rawValue }
+            get: { themeStore.preference },
+            set: { themeStore.set($0) }
         )
     }
 
@@ -758,6 +760,7 @@ struct AuthenticatedRootView: View {
         .onReceive(RootPreview.drawerRequests) { open in
             if open { panelState.open() } else { panelState.close() }
         }
+        .onReceive(RootPreview.themePicks) { theme.wrappedValue = $0 }
         .onAppear {
             guard RootPreview.isRequested else { return }
             let meter = RootPreview.meter

@@ -127,6 +127,11 @@ enum RootPreview {
     /// Opens or closes the side panel of a root hosted in a test, as the signals do in the preview.
     static func requestDrawer(_ open: Bool) { drawerSubject.send(open) }
 
+    /// A theme picked in a root hosted in a test, through the root's own theme binding: the one the side panel's
+    /// Appearance picker sets (its menu cannot be opened from a hosted test).
+    static let themePicks = PassthroughSubject<PocketThemePreference, Never>()
+    static func requestTheme(_ preference: PocketThemePreference) { themePicks.send(preference) }
+
     /// `-PocketRootThreadReading`: the newest message's thread, then its first reply read aloud, as taps would.
     private static func readInAThreadSoon() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
