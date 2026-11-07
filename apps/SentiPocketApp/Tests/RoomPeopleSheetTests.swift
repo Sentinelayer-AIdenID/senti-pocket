@@ -54,7 +54,9 @@ final class RoomPeopleSheetTests: XCTestCase {
     }
 
     func test_the_agents_you_work_with_show_where_the_room_offers_them() throws {
-        let room = RootPreviewAPI.midRoom
+        // The other room you own: the owner's test leaves its root on room-mid, where the agents are not offered, and
+        // a request for People reaches every root, so each test reads what its own room's People showed.
+        let room = RootPreviewAPI.longRoom
         try open(room, agentRequests: 0, addsAgents: true)
         let meter = RootPreview.meter
         // The room's read and who is here come with the room; People is opened once they have.
