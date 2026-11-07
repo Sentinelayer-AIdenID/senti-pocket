@@ -99,11 +99,13 @@ final class RoomPeopleSheetTests: XCTestCase {
         XCTAssertEqual(asked.count, 1, "Share invite link asks once")
         let ok = try XCTUnwrap(element("pocket.aiConsent.ok"), "the question's Agree")
         XCTAssertTrue(ok.accessibilityActivate(), "Agree is a button")
-        wait("the share sheet follows Agree", seconds: 10) { self.presented.contains { $0 is UIActivityViewController } }
+        wait("the share sheet follows Agree", seconds: 10) { self.showsShareSheet }
         watch(2)
         XCTAssertEqual(asked.count, 1, "and it is never asked again")
         print("BGAUDIT invite share: presenters \(String(describing: meter.invitePresenters[room])), questions \(asked.count), "
-              + "share sheet \(presented.contains { $0 is UIActivityViewController })")
+              + "share sheet \(showsShareSheet), presented "
+              + presented.map { shown in "\(type(of: shown))\(shown.children.map { child in "\(type(of: child))" })" }
+                .joined(separator: " > "))
         presented.last?.dismiss(animated: false)
         pump(0.5)
     }
@@ -113,6 +115,14 @@ final class RoomPeopleSheetTests: XCTestCase {
         for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix("pocket.aiConsent.") {
             UserDefaults.standard.removeObject(forKey: key)
         }
+    }
+
+    /// The system share sheet is up: presented over the root, or held inside what is (a SwiftUI sheet hosts it as a child).
+    private var showsShareSheet: Bool {
+        func holds(_ controller: UIViewController) -> Bool {
+            controller is UIActivityViewController || controller.children.contains(where: holds)
+        }
+        return presented.contains(where: holds)
     }
 
     /// What is presented over the root, from the bottom up.
