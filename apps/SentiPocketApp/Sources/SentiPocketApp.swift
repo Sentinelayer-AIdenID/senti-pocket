@@ -244,6 +244,8 @@ struct RootServices {
     var calendar: (any RoomCalendarServing & CalendarFeedServing)?
     /// Your blocks on the server (`/me/blocks`), for the account signed in; nil (a preview) keeps them on the phone.
     var blocks: (_ account: String?) -> (any BlockListClient)? = { _ in nil }
+    /// The existing End chat route; previews without it offer no destructive row action.
+    var chatLifecycle: (any ChatLifecycleServing)? = nil
 
     /// The Senti API as you.
     static func live() -> RootServices {
@@ -257,6 +259,8 @@ struct RootServices {
         // Typed room messages go straight to the Senti API as you, like the web; the gateway's confirm-and-receipt
         // flow stays for AI-drafted writes (the Pocket tab and voice replies).
         let sender = HTTPRoomMessageSender(apiBaseURL: apiURL)
+        let chatCredentials = ChatLifecycleAccountCredentials(apiBaseURL: apiURL,
+            urlSession: SentiHTTPTransportPolicy.protectedReadSession)
         return RootServices(
             sessions: transport,
             room: transport,
@@ -291,7 +295,10 @@ struct RootServices {
             readMarker: HTTPRoomReadMarker(apiBaseURL: apiURL),
             calendar: HTTPRoomCalendarClient(apiBaseURL: apiURL, urlSession: CalendarHTTP.session,
                                              tokenProvider: { SessionTokenStore.load() }),
-            blocks: { HTTPBlockListClient(apiBaseURL: apiURL, account: $0) }
+            blocks: { HTTPBlockListClient(apiBaseURL: apiURL, account: $0) },
+            chatLifecycle: HTTPChatLifecycleClient(apiBaseURL: apiURL,
+                urlSession: SentiHTTPTransportPolicy.protectedReadSession,
+                credentialProvider: { try await chatCredentials.current() }, leaveEnabled: ChatLifecycleFeatures.leaveEnabled)
         )
     }
 }
@@ -426,6 +433,8 @@ struct AuthenticatedRootView: View {
     @StateObject private var directMessages: DirectMessagesCenter
     /// Your room folders: on when the server lists them (ROOM_FOLDERS_ENABLED), else nothing shows.
     @StateObject private var roomFolders: RoomFoldersCenter
+    /// Only its alert observes this center, so opening a confirmation does not rebuild the chat underneath.
+    @State private var chatLifecycle: ChatLifecycleCenter
     /// The calendar: on when the server answers its routes (CALENDAR_DRAFTS_ENABLED, CALENDAR_FEED_ENABLED). Kept, not
     /// watched, as the side panel's placement is: the room's calendar entry and Settings watch it, so its answers draw
     /// them and never the root (each draw of the root can make the room screen under it again).
@@ -457,6 +466,7 @@ struct AuthenticatedRootView: View {
     @State private var presentsPocket = false
     @State private var presentsActivity = false
     @State private var accountName: String?
+    @State private var signedInAccountId: String?
     /// A room being opened from its id while the server says what it is; any other open replaces it.
     @State private var pendingOpen: UUID?
     /// The room opened last, reopened when the app starts (as the big assistant apps reopen your last chat).
@@ -593,6 +603,16 @@ struct AuthenticatedRootView: View {
             onRoomsChanged: { sessions.send(.refreshSessions) },
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
         ))
+        let leaveEnabled = ChatLifecycleFeatures.leaveEnabled
+        _chatLifecycle = State(initialValue: ChatLifecycleCenter(
+            client: services.chatLifecycle, leaveEnabled: leaveEnabled,
+            lookup: { id in
+                guard let row = sessions.state.rows.first(where: { $0.sessionId == id }) else { return nil }
+                return ChatRowLifecycleAction.available(membershipRole: row.membershipRole,
+                                                         status: row.status, leaveEnabled: leaveEnabled)
+            },
+            onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
+        ))
         let calendarClient = services.calendar ?? CalendarOff()
         let identity = services.identity
         _calendar = State(initialValue: CalendarCenter(
@@ -656,6 +676,7 @@ struct AuthenticatedRootView: View {
                                 show(roomRoute(for: sessionId))
                             }
                         }
+                        .environment(\.chatRowLifecycle, signedInAccountId == nil ? nil : chatLifecycle.context(rows: sessions.state.rows))
                     }
                 }
                 .toolbar {
@@ -786,7 +807,11 @@ struct AuthenticatedRootView: View {
             }
         }
         .task {
-            accountName = await accountIdentity.currentAccount()?.login
+            let account = await accountIdentity.currentAccount()
+            guard !Task.isCancelled else { return }
+            chatLifecycle.setAccountId(account?.accountId)
+            signedInAccountId = account?.accountId
+            accountName = account?.login
         }
         .sheet(isPresented: $presentsNotifications) {
             NotificationsView(state: notifications.state) { intent in
@@ -879,6 +904,16 @@ struct AuthenticatedRootView: View {
         }
         .aiConsentPrompt($newRoomConsentHeld) { aiConsent.grant() }
         .modifier(RoomFolderSheets(center: roomFolders))
+        .modifier(ChatLifecycleAlerts(center: chatLifecycle) { roomId in
+            sessions.send(.refreshSessions)
+            if currentRoom?.sessionId == roomId || roomPath.contains(where: { $0.sessionId == roomId }) {
+                roomPath = []
+                currentRoom = nil
+                sessions.clearSelection()
+                lastRoomId = ""
+                closeDrawer()
+            }
+        })
         .sheet(isPresented: $presentsNewRoom) {
             if let creator = roomSender as? any RoomCreating {
                 NewRoomSheet(
@@ -1135,6 +1170,7 @@ struct AuthenticatedRootView: View {
             // Folders show only where they are on.
             onFolder: roomFolders.items == nil ? nil : { roomFolders.send($0) }
         )
+        .environment(\.chatRowLifecycle, signedInAccountId == nil ? nil : chatLifecycle.context(rows: sessions.state.rows))
     }
 
     /// A direct message with someone you blocked is not placed (`withoutDirectMessages`).

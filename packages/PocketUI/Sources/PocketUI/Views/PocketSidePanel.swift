@@ -585,6 +585,7 @@ public struct PocketSidePanel: View {
         .buttonStyle(.plain)
         .accessibilityLabel(Self.directAccessibilityLabel(name: name, isAgent: isAgent, isCurrent: isCurrent,
                                                           unread: activity.unread))
+        .modifier(RoomFolderContextMenu(roomId: room.id, filedIn: nil, send: nil))
         .accessibilityIdentifier("pocket.drawer.direct.\(room.id)")
     }
 
