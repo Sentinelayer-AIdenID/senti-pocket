@@ -19,9 +19,11 @@ final class LaunchUrgency: ObservableObject {
 /// out at you in a glow as the app shows through. It stays at least `shortest` so the motto can be read, never longer
 /// than `longest`, and leaves once the rooms are in. Opened by a notification, a link or a call, it leaves at once. Reduce Motion gets a
 /// plain fade. Tests and previews skip it.
+@MainActor
 struct LaunchSplash: View {
     /// The room list has loaded (or failed): the app underneath is ready.
     let isReady: Bool
+    private let onGone: () -> Void
 
     static let shortest: TimeInterval = 2.0
     static let longest: TimeInterval = 3.0
@@ -31,12 +33,20 @@ struct LaunchSplash: View {
     static let motto = "Every agent. One room. Proof of everything."
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @ObservedObject private var urgency = LaunchUrgency.shared
+    @ObservedObject private var urgency: LaunchUrgency
     @State private var appeared = false
     @State private var growing = false
     @State private var leaving = false
-    @State private var gone = CrashReporter.isTestRun
+    @State private var gone: Bool
     @State private var shownAt = Date()
+
+    init(isReady: Bool, skipsSplash: Bool = CrashReporter.isTestRun,
+         urgency: LaunchUrgency? = nil, onGone: @escaping () -> Void = {}) {
+        self.isReady = isReady
+        self.onGone = onGone
+        _urgency = ObservedObject(wrappedValue: urgency ?? .shared)
+        _gone = State(initialValue: skipsSplash)
+    }
 
     private static let glow = Color(red: 0.2, green: 0.95, blue: 0.55)
 
@@ -103,7 +113,10 @@ struct LaunchSplash: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
             guard !leaving else { return }
             withAnimation(reduceMotion ? .easeIn(duration: 0.45) : .easeIn(duration: Self.burst)) { leaving = true }
-            DispatchQueue.main.asyncAfter(deadline: .now() + Self.burst + 0.05) { gone = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.burst + 0.05) {
+                gone = true
+                onGone()
+            }
         }
     }
 }

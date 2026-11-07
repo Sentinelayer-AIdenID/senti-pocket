@@ -245,6 +245,7 @@ public struct PocketSidePanel: View {
         .background(PocketPalette.canvas.ignoresSafeArea())
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("pocket.drawer")
+        .modifier(ChatHintAnchor(context: .folders(hasFolders: onFolder != nil && !placement.shown.layout.folders.isEmpty)))
     }
 
     /// The title, the search, the shortcuts, and the Rooms line with New folder and See all.

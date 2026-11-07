@@ -28,6 +28,7 @@ public struct SessionListView: View {
         .navigationTitle(ChatListWords.title)
         .accessibilityIdentifier("pocket.sessions.screen")
         .pocketCanvas()
+        .modifier(ChatHintAnchor(context: .folders(hasFolders: folders?.isEmpty == false)))
     }
 
     private var sessionList: some View {

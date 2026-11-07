@@ -115,6 +115,7 @@ public struct RoomChatView: View {
                 restored: restoredDraft,
                 actions: composerActions,
                 hasRunningBox: state.hasRunningBox,
+                hasAgents: roster.current.contains { $0.kind != .person },
                 replying: replyTarget,
                 onCancelReply: { replyTarget = nil },
                 onIntent: send,
@@ -2814,6 +2815,7 @@ private struct RoomComposerBar: View {
     var actions = RoomComposerActions()
     /// A box still running is in the room: the placeholder says how to reach it.
     var hasRunningBox = false
+    var hasAgents = false
     /// The message this box answers, in its thread; nil writes to the room.
     var replying: RoomChatMessageRow?
     var onCancelReply: () -> Void = {}
@@ -2968,6 +2970,7 @@ private struct RoomComposerBar: View {
         let problem = composer.lengthProblem(for: outgoing)
         let canSend = !outgoing.isEmpty && problem == nil
         let suggestions = self.suggestions
+        Group {
         if composer.canPost {
             VStack(alignment: .leading, spacing: 0) {
             if let problem {
@@ -3212,6 +3215,9 @@ private struct RoomComposerBar: View {
                 .padding(.bottom, 6)
                 .accessibilityIdentifier("pocket.room.composerDisabled")
         }
+        }
+        .modifier(ChatHintAnchor(context: .chat(hasAgents: hasAgents, isEmpty: outgoing.isEmpty,
+                                               isFocused: isEditing), aboveComposer: true))
     }
 }
 
