@@ -405,6 +405,7 @@ public struct RoomChatView: View {
             // The reader scrolling lets go of a message they were taken to, and of the unread line being placed.
             .simultaneousGesture(DragGesture(minimumDistance: 8).onChanged { _ in
                 bottomWatch.readerScrolled = true
+                if bottomWatch.lineHeld { RoomScrollTrace.lineHold("let go: the reader's drag") }
                 bottomWatch.lineHeld = false
                 if heldAnchor != nil { heldAnchor = nil }
             }.onEnded { _ in
@@ -541,7 +542,10 @@ public struct RoomChatView: View {
             .modifier(RoomReaderScrolling { moving in
                 let wasMoving = bottomWatch.readerMoving
                 bottomWatch.readerMoving = moving
-                if moving { bottomWatch.lineHeld = false }
+                if moving, bottomWatch.lineHeld {
+                    RoomScrollTrace.lineHold("let go: the reader moving the list")
+                    bottomWatch.lineHeld = false
+                }
                 guard wasMoving, !moving else { return }
                 // The reader's drag and its coast are over: the reader's place again, and a follow held back while
                 // the list moved is made now (`RoomReaderPlace.Tracker.rested`).
@@ -824,6 +828,8 @@ public struct RoomChatView: View {
         // A room opened at a message (a link or notification) is positioned by `focus(onRow:proxy:)` instead.
         let position = reopensAtLine && state.rows.contains(.unreadDivider)
             ? RoomOpenPosition.unreadLine : state.openPosition(reopening: listEpoch > 0)
+        RoomScrollTrace.lineHold("open: \(position) (reopens at the line \(reopensAtLine), the line in the rows "
+            + "\(state.rows.contains(.unreadDivider)), list \(listEpoch))")
         reopensAtLine = false
         guard position == .latest || position == .unreadLine else { return }
         didInitialScroll = true
@@ -867,14 +873,30 @@ public struct RoomChatView: View {
     /// moves the list, the room is at its bottom, or it has been placed `RoomBottomWatch.lineHoldLimit` times.
     private func placeHeldLine(_ proxy: ScrollViewProxy) {
         bottomWatch.linePlaceQueued = false
-        guard bottomWatch.lineHeld, bottomWatch.isActive, !bottomWatch.readerScrolled, !bottomWatch.readerMoving,
-              !bottomWatch.atBottom, heldAnchor == nil, state.rows.contains(.unreadDivider),
-              bottomWatch.linePlacements < RoomBottomWatch.lineHoldLimit else {
+        guard bottomWatch.lineHeld else { return }
+        let letGo: String? = !bottomWatch.isActive ? "the room put away"
+            : bottomWatch.readerScrolled ? "the reader's drag"
+            : bottomWatch.readerMoving ? "the reader moving the list"
+            : heldAnchor != nil ? "a message the reader was taken to"
+            : !state.rows.contains(.unreadDivider) ? "no line in the rows"
+            : bottomWatch.linePlacements >= RoomBottomWatch.lineHoldLimit ? "the \(RoomBottomWatch.lineHoldLimit)-placement cap"
+            : nil
+        if let letGo {
+            RoomScrollTrace.lineHold("let go: \(letGo)")
             bottomWatch.lineHeld = false
             return
         }
+        let height = bottomWatch.reading.map(RoomBottomWatch.height) ?? bottomWatch.lineHeldHeight
+        // At the bottom, the room follows what arrives there: this placement is skipped, not the hold. A new list
+        // starts at its end before its scroll to the line, so its first readings count the reader at the bottom; the
+        // next change in the room's height tries again.
+        guard !bottomWatch.atBottom else {
+            RoomScrollTrace.lineHold("skipped at the bottom (height \(Int(height)))")
+            return
+        }
         bottomWatch.linePlacements += 1
-        bottomWatch.lineHeldHeight = bottomWatch.reading.map(RoomBottomWatch.height) ?? bottomWatch.lineHeldHeight
+        bottomWatch.lineHeldHeight = height
+        RoomScrollTrace.lineHold("placed #\(bottomWatch.linePlacements) (height \(Int(height)))")
         proxy.scrollTo(RoomChatRow.unreadDivider.id, anchor: Self.unreadLineAnchor)
     }
 
@@ -935,6 +957,7 @@ public struct RoomChatView: View {
     /// A linked message could not be loaded: open as the room normally opens (the latest messages, or the unread
     /// divider), or, when already open, go to the latest messages, instead of staying in older history.
     private func showLatest(_ proxy: ScrollViewProxy) {
+        if bottomWatch.lineHeld { RoomScrollTrace.lineHold("let go: the arrow to the latest") }
         bottomWatch.lineHeld = false
         guard didInitialScroll else {
             scrollToInitialPosition(proxy)
@@ -1201,13 +1224,18 @@ private final class RoomBottomWatch {
     /// The room opened at the line: hold it from here, from the room's height now.
     func holdLine() {
         lineHeld = true
+        linePlaceQueued = false
         linePlacements = 0
         lineHeldHeight = reading.map(Self.height) ?? 0
+        RoomScrollTrace.lineHold("armed (height \(Int(lineHeldHeight)), at the bottom \(atBottom), "
+            + "a reading \(reading != nil))")
     }
 
     /// Whether a reading shows the room's height changed while the line is held, and no placement is waiting yet.
     func lineMoved(by reading: RoomReaderPlace.Reading) -> Bool {
-        guard lineHeld, !linePlaceQueued, abs(Self.height(reading) - lineHeldHeight) > 0.5 else { return false }
+        guard lineHeld, abs(Self.height(reading) - lineHeldHeight) > 0.5 else { return false }
+        guard !linePlaceQueued else { return false }
+        RoomScrollTrace.lineHold("height \(Int(lineHeldHeight)) to \(Int(Self.height(reading))): a placement queued")
         linePlaceQueued = true
         return true
     }

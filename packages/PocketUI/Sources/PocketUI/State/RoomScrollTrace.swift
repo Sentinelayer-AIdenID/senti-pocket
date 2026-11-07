@@ -17,6 +17,7 @@ public enum RoomScrollTrace {
     private static var shortLandings = 0
     private static var retries = 0
     private static var gaveUp = 0
+    private static var lineEvents: [String] = []
 
     /// Test seams (DEBUG builds only; none in a release build): placed follows that move nothing, and how the room's
     /// one retry of such a follow goes, so the hosted tests can make a follow chain stop short at will.
@@ -128,6 +129,23 @@ public enum RoomScrollTrace {
         shortLandings = 0
         retries = 0
         gaveUp = 0
+        lineEvents = []
         lock.unlock()
+    }
+
+    /// The held New messages line's story since `start()`: how the room opened, the hold armed, the heights it saw, each
+    /// placement queued, made or skipped, and what let it go. Nothing is kept until the hosted tests start counting.
+    public static func lineHold(_ event: @autoclosure () -> String) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard counting, lineEvents.count < 200 else { return }
+        lineEvents.append(event())
+    }
+
+    /// What `lineHold` kept.
+    public static var lineHoldEvents: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return lineEvents
     }
 }

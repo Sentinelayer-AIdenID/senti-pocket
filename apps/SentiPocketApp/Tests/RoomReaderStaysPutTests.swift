@@ -455,6 +455,7 @@ final class RoomReaderStaysPutTests: XCTestCase {
     /// the line in view in the top half, and must not be taken for the bottom while it shows the line.
     func test_the_arrows_first_tap_from_up_a_long_history_opens_the_room_at_the_line() throws {
         try XCTSkipUnless(Self.readsGeometry, "the exact place reads the scroll view's geometry (iOS 18 and later)")
+        RoomScrollTrace.start()
         let room = Room(Self.messages(count: 120))
         room.keepsTheLine = true
         room.trimsForJumpDown = true
@@ -492,6 +493,7 @@ final class RoomReaderStaysPutTests: XCTestCase {
         }
         print("READER-STAYS-PUT first-tap line-top=\(lineTop.map { "\(Int($0))" } ?? "absent") end-below=\(Int(below)) "
             + "rows=\(room.state.rows.count) unread=\(room.unreadCount)")
+        for event in RoomScrollTrace.lineHoldEvents { print("READER-STAYS-PUT line-hold \(event)") }
         XCTAssertGreaterThan(below, -visible, "the new list is not a screen past its end: the room shows")
         let top = try XCTUnwrap(lineTop, "the New messages line is in view")
         XCTAssertGreaterThanOrEqual(top, 0, "the line is in view, below the top")
