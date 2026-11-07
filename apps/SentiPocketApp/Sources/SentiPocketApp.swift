@@ -637,6 +637,7 @@ struct AuthenticatedRootView: View {
     var body: some View {
         #if DEBUG
         let _ = RootPreview.meter.rootBodyRan()
+        let _ = RootPreview.meter.explainsRootBodies ? Self._printChanges() : ()
         #endif
         ZStack(alignment: .leading) {
             // The side panel sits underneath; opening it pushes the room aside as a card (Carter #55006). It is in the
