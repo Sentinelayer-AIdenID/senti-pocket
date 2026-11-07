@@ -534,6 +534,9 @@ public struct RoomChatThreadState: Equatable, Sendable {
     public let totalReplies: Int?
     /// The reply the thread was opened at is further back than a search may read at once: "Jump to the reply" goes on.
     public let focusMissing: Bool
+    /// The replies shown are further back than the newest (a long way back, the newest were let go): "Newest replies"
+    /// reads them again.
+    public let hasNewer: Bool
 
     public init(
         parent: RoomChatMessageRow,
@@ -547,7 +550,8 @@ public struct RoomChatThreadState: Equatable, Sendable {
         hasOlder: Bool = false,
         isLoadingOlder: Bool = false,
         totalReplies: Int? = nil,
-        focusMissing: Bool = false
+        focusMissing: Bool = false,
+        hasNewer: Bool = false
     ) {
         self.parent = parent
         self.replies = replies
@@ -561,6 +565,7 @@ public struct RoomChatThreadState: Equatable, Sendable {
         self.isLoadingOlder = isLoadingOlder
         self.totalReplies = totalReplies
         self.focusMissing = focusMissing
+        self.hasNewer = hasNewer
     }
 
     /// The sheet's title: the thread's whole count when known, else the replies loaded.
@@ -590,6 +595,7 @@ public struct RoomChatThreadInput: Equatable, Sendable {
     public let isLoadingOlder: Bool
     public let totalReplies: Int?
     public let focusMissing: Bool
+    public let hasNewer: Bool
 
     public init(
         sequenceId: Int64,
@@ -603,7 +609,8 @@ public struct RoomChatThreadInput: Equatable, Sendable {
         hasOlder: Bool = false,
         isLoadingOlder: Bool = false,
         totalReplies: Int? = nil,
-        focusMissing: Bool = false
+        focusMissing: Bool = false,
+        hasNewer: Bool = false
     ) {
         self.sequenceId = sequenceId
         self.replies = replies
@@ -617,6 +624,7 @@ public struct RoomChatThreadInput: Equatable, Sendable {
         self.isLoadingOlder = isLoadingOlder
         self.totalReplies = totalReplies
         self.focusMissing = focusMissing
+        self.hasNewer = hasNewer
     }
 }
 
@@ -1045,7 +1053,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 hasOlder: threadInput.hasOlder,
                 isLoadingOlder: threadInput.isLoadingOlder,
                 totalReplies: threadInput.totalReplies,
-                focusMissing: threadInput.focusMissing
+                focusMissing: threadInput.focusMissing,
+                hasNewer: threadInput.hasNewer
             )
         } else {
             self.thread = nil
@@ -1811,6 +1820,8 @@ public enum RoomChatIntent: Equatable, Sendable {
     case loadOlderReplies(sequenceId: Int64)
     /// Go on looking for the reply the thread was opened at, further back than a search reads at once.
     case continueToReply(sequenceId: Int64)
+    /// The open thread's newest replies again, when those shown are a long way back.
+    case jumpToNewestReplies(sequenceId: Int64)
     /// Send the open report.
     case sendReport(reason: RoomReportReason, note: String)
     case closeReport

@@ -22,6 +22,8 @@ private final class PagedThread: RoomTransport, @unchecked Sendable {
     }
 
     let pageSize: Int
+    /// How long each read of the thread takes, as a slow network answers.
+    var readDelay: UInt64 = 0
     let replies: [RoomReply]
     private let lock = NSLock()
     private var visible: Int
@@ -77,6 +79,7 @@ private final class PagedThread: RoomTransport, @unchecked Sendable {
             guard let beforeCursor else { return (false, visible) }
             return (failing.remove(beforeCursor) != nil, visible)
         }
+        if readDelay > 0 { try? await Task.sleep(nanoseconds: readDelay) }
         if fails { throw URLError(.timedOut) }
         let end = beforeCursor.flatMap { Int($0) } ?? count + 1
         let start = max(1, end - min(limit, pageSize))
@@ -184,11 +187,54 @@ final class BigThreadTests: XCTestCase {
         await room.replyPosted(to: 42)
         XCTAssertEqual(transport.reads.count, 2 + RoomChatCoordinator.threadGapPages)
         let ids = try XCTUnwrap(room.state.thread?.replies.map(\.id))
-        XCTAssertEqual(ids, (1_901...4_000).map(Self.id), "the newest pages, with nothing between them missing")
+        XCTAssertEqual(ids, (3_901...4_000).map(Self.id), "the newest page alone, with nothing between it and older pages")
         XCTAssertEqual(room.state.thread?.hasOlder, true)
         room.send(.loadOlderReplies(sequenceId: 42))
-        await waitUntil("scrolling up reads on from them") { room.state.thread?.replies.first?.id == Self.id(1_801) }
+        await waitUntil("scrolling up reads on from it") { room.state.thread?.replies.first?.id == Self.id(3_801) }
         room.pause()
+    }
+
+    /// One search reads up to 20,000 replies back. The thread holds 1,000 of them at most (every room update goes over
+    /// all it holds): older pages let the newest go, and "Newest replies" reads the newest again.
+    func test_a_long_search_holds_at_most_a_thousand_replies_and_offers_the_newest_again() async throws {
+        let transport = PagedThread(count: 25_000)
+        let room = coordinator(transport, focus: 42)
+        room.resume()
+        room.openThread(42, at: Self.id(5))
+        await waitUntil("the search stops at its last page") { room.state.thread?.focusMissing == true }
+        XCTAssertEqual(transport.reads.count, 1 + RoomChatCoordinator.threadSearchPages, "20,100 replies read")
+        XCTAssertEqual(RoomChatCoordinator.threadHeld, 1_000)
+        XCTAssertEqual(room.state.thread?.replies.map(\.id), (4_901...5_900).map(Self.id),
+                       "the oldest 1,000 read, in order: the newest were let go")
+        XCTAssertEqual(room.state.thread?.hasNewer, true, "the thread offers its newest again")
+        XCTAssertEqual(room.state.thread?.hasOlder, true)
+
+        room.send(.jumpToNewestReplies(sequenceId: 42))
+        await waitUntil("the newest are read again") {
+            room.state.thread?.hasNewer == false && room.state.thread?.isLoading == false
+                && room.state.thread?.replies.last?.id == Self.id(25_000)
+        }
+        XCTAssertEqual(room.state.thread?.replies.count, 100, "the newest page")
+        XCTAssertNil(room.state.thread?.focusReplyId, "no longer at the reply it was opened at")
+        XCTAssertEqual(room.state.thread?.focusMissing, false)
+        room.pause()
+    }
+
+    /// Leaving the room (or the app going to the background) pauses it: a search for the reply stops there, with at most
+    /// the read on its way, and "Jump to the reply" goes on from where it stopped.
+    func test_leaving_the_room_stops_a_search_for_the_reply() async throws {
+        let transport = PagedThread(count: 25_000)
+        transport.readDelay = 30_000_000
+        let room = coordinator(transport, focus: 42)
+        room.resume()
+        room.openThread(42, at: Self.id(5))
+        await waitUntil("the search is under way") { transport.reads.count >= 3 }
+        room.pause()
+        let left = transport.reads.count
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        XCTAssertLessThanOrEqual(transport.reads.count, left + 1, "at most the read on its way when the room was left")
+        XCTAssertLessThan(transport.reads.count, 1 + RoomChatCoordinator.threadSearchPages)
+        await waitUntil("Jump to the reply is offered") { room.state.thread?.focusMissing == true }
     }
 
     // MARK: - Opened at a reply
@@ -554,6 +600,8 @@ final class BigThreadTests: XCTestCase {
         let box = Self.views(in: window).compactMap { $0 as? UITextView }
             .first { $0.accessibilityIdentifier == "pocket.thread.composer" }
         XCTAssertEqual(box?.text, "Agreed, the paste check first.", "the kept reply is back in the box")
+        XCTAssertNotNil(HostedSummary.wait(for: "pocket.thread.composer.restoredAnswer", in: window, timeout: 5),
+                        "the box says it answers an earlier reply, and can stop")
         let send = try XCTUnwrap(HostedSummary.element("pocket.thread.send", in: window))
         XCTAssertTrue(send.accessibilityActivate())
         HostedSummary.pump(0.3)

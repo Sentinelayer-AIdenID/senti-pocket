@@ -33,8 +33,10 @@ public enum RenderTrace {
     private static var builtRoomBodies = 0
     private static var builtThreadLists = 0
     private static var builtThreadReplies = 0
-    /// The thread replies built since `resetThreadReplies()`, by id: a lazy list builds only those in sight.
+    /// The thread replies built since `resetThreadReplies()`, by id: a lazy list builds only those in sight. Kept only
+    /// once a test has called `resetThreadReplies()`: the app itself never keeps them.
     private static var threadRepliesBuilt: Set<String> = []
+    private static var recordsThreadReplies = false
     private static var furthestStrip = -1
 
     /// One row drawn (its body evaluated).
@@ -69,7 +71,7 @@ public enum RenderTrace {
     public static func builtThreadReply(_ id: String) {
         lock.lock()
         builtThreadReplies &+= 1
-        threadRepliesBuilt.insert(id)
+        if recordsThreadReplies { threadRepliesBuilt.insert(id) }
         lock.unlock()
     }
 
@@ -80,10 +82,11 @@ public enum RenderTrace {
         return threadRepliesBuilt
     }
 
-    /// Starts `threadRepliesBuiltSinceReset()` again from none.
+    /// Starts keeping `threadRepliesBuiltSinceReset()`, from none.
     public static func resetThreadReplies() {
         lock.lock()
         threadRepliesBuilt = []
+        recordsThreadReplies = true
         lock.unlock()
     }
 

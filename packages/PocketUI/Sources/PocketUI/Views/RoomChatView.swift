@@ -2386,6 +2386,27 @@ private struct RoomThreadComposer: View {
             .foregroundStyle(PocketPalette.textSecondary)
             .padding(.horizontal, 16)
             .padding(.top, 8)
+        } else if restoringAnswer != nil {
+            // Kept text answers a reply not loaded yet (on an older page): it still answers it, and can stop.
+            HStack(spacing: 6) {
+                Image(systemName: "arrowshape.turn.up.left")
+                Text("Replying to an earlier reply")
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Button {
+                    restoringAnswer = nil
+                    saveDraft()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Stop replying to the earlier reply")
+            }
+            .font(.caption)
+            .foregroundStyle(PocketPalette.textSecondary)
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+            .accessibilityIdentifier("pocket.thread.composer.restoredAnswer")
         }
         // Read once: each row looks at the one before it for its box's label.
         let suggestions = self.suggestions
@@ -2693,6 +2714,9 @@ private struct RoomThreadRepliesList: View {
                             replyRow(reply)
                         }
                     }
+                    if thread.hasNewer {
+                        newestRow
+                    }
                     ForEach(thread.pending) { pending in
                         RoomPendingRowView(
                             row: pending,
@@ -2728,6 +2752,12 @@ private struct RoomThreadRepliesList: View {
                 showFocusedReply(proxy)
             }
             .onChange(of: thread.focusMissing) { missing in if missing { scroll(to: Self.endAnchor, anchor: .bottom) } }
+            // Back at the newest replies (the shown ones were a long way back): the thread shows them from its end.
+            .onChange(of: thread.hasNewer) { newer in
+                guard !newer else { return }
+                shownFrom = nil
+                scroll(to: Self.endAnchor, anchor: .bottom)
+            }
             // Made once the rows it scrolls to are in the list: the first reply shown is set in the same update.
             .onChange(of: scrollRequest) { request in
                 guard let request else { return }
@@ -2819,6 +2849,24 @@ private struct RoomThreadRepliesList: View {
         guard let index = replies.firstIndex(where: { $0.id == anchor }) else { return }
         shownFrom = replies[max(0, index - Self.shownAtOnce)].id
         scroll(to: Self.replyAnchor(anchor), anchor: .top)
+    }
+
+    /// Below the replies shown when they are a long way back (the newest were let go): reads the newest again.
+    private var newestRow: some View {
+        Button {
+            send(.jumpToNewestReplies(sequenceId: thread.parent.sequenceId))
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.down.circle")
+                Text("Newest replies")
+            }
+            .font(.footnote.weight(.semibold))
+            .foregroundStyle(PocketPalette.accent)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("pocket.thread.newest")
     }
 
     /// The reply this thread was opened at is further back than one search reads: one tap reads on.
