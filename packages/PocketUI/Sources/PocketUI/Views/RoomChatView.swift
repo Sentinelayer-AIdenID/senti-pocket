@@ -2714,6 +2714,9 @@ private struct RoomThreadRepliesList: View {
                             replyRow(reply)
                         }
                     }
+                    if thread.hasLater {
+                        laterRow
+                    }
                     if thread.hasNewer {
                         newestRow
                     }
@@ -2849,6 +2852,32 @@ private struct RoomThreadRepliesList: View {
         guard let index = replies.firstIndex(where: { $0.id == anchor }) else { return }
         shownFrom = replies[max(0, index - Self.shownAtOnce)].id
         scroll(to: Self.replyAnchor(anchor), anchor: .top)
+    }
+
+    /// Below the newest reply loaded when the thread was opened at a reply short of its newest (one read around it):
+    /// reached by scrolling down, it loads the page after. A page that could not be read says so here too, where the
+    /// reader is.
+    private var laterRow: some View {
+        VStack(spacing: 4) {
+            if thread.isLoadingLater {
+                HStack(spacing: 8) {
+                    ProgressView()
+                    Text("Loading later replies…")
+                }
+            } else {
+                if let failure = thread.failureText {
+                    Text(failure).foregroundStyle(PocketPalette.warning)
+                }
+                Button("Load later replies") { send(.loadLaterReplies(sequenceId: thread.parent.sequenceId)) }
+                    .accessibilityIdentifier("pocket.thread.later")
+            }
+        }
+        .font(.footnote)
+        .foregroundStyle(PocketPalette.textSecondary)
+        .frame(maxWidth: .infinity)
+        .onAppear {
+            if settled, !thread.isLoadingLater { send(.loadLaterReplies(sequenceId: thread.parent.sequenceId)) }
+        }
     }
 
     /// Below the replies shown when they are a long way back (the newest were let go): reads the newest again.

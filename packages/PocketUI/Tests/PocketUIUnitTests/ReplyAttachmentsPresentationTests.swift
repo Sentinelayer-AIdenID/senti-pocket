@@ -58,6 +58,22 @@ final class ReplyAttachmentsPresentationTests: XCTestCase {
         XCTAssertEqual(unknown?.title, "1 reply", "the replies loaded, when the room has no count")
         XCTAssertEqual(unknown?.hasOlder, false)
         XCTAssertEqual(unknown?.focusMissing, false)
+        XCTAssertEqual(unknown?.hasLater, false)
+    }
+
+    /// A thread opened at a reply short of its newest (one read around it) says later replies are there, and when a
+    /// page of them is on its way.
+    func test_a_thread_opened_short_of_its_newest_says_later_replies_are_there() {
+        let reply = RoomChatReplyRow(id: "r1", authorName: "pat", isHuman: true, isOwn: false, text: "reply", date: nil,
+                                     isEdited: false)
+        let window = RoomChatPresentationState(
+            sessionId: "room", title: "Room", messages: [parent],
+            thread: RoomChatThreadInput(sequenceId: 7, replies: [reply], focusReplyId: "r1", hasOlder: true,
+                                        hasLater: true, isLoadingLater: true)
+        ).thread
+        XCTAssertEqual(window?.hasLater, true)
+        XCTAssertEqual(window?.isLoadingLater, true)
+        XCTAssertEqual(window?.hasNewer, false)
     }
 
     func test_a_reply_bell_has_its_own_mark() {

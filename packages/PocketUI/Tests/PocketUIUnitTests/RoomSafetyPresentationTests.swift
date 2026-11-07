@@ -242,7 +242,8 @@ final class RoomSafetyPresentationTests: XCTestCase {
             .loadOlder, .openThread(sequenceId: 1), .readAloud(id: "a", text: "b"), .messageOnScreen(id: "a", isOnScreen: true),
             .openReport(RoomReportTarget(sequenceId: 1, authorId: "human-sam", authorName: "sam")),
             .sendReport(reason: .spam, note: ""), .block(RoomBlockTarget(actorId: "human-sam", name: "sam")),
-            .revealBlocked(key: "msg:1"), .allowAIAgents, .declineAIAgents, .discardSend(clientId: "c")
+            .revealBlocked(key: "msg:1"), .allowAIAgents, .declineAIAgents, .discardSend(clientId: "c"),
+            .loadOlderReplies(sequenceId: 1), .loadLaterReplies(sequenceId: 1)
         ]
         XCTAssertFalse(others.contains(where: \.isRoomWrite))
     }
