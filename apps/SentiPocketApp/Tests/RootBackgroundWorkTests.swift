@@ -13,19 +13,38 @@ import XCTest
 /// and opening the side panel draws none of the room's rows and reads only what the panel shows that is not fresh.
 @MainActor
 final class RootBackgroundWorkTests: XCTestCase {
-    private var window: UIWindow?
+    private var window: UIWindow? {
+        didSet { if let shown = window?.rootViewController { Self.shown.append(Shown(controller: shown, test: name)) } }
+    }
     private var watching: AnyCancellable?
 
-    /// Each test reads only its own root's calendar entry: a window left by an earlier test could still write it.
+    /// What each test of this class put in a window (a root, or a room), held weakly: once its test is over nothing may
+    /// keep it alive. One left alive hears the next test's signals (the side panel's open and a room picked in it are
+    /// static subjects every root hears) and its draws and rooms count in that test's (the meter counts every root's
+    /// draws, and every room's).
+    private static var shown: [Shown] = []
+
+    private struct Shown {
+        weak var controller: UIViewController?
+        var test = ""
+    }
+
     override func setUp() {
         super.setUp()
+        let alive = Self.shown.filter { $0.controller != nil }.map(\.test)
+        XCTAssertEqual(alive.count, 0, "nothing an earlier test showed is still alive; still alive from: \(alive)")
         RootPreview.meter.forgetCalendarEntry()
     }
 
+    /// Torn down for real: the window hidden and emptied, then the run loop turned until what it showed is gone.
     override func tearDown() {
+        let shown = Shown(controller: window?.rootViewController)
         window?.isHidden = true
+        window?.rootViewController = nil
         window = nil
-        pump(0.4)
+        let end = Date().addingTimeInterval(10)
+        while Date() < end, shown.controller != nil { pump(0.1) }
+        XCTAssertNil(shown.controller, "what this test showed is gone once the test is over")
         UserDefaults.standard.removeObject(forKey: "pocket.lastRoomId")
         super.tearDown()
     }
