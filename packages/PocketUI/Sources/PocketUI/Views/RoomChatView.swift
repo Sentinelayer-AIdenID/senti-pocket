@@ -2372,9 +2372,13 @@ private struct RoomThreadSheet: View {
             // nothing, and a reading starting or stopping never lays the replies out again.
             .safeAreaInset(edge: .top, spacing: 0) {
                 if let readAloudBar {
-                    readAloudBar.content()
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 44)
+                    // The clear view holds the space while nothing is read: an empty bar alone reserves none.
+                    ZStack {
+                        Color.clear
+                        readAloudBar.content()
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 44)
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {

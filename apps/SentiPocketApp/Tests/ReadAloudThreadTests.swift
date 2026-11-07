@@ -20,6 +20,7 @@ final class ReadAloudThreadTests: XCTestCase {
     }
 
     override func tearDown() {
+        HostedSummary.turnOffAutomation()
         RootPreview.requestRoom(.stopReadingAloud)
         window?.rootViewController?.dismiss(animated: false)
         window?.isHidden = true
@@ -29,6 +30,8 @@ final class ReadAloudThreadTests: XCTestCase {
     }
 
     func test_reading_a_reply_aloud_keeps_its_thread_open_and_draws_no_root() throws {
+        // What VoiceOver reads is built only under UI automation (or an assistive technology).
+        try HostedSummary.turnOnAutomation()
         let api = RootPreviewAPI(postsPerSecond: 0, onePage: false, openRoomId: RootPreviewAPI.midRoom)
         UserDefaults.standard.set(RootPreviewAPI.midRoom, forKey: "pocket.lastRoomId")
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
@@ -141,6 +144,7 @@ final class ReadAloudThreadTests: XCTestCase {
     /// or stopping a reading never lays the list out again (#360: a top inset that changes keeps the list laying itself
     /// out).
     func test_a_reading_draws_its_bar_never_the_room_screen_and_never_places_the_list_again() throws {
+        try HostedSummary.turnOnAutomation()
         // room-long: the thread's test reads in room-mid, and each room's marks are its own.
         let window = try hostRoot(RootPreviewAPI.longRoom, links: IncomingLinkInbox())
         let meter = RootPreview.meter
