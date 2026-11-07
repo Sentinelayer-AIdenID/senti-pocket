@@ -25,7 +25,7 @@ extension RoomFoldersCenter {
     private func changePins(_ operation: (any RoomFolderPinsServing, String) async throws -> Void) async {
         guard !isPinSaving, let pinClient, let accountId = pinAccountId else { return }
         isPinSaving = true
-        notice = nil
+        if notice != nil { notice = nil }
         defer { isPinSaving = false }
         let outcome: PinOutcome
         do {

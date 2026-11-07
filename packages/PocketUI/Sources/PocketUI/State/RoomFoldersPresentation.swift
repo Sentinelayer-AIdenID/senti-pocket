@@ -355,8 +355,12 @@ public struct SidePanelLayout: Equatable, Sendable {
     /// Direct messages whose room is gone or not in the list.
     public let messages: [PocketSidePanel.Room]
     public let tree: RoomFolderTree
+    /// Pin capability and order are placed with the tree, never recalculated while the panel draws.
+    public let pinsAvailable: Bool
+    public let pinnedFolders: [RoomFolderItem]
 
-    public static let empty = SidePanelLayout(folders: [], rooms: [], messages: [], tree: .empty)
+    public static let empty = SidePanelLayout(folders: [], rooms: [], messages: [], tree: .empty,
+                                              pinsAvailable: false, pinnedFolders: [])
 
     public var isEmpty: Bool { folders.isEmpty && rooms.isEmpty && messages.isEmpty }
 
@@ -384,6 +388,9 @@ public struct SidePanelLayout: Equatable, Sendable {
             Entry(room: room, directs: newestFirst(nested[room.id] ?? []))
         }
         let tree = RoomFolderTree.build(folders ?? [])
+        let placedFolders = tree.nodes.map(\.folder)
+        let pinsAvailable = RoomFolderPinsPresentation.isAvailable(placedFolders)
+        let pinnedFolders = RoomFolderPinsPresentation.ordered(placedFolders)
         var filed: [String: [Entry]] = [:]
         var unfiled: [Entry] = []
         for room in plain {
@@ -409,7 +416,8 @@ public struct SidePanelLayout: Equatable, Sendable {
                           hasFolders: !node.childIds.isEmpty, unread: unread[node.id] ?? 0,
                           siblingIndex: node.siblingIndex, siblingCount: node.siblingCount)
         }
-        return SidePanelLayout(folders: sections, rooms: unfiled, messages: newestFirst(orphans), tree: tree)
+        return SidePanelLayout(folders: sections, rooms: unfiled, messages: newestFirst(orphans), tree: tree,
+                               pinsAvailable: pinsAvailable, pinnedFolders: pinnedFolders)
     }
 
     /// One line of the side panel's list, in order, with what it shows. Ids are stable across reads.
@@ -503,8 +511,8 @@ public struct SidePanelLayout: Equatable, Sendable {
     }
 }
 
-/// The side panel's placed rooms, kept ready: the tree and the lines are made off the main thread when the rooms or the
-/// folders change, and written only when what shows changed, so opening the panel or a poll that finds nothing new
+/// The side panel's placed rooms, kept ready: the tree, pin order and lines are made off the main thread when the rooms
+/// or folders change, and written only when what shows changed, so opening the panel or a poll that finds nothing new
 /// lays nothing out on the main thread. The folded folders are kept here too, in the same place and form as before.
 @MainActor
 public final class SidePanelPlacement: ObservableObject {

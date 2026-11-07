@@ -1097,6 +1097,7 @@ struct AuthenticatedRootView: View {
     /// The side panel. Its rooms and folders are placed off the main thread, and only when the room list or your
     /// folders change: opening it, and a read that finds nothing new, place nothing.
     private var sidePanel: some View {
+        RoomFolderPinControlsView(controls: roomFolders.pinControls) { pinSaving, pinActionsAvailable in
         PocketSidePanel(
             placement: sidePanelPlacement,
             currentRoomId: currentRoom?.sessionId,
@@ -1146,11 +1147,12 @@ struct AuthenticatedRootView: View {
                 }
             } : nil,
             folderNotice: roomFolders.notice,
-            pinSaving: roomFolders.isPinSaving,
-            pinActionsAvailable: roomFolders.canChangePins,
+            pinSaving: pinSaving,
+            pinActionsAvailable: pinActionsAvailable,
             // Folders show only where they are on.
             onFolder: roomFolders.items == nil ? nil : { roomFolders.send($0) }
         )
+        }
     }
 
     /// A direct message with someone you blocked is not placed (`withoutDirectMessages`).

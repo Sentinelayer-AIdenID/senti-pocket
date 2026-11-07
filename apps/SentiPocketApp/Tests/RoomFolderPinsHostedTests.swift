@@ -54,6 +54,35 @@ final class RoomFolderPinsHostedTests: XCTestCase {
         }
     }
 
+    /// Mutant: stop observing the isolated controls in the panel wrapper. The real group and progress never update.
+    func test_pin_controls_update_the_existing_panel_without_replacing_its_placement() throws {
+        let controls = RoomFolderPinControls()
+        let folder = RoomFolderItem(id: "pin-fixture", name: "Planning", position: 0,
+                                    pinnedPosition: 0, supportsPinning: true)
+        let placement = SidePanelPlacement(rooms: [], folders: [folder])
+        let window = try HostedSummary.host(RoomFolderPinControlsView(controls: controls) { saving, available in
+            PocketSidePanel(
+                placement: placement, currentRoomId: nil, unreadNotifications: 0, accountName: "Member",
+                theme: .constant(.system), onSelectRoom: { _ in }, onAllRooms: {}, onNotifications: {}, onCalls: {},
+                onActivity: {}, onSettings: {}, pinSaving: saving, pinActionsAvailable: available, onFolder: { _ in }
+            )
+        })
+        defer { HostedSummary.close(window) }
+        XCTAssertNotNil(HostedSummary.wait(for: "pocket.drawer.folder.pin-fixture.menu", in: window))
+        XCTAssertNil(HostedSummary.element("pocket.drawer.pinnedFolders", in: window))
+
+        controls.setAvailable(true)
+        XCTAssertNotNil(HostedSummary.wait(for: "pocket.drawer.pinnedFolders", in: window))
+        controls.setSaving(true)
+        HostedSummary.pump(0.3)
+        XCTAssertTrue(HostedSummary.elements(in: window).contains { $0.accessibilityLabel == "Saving pinned folders" })
+        controls.setSaving(false)
+        controls.setAvailable(false)
+        HostedSummary.pump(0.3)
+        XCTAssertNil(HostedSummary.element("pocket.drawer.pinnedFolders", in: window))
+        XCTAssertEqual(placement.builds, 1, "control state never runs folder placement again")
+    }
+
     func test_the_actual_pinned_group_scrolls_at_phone_width_in_light_and_dark() throws {
         let folders = (0..<10).map {
             RoomFolderItem(id: "f-\($0)", name: "Planning \($0 + 1)", position: $0,

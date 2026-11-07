@@ -425,8 +425,7 @@ public struct PocketSidePanel: View {
     @ViewBuilder
     private var placedRooms: some View {
         let rows = placement.shown.rows
-        let pinsAvailable = pinActionsAvailable
-            && RoomFolderPinsPresentation.isAvailable(placement.shown.layout.tree.nodes.map(\.folder))
+        let pinsAvailable = pinActionsAvailable && placement.shown.layout.pinsAvailable
         if rows.isEmpty {
             emptyLine("No rooms yet")
         }

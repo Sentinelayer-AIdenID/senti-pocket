@@ -43,7 +43,11 @@ final class RoomFoldersCenter: ObservableObject {
     /// What the server said about the name in the open sheet (a name already used, a change that did not save).
     @Published private(set) var sheetProblem: String?
     @Published private(set) var isSaving = false
-    @Published var isPinSaving = false
+    let pinControls = RoomFolderPinControls()
+    var isPinSaving: Bool {
+        get { pinControls.isSaving }
+        set { pinControls.setSaving(newValue) }
+    }
     /// The folder whose delete waits on your confirmation.
     @Published var deleting: RoomFolder?
     /// Which read of the folders is the newest, and whether a move is on its way.
@@ -52,7 +56,7 @@ final class RoomFoldersCenter: ObservableObject {
 
     let client: any RoomFoldersServing
     let pinClient: (any RoomFolderPinsServing)?
-    @Published private(set) var pinAccountId: String?
+    private(set) var pinAccountId: String?
     var canChangePins: Bool { pinClient != nil && pinAccountId != nil }
     /// Reads the room list again: where each room is filed is its `folderId` there.
     private let onRoomsChanged: @MainActor () -> Void
@@ -70,6 +74,7 @@ final class RoomFoldersCenter: ObservableObject {
     func setPinAccountId(_ value: String?) {
         guard pinAccountId != value else { return }
         pinAccountId = value
+        pinControls.setAvailable(canChangePins)
         readRevision += 1
     }
 

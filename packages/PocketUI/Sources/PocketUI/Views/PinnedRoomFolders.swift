@@ -48,11 +48,8 @@ struct PinnedRoomFolders: View {
     let scrollTo: (String) -> Void
     @State private var dropTarget: String?
 
-    private var folders: [RoomFolderItem] { placement.shown.layout.tree.nodes.map(\.folder) }
-    private var pins: [RoomFolderItem] { RoomFolderPinsPresentation.ordered(folders) }
-
     var body: some View {
-        let shown = pins
+        let shown = placement.shown.layout.pinnedFolders
         if !shown.isEmpty {
             VStack(alignment: .leading, spacing: 4) {
                 HStack {

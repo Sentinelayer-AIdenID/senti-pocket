@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import PocketContracts
 import PocketSyncClient
@@ -572,6 +573,34 @@ final class RoomFoldersCenterTests: XCTestCase {
         folders.setPinAccountId(nil)
         XCTAssertFalse(folders.canChangePins)
         XCTAssertTrue(RoomFolderPinsPresentation.isAvailable(folders.items ?? []), "sign-in readiness is not a server capability")
+    }
+
+    /// Mutants: publish pin busy/account state through the root's center, or clear an already nil notice on a pin.
+    func test_pin_control_changes_and_an_unchanged_reload_notify_only_the_panel() async {
+        let fake = FakeRoomFolders([RoomFolder(id: "a", name: "Work", position: 0,
+                                               pinnedPosition: 0, supportsPinning: true)])
+        let folders = RoomFoldersCenter(client: fake, onRoomsChanged: {}, pinClient: fake)
+        await folders.refresh()
+        var rootWrites = 0
+        var saving: [Bool] = []
+        var available: [Bool] = []
+        let rootWatch = folders.objectWillChange.sink { rootWrites += 1 }
+        let savingWatch = folders.pinControls.$isSaving.sink { saving.append($0) }
+        let availableWatch = folders.pinControls.$isAvailable.sink { available.append($0) }
+        defer { rootWatch.cancel(); savingWatch.cancel(); availableWatch.cancel() }
+
+        folders.setPinAccountId("account-a")
+        folders.setPinAccountId("account-a")
+        XCTAssertEqual(available, [false, true], "unchanged readiness does not publish twice")
+        XCTAssertEqual(rootWrites, 0)
+        await folders.setPinned("a", pinned: true)
+        XCTAssertEqual(fake.calls, ["list", "pin a", "list"], "the real pin and authoritative reload ran")
+        XCTAssertEqual(saving, [false, true, false], "the panel sees both ends of the write")
+        XCTAssertEqual(rootWrites, 0, "pin progress and an unchanged response never notify the root")
+
+        folders.setPinAccountId(nil)
+        XCTAssertEqual(available, [false, true, false])
+        XCTAssertEqual(rootWrites, 0, "account readiness is observed only below the root")
     }
 
     func test_changed_pins_reload_the_servers_new_membership_and_order() async {
