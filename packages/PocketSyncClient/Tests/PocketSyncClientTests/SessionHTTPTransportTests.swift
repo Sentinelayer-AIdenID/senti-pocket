@@ -380,6 +380,117 @@ final class SessionHTTPTransportTests: XCTestCase {
                      "an API without pages has none")
     }
 
+    /// A thread opened at a reply reads ONE window around it (`aroundActionId`, sentinelayer-api #1199), with no
+    /// cursor: its answer names the reply it is around and gives a cursor each way. The page after is read with
+    /// `afterCursor`.
+    func test_a_thread_opened_at_a_reply_reads_one_window_around_it_and_on_from_it() async throws {
+        let reply = "9b2f7a40-0000-4000-8000-000000040000"
+        let transport = makeTransport { request in
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            let around = query.contains { $0.name == "aroundActionId" }
+            let body = around
+                ? #"{"actions":[],"projection":{},"auditWindow":{"hasMore":true,"nextCursor":"w1.older"},"#
+                    + #""anchoredActionId":"9b2f7a40-0000-4000-8000-000000040000","beforeCursor":"w1.older","#
+                    + #""afterCursor":"w1.newer"}"#
+                : #"{"actions":[],"projection":{},"auditWindow":{"hasMore":true,"nextCursor":"w1.page-older"},"#
+                    + #""anchoredActionId":null,"beforeCursor":"w1.page-older","afterCursor":null}"#
+            return (self.http(request, status: 200), Data(body.utf8))
+        }
+        let window = try await transport.roomActions(sessionId: "room_1", targetSequenceId: 42, limit: 500,
+                                                     aroundActionId: reply)
+        XCTAssertEqual(window.anchoredActionId, reply)
+        XCTAssertEqual(window.nextCursor, "w1.older", "scrolling up reads on from its older side")
+        XCTAssertEqual(window.afterCursor, "w1.newer")
+        let later = try await transport.roomActions(sessionId: "room_1", targetSequenceId: 42, limit: 100,
+                                                    afterCursor: try XCTUnwrap(window.afterCursor))
+        XCTAssertNil(later.afterCursor, "the newest page has nothing after it")
+        XCTAssertNil(later.anchoredActionId)
+
+        let queries = SessionTransportURLProtocol.capturedRequests().map {
+            Dictionary(uniqueKeysWithValues: (URLComponents(url: $0.url!, resolvingAgainstBaseURL: false)?
+                .queryItems ?? []).map { ($0.name, $0.value ?? "") })
+        }
+        XCTAssertEqual(queries, [
+            ["targetSequenceId": "42", "limit": "500", "aroundActionId": reply],
+            ["targetSequenceId": "42", "limit": "100", "afterCursor": "w1.newer"]
+        ], "one read around the reply, with no beforeCursor; then the page after")
+        XCTAssertEqual(SessionTransportURLProtocol.capturedRequests().first?.url?.path,
+                       "/api/v1/sessions/room_1/actions")
+
+        await expect(.invalidRequest) {
+            try await transport.roomActions(sessionId: "room_1", targetSequenceId: 42, limit: 500, aroundActionId: "")
+        }
+        await expect(.invalidRequest) {
+            try await transport.roomActions(sessionId: "room_1", targetSequenceId: 42, limit: 500,
+                                            aroundActionId: "reply-40000")
+        }
+        await expect(.invalidRequest) {
+            try await transport.roomActions(sessionId: "room_1", targetSequenceId: 0, limit: 500, aroundActionId: reply)
+        }
+        await expect(.invalidRequest) {
+            try await transport.roomActions(sessionId: "room_1", targetSequenceId: 42, limit: 501,
+                                            aroundActionId: reply)
+        }
+        await expect(.invalidRequest) {
+            try await transport.roomActions(sessionId: "room_1", targetSequenceId: 42, limit: 100, afterCursor: "")
+        }
+        await expect(.invalidRequest) {
+            try await transport.roomActions(sessionId: "room_1", targetSequenceId: 42, limit: 100,
+                                            afterCursor: String(repeating: "c", count: 513))
+        }
+        XCTAssertEqual(SessionTransportURLProtocol.capturedRequests().count, 2,
+                       "an id or a cursor that cannot be one is never sent")
+    }
+
+    /// A reply not in the thread is the API's own 404 (`ACTION_NOT_FOUND`), told apart from a room this account cannot
+    /// read: any other 404 keeps the membership boundary, and so does that code on a read that does not ask for it.
+    func test_a_reply_not_in_the_thread_is_told_apart_from_a_room_not_readable() async {
+        let reply = "9b2f7a40-0000-4000-8000-000000040000"
+        func around(answering status: Int, _ body: String) async -> Error? {
+            let transport = makeTransport { request in (self.http(request, status: status), Data(body.utf8)) }
+            do {
+                _ = try await transport.roomActions(sessionId: "room_1", targetSequenceId: 42, limit: 500,
+                                                    aroundActionId: reply)
+                return nil
+            } catch {
+                return error
+            }
+        }
+        let gone = await around(answering: 404, #"{"error":{"code":"ACTION_NOT_FOUND","message":"Reply not found."}}"#)
+        XCTAssertNotNil(gone as? RoomActionNotFound, "\(String(describing: gone))")
+        let wrapped = await around(answering: 404, #"{"detail":{"error":{"code":"ACTION_NOT_FOUND"}}}"#)
+        XCTAssertNotNil(wrapped as? RoomActionNotFound, "\(String(describing: wrapped))")
+        let room = await around(answering: 404, #"{"error":{"code":"SESSION_NOT_FOUND"}}"#)
+        XCTAssertEqual(room as? SessionTransportError, .accessDenied, "a room this account cannot read")
+        let bare = await around(answering: 404, "")
+        XCTAssertEqual(bare as? SessionTransportError, .accessDenied)
+        let failed = await around(answering: 503, #"{"error":{"code":"ACTION_NOT_FOUND"}}"#)
+        XCTAssertEqual(failed as? SessionTransportError, .service(statusCode: 503))
+
+        let paged = makeTransport { request in
+            (self.http(request, status: 404), Data(#"{"error":{"code":"ACTION_NOT_FOUND"}}"#.utf8))
+        }
+        await expect(.accessDenied) {
+            try await paged.roomActions(sessionId: "room_1", targetSequenceId: 42, limit: 100, beforeCursor: "page-2")
+        }
+    }
+
+    /// A window's cursors and anchor that could not be one are none: nothing reads on from them.
+    func test_a_windows_cursor_or_anchor_that_cannot_be_one_is_none() throws {
+        func page(_ extra: String) throws -> RoomActionsPage {
+            try JSONDecoder().decode(RoomActionsPage.self,
+                                     from: Data((#"{"actions":[],"projection":{},"auditWindow":{},"# + extra).utf8))
+        }
+        XCTAssertNil(try page(#""afterCursor":""}"#).afterCursor)
+        XCTAssertNil(try page("\"afterCursor\":\"\(String(repeating: "c", count: 513))\"}").afterCursor)
+        XCTAssertNil(try page(#""afterCursor":7}"#).afterCursor)
+        XCTAssertEqual(try page(#""afterCursor":"w1.newer"}"#).afterCursor, "w1.newer")
+        XCTAssertNil(try page(#""anchoredActionId":""}"#).anchoredActionId)
+        XCTAssertNil(try page(#""anchoredActionId":null}"#).anchoredActionId)
+        XCTAssertNil(try JSONDecoder().decode(RoomActionsPage.self, from: Data(#"{"actions":[]}"#.utf8)).afterCursor,
+                     "a read that is not around a reply has none")
+    }
+
     private func expect<T>(
         _ expected: SessionTransportError,
         operation: () async throws -> T,

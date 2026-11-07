@@ -209,7 +209,8 @@ extension RoomChatIntent {
              .openLeaderboard, .closeLeaderboard, .focusHandled, .openBreakout, .openAttachment, .shareAttachment,
              .readAloud, .stopReadingAloud, .attachmentAppeared, .messageOnScreen, .replyOnScreen, .toggleRepeats,
              .peopleOpened, .openInvite, .keepLatestForJumpDown, .openReport, .sendReport, .closeReport, .block,
-             .revealBlocked, .allowAIAgents, .declineAIAgents, .loadOlderReplies, .continueToReply, .jumpToNewestReplies:
+             .revealBlocked, .allowAIAgents, .declineAIAgents, .loadOlderReplies, .loadLaterReplies, .continueToReply,
+             .jumpToNewestReplies:
             return false
         }
     }

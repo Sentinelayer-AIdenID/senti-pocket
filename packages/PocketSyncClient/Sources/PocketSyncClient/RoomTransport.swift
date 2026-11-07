@@ -11,6 +11,14 @@ public protocol RoomTransport: Sendable {
     /// The same, the page older than `beforeCursor` (a page's `nextCursor`); nil reads the newest page.
     func roomActions(sessionId: String, targetSequenceId: Int64?, limit: Int, beforeCursor: String?) async throws
         -> RoomActionsPage
+    /// One thread opened at one of its replies, in one read however far back it is: up to `limit` actions around it
+    /// (`aroundActionId`, sentinelayer-api #1199), with `anchoredActionId` and a cursor each way. A reply not in the
+    /// thread throws `RoomActionNotFound`; an API without this read answers with the thread's newest page.
+    func roomActions(sessionId: String, targetSequenceId: Int64, limit: Int, aroundActionId: String) async throws
+        -> RoomActionsPage
+    /// The page newer than `afterCursor` (a read around a reply's, or a page's read on from it).
+    func roomActions(sessionId: String, targetSequenceId: Int64, limit: Int, afterCursor: String) async throws
+        -> RoomActionsPage
     /// The breakouts started from this room that the viewer may see (metadata only).
     func roomBreakouts(parentSessionId: String, cursor: String?, limit: Int) async throws -> RoomBreakoutsPage
     /// A short-lived link to one attachment's bytes.
@@ -34,6 +42,18 @@ extension RoomTransport {
                             beforeCursor: String?) async throws -> RoomActionsPage {
         guard beforeCursor == nil else { return RoomActionsPage() }
         return try await roomActions(sessionId: sessionId, targetSequenceId: targetSequenceId, limit: limit)
+    }
+
+    /// Transports without reads around a reply answer as an API without them does: with the thread's newest page.
+    public func roomActions(sessionId: String, targetSequenceId: Int64, limit: Int,
+                            aroundActionId: String) async throws -> RoomActionsPage {
+        try await roomActions(sessionId: sessionId, targetSequenceId: targetSequenceId, limit: limit, beforeCursor: nil)
+    }
+
+    /// Transports without reads around a reply never give a newer page's cursor: there is nothing newer to read.
+    public func roomActions(sessionId: String, targetSequenceId: Int64, limit: Int,
+                            afterCursor: String) async throws -> RoomActionsPage {
+        RoomActionsPage()
     }
 
     /// Transports without breakout support show none.
