@@ -2202,10 +2202,11 @@ private struct RoomThreadSheet: View {
     /// Keeps the box's text on the phone as it is typed, for whatever it answers now: once typing pauses
     /// (`RoomDraftDebouncer`), and at once when the thread closes or the reply is sent.
     private func saveDraft() {
-        guard !keepsSavedDraft, restoringAnswer == nil, let drafts else { return }
+        guard !keepsSavedDraft, let drafts else { return }
         let text = draft
         let sequenceId = thread.parent.sequenceId
-        let reply = answering?.id
+        // Kept under the reply it answers, chosen or restored (whose row may be on a page not yet read).
+        let reply = answeringId
         draftWriter.schedule { drafts.save(text, thread: sequenceId, reply: reply) }
     }
 
@@ -2220,13 +2221,15 @@ private struct RoomThreadSheet: View {
         answerRestoredReply()
     }
 
-    /// The restored text answered a reply: answer it again once its row is loaded (the message, if it is gone).
+    /// The restored text answered a reply: answer it again once its row is loaded (the message, if it is gone). A long
+    /// thread opens on its newest page: while older pages are there to read, the reply may be on one of them, and a
+    /// send still answers it.
     private func answerRestoredReply() {
         guard let id = restoringAnswer else { return }
         if let row = thread.replies.first(where: { $0.id == id }) {
             answering = row
             restoringAnswer = nil
-        } else if !thread.isLoading {
+        } else if !thread.isLoading, !thread.hasOlder {
             restoringAnswer = nil
         }
     }

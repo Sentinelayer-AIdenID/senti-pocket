@@ -13,33 +13,39 @@ import XCTest
 // reply box, never the room or the replies.
 
 /// A thread of `count` replies on message 42, read as the API reads it: newest first, at most `pageSize` replies a read
-/// (fewer than asked, as a server may answer), each page giving the cursor of the one before. Its reads are kept.
+/// (fewer than asked, as a server may answer), each page giving the cursor of the one before. Its reads are kept. It can
+/// grow to `capacity` replies, as new ones arrive.
 private final class PagedThread: RoomTransport, @unchecked Sendable {
     struct Read: Equatable {
         let limit: Int
         let cursor: String?
     }
 
-    let count: Int
     let pageSize: Int
     let replies: [RoomReply]
     private let lock = NSLock()
+    private var visible: Int
     private var kept: [Read] = []
     private var failing: Set<String> = []
 
-    init(count: Int, pageSize: Int = .max) {
-        self.count = count
+    init(count: Int, pageSize: Int = .max, capacity: Int? = nil) {
+        let capacity = max(count, capacity ?? count)
+        visible = count
         self.pageSize = pageSize
-        replies = (1...count).map { index in
+        replies = (1...capacity).map { index in
             RoomReply(id: BigThreadTests.id(index), targetSequenceId: 42,
                       authorId: index.isMultiple(of: 2) ? "build-agent" : "review-agent",
-                      text: BigThreadTests.text(index, of: count),
+                      text: BigThreadTests.text(index, of: capacity),
                       createdAt: String(format: "2026-11-05T%02ld:%02ld:%02ld.000000+00:00",
                                         index / 3_600 % 24, index / 60 % 60, index % 60))
         }
     }
 
+    var count: Int { lock.withLock { visible } }
     var reads: [Read] { lock.withLock { kept } }
+
+    /// Replies up to `count` have arrived.
+    func grow(to count: Int) { lock.withLock { visible = min(count, replies.count) } }
 
     /// The read with this cursor fails, once.
     func failOnce(before cursor: String) { lock.withLock { _ = failing.insert(cursor) } }
@@ -66,10 +72,10 @@ private final class PagedThread: RoomTransport, @unchecked Sendable {
             return RoomActionsPage(byTarget: [42: RoomReactionSummary(targetSequenceId: 42, counts: ["reply": count],
                                                                       replyTotal: count)])
         }
-        let fails = lock.withLock { () -> Bool in
+        let (fails, count) = lock.withLock { () -> (Bool, Int) in
             kept.append(Read(limit: limit, cursor: beforeCursor))
-            guard let beforeCursor else { return false }
-            return failing.remove(beforeCursor) != nil
+            guard let beforeCursor else { return (false, visible) }
+            return (failing.remove(beforeCursor) != nil, visible)
         }
         if fails { throw URLError(.timedOut) }
         let end = beforeCursor.flatMap { Int($0) } ?? count + 1
@@ -141,6 +147,47 @@ final class BigThreadTests: XCTestCase {
 
         await room.replyPosted(to: 42)
         XCTAssertEqual(room.state.thread?.replies.count, 200, "a read of the newest page after a send keeps the older ones")
+        room.pause()
+    }
+
+    /// More replies arrived while the thread was open than its newest page holds: the next read reads back until it
+    /// meets the replies loaded, so none between is left out.
+    func test_a_read_after_more_than_a_page_arrived_leaves_no_reply_out() async throws {
+        let transport = PagedThread(count: 1_000, capacity: 1_150)
+        let room = coordinator(transport)
+        room.resume()
+        room.send(.openThread(sequenceId: 42))
+        await waitUntil("the newest page is read") { room.state.thread?.replies.count == 100 }
+        transport.grow(to: 1_150)
+        await room.replyPosted(to: 42)
+        XCTAssertEqual(Array(transport.reads.suffix(2)), [PagedThread.Read(limit: 100, cursor: nil),
+                                                          PagedThread.Read(limit: 500, cursor: "1051")],
+                       "the newest page, then back to meet the replies loaded")
+        let ids = try XCTUnwrap(room.state.thread?.replies.map(\.id))
+        XCTAssertEqual(ids, (551...1_150).map(Self.id), "every reply from the oldest loaded to the newest, once each")
+        room.send(.loadOlderReplies(sequenceId: 42))
+        await waitUntil("scrolling up reads on from the oldest reply loaded") {
+            room.state.thread?.replies.first?.id == Self.id(451)
+        }
+        XCTAssertEqual(transport.reads.last, PagedThread.Read(limit: 100, cursor: "551"))
+        room.pause()
+    }
+
+    /// Too many arrived to meet within a few pages: the newest pages stand alone, and scrolling up reads on from them.
+    func test_a_read_too_far_from_the_replies_loaded_starts_from_the_newest() async throws {
+        let transport = PagedThread(count: 1_000, capacity: 4_000)
+        let room = coordinator(transport)
+        room.resume()
+        room.send(.openThread(sequenceId: 42))
+        await waitUntil("the newest page is read") { room.state.thread?.replies.count == 100 }
+        transport.grow(to: 4_000)
+        await room.replyPosted(to: 42)
+        XCTAssertEqual(transport.reads.count, 2 + RoomChatCoordinator.threadGapPages)
+        let ids = try XCTUnwrap(room.state.thread?.replies.map(\.id))
+        XCTAssertEqual(ids, (1_901...4_000).map(Self.id), "the newest pages, with nothing between them missing")
+        XCTAssertEqual(room.state.thread?.hasOlder, true)
+        room.send(.loadOlderReplies(sequenceId: 42))
+        await waitUntil("scrolling up reads on from them") { room.state.thread?.replies.first?.id == Self.id(1_801) }
         room.pause()
     }
 
@@ -241,7 +288,7 @@ final class BigThreadTests: XCTestCase {
 
     /// Message 42 with a thread of `count` long replies open (the newest `count`, numbered up to `newest`).
     private static func openThread(count: Int = 1_000, newest: Int = 1_000, focus: Int? = nil, hasOlder: Bool = false,
-                                   focusMissing: Bool = false) -> RoomChatPresentationState {
+                                   focusMissing: Bool = false, draftKey: String? = nil) -> RoomChatPresentationState {
         let parent = RoomChatMessageInput(id: "evt-42", sequenceId: 42, kind: .message, authorId: "review-agent",
                                           authorName: "review-agent", isHuman: false, text: "Two findings so far.",
                                           timestamp: "2026-11-05T00:00:00.000000+00:00")
@@ -253,7 +300,8 @@ final class BigThreadTests: XCTestCase {
         return RoomChatPresentationState(
             sessionId: "room-big", title: "Review", messages: [parent], connection: .live,
             thread: RoomChatThreadInput(sequenceId: 42, replies: replies, canReply: true, focusReplyId: focus.map(id),
-                                        hasOlder: hasOlder, totalReplies: newest, focusMissing: focusMissing)
+                                        hasOlder: hasOlder, totalReplies: newest, focusMissing: focusMissing),
+            draftKey: draftKey
         )
     }
 
@@ -350,6 +398,34 @@ final class BigThreadTests: XCTestCase {
         print("THREADFOCUS built \(built.count) of 1,000 replies to show reply 600")
         XCTAssertTrue(built.contains(Self.id(600)))
         XCTAssertLessThan(built.count, 200, "it went to the reply, not through the thousand")
+    }
+
+    /// A reply kept on the phone answers a reply on an older page: the thread opens on its newest page, and the reply
+    /// sent still answers that one, not the message (its row has not loaded, but it may be on a page not yet read).
+    func test_a_kept_reply_to_a_reply_further_back_still_answers_it() throws {
+        let key = RoomComposerDraft.savedKey(sessionId: "room-big-\(UUID().uuidString)", account: "big-thread-test")
+        let drafts = RoomReplyDrafts(base: key)
+        drafts.save("Agreed, the paste check first.", thread: 42, reply: Self.id(5))
+        defer { drafts.save("", thread: 42, reply: Self.id(5)) }
+        var sent: [RoomChatIntent] = []
+        let window = try host(Self.openThread(count: 100, newest: 1_000, hasOlder: true, draftKey: key)) {
+            sent.append($0)
+        }
+        defer { HostedSummary.close(window) }
+        HostedSummary.pump(0.5)
+        let box = Self.views(in: window).compactMap { $0 as? UITextView }
+            .first { $0.accessibilityIdentifier == "pocket.thread.composer" }
+        XCTAssertEqual(box?.text, "Agreed, the paste check first.", "the kept reply is back in the box")
+        let send = try XCTUnwrap(HostedSummary.element("pocket.thread.send", in: window))
+        XCTAssertTrue(send.accessibilityActivate())
+        HostedSummary.pump(0.3)
+        let replied = sent.compactMap { intent -> String? in
+            guard case .sendReplyToReply(let sequenceId, let replyId, _) = intent, sequenceId == 42 else { return nil }
+            return replyId
+        }
+        XCTAssertEqual(replied, [Self.id(5)], "it answers the reply it was written to")
+        XCTAssertFalse(sent.contains { if case .sendReply = $0 { return true } else { return false } },
+                       "never the message instead")
     }
 
     /// The reply it was opened at is further back than a search reads: the thread shows its newest reply, and "Jump to

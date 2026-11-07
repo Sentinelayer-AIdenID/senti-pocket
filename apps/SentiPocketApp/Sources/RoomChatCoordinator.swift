@@ -1547,6 +1547,9 @@ final class RoomChatCoordinator: ObservableObject {
     /// once: the API reads 120 a minute for each person and room. Further back, the thread offers to go on.
     static let threadSearchPageSize = 500
     static let threadSearchPages = 40
+    /// More arrived since the last read than its newest page holds: at most this many pages (of 500) are read back to
+    /// meet the replies loaded. Further apart, the newest pages stand alone and scrolling up reads on from them.
+    static let threadGapPages = 4
 
     /// Reads the open thread's newest page. The first read replaces the summary's few replies shown while it was on
     /// its way; a later one (after a send, an edit or a reaction) merges into every page loaded, so the reader keeps
@@ -1559,9 +1562,38 @@ final class RoomChatCoordinator: ObservableObject {
                                                        limit: Self.threadPageSize, beforeCursor: nil)
             noteReplyAttachmentSupport(page.replyAttachments)
             guard openThreadSequence == sequenceId, threadGeneration == generation else { return }
-            let newest = page.replies.filter { $0.targetSequenceId == sequenceId }
+            var newest = page.replies.filter { $0.targetSequenceId == sequenceId }
             if threadRead {
-                threadReplies = Self.merged(threadReplies, newest)
+                // The newest page must meet what is loaded, or the replies between would never show: read back until
+                // it does.
+                let known = Set(threadReplies.map(\.id))
+                var cursor = page.nextCursor
+                var pages = 0
+                while !known.isEmpty, !newest.contains(where: { known.contains($0.id) }), let before = cursor,
+                      pages < Self.threadGapPages {
+                    let more = try await transport.roomActions(sessionId: sessionId, targetSequenceId: sequenceId,
+                                                               limit: Self.threadSearchPageSize, beforeCursor: before)
+                    guard openThreadSequence == sequenceId, threadGeneration == generation else { return }
+                    newest = Self.merged(more.replies.filter { $0.targetSequenceId == sequenceId }, newest)
+                    cursor = more.nextCursor
+                    pages += 1
+                }
+                if newest.contains(where: { known.contains($0.id) }) {
+                    // Read back past the oldest reply loaded: the page before is the one before the last page read.
+                    if let first = newest.first, let oldest = threadReplies.first,
+                       (first.createdAt, first.id) < (oldest.createdAt, oldest.id) {
+                        threadOlderCursor = cursor
+                    }
+                    threadReplies = Self.merged(threadReplies, newest)
+                } else {
+                    // Still apart (or nothing was loaded to meet): the newest pages stand alone, read on from them. An
+                    // older page on its way belongs to the pages dropped.
+                    threadReplies = newest
+                    threadOlderCursor = cursor
+                    threadGeneration &+= 1
+                    threadLoadingOlder = false
+                    threadSearching = false
+                }
             } else {
                 threadReplies = newest
                 threadOlderCursor = page.nextCursor
