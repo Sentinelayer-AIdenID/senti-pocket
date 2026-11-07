@@ -589,13 +589,13 @@ private enum QuestionSettingsAccessibility {
             "label": object.accessibilityLabel ?? "",
             "isAccessibilityElement": object.isAccessibilityElement,
             "accessibilityElementsHidden": object.accessibilityElementsHidden,
-            "accessibilityFrame": NSStringFromCGRect(object.accessibilityFrame),
+            "accessibilityFrame": NSCoder.string(for: object.accessibilityFrame),
         ]
         if let view = object as? UIView {
             result["isHidden"] = view.isHidden
             result["alpha"] = view.alpha
             result["attachedToTestWindow"] = view === window || view.window === window
-            result["frame"] = NSStringFromCGRect(view.frame)
+            result["frame"] = NSCoder.string(for: view.frame)
         }
         return result
     }
