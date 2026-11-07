@@ -47,8 +47,6 @@ final class RoomChatCoordinator: ObservableObject {
         var sentAt: Date?
     }
     private var pending: [PendingSend] = []
-    /// Run once a send's POST succeeds (a shared crash report is marked handled only then).
-    private var sentCallbacks: [String: () -> Void] = [:]
     /// Sends not yet confirmed, kept on the phone so a relaunch retries them under the same client id.
     private let outbox: RoomSendOutbox?
     /// The account key the outbox is read and written under, fixed when the room opens (the ids learned later never
@@ -1672,13 +1670,6 @@ final class RoomChatCoordinator: ObservableObject {
         return RoomComposerState(canPost: true, disabledReason: nil, maximumLength: HTTPRoomMessageSender.maximumLength)
     }
 
-    /// Sends a crash report the person chose to share, and calls `onSent` only once the room accepted it: a send that
-    /// fails or is cut off leaves the report unhandled, so it is offered again instead of being lost.
-    func sendCrashReport(_ text: String, onSent: @escaping () -> Void) {
-        guard let clientId = enqueueSend(text) else { return }
-        sentCallbacks[clientId] = onSent
-    }
-
     @discardableResult
     private func enqueueSend(_ raw: String) -> String? {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1753,7 +1744,6 @@ final class RoomChatCoordinator: ObservableObject {
                 guard let self else { return }
                 self.updatePending(clientId) { $0.status = .sent; $0.sentAt = self.now() }
                 self.forgetUnconfirmed(clientId)
-                self.sentCallbacks.removeValue(forKey: clientId)?()
                 if let draftKey { RoomComposerDraft.forgetSaved(key: draftKey, sent: item.text) }
                 self.onFeedback?(.sent)
                 // Pull the echo now instead of waiting for the stream or the next poll.

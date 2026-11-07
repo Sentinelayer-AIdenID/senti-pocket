@@ -25,6 +25,8 @@ import PocketUI
 /// - `-PocketRootRoom member`: a room where you are a contributor, not its owner.
 /// - `-PocketRootPeople`: People opens a moment after launch. `-PocketRootAgentRequests <n>`: that many agent requests
 ///   wait in every room. `-PocketRootAddAgents`: the rooms you own offer the agents you work with.
+/// - `-PocketRootCrashOffer`: one made-up crash report waits to be offered, and sending it is answered by the preview,
+///   so the offer (`CrashReportOffer`) shows a moment after launch.
 /// - `-PocketRootThreadReading`: a moment after launch, the open room's newest message opens its thread and its first
 ///   reply is read aloud (made-up words), for pictures of the Listen bar over a thread.
 /// - `-PocketRootInlineReplies`: every message with replies shows its newest reply in the room, as a row to answer in
@@ -62,11 +64,25 @@ enum RootPreview {
 
     static func requestPeople() { peopleRequests.send(()) }
 
+    static var offersCrashReport: Bool { ProcessInfo.processInfo.arguments.contains("-PocketRootCrashOffer") }
+
+    /// The made-up report: a crash with a few steps and frames, nothing from a real run.
+    static func madeUpCrashReport(at date: Date = Date()) -> CrashReport {
+        CrashReport(id: "preview-crash-1", kind: .crash, at: date.addingTimeInterval(-20 * 60), build: "2026110600",
+                    system: "iOS 26.1", device: "iPhone17,5", reason: "EXC_BREAKPOINT (SIGTRAP), made up for the preview",
+                    frames: ["SentiPocketApp +0x0001a2b4", "SwiftUI +0x0049f210", "UIKitCore +0x00d1c0e8"],
+                    binaries: ["SentiPocketApp 00000000-0000-4000-8000-0000000000a1",
+                               "SwiftUI 00000000-0000-4000-8000-0000000000a2",
+                               "UIKitCore 00000000-0000-4000-8000-0000000000a3"],
+                    trail: ["opened room", "opened side panel", "closed side panel", "opened room"])
+    }
+
     @MainActor
     static func rootView(whisperModel: WhisperModelProvisioningCoordinator, incomingLinks: IncomingLinkInbox) -> some View {
         if ProcessInfo.processInfo.arguments.contains("-PocketRootPeople") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 4) { requestPeople() }
         }
+        if offersCrashReport { CrashReporter.shared.offerForPreview(madeUpCrashReport()) }
         if ProcessInfo.processInfo.arguments.contains("-PocketRootThreadReading") { readInAThreadSoon() }
         // The root reopens the room opened last once the room list has loaded, as the app does after a launch.
         UserDefaults.standard.set(openRoomId ?? "", forKey: "pocket.lastRoomId")
@@ -385,7 +401,8 @@ final class RootPreviewAPI: @unchecked Sendable {
             notificationMarker: self, callLog: self, waiting: self, checkpoints: self, directMessages: self,
             roomFolders: self, admissionDecider: self, sender: sender, actionSender: sender, ticketWriter: self,
             ticketLeases: InMemoryTicketLeaseStore(), ticketExtras: self, identity: self, receipts: self, readMarker: self,
-            registersPush: false, agentContacts: self
+            registersPush: false, crashReports: RootPreview.offersCrashReport ? RootPreviewCrashReports() as any CrashReportSending : nil,
+            agentContacts: self
         )
     }
 
@@ -844,6 +861,20 @@ extension RootPreviewAPI: AgentContactsServing {
     func addAgent(_ agentId: String, to sessionId: String) async throws -> AddedAgent {
         try? await Task.sleep(nanoseconds: 300_000_000)
         return AddedAgent(agentId: agentId, status: "approved", addedAt: Date())
+    }
+}
+
+/// The preview's answer to a sent crash report: taken, after a moment. Its credential is made up, with an account.
+private struct RootPreviewCrashReports: CrashReportSending {
+    func currentToken() -> String? {
+        let claims = Data(#"{"sub":"preview-alex"}"#.utf8).base64EncodedString()
+            .replacingOccurrences(of: "=", with: "").replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+        return "e30." + claims + ".preview"
+    }
+
+    func send(_ payload: CrashReportPayload, token: String) async -> CrashReportSendResult {
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        return .accepted
     }
 }
 
