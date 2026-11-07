@@ -207,7 +207,7 @@ struct RoomInviteRows: View {
     }
 }
 
-// MARK: - Agents you work with (contract draft 2: GET /api/v1/me/contacts?kind=agent, POST /sessions/{id}/agents)
+// MARK: - Agents you work with (GET /api/v1/me/contacts?kind=agent, a page at a time; POST /sessions/{id}/agents)
 
 /// An agent you work with (`GET /api/v1/me/contacts?kind=agent`).
 struct AgentContact: Equatable, Identifiable, Sendable {
@@ -219,11 +219,20 @@ struct AgentContact: Equatable, Identifiable, Sendable {
     let canAdd: Bool
 }
 
-/// The answer to adding an agent: approved to join, or joined already.
+/// One page of the agents you work with, and where the next starts (`nextCursor`; nil: this was the last).
+struct AgentContactsPage: Equatable, Sendable {
+    let contacts: [AgentContact]
+    let nextCursor: String?
+}
+
+/// The answer to adding an agent, as the API gives it: `{"agentId", "status", "addedAt"}`. Only "approved" (a one-use
+/// approval for it to join) counts as added.
 struct AddedAgent: Equatable, Sendable {
     let agentId: String
     let status: String
     let addedAt: Date?
+
+    var isApproved: Bool { status == "approved" }
 }
 
 enum AddAgentError: Error, Equatable {
@@ -231,25 +240,29 @@ enum AddAgentError: Error, Equatable {
     case notAllowed
     /// 404: no agent of yours by that id.
     case unknown
-    /// 409: it is in the room already.
-    case alreadyInTheRoom
+    /// 409: the agent is already a member of this chat.
+    case alreadyMember
     case failed
 }
 
 protocol AgentContactsServing: Sendable {
-    func agentContacts() async throws -> [AgentContact]
+    /// A page of the agents you work with: the first with `cursor` nil, then each `nextCursor` unchanged.
+    func agentContacts(cursor: String?) async throws -> AgentContactsPage
     func addAgent(_ agentId: String, to sessionId: String) async throws -> AddedAgent
 }
 
-/// One agent's row: Add, in your rooms (not yours to add), added and joining, or in the room.
+/// One agent's row: Add, in your rooms (not yours to add), added and joining, already a member of this chat (the
+/// API's 409), or in the room (its presence shows it).
 enum AgentContactRowState: Equatable {
     case add
     case inYourRooms
     case joining
+    case alreadyInThisChat
     case inTheRoom
 
-    static func of(_ contact: AgentContact, added: Bool, present: Bool) -> AgentContactRowState {
+    static func of(_ contact: AgentContact, added: Bool, member: Bool, present: Bool) -> AgentContactRowState {
         if present { return .inTheRoom }
+        if member { return .alreadyInThisChat }
         if added { return .joining }
         return contact.canAdd ? .add : .inYourRooms
     }
@@ -260,6 +273,11 @@ enum AgentContactRowState: Equatable {
 final class AgentContactsModel: ObservableObject {
     @Published private(set) var contacts: [AgentContact] = []
     @Published private(set) var added: Set<String> = []
+    /// Agents the API said are already members of this chat (409).
+    @Published private(set) var members: Set<String> = []
+    /// Where the next page starts; nil once the last page is read.
+    @Published private(set) var nextCursor: String?
+    @Published private(set) var loadingMore = false
     @Published private(set) var adding: Set<String> = []
     @Published private(set) var problem: String?
     /// Who is in the room now, by id (lowercased): an agent added shows as in the room once it is here.
@@ -267,6 +285,9 @@ final class AgentContactsModel: ObservableObject {
     let sessionId: String
     private let service: any AgentContactsServing
     private var loaded = false
+    private var pages = 0
+    /// At most this many pages of 50 are read (500 agents); past it the list says so.
+    static let pageCap = 10
 
     init(sessionId: String, service: any AgentContactsServing) {
         self.sessionId = sessionId
@@ -277,10 +298,34 @@ final class AgentContactsModel: ObservableObject {
         guard !loaded else { return }
         loaded = true
         do {
-            contacts = try await service.agentContacts()
+            let page = try await service.agentContacts(cursor: nil)
+            contacts = page.contacts
+            nextCursor = page.nextCursor
+            pages = 1
         } catch {
             loaded = false
             problem = "Your agents couldn't be read. Try again in a moment."
+        }
+    }
+
+    /// More pages remain, within the cap: the list ends with a row that reads the next.
+    var hasMore: Bool { nextCursor != nil && pages < Self.pageCap }
+    /// More pages remain past the cap: the list says it shows the first ones.
+    var reachedCap: Bool { nextCursor != nil && pages >= Self.pageCap }
+
+    /// The next page, from where the last one ended, added to the list (an agent already listed is not listed again).
+    func loadMore() async {
+        guard let cursor = nextCursor, hasMore, !loadingMore else { return }
+        loadingMore = true
+        defer { loadingMore = false }
+        do {
+            let page = try await service.agentContacts(cursor: cursor)
+            let known = Set(contacts.map(\.id))
+            contacts += page.contacts.filter { !known.contains($0.id) }
+            nextCursor = page.nextCursor
+            pages += 1
+        } catch {
+            problem = "More of your agents couldn't be read. Try again."
         }
     }
 
@@ -290,10 +335,15 @@ final class AgentContactsModel: ObservableObject {
         problem = nil
         defer { adding.remove(contact.id) }
         do {
-            _ = try await service.addAgent(contact.id, to: sessionId)
+            let answer = try await service.addAgent(contact.id, to: sessionId)
+            // Added only as the answer says: this agent, approved to join.
+            guard answer.agentId == contact.id, answer.isApproved else {
+                problem = "\(contact.displayName) couldn't be added. Try again."
+                return
+            }
             added.insert(contact.id)
-        } catch AddAgentError.alreadyInTheRoom {
-            added.insert(contact.id)
+        } catch AddAgentError.alreadyMember {
+            members.insert(contact.id)
         } catch AddAgentError.notAllowed {
             problem = "Only the room's owner or an admin can add agents."
         } catch {
@@ -302,7 +352,8 @@ final class AgentContactsModel: ObservableObject {
     }
 
     func state(of contact: AgentContact) -> AgentContactRowState {
-        AgentContactRowState.of(contact, added: added.contains(contact.id), present: presentIds.contains(contact.id.lowercased()))
+        AgentContactRowState.of(contact, added: added.contains(contact.id), member: members.contains(contact.id),
+                                present: presentIds.contains(contact.id.lowercased()))
     }
 }
 
@@ -333,6 +384,22 @@ private struct RoomAgentContactRows: View {
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("pocket.room.people.agent.\(contact.id)")
             }
+            // More of your agents, a page at a time, read as the list's end comes into view (or on a tap).
+            if model.hasMore {
+                Button {
+                    Task { await model.loadMore() }
+                } label: {
+                    Label(model.loadingMore ? "Loading more agents…" : "Show more agents",
+                          systemImage: "ellipsis.circle")
+                }
+                .disabled(model.loadingMore)
+                .onAppear { Task { await model.loadMore() } }
+                .accessibilityIdentifier("pocket.room.people.agents.more")
+            } else if model.reachedCap {
+                Text("Showing your first \(AgentContactsModel.pageCap * 50) agents.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
             if let problem = model.problem {
                 Text(problem).font(.footnote).foregroundStyle(.red)
             }
@@ -361,6 +428,8 @@ private struct RoomAgentContactRows: View {
             Text("In your rooms").font(.caption).foregroundStyle(.secondary)
         case .joining:
             Text("Added, joining…").font(.caption).foregroundStyle(.secondary)
+        case .alreadyInThisChat:
+            Text("Already in this chat").font(.caption).foregroundStyle(.secondary)
         case .inTheRoom:
             Text("In the room").font(.caption.weight(.semibold)).foregroundStyle(.green)
         }
@@ -381,11 +450,13 @@ struct HTTPAgentContacts: AgentContactsServing, @unchecked Sendable {
     var urlSession: URLSession = SentiHTTPTransportPolicy.protectedReadSession
     var tokenProvider: @Sendable () -> String? = { SessionTokenStore.load() }
 
-    func agentContacts() async throws -> [AgentContact] {
+    func agentContacts(cursor: String?) async throws -> AgentContactsPage {
         guard let apiBaseURL, var components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false),
               let token = tokenProvider(), !token.isEmpty else { throw AddAgentError.failed }
         components.percentEncodedPath = "/api/v1/me/contacts"
+        // The next page: the last one's `nextCursor`, passed back unchanged.
         components.queryItems = [URLQueryItem(name: "kind", value: "agent"), URLQueryItem(name: "limit", value: "50")]
+            + (cursor.map { [URLQueryItem(name: "cursor", value: $0)] } ?? [])
         guard let url = components.url else { throw AddAgentError.failed }
         var request = URLRequest(url: url)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -394,7 +465,23 @@ struct HTTPAgentContacts: AgentContactsServing, @unchecked Sendable {
         guard (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) == true else {
             throw AddAgentError.failed
         }
-        return Self.contacts(from: data)
+        return Self.page(from: data)
+    }
+
+    /// A contacts page: its agents, and `nextCursor` (null on the last page).
+    static func page(from data: Data) -> AgentContactsPage {
+        let json = try? JSONDecoder().decode(JSONValue.self, from: data)
+        let cursor = json?["nextCursor"]?.stringValue
+        return AgentContactsPage(contacts: contacts(from: data), nextCursor: (cursor?.isEmpty ?? true) ? nil : cursor)
+    }
+
+    /// The Add answer, read as the API gives it: an agentId and a status are both needed, never assumed.
+    static func added(from data: Data) -> AddedAgent? {
+        guard let json = try? JSONDecoder().decode(JSONValue.self, from: data),
+              let agentId = json["agentId"]?.stringValue, !agentId.isEmpty,
+              let status = json["status"]?.stringValue, !status.isEmpty else { return nil }
+        return AddedAgent(agentId: agentId, status: status,
+                          addedAt: json["addedAt"]?.stringValue.flatMap { ParsedSessionTimestamp($0).date })
     }
 
     /// The agent items of a contacts page: `items` (or a bare list), each with an id and a name to show; an item that
@@ -419,13 +506,12 @@ struct HTTPAgentContacts: AgentContactsServing, @unchecked Sendable {
         )
         switch http.statusCode {
         case 200..<300:
-            let json = try? JSONDecoder().decode(JSONValue.self, from: data)
-            return AddedAgent(agentId: json?["agentId"]?.stringValue ?? agentId,
-                              status: json?["status"]?.stringValue ?? "approved",
-                              addedAt: json?["addedAt"]?.stringValue.flatMap { ParsedSessionTimestamp($0).date })
+            guard let added = Self.added(from: data) else { throw AddAgentError.failed }
+            return added
         case 403: throw AddAgentError.notAllowed
         case 404: throw AddAgentError.unknown
-        case 409: throw AddAgentError.alreadyInTheRoom
+        // The API's 409: the agent is already a member of this chat.
+        case 409: throw AddAgentError.alreadyMember
         default: throw AddAgentError.failed
         }
     }

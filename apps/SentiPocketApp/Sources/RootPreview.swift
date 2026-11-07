@@ -871,13 +871,13 @@ extension RootPreviewAPI: RoomReceiptsClient, RoomReadMarking {
 
 /// The agents you work with: two of your own, one you meet in your rooms. Made up.
 extension RootPreviewAPI: AgentContactsServing {
-    func agentContacts() async throws -> [AgentContact] {
-        [AgentContact(id: "plan-agent", displayName: "plan-agent", lastActiveAt: started.addingTimeInterval(-600),
+    func agentContacts(cursor: String?) async throws -> AgentContactsPage {
+        AgentContactsPage(contacts: [AgentContact(id: "plan-agent", displayName: "plan-agent", lastActiveAt: started.addingTimeInterval(-600),
                       sharedRooms: 3, canAdd: true),
          AgentContact(id: "ops-agent", displayName: "ops-agent", lastActiveAt: started.addingTimeInterval(-7_200),
                       sharedRooms: 2, canAdd: true),
          AgentContact(id: "helper-of-someone", displayName: "Someone's helper", lastActiveAt: started.addingTimeInterval(-86_400),
-                      sharedRooms: 1, canAdd: false)]
+                      sharedRooms: 1, canAdd: false)], nextCursor: nil)
     }
 
     func addAgent(_ agentId: String, to sessionId: String) async throws -> AddedAgent {

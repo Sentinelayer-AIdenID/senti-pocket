@@ -213,18 +213,27 @@ final class RoomPeopleSheetTests: XCTestCase {
 final class AgentContactsTests: XCTestCase {
     private final class Service: AgentContactsServing, @unchecked Sendable {
         private let lock = NSLock()
-        var answer: Result<AddedAgent, AddAgentError> = .success(AddedAgent(agentId: "", status: "approved", addedAt: nil))
+        /// The Add answer; nil answers with what was asked, approved.
+        var answer: Result<AddedAgent, AddAgentError>?
+        /// The pages, by the cursor that asks for each (nil: the first).
+        var pages: [String?: AgentContactsPage] = [nil: AgentContactsPage(contacts: [
+            AgentContact(id: "mine", displayName: "mine", lastActiveAt: nil, sharedRooms: 2, canAdd: true),
+            AgentContact(id: "theirs", displayName: "theirs", lastActiveAt: nil, sharedRooms: 1, canAdd: false)
+        ], nextCursor: nil)]
         private var calls: [String] = []
+        private var cursors: [String?] = []
         var added: [String] { lock.withLock { calls } }
+        var asked: [String?] { lock.withLock { cursors } }
 
-        func agentContacts() async throws -> [AgentContact] {
-            [AgentContact(id: "mine", displayName: "mine", lastActiveAt: nil, sharedRooms: 2, canAdd: true),
-             AgentContact(id: "theirs", displayName: "theirs", lastActiveAt: nil, sharedRooms: 1, canAdd: false)]
+        func agentContacts(cursor: String?) async throws -> AgentContactsPage {
+            lock.withLock { cursors.append(cursor) }
+            guard let page = pages[cursor] else { throw AddAgentError.failed }
+            return page
         }
 
         func addAgent(_ agentId: String, to sessionId: String) async throws -> AddedAgent {
             lock.withLock { calls.append("\(agentId) to \(sessionId)") }
-            return try answer.get()
+            return try answer?.get() ?? AddedAgent(agentId: agentId, status: "approved", addedAt: nil)
         }
     }
 
@@ -251,14 +260,103 @@ final class AgentContactsTests: XCTestCase {
         XCTAssertEqual(service.added.count, 1, "added once")
     }
 
-    func test_an_agent_already_in_the_room_counts_as_added() async {
+    /// The API's 409 means the agent is already a member of this chat: it says so, and waits for nothing.
+    func test_an_agent_already_a_member_shows_already_in_this_chat() async {
         let service = Service()
-        service.answer = .failure(.alreadyInTheRoom)
+        service.answer = .failure(.alreadyMember)
         let model = AgentContactsModel(sessionId: "room-1", service: service)
         await model.load()
         await model.add(model.contacts[0])
-        XCTAssertEqual(model.state(of: model.contacts[0]), .joining)
+        XCTAssertEqual(model.state(of: model.contacts[0]), .alreadyInThisChat, "Already in this chat, never joining")
         XCTAssertNil(model.problem)
+        await model.add(model.contacts[0])
+        XCTAssertEqual(service.added.count, 1, "not asked again")
+    }
+
+    /// Added only as the answer says: this agent, approved. Any other answer is no add, and says so.
+    func test_the_add_answers_status_decides_the_row() async {
+        let cases: [(AddedAgent, AgentContactRowState)] = [
+            (AddedAgent(agentId: "mine", status: "approved", addedAt: nil), .joining),
+            (AddedAgent(agentId: "mine", status: "pending", addedAt: nil), .add),
+            (AddedAgent(agentId: "someone-else", status: "approved", addedAt: nil), .add)
+        ]
+        for (answer, expected) in cases {
+            let service = Service()
+            service.answer = .success(answer)
+            let model = AgentContactsModel(sessionId: "room-1", service: service)
+            await model.load()
+            await model.add(model.contacts[0])
+            XCTAssertEqual(model.state(of: model.contacts[0]), expected, "\(answer)")
+            XCTAssertEqual(model.problem == nil, expected == .joining, "a refused answer says it was not added (\(answer))")
+        }
+    }
+
+    /// The audit: an agent of yours past the first 50 is reached. The list reads the next page from `nextCursor`
+    /// (passed back unchanged) at its end, finds the agent there and adds it; it stops at the cap and says so.
+    func test_an_addable_agent_on_the_second_page_is_found_and_added() async {
+        let service = Service()
+        let others = (1...50).map { AgentContact(id: "theirs-\($0)", displayName: "Theirs \($0)", lastActiveAt: nil,
+                                                 sharedRooms: 1, canAdd: false) }
+        let mine = AgentContact(id: "mine-on-page-2", displayName: "Mine", lastActiveAt: nil, sharedRooms: 1, canAdd: true)
+        service.pages = [nil: AgentContactsPage(contacts: others, nextCursor: "aa1.page-2"),
+                         "aa1.page-2": AgentContactsPage(contacts: [others[49], mine], nextCursor: nil)]
+        let model = AgentContactsModel(sessionId: "room-1", service: service)
+        await model.load()
+        XCTAssertFalse(model.contacts.contains(mine), "not on the first page")
+        XCTAssertTrue(model.hasMore, "the list ends with a row for more")
+        await model.loadMore()
+        XCTAssertEqual(service.asked, [nil, "aa1.page-2"], "the next page from the cursor, passed back unchanged")
+        XCTAssertEqual(model.contacts.count, 51, "an agent already listed is not listed again")
+        let found = model.contacts.first { $0.id == "mine-on-page-2" }
+        XCTAssertEqual(found, mine, "found on page 2")
+        guard let found else { return }
+        XCTAssertEqual(model.state(of: found), .add)
+        await model.add(found)
+        XCTAssertEqual(service.added, ["mine-on-page-2 to room-1"])
+        XCTAssertEqual(model.state(of: found), .joining)
+        XCTAssertFalse(model.hasMore, "the last page read")
+    }
+
+    func test_contacts_stop_at_the_cap_and_say_so() async {
+        let service = Service()
+        var pages: [String?: AgentContactsPage] = [:]
+        for index in 0..<15 {
+            let contact = AgentContact(id: "a\(index)", displayName: "A\(index)", lastActiveAt: nil, sharedRooms: 1, canAdd: true)
+            pages[index == 0 ? nil : "c\(index)"] = AgentContactsPage(contacts: [contact], nextCursor: "c\(index + 1)")
+        }
+        service.pages = pages
+        let model = AgentContactsModel(sessionId: "room-1", service: service)
+        await model.load()
+        for _ in 0..<20 { await model.loadMore() }
+        XCTAssertEqual(service.asked.count, AgentContactsModel.pageCap, "no more pages than the cap")
+        XCTAssertFalse(model.hasMore)
+        XCTAssertTrue(model.reachedCap, "the list says it shows the first ones")
+    }
+
+    /// The transport reads the Add answer as the API gives it, never assuming one: no agentId or no status is no add.
+    func test_the_add_answer_is_read_as_the_api_gives_it() throws {
+        let answer = try XCTUnwrap(HTTPAgentContacts.added(from: Data(
+            #"{"agentId": "forge", "status": "approved", "addedAt": "2026-11-07T12:00:00Z"}"#.utf8)))
+        XCTAssertEqual(answer.agentId, "forge")
+        XCTAssertEqual(answer.status, "approved")
+        XCTAssertTrue(answer.isApproved)
+        XCTAssertNotNil(answer.addedAt)
+        XCTAssertNil(HTTPAgentContacts.added(from: Data(#"{"agentId": "forge"}"#.utf8)), "no status: no add")
+        XCTAssertNil(HTTPAgentContacts.added(from: Data(#"{"status": "approved"}"#.utf8)), "no agentId: no add")
+        XCTAssertNil(HTTPAgentContacts.added(from: Data("".utf8)), "no body: no add")
+        XCTAssertFalse(try XCTUnwrap(HTTPAgentContacts.added(from: Data(#"{"agentId": "forge", "status": "pending"}"#.utf8)))
+            .isApproved)
+    }
+
+    func test_a_contacts_page_carries_its_next_cursor() {
+        let first = HTTPAgentContacts.page(from: Data("""
+        {"contacts": [{"id": "forge", "kind": "agent", "displayName": "forge", "sharedRooms": 2, "canAdd": true}],
+         "nextCursor": "aa1.next"}
+        """.utf8))
+        XCTAssertEqual(first.contacts.map(\.id), ["forge"])
+        XCTAssertEqual(first.nextCursor, "aa1.next")
+        XCTAssertNil(HTTPAgentContacts.page(from: Data(#"{"contacts": [], "nextCursor": null}"#.utf8)).nextCursor,
+                     "null: the last page")
     }
 
     func test_the_contacts_page_keeps_agents_with_a_name() {
