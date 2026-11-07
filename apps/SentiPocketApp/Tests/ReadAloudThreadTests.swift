@@ -168,7 +168,8 @@ final class ReadAloudThreadTests: XCTestCase {
     }
 
     /// Reading goes on when you leave its room (Carter, 10-30): the room you open shows the bar over its top, and its
-    /// title takes you back to the message.
+    /// title takes you back to the message. Opened at its unread line, the room keeps the line and the composer clear of
+    /// the bar: 44 pt over the top of the room, which may cover who is here and the pinned strip, never those.
     func test_a_reading_from_another_room_shows_its_bar_over_the_room_on_screen() throws {
         let links = IncomingLinkInbox()
         let window = try hostRoot(RootPreviewAPI.midRoom, links: links)
@@ -177,12 +178,35 @@ final class ReadAloudThreadTests: XCTestCase {
         wait("the room shows the bar", seconds: 10) { meter.readAloudBars["room"]?["bar"] != nil }
         XCTAssertNil(meter.readAloudBars["other"]?["bar"], "in its own room, the room's bar")
 
-        let url = try XCTUnwrap(URL(string: "https://sentinelayer.com/dashboard/sessions/\(RootPreviewAPI.longRoom)"))
+        // A room with unread messages opens at its unread line, a little below the top.
+        let unread = try XCTUnwrap(RootPreviewAPI.rooms.first { $0.direct == nil && $0.unread >= 12 }, "a room with unreads")
+        let url = try XCTUnwrap(URL(string: "https://sentinelayer.com/dashboard/sessions/\(unread.id)"))
         XCTAssertTrue(links.receive(url))
         wait("the other room shows the bar", seconds: 15) { meter.readAloudBars["other"]?["bar"] != nil }
+        wait("the room opens at its unread line", seconds: 10) { meter.unreadLines[unread.id] != nil }
+        pump(1.5)
         let bar = try XCTUnwrap(meter.readAloudBars["other"]?["bar"])
         XCTAssertLessThan(bar.minY, window.bounds.height * 0.3, "at the top of the room on screen (\(bar))")
+        XCTAssertLessThanOrEqual(bar.height, 44.5, "compact: one 44 pt line (\(bar.height) pt)")
+        let line = try XCTUnwrap(meter.unreadLines[unread.id])
+        XCTAssertGreaterThanOrEqual(line.minY, bar.maxY, "the bar never covers the unread line (\(line), bar \(bar))")
+        let composer = try XCTUnwrap(composerFrame(in: window), "the room's composer")
+        XCTAssertGreaterThanOrEqual(composer.minY, bar.maxY, "the bar never covers the composer (\(composer))")
+        print("BGAUDIT read aloud bar over another room: bar \(bar), unread line \(line), composer \(composer)")
         XCTAssertEqual(ReadAloudSource.shared.sessionId, RootPreviewAPI.midRoom, "still the first room's message")
+    }
+
+    /// The composer's text view, in the window: the lowest text view on screen.
+    private func composerFrame(in window: UIWindow) -> CGRect? {
+        var frames: [CGRect] = []
+        func walk(_ view: UIView) {
+            if let text = view as? UITextView, !text.isHidden, let frame = text.superview?.convert(text.frame, to: nil) {
+                frames.append(frame)
+            }
+            view.subviews.forEach(walk)
+        }
+        walk(window)
+        return frames.max { $0.maxY < $1.maxY }
     }
 
     private static let longText = (1...12).map { "This is sentence \($0) of the message." }.joined(separator: " ")

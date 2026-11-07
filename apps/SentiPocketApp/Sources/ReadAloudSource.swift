@@ -46,8 +46,8 @@ struct ReadAloudBarSlot: View {
         #endif
         Group {
             if let playback = reader.playback, shows(source.sessionId) {
+                // 44 pt and nothing around it: it floats over the page, which shows faintly through its material.
                 ReadAloudPlayer(reader: reader, playback: playback, onShowMessage: onShowMessage)
-                    .padding(.vertical, 4)
                     .transition(.move(edge: .top).combined(with: .opacity))
                     #if DEBUG
                     .onPreferenceChange(ReadAloudBarFrames.self) { frames in

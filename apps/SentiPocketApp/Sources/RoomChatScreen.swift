@@ -773,6 +773,10 @@ struct RoomChatScreen: View {
         #if DEBUG
         // A hosted test asks the room on screen for what a tap would.
         .onReceive(RootPreview.roomRequests) { intent in handle(intent) }
+        // Where the unread line is, for the hosted test that checks the Listen bar never covers it.
+        .onPreferenceChange(RoomUnreadLineFrame.self) { [sessionId = route.sessionId] frame in
+            RootPreview.meter.unreadLineLaidOut(sessionId, frame)
+        }
         #endif
         // A sheet, the side panel or a call's window covers the room: its moving parts (the presence ring) rest
         // underneath (#265, #269). The app's cover passes through as it is, read only by what rests.

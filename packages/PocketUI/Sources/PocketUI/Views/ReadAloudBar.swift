@@ -64,6 +64,16 @@ public enum ReadAloudBarIntent: Equatable, Sendable {
 
 /// Where the bar and its controls were laid out, by name ("bar", "title", "line", "pause", "close"), in the window: for
 /// the app's hosted tests (the bar sits at the top, one line, every control at least 44 pt and on the screen).
+/// Where the room's unread line was last laid out, in the window (DEBUG builds only): for the app's hosted tests, which
+/// check that the read-aloud bar floating over the room never covers it.
+public struct RoomUnreadLineFrame: PreferenceKey {
+    public static let defaultValue: CGRect? = nil
+
+    public static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
+        value = nextValue() ?? value
+    }
+}
+
 public struct ReadAloudBarFrames: PreferenceKey {
     public static let defaultValue: [String: CGRect] = [:]
 

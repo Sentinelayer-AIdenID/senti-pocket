@@ -575,6 +575,11 @@ public struct RoomChatView: View {
             }
             .padding(.vertical, 8)
             .accessibilityIdentifier("pocket.room.unreadDivider")
+            #if DEBUG
+            .background(GeometryReader { proxy in
+                Color.clear.preference(key: RoomUnreadLineFrame.self, value: proxy.frame(in: .global))
+            })
+            #endif
         case .message(let message):
             // A part of a file posted as base64 folds behind the file's card, unless its thread's parts are shown.
             if message.filePartOf.map(shownFileParts.contains) ?? true {
