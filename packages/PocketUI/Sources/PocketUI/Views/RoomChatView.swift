@@ -15,8 +15,9 @@ public struct RoomChatView: View {
     /// What is being read aloud (a `RoomReadAloud` id): its row shows a Stop button.
     private let readingAloudId: String?
 
-    /// The reply being typed in each thread, kept while the room is open: closing the sheet does not lose it.
-    @State private var threadDrafts: [Int64: String] = [:]
+    /// The reply being typed in each thread, kept while the room is open: closing the sheet does not lose it. A
+    /// reference, so typing never draws the room again: each keystroke in a thread used to (Carter, #62423).
+    @State private var threadDrafts = RoomThreadDraftStore()
     /// Opens a profile card from an avatar, where direct messages are on.
     @Environment(\.roomProfileOpener) private var profileOpener
     /// The pickers and viewers a thread opens over itself.
@@ -95,11 +96,8 @@ public struct RoomChatView: View {
     /// The message the room's box is answering (swipe to reply), sent to its thread.
     @State private var replyTarget: RoomChatMessageRow?
 
-    private func threadDraft(_ sequenceId: Int64) -> Binding<String> {
-        Binding(get: { threadDrafts[sequenceId] ?? "" }, set: { threadDrafts[sequenceId] = $0 })
-    }
-
     public var body: some View {
+        let _ = RenderTrace.built(.roomBody)
         Group {
             if state.isEmpty {
                 emptyOrFailure
@@ -152,9 +150,11 @@ public struct RoomChatView: View {
                     previews: state.attachmentPreviews,
                     mediaHost: sheetMediaHost,
                     draftKey: state.draftKey,
-                    send: send,
-                    draft: threadDraft(thread.parent.sequenceId)
+                    draftStore: threadDrafts,
+                    send: send
                 )
+                // Another thread opened in its place is another reply box, with its own text.
+                .id(thread.parent.sequenceId)
             }
         }
         .sheet(isPresented: Binding(
@@ -2132,8 +2132,12 @@ private struct RoomThreadSheet: View {
     /// The room's saved-text key for this account: the reply being written is kept on the phone under it
     /// (`RoomReplyDrafts`); nil keeps none.
     var draftKey: String?
+    /// The text typed in each thread while the room is open, so closing the sheet keeps it. Typing writes it without
+    /// drawing anything else.
+    let draftStore: RoomThreadDraftStore
     let send: (RoomChatIntent) -> Void
-    @Binding var draft: String
+    /// What is typed in the reply box: this sheet's own, so a keystroke draws the box, never the room or the replies.
+    @State private var draft = ""
     /// A sent reply's text stays saved until the server has it (the coordinator lets it go then); typing meanwhile is
     /// saved once that has had time to happen, as in the room's box.
     @State private var keepsSavedDraft = false
@@ -2158,8 +2162,6 @@ private struct RoomThreadSheet: View {
     /// `emptyComposer`).
     @State private var replySent: String?
     @State private var replyWrittenBack = RoomComposerWriteBack()
-    /// The thread's file parts are shown; otherwise they fold behind the file's card.
-    @State private var showsFileParts = false
     /// Writes the reply box's text a moment after typing pauses, not on every keystroke.
     @State private var draftWriter = RoomDraftDebouncer()
 
@@ -2252,81 +2254,47 @@ private struct RoomThreadSheet: View {
 
     var body: some View {
         NavigationStack {
-            ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        if thread.parent.hidesAsBlocked {
-                            RoomBlockedLine(identifier: "pocket.thread.blocked.parent") {
-                                send(.revealBlocked(key: RoomBlocking.revealKey(thread.parent)))
-                            }
-                        } else {
-                            Text(thread.parent.authorName)
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(thread.parent.isHuman ? PocketPalette.listening : PocketPalette.textPrimary)
-                            if thread.parent.filePartOf == nil || showsFileParts {
-                                ChatMarkdownView(text: thread.parent.text, ownHandles: ownHandles)
-                            }
-                        }
+            RoomThreadRepliesList(
+                thread: thread,
+                ownHandles: ownHandles,
+                readingAloudId: readingAloudId,
+                canReact: canReact,
+                canReport: canReport,
+                canBlock: canBlock,
+                media: media,
+                previews: previews,
+                blockingReplyId: blockingReply?.id,
+                asksAIConsent: asksAIConsent,
+                send: send,
+                onAnswer: { answer($0) },
+                onEdit: { reply in
+                    // Asked before the editor opens, so an edit is never written to be dropped.
+                    if asksAIConsent {
+                        consentHeld = AIConsentHeld({ editingReply = reply }, onDecline: { send(.declineAIAgents) })
+                    } else {
+                        editingReply = reply
                     }
-                    .padding(12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    ForEach(thread.parent.files) { card in
-                        RoomFileCardView(card: card, showsParts: showsFileParts) { showsFileParts.toggle() }
-                    }
-
-                    if thread.isLoading && thread.replies.isEmpty {
-                        ProgressView("Loading replies").frame(maxWidth: .infinity)
-                    }
-                    if let failure = thread.failureText {
-                        Text(failure).font(.footnote).foregroundStyle(PocketPalette.warning)
-                    }
-                    ForEach(thread.replies.filter { showsFileParts || $0.filePartOf == nil }) { reply in
-                        if reply.hidesAsBlocked {
-                            RoomBlockedLine(identifier: "pocket.thread.blocked.\(reply.id)") {
-                                send(.revealBlocked(key: RoomBlocking.revealKey(reply: reply.id)))
-                            }
-                            .id(Self.replyAnchor(reply.id))
-                            .padding(.leading, 12 + CGFloat(reply.depth) * 16)
-                        } else {
-                            replyRow(reply)
-                        }
-                    }
-                    ForEach(thread.pending) { pending in
-                        RoomPendingRowView(
-                            row: pending,
-                            recovery: RoomPendingRecovery(canPost: thread.canReply),
-                            onRetry: { send(.retrySend(clientId: pending.clientId)) },
-                            onDiscard: { send(.discardSend(clientId: pending.clientId)) },
-                            onEdit: {
-                                draft = RoomComposerDraft.restoring(pending.text, into: draft)
-                                send(.discardSend(clientId: pending.clientId))
-                            }
-                        )
-                    }
-                    // This thread's replies with files on their way, each with its pictures and progress.
-                    if let media {
-                        RoomMediaOutgoingList(board: media, thread: thread.parent.sequenceId)
-                    }
+                },
+                onBlock: { blockingReply = $0 },
+                onEditPending: { pending in
+                    draft = RoomComposerDraft.restoring(pending.text, into: draft)
+                    send(.discardSend(clientId: pending.clientId))
                 }
-                .padding(16)
-            }
-            .scrollDismissesKeyboard(.interactively)
-            // Opened at a reply (its notification): it comes into view once the replies are loaded.
+            )
+            // Drawn again only when what it shows changes: never as the reply box is typed in.
+            .equatable()
             .onAppear {
-                showFocusedReply(proxy)
+                if draft.isEmpty {
+                    lastDraft = draftStore[thread.parent.sequenceId]
+                    draft = lastDraft
+                }
                 restoreDraft()
             }
             // Closing the thread writes what typing had not yet saved.
             .onDisappear { draftWriter.flush() }
-            .onChange(of: thread.replies.count) { _ in
-                showFocusedReply(proxy)
-                answerRestoredReply()
-            }
+            .onChange(of: thread.replies.count) { _ in answerRestoredReply() }
             .onChange(of: thread.isLoading) { _ in answerRestoredReply() }
             .onChange(of: answering?.id) { _ in saveDraft() }
-            }
             .sheet(item: $editingReply) { reply in
                 MessageEditSheet(original: reply.text) { text in
                     send(.editReply(sequenceId: thread.parent.sequenceId, replyId: reply.id, text: text))
@@ -2345,7 +2313,7 @@ private struct RoomThreadSheet: View {
                 guard requested, consentHeld == nil else { return }
                 consentHeld = AIConsentHeld({}, onDecline: { send(.declineAIAgents) })
             }
-            .navigationTitle(thread.replies.count == 1 ? "1 reply" : "\(thread.replies.count) replies")
+            .navigationTitle(thread.title)
             .navigationBarTitleDisplayModeInlineIfAvailable()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -2462,6 +2430,7 @@ private struct RoomThreadSheet: View {
                                 replyWrittenBack.changed(from: lastDraft, to: new, sent: replySent)
                                 editOffset = MentionSuggester.editOffsetUnlessAtEnd(from: lastDraft, to: new)
                                 lastDraft = new
+                                draftStore[thread.parent.sequenceId] = new
                                 saveDraft()
                             }
                             .padding(.horizontal, 12)
@@ -2496,76 +2465,6 @@ private struct RoomThreadSheet: View {
                 }
             }
         }
-    }
-
-    /// One reply in the thread, with its menu and swipe to answer.
-    private func replyRow(_ reply: RoomChatReplyRow) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
-                Text(reply.authorName)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(reply.isHuman ? PocketPalette.listening : PocketPalette.textPrimary)
-                if let date = reply.date {
-                    Text(date, style: .time).font(.caption).foregroundStyle(PocketPalette.textSecondary)
-                }
-                if reply.isEdited {
-                    Text("edited").font(.caption2).foregroundStyle(PocketPalette.textSecondary)
-                }
-            }
-            if !reply.text.isEmpty {
-                ChatMarkdownView(text: reply.text, ownHandles: ownHandles)
-            }
-            if !reply.attachments.isEmpty {
-                RoomAttachmentsView(chips: reply.attachments, previews: previews, send: send)
-            }
-            // Who the server chose for an @any in it, or that nobody was free, as under a message.
-            if let line = reply.addressedLine {
-                Text(line)
-                    .font(.caption2)
-                    .foregroundStyle(PocketPalette.textSecondary)
-                    .accessibilityLabel(line)
-                    .accessibilityIdentifier("pocket.thread.addressed.\(reply.id)")
-            }
-            if let views = reply.views {
-                RoomViewedLine(views: views)
-            }
-        }
-        .id(Self.replyAnchor(reply.id))
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(thread.focusReplyId == reply.id ? PocketPalette.accent.opacity(0.12) : Color.clear)
-                .padding(-4)
-        )
-        .onAppear { send(.replyOnScreen(id: reply.id, isOnScreen: true)) }
-        .onDisappear { send(.replyOnScreen(id: reply.id, isOnScreen: false)) }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .overlay(alignment: .topTrailing) {
-            if readingAloudId == RoomReadAloud.reply(reply.id) {
-                RoomReadingAloudMark { send(.stopReadingAloud) }
-            }
-        }
-        .contentShape(Rectangle())
-        .contextMenu { replyMenu(reply) }
-        .gesture(DragGesture(minimumDistance: 30).onEnded { value in
-            // Swipe right to answer this reply, as in Messages.
-            if thread.canReply, value.translation.width > 60,
-               abs(value.translation.width) > abs(value.translation.height) * 1.8 {
-                answer(reply)
-            }
-        })
-        .padding(.leading, 12)
-        .overlay(alignment: .leading) {
-            Rectangle().fill(PocketPalette.separator).frame(width: 2)
-        }
-        .padding(.leading, CGFloat(reply.depth) * 16)
-        .accessibilityAction(named: "Reply") { answer(reply) }
-        // Asked at the reply, so the question points at it.
-        .roomBlockConfirmation(Binding(
-            get: {
-                blockingReply?.id == reply.id ? reply.reportTarget(inThread: thread.parent.sequenceId).map { RoomBlockTarget($0) } : nil
-            },
-            set: { if $0 == nil { blockingReply = nil } }
-        ), send: send)
     }
 
     private var canSendReply: Bool {
@@ -2627,14 +2526,296 @@ private struct RoomThreadSheet: View {
         answering = nil
     }
 
+
+}
+
+
+/// A thread's message and its replies, oldest first, in a lazy list: it builds the replies in sight. It is drawn again
+/// only when what it shows changes (`==`), never as the reply box is typed in: typing used to draw every reply again at
+/// each keystroke (Carter, #62423, a thread of 106 long replies). A long thread opens at its newest page, and scrolling
+/// up to its top loads the page before. Opened at a reply (its notification), it shows that reply, marked a moment.
+private struct RoomThreadRepliesList: View, Equatable {
+    let thread: RoomChatThreadState
+    let ownHandles: Set<String>
+    var readingAloudId: String?
+    var canReact = false
+    var canReport = false
+    var canBlock = false
+    var media: RoomMediaBoard?
+    var previews: [String: Data] = [:]
+    /// The reply whose author is being blocked, while its row asks to be sure.
+    var blockingReplyId: String?
+    /// Read by `onEdit` (an edit asks the AI consent first): compared, so the list takes the closure that reads it anew.
+    var asksAIConsent = false
+    let send: (RoomChatIntent) -> Void
+    /// Answer this reply from the box.
+    let onAnswer: (RoomChatReplyRow) -> Void
+    /// Edit your own reply (the sheet asks the AI consent first when it must).
+    let onEdit: (RoomChatReplyRow) -> Void
+    /// Block this reply's author (it asks first), or nil once asked.
+    let onBlock: (RoomChatReplyRow?) -> Void
+    /// Put an unsent reply's text back in the box.
+    let onEditPending: (RoomChatPendingRow) -> Void
+    /// The thread's file parts are shown; otherwise they fold behind the file's card.
+    @State private var showsFileParts = false
+    /// The reply the thread was opened at, marked for a moment once it is in view.
+    @State private var flashing: String?
+    /// The reply already brought into view: a later read never pulls the reader back to it.
+    @State private var shownFocus: String?
+    /// The thread has come to rest where it opens: until then, its top is not the reader scrolling up.
+    @State private var settled = false
+    /// The oldest reply shown when a page of older ones was asked for: the reader stays on it as they arrive above.
+    @State private var anchorBeforeOlder: String?
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.thread == rhs.thread && lhs.ownHandles == rhs.ownHandles && lhs.readingAloudId == rhs.readingAloudId
+            && lhs.canReact == rhs.canReact && lhs.canReport == rhs.canReport && lhs.canBlock == rhs.canBlock
+            && lhs.media === rhs.media && lhs.previews == rhs.previews && lhs.blockingReplyId == rhs.blockingReplyId
+            && lhs.asksAIConsent == rhs.asksAIConsent
+    }
+
+    var body: some View {
+        let _ = RenderTrace.built(.threadList)
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        if thread.parent.hidesAsBlocked {
+                            RoomBlockedLine(identifier: "pocket.thread.blocked.parent") {
+                                send(.revealBlocked(key: RoomBlocking.revealKey(thread.parent)))
+                            }
+                        } else {
+                            Text(thread.parent.authorName)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(thread.parent.isHuman ? PocketPalette.listening : PocketPalette.textPrimary)
+                            if thread.parent.filePartOf == nil || showsFileParts {
+                                ChatMarkdownView(text: thread.parent.text, ownHandles: ownHandles)
+                            }
+                        }
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    ForEach(thread.parent.files) { card in
+                        RoomFileCardView(card: card, showsParts: showsFileParts) { showsFileParts.toggle() }
+                    }
+
+                    if thread.isLoading && thread.replies.isEmpty {
+                        ProgressView("Loading replies").frame(maxWidth: .infinity)
+                    }
+                    if let failure = thread.failureText {
+                        Text(failure).font(.footnote).foregroundStyle(PocketPalette.warning)
+                    }
+                    if thread.hasOlder {
+                        olderRow
+                    }
+                    ForEach(thread.replies.filter { showsFileParts || $0.filePartOf == nil }) { reply in
+                        if reply.hidesAsBlocked {
+                            RoomBlockedLine(identifier: "pocket.thread.blocked.\(reply.id)") {
+                                send(.revealBlocked(key: RoomBlocking.revealKey(reply: reply.id)))
+                            }
+                            .id(Self.replyAnchor(reply.id))
+                            .padding(.leading, 12 + CGFloat(reply.depth) * 16)
+                        } else {
+                            replyRow(reply)
+                        }
+                    }
+                    ForEach(thread.pending) { pending in
+                        RoomPendingRowView(
+                            row: pending,
+                            recovery: RoomPendingRecovery(canPost: thread.canReply),
+                            onRetry: { send(.retrySend(clientId: pending.clientId)) },
+                            onDiscard: { send(.discardSend(clientId: pending.clientId)) },
+                            onEdit: { onEditPending(pending) }
+                        )
+                    }
+                    // This thread's replies with files on their way, each with its pictures and progress.
+                    if let media {
+                        RoomMediaOutgoingList(board: media, thread: thread.parent.sequenceId)
+                    }
+                    Color.clear.frame(height: 1).id(Self.endAnchor)
+                }
+                .padding(16)
+            }
+            .scrollDismissesKeyboard(.interactively)
+            // The reply it was opened at is further back than one search reads: say so, and go on when asked.
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if thread.focusMissing {
+                    jumpToReplyRow
+                }
+            }
+            // Where it opens, once its replies are read: the reply it was opened at (its notification), a long
+            // thread's newest reply, or its top.
+            .onAppear { if !thread.isLoading { arrive(proxy) } }
+            .onChange(of: thread.isLoading) { loading in if !loading { arrive(proxy) } }
+            .onChange(of: thread.replies.count) { _ in
+                // A page of older replies keeps the reader where they were; a reply found further back comes into view
+                // (after, so it wins).
+                keepPlace(proxy)
+                showFocusedReply(proxy)
+            }
+            .onChange(of: thread.focusMissing) { missing in if missing { proxy.scrollTo(Self.endAnchor, anchor: .bottom) } }
+        }
+    }
+
+    private static let endAnchor = "thread.end"
+
     private static func replyAnchor(_ id: String) -> String { "reply:" + id }
 
-    /// Brings the reply the thread was opened at into view, once it is loaded.
-    private func showFocusedReply(_ proxy: ScrollViewProxy) {
-        guard let focus = thread.focusReplyId, thread.replies.contains(where: { $0.id == focus }) else { return }
-        DispatchQueue.main.async {
-            withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(Self.replyAnchor(focus), anchor: .center) }
+    /// Where the thread opens, once: the reply it was opened at; a long thread's newest reply; else its top.
+    private func arrive(_ proxy: ScrollViewProxy) {
+        guard !settled else { return }
+        if thread.focusReplyId != nil, !thread.focusMissing {
+            showFocusedReply(proxy)
+        } else if thread.hasOlder || thread.focusMissing {
+            DispatchQueue.main.async { proxy.scrollTo(Self.endAnchor, anchor: .bottom) }
         }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { settled = true }
+    }
+
+    /// Brings the reply the thread was opened at into view once it is loaded, once, and marks it a moment.
+    private func showFocusedReply(_ proxy: ScrollViewProxy) {
+        guard let focus = thread.focusReplyId, focus != shownFocus,
+              thread.replies.contains(where: { $0.id == focus }) else { return }
+        shownFocus = focus
+        DispatchQueue.main.async {
+            // Straight there, the mark shows where: an animated scroll would build every reply it passes.
+            proxy.scrollTo(Self.replyAnchor(focus), anchor: .center)
+            flashing = focus
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
+                withAnimation(.easeOut(duration: 0.4)) {
+                    if flashing == focus { flashing = nil }
+                }
+            }
+        }
+    }
+
+    /// The top of a long thread's loaded replies: reached by scrolling up, it loads the page before.
+    private var olderRow: some View {
+        HStack(spacing: 8) {
+            if thread.isLoadingOlder {
+                ProgressView()
+                Text("Loading earlier replies…")
+            } else {
+                Button("Load earlier replies") { loadOlder() }
+                    .accessibilityIdentifier("pocket.thread.older")
+            }
+        }
+        .font(.footnote)
+        .foregroundStyle(PocketPalette.textSecondary)
+        .frame(maxWidth: .infinity)
+        .onAppear { if settled { loadOlder() } }
+    }
+
+    private func loadOlder() {
+        guard thread.hasOlder, !thread.isLoadingOlder else { return }
+        anchorBeforeOlder = thread.replies.first?.id
+        send(.loadOlderReplies(sequenceId: thread.parent.sequenceId))
+    }
+
+    /// The older page arrived above: the reader stays on the reply they were at.
+    private func keepPlace(_ proxy: ScrollViewProxy) {
+        guard let anchor = anchorBeforeOlder else { return }
+        anchorBeforeOlder = nil
+        DispatchQueue.main.async { proxy.scrollTo(Self.replyAnchor(anchor), anchor: .top) }
+    }
+
+    /// The reply this thread was opened at is further back than one search reads: one tap reads on.
+    private var jumpToReplyRow: some View {
+        Button {
+            send(.continueToReply(sequenceId: thread.parent.sequenceId))
+        } label: {
+            HStack(spacing: 8) {
+                if thread.isLoadingOlder {
+                    ProgressView()
+                    Text("Looking for the reply…")
+                } else {
+                    Image(systemName: "arrow.up.circle")
+                    Text("Jump to the reply")
+                }
+                Spacer(minLength: 0)
+            }
+            .font(.footnote.weight(.semibold))
+            .foregroundStyle(PocketPalette.accent)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(PocketPalette.raised)
+        }
+        .buttonStyle(.plain)
+        .disabled(thread.isLoadingOlder)
+        .accessibilityIdentifier("pocket.thread.jumpToReply")
+    }
+
+    /// One reply in the thread, with its menu and swipe to answer.
+    private func replyRow(_ reply: RoomChatReplyRow) -> some View {
+        RenderTrace.builtThreadReply(reply.id)
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Text(reply.authorName)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(reply.isHuman ? PocketPalette.listening : PocketPalette.textPrimary)
+                if let date = reply.date {
+                    Text(date, style: .time).font(.caption).foregroundStyle(PocketPalette.textSecondary)
+                }
+                if reply.isEdited {
+                    Text("edited").font(.caption2).foregroundStyle(PocketPalette.textSecondary)
+                }
+            }
+            if !reply.text.isEmpty {
+                ChatMarkdownView(text: reply.text, ownHandles: ownHandles)
+            }
+            if !reply.attachments.isEmpty {
+                RoomAttachmentsView(chips: reply.attachments, previews: previews, send: send)
+            }
+            // Who the server chose for an @any in it, or that nobody was free, as under a message.
+            if let line = reply.addressedLine {
+                Text(line)
+                    .font(.caption2)
+                    .foregroundStyle(PocketPalette.textSecondary)
+                    .accessibilityLabel(line)
+                    .accessibilityIdentifier("pocket.thread.addressed.\(reply.id)")
+            }
+            if let views = reply.views {
+                RoomViewedLine(views: views)
+            }
+        }
+        .id(Self.replyAnchor(reply.id))
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(flashing == reply.id ? PocketPalette.accent.opacity(0.18) : Color.clear)
+                .padding(-4)
+        )
+        .onAppear { send(.replyOnScreen(id: reply.id, isOnScreen: true)) }
+        .onDisappear { send(.replyOnScreen(id: reply.id, isOnScreen: false)) }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .topTrailing) {
+            if readingAloudId == RoomReadAloud.reply(reply.id) {
+                RoomReadingAloudMark { send(.stopReadingAloud) }
+            }
+        }
+        .contentShape(Rectangle())
+        .contextMenu { replyMenu(reply) }
+        .gesture(DragGesture(minimumDistance: 30).onEnded { value in
+            // Swipe right to answer this reply, as in Messages.
+            if thread.canReply, value.translation.width > 60,
+               abs(value.translation.width) > abs(value.translation.height) * 1.8 {
+                onAnswer(reply)
+            }
+        })
+        .padding(.leading, 12)
+        .overlay(alignment: .leading) {
+            Rectangle().fill(PocketPalette.separator).frame(width: 2)
+        }
+        .padding(.leading, CGFloat(reply.depth) * 16)
+        .accessibilityAction(named: "Reply") { onAnswer(reply) }
+        // Asked at the reply, so the question points at it.
+        .roomBlockConfirmation(Binding(
+            get: {
+                blockingReplyId == reply.id ? reply.reportTarget(inThread: thread.parent.sequenceId).map { RoomBlockTarget($0) } : nil
+            },
+            set: { if $0 == nil { onBlock(nil) } }
+        ), send: send)
     }
 
     /// The same choices as a message in the room: reply, react, listen, copy.
@@ -2642,7 +2823,7 @@ private struct RoomThreadSheet: View {
     private func replyMenu(_ reply: RoomChatReplyRow) -> some View {
         if thread.canReply {
             Button {
-                answer(reply)
+                onAnswer(reply)
             } label: {
                 Label("Reply", systemImage: "arrowshape.turn.up.left")
             }
@@ -2671,12 +2852,7 @@ private struct RoomThreadSheet: View {
         }
         if reply.isOwn, thread.canReply {
             Button {
-                // Asked before the editor opens, so an edit is never written to be dropped.
-                if asksAIConsent {
-                    consentHeld = AIConsentHeld({ editingReply = reply }, onDecline: { send(.declineAIAgents) })
-                } else {
-                    editingReply = reply
-                }
+                onEdit(reply)
             } label: {
                 Label("Edit", systemImage: "pencil")
             }
@@ -2697,12 +2873,23 @@ private struct RoomThreadSheet: View {
             if canBlock, !reply.isAuthorBlocked, reply.authorId.lowercased() != RoomBlocking.serverAuthor {
                 Button(role: .destructive) {
                     // Once the menu has gone, so the question is never dropped.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { blockingReply = reply }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { onBlock(reply) }
                 } label: {
                     Label("Block \(reply.authorName)", systemImage: "hand.raised")
                 }
             }
         }
+    }
+}
+
+/// The reply typed in each thread while the room is open, by the thread's message. A reference: typing writes it, and
+/// nothing is drawn again for it.
+final class RoomThreadDraftStore {
+    private var texts: [Int64: String] = [:]
+
+    subscript(thread: Int64) -> String {
+        get { texts[thread] ?? "" }
+        set { texts[thread] = newValue.isEmpty ? nil : newValue }
     }
 }
 

@@ -526,6 +526,14 @@ public struct RoomChatThreadState: Equatable, Sendable {
     public let maximumReplyLength: Int?
     /// The reply the thread was opened at (a reply notification): brought into view and marked.
     public let focusReplyId: String?
+    /// Older replies than those loaded are there: scrolling up to the top loads the next page.
+    public let hasOlder: Bool
+    /// A page of older replies is on its way.
+    public let isLoadingOlder: Bool
+    /// The thread's whole reply count, when the room knows it (more than are loaded, in a long thread).
+    public let totalReplies: Int?
+    /// The reply the thread was opened at is further back than a search may read at once: "Jump to the reply" goes on.
+    public let focusMissing: Bool
 
     public init(
         parent: RoomChatMessageRow,
@@ -535,7 +543,11 @@ public struct RoomChatThreadState: Equatable, Sendable {
         failureText: String? = nil,
         canReply: Bool = false,
         maximumReplyLength: Int? = nil,
-        focusReplyId: String? = nil
+        focusReplyId: String? = nil,
+        hasOlder: Bool = false,
+        isLoadingOlder: Bool = false,
+        totalReplies: Int? = nil,
+        focusMissing: Bool = false
     ) {
         self.parent = parent
         self.replies = replies
@@ -545,6 +557,16 @@ public struct RoomChatThreadState: Equatable, Sendable {
         self.canReply = canReply
         self.maximumReplyLength = maximumReplyLength
         self.focusReplyId = focusReplyId
+        self.hasOlder = hasOlder
+        self.isLoadingOlder = isLoadingOlder
+        self.totalReplies = totalReplies
+        self.focusMissing = focusMissing
+    }
+
+    /// The sheet's title: the thread's whole count when known, else the replies loaded.
+    public var title: String {
+        let count = max(totalReplies ?? 0, replies.count)
+        return count == 1 ? "1 reply" : "\(count) replies"
     }
 
     /// Why this reply cannot be sent as it is, or nil. A reply over the limit stays in the reply box.
@@ -564,6 +586,10 @@ public struct RoomChatThreadInput: Equatable, Sendable {
     public let maximumReplyLength: Int?
     /// The reply the thread was opened at, if any.
     public let focusReplyId: String?
+    public let hasOlder: Bool
+    public let isLoadingOlder: Bool
+    public let totalReplies: Int?
+    public let focusMissing: Bool
 
     public init(
         sequenceId: Int64,
@@ -573,7 +599,11 @@ public struct RoomChatThreadInput: Equatable, Sendable {
         failureText: String? = nil,
         canReply: Bool = false,
         maximumReplyLength: Int? = nil,
-        focusReplyId: String? = nil
+        focusReplyId: String? = nil,
+        hasOlder: Bool = false,
+        isLoadingOlder: Bool = false,
+        totalReplies: Int? = nil,
+        focusMissing: Bool = false
     ) {
         self.sequenceId = sequenceId
         self.replies = replies
@@ -583,6 +613,10 @@ public struct RoomChatThreadInput: Equatable, Sendable {
         self.canReply = canReply
         self.maximumReplyLength = maximumReplyLength
         self.focusReplyId = focusReplyId
+        self.hasOlder = hasOlder
+        self.isLoadingOlder = isLoadingOlder
+        self.totalReplies = totalReplies
+        self.focusMissing = focusMissing
     }
 }
 
@@ -1007,7 +1041,11 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                 failureText: threadInput.failureText,
                 canReply: threadInput.canReply,
                 maximumReplyLength: threadInput.maximumReplyLength,
-                focusReplyId: threadInput.focusReplyId
+                focusReplyId: threadInput.focusReplyId,
+                hasOlder: threadInput.hasOlder,
+                isLoadingOlder: threadInput.isLoadingOlder,
+                totalReplies: threadInput.totalReplies,
+                focusMissing: threadInput.focusMissing
             )
         } else {
             self.thread = nil
@@ -1769,6 +1807,10 @@ public enum RoomChatIntent: Equatable, Sendable {
     case keepLatestForJumpDown
     /// Open the report sheet for someone else's message or reply.
     case openReport(RoomReportTarget)
+    /// The open thread's next page back: the reader scrolled up to its oldest loaded reply.
+    case loadOlderReplies(sequenceId: Int64)
+    /// Go on looking for the reply the thread was opened at, further back than a search reads at once.
+    case continueToReply(sequenceId: Int64)
     /// Send the open report.
     case sendReport(reason: RoomReportReason, note: String)
     case closeReport

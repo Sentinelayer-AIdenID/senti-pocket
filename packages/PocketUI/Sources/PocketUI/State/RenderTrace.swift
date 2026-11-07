@@ -14,6 +14,12 @@ public enum RenderTrace {
         case roomRow
         /// The side panel's rooms and direct messages.
         case sidePanel
+        /// The room's own view, its body: a keystroke in a thread must never draw it again.
+        case roomBody
+        /// A thread's list of replies, its body: a keystroke in the thread's box must never draw it again.
+        case threadList
+        /// One reply of a thread built.
+        case threadReply
     }
 
     private static let lock = NSLock()
@@ -21,6 +27,11 @@ public enum RenderTrace {
     private static var last: Int64 = 0
     private static var builtRoomRows = 0
     private static var builtSidePanel = 0
+    private static var builtRoomBodies = 0
+    private static var builtThreadLists = 0
+    private static var builtThreadReplies = 0
+    /// The thread replies built since `resetThreadReplies()`, by id: a lazy list builds only those in sight.
+    private static var threadRepliesBuilt: Set<String> = []
     private static var furthestStrip = -1
 
     /// One row drawn (its body evaluated).
@@ -44,7 +55,32 @@ public enum RenderTrace {
         switch list {
         case .roomRow: builtRoomRows &+= 1
         case .sidePanel: builtSidePanel &+= 1
+        case .roomBody: builtRoomBodies &+= 1
+        case .threadList: builtThreadLists &+= 1
+        case .threadReply: builtThreadReplies &+= 1
         }
+        lock.unlock()
+    }
+
+    /// Thread reply `id` built (and counted as a `.threadReply`).
+    public static func builtThreadReply(_ id: String) {
+        lock.lock()
+        builtThreadReplies &+= 1
+        threadRepliesBuilt.insert(id)
+        lock.unlock()
+    }
+
+    /// The thread replies built since `resetThreadReplies()`; safe from any thread.
+    public static func threadRepliesBuiltSinceReset() -> Set<String> {
+        lock.lock()
+        defer { lock.unlock() }
+        return threadRepliesBuilt
+    }
+
+    /// Starts `threadRepliesBuiltSinceReset()` again from none.
+    public static func resetThreadReplies() {
+        lock.lock()
+        threadRepliesBuilt = []
         lock.unlock()
     }
 
@@ -77,6 +113,9 @@ public enum RenderTrace {
         switch list {
         case .roomRow: return builtRoomRows
         case .sidePanel: return builtSidePanel
+        case .roomBody: return builtRoomBodies
+        case .threadList: return builtThreadLists
+        case .threadReply: return builtThreadReplies
         }
     }
 }
