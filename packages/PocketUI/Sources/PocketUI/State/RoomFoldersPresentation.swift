@@ -12,6 +12,9 @@ public struct RoomFolderItem: Identifiable, Equatable, Hashable, Sendable {
     /// The folder it is in, as the server says; nil at the top level. `RoomFolderTree` decides where it is shown.
     public let parentId: String?
     public let position: Int
+    public let pinnedPosition: Int?
+    /// True even for an unpinned folder (explicit null); false when the server omitted the field.
+    public let supportsPinning: Bool
     /// The rooms in it.
     public let roomCount: Int
     /// The rooms in it and in every folder inside it: what a folded folder shows.
@@ -19,11 +22,14 @@ public struct RoomFolderItem: Identifiable, Equatable, Hashable, Sendable {
     public let createdAt: Date?
 
     public init(id: String, name: String, parentId: String? = nil, position: Int, roomCount: Int = 0,
-                totalRoomCount: Int? = nil, createdAt: Date? = nil) {
+                totalRoomCount: Int? = nil, createdAt: Date? = nil,
+                pinnedPosition: Int? = nil, supportsPinning: Bool = false) {
         self.id = id
         self.name = name
         self.parentId = parentId
         self.position = position
+        self.pinnedPosition = pinnedPosition
+        self.supportsPinning = supportsPinning
         self.roomCount = roomCount
         self.totalRoomCount = max(roomCount, totalRoomCount ?? roomCount)
         self.createdAt = createdAt
@@ -268,6 +274,8 @@ public enum RoomFolderIntent: Equatable, Sendable {
     case pickFolder(roomId: String, folderId: String?)
     case file(roomId: String, folderId: String)
     case unfile(roomId: String, folderId: String)
+    case setPinned(folderId: String, pinned: Bool)
+    case reorderPins(folderIds: [String])
     case dismissNotice
 }
 

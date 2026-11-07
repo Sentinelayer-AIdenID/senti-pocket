@@ -119,7 +119,9 @@ struct SentiPocketApp: App {
 
     @ViewBuilder private var rootView: some View {
         #if DEBUG
-        if RoomCalendarPreview.isRequested {
+        if RoomFolderPinsPreview.isRequested {
+            RoomFolderPinsPreview.rootView
+        } else if RoomCalendarPreview.isRequested {
             RoomCalendarPreview.rootView
         } else if RootPreview.isRequested {
             RootPreview.rootView(whisperModel: whisperModel, incomingLinks: incomingLinks)
@@ -244,6 +246,8 @@ struct RootServices {
     var calendar: (any RoomCalendarServing & CalendarFeedServing)?
     /// Your blocks on the server (`/me/blocks`), for the account signed in; nil (a preview) keeps them on the phone.
     var blocks: (_ account: String?) -> (any BlockListClient)? = { _ in nil }
+    /// Pins and their reloads verify the same account, even when its bearer rotates in flight.
+    var roomFolderPins: (any RoomFolderPinsServing)?
 
     /// The Senti API as you.
     static func live() -> RootServices {
@@ -257,6 +261,8 @@ struct RootServices {
         // Typed room messages go straight to the Senti API as you, like the web; the gateway's confirm-and-receipt
         // flow stays for AI-drafted writes (the Pocket tab and voice replies).
         let sender = HTTPRoomMessageSender(apiBaseURL: apiURL)
+        let pinCredentials = RoomFolderPinsAccountCredentials(apiBaseURL: apiURL,
+            urlSession: SentiHTTPTransportPolicy.protectedReadSession)
         return RootServices(
             sessions: transport,
             room: transport,
@@ -291,7 +297,10 @@ struct RootServices {
             readMarker: HTTPRoomReadMarker(apiBaseURL: apiURL),
             calendar: HTTPRoomCalendarClient(apiBaseURL: apiURL, urlSession: CalendarHTTP.session,
                                              tokenProvider: { SessionTokenStore.load() }),
-            blocks: { HTTPBlockListClient(apiBaseURL: apiURL, account: $0) }
+            blocks: { HTTPBlockListClient(apiBaseURL: apiURL, account: $0) },
+            roomFolderPins: HTTPRoomFolderPinsClient(apiBaseURL: apiURL,
+                urlSession: SentiHTTPTransportPolicy.protectedReadSession,
+                credentialProvider: { try await pinCredentials.current() })
         )
     }
 }
@@ -593,7 +602,8 @@ struct AuthenticatedRootView: View {
             client: services.roomFolders,
             // Where each room is filed is the room list's: it is read again after every change.
             onRoomsChanged: { sessions.send(.refreshSessions) },
-            onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
+            onReauthenticationRequired: { revocationRelay.invalidateAuthentication() },
+            pinClient: services.roomFolderPins
         ))
         let calendarClient = services.calendar ?? CalendarOff()
         let identity = services.identity
@@ -784,7 +794,10 @@ struct AuthenticatedRootView: View {
             }
         }
         .task {
-            accountName = await accountIdentity.currentAccount()?.login
+            let account = await accountIdentity.currentAccount()
+            guard !Task.isCancelled else { return }
+            accountName = account?.login
+            roomFolders.setPinAccountId(account?.accountId)
         }
         .sheet(isPresented: $presentsNotifications) {
             NotificationsView(state: notifications.state) { intent in
@@ -1133,6 +1146,8 @@ struct AuthenticatedRootView: View {
                 }
             } : nil,
             folderNotice: roomFolders.notice,
+            pinSaving: roomFolders.isPinSaving,
+            pinActionsAvailable: roomFolders.canChangePins,
             // Folders show only where they are on.
             onFolder: roomFolders.items == nil ? nil : { roomFolders.send($0) }
         )

@@ -7,7 +7,7 @@ import XCTest
 
 /// Your folders as a fake of the API's contract (sentinelayer-api #1125): 404 for everything when the flag is off, 404
 /// for a folder that is gone, and whatever refusal a test sets for the next call.
-private final class FakeRoomFolders: RoomFoldersServing, @unchecked Sendable {
+private final class FakeRoomFolders: RoomFoldersServing, RoomFolderPinsServing, @unchecked Sendable {
     private let lock = NSLock()
     private var _on = true
     private var _folders: [RoomFolder] = []
@@ -69,6 +69,11 @@ private final class FakeRoomFolders: RoomFoldersServing, @unchecked Sendable {
         return seen
     }
 
+    func folders(accountId: String) async throws -> [RoomFolder] {
+        guard accountId == "account-a" else { throw RoomFolderError.accountChanged }
+        return try await folders()
+    }
+
     func createFolder(named name: String, in parentFolderId: String?, idempotencyKey: String?) async throws -> RoomFolder {
         lock.withLock { _keys.append(idempotencyKey) }
         try note("create \(name)" + (parentFolderId.map { " in \($0)" } ?? ""))
@@ -108,6 +113,39 @@ private final class FakeRoomFolders: RoomFoldersServing, @unchecked Sendable {
     func unfile(room sessionId: String, from folderId: String) async throws {
         try note("unfile \(sessionId) \(folderId)")
     }
+
+    private func withPin(_ folder: RoomFolder, _ position: Int?) -> RoomFolder {
+        RoomFolder(id: folder.id, name: folder.name, parentFolderId: folder.parentFolderId, position: folder.position,
+                   roomCount: folder.roomCount, totalRoomCount: folder.totalRoomCount, createdAt: folder.createdAt,
+                   pinnedPosition: position, supportsPinning: true)
+    }
+
+    func pinFolder(_ folderId: String, accountId: String) async throws -> RoomFolder {
+        guard accountId == "account-a" else { throw RoomFolderError.accountChanged }
+        try note("pin \(folderId)")
+        await pause(if: \._holdNextMove)
+        return lock.withLock {
+            let position = _folders.filter { $0.pinnedPosition != nil }.count
+            _folders = _folders.map { $0.id == folderId ? withPin($0, $0.pinnedPosition ?? position) : $0 }
+            return _folders.first { $0.id == folderId }!
+        }
+    }
+
+    func unpinFolder(_ folderId: String, accountId: String) async throws {
+        guard accountId == "account-a" else { throw RoomFolderError.accountChanged }
+        try note("unpin \(folderId)")
+        lock.withLock {
+            let ids = _folders.filter { $0.id != folderId && $0.pinnedPosition != nil }
+                .sorted { ($0.pinnedPosition ?? 10) < ($1.pinnedPosition ?? 10) }.map(\.id)
+            _folders = _folders.map { withPin($0, ids.firstIndex(of: $0.id)) }
+        }
+    }
+
+    func reorderFolderPins(_ folderIds: [String], accountId: String) async throws {
+        guard accountId == "account-a" else { throw RoomFolderError.accountChanged }
+        try note("pins " + folderIds.joined(separator: ","))
+        lock.withLock { _folders = _folders.map { withPin($0, folderIds.firstIndex(of: $0.id)) } }
+    }
 }
 
 @MainActor
@@ -126,7 +164,10 @@ final class RoomFoldersCenterTests: XCTestCase {
     private var roomReads = 0
 
     private func center(_ fake: FakeRoomFolders) -> RoomFoldersCenter {
-        RoomFoldersCenter(client: fake, onRoomsChanged: { [weak self] in self?.roomReads += 1 })
+        let center = RoomFoldersCenter(client: fake, onRoomsChanged: { [weak self] in self?.roomReads += 1 },
+                                       pinClient: fake)
+        center.setPinAccountId("account-a")
+        return center
     }
 
     /// Waits for work the center started on its own (a menu's change).
@@ -488,4 +529,104 @@ final class RoomFoldersCenterTests: XCTestCase {
         XCTAssertNil(folders.sheet)
         XCTAssertNil(folders.deleting)
     }
+    func test_pins_round_trip_through_the_server_and_items_keep_the_capability() async {
+        let fake = FakeRoomFolders([RoomFolder(id: "a", name: "Work", position: 0, supportsPinning: true),
+                                    RoomFolder(id: "b", name: "Ideas", position: 1, supportsPinning: true)])
+        let folders = center(fake)
+        await folders.refresh()
+        XCTAssertTrue(RoomFolderPinsPresentation.isAvailable(folders.items ?? []))
+        await folders.setPinned("a", pinned: true)
+        await folders.setPinned("b", pinned: true)
+        await folders.reorderPins(["b", "a"])
+        XCTAssertEqual(RoomFolderPinsPresentation.ordered(folders.items ?? []).map(\.id), ["b", "a"])
+        await folders.setPinned("b", pinned: false)
+        XCTAssertEqual(RoomFolderPinsPresentation.ordered(folders.items ?? []).map(\.id), ["a"])
+        XCTAssertEqual(fake.calls, ["list", "pin a", "list", "pin b", "list", "pins b,a", "list", "unpin b", "list"])
+        XCTAssertEqual(roomReads, 0, "pinning never changes which folder holds a chat")
+    }
+
+    func test_pin_controls_are_inactive_before_the_server_supplies_pinned_position() async {
+        let fake = FakeRoomFolders(three)
+        let folders = center(fake)
+        await folders.refresh()
+        await folders.setPinned("f-a", pinned: true)
+        await folders.reorderPins(["f-a"])
+        XCTAssertFalse(RoomFolderPinsPresentation.isAvailable(folders.items ?? []))
+        XCTAssertEqual(fake.calls, ["list"])
+    }
+
+    func test_pin_account_availability_is_separate_from_the_servers_capability() async {
+        let fake = FakeRoomFolders([RoomFolder(id: "a", name: "Work", position: 0, supportsPinning: true)])
+        let folders = RoomFoldersCenter(client: fake, onRoomsChanged: {}, pinClient: fake)
+        await folders.refresh()
+        XCTAssertTrue(RoomFolderPinsPresentation.isAvailable(folders.items ?? []))
+        XCTAssertFalse(folders.canChangePins, "the actual account has not been resolved yet")
+        await folders.setPinned("a", pinned: true)
+        XCTAssertEqual(fake.calls, ["list"])
+
+        folders.setPinAccountId("account-a")
+        XCTAssertTrue(folders.canChangePins)
+        await folders.setPinned("a", pinned: true)
+        XCTAssertEqual(fake.calls, ["list", "pin a", "list"])
+
+        folders.setPinAccountId(nil)
+        XCTAssertFalse(folders.canChangePins)
+        XCTAssertTrue(RoomFolderPinsPresentation.isAvailable(folders.items ?? []), "sign-in readiness is not a server capability")
+    }
+
+    func test_changed_pins_reload_the_servers_new_membership_and_order() async {
+        let initial = [RoomFolder(id: "a", name: "Work", position: 0, pinnedPosition: 0, supportsPinning: true),
+                       RoomFolder(id: "b", name: "Ideas", position: 1, pinnedPosition: 1, supportsPinning: true),
+                       RoomFolder(id: "c", name: "Notes", position: 2, supportsPinning: true)]
+        let fake = FakeRoomFolders(initial)
+        let folders = center(fake)
+        await folders.refresh()
+        fake.setFolders([RoomFolder(id: "a", name: "Work", position: 0, supportsPinning: true),
+                         RoomFolder(id: "b", name: "Ideas", position: 1, pinnedPosition: 1, supportsPinning: true),
+                         RoomFolder(id: "c", name: "Notes", position: 2, pinnedPosition: 0, supportsPinning: true)])
+        fake.failNext = .pinsChanged
+        await folders.reorderPins(["b", "a"])
+        XCTAssertEqual(fake.calls, ["list", "pins b,a", "list"])
+        XCTAssertEqual(RoomFolderPinsPresentation.ordered(folders.items ?? []).map(\.id), ["c", "b"])
+        XCTAssertEqual(folders.notice, "Your pinned folders changed. The latest order is shown.")
+    }
+
+    func test_an_eleventh_pin_shows_the_exact_cap_message() async {
+        let ten = (0..<10).map { RoomFolder(id: "f-\($0)", name: "Folder \($0)", position: $0, pinnedPosition: $0, supportsPinning: true) }
+        let fake = FakeRoomFolders(ten + [RoomFolder(id: "extra", name: "Extra", position: 10, supportsPinning: true)])
+        let folders = center(fake)
+        await folders.refresh()
+        fake.failNext = .pinLimit
+        await folders.setPinned("extra", pinned: true)
+        XCTAssertEqual(folders.notice, "You can pin up to 10 folders.")
+        XCTAssertEqual(RoomFolderPinsPresentation.ordered(folders.items ?? []).count, 10)
+    }
+
+    func test_an_account_changed_pin_does_not_reload_with_another_accounts_credentials() async {
+        let fake = FakeRoomFolders([RoomFolder(id: "a", name: "Work", position: 0, supportsPinning: true)])
+        let folders = center(fake)
+        await folders.refresh()
+        fake.failNext = .accountChanged
+        await folders.setPinned("a", pinned: true)
+        XCTAssertEqual(fake.calls, ["list", "pin a"])
+        XCTAssertNil(folders.notice)
+        XCTAssertFalse(folders.isPinSaving)
+    }
+
+    func test_a_second_pin_while_the_first_is_saving_is_not_sent() async {
+        let fake = FakeRoomFolders([RoomFolder(id: "a", name: "Work", position: 0, supportsPinning: true),
+                                    RoomFolder(id: "b", name: "Ideas", position: 1, supportsPinning: true)])
+        let folders = center(fake)
+        await folders.refresh()
+        fake.holdNextMove = true
+        let first = Task { await folders.setPinned("a", pinned: true) }
+        for _ in 0..<1000 where fake.holding == 0 { await Task.yield() }
+        XCTAssertEqual(fake.holding, 1)
+        await folders.setPinned("b", pinned: true)
+        fake.releaseHeld()
+        await first.value
+        XCTAssertEqual(fake.calls, ["list", "pin a", "list"])
+        XCTAssertFalse(folders.isPinSaving)
+    }
+
 }

@@ -43,6 +43,7 @@ final class RoomFoldersCenter: ObservableObject {
     /// What the server said about the name in the open sheet (a name already used, a change that did not save).
     @Published private(set) var sheetProblem: String?
     @Published private(set) var isSaving = false
+    @Published var isPinSaving = false
     /// The folder whose delete waits on your confirmation.
     @Published var deleting: RoomFolder?
     /// Which read of the folders is the newest, and whether a move is on its way.
@@ -50,15 +51,26 @@ final class RoomFoldersCenter: ObservableObject {
     private var moving = false
 
     let client: any RoomFoldersServing
+    let pinClient: (any RoomFolderPinsServing)?
+    @Published private(set) var pinAccountId: String?
+    var canChangePins: Bool { pinClient != nil && pinAccountId != nil }
     /// Reads the room list again: where each room is filed is its `folderId` there.
     private let onRoomsChanged: @MainActor () -> Void
-    private let onReauthenticationRequired: @MainActor () -> Void
+    let onReauthenticationRequired: @MainActor () -> Void
 
     init(client: any RoomFoldersServing, onRoomsChanged: @escaping @MainActor () -> Void,
-         onReauthenticationRequired: @escaping @MainActor () -> Void = {}) {
+         onReauthenticationRequired: @escaping @MainActor () -> Void = {},
+         pinClient: (any RoomFolderPinsServing)? = nil) {
         self.client = client
+        self.pinClient = pinClient
         self.onRoomsChanged = onRoomsChanged
         self.onReauthenticationRequired = onReauthenticationRequired
+    }
+
+    func setPinAccountId(_ value: String?) {
+        guard pinAccountId != value else { return }
+        pinAccountId = value
+        readRevision += 1
     }
 
     /// The tree of your folders, for the pickers and the menus: made when one opens.
@@ -71,7 +83,8 @@ final class RoomFoldersCenter: ObservableObject {
     static func item(_ folder: RoomFolder) -> RoomFolderItem {
         RoomFolderItem(id: folder.id, name: folder.name, parentId: folder.parentFolderId, position: folder.position,
                        roomCount: folder.roomCount, totalRoomCount: folder.totalRoomCount,
-                       createdAt: ParsedSessionTimestamp(folder.createdAt)?.date)
+                       createdAt: ParsedSessionTimestamp(folder.createdAt)?.date,
+                       pinnedPosition: folder.pinnedPosition, supportsPinning: folder.supportsPinning)
     }
 
     /// What a refusal says, in plain words; nil for one that is not about where folders go or what they are called.
@@ -99,15 +112,17 @@ final class RoomFoldersCenter: ObservableObject {
     /// Reads your folders. A 404 (or 403) means folders are off: everything about them hides. A failure that says
     /// nothing either way keeps what is shown. A read that finds what is shown writes nothing, so the root and the side
     /// panel draw only for a change.
-    func refresh() async {
+    @discardableResult
+    func refresh() async -> Bool {
         // Only the newest read is shown: an older one that lands late (a slow link) never puts back what it saw.
         readRevision += 1
         let revision = readRevision
         do {
             let read = try await client.folders()
-            guard revision == readRevision else { return }
+            guard revision == readRevision else { return false }
             readAt = Date()
             if read != folders { folders = read }
+            return true
         } catch RoomFolderError.unavailable {
             readAt = Date()
             if folders != nil { folders = nil }
@@ -117,6 +132,32 @@ final class RoomFoldersCenter: ObservableObject {
         } catch RoomFolderError.reauthenticationRequired {
             onReauthenticationRequired()
         } catch {
+        }
+        return false
+    }
+
+    /// A pin write and its authoritative read belong to the same person. The pin transport checks that account
+    /// before sending a read, so a sign-in change between the write and this reload never starts a new-account GET.
+    func refreshPins(accountId: String) async throws -> Bool {
+        guard let pinClient, pinAccountId == accountId else { throw RoomFolderError.accountChanged }
+        readRevision += 1
+        let revision = readRevision
+        do {
+            let read = try await pinClient.folders(accountId: accountId)
+            guard pinAccountId == accountId else { throw RoomFolderError.accountChanged }
+            guard revision == readRevision else { return false }
+            readAt = Date()
+            if read != folders { folders = read }
+            return true
+        } catch RoomFolderError.unavailable {
+            guard pinAccountId == accountId else { throw RoomFolderError.accountChanged }
+            guard revision == readRevision else { return false }
+            readAt = Date()
+            if folders != nil { folders = nil }
+            if sheet != nil { sheet = nil }
+            if deleting != nil { deleting = nil }
+            if notice != nil { notice = nil }
+            return false
         }
     }
 
@@ -143,6 +184,10 @@ final class RoomFoldersCenter: ObservableObject {
             Task { await change { try await self.client.file(room: room, in: folder) } }
         case .unfile(let room, let folder):
             Task { await change { try await self.client.unfile(room: room, from: folder) } }
+        case .setPinned(let id, let pinned):
+            Task { await setPinned(id, pinned: pinned) }
+        case .reorderPins(let ids):
+            Task { await reorderPins(ids) }
         case .dismissNotice:
             notice = nil
         }

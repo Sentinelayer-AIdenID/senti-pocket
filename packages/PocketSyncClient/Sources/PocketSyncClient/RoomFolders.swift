@@ -17,6 +17,9 @@ public struct RoomFolder: Equatable, Identifiable, Sendable {
     public let parentFolderId: String?
     /// Where it sits among the folders beside it.
     public let position: Int
+    /// Missing on older servers; explicit null means supported but not pinned.
+    public let pinnedPosition: Int?
+    public let supportsPinning: Bool
     /// The rooms in it.
     public let roomCount: Int
     /// The rooms in it and in every folder inside it.
@@ -24,11 +27,14 @@ public struct RoomFolder: Equatable, Identifiable, Sendable {
     public let createdAt: String?
 
     public init(id: String, name: String, parentFolderId: String? = nil, position: Int, roomCount: Int = 0,
-                totalRoomCount: Int? = nil, createdAt: String? = nil) {
+                totalRoomCount: Int? = nil, createdAt: String? = nil,
+                pinnedPosition: Int? = nil, supportsPinning: Bool = false) {
         self.id = id
         self.name = name
         self.parentFolderId = parentFolderId
         self.position = position
+        self.pinnedPosition = pinnedPosition
+        self.supportsPinning = supportsPinning
         self.roomCount = max(0, roomCount)
         self.totalRoomCount = max(self.roomCount, totalRoomCount ?? 0)
         self.createdAt = createdAt
@@ -40,6 +46,8 @@ public struct RoomFolder: Equatable, Identifiable, Sendable {
         guard let json, let id = json["id"]?.stringValue, PersonalRequest.isIdentifier(id),
               let name = json["name"]?.stringValue, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { return nil }
+        let pin = json["pinnedPosition"]
+        let position = pin?.intValue.flatMap { (0..<10).contains($0) ? Int($0) : nil }
         self.init(
             id: id,
             name: name,
@@ -47,7 +55,9 @@ public struct RoomFolder: Equatable, Identifiable, Sendable {
             position: json["position"]?.intValue.map { Int(clamping: $0) } ?? Int.max,
             roomCount: json["roomCount"]?.intValue.map { Int(clamping: $0) } ?? 0,
             totalRoomCount: json["totalRoomCount"]?.intValue.map { Int(clamping: $0) },
-            createdAt: json["createdAt"]?.stringValue
+            createdAt: json["createdAt"]?.stringValue,
+            pinnedPosition: position,
+            supportsPinning: pin == JSONValue.null || position != nil
         )
     }
 }
@@ -66,6 +76,10 @@ public enum RoomFolderError: Error, Equatable, Sendable {
     case tooDeep
     /// 409 `ROOM_FOLDER_CYCLE`: a folder cannot go inside itself or a folder inside it.
     case cycle
+    /// 409 ROOM_FOLDER_PIN_LIMIT.
+    case pinLimit
+    /// 409 ROOM_FOLDER_PINS_CHANGED: reload the authoritative pin set and order.
+    case pinsChanged
     /// The name is not one the API takes (see `RoomFolderName`), or the API refused the request.
     case rejected
     case reauthenticationRequired
@@ -96,7 +110,7 @@ public protocol RoomFoldersServing: Sendable {
 
 public final class HTTPRoomFoldersClient: RoomFoldersServing, @unchecked Sendable {
     private let request: PersonalRequest
-    private static let base = ["api", "v1", "me", "room-folders"]
+    static let base = ["api", "v1", "me", "room-folders"]
 
     public init(apiBaseURL: URL?, urlSession: URLSession, tokenProvider: @escaping @Sendable () -> String?) {
         request = PersonalRequest(apiBaseURL: apiBaseURL, urlSession: urlSession, tokenProvider: tokenProvider)
@@ -178,6 +192,8 @@ public final class HTTPRoomFoldersClient: RoomFoldersServing, @unchecked Sendabl
         case "ROOM_FOLDER_LIMIT": return .limitReached
         case "ROOM_FOLDER_DEPTH": return .tooDeep
         case "ROOM_FOLDER_CYCLE": return .cycle
+        case "ROOM_FOLDER_PIN_LIMIT": return .pinLimit
+        case "ROOM_FOLDER_PINS_CHANGED": return .pinsChanged
         default: return .rejected
         }
     }
@@ -187,12 +203,12 @@ public final class HTTPRoomFoldersClient: RoomFoldersServing, @unchecked Sendabl
         (1...200).contains(key.utf8.count) && key.unicodeScalars.allSatisfy { (0x21...0x7E).contains($0.value) }
     }
 
-    private func folder(in answer: JSONValue?) throws -> RoomFolder {
+    func folder(in answer: JSONValue?) throws -> RoomFolder {
         guard let folder = RoomFolder(json: answer?["folder"]) else { throw RoomFolderError.invalidData }
         return folder
     }
 
-    private func send(_ method: String, _ path: [String], body: [String: Any]? = nil, headers: [String: String] = [:],
+    func send(_ method: String, _ path: [String], body: [String: Any]? = nil, headers: [String: String] = [:],
                       notFound: RoomFolderError) async throws -> JSONValue? {
         let answer: PersonalRequest.Answer
         do {
