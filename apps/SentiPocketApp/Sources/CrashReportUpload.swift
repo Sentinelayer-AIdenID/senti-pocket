@@ -58,14 +58,15 @@ struct CrashReportPayload: Encodable, Equatable {
     }
 
     /// The report's "name UUID" pairs the API takes: a name of at most 64 of [A-Za-z0-9._+-] and a strict UUID, the
-    /// first 16, once each. Any other pair is left out.
+    /// first 16, once each. Any other pair is left out. `\z`, not `$`: `$` also matches before a final newline, which
+    /// the API refuses.
     static func binaries(_ listed: [String]) -> [Binary] {
         var kept: [Binary] = []
         for pair in listed {
             guard let space = pair.lastIndex(of: " ") else { continue }
             let binary = Binary(name: String(pair[..<space]), uuid: String(pair[pair.index(after: space)...]))
-            guard binary.name.range(of: #"^[A-Za-z0-9._+-]{1,64}$"#, options: .regularExpression) != nil,
-                  binary.uuid.range(of: #"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"#,
+            guard binary.name.range(of: #"^[A-Za-z0-9._+-]{1,64}\z"#, options: .regularExpression) != nil,
+                  binary.uuid.range(of: #"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\z"#,
                                     options: .regularExpression) != nil,
                   !kept.contains(binary) else { continue }
             kept.append(binary)
@@ -316,8 +317,10 @@ struct CrashReportOffer: View {
     @StateObject private var timing: CrashOfferTiming
     @Environment(\.scenePhase) private var scenePhase
 
-    static let message = "Send what the phone recorded to the team so it can be fixed? It has where the app stopped and "
-        + "your last few steps, never your messages, rooms or names."
+    /// The API posts each report with the sender's name and, when verified, GitHub username: the words say so.
+    static let message = "Send a report so the team can fix it? It goes from your account, with your name and GitHub "
+        + "username (if verified), where the app stopped and your last few steps. Never your messages or anything in "
+        + "your rooms."
 
     init(api: (any CrashReportSending)?) {
         self.api = api

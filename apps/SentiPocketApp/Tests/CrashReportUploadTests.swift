@@ -160,7 +160,8 @@ final class CrashReportUploadTests: XCTestCase {
     func test_the_binaries_go_with_the_frames() throws {
         let uuid = { (index: Int) in String(format: "00000000-0000-4000-8000-%012d", index) }
         var listed = ["SentiPocketApp \(uuid(1))", "? \(uuid(2))", "bad name! \(uuid(3))", "UIKitCore not-a-uuid",
-                      "SentiPocketApp \(uuid(1))", String(repeating: "n", count: 65) + " \(uuid(4))"]
+                      "SentiPocketApp \(uuid(1))", String(repeating: "n", count: 65) + " \(uuid(4))",
+                      "UIKitCore \(uuid(31))\n", "Foundation\n \(uuid(32))"]
         listed += (5...30).map { "libsystem_\($0).dylib \(uuid($0))" }
         var crash = report("binaries", minutesAgo: 1)
         crash.binaries = listed
@@ -169,7 +170,8 @@ final class CrashReportUploadTests: XCTestCase {
         XCTAssertEqual(binaries.count, 16, "the first 16 the API takes")
         XCTAssertEqual(binaries.first, CrashReportPayload.Binary(name: "SentiPocketApp", uuid: uuid(1)))
         XCTAssertEqual(binaries[1], CrashReportPayload.Binary(name: "libsystem_5.dylib", uuid: uuid(5)),
-                       "a name outside the API's characters or over 64, a UUID that is not one, and a repeat are left out")
+                       "a name outside the API's characters or over 64, a UUID that is not one, a final newline the API "
+                       + "refuses, and a repeat are left out")
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(payload)) as? [String: Any])
         let first = try XCTUnwrap((object["binaries"] as? [[String: String]])?.first)
         XCTAssertEqual(first, ["name": "SentiPocketApp", "uuid": uuid(1)])
@@ -323,10 +325,14 @@ final class CrashReportUploadTests: XCTestCase {
         XCTAssertTrue(api.sent.isEmpty, "the API takes nothing older than 14 days")
     }
 
-    func test_the_offer_says_where_the_report_goes() {
-        XCTAssertTrue(CrashReportOffer.message.contains("to the team"))
-        XCTAssertFalse(CrashReportOffer.message.contains("this room"))
-        XCTAssertTrue(CrashReportOffer.message.contains("never your messages"))
+    /// The API posts each report with the sender's name and, when verified, GitHub username: the offer says so, and
+    /// promises only what is true (never the messages or what is in the rooms).
+    func test_the_offer_says_where_the_report_goes_and_who_it_comes_from() {
+        XCTAssertEqual(CrashReportOffer.message, "Send a report so the team can fix it? It goes from your account, with "
+                       + "your name and GitHub username (if verified), where the app stopped and your last few steps. "
+                       + "Never your messages or anything in your rooms.")
+        XCTAssertNil(CrashReportOffer.message.range(of: "names", options: .caseInsensitive),
+                     "the name goes with every report: the offer never says it does not")
     }
 }
 
