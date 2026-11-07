@@ -32,12 +32,15 @@ public struct RoomMemberMessageRow: Equatable, Identifiable, Sendable {
     public let date: Date?
     /// How many photos and files it carries.
     public let attachments: Int
+    /// The model the post declared, as the API gave it (`agent.model`); nil when it gave none.
+    public let model: String?
 
-    public init(sequenceId: Int64, text: String, date: Date?, attachments: Int = 0) {
+    public init(sequenceId: Int64, text: String, date: Date?, attachments: Int = 0, model: String? = nil) {
         self.sequenceId = sequenceId
         self.text = text
         self.date = date
         self.attachments = attachments
+        self.model = model
     }
 
     /// "2 files" under a message of files alone, so the row is never blank.
@@ -91,6 +94,24 @@ public struct RoomMemberMessagesState: Equatable, Sendable {
 
     /// How their posts come in, only when the API said: nothing is shown for an unknown connection, never a guess.
     public var connectionLine: String? { connection?.label }
+
+    /// The model their card shows (ticket 00bcfcef): the one declared by their newest post that declared one. Nothing
+    /// when no post did; never a stand-in (`shownModel`), and never a guess.
+    public var model: String? {
+        rows.filter { Self.shownModel($0.model) != nil }
+            .max { $0.sequenceId < $1.sequenceId }
+            .flatMap { Self.shownModel($0.model) }
+    }
+
+    /// What a post writes for its model when it names none: these, in any case, or blank.
+    static let standInModels: Set<String> = ["mcp", "agent", "human"]
+
+    /// A declared model as the card shows it, trimmed; nil for a stand-in or a blank one.
+    public static func shownModel(_ model: String?) -> String? {
+        guard let model = model?.trimmingCharacters(in: .whitespacesAndNewlines), !model.isEmpty,
+              !standInModels.contains(model.lowercased()) else { return nil }
+        return model
+    }
 
     /// The messages the list shows: none for someone you blocked.
     public var listedRows: [RoomMemberMessageRow] { isBlocked ? [] : rows }

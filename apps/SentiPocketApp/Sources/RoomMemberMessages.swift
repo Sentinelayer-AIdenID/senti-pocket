@@ -99,7 +99,8 @@ final class RoomMemberMessagesModel: ObservableObject {
         state = RoomMemberMessagesState(
             rows: messages.map {
                 RoomMemberMessageRow(sequenceId: $0.sequenceId, text: RoomChatQuiet.line($0.text),
-                                     date: ParsedSessionTimestamp($0.timestamp).date, attachments: $0.attachments.count)
+                                     date: ParsedSessionTimestamp($0.timestamp).date, attachments: $0.attachments.count,
+                                     model: $0.model)
             },
             phase: isLoading ? .loading : (failure.map { .failed($0) } ?? .idle),
             canLoadMore: !reachedStart,

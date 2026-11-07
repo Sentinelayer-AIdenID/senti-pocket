@@ -415,9 +415,7 @@ private struct AgentLogo: View {
     var body: some View {
         let (red, green, blue) = agent.lab.tint
         let tint = Color(red: red, green: green, blue: blue)
-        mark
-            .foregroundStyle(tint)
-            .frame(width: 21, height: 21)
+        AgentLabMark(lab: agent.lab, size: 21)
             .rotationEffect(.degrees(turn))
             .scaleEffect(beating ? 1.22 : 1)
             .shadow(color: tint.opacity(beating ? 0.75 : 0), radius: 7)
@@ -435,20 +433,6 @@ private struct AgentLogo: View {
             .onChange(of: agent.signal) { signal in if signal != nil { beat() } }
             .onChange(of: agent.isWorking) { working in if working { beat() } }
             .accessibilityHidden(true)
-    }
-
-    @ViewBuilder
-    private var mark: some View {
-        if let asset = agent.lab.logoAsset {
-            Image(asset)
-                .renderingMode(.template)
-                .resizable()
-                .scaledToFit()
-        } else if let initial = agent.lab.initial {
-            Text(initial).font(.system(size: 15, weight: .heavy, design: .rounded))
-        } else {
-            Image(systemName: "cpu").font(.system(size: 15, weight: .semibold))
-        }
     }
 
     /// One slow beat: up and glowing over half a second, back down over most of a second, then still.

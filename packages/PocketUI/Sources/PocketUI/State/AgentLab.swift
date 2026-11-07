@@ -84,6 +84,20 @@ public enum AgentLab: String, CaseIterable, Comparable, Sendable {
         return match(name) ?? .other
     }
 
+    /// The badge after an author's name in the room's messages and on their card (ticket 00bcfcef): an agent's lab,
+    /// read as `of` reads it. None for a person, and none for an agent whose lab is not known: a name never carries the
+    /// chip the who-is-here row shows for one.
+    public static func badge(id: String, isHuman: Bool, model: String?, reported: String? = nil) -> AgentLab? {
+        guard !isHuman else { return nil }
+        let lab = of(id: id, model: model, reported: reported)
+        return lab == .other ? nil : lab
+    }
+
+    /// What VoiceOver reads for a name with its badge: "forge, Claude agent".
+    public static func spokenName(_ name: String, lab: AgentLab) -> String {
+        "\(name), \(lab.name) agent"
+    }
+
     /// Matched on whole words of the model or name, a version allowed right after ("gpt4o", "glm4"), never inside
     /// another word (warden, #254: "opus" in "octopus" is not Claude).
     private static func match(_ text: String) -> AgentLab? {

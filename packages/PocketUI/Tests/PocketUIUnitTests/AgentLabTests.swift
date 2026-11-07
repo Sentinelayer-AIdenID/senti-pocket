@@ -24,6 +24,25 @@ final class AgentLabTests: XCTestCase {
         XCTAssertNil(AgentLab.other.initial, "an unknown lab shows a chip, not a letter")
     }
 
+    /// Ticket 00bcfcef: an agent's name in the room carries its lab's badge; a person's never does, and neither does an
+    /// agent whose lab is not known (no chip after a name).
+    func test_a_name_gets_a_badge_only_for_an_agent_of_a_known_lab() {
+        XCTAssertEqual(AgentLab.badge(id: "forge", isHuman: false, model: nil, reported: "anthropic"), .anthropic,
+                       "the lab the server reports")
+        XCTAssertEqual(AgentLab.badge(id: "lab-box-1", isHuman: false, model: "deepseek-v4-pro"), .deepseek,
+                       "a box's model")
+        XCTAssertEqual(AgentLab.badge(id: "claude-warden", isHuman: false, model: nil), .anthropic, "its name")
+        XCTAssertEqual(AgentLab.badge(id: "grok-helper", isHuman: false, model: nil), .xai,
+                       "a known lab with no logo carried still gets its badge (its initial)")
+        XCTAssertNil(AgentLab.badge(id: "human-claude", isHuman: true, model: "claude-opus-5-5", reported: "anthropic"),
+                     "a person, whatever their name or the model says")
+        XCTAssertNil(AgentLab.badge(id: "sol-max", isHuman: false, model: nil), "an unknown lab")
+        XCTAssertNil(AgentLab.badge(id: "ticket-keeper", isHuman: false, model: "unknown", reported: "other"),
+                     "an unknown lab, as the server says too")
+        XCTAssertEqual(AgentLab.spokenName("forge", lab: .anthropic), "forge, Claude agent")
+        XCTAssertEqual(AgentLab.spokenName("ds-box-1", lab: .deepseek), "ds-box-1, DeepSeek agent")
+    }
+
     /// Warden, #254: the match was on any substring.
     func test_a_lab_is_matched_on_whole_words_with_a_version_after_never_inside_a_word() {
         XCTAssertEqual(AgentLab.of(id: "octopus-helper", model: nil), .other, "opus inside octopus")

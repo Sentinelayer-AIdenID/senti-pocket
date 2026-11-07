@@ -19,11 +19,16 @@ public struct RoomMemberSheetView: View {
     private let onOpenFlight: (() -> Void)?
     /// See all on the card's "Rooms you share".
     private let onSeeAllRooms: (() -> Void)?
+    /// What the room knows of an agent's lab, as its name's badge in the room reads it: its model there (a box's) and
+    /// the lab the server reports for it while it is here.
+    private let roomModel: String?
+    private let reportedLab: String?
 
     /// The most of a box's steps shown here; its Flight record has them all.
     static let stepsShown = 5
 
     public init(card: RoomProfileCardState, messages: RoomMemberMessagesState, box: FlightRecordState.Box? = nil,
+                roomModel: String? = nil, reportedLab: String? = nil,
                 onMessage: @escaping () -> Void, onBlock: ((Int64) -> Void)? = nil, onClose: @escaping () -> Void,
                 onOpenMessage: @escaping (Int64) -> Void, onLoadMore: @escaping () -> Void,
                 onRetry: @escaping () -> Void, onOpenFlight: (() -> Void)? = nil,
@@ -31,6 +36,8 @@ public struct RoomMemberSheetView: View {
         self.card = card
         self.messages = messages
         self.box = box
+        self.roomModel = roomModel
+        self.reportedLab = reportedLab
         self.onMessage = onMessage
         self.onBlock = onBlock
         self.onClose = onClose
@@ -44,8 +51,9 @@ public struct RoomMemberSheetView: View {
     public var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                RoomProfileCardView(state: card, onMessage: onMessage, onBlock: messages.blockAction(onBlock),
-                                    onSeeAllRooms: onSeeAllRooms, onClose: onClose)
+                RoomProfileCardView(state: card, lab: lab, model: messages.model, onMessage: onMessage,
+                                    onBlock: messages.blockAction(onBlock), onSeeAllRooms: onSeeAllRooms,
+                                    onClose: onClose)
                 if let line = messages.connectionLine {
                     Label(line, systemImage: connectionSymbol)
                         .font(.subheadline)
@@ -65,6 +73,13 @@ public struct RoomMemberSheetView: View {
         .background(PocketPalette.canvas.ignoresSafeArea())
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("pocket.member.sheet")
+    }
+
+    /// An agent's lab, for the logo on its card: the lab the server reports for it, else the model its posts declare or
+    /// the room knows, else its name. Nil for a person or a lab not known.
+    private var lab: AgentLab? {
+        AgentLab.badge(id: card.target.senderId, isHuman: !card.target.isAgent, model: messages.model ?? roomModel,
+                       reported: reportedLab)
     }
 
     private var connectionSymbol: String {
