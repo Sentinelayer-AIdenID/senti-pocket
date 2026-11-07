@@ -13,6 +13,8 @@ public struct VoiceRoomPanel: View {
     private let addable: () -> [String]
     private let send: (VoiceRoomIntent) -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// Where the call's sound goes, from the app (`voiceRoomAudioRoute`).
+    @Environment(\.voiceRoomAudioRoute) private var audioRoute
     @State private var pressStarted = Date()
     @State private var startedByPress = false
     @State private var pulse = false
@@ -231,6 +233,7 @@ public struct VoiceRoomPanel: View {
                 .font(.caption2)
                 .tint(PocketPalette.listening)
                 .accessibilityIdentifier("pocket.voice.handsFree")
+                audioRoute?.content()
             }
             Spacer()
             talkButton
@@ -348,6 +351,30 @@ public struct VoiceRoomPanel: View {
     static func elapsed(from start: Date, to now: Date) -> String {
         let seconds = max(0, Int(now.timeIntervalSince(start)))
         return String(format: "%d:%02d", seconds / 60, seconds % 60)
+    }
+}
+
+/// A control the app puts on the call screen: where the call's sound goes (the speaker, the earpiece, headphones).
+public struct VoiceRoomExtraControl: Equatable {
+    let content: () -> AnyView
+
+    public init<Content: View>(@ViewBuilder _ content: @escaping () -> Content) {
+        self.content = { AnyView(content()) }
+    }
+
+    /// The same control each time the room draws: it watches what it shows itself.
+    public static func == (lhs: VoiceRoomExtraControl, rhs: VoiceRoomExtraControl) -> Bool { true }
+}
+
+private struct VoiceRoomAudioRouteKey: EnvironmentKey {
+    static let defaultValue: VoiceRoomExtraControl? = nil
+}
+
+extension EnvironmentValues {
+    /// The call screen's sound control, from the app.
+    public var voiceRoomAudioRoute: VoiceRoomExtraControl? {
+        get { self[VoiceRoomAudioRouteKey.self] }
+        set { self[VoiceRoomAudioRouteKey.self] = newValue }
     }
 }
 #endif

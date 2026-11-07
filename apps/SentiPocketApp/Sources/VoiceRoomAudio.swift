@@ -143,9 +143,12 @@ final class RingbackTone: VoiceRoomRinging {
 }
 
 final class PhoneVoiceRoomAudioSession: VoiceRoomAudioSession {
+    /// Never forced to the speaker: where the call's sound goes is the person's choice (`CallAudioRouter`).
+    static let options = CallAudioRouting.sessionOptions.union([.allowBluetoothA2DP, .duckOthers])
+
     func activate() throws {
         let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP, .duckOthers])
+        try session.setCategory(.playAndRecord, mode: .default, options: Self.options)
         try session.setActive(true)
     }
 
@@ -158,9 +161,10 @@ final class PhoneVoiceRoomAudioSession: VoiceRoomAudioSession {
 /// call), so the voice room only sets how it sounds, as a call does (the dial's category, with echo cancellation).
 /// This is what lets the call talk with the phone locked.
 final class CallKitVoiceRoomAudioSession: VoiceRoomAudioSession {
+    static let options = CallAudioRouting.sessionOptions
+
     func activate() throws {
-        try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .voiceChat,
-                                                        options: [.defaultToSpeaker, .allowBluetooth])
+        try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .voiceChat, options: Self.options)
     }
 
     func deactivate() {}

@@ -237,10 +237,11 @@ private struct SystemDuplexAudioSession: DuplexAudioSessionSystem {
 
     #if os(iOS)
     private func configure(_ session: AVAudioSession) throws {
+        // Never forced to the speaker: where a call's sound goes is the person's choice (`CallAudioRouting`).
         try session.setCategory(
             .playAndRecord,
             mode: .voiceChat,
-            options: [.defaultToSpeaker, .allowBluetooth]
+            options: CallAudioRouting.sessionOptions
         )
     }
     #endif
