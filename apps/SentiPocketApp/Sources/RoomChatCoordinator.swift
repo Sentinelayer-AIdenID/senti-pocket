@@ -1665,6 +1665,9 @@ final class RoomChatCoordinator: ObservableObject {
                     threadOlderCursor = page.nextCursor
                     threadGeneration &+= 1
                     threadLoadingOlder = false
+                    // A page on still on its way is dropped with the generation, and would never clear its flag: the
+                    // next page back would then be refused until the thread opened again.
+                    threadLoadingLater = false
                     threadSearching = false
                 }
             } else {
@@ -1810,7 +1813,12 @@ final class RoomChatCoordinator: ObservableObject {
             return current() ? .readBack : .done
         }
         guard current() else { return .done }
-        guard let anchored = page.anchoredActionId else { return .newestPage(page) }
+        // No anchor: an API without this read answered with the thread's newest page, which has no newer side. An
+        // answer with a newer side but no anchor is a window that cannot be placed: the thread reads back instead, so
+        // it never stands on a window as if it were the newest.
+        guard let anchored = page.anchoredActionId else {
+            return page.afterCursor == nil ? .newestPage(page) : .readBack
+        }
         let window = page.replies.filter { $0.targetSequenceId == sequenceId }
         // The window keeps a collapsed reply's own row as well as its final one: open at the API's answer.
         guard let reply = window.first(where: { $0.id == anchored }) else { return .readBack }

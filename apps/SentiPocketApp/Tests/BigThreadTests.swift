@@ -51,6 +51,8 @@ private final class PagedThread: RoomTransport, @unchecked Sendable {
     var failsAround = false
     /// A read around a reply answers a window without that reply in it.
     var windowLeavesOutItsReply = false
+    /// A read around a reply answers a window (with its cursors) but no `anchoredActionId`.
+    var windowWithoutAnchor = false
     /// Collapsed replies (never shown) and the reply each resolves to, as the API resolves them.
     var collapsed: [String: Int] = [:]
     private let capacity: Int
@@ -166,7 +168,7 @@ private final class PagedThread: RoomTransport, @unchecked Sendable {
         return RoomActionsPage(replies: window,
                                nextCursor: anchor - older > 1 ? "w1.\(anchor - older)" : nil,
                                afterCursor: anchor + newer < count ? "w1.\(anchor + newer)" : nil,
-                               anchoredActionId: BigThreadTests.id(anchor))
+                               anchoredActionId: windowWithoutAnchor ? nil : BigThreadTests.id(anchor))
     }
 
     func roomActions(sessionId: String, targetSequenceId: Int64, limit: Int, afterCursor: String) async throws
@@ -579,6 +581,57 @@ final class BigThreadTests: XCTestCase {
         XCTAssertEqual(transport.reads, [.init(limit: 500, around: Self.id(600)), .init(limit: 100, cursor: nil),
                                          .init(limit: 500, cursor: "901")])
         XCTAssertEqual(room.state.thread?.focusReplyId, Self.id(600))
+        room.pause()
+    }
+
+    /// An answer with a newer side but no `anchoredActionId` is no window to land on (an API without the read around a
+    /// reply answers with its newest page, which has no newer side): the thread reads back from its newest page
+    /// instead, never standing on the window as if it were the newest.
+    func test_a_window_without_an_anchor_reads_back_from_the_newest_instead() async throws {
+        let transport = PagedThread(count: 1_000)
+        transport.windowWithoutAnchor = true
+        let room = coordinator(transport, focus: 42)
+        room.resume()
+        room.openThread(42, at: Self.id(300))
+        await waitUntil("the reply is loaded") {
+            room.state.thread?.isLoading == false && room.state.thread?.isLoadingOlder == false
+                && room.state.thread?.replies.contains { $0.id == Self.id(300) } == true
+        }
+        XCTAssertEqual(transport.reads, [.init(limit: 500, around: Self.id(300)), .init(limit: 100, cursor: nil),
+                                         .init(limit: 500, cursor: "901"), .init(limit: 500, cursor: "401")],
+                       "read back from the newest page, not stood on the window")
+        XCTAssertEqual(room.state.thread?.focusReplyId, Self.id(300))
+        XCTAssertEqual(room.state.thread?.replies.last?.id, Self.id(1_000), "nothing after the reply left out")
+        room.pause()
+    }
+
+    /// The newest page standing alone (too far from the replies held) drops a page on that is still on its way: its
+    /// flag goes with it, so the next page back is read, not refused until the thread opens again.
+    func test_a_newest_page_standing_alone_lets_a_page_on_in_flight_go() async throws {
+        let transport = PagedThread(count: 2_500, capacity: 10_000)
+        let room = coordinator(transport, focus: 42)
+        room.resume()
+        room.openThread(42, at: Self.id(2_200))
+        await waitUntil("the thread is open at the reply, short of the newest") {
+            room.state.thread?.isLoading == false && room.state.thread?.hasLater == true
+        }
+        // A page on, slow to land.
+        transport.laterDelay = 1_000_000_000
+        room.send(.loadLaterReplies(sequenceId: 42))
+        await waitUntil("the page on is on its way") { room.state.thread?.isLoadingLater == true }
+        // A send: the newest page meets the window, which then reaches the newest.
+        await room.replyPosted(to: 42)
+        XCTAssertEqual(room.state.thread?.hasLater, false)
+        // Many more arrive, too far to meet: the newest page stands alone, and the page on still on its way goes.
+        transport.grow(to: 10_000)
+        await room.replyPosted(to: 42)
+        XCTAssertEqual(room.state.thread?.replies.first?.id, Self.id(9_901), "the newest page alone")
+        try? await Task.sleep(nanoseconds: 1_300_000_000)
+        XCTAssertEqual(room.state.thread?.isLoadingLater, false, "no page on is on its way any more")
+
+        room.send(.loadOlderReplies(sequenceId: 42))
+        await waitUntil("scrolling up reads the page back") { room.state.thread?.replies.first?.id == Self.id(9_801) }
+        XCTAssertEqual(transport.reads.last, PagedThread.Read(limit: 100, cursor: "9901"))
         room.pause()
     }
 
