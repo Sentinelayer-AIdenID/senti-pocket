@@ -229,6 +229,7 @@ final class VoiceCallMinimizeTests: XCTestCase {
 @MainActor
 final class VoiceCallBarRootTests: XCTestCase {
     private var window: UIWindow?
+    private var api: RootPreviewAPI?
 
     override func setUp() {
         super.setUp()
@@ -240,14 +241,15 @@ final class VoiceCallBarRootTests: XCTestCase {
         VoiceCallWindow.shared.hide()
         if let window { HostedSummary.close(window) }
         window = nil
+        api = nil
         HostedSummary.pump(0.4)
         super.tearDown()
     }
 
     /// #360 and #379: a list whose top inset changed as a bar came and went kept laying itself out, and froze the
     /// phone. The bar coming (a call minimized) and going (the call screen back, or the call ended) leaves every list
-    /// where it was, the room's message list among them, and its rows where they were, and draws neither the root nor
-    /// a new room screen.
+    /// where it was, the room's message list among them, and draws neither the root nor a new room screen. The rows on
+    /// screen stay where they were too: the bar covers a row, never moves it.
     func test_the_bar_comes_and_goes_without_moving_any_list() throws {
         let window = try hostRoot()
         let meter = RootPreview.meter
@@ -255,22 +257,24 @@ final class VoiceCallBarRootTests: XCTestCase {
         let tallest = try XCTUnwrap(placed.max { $0.value.height < $1.value.height }, "a list is on screen")
         XCTAssertGreaterThan(tallest.value.height, window.bounds.height / 2,
                              "the tallest list is the room's messages (\(tallest.value))")
-        let rows = rowPlaces(in: window)
-        XCTAssertFalse(rows.isEmpty, "the room's rows are on screen")
+        let list = tallest.value
+        let rows = settledRows(in: window, list: list, "before the bar")
+        XCTAssertFalse(rows.isEmpty, "rows of the room are on screen, inside its list, to compare")
         let rootBodies = meter.rootBodies
         let screens = meter.roomScreens
 
         let bar = VoiceCallBarModel(state: Self.call()) { _ in }
         minimizeACall(bar, in: window)
         assertSamePlacements(placed, placements(in: window), tallest: tallest.key, "the bar coming")
-        assertSameRows(rows, rowPlaces(in: window), "the bar coming")
+        assertSameRows(rows, settledRows(in: window, list: list, "with the bar"), "the bar coming")
 
         VoiceCallWindow.shared.restore()
         HostedSummary.pump(1.5)
         XCTAssertNil(HostedSummary.element("pocket.callBar.open", in: window),
                      "the bar goes as the call screen comes back")
         assertSamePlacements(placed, placements(in: window), tallest: tallest.key, "the bar going for the call screen")
-        assertSameRows(rows, rowPlaces(in: window), "the bar going for the call screen")
+        assertSameRows(rows, settledRows(in: window, list: list, "the call screen back"),
+                       "the bar going for the call screen")
 
         VoiceCallWindow.shared.minimize()
         XCTAssertNotNil(HostedSummary.wait(for: "pocket.callBar.open", in: window), "minimized again")
@@ -279,7 +283,7 @@ final class VoiceCallBarRootTests: XCTestCase {
         HostedSummary.pump(1.5)
         XCTAssertNil(HostedSummary.element("pocket.callBar.open", in: window), "the bar goes with the call")
         assertSamePlacements(placed, placements(in: window), tallest: tallest.key, "the bar going with the call")
-        assertSameRows(rows, rowPlaces(in: window), "the bar going with the call")
+        assertSameRows(rows, settledRows(in: window, list: list, "the call ended"), "the bar going with the call")
 
         print("BGAUDIT call bar: root bodies \(meter.rootBodies - rootBodies), "
               + "room screens \(meter.roomScreens - screens)")
@@ -348,6 +352,7 @@ final class VoiceCallBarRootTests: XCTestCase {
         )
         .environment(\.scenePhase, .active))
         self.window = window
+        self.api = api
         let firstReads = ["rooms", "history", "actions"]
         let end = Date().addingTimeInterval(30)
         while Date() < end, !firstReads.allSatisfy({ api.callCount($0) > 0 }) { HostedSummary.pump(0.1) }
@@ -385,27 +390,69 @@ final class VoiceCallBarRootTests: XCTestCase {
         return found
     }
 
-    /// Where the room's message rows are on the screen, by row, as VoiceOver finds them: a list that kept its frame and
-    /// insets but moved its rows (its content padded for a bar) shows here.
-    private func rowPlaces(in window: UIWindow) -> [String: CGRect] {
+    /// The room's message rows wholly on screen inside its list (`list`: where the list shows its content, in the
+    /// window), by message, as VoiceOver finds them. A list that kept its frame and insets but moved its rows (its
+    /// content padded for a bar) shows here. Rows off screen are left out: their frames are where the list last laid
+    /// them out, not where they are.
+    private func rowsOnScreen(in window: UIWindow, list: CGRect) -> [String: CGRect] {
         var found: [String: CGRect] = [:]
         for element in HostedSummary.elements(in: window) {
             guard let id = HostedSummary.identifier(of: element), id.hasPrefix("pocket.room.message.") else { continue }
-            found[id] = element.accessibilityFrame
+            let frame = window.convert(element.accessibilityFrame, from: nil)
+            if list.contains(frame) { found[id] = frame }
         }
         return found
     }
 
+    /// The rows on screen once the room has settled. A row's "Viewed by" line arrives after the row shows (it is read
+    /// 0.3 s after the row is reported viewed, and again every 15 s) and adds a line to it; the scripted room answers
+    /// every later read the same, and no message arrives. Settled: the views have been read, and two readings a second
+    /// apart find the same rows in the same places, with no read of the views between them. Up to 10 s.
+    private func settledRows(in window: UIWindow, list: CGRect, _ when: String,
+                             file: StaticString = #filePath, line: UInt = #line) -> [String: CGRect] {
+        guard let api else {
+            XCTFail("\(when): no room hosted", file: file, line: line)
+            return [:]
+        }
+        let end = Date().addingTimeInterval(10)
+        var rows = rowsOnScreen(in: window, list: list)
+        var reads = api.callCount("views")
+        while Date() < end {
+            HostedSummary.pump(1)
+            let again = rowsOnScreen(in: window, list: list)
+            let readsAgain = api.callCount("views")
+            if reads > 0, readsAgain == reads, !again.isEmpty, Set(again.keys) == Set(rows.keys),
+               moved(from: rows, to: again).isEmpty {
+                return again
+            }
+            rows = again
+            reads = readsAgain
+        }
+        XCTFail("\(when): the room's rows did not settle within 10 s (views read \(reads) times)",
+                file: file, line: line)
+        return rows
+    }
+
+    /// The rows in both readings whose frames differ by more than half a point on any side.
+    private func moved(from before: [String: CGRect], to after: [String: CGRect]) -> [String] {
+        before.keys.sorted().filter { id in
+            guard let was = before[id], let now = after[id] else { return false }
+            return abs(now.minX - was.minX) > 0.5 || abs(now.minY - was.minY) > 0.5
+                || abs(now.width - was.width) > 0.5 || abs(now.height - was.height) > 0.5
+        }
+    }
+
+    /// The same rows, by message, settled before and after, on screen inside the list both times, in the same places:
+    /// the bar covers a row, never moves it.
     private func assertSameRows(_ before: [String: CGRect], _ after: [String: CGRect], _ what: String,
                                 file: StaticString = #filePath, line: UInt = #line) {
         let compared = before.keys.filter { after[$0] != nil }
-        XCTAssertFalse(compared.isEmpty, "\(what): rows on screen before are still there to compare",
+        XCTAssertFalse(compared.isEmpty, "\(what): no row on screen before is on screen after, to compare",
                        file: file, line: line)
-        for id in compared {
-            guard let was = before[id], let now = after[id] else { continue }
-            if abs(now.minY - was.minY) > 0.5 || abs(now.height - was.height) > 0.5 {
-                XCTFail("\(what) moved \(id): \(was) became \(now)", file: file, line: line)
-            }
+        for id in moved(from: before, to: after) {
+            let was = before[id].map { "\($0)" } ?? "none"
+            let now = after[id].map { "\($0)" } ?? "none"
+            XCTFail("\(what) moved \(id): \(was) became \(now)", file: file, line: line)
         }
     }
 
