@@ -99,6 +99,26 @@ final class RootThemeTests: XCTestCase {
         XCTAssertEqual(style(of: window), .dark, "and the app follows it")
     }
 
+    /// The last room is read once at launch and written as rooms open; nothing the root draws depends on it, so writing
+    /// it, the same room again or another, draws no root. (As `@AppStorage` each write drew the root again. An unset
+    /// last room did not react to a notice that changed nothing, unlike the theme: measured, so it is tested this way.)
+    func test_the_last_room_written_draws_no_root() throws {
+        _ = try showRoot()
+        let meter = RootPreview.meter
+        let rootBodies = meter.rootBodies
+        let screens = meter.roomScreens
+
+        UserDefaults.standard.set(RootPreviewAPI.midRoom, forKey: AuthenticatedRootView.lastRoomKey)
+        pump(1)
+        UserDefaults.standard.set("room-000", forKey: AuthenticatedRootView.lastRoomKey)
+        pump(1)
+        UserDefaults.standard.set(RootPreviewAPI.midRoom, forKey: AuthenticatedRootView.lastRoomKey)
+        pump(1)
+
+        XCTAssertEqual(meter.rootBodies - rootBodies, 0, "the last room written, the same or another, draws no root")
+        XCTAssertEqual(meter.roomScreens - screens, 0, "and makes no new room screen")
+    }
+
     func test_the_store_publishes_only_a_real_change() {
         let suite = "pocket.test.theme.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
