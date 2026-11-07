@@ -145,8 +145,7 @@ struct RoomInviteRows: View {
         .sheet(item: $sharing) { item in RoomShareSheet(items: [item.url]) }
         .aiConsentPrompt($consentHeld) { aiConsent?.grant() }
         #if DEBUG
-        .onAppear { RootPreview.meter.peopleAgentsShown[sessionId] = agents != nil }
-        .onChange(of: agents != nil) { RootPreview.meter.peopleAgentsShown[sessionId] = $0 }
+        .onAppear { if agents == nil { RootPreview.meter.peopleAgentsShown[sessionId] = false } }
         #endif
     }
 
@@ -304,6 +303,7 @@ private struct RoomAgentContactRows: View {
         }
         .task { await model.load() }
         #if DEBUG
+        .onAppear { RootPreview.meter.peopleAgentsShown[model.sessionId] = true }
         .onChange(of: model.contacts.map { model.state(of: $0) }) { states in
             RootPreview.meter.peopleAgentStates[model.sessionId] = Dictionary(uniqueKeysWithValues: zip(model.contacts.map(\.id),
                                                                                                     states))
