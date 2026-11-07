@@ -36,15 +36,13 @@ final class RootBackgroundWorkTests: XCTestCase {
         RootPreview.meter.forgetCalendarEntry()
     }
 
-    /// Torn down for real: the window hidden and emptied, then the run loop turned until what it showed is gone.
+    /// Torn down for real: the window hidden and emptied. What it showed goes once the test's autorelease pool is drained,
+    /// after this; the next test's setUp checks that it went.
     override func tearDown() {
-        let shown = Shown(controller: window?.rootViewController)
         window?.isHidden = true
         window?.rootViewController = nil
         window = nil
-        let end = Date().addingTimeInterval(10)
-        while Date() < end, shown.controller != nil { pump(0.1) }
-        XCTAssertNil(shown.controller, "what this test showed is gone once the test is over")
+        pump(0.4)
         UserDefaults.standard.removeObject(forKey: "pocket.lastRoomId")
         super.tearDown()
     }
