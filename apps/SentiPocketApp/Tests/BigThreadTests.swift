@@ -461,6 +461,38 @@ final class BigThreadTests: XCTestCase {
         XCTAssertNotNil(replyOnScreen(600, in: window), "reply 600 of 1,000 is on screen")
     }
 
+    /// A long thread opens with its newest replies shown. Scrolled up to the top, it shows the replies loaded above
+    /// them, 30 at a time, and asks for the page before only once all loaded are shown.
+    func test_scrolling_up_shows_the_replies_loaded_above_before_reading_the_page_before() throws {
+        var sent: [RoomChatIntent] = []
+        let window = try roomWindow(showing: Self.openThread(count: 100, newest: 1_000, hasOlder: true),
+                                    automation: false) { sent.append($0) }
+        defer { close(window) }
+        XCTAssertNotNil(composer(in: window), "the thread opens over the room")
+        HostedSummary.pump(1.2)
+        let list = try XCTUnwrap(Self.views(in: window).compactMap { $0 as? UIScrollView }
+            .filter { !($0 is UITextView) }.max { $0.contentSize.height < $1.contentSize.height }, "the replies' list")
+        func asksForThePageBefore() -> Bool {
+            sent.contains { intent in
+                guard case .loadOlderReplies(let sequenceId) = intent else { return false }
+                return sequenceId == 42
+            }
+        }
+        var scrolls = 0
+        RenderTrace.resetThreadReplies()
+        while !asksForThePageBefore(), scrolls < 8 {
+            list.setContentOffset(CGPoint(x: 0, y: -list.adjustedContentInset.top), animated: false)
+            HostedSummary.pump(0.8)
+            scrolls += 1
+        }
+        print("THREADSCROLLUP asked for the page before at scroll \(scrolls); built on the way: "
+              + "\(Self.runs(RenderTrace.threadRepliesBuiltSinceReset()))")
+        XCTAssertTrue(asksForThePageBefore(), "with every loaded reply shown, scrolling up asks for the page before")
+        XCTAssertEqual(scrolls, 4, "first the 70 replies loaded above the newest 30: 30, 30, then 10")
+        XCTAssertTrue(RenderTrace.threadRepliesBuiltSinceReset().contains(Self.id(901)),
+                      "the oldest reply loaded is shown when the page before is asked for")
+    }
+
     /// What `keystrokes` keystrokes into `box` drew: the room, the replies' list, and replies built.
     private func typing(_ keystrokes: Int, into box: UITextView, in window: UIWindow, explaining: Bool)
         -> (room: Int, list: Int, replies: Int, ms: Int) {

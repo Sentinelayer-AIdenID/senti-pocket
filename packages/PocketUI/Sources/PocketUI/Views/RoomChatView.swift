@@ -2609,10 +2609,39 @@ private struct RoomThreadRepliesList: View {
     @State private var settled = false
     /// The oldest reply shown when a page of older ones was asked for: the reader stays on it as they arrive above.
     @State private var anchorBeforeOlder: String?
+    /// The first reply shown: the replies before it wait above, shown a few at a time as the reader scrolls up. A lazy
+    /// list scrolled to a row builds every row before it (the thread opened at reply 600 of 1,000 built 602), so the
+    /// thread opens with its first shown reply near where it opens, and the scroll builds only the rows near it.
+    @State private var shownFrom: String?
+    /// A scroll asked for, made once what it scrolls to is in the list (set with the first reply shown).
+    @State private var scrollRequest: ThreadScrollRequest?
+
+    /// Replies shown before the one a thread opens at.
+    static let shownBeforeFocus = 10
+    /// The newest replies a long thread opens with.
+    static let newestShown = 30
+    /// Replies shown at once above the first, as the reader scrolls up.
+    static let shownAtOnce = 30
+
+    /// The replies the thread shows (file parts fold behind their file's card).
+    private var replies: [RoomChatReplyRow] { thread.replies.filter { showsFileParts || $0.filePartOf == nil } }
+
+    /// Where in `replies` the shown ones start: the first reply shown, or where the thread opens (a few before the
+    /// reply it was opened at, a long thread's newest, else its first).
+    private func shownStart(in replies: [RoomChatReplyRow]) -> Int {
+        if let shownFrom, let index = replies.firstIndex(where: { $0.id == shownFrom }) { return index }
+        if let focus = thread.focusReplyId, let index = replies.firstIndex(where: { $0.id == focus }) {
+            return max(0, index - Self.shownBeforeFocus)
+        }
+        if thread.hasOlder || thread.focusMissing { return max(0, replies.count - Self.newestShown) }
+        return 0
+    }
 
     var body: some View {
         let _ = RenderTrace.built(.threadList)
         let _ = RenderTrace.explainsThreadList ? Self._printChanges() : ()
+        let replies = self.replies
+        let start = shownStart(in: replies)
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
@@ -2643,10 +2672,10 @@ private struct RoomThreadRepliesList: View {
                     if let failure = thread.failureText {
                         Text(failure).font(.footnote).foregroundStyle(PocketPalette.warning)
                     }
-                    if thread.hasOlder {
+                    if start > 0 || thread.hasOlder {
                         olderRow
                     }
-                    ForEach(thread.replies.filter { showsFileParts || $0.filePartOf == nil }) { reply in
+                    ForEach(Array(replies[start...])) { reply in
                         if reply.hidesAsBlocked {
                             RoomBlockedLine(identifier: "pocket.thread.blocked.\(reply.id)") {
                                 send(.revealBlocked(key: RoomBlocking.revealKey(reply: reply.id)))
@@ -2691,70 +2720,98 @@ private struct RoomThreadRepliesList: View {
                 keepPlace(proxy)
                 showFocusedReply(proxy)
             }
-            .onChange(of: thread.focusMissing) { missing in if missing { proxy.scrollTo(Self.endAnchor, anchor: .bottom) } }
+            .onChange(of: thread.focusMissing) { missing in if missing { scroll(to: Self.endAnchor, anchor: .bottom) } }
+            // Made once the rows it scrolls to are in the list: the first reply shown is set in the same update.
+            .onChange(of: scrollRequest) { request in
+                guard let request else { return }
+                DispatchQueue.main.async { proxy.scrollTo(request.target, anchor: request.anchor) }
+            }
         }
+    }
+
+    private func scroll(to target: String, anchor: UnitPoint) {
+        scrollRequest = ThreadScrollRequest(target: target, anchor: anchor)
     }
 
     private static let endAnchor = "thread.end"
 
     private static func replyAnchor(_ id: String) -> String { "reply:" + id }
 
-    /// Where the thread opens, once: the reply it was opened at; a long thread's newest reply; else its top.
+    /// Where the thread opens, once: the reply it was opened at; a long thread's newest reply; else its top. The first
+    /// reply shown is kept from here on (by its id), so replies arriving below never move the ones on screen.
     private func arrive(_ proxy: ScrollViewProxy) {
         guard !settled else { return }
+        let replies = self.replies
+        let start = shownStart(in: replies)
+        if shownFrom == nil, replies.indices.contains(start) { shownFrom = replies[start].id }
         if thread.focusReplyId != nil, !thread.focusMissing {
             showFocusedReply(proxy)
         } else if thread.hasOlder || thread.focusMissing {
-            DispatchQueue.main.async { proxy.scrollTo(Self.endAnchor, anchor: .bottom) }
+            scroll(to: Self.endAnchor, anchor: .bottom)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { settled = true }
     }
 
-    /// Brings the reply the thread was opened at into view once it is loaded, once, and marks it a moment.
+    /// Brings the reply the thread was opened at into view once it is loaded, once, and marks it a moment. The replies
+    /// shown start a few before it, so the scroll builds the rows near it, never all those above it.
     private func showFocusedReply(_ proxy: ScrollViewProxy) {
+        let replies = self.replies
         guard let focus = thread.focusReplyId, focus != shownFocus,
-              thread.replies.contains(where: { $0.id == focus }) else { return }
+              let index = replies.firstIndex(where: { $0.id == focus }) else { return }
         shownFocus = focus
-        DispatchQueue.main.async {
-            // Straight there, the mark shows where: an animated scroll would build every reply it passes.
-            proxy.scrollTo(Self.replyAnchor(focus), anchor: .center)
-            flashing = focus
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
-                withAnimation(.easeOut(duration: 0.4)) {
-                    if flashing == focus { flashing = nil }
-                }
+        shownFrom = replies[max(0, index - Self.shownBeforeFocus)].id
+        // Straight there, the mark shows where: an animated scroll would build every reply it passes.
+        scroll(to: Self.replyAnchor(focus), anchor: .center)
+        flashing = focus
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
+            withAnimation(.easeOut(duration: 0.4)) {
+                if flashing == focus { flashing = nil }
             }
         }
     }
 
-    /// The top of a long thread's loaded replies: reached by scrolling up, it loads the page before.
+    /// Above the first reply shown: reached by scrolling up, it shows the replies loaded above it, a few at a time, and
+    /// once all are shown it loads the page before.
     private var olderRow: some View {
         HStack(spacing: 8) {
             if thread.isLoadingOlder {
                 ProgressView()
                 Text("Loading earlier replies…")
             } else {
-                Button("Load earlier replies") { loadOlder() }
+                Button("Load earlier replies") { showEarlier() }
                     .accessibilityIdentifier("pocket.thread.older")
             }
         }
         .font(.footnote)
         .foregroundStyle(PocketPalette.textSecondary)
         .frame(maxWidth: .infinity)
-        .onAppear { if settled { loadOlder() } }
+        .onAppear { if settled { showEarlier() } }
     }
 
-    private func loadOlder() {
-        guard thread.hasOlder, !thread.isLoadingOlder else { return }
-        anchorBeforeOlder = thread.replies.first?.id
-        send(.loadOlderReplies(sequenceId: thread.parent.sequenceId))
+    /// Shows the replies above the first shown, `shownAtOnce` of them, keeping the reader on the reply they were at; with
+    /// none above, loads the page before.
+    private func showEarlier() {
+        let replies = self.replies
+        let start = shownStart(in: replies)
+        if start > 0 {
+            let first = replies[start].id
+            shownFrom = replies[max(0, start - Self.shownAtOnce)].id
+            scroll(to: Self.replyAnchor(first), anchor: .top)
+        } else if thread.hasOlder, !thread.isLoadingOlder {
+            anchorBeforeOlder = replies.first?.id
+            send(.loadOlderReplies(sequenceId: thread.parent.sequenceId))
+        }
     }
 
-    /// The older page arrived above: the reader stays on the reply they were at.
+    /// The older page arrived above: the reader stays on the reply they were at, with the newest of the page shown
+    /// above it.
     private func keepPlace(_ proxy: ScrollViewProxy) {
         guard let anchor = anchorBeforeOlder else { return }
         anchorBeforeOlder = nil
-        DispatchQueue.main.async { proxy.scrollTo(Self.replyAnchor(anchor), anchor: .top) }
+        let replies = self.replies
+        guard let index = replies.firstIndex(where: { $0.id == anchor }) else { return }
+        shownFrom = replies[max(0, index - Self.shownAtOnce)].id
+        scroll(to: Self.replyAnchor(anchor), anchor: .top)
     }
 
     /// The reply this thread was opened at is further back than one search reads: one tap reads on.
@@ -2917,6 +2974,13 @@ private struct RoomThreadRepliesList: View {
             }
         }
     }
+}
+
+/// A scroll the thread's list asks for: to a row's id, at an anchor. Each one asked for is new, even to the same row.
+private struct ThreadScrollRequest: Equatable {
+    let target: String
+    let anchor: UnitPoint
+    let token = UUID()
 }
 
 /// The reply typed in each thread while the room is open, by the thread's message. A reference: typing writes it, and
