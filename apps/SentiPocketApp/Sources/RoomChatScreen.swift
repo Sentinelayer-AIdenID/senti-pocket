@@ -149,7 +149,6 @@ struct RoomChatScreen: View {
     @State private var appliedRouteLinks = false
     /// The times the app closed unexpectedly, offered once each to send to this room.
     @ObservedObject private var crashes = CrashReporter.shared
-    @ObservedObject private var readingSource = ReadAloudSource.shared
     @State private var offersCrashReports = false
     /// A box's console, shown in the app.
     @State private var consolePage: InAppPage?
@@ -417,6 +416,13 @@ struct RoomChatScreen: View {
             endedBoxes: endedBoxes,
             now: Date()
         )
+    }
+
+    /// The Listen bar for this room's readings.
+    private func readAloudBar(place: String) -> ReadAloudBarSlot {
+        ReadAloudBarSlot(reader: reader, place: place, shows: { [inVoiceRoom = voiceRoom != nil, sessionId = route.sessionId] source in
+            !inVoiceRoom && (source == nil || source == sessionId)
+        }, onShowMessage: showReadingMessage)
     }
 
     /// The message being read, brought into view (Carter, #55229); a reply opens its thread.
@@ -687,6 +693,45 @@ struct RoomChatScreen: View {
         #endif
     }
 
+    /// What a tap in the room asks for, and the same from a hosted test (`RootPreview.requestRoom`, DEBUG).
+    private func handle(_ intent: RoomChatIntent) {
+        if case .bottomFlapHeld(let rows, let longest) = intent {
+            // The room's bottom marker flapped and the reader's place was held still:
+            // one line for the freeze recorder, with what may have kept it moving, never what the room says.
+            CrashReporter.shared.note("bottom marker flapped, held \(Int(RoomBottomSettle.holdTime)) s (\(rows) rows, "
+                + "longest message \(longest) chars, voice room \(voiceRoom == nil ? "off" : "on"))")
+            return
+        }
+        CrashReporter.shared.note(intent, rows: coordinator.state.rows.count)
+        if case .openBreakout(let childSessionId) = intent {
+            openBreakout(childSessionId)
+        } else if case .openTickets(let filing) = intent {
+            ticketsStartFiling = filing
+            showsTickets = true
+        } else if intent == .openSearch {
+            showsSearch = true
+        } else if case .openAttachment(let attachmentId) = intent {
+            openAttachment(attachmentId)
+        } else if case .shareAttachment(let attachmentId) = intent {
+            shareAttachment(attachmentId)
+        } else if case .readAloud(let id, let text) = intent {
+            ReadAloudSource.shared.reading(in: route.sessionId)
+            if reader.read(id: id, markdown: text, title: readAloudTitle(for: id)) == .unavailable {
+                listenProblem = "A call or briefing is using the audio. Listen when it ends."
+            }
+        } else if intent == .stopReadingAloud {
+            reader.stop()
+        } else if intent == .openInvite {
+            // An invite writes to the room too: the first write asks.
+            afterAIConsent { showsInvite = true }
+        } else if intent == .peopleOpened {
+            // Which boxes still run, so the people list shows them as here or ended.
+            Task { await flight.refresh() }
+        } else {
+            coordinator.send(intent)
+        }
+    }
+
     var body: some View {
         #if DEBUG
         let _ = RootPreview.meter.roomScreenBodyRan()
@@ -700,43 +745,11 @@ struct RoomChatScreen: View {
             ),
             roster: roster,
             media: media.canUpload && coordinator.state.composer.canPost ? media.board : nil
-        ) { intent in
-            if case .bottomFlapHeld(let rows, let longest) = intent {
-                // The room's bottom marker flapped and the reader's place was held still:
-                // one line for the freeze recorder, with what may have kept it moving, never what the room says.
-                CrashReporter.shared.note("bottom marker flapped, held \(Int(RoomBottomSettle.holdTime)) s (\(rows) rows, "
-                    + "longest message \(longest) chars, voice room \(voiceRoom == nil ? "off" : "on"))")
-                return
-            }
-            CrashReporter.shared.note(intent, rows: coordinator.state.rows.count)
-            if case .openBreakout(let childSessionId) = intent {
-                openBreakout(childSessionId)
-            } else if case .openTickets(let filing) = intent {
-                ticketsStartFiling = filing
-                showsTickets = true
-            } else if intent == .openSearch {
-                showsSearch = true
-            } else if case .openAttachment(let attachmentId) = intent {
-                openAttachment(attachmentId)
-            } else if case .shareAttachment(let attachmentId) = intent {
-                shareAttachment(attachmentId)
-            } else if case .readAloud(let id, let text) = intent {
-                ReadAloudSource.shared.reading(in: route.sessionId)
-                if reader.read(id: id, markdown: text, title: readAloudTitle(for: id)) == .unavailable {
-                    listenProblem = "A call or briefing is using the audio. Listen when it ends."
-                }
-            } else if intent == .stopReadingAloud {
-                reader.stop()
-            } else if intent == .openInvite {
-                // An invite writes to the room too: the first write asks.
-                afterAIConsent { showsInvite = true }
-            } else if intent == .peopleOpened {
-                // Which boxes still run, so the people list shows them as here or ended.
-                Task { await flight.refresh() }
-            } else {
-                coordinator.send(intent)
-            }
-        }
+        ) { intent in handle(intent) }
+        #if DEBUG
+        // A hosted test asks the room on screen for what a tap would.
+        .onReceive(RootPreview.roomRequests) { intent in handle(intent) }
+        #endif
         // A sheet, the side panel or a call's window covers the room: its moving parts (the presence ring) rest
         // underneath (#265, #269). The app's cover passes through as it is, read only by what rests.
         .transformEnvironment(\.roomIsCovered) { [coversItself] covered in covered = covered || coversItself }
@@ -748,6 +761,11 @@ struct RoomChatScreen: View {
                 .accessibilityHidden(true)
                 .modifier(mediaPresenters(isActive: true))
         })
+        // The Listen bar, at the top while this room's message is read (a voice room speaks on its own); a thread shows it
+        // at its own top, so reading a reply keeps the thread open and in view (Carter, #62471). Reading from another
+        // room, the app's own bar shows instead.
+        .safeAreaInset(edge: .top, spacing: 0) { readAloudBar(place: "room") }
+        .environment(\.roomReadAloudBar, RoomReadAloudBarHost { readAloudBar(place: "thread") })
         // A direct message: whom it is with, the room you share, and for an agent whether it may use this chat there.
         .safeAreaInset(edge: .top, spacing: 0) {
             if let info = route.direct {
@@ -973,17 +991,6 @@ struct RoomChatScreen: View {
             }
         }
         .animation(.spring(response: 0.32, dampingFraction: 0.9), value: showsArtifacts)
-        .overlay(alignment: .bottom) {
-            // The Listen player: above the composer while this room's message is read (a voice room speaks on its
-            // own). Reading from another room, the app's own player shows instead, over every screen.
-            if voiceRoom == nil, let playback = reader.playback,
-               readingSource.sessionId == nil || readingSource.sessionId == route.sessionId {
-                ReadAloudPlayer(reader: reader, playback: playback, onShowMessage: showReadingMessage)
-                    .padding(.bottom, 72)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-        }
-        .animation(.spring(response: 0.3, dampingFraction: 0.9), value: reader.playback == nil)
         // Tick one agent or several, or call everyone as a meeting.
         .sheet(isPresented: $choosesVoicePartner) {
             VoiceCallPicker(partners: voicePartners, onCall: { agents in

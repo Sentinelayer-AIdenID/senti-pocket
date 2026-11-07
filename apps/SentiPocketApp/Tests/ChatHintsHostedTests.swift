@@ -65,22 +65,33 @@ final class ChatHintsHostedTests: XCTestCase {
         return (suite, try XCTUnwrap(UserDefaults(suiteName: suite)))
     }
 
+    /// Check each rendered control as well as the containing banner, so a misleading container frame cannot pass.
+    /// Mutant: remove the zero-height bottom-aligned frame and the text or actions overlap the input again.
+    private func assertTipAboveComposer(in window: UIWindow, composer: CGRect,
+                                       file: StaticString = #filePath, line: UInt = #line) throws {
+        for id in ["pocket.hint", "pocket.hint.text", "pocket.hint.never", "pocket.hint.dismiss"] {
+            let element = try XCTUnwrap(HostedSummary.element(id, in: window), file: file, line: line)
+            let frame = element.accessibilityFrame
+            XCTAssertGreaterThan(frame.height, 0, "\(id) has a visible frame", file: file, line: line)
+            XCTAssertLessThanOrEqual(frame.maxY, composer.minY,
+                                     "\(id) stays entirely above the message box", file: file, line: line)
+        }
+    }
+
     func test_a_tip_sits_above_the_box_and_dismissing_it_keeps_the_messages_in_place() throws {
         let (suite, defaults) = try storage()
         defer { defaults.removePersistentDomain(forName: suite) }
         let hints = ChatHints(accountId: "account-a", defaults: defaults)
         let window = try host(hints)
         defer { HostedSummary.close(window) }
-        let tip = try XCTUnwrap(HostedSummary.wait(for: "pocket.hint", in: window))
+        _ = try XCTUnwrap(HostedSummary.wait(for: "pocket.hint", in: window))
         let input = try XCTUnwrap(HostedSummary.wait(for: "pocket.room.composer", in: window))
         let message = try XCTUnwrap(HostedSummary.wait(for: "pocket.room.message.12", in: window))
         HostedSummary.pump(0.5)
         let before = message.accessibilityFrame
-        XCTAssertGreaterThan(tip.accessibilityFrame.height, 0, "the banner has a visible frame")
         XCTAssertGreaterThan(input.accessibilityFrame.height, 0, "the message box has a visible frame")
         XCTAssertGreaterThan(before.height, 0, "the compared message is visible")
-        XCTAssertLessThanOrEqual(tip.accessibilityFrame.maxY, input.accessibilityFrame.minY,
-                                 "the tip never covers the message box")
+        try assertTipAboveComposer(in: window, composer: input.accessibilityFrame)
         let close = try XCTUnwrap(HostedSummary.element("pocket.hint.dismiss", in: window))
         XCTAssertTrue(close.accessibilityActivate(), "the visible close button is wired")
         HostedSummary.pump(0.3)
@@ -104,6 +115,8 @@ final class ChatHintsHostedTests: XCTestCase {
         XCTAssertTrue(box.becomeFirstResponder())
         XCTAssertNotNil(HostedSummary.wait(for: "pocket.hint.text", in: window, label: ChatHints.Tip.mention.text))
         XCTAssertEqual(hints.current?.tip, .mention, "the actual input's focus reaches the hint controller")
+        HostedSummary.pump(0.5)
+        try assertTipAboveComposer(in: window, composer: box.accessibilityFrame)
         box.insertText("Hello")
         HostedSummary.pump(0.3)
         XCTAssertNil(hints.current, "a nonempty input has no mention tip")

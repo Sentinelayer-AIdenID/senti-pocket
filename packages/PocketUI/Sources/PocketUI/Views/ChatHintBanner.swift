@@ -105,11 +105,12 @@ struct ChatHintAnchor: ViewModifier {
             .overlay(alignment: aboveComposer ? .top : .bottom) {
                 if let hints {
                     ChatHintAtAnchor(hints: hints, anchor: anchor)
+                        .fixedSize(horizontal: false, vertical: true)
                         .padding(.horizontal, 10)
                         .padding(.bottom, aboveComposer ? 4 : 8)
-                        .alignmentGuide(.top) { dimensions in
-                            aboveComposer ? dimensions[.bottom] : dimensions[.top]
-                        }
+                        // A zero-height overlay at the top edge places its bottom-aligned content above the box.
+                        // Its intrinsic height can change with the tip or text size without sizing the composer.
+                        .frame(height: aboveComposer ? 0 : nil, alignment: .bottom)
                 }
             }
             .onAppear { hints?.update(anchor: anchor, context: context, visible: visible) }
