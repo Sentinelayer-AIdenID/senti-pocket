@@ -2829,6 +2829,8 @@ final class RoomChatCoordinator: ObservableObject {
             // Reports are taken on posted messages, not a file's upload notice or a relayed line.
             input.isReportable = message.eventType == "session_message"
             input.addressedLine = Self.addressedLine(message.addressed)
+            // For the lab badge after an agent's name: the model the post itself declared.
+            input.model = message.model
             return input
         }
         let threadInput = openThreadSequence.map { sequence in

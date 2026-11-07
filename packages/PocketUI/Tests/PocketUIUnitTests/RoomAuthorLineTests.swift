@@ -45,12 +45,15 @@ final class RoomAuthorLineTests: XCTestCase {
                        "a lab with no logo carried shows its initial in the same square")
         XCTAssertEqual(width(RoomAuthorLine(row: person, lab: .anthropic)),
                        width(RoomAuthorLine(row: person, lab: nil)), "never on a person's name, whatever is passed")
-        // What the room passes for an agent whose lab is not known.
-        let unknown = AgentLab.badge(id: "sol-max", isHuman: false, model: nil)
-        let unknownRow = row(author: "sol-max", name: "sol-max", isHuman: false)
-        XCTAssertEqual(width(RoomAuthorLine(row: unknownRow, lab: unknown)),
-                       width(RoomAuthorLine(row: unknownRow, lab: nil)),
-                       "no chip after the name of an agent whose lab is not known")
+        // What the room passes for an agent whose lab is not known, and for one known only by a name the who-is-here
+        // row reads a lab from.
+        for id in ["sol-max", "gemini-reviewer"] {
+            let unknown = AgentLab.Known().badge(authorId: id, isHuman: false, declared: nil)
+            let unknownRow = row(author: id, name: id, isHuman: false)
+            XCTAssertEqual(width(RoomAuthorLine(row: unknownRow, lab: unknown)),
+                           width(RoomAuthorLine(row: unknownRow, lab: nil)),
+                           "\(id): no badge after the name of an agent whose lab is not known")
+        }
     }
 
     func test_the_badge_leaves_the_line_as_tall_as_the_same_name_without_it() {

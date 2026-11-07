@@ -73,6 +73,9 @@ public struct RoomChatView: View {
 
     /// Everyone who came to the room, for its people list.
     private let roster: RoomRoster
+    /// What the room knows of its agents' labs, for the badge after an agent's name: made once here, from who is here
+    /// and the roster, so each row looks its author up instead of scanning the room.
+    private let authorLabs: AgentLab.Known
 
     /// Photos, videos and files on their way, where the room can take them: the composer's paperclip and tray, and the
     /// messages being sent. Read by those parts alone, so an upload never redraws the room.
@@ -90,6 +93,7 @@ public struct RoomChatView: View {
         self.readingAloudId = readingAloudId
         self.composerActions = composerActions
         self.roster = roster
+        self.authorLabs = AgentLab.Known(people: state.presence?.people ?? [], boxModels: roster.modelsById)
         self.media = media
         self.send = send
     }
@@ -656,15 +660,11 @@ public struct RoomChatView: View {
         .onDisappear { send(.messageOnScreen(id: message.id, isOnScreen: false)) }
     }
 
-    /// The lab badge after an agent's name (ticket 00bcfcef), from what the room knows of the agent, as its logo in the
-    /// who-is-here row reads it: the lab the server reports for it while it is here, a box's model, else its name. Nil
-    /// for a person or a lab not known.
+    /// The lab badge after an agent's name (ticket 00bcfcef): the lab the server reports for it while it is here, else
+    /// the model this post declared, else its box's model; never guessed from its name. Nil for a person or a lab not
+    /// known.
     private func authorLab(_ message: RoomChatMessageRow) -> AgentLab? {
-        guard !message.isHuman else { return nil }
-        let key = message.authorId.lowercased()
-        return AgentLab.badge(id: message.authorId, isHuman: false,
-                              model: roster.members.first(where: { $0.id.lowercased() == key })?.model,
-                              reported: state.presence?.people.first(where: { $0.id.lowercased() == key })?.lab)
+        authorLabs.badge(authorId: message.authorId, isHuman: message.isHuman, declared: message.model)
     }
 
     /// Below a window further back: the next newer page loads when this comes into view (its identity follows the

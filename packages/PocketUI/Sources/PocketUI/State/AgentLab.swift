@@ -84,13 +84,45 @@ public enum AgentLab: String, CaseIterable, Comparable, Sendable {
         return match(name) ?? .other
     }
 
-    /// The badge after an author's name in the room's messages and on their card (ticket 00bcfcef): an agent's lab,
-    /// read as `of` reads it. None for a person, and none for an agent whose lab is not known: a name never carries the
-    /// chip the who-is-here row shows for one.
-    public static func badge(id: String, isHuman: Bool, model: String?, reported: String? = nil) -> AgentLab? {
+    /// The badge after an author's name in the room's messages and on their card (ticket 00bcfcef): an agent's lab from
+    /// what is known of its model, never guessed from its id or name (unlike `of`, which the who-is-here row reads). In
+    /// order: the lab the server reports for it (API #1055, from its model), else the model its post declared, else its
+    /// box's model; else none. A person never gets one, and neither does an agent whose lab is not known: "other", a
+    /// stand-in model ("agent", "human", "mcp"), a model of a lab the app does not know, or no model at all.
+    public static func badge(isHuman: Bool, reported: String?, declared: String?, boxModel: String?) -> AgentLab? {
         guard !isHuman else { return nil }
-        let lab = of(id: id, model: model, reported: reported)
-        return lab == .other ? nil : lab
+        if let reported, let lab = AgentLab(rawValue: reported.lowercased()), lab != .other { return lab }
+        for model in [declared, boxModel] {
+            if let model, let lab = match(model) { return lab }
+        }
+        return nil
+    }
+
+    /// What a room knows of its agents' labs, by lowercased id (ticket 00bcfcef): the lab the server reports for each
+    /// agent here, and each running box's model. Made once from the room's presence and roster, so a row's badge is
+    /// two lookups and its own post's model, never a scan of the room.
+    public struct Known: Equatable, Sendable {
+        private let reported: [String: String]
+        private let boxModels: [String: String]
+
+        /// `people` is who is here (`RoomChatPresence.people`); `boxModels` each box's model by lowercased id
+        /// (`RoomRoster.modelsById`).
+        public init(people: [RoomChatPresence.Person] = [], boxModels: [String: String] = [:]) {
+            var reported: [String: String] = [:]
+            for person in people where !person.isHuman {
+                let key = person.id.lowercased()
+                if let lab = person.lab, reported[key] == nil { reported[key] = lab }
+            }
+            self.reported = reported
+            self.boxModels = boxModels
+        }
+
+        /// The badge after this author's name, for a post that declared `declared` (`AgentLab.badge`).
+        public func badge(authorId: String, isHuman: Bool, declared: String?) -> AgentLab? {
+            guard !isHuman else { return nil }
+            let key = authorId.lowercased()
+            return AgentLab.badge(isHuman: false, reported: reported[key], declared: declared, boxModel: boxModels[key])
+        }
     }
 
     /// What VoiceOver reads for a name with its badge: "forge, Claude agent".

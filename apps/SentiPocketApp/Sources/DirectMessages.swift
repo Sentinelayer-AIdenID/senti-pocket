@@ -295,8 +295,8 @@ struct RoomProfileSheet: View {
             card: model.state,
             messages: messages.state,
             box: box,
-            // A box's model, as the room knows it.
-            roomModel: box?.model,
+            // A box's model, from the Flight record while it runs.
+            boxModel: box?.model,
             reportedLab: reportedLab,
             onMessage: {
                 guard let context else { return }

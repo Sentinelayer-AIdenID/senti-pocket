@@ -19,16 +19,16 @@ public struct RoomMemberSheetView: View {
     private let onOpenFlight: (() -> Void)?
     /// See all on the card's "Rooms you share".
     private let onSeeAllRooms: (() -> Void)?
-    /// What the room knows of an agent's lab, as its name's badge in the room reads it: its model there (a box's) and
-    /// the lab the server reports for it while it is here.
-    private let roomModel: String?
+    /// What the room knows of an agent's lab, as its name's badge in the room reads it: the lab the server reports for
+    /// it while it is here, and its box's model while it runs.
+    private let boxModel: String?
     private let reportedLab: String?
 
     /// The most of a box's steps shown here; its Flight record has them all.
     static let stepsShown = 5
 
     public init(card: RoomProfileCardState, messages: RoomMemberMessagesState, box: FlightRecordState.Box? = nil,
-                roomModel: String? = nil, reportedLab: String? = nil,
+                boxModel: String? = nil, reportedLab: String? = nil,
                 onMessage: @escaping () -> Void, onBlock: ((Int64) -> Void)? = nil, onClose: @escaping () -> Void,
                 onOpenMessage: @escaping (Int64) -> Void, onLoadMore: @escaping () -> Void,
                 onRetry: @escaping () -> Void, onOpenFlight: (() -> Void)? = nil,
@@ -36,7 +36,7 @@ public struct RoomMemberSheetView: View {
         self.card = card
         self.messages = messages
         self.box = box
-        self.roomModel = roomModel
+        self.boxModel = boxModel
         self.reportedLab = reportedLab
         self.onMessage = onMessage
         self.onBlock = onBlock
@@ -75,11 +75,11 @@ public struct RoomMemberSheetView: View {
         .accessibilityIdentifier("pocket.member.sheet")
     }
 
-    /// An agent's lab, for the logo on its card: the lab the server reports for it, else the model its posts declare or
-    /// the room knows, else its name. Nil for a person or a lab not known.
+    /// An agent's lab, for the logo on its card: the lab the server reports for it, else the model its newest post
+    /// declared, else its box's model; never guessed from its name. Nil for a person or a lab not known.
     private var lab: AgentLab? {
-        AgentLab.badge(id: card.target.senderId, isHuman: !card.target.isAgent, model: messages.model ?? roomModel,
-                       reported: reportedLab)
+        AgentLab.badge(isHuman: !card.target.isAgent, reported: reportedLab, declared: messages.model,
+                       boxModel: boxModel)
     }
 
     private var connectionSymbol: String {
