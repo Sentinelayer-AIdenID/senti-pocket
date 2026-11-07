@@ -664,11 +664,18 @@ struct RoomChatScreen: View {
                 })
             }
         }
+        // The agents come in once the room's read offers them: the sheet takes the new invite rows then.
+        let revision = coordinator.addsAgents ? 1 : 0
         #if DEBUG
-        let sessionId = route.sessionId
-        return RoomPeopleExtras(invite: invite, requests: requests, shown: { RootPreview.meter.peopleSections[sessionId] = $0 })
+        // As People appears, for the hosted tests: its sections, and the requests row's words (that row sits at the
+        // list's foot, made only once scrolled to).
+        let sessionId = route.sessionId, counted = peopleRequests
+        return RoomPeopleExtras(invite: invite, requests: requests, revision: revision, shown: { sections in
+            RootPreview.meter.peopleSections[sessionId] = sections
+            if let counted { RootPreview.meter.peopleRequestsTitle[sessionId] = RoomRequestsTitle.text(count: counted.state.pending.count) }
+        })
         #else
-        return RoomPeopleExtras(invite: invite, requests: requests)
+        return RoomPeopleExtras(invite: invite, requests: requests, revision: revision)
         #endif
     }
 

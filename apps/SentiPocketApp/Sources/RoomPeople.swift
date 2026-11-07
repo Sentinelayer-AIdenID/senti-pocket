@@ -57,6 +57,11 @@ private struct RoomPeopleIcon: View {
     }
 }
 
+/// The agent requests row's words, with how many wait.
+enum RoomRequestsTitle {
+    static func text(count: Int) -> String { "Agent requests (\(count))" }
+}
+
 /// Agent requests, at the foot of People: the count on its row, and the same requests screen as before.
 struct RoomRequestsRow<Destination: View>: View {
     let sessionId: String
@@ -70,13 +75,9 @@ struct RoomRequestsRow<Destination: View>: View {
             Label(title, systemImage: "person.badge.shield.checkmark")
         }
         .accessibilityIdentifier("pocket.room.people.requests.open")
-        #if DEBUG
-        .onAppear { RootPreview.meter.peopleRequestsTitle[sessionId] = title }
-        .onChange(of: title) { RootPreview.meter.peopleRequestsTitle[sessionId] = $0 }
-        #endif
     }
 
-    var title: String { "Agent requests (\(requests.state.pending.count))" }
+    var title: String { RoomRequestsTitle.text(count: requests.state.pending.count) }
 }
 
 /// The agent requests screen as it was in its own sheet, now inside People: read every 10 seconds while on screen.
@@ -145,6 +146,7 @@ struct RoomInviteRows: View {
         .aiConsentPrompt($consentHeld) { aiConsent?.grant() }
         #if DEBUG
         .onAppear { RootPreview.meter.peopleAgentsShown[sessionId] = agents != nil }
+        .onChange(of: agents != nil) { RootPreview.meter.peopleAgentsShown[sessionId] = $0 }
         #endif
     }
 

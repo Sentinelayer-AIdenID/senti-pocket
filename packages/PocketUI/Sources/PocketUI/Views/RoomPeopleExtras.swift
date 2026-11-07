@@ -10,16 +10,23 @@ public struct RoomPeopleExtras: Equatable {
     let requests: (() -> AnyView)?
     /// Told which sections the sheet shows, in order ("invite", "members", "requests"), as it appears.
     let shown: (([String]) -> Void)?
+    /// Changes when what the app's parts show changes in a way their presence does not tell (the agents you work with
+    /// coming in once the room's read offers them).
+    let revision: Int
 
-    public init(invite: (() -> AnyView)? = nil, requests: (() -> AnyView)? = nil, shown: (([String]) -> Void)? = nil) {
+    public init(invite: (() -> AnyView)? = nil, requests: (() -> AnyView)? = nil, revision: Int = 0,
+                shown: (([String]) -> Void)? = nil) {
         self.invite = invite
         self.requests = requests
+        self.revision = revision
         self.shown = shown
     }
 
-    /// Every one the room screen makes is the room's own: a new one each time the screen draws changes nothing shown.
+    /// A new one each time the room screen draws is the same, unless a part comes or goes or its revision changes: then
+    /// the sheet takes the new one.
     public static func == (lhs: RoomPeopleExtras, rhs: RoomPeopleExtras) -> Bool {
         (lhs.invite == nil) == (rhs.invite == nil) && (lhs.requests == nil) == (rhs.requests == nil)
+            && lhs.revision == rhs.revision
     }
 }
 
