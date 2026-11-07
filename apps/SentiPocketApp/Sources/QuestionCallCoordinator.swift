@@ -5,7 +5,7 @@ import SwiftUI
 /// question answer API: no agent persona, model turn, generic room post or synthetic call transcript.
 @MainActor
 final class QuestionCallCoordinator: ObservableObject {
-    enum Phase: Equatable { case loading, speaking, ready, listening, sending, retry, answered, ended }
+    enum Phase: Equatable { case loading, speaking, ready, listening, recognizing, sending, retry, answered, ended }
     @Published private(set) var phase: Phase = .loading
     @Published private(set) var question: RoomQuestion?
     @Published private(set) var partial = ""
@@ -71,7 +71,7 @@ final class QuestionCallCoordinator: ObservableObject {
         partial = ""
         phase = .speaking
         let revision = generation
-        speaker.speak(question.spoken, as: "Senti") { [weak self] in
+        speaker.speakVerbatim(question.spoken, as: "Senti") { [weak self] in
             guard let self, self.generation == revision, self.phase == .speaking else { return }
             self.phase = .ready
             if !self.isMuted { Task { await self.listen() } }
@@ -120,9 +120,9 @@ final class QuestionCallCoordinator: ObservableObject {
         generation += 1
         let revision = generation
         silence?.cancel()
-        phase = .sending
+        phase = .recognizing
         let heard = await listener.stop()
-        guard revision == generation, phase == .sending else { return }
+        guard revision == generation, phase == .recognizing, !isMuted else { return }
         let text = (heard.isEmpty ? partial : heard).trimmingCharacters(in: .whitespacesAndNewlines)
         partial = ""
         guard !text.isEmpty else { phase = .ready; return }
@@ -182,7 +182,7 @@ final class QuestionCallCoordinator: ObservableObject {
 
     func callScreenMuted(_ muted: Bool) {
         isMuted = muted
-        if muted, phase == .listening {
+        if muted, phase == .listening || phase == .recognizing {
             generation += 1
             silence?.cancel()
             listener.cancel()

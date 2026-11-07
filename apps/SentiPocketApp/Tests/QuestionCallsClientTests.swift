@@ -130,6 +130,29 @@ final class QuestionCallsClientTests: XCTestCase {
         }
     }
 
+    func test_redacted_duplicate_answer_is_a_final_refusal_not_an_uncertain_retry() async throws {
+        let initial = try XCTUnwrap(RoomQuestion(json: JSONDecoder().decode(JSONValue.self, from: encoded(payload()))))
+        for status in ["cancelled", "expired"] {
+            var redacted = payload(status: status, answerID: "0d312baa-b7b8-4e4d-b111-e069a059b1ea")
+            redacted["text"] = ""
+            redacted["choices"] = [] as [[String: String]]
+            let data = try encoded(["ok": true, "duplicate": true, "question": redacted])
+            let client = makeClient { _ in (200, data) }
+            do { _ = try await client.answer(.choice("ship"), question: initial); XCTFail("expected final refusal") }
+            catch { XCTAssertEqual(error as? RoomCallsClient.Failure, .refused(409)) }
+        }
+    }
+
+    func test_valid_unicode_room_identifier_is_encoded_before_url_components() async throws {
+        let room = "café"
+        let data = try encoded(payload(room: room))
+        let client = makeClient { _ in (200, data) }
+        let result = try await client.question(sessionId: room, questionId: id)
+        XCTAssertEqual(result.sessionId, room)
+        XCTAssertEqual(QuestionHTTPStub.sent.first?.url?.absoluteString,
+                       "https://api.example.invalid/api/v1/sessions/caf%C3%A9/questions/\(id)")
+    }
+
     func test_signed_out_or_switched_account_sends_nothing_and_late_read_is_discarded() async throws {
         let data = try encoded(payload())
         for original: String? in [nil, ""] {

@@ -19,11 +19,13 @@ person's session. The original source and choices must still match. This protect
 call read and opening the question screen. Invalid sources close the call with a room notice and no speech/write.
 
 The existing on-device `AgentVoiceSpeaker`, `OnDeviceVoiceListener`, `CallKitVoiceRoomAudioSession` and
-`VoiceCallWindow` provide the call. The phone reads the question and numbered choices, then listens. A pause of
+`VoiceCallWindow` provide the call. The phone reads the question and numbered choices without the ordinary chat
+readout's URL/code substitutions, so distinct URLs and command choices retain their content, then listens. A pause of
 1.8 seconds after the recognizer's last changed words, or tapping **Send spoken answer**, submits one answer.
 A complete, unambiguous choice label or numbered option selects that choice; other speech stays the person's
 transcript. Microphone denial leaves choices available. The call screen's mute stops and discards a partial
-answer. Hanging up stops speech/listening immediately and ignores late responses.
+answer, including while the recognizer is finishing its final transcript. Hanging up stops speech/listening immediately
+and ignores late responses. Once the answer has been sent, mute cannot withdraw that request.
 
 Tap sends `{"choiceId":"ship"}`; free speech sends `{"text":"Tomorrow.","inputKind":"voice"}` to
 `POST /api/v1/sessions/{roomId}/questions/{questionId}/answer`. Only the server selects the authenticated human
@@ -34,6 +36,8 @@ An accepted answer must return the same question/source plus `status: "answered"
 the phone says it posted. A lost/unreadable response retains the exact answer and offers **Retry the same answer**.
 The API's same-answer idempotency returns one existing reply. Other choices are disabled while that result is
 uncertain. Authentication, missing question, conflict and validation refusals close the call without claiming success.
+An acknowledged duplicate with a now-cancelled/expired, redacted source also closes the call; it cannot keep the old
+question visible in a retry loop.
 An in-flight write can still reach the server after hang-up; the original thread is the authoritative record.
 
 ## Owner setting and authority

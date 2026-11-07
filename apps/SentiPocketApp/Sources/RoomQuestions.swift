@@ -65,11 +65,14 @@ struct RoomQuestion: Equatable, Sendable {
 
     func canAnswer(at now: Date) -> Bool { ["pending", "called"].contains(status) && expiresAt > now }
 
+    func isSameTarget(as other: RoomQuestion) -> Bool {
+        id == other.id && sessionId == other.sessionId && targetSequenceId == other.targetSequenceId
+            && targetActionId == other.targetActionId && callId == other.callId
+    }
+
     /// Both the original source and its choices remain fixed; an edited source cannot silently become another ask.
     func isSameSource(as other: RoomQuestion) -> Bool {
-        id == other.id && sessionId == other.sessionId && targetSequenceId == other.targetSequenceId
-            && targetActionId == other.targetActionId && callId == other.callId && text == other.text
-            && choices == other.choices
+        isSameTarget(as: other) && text == other.text && choices == other.choices
     }
 
     var spoken: String {
@@ -148,7 +151,12 @@ struct RoomQuestionsClient: RoomQuestionsAPI, QuestionCallPreferencesAPI {
         }
         let json = try await send("POST", path: try path(question.sessionId, question.id) + "/answer", body: answer.body)
         guard json["ok"]?.boolValue == true, let value = json["question"], let result = RoomQuestion(json: value),
-              result.isSameSource(as: question), result.status == "answered", result.answerActionId != nil
+              result.isSameTarget(as: question)
+        else { throw RoomCallsClient.Failure.unreadable }
+        // A duplicate can be acknowledged after its source was changed/removed. Its redacted receipt is final,
+        // not a transport failure to retry; do not keep showing the old question or announce a new success.
+        if ["cancelled", "expired"].contains(result.status) { throw RoomCallsClient.Failure.refused(409) }
+        guard result.isSameSource(as: question), result.status == "answered", result.answerActionId != nil
         else { throw RoomCallsClient.Failure.unreadable }
         return result
     }
@@ -168,7 +176,10 @@ struct RoomQuestionsClient: RoomQuestionsAPI, QuestionCallPreferencesAPI {
     private func path(_ sessionId: String, _ questionId: String) throws -> String {
         guard RoomCallDoorbell.isIdentifier(sessionId), UUID(uuidString: questionId) != nil
         else { throw RoomCallsClient.Failure.unreadable }
-        return "/api/v1/sessions/\(sessionId)/questions/\(questionId)"
+        guard let encoded = "/api/v1/sessions/\(sessionId)/questions/\(questionId)"
+            .addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
+        else { throw RoomCallsClient.Failure.unreadable }
+        return encoded
     }
 
     private func send(_ method: String, path: String, body: [String: Any]?) async throws -> JSONValue {

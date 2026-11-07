@@ -67,23 +67,35 @@ private final class QuestionListener: VoiceListening {
     var starts = 0
     var cancels = 0
     var failure: Error?
+    var holdStop = false
+    var stopWaiter: CheckedContinuation<Void, Never>?
     func start(partial: @escaping @MainActor (String) -> Void) async throws {
         starts += 1
         if let failure { throw failure }
         self.partial = partial
     }
     func say(_ text: String) { words = text; partial?(text) }
-    func stop() async -> String { partial = nil; return words }
+    func stop() async -> String {
+        partial = nil
+        if holdStop { await withCheckedContinuation { stopWaiter = $0 } }
+        return words
+    }
+    func releaseStop() { holdStop = false; stopWaiter?.resume(); stopWaiter = nil }
     func cancel() { cancels += 1; partial = nil }
 }
 
 @MainActor
 private final class QuestionSpeaker: VoiceSpeaking {
     var spoken: [String] = []
+    var verbatim: [String] = []
     var finished: (@MainActor () -> Void)?
     func speak(_ markdown: String, as speaker: String, finished: @escaping @MainActor () -> Void) {
         spoken.append(markdown)
         self.finished = finished
+    }
+    func speakVerbatim(_ text: String, as speaker: String, finished: @escaping @MainActor () -> Void) {
+        verbatim.append(text)
+        speak(text, as: speaker, finished: finished)
     }
     func stop() { finished = nil }
     func finish() { let done = finished; finished = nil; done?() }
@@ -170,6 +182,7 @@ final class QuestionCallsTests: XCTestCase {
         XCTAssertTrue(speaker.spoken[0].contains("Should we ship?"))
         XCTAssertTrue(speaker.spoken[0].contains("Option 1: Ship it."))
         XCTAssertTrue(speaker.spoken[0].contains("Option 2: Wait."))
+        XCTAssertEqual(speaker.verbatim, [speaker.spoken[0]])
         XCTAssertEqual(listener.starts, 0, "the microphone does not hear the question")
         speaker.finish()
         await until("listening after readout") { call.phase == .listening }
@@ -270,6 +283,52 @@ final class QuestionCallsTests: XCTestCase {
         await call.choose("wait")
         let writes = await api.writes
         XCTAssertEqual(writes, [.choice("wait")])
+    }
+
+    func test_mute_while_final_recognition_is_pending_never_posts_the_transcript() async throws {
+        let api = try stub()
+        let listener = QuestionListener()
+        listener.holdStop = true
+        let call = try QuestionCallCoordinator(question: question(), api: api, listener: listener,
+                                              speaker: QuestionSpeaker(), audio: QuestionAudio(), now: { questionNow }, onEnded: {})
+        await call.begin()
+        await call.listen()
+        listener.say("Do not post this answer")
+        let finishing = Task { await call.finishSpeaking() }
+        await until("final recognition is pending") { listener.stopWaiter != nil }
+        XCTAssertEqual(call.phase, .recognizing)
+        call.callScreenMuted(true)
+        listener.releaseStop()
+        await finishing.value
+        let writes = await api.writes
+        XCTAssertTrue(writes.isEmpty)
+        XCTAssertEqual(call.partial, "")
+        XCTAssertEqual(call.phase, .ready)
+        XCTAssertTrue(call.canAnswer, "muting speech still allows an explicit choice")
+        call.hangUp()
+    }
+
+    func test_question_speech_retains_distinct_urls_and_fenced_code() async throws {
+        let q = try question([
+            "text": "Which command should run?\n```sh\nship --region east\n```",
+            "choices": [["id": "east", "label": "https://east.example.com/deploy"],
+                        ["id": "west", "label": "https://west.example.com/deploy"]],
+        ])
+        let speaker = QuestionSpeaker()
+        let call = QuestionCallCoordinator(question: q, api: try stub(read: q), listener: QuestionListener(),
+                                           speaker: speaker, audio: QuestionAudio(), now: { questionNow }, onEnded: {})
+        await call.begin()
+        XCTAssertEqual(speaker.verbatim, [q.spoken])
+        let utterances = AgentVoiceSpeaker.speechSegments(try XCTUnwrap(speaker.verbatim.first), verbatim: true)
+            .map(\.text).joined(separator: " ")
+        XCTAssertTrue(utterances.contains("ship --region east"))
+        XCTAssertTrue(utterances.contains("Option 1: https://east.example.com/deploy"))
+        XCTAssertTrue(utterances.contains("Option 2: https://west.example.com/deploy"))
+        XCTAssertFalse(utterances.contains("code block"))
+        let ordinary = AgentVoiceSpeaker.speechSegments(q.spoken, verbatim: false).map(\.text).joined(separator: " ")
+        XCTAssertTrue(ordinary.contains("code block"), "ordinary chat keeps its existing Markdown readout")
+        XCTAssertFalse(ordinary.contains("https://east.example.com/deploy"))
+        call.hangUp()
     }
 
     func test_refused_or_conflicting_answer_ends_without_retrying_or_claiming_success() async throws {

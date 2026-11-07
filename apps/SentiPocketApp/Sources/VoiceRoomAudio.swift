@@ -22,10 +22,16 @@ protocol VoiceSpeaking: AnyObject {
     /// The same, and `started` runs once at the answer's first sound (for the call's timings).
     func speak(_ markdown: String, as speaker: String, started: @escaping @MainActor () -> Void,
                finished: @escaping @MainActor () -> Void)
+    /// Keeps question/choice content, including URLs and code, instead of applying chat Markdown substitutions.
+    func speakVerbatim(_ text: String, as speaker: String, finished: @escaping @MainActor () -> Void)
     func stop()
 }
 
 extension VoiceSpeaking {
+    func speakVerbatim(_ text: String, as speaker: String, finished: @escaping @MainActor () -> Void) {
+        speak(text, as: speaker, finished: finished)
+    }
+
     /// A speaker that cannot tell when sound starts reports it at once.
     func speak(_ markdown: String, as speaker: String, started: @escaping @MainActor () -> Void,
                finished: @escaping @MainActor () -> Void) {
@@ -290,10 +296,22 @@ final class AgentVoiceSpeaker: NSObject, VoiceSpeaking, AVSpeechSynthesizerDeleg
 
     func speak(_ markdown: String, as speaker: String, started: @escaping @MainActor () -> Void,
                finished: @escaping @MainActor () -> Void) {
+        speakText(markdown, verbatim: false, as: speaker, started: started, finished: finished)
+    }
+
+    func speakVerbatim(_ text: String, as speaker: String, finished: @escaping @MainActor () -> Void) {
+        speakText(text, verbatim: true, as: speaker, started: {}, finished: finished)
+    }
+
+    static func speechSegments(_ text: String, verbatim: Bool) -> [SpeechText.Segment] {
+        SpeechText.segments(verbatim ? text : SpeechText.spoken(fromMarkdown: text))
+    }
+
+    private func speakText(_ text: String, verbatim: Bool, as speaker: String,
+                           started: @escaping @MainActor () -> Void, finished: @escaping @MainActor () -> Void) {
         stop()
         self.started = started
-        let spoken = SpeechText.spoken(fromMarkdown: markdown)
-        let segments = SpeechText.segments(spoken)
+        let segments = Self.speechSegments(text, verbatim: verbatim)
         guard !segments.isEmpty else {
             finished()
             return
@@ -301,6 +319,7 @@ final class AgentVoiceSpeaker: NSObject, VoiceSpeaking, AVSpeechSynthesizerDeleg
         let synthesizer = AVSpeechSynthesizer()
         synthesizer.delegate = self
         self.synthesizer = synthesizer
+        let spoken = segments.map(\.text).joined(separator: " ")
         let voice = AgentVoices.identifier(for: speaker, saying: spoken).flatMap(AVSpeechSynthesisVoice.init(identifier:))
         for segment in segments {
             let utterance = AVSpeechUtterance(string: segment.text)

@@ -75,6 +75,7 @@ struct QuestionCallView: View {
         case .speaking: return "Reading aloud. You can tap a choice at any time."
         case .ready: return call.isMuted ? "Microphone muted. You can tap a choice." : "Speak your answer or tap a choice."
         case .listening: return "Listening. A pause sends your answer."
+        case .recognizing: return "Finishing speech recognition…"
         case .sending: return "Posting your answer…"
         case .retry: return "Answer not confirmed."
         case .answered: return "Your answer is posted under the question."
