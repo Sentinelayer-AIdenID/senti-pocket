@@ -242,6 +242,8 @@ struct RootServices {
     var registersPush = true
     /// The calendar and its Apple Calendar link, shown once the server answers their routes; nil (a preview) hides it.
     var calendar: (any RoomCalendarServing & CalendarFeedServing)?
+    /// Where crash reports go when the person sends them: the team, through the API. Nil (a preview) offers nothing.
+    var crashReports: (any CrashReportSending)?
     /// Your blocks on the server (`/me/blocks`), for the account signed in; nil (a preview) keeps them on the phone.
     var blocks: (_ account: String?) -> (any BlockListClient)? = { _ in nil }
 
@@ -291,6 +293,7 @@ struct RootServices {
             readMarker: HTTPRoomReadMarker(apiBaseURL: apiURL),
             calendar: HTTPRoomCalendarClient(apiBaseURL: apiURL, urlSession: CalendarHTTP.session,
                                              tokenProvider: { SessionTokenStore.load() }),
+            crashReports: HTTPCrashReports(apiBaseURL: apiURL),
             blocks: { HTTPBlockListClient(apiBaseURL: apiURL, account: $0) }
         )
     }
@@ -463,8 +466,10 @@ struct AuthenticatedRootView: View {
     @AppStorage("pocket.lastRoomId") private var lastRoomId = ""
     @State private var restoredLastRoom = false
     @AppStorage("pocket.theme") private var themeRaw = PocketThemePreference.system.rawValue
-    @StateObject private var messageReader = MessageReader()
-    @ObservedObject private var readingSource = ReadAloudSource.shared
+    /// The app's one reader. Kept, not watched: its bar (`ReadAloudBarSlot`) watches it, so a reading draws the bar and
+    /// never the root, whose every draw can make the room screen under it again (Carter, #62471: a thread being read
+    /// from went away).
+    @State private var messageReader = MessageReader()
     private let roomTransport: any RoomTransport
     private let ticketsTransport: any RoomTicketsTransport
     private let admissionsTransport: any RoomAdmissionsTransport
@@ -475,6 +480,8 @@ struct AuthenticatedRootView: View {
     private let ticketLeases: any TicketLeaseStoring
     private let ticketExtras: any RoomTicketExtrasReading
     private let accountIdentity: any AccountIdentityProviding
+    /// Where crash reports go when the person sends them (`CrashReportOffer`).
+    private let crashReports: (any CrashReportSending)?
     private let roomReceipts: any RoomReceiptsClient
     private let roomSearch: any RoomSearching
     /// How far you have read each room, told to the server as you read, for the unread badges.
@@ -617,6 +624,7 @@ struct AuthenticatedRootView: View {
         self.ticketLeases = services.ticketLeases
         self.ticketExtras = services.ticketExtras
         self.accountIdentity = services.identity
+        self.crashReports = services.crashReports
         self.roomReceipts = services.receipts
         self.roomSearch = services.search
         self.roomReadMarker = services.readMarker
@@ -668,21 +676,17 @@ struct AuthenticatedRootView: View {
             }
             // A sheet or the side panel over the room: its moving parts rest (warden, #269).
             .environment(\.roomIsCovered, roomCovered)
-            // Listening goes on when you leave its room (Carter, 10-30): outside that room the app keeps the player,
-            // and its title takes you back to the message.
-            .overlay(alignment: .bottom) {
-                if let playback = messageReader.playback, let source = readingSource.sessionId,
-                   source != (roomPath.last ?? currentRoom)?.sessionId {
-                    ReadAloudPlayer(reader: messageReader, playback: playback) {
-                        if let id = messageReader.readingId {
-                            open(ReadAloudSource.link(readingId: id, sessionId: source))
-                        }
+            // Listening goes on when you leave its room (Carter, 10-30): outside that room the app keeps the player at
+            // the top, and its title takes you back to the message.
+            .safeAreaInset(edge: .top, spacing: 0) {
+                ReadAloudBarSlot(reader: messageReader, place: "app", shows: { [shownRoom = (roomPath.last ?? currentRoom)?.sessionId] source in
+                    source != nil && source != shownRoom
+                }, onShowMessage: {
+                    if let id = messageReader.readingId, let source = ReadAloudSource.shared.sessionId {
+                        open(ReadAloudSource.link(readingId: id, sessionId: source))
                     }
-                    .padding(.bottom, currentRoom == nil ? 16 : 72)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
+                })
             }
-            .animation(.spring(response: 0.3, dampingFraction: 0.9), value: messageReader.playback == nil)
             // The room moves right, a little smaller, its corners rounded into a card; a tap or a swipe on it closes.
             .overlay {
                 if drawerOpen {
@@ -707,9 +711,17 @@ struct AuthenticatedRootView: View {
         .pocketCanvas()
         // The logo at launch, while your rooms load underneath (Carter, #55287).
         .overlay { LaunchSplash(isReady: roomListSettled) }
+        // Crash reports are offered here, once a launch, for the whole app, to send to the team.
+        .background { CrashReportOffer(api: crashReports) }
         // With Reduce Motion, a short fade in place of the spring.
         .animation(reduceMotion ? .easeInOut(duration: 0.2) : .spring(response: 0.35, dampingFraction: 0.8),
                    value: drawerOpen)
+        // The side panel's rooms are placed as the rooms, your folders and your blocks change, open or closed: the panel
+        // is in the tree only while open, so these are the root's, and an open shows rooms already placed.
+        .onAppear(perform: placeSidePanelRooms)
+        .onChange(of: sessions.state.rows) { _ in placeSidePanelRooms() }
+        .onChange(of: roomFolders.folders) { _ in placeSidePanelRooms() }
+        .onChange(of: blocks.actorIds) { _ in placeSidePanelRooms() }
         // Opening the side panel reads what it shows that was not read lately: the bell, Waiting on you, whether folders
         // and direct messages are on, and your folders, so no count is older than `panelFreshness`. The rooms are read
         // once, at once, by the panel's own poll below (a second read here was the same request again).
@@ -803,6 +815,8 @@ struct AuthenticatedRootView: View {
             .onDisappear { notifications.listShown(false) }
         }
         .sheet(isPresented: $presentsCallLog) {
+            // The reader is watched here, for the call being read: the root keeps it without watching it.
+            ReaderWatch(reader: messageReader) { _ in
             CallLogView(state: callLog.state, readingId: readingCallId) { intent in
                 switch intent {
                 case .refresh:
@@ -830,6 +844,7 @@ struct AuthenticatedRootView: View {
                 case .close:
                     presentsCallLog = false
                 }
+            }
             }
         }
         .sheet(isPresented: $presentsWaiting) {
@@ -1129,14 +1144,13 @@ struct AuthenticatedRootView: View {
             // Folders show only where they are on.
             onFolder: roomFolders.items == nil ? nil : { roomFolders.send($0) }
         )
-        .onAppear(perform: placeSidePanelRooms)
-        .onChange(of: sessions.state.rows) { _ in placeSidePanelRooms() }
-        .onChange(of: roomFolders.folders) { _ in placeSidePanelRooms() }
-        .onChange(of: blocks.actorIds) { _ in placeSidePanelRooms() }
     }
 
     /// A direct message with someone you blocked is not placed (`withoutDirectMessages`).
     private func placeSidePanelRooms() {
+        #if DEBUG
+        RootPreview.meter.sidePanelPlaced()
+        #endif
         sidePanelPlacement.update(rows: sessions.state.withoutDirectMessages(from: blocks.actorIds).rows,
                                   folders: roomFolders.items)
     }

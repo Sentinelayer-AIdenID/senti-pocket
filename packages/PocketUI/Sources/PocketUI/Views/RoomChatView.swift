@@ -22,6 +22,7 @@ public struct RoomChatView: View {
     @Environment(\.roomProfileOpener) private var profileOpener
     /// The pickers and viewers a thread opens over itself.
     @Environment(\.roomSheetMediaHost) private var sheetMediaHost
+    @Environment(\.roomReadAloudBar) private var readAloudBar
     /// Where the typing line is said: VoiceOver.
     @Environment(\.roomAnnouncer) private var announcer
     @State private var readerAtBottom = true
@@ -149,6 +150,7 @@ public struct RoomChatView: View {
                     media: media?.threadBoard(thread.parent.sequenceId),
                     previews: state.attachmentPreviews,
                     mediaHost: sheetMediaHost,
+                    readAloudBar: readAloudBar,
                     draftKey: state.draftKey,
                     draftStore: threadDrafts,
                     send: send
@@ -2129,6 +2131,9 @@ private struct RoomThreadSheet: View {
     var previews: [String: Data] = [:]
     /// The pickers and viewers, hosted by this sheet (the room under it cannot present them).
     var mediaHost: RoomSheetMediaHost?
+    /// The read-aloud bar, at the top of the thread while something is read: reading a reply keeps the thread open and
+    /// in view, with the bar over it (Carter, #62471).
+    var readAloudBar: RoomReadAloudBarHost?
     /// The room's saved-text key for this account: the reply being written is kept on the phone under it
     /// (`RoomReplyDrafts`); nil keeps none.
     var draftKey: String?
@@ -2208,6 +2213,8 @@ private struct RoomThreadSheet: View {
                 }
             }
             .background { mediaHost?.content() }
+            // The read-aloud bar (#363): its own slot, one line.
+            .safeAreaInset(edge: .top, spacing: 0) { readAloudBar?.content() }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if thread.canReply {
                     RoomThreadComposer(
