@@ -119,7 +119,9 @@ struct SentiPocketApp: App {
 
     @ViewBuilder private var rootView: some View {
         #if DEBUG
-        if RoomCalendarPreview.isRequested {
+        if ChatLifecyclePreview.isRequested {
+            ChatLifecyclePreview.rootView
+        } else if RoomCalendarPreview.isRequested {
             RoomCalendarPreview.rootView
         } else if RootPreview.isRequested {
             RootPreview.rootView(whisperModel: whisperModel, incomingLinks: incomingLinks)
