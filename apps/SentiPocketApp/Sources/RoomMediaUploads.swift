@@ -428,8 +428,19 @@ final class RoomMediaUploadCoordinator: ObservableObject {
     /// reaches the room, and its AI agents, only once it is given: its first send, every retry and a message restored
     /// after the app closed alike. Nil (previews, tests of uploading alone) asks nothing.
     private(set) var aiConsent: AIConsent?
-    /// Asks the room's AI question on its screen; what was asked for runs after OK.
-    var askAIConsent: (@MainActor (AIConsentHeld) -> Void)?
+    /// The room's AI question, waiting for the room's screen to ask it; what was asked for runs after OK. Held here as
+    /// state that the screen reads (`takeConsentRequest`), never as a closure from the screen: this coordinator lives as
+    /// long as the app (`forRoom`), and a closure that wrote the screen's state held that screen, and with it the room
+    /// it showed, after the room was left (ticket 02a80e6f). A question asked while no screen shows the room waits for
+    /// the next one.
+    @Published private(set) var consentRequest: AIConsentHeld?
+
+    /// The waiting AI question, taken: the screen that shows it is the only one that does.
+    func takeConsentRequest() -> AIConsentHeld? {
+        guard let request = consentRequest else { return nil }
+        consentRequest = nil
+        return request
+    }
 
     init(
         sessionId: String,
@@ -1149,7 +1160,7 @@ final class RoomMediaUploadCoordinator: ObservableObject {
         guard let index = outgoing.firstIndex(where: { $0.clientId == clientId }), outgoing[index].canRetry else { return }
         // Asked first, as a text is: OK retries it, Not now leaves it as it is.
         guard mayShareWithAI else {
-            askAIConsent?(AIConsentHeld { [weak self] in self?.retry(clientId) })
+            consentRequest = AIConsentHeld { [weak self] in self?.retry(clientId) }
             return
         }
         outgoing[index].status = .uploading

@@ -432,9 +432,11 @@ final class RoomMediaUploadCoordinatorTests: XCTestCase {
         let again = FakeUploader()
         let reopened = coordinator(again, consent: consent)
         var asked: [AIConsentHeld] = []
-        reopened.askAIConsent = { asked.append($0) }
         reopened.perform(.retry(clientId: clientId))
+        // The question waits for the room's screen, which takes it (`takeConsentRequest`).
+        asked += [reopened.takeConsentRequest()].compactMap { $0 }
         XCTAssertEqual(asked.count, 1, "Retry asks first, as a text does")
+        XCTAssertNil(reopened.consentRequest, "taken once, by the screen that asks it")
         try? await Task.sleep(nanoseconds: 100_000_000)
         XCTAssertTrue(again.posts.isEmpty, "no photo and no words reach the room's agents before OK")
         XCTAssertTrue(again.inits.isEmpty && again.completes.isEmpty, "nothing of it goes at all")
@@ -447,6 +449,7 @@ final class RoomMediaUploadCoordinatorTests: XCTestCase {
 
         // OK: it goes.
         reopened.perform(.retry(clientId: clientId))
+        asked += [reopened.takeConsentRequest()].compactMap { $0 }
         XCTAssertEqual(asked.count, 2)
         consent.grant()
         asked.last?.proceed()
@@ -460,8 +463,6 @@ final class RoomMediaUploadCoordinatorTests: XCTestCase {
         let uploader = FakeUploader()
         uploader.failingPuts = 1
         let media = coordinator(uploader, consent: consent)
-        var asked = 0
-        media.askAIConsent = { _ in asked += 1 }
         media.add([try source("IMG_0001.jpg")])
         media.perform(.send(text: "Hi"))
         let clientId = try XCTUnwrap(media.board.outgoing.first?.id)
@@ -469,7 +470,7 @@ final class RoomMediaUploadCoordinatorTests: XCTestCase {
 
         consent.withdraw()
         media.perform(.retry(clientId: clientId))
-        XCTAssertEqual(asked, 1, "withdrawn in Settings: Retry asks again")
+        XCTAssertNotNil(media.takeConsentRequest(), "withdrawn in Settings: Retry asks again")
         try? await Task.sleep(nanoseconds: 100_000_000)
         XCTAssertTrue(uploader.posts.isEmpty, "and nothing is posted")
     }

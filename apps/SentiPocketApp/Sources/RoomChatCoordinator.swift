@@ -176,8 +176,11 @@ final class RoomChatCoordinator: ObservableObject {
     }
     /// Replies seen before any were read are not news.
     private var hasReadReplies = false
-    /// The room on screen sounding and vibrating: your message sent, a message or reply arriving, a mention of you.
+    /// The room on screen sounding and vibrating: your message sent, a message or reply arriving, a mention of you. Set
+    /// by the room's screen with nothing of the screen in it (ticket 02a80e6f), and taken away when the screen goes.
     var onFeedback: (@MainActor (RoomFeedbackEvent) -> Void)?
+    /// A voice room speaks instead: while one is on, the room makes no sound. Its screen keeps this in step.
+    var feedbackMuted = false
     /// Something to tell the person once (an edit that did not save).
     private var notice: String?
     static let viewerReason = "You're a viewer in this room: you can read it, but not post."
@@ -407,6 +410,9 @@ final class RoomChatCoordinator: ObservableObject {
         aiConsent?.$givenAt.dropFirst().sink { [weak self] _ in
             Task { @MainActor in self?.publish() }
         }.store(in: &safetyWatch)
+        #if DEBUG
+        RootPreview.meter.roomCoordinatorMade(self)
+        #endif
     }
 
     // MARK: - Lifecycle
@@ -1613,7 +1619,7 @@ final class RoomChatCoordinator: ObservableObject {
                     RoomComposerDraft.forgetSaved(key: draftKey, sent: item.text)
                     RoomReplyDrafts(base: draftKey).forgetSent(item.text, thread: item.targetSequenceId, reply: item.toReply)
                 }
-                self.onFeedback?(.sent)
+                if !self.feedbackMuted { self.onFeedback?(.sent) }
                 if self.openThreadSequence == item.targetSequenceId { await self.loadThread(item.targetSequenceId) }
                 self.pendingReplies.removeAll { $0.clientId == clientId }
                 self.publish()
@@ -1751,7 +1757,7 @@ final class RoomChatCoordinator: ObservableObject {
                 self.forgetUnconfirmed(clientId)
                 self.sentCallbacks.removeValue(forKey: clientId)?()
                 if let draftKey { RoomComposerDraft.forgetSaved(key: draftKey, sent: item.text) }
-                self.onFeedback?(.sent)
+                if !self.feedbackMuted { self.onFeedback?(.sent) }
                 // Pull the echo now instead of waiting for the stream or the next poll.
                 await self.catchUp(self.generation)
                 await self.sleep(Self.sentEchoGrace)
@@ -2337,7 +2343,7 @@ final class RoomChatCoordinator: ObservableObject {
     /// A message or reply from someone else arrived in the room on screen: a mention of you sounds the chime, anything
     /// else the soft pop. Your own (echoes of what you sent) make no sound; the send already did.
     private func arrivalFeedback(_ arrivals: [(authorId: String, text: String)]) {
-        guard let onFeedback else { return }
+        guard let onFeedback, !feedbackMuted else { return }
         let others = arrivals.filter { !$0.authorId.isEmpty && !ownAuthorIds.contains($0.authorId.lowercased()) }
         guard !others.isEmpty else { return }
         let handles = state.ownMentionHandles

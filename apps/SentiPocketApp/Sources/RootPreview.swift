@@ -178,6 +178,20 @@ final class RootPreviewMeter: @unchecked Sendable {
 
     func roomScreenBodyRan() { roomScreenBodies += 1 }
 
+    private struct WeakRoom {
+        weak var room: RoomChatCoordinator?
+    }
+
+    private var rooms: [WeakRoom] = []
+
+    /// A room's coordinator made (held weakly): `liveRooms` says how many are still there.
+    func roomCoordinatorMade(_ room: RoomChatCoordinator) {
+        rooms = rooms.filter { $0.room != nil } + [WeakRoom(room: room)]
+    }
+
+    /// Room coordinators made and not gone yet: a room put in another's place lets the other go.
+    var liveRooms: Int { rooms.filter { $0.room != nil }.count }
+
     /// Where each read-aloud bar and its controls were last laid out, by place ("app", "room", "thread").
     private(set) var readAloudBars: [String: [String: CGRect]] = [:]
 
