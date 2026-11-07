@@ -715,6 +715,12 @@ struct AuthenticatedRootView: View {
         // With Reduce Motion, a short fade in place of the spring.
         .animation(reduceMotion ? .easeInOut(duration: 0.2) : .spring(response: 0.35, dampingFraction: 0.8),
                    value: drawerOpen)
+        // The side panel's rooms are placed as the rooms, your folders and your blocks change, open or closed: the panel
+        // is in the tree only while open, so these are the root's, and an open shows rooms already placed.
+        .onAppear(perform: placeSidePanelRooms)
+        .onChange(of: sessions.state.rows) { _ in placeSidePanelRooms() }
+        .onChange(of: roomFolders.folders) { _ in placeSidePanelRooms() }
+        .onChange(of: blocks.actorIds) { _ in placeSidePanelRooms() }
         // Opening the side panel reads what it shows that was not read lately: the bell, Waiting on you, whether folders
         // and direct messages are on, and your folders, so no count is older than `panelFreshness`. The rooms are read
         // once, at once, by the panel's own poll below (a second read here was the same request again).
@@ -1134,14 +1140,13 @@ struct AuthenticatedRootView: View {
             // Folders show only where they are on.
             onFolder: roomFolders.items == nil ? nil : { roomFolders.send($0) }
         )
-        .onAppear(perform: placeSidePanelRooms)
-        .onChange(of: sessions.state.rows) { _ in placeSidePanelRooms() }
-        .onChange(of: roomFolders.folders) { _ in placeSidePanelRooms() }
-        .onChange(of: blocks.actorIds) { _ in placeSidePanelRooms() }
     }
 
     /// A direct message with someone you blocked is not placed (`withoutDirectMessages`).
     private func placeSidePanelRooms() {
+        #if DEBUG
+        RootPreview.meter.sidePanelPlaced()
+        #endif
         sidePanelPlacement.update(rows: sessions.state.withoutDirectMessages(from: blocks.actorIds).rows,
                                   folders: roomFolders.items)
     }
