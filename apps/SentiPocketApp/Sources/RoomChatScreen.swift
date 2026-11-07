@@ -791,10 +791,11 @@ struct RoomChatScreen: View {
                 .accessibilityHidden(true)
                 .modifier(mediaPresenters(isActive: true))
         })
-        // The Listen bar, over the top of the room while a message is read (this room's, unless it is a voice room, which
-        // speaks on its own; or another room's); a thread shows it over its own top, so reading a reply keeps the thread
-        // open and in view (Carter, #62471). Only the message read draws the room again, never a sentence.
-        .overlay(alignment: .top) { readAloudBars }
+        // The Listen bar, over who is here at the top of the room while a message is read (this room's, unless it is a
+        // voice room, which speaks on its own; or another room's); a thread shows it in a fixed space at its own top, so
+        // reading a reply keeps the thread open and in view (Carter, #62471). Only the message read draws the room again,
+        // never a sentence.
+        .environment(\.listenBar, RoomReadAloudBarHost { readAloudBars })
         .onReceive(reader.$readingId) { id in if id != readingAloudId { readingAloudId = id } }
         .environment(\.roomReadAloudBar, RoomReadAloudBarHost { readAloudBar(place: "thread") })
         // A direct message: whom it is with, the room you share, and for an agent whether it may use this chat there.

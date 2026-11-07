@@ -1,4 +1,5 @@
 import Foundation
+import PocketUI
 import SwiftUI
 
 /// The on-device speech model file (Whisper, chosen from Files) is a developer's path: a DEBUG build offers it, and a
@@ -28,6 +29,8 @@ struct WhisperModelSettingsView: View {
     let offersModelFile: Bool
 
     @Environment(\.dismiss) private var dismiss
+    /// The Listen bar, over the top while something is read (the app supplies it).
+    @Environment(\.listenBar) private var listenBar
     @State private var presentsPicker = false
     @State private var stagedCopy: WhisperModelImportedCopy?
     @State private var presentsInstallConfirmation = false
@@ -70,6 +73,7 @@ struct WhisperModelSettingsView: View {
                 }
                 accountSection
             }
+            .overlay(alignment: .top) { listenBar?.content() }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

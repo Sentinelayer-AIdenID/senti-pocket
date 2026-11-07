@@ -59,7 +59,8 @@ final class ReadAloudThreadTests: XCTestCase {
         let placed = placements(in: window)
 
         // Listen on its first reply, as the reply's Listen does.
-        RootPreview.requestRoom(.readAloud(id: RoomReadAloud.reply("reply-165-1"), text: "Reply 1 to message 165."))
+        // Long enough to still be reading when VoiceOver is checked.
+        RootPreview.requestRoom(.readAloud(id: RoomReadAloud.reply("reply-165-1"), text: Self.longText))
         pump(3)
         XCTAssertEqual(ReadAloudSource.shared.sessionId, RootPreviewAPI.midRoom, "reading started in this room")
         XCTAssertNotNil(presentedThread, "the thread stays open while its reply is read")
@@ -82,6 +83,14 @@ final class ReadAloudThreadTests: XCTestCase {
         }
         let room = try XCTUnwrap(meter.readAloudBars["room"]?["bar"], "the room shows it too, under the thread")
         XCTAssertLessThan(room.minY, height * 0.3, "at the top of the room (\(room))")
+        // The thread keeps a fixed 44 pt for the bar at its top: its replies start below it, never under it.
+        let replies = try XCTUnwrap(presentedThread.flatMap { Self.mainList(in: $0.view) }, "the thread's replies")
+        let shown = Self.placement(of: replies)
+        XCTAssertGreaterThanOrEqual(shown.minY, bar.maxY - 0.5, "the bar covers no reply (\(shown), bar \(bar))")
+        // VoiceOver reaches the thread's bar: its title says what is read.
+        let threadView = try XCTUnwrap(presentedThread?.view)
+        XCTAssertTrue(Self.readAloudTitles(in: threadView).contains { $0.hasPrefix("Reading") },
+                      "VoiceOver reaches the thread's bar (\(Self.readAloudTitles(in: threadView)))")
     }
 
     /// At the largest accessibility text size the bar keeps its title on the screen, cut short if it must be, and every
@@ -160,6 +169,9 @@ final class ReadAloudThreadTests: XCTestCase {
               + "over 3 pauses and plays")
         XCTAssertGreaterThanOrEqual(barDraws, 6, "the bar drew at each pause and play")
         XCTAssertEqual(meter.roomScreenBodies - bodies, 0, "the room screen's body never ran while it read")
+        assertSamePlacements(placed, placements(in: window), "pausing and playing")
+        XCTAssertTrue(Self.readAloudTitles(in: window).contains { $0.hasPrefix("Reading") },
+                      "VoiceOver reaches the room's bar (\(Self.readAloudTitles(in: window)))")
 
         RootPreview.requestRoom(.stopReadingAloud)
         pump(1.5)
@@ -193,7 +205,93 @@ final class ReadAloudThreadTests: XCTestCase {
         let composer = try XCTUnwrap(composerFrame(in: window), "the room's composer")
         XCTAssertGreaterThanOrEqual(composer.minY, bar.maxY, "the bar never covers the composer (\(composer))")
         print("BGAUDIT read aloud bar over another room: bar \(bar), unread line \(line), composer \(composer)")
+        // Exactly one bar: this room's, for the other room's reading. None from the app, none over a room list.
+        XCTAssertNil(meter.readAloudBars["app"], "no bar of the app's own, in the root's inset")
+        XCTAssertNil(meter.readAloudBars["list"], "no room list on screen, so no bar over one")
+        let placed = placements(in: window)
+        RootPreview.requestRoom(.stopReadingAloud)
+        pump(1.5)
+        assertSamePlacements(placed, placements(in: window), "stopping in another room")
         XCTAssertEqual(ReadAloudSource.shared.sessionId, RootPreviewAPI.midRoom, "still the first room's message")
+    }
+
+    /// With no room open, a reading shows its bar over the room list, and starting or stopping it moves the list not at
+    /// all (Carter, 10-30: the player stays).
+    func test_a_reading_shows_its_bar_over_the_room_list_with_no_room_open() throws {
+        let api = RootPreviewAPI(postsPerSecond: 0, onePage: false, openRoomId: nil)
+        UserDefaults.standard.set("", forKey: "pocket.lastRoomId")
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = UIHostingController(rootView: AuthenticatedRootView(
+            authenticationEpoch: 1,
+            whisperModelCoordinator: WhisperModelProvisioningCoordinator(),
+            incomingLinks: IncomingLinkInbox(),
+            services: api.services,
+            onSignOut: {},
+            onReauthenticationRequired: { _ in }
+        )
+        .environment(\.scenePhase, .active))
+        window.makeKeyAndVisible()
+        self.window = window
+        wait("the room list's first read", seconds: 30) { api.callCount("rooms") > 0 }
+        pump(2.5)
+        let meter = RootPreview.meter
+        let reader = try XCTUnwrap(meter.reader, "the root's reader")
+        let placed = placements(in: window)
+
+        // A reading from a room, as one left playing when its room closed.
+        ReadAloudSource.shared.reading(in: RootPreviewAPI.midRoom)
+        _ = reader.read(id: RoomReadAloud.message(165), markdown: Self.longText, title: "Alex")
+        wait("the room list shows the bar", seconds: 10) { meter.readAloudBars["list"]?["bar"] != nil }
+        pump(1)
+        let bar = try XCTUnwrap(meter.readAloudBars["list"]?["bar"])
+        XCTAssertLessThan(bar.minY, window.bounds.height * 0.3, "at the top of the room list (\(bar))")
+        XCTAssertLessThanOrEqual(bar.height, 44.5, "one 44 pt line (\(bar.height) pt)")
+        assertSamePlacements(placed, placements(in: window), "starting to read over the room list")
+        reader.stop()
+        pump(1.5)
+        assertSamePlacements(placed, placements(in: window), "stopping over the room list")
+    }
+
+    /// What VoiceOver reads for each read-aloud title under `view`.
+    private static func readAloudTitles(in view: UIView) -> [String] {
+        var found: [String] = []
+        var queue: [Any] = [view]
+        var seen = Set<ObjectIdentifier>()
+        while !queue.isEmpty {
+            guard let object = queue.removeFirst() as? NSObject, seen.insert(ObjectIdentifier(object)).inserted else { continue }
+            if HostedSummary.identifier(of: object) == "pocket.readAloud.title", let label = object.accessibilityLabel {
+                found.append(label)
+            }
+            if let view = object as? UIView { queue.append(contentsOf: view.subviews) }
+            if let children = object.accessibilityElements { queue.append(contentsOf: children) }
+            let count = object.accessibilityElementCount()
+            if count > 0, count != NSNotFound {
+                for index in 0..<count {
+                    if let child = object.accessibilityElement(at: index) { queue.append(child) }
+                }
+            }
+        }
+        return found
+    }
+
+    /// The tallest outermost scroll view under `view`: a screen's main list.
+    private static func mainList(in view: UIView) -> UIScrollView? {
+        var found: [UIScrollView] = []
+        func walk(_ view: UIView) {
+            if let scroll = view as? UIScrollView, !(scroll is UITextView) {
+                if !scroll.isHidden { found.append(scroll) }
+                return
+            }
+            view.subviews.forEach(walk)
+        }
+        walk(view)
+        return found.max { $0.bounds.height < $1.bounds.height }
+    }
+
+    /// Where a list shows its content in the window: its frame less its content inset.
+    private static func placement(of list: UIScrollView) -> CGRect {
+        (list.superview?.convert(list.frame, to: nil) ?? list.frame).inset(by: list.adjustedContentInset)
     }
 
     /// The composer's text view, in the window: the lowest text view on screen.
@@ -255,6 +353,8 @@ final class ReadAloudThreadTests: XCTestCase {
                                       _ what: String, file: StaticString = #filePath, line: UInt = #line) {
         let kept = before.keys.filter { after[$0] != nil }
         XCTAssertFalse(kept.isEmpty, "\(what): the scroll views measured before are still there", file: file, line: line)
+        let main = before.max { $0.value.height < $1.value.height }?.key
+        XCTAssertTrue(main.map(kept.contains) ?? false, "\(what): the main list is still there", file: file, line: line)
         for key in kept where before[key]?.integral != after[key]?.integral {
             XCTFail("\(what) placed a list again: \(String(describing: before[key])) became \(String(describing: after[key]))",
                     file: file, line: line)

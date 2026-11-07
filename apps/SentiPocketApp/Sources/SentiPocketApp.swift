@@ -664,6 +664,8 @@ struct AuthenticatedRootView: View {
                                 show(roomRoute(for: sessionId))
                             }
                         }
+                        // With no room open, the Listen bar over the room list (Carter, 10-30: the player stays).
+                        .overlay(alignment: .top) { listenBar(place: "list") }
                     }
                 }
                 .toolbar {
@@ -876,6 +878,8 @@ struct AuthenticatedRootView: View {
                     onSignOut()
                 }
             )
+            // Settings shows the Listen bar over its top while something is read.
+            .environment(\.listenBar, RoomReadAloudBarHost { listenBar(place: "settings") })
         }
         .aiConsentPrompt($newRoomConsentHeld) { aiConsent.grant() }
         .modifier(RoomFolderSheets(center: roomFolders))
@@ -1135,6 +1139,16 @@ struct AuthenticatedRootView: View {
             // Folders show only where they are on.
             onFolder: roomFolders.items == nil ? nil : { roomFolders.send($0) }
         )
+    }
+
+    /// The Listen bar where no room is on screen (the room list, Settings): any reading from a room, over the top, its
+    /// title taking you back to the message.
+    private func listenBar(place: String) -> ReadAloudBarSlot {
+        ReadAloudBarSlot(reader: messageReader, place: place, shows: { $0 != nil }, onShowMessage: {
+            if let id = messageReader.readingId, let source = ReadAloudSource.shared.sessionId {
+                open(ReadAloudSource.link(readingId: id, sessionId: source))
+            }
+        })
     }
 
     /// A direct message with someone you blocked is not placed (`withoutDirectMessages`).

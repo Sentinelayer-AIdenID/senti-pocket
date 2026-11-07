@@ -6,7 +6,8 @@ import SwiftUI
 
 /// Which room the message being read aloud belongs to (Carter, 10-30: "Even if I go to another room my voice player
 /// needs to stay until I click another voice thing"). The room's own player shows while you are in that room; anywhere
-/// else, the app keeps a player on screen whose title takes you back to that room, at the message.
+/// else (another room, the room list, Settings) a player shows over the top of the screen, and its title takes you back
+/// to that room, at the message.
 @MainActor
 final class ReadAloudSource: ObservableObject {
     static let shared = ReadAloudSource()

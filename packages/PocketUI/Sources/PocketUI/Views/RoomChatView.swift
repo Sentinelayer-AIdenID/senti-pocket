@@ -22,6 +22,7 @@ public struct RoomChatView: View {
     /// The pickers and viewers a thread opens over itself.
     @Environment(\.roomSheetMediaHost) private var sheetMediaHost
     @Environment(\.roomReadAloudBar) private var readAloudBar
+    @Environment(\.listenBar) private var listenBar
     /// Where the typing line is said: VoiceOver.
     @Environment(\.roomAnnouncer) private var announcer
     @State private var readerAtBottom = true
@@ -426,6 +427,10 @@ public struct RoomChatView: View {
                         .padding(.top, RoomPeopleAvatars.topGap)
                 }
             }
+            // The Listen bar, over who is here in its fixed space while something is read: under the pins and the notice,
+            // never over the first message, and never in an inset, so a reading starting or stopping lays nothing out
+            // again (#360).
+            .overlay(alignment: .top) { listenBar?.content() }
             .safeAreaInset(edge: .top, spacing: 0) {
                 if !state.pinned.isEmpty {
                     RoomPinnedStrip(
@@ -2363,8 +2368,15 @@ private struct RoomThreadSheet: View {
                 }
             }
             .background { mediaHost?.content() }
-            // Over the thread's top, never in its inset: starting or stopping a reading never lays the replies out again.
-            .overlay(alignment: .top) { readAloudBar?.content() }
+            // A fixed 44 pt at the thread's top, always, where the Listen bar shows while a reply is read: it covers
+            // nothing, and a reading starting or stopping never lays the replies out again.
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if let readAloudBar {
+                    readAloudBar.content()
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 44)
+                }
+            }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if thread.canReply {
                     VStack(alignment: .leading, spacing: 4) {
