@@ -49,6 +49,10 @@ public struct ReadAloudBarState: Equatable, Sendable {
 
     /// The title's line: whose message is read.
     public var line: String { title.map { "Reading \($0)" } ?? "Reading aloud" }
+
+    /// What VoiceOver reads for the title: the whole line and the position, never cut short as the line on screen
+    /// may be.
+    public func spokenLine(_ elapsed: TimeInterval) -> String { "\(line), \(Self.spoken(elapsed, of: total))" }
 }
 
 public enum ReadAloudBarIntent: Equatable, Sendable {
@@ -58,8 +62,8 @@ public enum ReadAloudBarIntent: Equatable, Sendable {
     case showMessage
 }
 
-/// Where the bar and its controls were laid out, by name ("bar", "title", "pause", "close"), in the window: for the
-/// app's hosted tests (the bar sits at the top, one line, every control at least 44 pt).
+/// Where the bar and its controls were laid out, by name ("bar", "title", "line", "pause", "close"), in the window: for
+/// the app's hosted tests (the bar sits at the top, one line, every control at least 44 pt and on the screen).
 public struct ReadAloudBarFrames: PreferenceKey {
     public static let defaultValue: [String: CGRect] = [:]
 
@@ -96,6 +100,7 @@ public struct ReadAloudBar: View {
                             .font(.footnote.weight(.semibold))
                             .foregroundStyle(PocketPalette.textPrimary)
                             .lineLimit(1)
+                            .reportsFrame("line")
                         Spacer(minLength: 4)
                         Text("\(ReadAloudBarState.clock(elapsed)) / \(ReadAloudBarState.clock(state.total))")
                             .font(.caption.monospacedDigit())
@@ -108,7 +113,7 @@ public struct ReadAloudBar: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel("\(state.line), \(ReadAloudBarState.spoken(elapsed, of: state.total))")
+                .accessibilityLabel(state.spokenLine(elapsed))
                 .accessibilityHint(state.hasGoodVoice ? "Shows the message being read"
                     : "Shows the message being read. For a more natural voice, download an Enhanced or Premium voice in "
                         + "Settings, Accessibility, Spoken Content, Voices.")
@@ -133,6 +138,10 @@ public struct ReadAloudBar: View {
                 .accessibilityHidden(true)
             }
         }
+        // Its text stops growing at the largest standard size: at the largest accessibility sizes the position pushed
+        // the title out and Close off the screen. The title is cut short if it must be, the controls keep 44 pt, and
+        // VoiceOver reads the whole title and position.
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         .pocketFloating(in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .padding(.horizontal, 10)
         .accessibilityElement(children: .contain)
