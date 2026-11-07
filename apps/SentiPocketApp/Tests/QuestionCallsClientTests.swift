@@ -402,25 +402,24 @@ final class QuestionCallsClientTests: XCTestCase {
         let detached = label("fixture.detached", in: UIView())
         let hiddenElement = UIAccessibilityElement(accessibilityContainer: hiddenParent)
         hiddenElement.accessibilityIdentifier = "fixture.hidden-element"
-        let offscreenElement = UIAccessibilityElement(accessibilityContainer: window)
-        offscreenElement.accessibilityIdentifier = "fixture.offscreen-element"
-        offscreenElement.accessibilityFrame = CGRect(x: 20, y: window.bounds.height + 200, width: 100, height: 40)
+        hiddenParent.accessibilityElements = [hiddenElement]
         let cached = UIView(frame: .zero)
         window.addSubview(cached)
-        cached.accessibilityElements = [visible, offscreen, hidden, axHidden, detached, hiddenElement, offscreenElement]
+        let offscreenElement = UIAccessibilityElement(accessibilityContainer: cached)
+        offscreenElement.accessibilityIdentifier = "fixture.offscreen-element"
+        offscreenElement.accessibilityFrame = CGRect(x: 20, y: window.bounds.height + 200, width: 100, height: 40)
+        // UIView references retain their actual view ancestry. Synthetic AX elements
+        // belong only to their declared container's array, including the hidden one.
+        cached.accessibilityElements = [visible, offscreen, hidden, axHidden, detached, offscreenElement]
 
+        XCTAssertTrue((hiddenElement.accessibilityContainer as? UIView) === hiddenParent)
+        XCTAssertTrue((offscreenElement.accessibilityContainer as? UIView) === cached)
         attachSettingsAccessibility(QuestionSettingsAccessibility.snapshot(in: window),
                                     name: "settings-fixture-after-cache-assignment-ancestry")
-        // The fixture intentionally caches references outside this view's ownership.
-        // Establish each synthetic AX element's declared container after populating that cache.
-        hiddenElement.accessibilityContainer = hiddenParent
-        offscreenElement.accessibilityContainer = window
-        XCTAssertTrue((hiddenElement.accessibilityContainer as? UIView) === hiddenParent)
-        XCTAssertTrue((offscreenElement.accessibilityContainer as? UIView) === window)
         let snapshot = QuestionSettingsAccessibility.snapshot(in: window)
         attachSettingsAccessibility(snapshot, name: "settings-fixture-declared-containers-ancestry")
         XCTAssertTrue((hiddenElement.accessibilityContainer as? UIView) === hiddenParent)
-        XCTAssertTrue((offscreenElement.accessibilityContainer as? UIView) === window)
+        XCTAssertTrue((offscreenElement.accessibilityContainer as? UIView) === cached)
         for identifier in ["fixture.visible", "fixture.offscreen", "fixture.offscreen-element"] {
             XCTAssertNotNil(snapshot.element(identifier), "active controls remain discoverable, including offscreen controls")
         }
