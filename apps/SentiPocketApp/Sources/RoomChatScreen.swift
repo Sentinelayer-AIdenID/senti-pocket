@@ -1076,21 +1076,8 @@ struct RoomChatScreen: View {
                 ticketsStartFiling = false
             }
         }
-        .onChange(of: showsPeople) { shown in
-            guard shown else { return }
-            CrashReporter.shared.note("people opened")
-            if let peopleRequests { Task { await peopleRequests.refresh() } }
-        }
-        // Who is here, for the agents you add from People: in the room once its presence shows it.
-        .onChange(of: presentIds) { agentContactsModel?.presentIds = $0 }
-        .onAppear { agentContactsModel?.presentIds = presentIds }
-        // The People button's count, read as the room opens.
-        .task(id: route.sessionId) {
-            if let peopleRequests { await peopleRequests.refresh() }
-        }
-        #if DEBUG
-        .onReceive(RootPreview.peopleRequests) { showsPeople = true }
-        #endif
+        .modifier(RoomPeopleWatch(showsPeople: $showsPeople, presentIds: presentIds, agents: agentContactsModel,
+                                  requests: peopleRequests, sessionId: route.sessionId))
         .onChange(of: showsBreakouts) { shown in if shown { CrashReporter.shared.note("breakouts opened") } }
         .onChange(of: choosesVoicePartner) { shown in if shown { CrashReporter.shared.note("talk opened") } }
         .sheet(isPresented: $showsSummary) {
@@ -1619,5 +1606,33 @@ private struct RoomMediaPresenters: ViewModifier {
             } message: {
                 Text(attachmentProblem ?? "")
             }
+    }
+}
+
+/// People's moving parts on the room screen: its opening noted (and the requests read again), who is here for the agents
+/// added from People, the People button's count read as the room opens, and People opened by a hosted test.
+private struct RoomPeopleWatch: ViewModifier {
+    @Binding var showsPeople: Bool
+    let presentIds: Set<String>
+    let agents: AgentContactsModel?
+    let requests: AdmissionsCoordinator?
+    let sessionId: String
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: showsPeople) { shown in
+                guard shown else { return }
+                CrashReporter.shared.note("people opened")
+                if let requests { Task { await requests.refresh() } }
+            }
+            // An agent added from People is in the room once its presence shows it.
+            .onChange(of: presentIds) { agents?.presentIds = $0 }
+            .onAppear { agents?.presentIds = presentIds }
+            .task(id: sessionId) {
+                if let requests { await requests.refresh() }
+            }
+            #if DEBUG
+            .onReceive(RootPreview.peopleRequests) { showsPeople = true }
+            #endif
     }
 }

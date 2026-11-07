@@ -43,7 +43,7 @@ private struct RoomPeopleIcon: View {
                         .foregroundStyle(.white)
                         .padding(.horizontal, 4)
                         .frame(minWidth: 16, minHeight: 16)
-                        .background(PocketPalette.danger, in: Capsule())
+                        .background(Color.red, in: Capsule())
                         .offset(x: 9, y: -8)
                         .accessibilityHidden(true)
                 }
@@ -278,7 +278,7 @@ private struct RoomAgentContactRows: View {
         Group {
             Text("Agents you work with")
                 .font(.footnote.weight(.semibold))
-                .foregroundStyle(PocketPalette.textSecondary)
+                .foregroundStyle(.secondary)
                 .accessibilityAddTraits(.isHeader)
             ForEach(model.contacts) { contact in
                 HStack(spacing: 10) {
@@ -287,7 +287,7 @@ private struct RoomAgentContactRows: View {
                         if let last = contact.lastActiveAt {
                             Text("Last active \(Self.ago(last))")
                                 .font(.caption)
-                                .foregroundStyle(PocketPalette.textSecondary)
+                                .foregroundStyle(.secondary)
                         }
                     }
                     Spacer(minLength: 8)
@@ -320,11 +320,11 @@ private struct RoomAgentContactRows: View {
             .disabled(model.adding.contains(contact.id))
             .accessibilityLabel("Add \(contact.displayName)")
         case .inYourRooms:
-            Text("In your rooms").font(.caption).foregroundStyle(PocketPalette.textSecondary)
+            Text("In your rooms").font(.caption).foregroundStyle(.secondary)
         case .joining:
-            Text("Added, joining…").font(.caption).foregroundStyle(PocketPalette.textSecondary)
+            Text("Added, joining…").font(.caption).foregroundStyle(.secondary)
         case .inTheRoom:
-            Text("In the room").font(.caption.weight(.semibold)).foregroundStyle(PocketPalette.verified)
+            Text("In the room").font(.caption.weight(.semibold)).foregroundStyle(.green)
         }
     }
 
