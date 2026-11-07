@@ -330,7 +330,9 @@ final class AgentContactsModel: ObservableObject {
     }
 
     func add(_ contact: AgentContact) async {
-        guard contact.canAdd, !adding.contains(contact.id), !added.contains(contact.id) else { return }
+        // Never asked again once added, or once the API said it is already a member of this chat.
+        guard contact.canAdd, !adding.contains(contact.id), !added.contains(contact.id),
+              !members.contains(contact.id) else { return }
         adding.insert(contact.id)
         problem = nil
         defer { adding.remove(contact.id) }
