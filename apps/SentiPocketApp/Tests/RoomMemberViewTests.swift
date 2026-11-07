@@ -161,9 +161,10 @@ final class RoomMemberViewTests: XCTestCase {
         XCTAssertEqual(card(.box, .cli), .box, "a box stays a box")
     }
 
-    /// The card reads the newest post that says how it was sent, never an older one; a newer post that says nothing
-    /// leaves it to the one before (as the web reads it).
-    func test_the_card_reads_the_newest_posts_marks() async {
+    /// The newest post that decides is the agent's line, not the first (as the web's "the newest post that decides is
+    /// the agent's line, not the first"). A newer post that says nothing (case 3, or nothing declared) leaves the line
+    /// as an earlier post set it, or no line if none did; a newer post of a kind not named decides no line.
+    func test_the_newest_post_that_decides_is_the_agents_line_not_the_first() async {
         func line(newestFirst marks: [RoomPostClient?], api: RoomAuthorConnection? = .mcp) async -> String? {
             let messages = marks.enumerated().map { index, mark in
                 RoomMessage(id: "evt-\(100 - index)", sequenceId: Int64(100 - index), kind: .message,
@@ -184,6 +185,8 @@ final class RoomMemberViewTests: XCTestCase {
         XCTAssertEqual(newestCLIMCP, "Connected through the CLI (MCP)", "the newest post decides")
         let quietNewest = await line(newestFirst: [nil, .cliMCP, .mcp])
         XCTAssertEqual(quietNewest, "Connected through the CLI (MCP)", "a newer post that says nothing leaves it")
+        let nothingSaid = await line(newestFirst: [nil, nil])
+        XCTAssertNil(nothingSaid, "no post decided: no line")
         let mixed = await line(newestFirst: [.cli, .cliMCP])
         XCTAssertNil(mixed, "the API's mcp and a newest post that says cli disagree: no line")
         let unnamed = await line(newestFirst: [.other, .cliMCP])

@@ -498,9 +498,11 @@ private extension String {
 /// 2. `clientKind` "mcp" (the agent's, else the payload's) with the top-level `source` "cli": the CLI's MCP server.
 /// 3. "mcp" with no top-level source: nothing said (nil), as on the web, which cannot tell yet from a copy without one.
 /// 4. "mcp" with any other top-level source: MCP, true either way (an agent admitted through the hosted connector that
-///    then posts over REST still says "mcp"). A `clientKind` "hosted_mcp" is MCP too.
-/// 5. "cli": the CLI.
-/// 6. Any other kind: declared, but not one this app names (`other`, no line); no kind at all: nothing said (nil).
+///    then posts over REST still says "mcp").
+/// 5. "cli", no stamp: the CLI.
+/// 6. Any other kind, including "hosted_mcp" with no stamp (the stamp says hosted, not a client's claim): no line
+///    (`other`). No kind and no stamp: nothing said (nil).
+/// A post that says nothing (case 3, or no kind) leaves the agent's line as an earlier post set it; any other decides.
 /// A display hint, never authority.
 public enum RoomPostClient: String, Equatable, Sendable {
     /// MCP: hosted MCP (an AI app connected to the Senti MCP server), or an MCP client not known to be the CLI's.
@@ -532,7 +534,6 @@ public enum RoomPostClient: String, Equatable, Sendable {
         case "mcp":
             guard let source else { return nil }
             self = source == "cli" ? .cliMCP : .mcp
-        case "hosted_mcp": self = .mcp
         case "cli": self = .cli
         default: self = .other
         }
