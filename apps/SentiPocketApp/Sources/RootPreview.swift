@@ -166,7 +166,19 @@ final class RootPreviewMeter: @unchecked Sendable {
         watching[name] = object.objectWillChange.sink { [weak self] _ in self?.changes[name, default: 0] += 1 }
     }
 
-    func rootBodyRan() { rootBodies += 1 }
+    func rootBodyRan() {
+        rootBodies += 1
+        rootBodyTimes.append(CFAbsoluteTimeGetCurrent())
+        if rootBodyTimes.count > 64 { rootBodyTimes.removeFirst(rootBodyTimes.count - 64) }
+    }
+
+    /// When the root's body last ran (its 64 latest runs, main-thread clock), so a test can tell a draw an action caused
+    /// from one still landing from before it.
+    private(set) var rootBodyTimes: [CFAbsoluteTime] = []
+
+    /// Set by a test while it measures: each run of the root's body says in the log why SwiftUI ran it
+    /// (`_printChanges`: which of the root's objects or values changed).
+    var explainsRootBodies = false
 
     /// Room screens made (`RoomChatScreen.init`, which reads the Keychain) and room screen bodies run, so far.
     private(set) var roomScreens = 0
@@ -331,6 +343,13 @@ final class RootPreviewAPI: @unchecked Sendable {
 
     /// All the reads above, together: a hosted test waits until this stops moving.
     var totalCalls: Int { lock.withLock { calls.values.reduce(0, +) } }
+
+    /// Every read so far, by name.
+    func callCounts() -> [String: Int] { lock.withLock { calls } }
+
+    /// The open room's reads told to the server (`markRead`), apart from the reads above.
+    var readMarks: Int { lock.withLock { marks } }
+    private var marks = 0
 
     private func count(_ name: String) { lock.withLock { calls[name, default: 0] += 1 } }
 
@@ -781,7 +800,8 @@ extension RootPreviewAPI: RoomReceiptsClient, RoomReadMarking {
     }
 
     func markRead(sessionId: String, through sequenceId: Int64) async throws -> RoomReadReceipt {
-        RoomReadReceipt(outcome: .recorded, lastReadSequenceId: sequenceId)
+        lock.withLock { marks += 1 }
+        return RoomReadReceipt(outcome: .recorded, lastReadSequenceId: sequenceId)
     }
 }
 

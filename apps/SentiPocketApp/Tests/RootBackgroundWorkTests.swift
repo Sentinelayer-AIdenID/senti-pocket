@@ -226,6 +226,9 @@ final class RootBackgroundWorkTests: XCTestCase {
         window.makeKeyAndVisible()
         self.window = window
         settleRoot(api) { links.objectWillChange.send() }
+        RootPreview.meter.explainsRootBodies = true
+        defer { RootPreview.meter.explainsRootBodies = false }
+        print("BGAUDIT calendar answer \(on): settled")
         // The room's ⋯ entry asked whether drafting is on; the answer is held until now.
         let end = Date().addingTimeInterval(10)
         while Date() < end, gate.asks == 0 { pump(0.1) }
@@ -235,9 +238,22 @@ final class RootBackgroundWorkTests: XCTestCase {
         let rootBodies = meter.rootBodies
         let screens = meter.roomScreens
         let draws = RenderTrace.snapshot().draws
+        let reads = api.callCounts()
+        let readMarks = api.readMarks
 
+        // Each root draw since the root settled says why (`_printChanges`), and when it ran, so a draw the answer caused
+        // is told from one still landing from the root's setup, a read, or the room's read mark.
+        let answered = CFAbsoluteTimeGetCurrent()
+        print("BGAUDIT calendar answer \(on): answering")
         gate.answer(on)
         pump(1.5)
+        meter.explainsRootBodies = false
+        let readsInWindow = api.callCounts().filter { $0.value != reads[$0.key, default: 0] }
+            .map { "\($0.key) +\($0.value - reads[$0.key, default: 0])" }.sorted()
+        print("BGAUDIT calendar answer \(on): root bodies ran at "
+              + "\(meter.rootBodyTimes.suffix(6).map { Int((($0 - answered) * 1_000).rounded()) }) ms from the answer; "
+              + "reads in the window \(readsInWindow); read marks in the window \(api.readMarks - readMarks), "
+              + "\(api.readMarks) in all")
         XCTAssertEqual(meter.roomScreens - screens, 0, "a calendar change makes no new room screen")
         XCTAssertEqual(meter.rootBodies - rootBodies, 0, "a calendar change does not draw the root again")
         XCTAssertEqual(RenderTrace.snapshot().draws - draws, 0, "a calendar change draws none of the room's rows")
