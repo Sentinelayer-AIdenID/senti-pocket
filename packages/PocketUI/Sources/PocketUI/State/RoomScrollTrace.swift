@@ -134,7 +134,9 @@ public enum RoomScrollTrace {
     }
 
     /// The held New messages line's story since `start()`: how the room opened, the hold armed, the heights it saw, each
-    /// placement queued, made or skipped, and what let it go. Nothing is kept until the hosted tests start counting.
+    /// placement queued, made or skipped, and what let it go. Kept only in a DEBUG build, once the hosted tests start
+    /// counting; in a release build it is empty and its message is never even built.
+    #if DEBUG
     public static func lineHold(_ event: @autoclosure () -> String) {
         lock.lock()
         defer { lock.unlock() }
@@ -148,4 +150,8 @@ public enum RoomScrollTrace {
         defer { lock.unlock() }
         return lineEvents
     }
+    #else
+    @inline(__always)
+    public static func lineHold(_ event: @autoclosure () -> String) {}
+    #endif
 }
