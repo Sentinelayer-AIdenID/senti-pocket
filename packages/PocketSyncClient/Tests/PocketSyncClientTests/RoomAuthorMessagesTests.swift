@@ -59,6 +59,33 @@ final class RoomAuthorMessagesTests: XCTestCase {
      ],"count":2,"nextBeforeSequence":120,"hasMore":true,"connection":"MCP"}
     """
 
+    /// Ticket f7254a3b: how each post says it was sent, as the API stores it. Hosted MCP stamps `source: "hosted_mcp"`,
+    /// which outranks what a client says of itself; MCP admissions (the CLI's MCP server) stamp `clientKind: "mcp"`; the
+    /// CLI says "cli"; anything else is not known.
+    func test_each_post_says_how_it_was_sent() throws {
+        func sent(_ agent: String, _ payload: String, source: String? = nil) throws -> RoomPostClient? {
+            let top = source.map { #","source":"\#($0)""# } ?? ""
+            let json = try JSONDecoder().decode(JSONValue.self, from: Data("""
+            {"id":"e1","event":"session_message","sequenceId":1,"ts":"2026-11-07T10:00:00Z","agent":\(agent),
+             "payload":\(payload)\(top)}
+            """.utf8))
+            return try XCTUnwrap(RoomMessage(json: json)).sentThrough
+        }
+        // A post through the CLI's MCP server, as the server stores it: the event's source "cli", the agent's clientKind
+        // "mcp", the payload's source "mcp".
+        XCTAssertEqual(try sent(#"{"id":"claude-warden","clientKind":"mcp"}"#, #"{"text":"hi","source":"mcp"}"#,
+                                source: "cli"), .cliMCP, "the CLI's MCP server, never the CLI alone")
+        XCTAssertEqual(try sent(#"{"id":"claude-warden","clientKind":"mcp"}"#, #"{"text":"hi"}"#), .cliMCP,
+                       "clientKind mcp alone means the CLI's MCP server: hosted connectors say hosted_mcp")
+        XCTAssertEqual(try sent(#"{"id":"gpt-helper","clientKind":"hosted_mcp"}"#,
+                                #"{"text":"hi","source":"hosted_mcp"}"#), .hostedMCP)
+        XCTAssertEqual(try sent(#"{"id":"gpt-helper","clientKind":"mcp"}"#, #"{"text":"hi","source":"hosted_mcp"}"#),
+                       .hostedMCP, "the hosted marker outranks what the client says")
+        XCTAssertEqual(try sent(#"{"id":"ticket-keeper","clientKind":"cli"}"#, #"{"text":"hi"}"#), .cli)
+        XCTAssertNil(try sent(#"{"id":"someone","clientKind":"telegraph"}"#, #"{"text":"hi"}"#), "not known: nothing")
+        XCTAssertNil(try sent(#"{"id":"someone"}"#, #"{"text":"hi"}"#))
+    }
+
     func test_a_page_is_the_events_rows_newest_first_with_the_api_cursor_and_connection() throws {
         let page = try JSONDecoder().decode(RoomAuthorPage.self, from: Data(Self.page.utf8))
         XCTAssertEqual(page.messages.map(\.sequenceId), [140, 120], "newest first, as the API answers")
