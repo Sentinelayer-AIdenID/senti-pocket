@@ -16,6 +16,12 @@ final class RootBackgroundWorkTests: XCTestCase {
     private var window: UIWindow?
     private var watching: AnyCancellable?
 
+    /// Each test reads only its own root's calendar entry: a window left by an earlier test could still write it.
+    override func setUp() {
+        super.setUp()
+        RootPreview.meter.forgetCalendarEntry()
+    }
+
     override func tearDown() {
         window?.isHidden = true
         window = nil
@@ -97,7 +103,15 @@ final class RootBackgroundWorkTests: XCTestCase {
 
     /// The phone's freezes came right after the side panel opened over a room. Opening it must not draw the room's rows
     /// (nothing in them changed), and reads the rooms once (the panel's poll) and nothing read in the last 15 s.
+    ///
+    /// The root holds the panel in its `SidePanelLayer`: closed, the panel is not in the tree, so it builds none of its
+    /// rooms; each open makes it again (Carter's freeze of 11-06, #62485). Mutant it must catch: the root drawing the
+    /// panel itself, kept in the tree while closed (the closed check catches it). And the root's open ends editing
+    /// first. Mutant it must catch: the root setting the panel open without `SidePanelState.open()`. And its rooms are
+    /// placed while it is closed. Mutant it must catch: the placing moved back onto the panel.
     func test_opening_the_side_panel_draws_no_message_row_and_reads_only_the_rooms() throws {
+        let panelBuiltAtStart = RenderTrace.builtCount(.sidePanel)
+        let placedAtStart = RootPreview.meter.sidePanelPlacements
         let api = Self.api()
         UserDefaults.standard.set(RootPreviewAPI.midRoom, forKey: "pocket.lastRoomId")
         // The root observes its link inbox: a change announced there draws the root again and changes nothing else.
@@ -122,6 +136,12 @@ final class RootBackgroundWorkTests: XCTestCase {
         // The reads the root made as it was shown count as fresh for `panelFreshness` (15 s), which the reads asserted
         // below rely on: how long the root took to settle is printed.
         print("BGAUDIT settled \(String(format: "%.1f", Date().timeIntervalSince(shown))) s after the root was shown")
+        XCTAssertEqual(RenderTrace.builtCount(.sidePanel) - panelBuiltAtStart, 0,
+                       "closed, the side panel builds none of its rooms: it is not in the root's tree")
+        // Its rooms are placed all the same, by the root (the panel, out of the tree, could not): an open shows rooms
+        // already placed.
+        XCTAssertGreaterThan(RootPreview.meter.sidePanelPlacements - placedAtStart, 0,
+                             "closed since launch, the side panel's rooms were placed")
         let draws = RenderTrace.snapshot().draws
         let reads = Self.reads(api)
         let meter = RootPreview.meter
@@ -140,10 +160,33 @@ final class RootBackgroundWorkTests: XCTestCase {
         for name in ["bell", "waiting", "folders", "dmSettings"] {
             XCTAssertEqual(after[name]! - reads[name]!, 0, "\(name) was read moments ago: not again")
         }
+        let builtOpen = RenderTrace.builtCount(.sidePanel) - panelBuiltAtStart
+        XCTAssertGreaterThan(builtOpen, 0, "open, the panel is made and builds the rooms it shows")
         RootPreview.requestDrawer(false)
         pump(1.5)
         XCTAssertEqual(RenderTrace.snapshot().draws - draws, 0, "closing it draws none either")
         XCTAssertEqual(meter.roomScreens - screens, 0, "closing it makes no new room screen either")
+
+        RootPreview.requestDrawer(true)
+        pump(2)
+        XCTAssertGreaterThan(RenderTrace.builtCount(.sidePanel) - panelBuiltAtStart, builtOpen,
+                             "opened again, the panel is made again: it builds its rooms again")
+        RootPreview.requestDrawer(false)
+        pump(1.5)
+
+        // The root's open ends editing (`SidePanelState.open()`): a field being typed in, as the room's box after a
+        // send, is no longer first responder once the panel opens. Last, so a keyboard coming and going changes
+        // nothing measured above.
+        let field = UITextField(frame: CGRect(x: 0, y: 0, width: 200, height: 40))
+        window.addSubview(field)
+        XCTAssertTrue(field.becomeFirstResponder(), "the field is being typed in")
+        pump(0.3)
+        RootPreview.requestDrawer(true)
+        pump(1)
+        XCTAssertFalse(field.isFirstResponder, "opening the side panel ended editing")
+        RootPreview.requestDrawer(false)
+        pump(1)
+        field.removeFromSuperview()
     }
 
     // MARK: - The calendar's changes leave the root and its room alone

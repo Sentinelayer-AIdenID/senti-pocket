@@ -121,8 +121,9 @@ final class SessionPresentationTests: XCTestCase {
         XCTAssertEqual(state.events.first?.text, "hello")
         XCTAssertEqual(state.actions.first?.id.actionId, "act-1")
         XCTAssertEqual(state.actions.first?.targetSequenceId, 230141)
-        XCTAssertEqual(state.actions.first?.targetLabel, "Target #230141")
+        XCTAssertEqual(state.actions.first?.targetLabel, "On a message", "no server numbers in Activity")
         XCTAssertEqual(state.actions.first?.actionType, "ack")
+        XCTAssertEqual(state.actions.first?.actionTypeLabel, "Acknowledged", "said, not the server's token")
     }
 
     func testSessionLevelActionDoesNotManufactureEventZeroTarget() throws {
@@ -143,7 +144,8 @@ final class SessionPresentationTests: XCTestCase {
         )
 
         XCTAssertEqual(state.actions.first?.targetSequenceId, 0)
-        XCTAssertEqual(state.actions.first?.targetLabel, "Session-level")
+        XCTAssertEqual(state.actions.first?.targetLabel, "On the chat")
+        XCTAssertEqual(state.actions.first?.actionTypeLabel, "Working on it")
     }
 
     func testCrossSessionActivityFailsClosedWithoutLeakingRows() throws {

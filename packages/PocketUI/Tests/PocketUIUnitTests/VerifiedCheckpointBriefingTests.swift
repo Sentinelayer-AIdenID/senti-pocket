@@ -59,11 +59,11 @@ final class VerifiedCheckpointBriefingTests: XCTestCase {
     func test_checkpoint_row_copy_names_exact_fetch_and_pre_display_verification() {
         XCTAssertEqual(
             SessionCheckpointListView.exactCheckpointOpenHint,
-            "Fetches and verifies this exact signed checkpoint before any Pocket briefing content is shown."
+            "Checks this summary's signature before showing any of it."
         )
         XCTAssertEqual(
             SessionCheckpointListView.trustBoundaryMessage,
-            "Room checkpoints are available through your membership. Opening one separately fetches and verifies the exact signed Pocket briefing before any briefing content is shown."
+            "You see these summaries because you're in this chat. Each one's signature is checked before any of it is shown."
         )
     }
     #endif

@@ -2,6 +2,7 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
+import PocketContracts
 import XCTest
 @testable import PocketSyncClient
 
@@ -59,6 +60,33 @@ final class RoomAuthorMessagesTests: XCTestCase {
      ],"count":2,"nextBeforeSequence":120,"hasMore":true,"connection":"MCP"}
     """
 
+    /// Ticket f7254a3b: how each post says it was sent, as the API stores it. Hosted MCP stamps `source: "hosted_mcp"`,
+    /// which outranks what a client says of itself; MCP admissions (the CLI's MCP server) stamp `clientKind: "mcp"`; the
+    /// CLI says "cli"; anything else is not known.
+    func test_each_post_says_how_it_was_sent() throws {
+        func sent(_ agent: String, _ payload: String, source: String? = nil) throws -> RoomPostClient? {
+            let top = source.map { #","source":"\#($0)""# } ?? ""
+            let json = try JSONDecoder().decode(JSONValue.self, from: Data("""
+            {"id":"e1","event":"session_message","sequenceId":1,"ts":"2026-11-07T10:00:00Z","agent":\(agent),
+             "payload":\(payload)\(top)}
+            """.utf8))
+            return try XCTUnwrap(RoomMessage(json: json)).sentThrough
+        }
+        // A post through the CLI's MCP server, as the server stores it: the event's source "cli", the agent's clientKind
+        // "mcp", the payload's source "mcp".
+        XCTAssertEqual(try sent(#"{"id":"claude-warden","clientKind":"mcp"}"#, #"{"text":"hi","source":"mcp"}"#,
+                                source: "cli"), .cliMCP, "the CLI's MCP server, never the CLI alone")
+        XCTAssertEqual(try sent(#"{"id":"claude-warden","clientKind":"mcp"}"#, #"{"text":"hi"}"#), .cliMCP,
+                       "clientKind mcp alone means the CLI's MCP server: hosted connectors say hosted_mcp")
+        XCTAssertEqual(try sent(#"{"id":"gpt-helper","clientKind":"hosted_mcp"}"#,
+                                #"{"text":"hi","source":"hosted_mcp"}"#), .hostedMCP)
+        XCTAssertEqual(try sent(#"{"id":"gpt-helper","clientKind":"mcp"}"#, #"{"text":"hi","source":"hosted_mcp"}"#),
+                       .hostedMCP, "the hosted marker outranks what the client says")
+        XCTAssertEqual(try sent(#"{"id":"ticket-keeper","clientKind":"cli"}"#, #"{"text":"hi"}"#), .cli)
+        XCTAssertNil(try sent(#"{"id":"someone","clientKind":"telegraph"}"#, #"{"text":"hi"}"#), "not known: nothing")
+        XCTAssertNil(try sent(#"{"id":"someone"}"#, #"{"text":"hi"}"#))
+    }
+
     func test_a_page_is_the_events_rows_newest_first_with_the_api_cursor_and_connection() throws {
         let page = try JSONDecoder().decode(RoomAuthorPage.self, from: Data(Self.page.utf8))
         XCTAssertEqual(page.messages.map(\.sequenceId), [140, 120], "newest first, as the API answers")
@@ -102,6 +130,55 @@ final class RoomAuthorMessagesTests: XCTestCase {
             }
         }
         XCTAssertEqual(AuthorPageURLProtocol.captured().count, 2)
+    }
+
+    /// Ticket 386081b1, the API's answer for an agent and for a person, as it is shaped (sentinelayer-api a199151c,
+    /// src/routes/sessions.py:6778: `events`, `count`, `nextBeforeSequence`, `hasMore`, `connection`), through the
+    /// phone's own transport: each comes back as their rows, with who wrote them.
+    func test_an_agents_page_and_a_persons_page_read_as_their_rows() async throws {
+        AuthorPageURLProtocol.reset(body: """
+        {"events":[
+          {"id":"e9","event":"session_message","sequenceId":62390,"ts":"2026-11-06T06:00:00Z","agentId":"build-agent",
+           "payload":{"text":"The build is up."}},
+          {"id":"e7","event":"session_message","sequenceId":62310,"ts":"2026-11-06T05:40:00Z","agentId":"build-agent",
+           "payload":{"text":"Starting the build."}}
+         ],"count":2,"nextBeforeSequence":62000,"hasMore":true,"connection":"box"}
+        """)
+        let agent = try await transport().roomMessages(by: "build-agent", sessionId: "room_1", beforeSequence: nil, limit: 20)
+        XCTAssertEqual(agent.messages.map(\.sequenceId), [62390, 62310])
+        XCTAssertEqual(agent.messages.map(\.authorId), ["build-agent", "build-agent"])
+        XCTAssertEqual(agent.messages.map(\.isHuman), [false, false], "an agent's rows")
+        XCTAssertEqual(agent.nextBeforeSequence, 62000)
+        XCTAssertEqual(agent.connection, .box)
+
+        AuthorPageURLProtocol.reset(body: """
+        {"events":[
+          {"id":"e8","event":"session_message","sequenceId":62392,"ts":"2026-11-06T06:04:00Z","agentId":"human-alex",
+           "payload":{"text":"Thanks."}}
+         ],"count":1,"nextBeforeSequence":null,"hasMore":false,"connection":null}
+        """)
+        let person = try await transport().roomMessages(by: "human-alex", sessionId: "room_1", beforeSequence: nil,
+                                                        limit: 20)
+        XCTAssertEqual(person.messages.map(\.sequenceId), [62392])
+        XCTAssertEqual(person.messages.map(\.authorId), ["human-alex"])
+        XCTAssertEqual(person.messages.map(\.isHuman), [true], "a person's rows")
+        XCTAssertNil(person.nextBeforeSequence, "the start of the room")
+        XCTAssertNil(person.connection)
+    }
+
+    /// Ticket 386081b1: while the server did not answer this read it gave 503 with an empty body, for an agent and
+    /// a person alike. That is an error the card offers to retry, never an empty page (which would read as "no
+    /// messages from them yet").
+    func test_an_empty_503_is_an_error_never_an_empty_page() async {
+        for author in ["build-agent", "human-alex"] {
+            AuthorPageURLProtocol.reset(status: 503, body: "")
+            do {
+                let page = try await transport().roomMessages(by: author, sessionId: "room_1", beforeSequence: nil, limit: 20)
+                XCTFail("\(author): a 503 read as a page of \(page.messages.count) messages")
+            } catch {
+                XCTAssertEqual(error as? SessionTransportError, .service(statusCode: 503), "\(author)")
+            }
+        }
     }
 
     /// Exactly the API's rule for `author` (`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`): what it would refuse is never sent.

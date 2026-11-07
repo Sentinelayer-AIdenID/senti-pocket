@@ -38,7 +38,8 @@ struct SentiPocketApp: App {
     var body: some Scene {
         WindowGroup {
             rootView
-                .onAppear { whisperModel.start() }
+                // The model file is checked only where it is offered (DEBUG): Release never reads or asks for it.
+                .onAppear { if WhisperModelSettings.offersModelFile { whisperModel.start() } }
                 .onOpenURL { url in
                     LaunchUrgency.shared.raise()
                     _ = incomingLinks.receive(url)
@@ -241,6 +242,10 @@ struct RootServices {
     var registersPush = true
     /// The calendar and its Apple Calendar link, shown once the server answers their routes; nil (a preview) hides it.
     var calendar: (any RoomCalendarServing & CalendarFeedServing)?
+    /// Where crash reports go when the person sends them: the team, through the API. Nil (a preview) offers nothing.
+    var crashReports: (any CrashReportSending)?
+    /// Your blocks on the server (`/me/blocks`), for the account signed in; nil (a preview) keeps them on the phone.
+    var blocks: (_ account: String?) -> (any BlockListClient)? = { _ in nil }
 
     /// The Senti API as you.
     static func live() -> RootServices {
@@ -287,7 +292,9 @@ struct RootServices {
             receipts: HTTPRoomReceipts(apiBaseURL: apiURL),
             readMarker: HTTPRoomReadMarker(apiBaseURL: apiURL),
             calendar: HTTPRoomCalendarClient(apiBaseURL: apiURL, urlSession: CalendarHTTP.session,
-                                             tokenProvider: { SessionTokenStore.load() })
+                                             tokenProvider: { SessionTokenStore.load() }),
+            crashReports: HTTPCrashReports(apiBaseURL: apiURL),
+            blocks: { HTTPBlockListClient(apiBaseURL: apiURL, account: $0) }
         )
     }
 }
@@ -327,6 +334,67 @@ final class RoomScreenMaker {
     var make: (@MainActor (RoomRoute, String?) -> RoomChatScreen)?
 }
 
+/// The side panel under the room, in the view tree only while open, or fading out after a close (Carter's freeze of
+/// 11-06, #62485): a closed panel kept in the tree, faded out under the room, held its lazy list there, and a room put
+/// in place could set off a layout of all its rows that never settled. Out of the tree it is also out of reach of
+/// VoiceOver (ticket 066aca7a). It fades in and out under the sliding room as it faded before.
+struct SidePanelLayer<Panel: View>: View {
+    let isOpen: Bool
+    /// How far the room card moves right when the panel opens; the panel fits in that space.
+    let width: CGFloat
+    let panel: Panel
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            if isOpen {
+                // The panel ends before the room card begins, so its right edge (unread counts, See all) is never under
+                // it.
+                panel
+                    .frame(width: width - 14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .transition(.opacity)
+            }
+        }
+        // On the holder, which stays in the tree, so they turn off at the close and cover the panel while it fades out
+        // (SidePanelLayerTests: no touch reaches it then).
+        .allowsHitTesting(isOpen)
+        .accessibilityHidden(!isOpen)
+    }
+}
+
+/// Ends editing anywhere in the app, so the keyboard starts going down now: before the side panel's spring, or before a
+/// room is put in place of the one on screen (which takes away the composer the keyboard was for). Carter's freezes of
+/// 11-06 each came after a send or a reply, with the keyboard still up as the panel opened or a room was picked from it;
+/// on master, path (f) with the closed panel left out of the tree still hung once at the panel's open with the keyboard
+/// up.
+@MainActor
+func endAllEditing() {
+    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+}
+
+/// Whether the side panel is open, and its open: editing ends first, then the panel's state changes.
+@MainActor
+final class SidePanelState: ObservableObject {
+    @Published var isOpen = false
+
+    /// What ends editing before the panel opens: `endAllEditing` in the app; a test gives its own, to see it run first.
+    private let endEditing: @MainActor () -> Void
+
+    init(endEditing: @escaping @MainActor () -> Void = endAllEditing) {
+        self.endEditing = endEditing
+    }
+
+    /// Opens the panel, editing ended first, so the keyboard starts going down before the panel's spring.
+    func open() {
+        endEditing()
+        isOpen = true
+    }
+
+    func close() {
+        if isOpen { isOpen = false }
+    }
+}
+
 /// Release composition of the authenticated repository-backed Sessions surface and the selected-session Pocket flow.
 /// When the open side panel reads its rooms again: open, with the app in front.
 struct DrawerPoll: Equatable {
@@ -349,6 +417,14 @@ struct AuthenticatedRootView: View {
     /// What waits on your decision across your rooms (ticket 931e1d2e).
     @StateObject private var waiting: WaitingOnYouCoordinator
     @State private var presentsWaiting = false
+    /// Who this account blocked, for every room and Settings (App Store guideline 1.2).
+    @StateObject private var blocks: BlockList
+    /// This account's OK for what it sends to reach a room's AI agents (App Store guideline 5.1.2(i)).
+    @StateObject private var aiConsent: AIConsent
+    /// An answer from Waiting on you, held for that OK.
+    @State private var waitingConsentHeld: AIConsentHeld?
+    /// A new room, held for that OK.
+    @State private var newRoomConsentHeld: AIConsentHeld?
     /// Direct messages: on when the server answers their settings (DIRECT_MESSAGES_ENABLED), else nothing shows.
     @StateObject private var directMessages: DirectMessagesCenter
     /// Your room folders: on when the server lists them (ROOM_FOLDERS_ENABLED), else nothing shows.
@@ -361,6 +437,7 @@ struct AuthenticatedRootView: View {
     /// not watched: the panel watches it, so a new placing draws the panel and not the root (and the room under it).
     @State private var sidePanelPlacement = SidePanelPlacement()
     @Environment(\.scenePhase) private var rootScenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject private var whisperModelCoordinator: WhisperModelProvisioningCoordinator
     @ObservedObject private var incomingLinks: IncomingLinkInbox
     @State private var presentsNewRoom = false
@@ -368,7 +445,9 @@ struct AuthenticatedRootView: View {
     /// The room on screen, the root of the stack; nil shows your rooms. Breakouts push onto `roomPath`.
     @State private var currentRoom: RoomRoute?
     @State private var roomPath: [RoomRoute] = []
-    @State private var drawerOpen = false
+    /// The side panel's state: its open ends editing first (`SidePanelState.open()`).
+    @StateObject private var panelState = SidePanelState()
+    private var drawerOpen: Bool { panelState.isOpen }
     /// Makes the room screen for `RoomScreenHost`; the same one for the root's life.
     @State private var roomScreenMaker = RoomScreenMaker()
     /// How often the open side panel reads the rooms again, in nanoseconds.
@@ -387,8 +466,10 @@ struct AuthenticatedRootView: View {
     @AppStorage("pocket.lastRoomId") private var lastRoomId = ""
     @State private var restoredLastRoom = false
     @AppStorage("pocket.theme") private var themeRaw = PocketThemePreference.system.rawValue
-    @StateObject private var messageReader = MessageReader()
-    @ObservedObject private var readingSource = ReadAloudSource.shared
+    /// The app's one reader. Kept, not watched: its bar (`ReadAloudBarSlot`) watches it, so a reading draws the bar and
+    /// never the root, whose every draw can make the room screen under it again (Carter, #62471: a thread being read
+    /// from went away).
+    @State private var messageReader = MessageReader()
     private let roomTransport: any RoomTransport
     private let ticketsTransport: any RoomTicketsTransport
     private let admissionsTransport: any RoomAdmissionsTransport
@@ -399,6 +480,8 @@ struct AuthenticatedRootView: View {
     private let ticketLeases: any TicketLeaseStoring
     private let ticketExtras: any RoomTicketExtrasReading
     private let accountIdentity: any AccountIdentityProviding
+    /// Where crash reports go when the person sends them (`CrashReportOffer`).
+    private let crashReports: (any CrashReportSending)?
     private let roomReceipts: any RoomReceiptsClient
     private let roomSearch: any RoomSearching
     /// How far you have read each room, told to the server as you read, for the unread badges.
@@ -488,6 +571,16 @@ struct AuthenticatedRootView: View {
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
         )
         _notifications = StateObject(wrappedValue: notifications)
+        // Both belong to the account signed in now: another account signing in on this phone gets its own.
+        let account = RoomSendOutbox.account(token: SessionTokenStore.load())
+        _blocks = StateObject(wrappedValue: BlockList(account: account, store: .standard,
+                                                      client: services.blocks(account)))
+        let aiConsent = AIConsent(account: account)
+        #if DEBUG
+        // The root preview's tests of what follows a send start as a phone that said OK before (DEBUG only).
+        if RootPreview.startsWithAIConsentGiven() { aiConsent.grant() }
+        #endif
+        _aiConsent = StateObject(wrappedValue: aiConsent)
         _callLog = StateObject(wrappedValue: CallLogCoordinator(
             transport: services.callLog,
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
@@ -531,6 +624,7 @@ struct AuthenticatedRootView: View {
         self.ticketLeases = services.ticketLeases
         self.ticketExtras = services.ticketExtras
         self.accountIdentity = services.identity
+        self.crashReports = services.crashReports
         self.roomReceipts = services.receipts
         self.roomSearch = services.search
         self.roomReadMarker = services.readMarker
@@ -551,21 +645,18 @@ struct AuthenticatedRootView: View {
         let _ = RootPreview.meter.rootBodyRan()
         #endif
         ZStack(alignment: .leading) {
-            // The side panel sits underneath; opening it pushes the room aside as a card (Carter #55006).
-            // The panel ends before the room card begins, so its right edge (unread counts, See all) is never under it.
-            sidePanel
-                .frame(width: Self.drawerWidth - 14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .opacity(drawerOpen ? 1 : 0)
-                .allowsHitTesting(drawerOpen)
-                .accessibilityHidden(!drawerOpen)
+            // The side panel sits underneath; opening it pushes the room aside as a card (Carter #55006). It is in the
+            // tree only while open, or fading out after a close.
+            SidePanelLayer(isOpen: drawerOpen, width: Self.drawerWidth, panel: sidePanel)
             NavigationStack(path: $roomPath) {
                 Group {
                     if let currentRoom {
                         roomScreen(currentRoom)
                             .id(currentRoom)
                     } else {
-                        SessionListView(state: sessions.state, folders: roomFolders.items,
+                        // A direct message with someone you blocked is not listed.
+                        SessionListView(state: sessions.state.withoutDirectMessages(from: blocks.actorIds),
+                                        folders: roomFolders.items,
                                         onFolder: { roomFolders.send($0) }) { intent in
                             sessions.send(intent)
                             if case .selectSession(let sessionId) = intent,
@@ -585,21 +676,17 @@ struct AuthenticatedRootView: View {
             }
             // A sheet or the side panel over the room: its moving parts rest (warden, #269).
             .environment(\.roomIsCovered, roomCovered)
-            // Listening goes on when you leave its room (Carter, 10-30): outside that room the app keeps the player,
-            // and its title takes you back to the message.
-            .overlay(alignment: .bottom) {
-                if let playback = messageReader.playback, let source = readingSource.sessionId,
-                   source != (roomPath.last ?? currentRoom)?.sessionId {
-                    ReadAloudPlayer(reader: messageReader, playback: playback) {
-                        if let id = messageReader.readingId {
-                            open(ReadAloudSource.link(readingId: id, sessionId: source))
-                        }
+            // Listening goes on when you leave its room (Carter, 10-30): outside that room the app keeps the player at
+            // the top, and its title takes you back to the message.
+            .safeAreaInset(edge: .top, spacing: 0) {
+                ReadAloudBarSlot(reader: messageReader, place: "app", shows: { [shownRoom = (roomPath.last ?? currentRoom)?.sessionId] source in
+                    source != nil && source != shownRoom
+                }, onShowMessage: {
+                    if let id = messageReader.readingId, let source = ReadAloudSource.shared.sessionId {
+                        open(ReadAloudSource.link(readingId: id, sessionId: source))
                     }
-                    .padding(.bottom, currentRoom == nil ? 16 : 72)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
+                })
             }
-            .animation(.spring(response: 0.3, dampingFraction: 0.9), value: messageReader.playback == nil)
             // The room moves right, a little smaller, its corners rounded into a card; a tap or a swipe on it closes.
             .overlay {
                 if drawerOpen {
@@ -624,7 +711,17 @@ struct AuthenticatedRootView: View {
         .pocketCanvas()
         // The logo at launch, while your rooms load underneath (Carter, #55287).
         .overlay { LaunchSplash(isReady: roomListSettled) }
-        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: drawerOpen)
+        // Crash reports are offered here, once a launch, for the whole app, to send to the team.
+        .background { CrashReportOffer(api: crashReports) }
+        // With Reduce Motion, a short fade in place of the spring.
+        .animation(reduceMotion ? .easeInOut(duration: 0.2) : .spring(response: 0.35, dampingFraction: 0.8),
+                   value: drawerOpen)
+        // The side panel's rooms are placed as the rooms, your folders and your blocks change, open or closed: the panel
+        // is in the tree only while open, so these are the root's, and an open shows rooms already placed.
+        .onAppear(perform: placeSidePanelRooms)
+        .onChange(of: sessions.state.rows) { _ in placeSidePanelRooms() }
+        .onChange(of: roomFolders.folders) { _ in placeSidePanelRooms() }
+        .onChange(of: blocks.actorIds) { _ in placeSidePanelRooms() }
         // Opening the side panel reads what it shows that was not read lately: the bell, Waiting on you, whether folders
         // and direct messages are on, and your folders, so no count is older than `panelFreshness`. The rooms are read
         // once, at once, by the panel's own poll below (a second read here was the same request again).
@@ -653,7 +750,9 @@ struct AuthenticatedRootView: View {
         #if DEBUG
         // The root preview's side panel opens and closes on a signal, so a profile of it has no accessibility client
         // tapping (each tap of a UI test reads the screen's whole accessibility tree first).
-        .onReceive(RootPreview.drawerRequests) { open in drawerOpen = open }
+        .onReceive(RootPreview.drawerRequests) { open in
+            if open { panelState.open() } else { panelState.close() }
+        }
         .onAppear {
             guard RootPreview.isRequested else { return }
             let meter = RootPreview.meter
@@ -676,7 +775,8 @@ struct AuthenticatedRootView: View {
                     presentsPocket = false
                     presentsActivity = true
                 },
-                onReauthenticationRequired: invalidateProtectedAuthentication
+                onReauthenticationRequired: invalidateProtectedAuthentication,
+                aiConsent: aiConsent
             )
         }
         .sheet(isPresented: $presentsActivity) {
@@ -715,6 +815,8 @@ struct AuthenticatedRootView: View {
             .onDisappear { notifications.listShown(false) }
         }
         .sheet(isPresented: $presentsCallLog) {
+            // The reader is watched here, for the call being read: the root keeps it without watching it.
+            ReaderWatch(reader: messageReader) { _ in
             CallLogView(state: callLog.state, readingId: readingCallId) { intent in
                 switch intent {
                 case .refresh:
@@ -743,16 +845,27 @@ struct AuthenticatedRootView: View {
                     presentsCallLog = false
                 }
             }
+            }
         }
         .sheet(isPresented: $presentsWaiting) {
             WaitingOnYouView(state: waiting.state, send: { intent in
+                // An answer goes to the room that asked, where its agents read it: the first asks this account's OK.
+                if case .answer = intent, aiConsent.asks {
+                    waitingConsentHeld = AIConsentHeld { _ = waiting.send(intent) }
+                    return
+                }
                 guard let link = waiting.send(intent) else { return }
                 presentsWaiting = false
                 open(link)
             }, onDone: { presentsWaiting = false })
+            .aiConsentPrompt($waitingConsentHeld) { aiConsent.grant() }
         }
+        // Activity shows a blocked person's messages and replies as one line, as rooms do.
+        .onReceive(blocks.$actorIds) { details.setBlockedAuthors($0) }
         .onChange(of: rootScenePhase) { phase in
             if phase == .active { notifications.startPolling() } else { notifications.stopPolling() }
+            // Blocks made on the web, or here while offline, catch up when Pocket comes back.
+            if phase == .active { Task { await blocks.sync() } }
             if phase == .active { waiting.startPolling() } else { waiting.stopPolling() }
         }
         .onChange(of: incomingLinks.revision) { _ in openPendingLinkIfReady() }
@@ -762,6 +875,8 @@ struct AuthenticatedRootView: View {
         .sheet(isPresented: $presentsSettings) {
             WhisperModelSettingsView(
                 coordinator: whisperModelCoordinator,
+                blocks: blocks,
+                aiConsent: aiConsent,
                 directMessages: directMessages,
                 calendar: CalendarSettingsContext(center: calendar, rooms: calendarRooms,
                                                   onReauthenticationRequired: invalidateProtectedAuthentication),
@@ -771,6 +886,7 @@ struct AuthenticatedRootView: View {
                 }
             )
         }
+        .aiConsentPrompt($newRoomConsentHeld) { aiConsent.grant() }
         .modifier(RoomFolderSheets(center: roomFolders))
         .sheet(isPresented: $presentsNewRoom) {
             if let creator = roomSender as? any RoomCreating {
@@ -799,6 +915,9 @@ struct AuthenticatedRootView: View {
             Task { await directMessages.refresh() }
             Task { await roomFolders.refresh() }
             notifications.startPolling()
+            Task { await blocks.sync() }
+            // A dial asks this account's consent (its question shows in a window of its own, over any sheet).
+            AIConsentAsker.shared.consent = aiConsent
             // Waiting on you is read from sign-in on, not only once the app comes back to the front (warden, #270).
             waiting.startPolling()
             // Apple push: a tap opens its room at the message; the room on screen gets no banner.
@@ -912,6 +1031,7 @@ struct AuthenticatedRootView: View {
     /// selection Pocket and Activity follow in step, and remembers it for the next launch.
     @MainActor
     private func show(_ route: RoomRoute) {
+        endAllEditing()
         pendingOpen = nil
         if !UTF8ExactIdentity.matches(sessions.selectedSessionId, route.sessionId) {
             sessions.send(.selectSession(sessionId: route.sessionId))
@@ -945,13 +1065,13 @@ struct AuthenticatedRootView: View {
 
     @MainActor
     private func closeDrawer() {
-        if drawerOpen { drawerOpen = false }
+        panelState.close()
     }
 
     private var drawerButton: some View {
         Button {
             CrashReporter.shared.note("drawerOpened")
-            drawerOpen = true
+            panelState.open()
         } label: {
             Image(systemName: "line.3.horizontal")
                 .overlay(alignment: .topTrailing) {
@@ -981,6 +1101,7 @@ struct AuthenticatedRootView: View {
             theme: theme,
             onSelectRoom: { sessionId in show(roomRoute(for: sessionId)) },
             onAllRooms: {
+                endAllEditing()
                 roomPath = []
                 currentRoom = nil
                 closeDrawer()
@@ -1012,19 +1133,26 @@ struct AuthenticatedRootView: View {
             },
             onNewRoom: roomSender is any RoomCreating ? {
                 closeDrawer()
-                presentsNewRoom = true
+                // A new room is written to as it is made: the first write asks.
+                if aiConsent.asks {
+                    newRoomConsentHeld = AIConsentHeld { presentsNewRoom = true }
+                } else {
+                    presentsNewRoom = true
+                }
             } : nil,
             folderNotice: roomFolders.notice,
             // Folders show only where they are on.
             onFolder: roomFolders.items == nil ? nil : { roomFolders.send($0) }
         )
-        .onAppear(perform: placeSidePanelRooms)
-        .onChange(of: sessions.state.rows) { _ in placeSidePanelRooms() }
-        .onChange(of: roomFolders.folders) { _ in placeSidePanelRooms() }
     }
 
+    /// A direct message with someone you blocked is not placed (`withoutDirectMessages`).
     private func placeSidePanelRooms() {
-        sidePanelPlacement.update(rows: sessions.state.rows, folders: roomFolders.items)
+        #if DEBUG
+        RootPreview.meter.sidePanelPlaced()
+        #endif
+        sidePanelPlacement.update(rows: sessions.state.withoutDirectMessages(from: blocks.actorIds).rows,
+                                  folders: roomFolders.items)
     }
 
     /// The room on screen, made and drawn again only when what it is opened with changes (`RoomScreenHost`).
@@ -1077,6 +1205,8 @@ struct AuthenticatedRootView: View {
             onRead: { sessionId, sequence, caughtUp in
                 sessions.noteRead(sessionId: sessionId, through: sequence, caughtUp: caughtUp)
             },
+            blocks: blocks,
+            aiConsent: aiConsent,
             direct: direct,
             onReauthenticationRequired: invalidateProtectedAuthentication
         )
@@ -1164,6 +1294,8 @@ private struct SelectedSessionPocketView: View {
     @ObservedObject var checkpointNarrationRevocation: VerifiedCheckpointNarrationRevocationRelay
     let onCheckpointDone: @MainActor () -> Void
     let onReauthenticationRequired: @MainActor @Sendable () -> Void
+    /// This account's OK to share with AI, for what you dictate here.
+    let aiConsent: AIConsent
 
     @ViewBuilder var body: some View {
         switch checkpointPocket.phase {
@@ -1207,6 +1339,7 @@ private struct SelectedSessionPocketView: View {
         if let sessionId = sessions.selectedSessionId {
             PhoneRootView(
                 sessionId: sessionId,
+                aiConsent: aiConsent,
                 onReauthenticationRequired: onReauthenticationRequired,
                 isWriteAuthorized: {
                     UTF8ExactIdentity.matches(sessions.selectedSessionId, sessionId)
@@ -1265,9 +1398,9 @@ private struct SelectedSessionActivityBoundary: View {
             Group {
                 if sessions.selectedSessionId == nil {
                     StatusView(
-                        title: "Choose a session",
+                        title: "Open a chat",
                         systemImage: "waveform.path.ecg",
-                        message: "Select an authorized session before loading its activity or room checkpoints."
+                        message: "Open a chat to see its activity."
                     )
                     .navigationTitle("Activity")
                 } else {
@@ -1277,10 +1410,10 @@ private struct SelectedSessionActivityBoundary: View {
                                 NavigationLink {
                                     checkpointContent
                                 } label: {
-                                    Label("Room checkpoints", systemImage: "tray.full")
+                                    Label("Saved summaries", systemImage: "tray.full")
                                         .labelStyle(.iconOnly)
                                 }
-                                .accessibilityLabel("Room checkpoints")
+                                .accessibilityLabel("Saved summaries")
                             }
                         }
                 }
@@ -1341,7 +1474,7 @@ private struct SelectedSessionActivityBoundary: View {
         } else {
             loadStatus(
                 details.activityLoadState,
-                emptyTitle: "No activity loaded",
+                emptyTitle: "No activity yet",
                 systemImage: "waveform.path.ecg",
                 retry: { details.refreshActivity() }
             )
@@ -1362,7 +1495,7 @@ private struct SelectedSessionActivityBoundary: View {
                 systemImage: "tray.full",
                 retry: { details.refreshCheckpoints() }
             )
-            .navigationTitle("Room checkpoints")
+            .navigationTitle("Saved summaries")
         }
     }
 
@@ -1380,7 +1513,7 @@ private struct SelectedSessionActivityBoundary: View {
         switch loadState {
         case .loading:
             title = "Loading"
-            message = "Fetching the selected session through your current Senti authorization."
+            message = "Getting this chat's activity."
             actionTitle = nil
             action = nil
         case .failed(let failure):
@@ -1390,7 +1523,7 @@ private struct SelectedSessionActivityBoundary: View {
             action = retry
         case .idle, .loaded:
             title = emptyTitle
-            message = "Refresh to load the currently selected authorized session."
+            message = "Refresh to see this chat's activity."
             actionTitle = "Refresh"
             action = retry
         }
@@ -1410,12 +1543,15 @@ private struct SelectedSessionActivityBoundary: View {
 struct PhoneRootView: View {
     @StateObject private var reasoning: RealReasoningCoordinator
     @StateObject private var write: PhoneWriteViewModel
+    private let aiConsent: AIConsent
 
     init(
         sessionId: String,
+        aiConsent: AIConsent,
         onReauthenticationRequired: @escaping @MainActor @Sendable () -> Void = {},
         isWriteAuthorized: @escaping @MainActor () -> Bool = { true }
     ) {
+        self.aiConsent = aiConsent
         let unavailable = UnavailableSessionReasoningProvider()
         let gatewayURL = GatewayEndpoint.resolve(infoPlistKeys: ["SENTI_GATEWAY_URL"])
         let authenticationExpiry = AuthenticationExpiryRelay()
@@ -1459,7 +1595,7 @@ struct PhoneRootView: View {
             isWriteAuthorized: isWriteAuthorized))
     }
 
-    var body: some View { PocketPhoneView(reasoning: reasoning, write: write) }
+    var body: some View { PocketPhoneView(reasoning: reasoning, write: write, aiConsent: aiConsent) }
 }
 
 private struct UnavailableSessionReasoningProvider: ReasoningProvider {

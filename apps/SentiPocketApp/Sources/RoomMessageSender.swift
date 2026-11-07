@@ -126,8 +126,11 @@ struct SignedInAccount: Equatable, Sendable {
     let accountId: String?
     /// The GitHub username as written, when the account has one.
     let login: String?
+    /// The author id the server writes your posts under (`/auth/me` `sender_id`, sentinelayer-api #1115); nil from an
+    /// API without it.
+    let senderId: String?
 
-    init?(githubUsername: String?, accountId: String?) {
+    init?(githubUsername: String?, accountId: String?, senderId: String? = nil) {
         let username = (githubUsername ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let id = (accountId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let source = username.isEmpty ? id : username
@@ -143,6 +146,15 @@ struct SignedInAccount: Equatable, Sendable {
         actorRef = ref
         self.accountId = id.isEmpty ? nil : id.lowercased()
         login = username.isEmpty ? nil : username
+        let serverSender = (senderId ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        self.senderId = serverSender.isEmpty ? nil : serverSender
+    }
+
+    /// The author id the API writes your messages under when the account has no verified GitHub login: bound to the
+    /// account, `human-g.<account id as hex>` (sentinelayer-api #1105). Nil without an account id.
+    var accountBoundAuthorId: String? {
+        guard let accountId, let id = UUID(uuidString: accountId) else { return nil }
+        return "human-g." + id.uuidString.replacingOccurrences(of: "-", with: "").lowercased()
     }
 }
 
@@ -181,7 +193,8 @@ final class HTTPAccountIdentity: AccountIdentityProviding, @unchecked Sendable {
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }
-        return SignedInAccount(githubUsername: object["github_username"] as? String, accountId: object["id"] as? String)
+        return SignedInAccount(githubUsername: object["github_username"] as? String, accountId: object["id"] as? String,
+                               senderId: object["sender_id"] as? String)
     }
 }
 
@@ -237,6 +250,8 @@ struct RoomActionRequest: Equatable, Sendable {
 
     static let replyLimit = 4_000
     static let reactionTypes: Set<String> = ["ack", "like", "dislike", "unlike", "undislike"]
+    /// Taking back a like or a dislike.
+    static let undoTypes: Set<String> = ["unlike", "undislike"]
     static let pinTypes: Set<String> = ["pin", "unpin"]
     static let emojiTypes: Set<String> = ["react", "unreact"]
 
@@ -383,6 +398,8 @@ final class HTTPRoomActionSender: RoomActionSending, @unchecked Sendable {
         }
         switch http.statusCode {
         case 200..<300: return
+        // Taking back a like or dislike that is not there (the API's REACTION_NOT_ACTIVE): it is not there, as asked.
+        case 409 where RoomActionRequest.undoTypes.contains(action.actionType): return
         case 401: throw RoomSendError.reauthenticationRequired
         case 403, 404: throw RoomSendError.notAllowed
         case 409, 425, 429, 500..<600:

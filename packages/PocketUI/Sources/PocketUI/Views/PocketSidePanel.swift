@@ -171,6 +171,13 @@ public struct PocketSidePanel: View {
         }
     }
 
+    /// When someone was last here, in words: "last seen just now" within the minute (never "last seen now ago",
+    /// Carter's IMG_7607), else "last seen 5m ago".
+    static func lastSeen(of date: Date, now: Date = Date()) -> String {
+        let age = compactAge(of: date, now: now)
+        return age == "now" ? "last seen just now" : "last seen \(age) ago"
+    }
+
     /// What VoiceOver says for a room's row: "Design review, open now", or with who is online and what is unread,
     /// "Weekly sync, 3 people and 2 agents online, 5 unread".
     static func accessibilityLabel(title: String, isCurrent: Bool, activity: RoomListActivity) -> String {
@@ -255,12 +262,12 @@ public struct PocketSidePanel: View {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(PocketPalette.textSecondary)
                     .accessibilityHidden(true)
-                TextField("Search rooms", text: $query)
+                TextField("Search chats", text: $query)
                     .autocorrectionDisabled()
                     #if os(iOS)
                     .textInputAutocapitalization(.never)
                     #endif
-                    .accessibilityLabel("Search rooms")
+                    .accessibilityLabel("Search chats")
                     .accessibilityIdentifier("pocket.drawer.search")
             }
             .padding(.horizontal, 12)
@@ -270,7 +277,7 @@ public struct PocketSidePanel: View {
 
             VStack(spacing: 2) {
                 if let onNewRoom {
-                    shortcut("New room", icon: "plus.bubble", id: "newRoom", action: onNewRoom)
+                    shortcut("New chat", icon: "plus.bubble", id: "newRoom", action: onNewRoom)
                 }
                 // Decisions first: what is waiting on you, across every room.
                 if let waitingOnYou {
@@ -336,7 +343,7 @@ public struct PocketSidePanel: View {
     }
 
     private var roomsTitle: some View {
-        Text("Rooms")
+        Text("Chats")
             .font(.footnote.weight(.semibold))
             .foregroundStyle(PocketPalette.textSecondary)
             .lineLimit(1)
@@ -416,7 +423,7 @@ public struct PocketSidePanel: View {
                 case .folder(let line):
                     folderHeader(line)
                 case .emptyFolder(_, let depth):
-                    Text("No rooms in this folder")
+                    Text("No chats in this folder")
                         .font(.caption)
                         .foregroundStyle(PocketPalette.textSecondary)
                         .frame(maxWidth: .infinity, alignment: .leading)

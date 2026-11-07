@@ -226,11 +226,12 @@ public struct ActionProposalReviewView: View {
                 locallyConsumedProposalKey = key
                 send(.confirmProposal(intent))
             } label: {
+                // The composer's own send arrow: no paper planes (Carter: "I see an airplane still").
                 Label(
                     confirmButtonTitle,
                     systemImage: connectivity.requiresQueuedWrite
                         ? "tray.and.arrow.down.fill"
-                        : "paperplane.fill"
+                        : "arrow.up.circle.fill"
                 )
                     .font(.headline)
                     .frame(maxWidth: .infinity, minHeight: 56)

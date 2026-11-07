@@ -141,6 +141,21 @@ final class RoomMemberViewTests: XCTestCase {
         XCTAssertNil(model.state.blockReference, "and Block is not offered again")
     }
 
+    /// Ticket f7254a3b: the API's "mcp" covers hosted MCP and the CLI's own MCP server alike, so the newest post's own
+    /// marks tell them apart; the CLI says so; with nothing to tell, nothing is shown.
+    func test_the_card_says_which_way_an_agent_is_connected() {
+        let card = RoomMemberMessagesModel.connection
+        XCTAssertEqual(card(.mcp, .cliMCP), .cliMCP, "the CLI's MCP server: Connected through the CLI (MCP)")
+        XCTAssertEqual(card(.mcp, .cliMCP)?.label, "Connected through the CLI (MCP)")
+        XCTAssertEqual(card(.mcp, .hostedMCP), .hostedMCP, "hosted MCP: Connected through MCP")
+        XCTAssertEqual(card(.mcp, .hostedMCP)?.label, "Connected through MCP")
+        XCTAssertEqual(card(.cli, .cli)?.label, "Connected through the CLI")
+        XCTAssertEqual(card(nil, .cli)?.label, "Connected through the CLI")
+        XCTAssertNil(card(.mcp, nil), "the API's mcp alone could be either: no line")
+        XCTAssertNil(card(nil, nil), "unknown: no line")
+        XCTAssertEqual(card(.box, .cli), .box, "a box stays a box")
+    }
+
     /// For people the API usually knows no connection: nothing is shown then, never a guess.
     func test_a_null_connection_shows_nothing() async {
         let unknown = RoomMemberMessagesModel(sessionId: "room_1", authorId: "human-pat",
@@ -197,6 +212,88 @@ final class RoomMemberViewTests: XCTestCase {
         XCTAssertTrue(model.state.canLoadMore, "Retry reads it again")
         await model.loadMore()
         XCTAssertEqual(reader.befores, [nil, nil])
+        XCTAssertEqual(model.state.phase, .idle)
+    }
+
+    /// Ticket 386081b1: on build 02 every card said "Their messages couldn't load" (the server answered the read with a
+    /// 503). Once the read is answered, Retry shows their messages, an agent's and a person's alike, newest first.
+    func test_once_the_read_is_answered_retry_shows_an_agents_and_a_persons_messages() async {
+        final class FailingThenAnswer: RoomAuthorMessagesReading, @unchecked Sendable {
+            var answered = false
+            let page: RoomAuthorPage
+            init(page: RoomAuthorPage) { self.page = page }
+            func roomMessages(by authorId: String, sessionId: String, beforeSequence: Int64?, limit: Int) async throws -> RoomAuthorPage {
+                guard answered else { throw SessionTransportError.service(statusCode: 503) }
+                return page
+            }
+        }
+        for author in ["build-agent", "human-alex"] {
+            // Oldest first on purpose: the card puts them newest first itself.
+            let reader = FailingThenAnswer(page: RoomAuthorPage(messages: [message(62300, author: author),
+                                                                         message(62392, author: author)],
+                                                              nextBeforeSequence: nil))
+            let model = RoomMemberMessagesModel(sessionId: "room_1", authorId: author, reader: reader)
+            await model.loadMore()
+            XCTAssertEqual(model.state.phase, .failed("Their messages couldn't load."), author)
+            XCTAssertTrue(model.state.rows.isEmpty, author)
+            XCTAssertTrue(model.state.canLoadMore, "\(author): Retry is offered")
+            XCTAssertNil(model.state.emptyLine(name: author), "\(author): after a failure, never \"no messages yet\"")
+            reader.answered = true
+            await model.loadMore()
+            XCTAssertEqual(model.state.phase, .idle, author)
+            XCTAssertEqual(model.state.rows.map(\.sequenceId), [62392, 62300], "\(author)'s messages, newest first")
+            XCTAssertFalse(model.state.canLoadMore, "\(author): the room's start")
+        }
+    }
+
+    /// Two taps on Retry while it reads read once: the card never reads two pages at once, and shows their messages once.
+    func test_two_taps_on_retry_read_once() async {
+        final class FailThenHold: RoomAuthorMessagesReading, @unchecked Sendable {
+            private let lock = NSLock()
+            private var reads = 0
+            private var released = false
+            let page: RoomAuthorPage
+            init(page: RoomAuthorPage) { self.page = page }
+
+            var calls: Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return reads
+            }
+
+            func release() {
+                lock.lock()
+                released = true
+                lock.unlock()
+            }
+
+            private var isReleased: Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                return released
+            }
+
+            func roomMessages(by authorId: String, sessionId: String, beforeSequence: Int64?, limit: Int) async throws -> RoomAuthorPage {
+                lock.lock()
+                reads += 1
+                let first = reads == 1
+                lock.unlock()
+                if first { throw SessionTransportError.service(statusCode: 503) }
+                while !isReleased { try? await Task.sleep(nanoseconds: 2_000_000) }
+                return page
+            }
+        }
+        let reader = FailThenHold(page: RoomAuthorPage(messages: [message(10, author: "build-agent")], nextBeforeSequence: nil))
+        let model = RoomMemberMessagesModel(sessionId: "room_1", authorId: "build-agent", reader: reader)
+        await model.loadMore()
+        XCTAssertEqual(model.state.phase, .failed("Their messages couldn't load."))
+        async let first: Void = model.loadMore()
+        async let second: Void = model.loadMore()
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        reader.release()
+        _ = await (first, second)
+        XCTAssertEqual(reader.calls, 2, "the failed read and one Retry, never two at once")
+        XCTAssertEqual(model.state.rows.map(\.sequenceId), [10], "their message, once")
         XCTAssertEqual(model.state.phase, .idle)
     }
 

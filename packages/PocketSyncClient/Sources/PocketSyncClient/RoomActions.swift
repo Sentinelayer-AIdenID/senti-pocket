@@ -21,6 +21,10 @@ public struct RoomReply: Equatable, Identifiable, Sendable {
     /// Its photos and files, in the shape a message's take (sentinelayer-api #1135). An API that stores none, and a
     /// reply from before it, carries none.
     public let attachments: [RoomAttachment]
+    /// Who it was addressed to, as the server decided when it was written (`RoomAddressed`), as a message's.
+    public let addressed: RoomAddressed?
+    /// The box its author runs in, from the author record (`RoomAgentBox`).
+    public let authorBox: RoomAgentBox?
 
     public init(
         id: String,
@@ -31,7 +35,9 @@ public struct RoomReply: Equatable, Identifiable, Sendable {
         createdAt: String,
         revision: Int64 = 1,
         isEdited: Bool = false,
-        attachments: [RoomAttachment] = []
+        attachments: [RoomAttachment] = [],
+        addressed: RoomAddressed? = nil,
+        authorBox: RoomAgentBox? = nil
     ) {
         self.id = id
         self.targetSequenceId = targetSequenceId
@@ -43,6 +49,8 @@ public struct RoomReply: Equatable, Identifiable, Sendable {
         self.revision = revision
         self.isEdited = isEdited
         self.attachments = attachments
+        self.addressed = addressed
+        self.authorBox = authorBox
     }
 
     /// A reply action, or nil. It says something, or carries a photo or file; a reply with neither is not shown.
@@ -67,7 +75,9 @@ public struct RoomReply: Equatable, Identifiable, Sendable {
             createdAt: json["createdAt"]?.stringValue ?? "",
             revision: json["messageRevision"]?.intValue ?? 1,
             isEdited: json["editedAt"]?.stringValue.map { !$0.isEmpty } ?? false,
-            attachments: attachments
+            attachments: attachments,
+            addressed: RoomAddressed(in: json),
+            authorBox: RoomAgentBox.actor(of: json)
         )
     }
 }
@@ -286,6 +296,11 @@ public struct RoomActionsPage: Decodable, Equatable, Sendable {
     public let pinLimit: Int
     /// Whether this API takes photos and files on a reply, as its rows show.
     public let replyAttachments: RoomReplyAttachmentSupport
+    /// What reads the page older than this one (`auditWindow.nextCursor`, sent back as `beforeCursor`); nil at the
+    /// oldest.
+    public let nextCursor: String?
+    /// Older actions than this page's are there (`auditWindow.hasMore`): the API reads newest first.
+    public var hasMore: Bool { nextCursor != nil }
 
     public init(
         byTarget: [Int64: RoomReactionSummary] = [:],
@@ -294,7 +309,8 @@ public struct RoomActionsPage: Decodable, Equatable, Sendable {
         workingOnStaleAfter: TimeInterval = 900,
         pinned: [RoomPinnedMessage] = [],
         pinLimit: Int = 10,
-        replyAttachments: RoomReplyAttachmentSupport = .unknown
+        replyAttachments: RoomReplyAttachmentSupport = .unknown,
+        nextCursor: String? = nil
     ) {
         self.byTarget = byTarget
         self.replies = replies
@@ -303,9 +319,10 @@ public struct RoomActionsPage: Decodable, Equatable, Sendable {
         self.pinned = pinned
         self.pinLimit = pinLimit
         self.replyAttachments = replyAttachments
+        self.nextCursor = nextCursor
     }
 
-    enum CodingKeys: String, CodingKey { case actions, projection }
+    enum CodingKeys: String, CodingKey { case actions, projection, auditWindow }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -333,6 +350,11 @@ public struct RoomActionsPage: Decodable, Equatable, Sendable {
             ($0.createdAt, $0.id) < ($1.createdAt, $1.id)
         }
         self.replyAttachments = RoomReplyAttachmentSupport.reading(actions)
+        // Older pages, as the API reads them: newest first by (created_at, id), the next older through the cursor. A
+        // cursor that could not be one is no cursor: the thread is then as far back as it goes.
+        let window = (try? container.decode(JSONValue.self, forKey: .auditWindow)) ?? .null
+        let cursor = window["nextCursor"]?.stringValue.flatMap { (1...512).contains($0.utf8.count) ? $0 : nil }
+        self.nextCursor = window["hasMore"]?.boolValue == true ? cursor : nil
     }
 }
 
@@ -344,15 +366,28 @@ extension HTTPSessionTransport {
         targetSequenceId: Int64? = nil,
         limit: Int = 500
     ) async throws -> RoomActionsPage {
+        try await roomActions(sessionId: sessionId, targetSequenceId: targetSequenceId, limit: limit, beforeCursor: nil)
+    }
+
+    /// The same, one page older than `beforeCursor` (a page's `nextCursor`): a thread of any length is read a page at
+    /// a time, newest first.
+    public func roomActions(
+        sessionId: String,
+        targetSequenceId: Int64?,
+        limit: Int,
+        beforeCursor: String?
+    ) async throws -> RoomActionsPage {
         try Self.requireIdentifier(sessionId)
         try Self.requireLimit(limit, allowed: 1...500)
         if let targetSequenceId, targetSequenceId < 1 { throw SessionTransportError.invalidRequest }
+        if let beforeCursor, !(1...512).contains(beforeCursor.utf8.count) { throw SessionTransportError.invalidRequest }
         return try await getDecodable(
             RoomActionsPage.self,
             path: ["api", "v1", "sessions", sessionId, "actions"],
             query: [
                 targetSequenceId.map { URLQueryItem(name: "targetSequenceId", value: String($0)) },
-                URLQueryItem(name: "limit", value: String(limit))
+                URLQueryItem(name: "limit", value: String(limit)),
+                beforeCursor.map { URLQueryItem(name: "beforeCursor", value: $0) }
             ].compactMap { $0 }
         )
     }

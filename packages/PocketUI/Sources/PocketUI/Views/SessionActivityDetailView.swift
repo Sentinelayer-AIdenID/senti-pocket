@@ -24,11 +24,9 @@ public struct SessionEventDetailView: View {
             }
             .listRowBackground(PocketPalette.raised)
 
-            Section("Event") {
-                detail("Type", event.eventTypeLabel)
-                detail("Author", event.author)
-                detail("Sequence", "#\(event.sequenceId)", monospaced: true)
-                detail("Event ID", event.id.eventId, monospaced: true)
+            Section("Details") {
+                detail("What", event.eventTypeLabel)
+                detail("From", event.author)
                 timestamp
             }
             .listRowBackground(PocketPalette.raised)
@@ -44,14 +42,14 @@ public struct SessionEventDetailView: View {
             }
         }
         .scrollContentBackground(.hidden)
-        .navigationTitle("Event #\(event.sequenceId)")
+        .navigationTitle(event.eventTypeLabel)
         .accessibilityIdentifier("pocket.activity.event-detail")
         .pocketCanvas()
     }
 
     private var membershipNotice: some View {
         Label(
-            "Available through your current session membership. This event is not a signed Pocket briefing.",
+            "You see this because you're in this chat. It isn't a signed briefing.",
             systemImage: "person.2"
         )
         .font(.subheadline)
@@ -63,9 +61,9 @@ public struct SessionEventDetailView: View {
     @ViewBuilder
     private var timestamp: some View {
         if let date = event.timestamp.date {
-            detail("Received", date.formatted(date: .abbreviated, time: .standard))
+            detail("When", date.formatted(date: .abbreviated, time: .standard))
         } else {
-            detail("Received", event.timestamp.raw, monospaced: true)
+            detail("When", event.timestamp.raw, monospaced: true)
         }
     }
 
@@ -100,11 +98,10 @@ public struct SessionActionDetailView: View {
             }
             .listRowBackground(PocketPalette.raised)
 
-            Section("Action") {
-                detail("Type", action.actionTypeLabel)
-                detail("Actor", action.actor)
-                detail("Target", action.targetLabel, monospaced: true)
-                detail("Action ID", action.id.actionId, monospaced: true)
+            Section("Details") {
+                detail("What", action.actionTypeLabel)
+                detail("Who", action.actor)
+                detail("On", action.targetLabel)
                 timestamp
             }
             .listRowBackground(PocketPalette.raised)
@@ -127,7 +124,7 @@ public struct SessionActionDetailView: View {
 
     private var membershipNotice: some View {
         Label(
-            "Available through your current session membership. This action is not a cryptographic receipt.",
+            "You see this because you're in this chat. It isn't a signed receipt.",
             systemImage: "person.2"
         )
         .font(.subheadline)
@@ -139,9 +136,9 @@ public struct SessionActionDetailView: View {
     @ViewBuilder
     private var timestamp: some View {
         if let date = action.createdAt.date {
-            detail("Created", date.formatted(date: .abbreviated, time: .standard))
+            detail("When", date.formatted(date: .abbreviated, time: .standard))
         } else {
-            detail("Created", action.createdAt.raw, monospaced: true)
+            detail("When", action.createdAt.raw, monospaced: true)
         }
     }
 

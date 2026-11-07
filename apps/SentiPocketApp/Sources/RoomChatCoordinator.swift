@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import PocketSyncClient
 import PocketUI
@@ -19,12 +20,19 @@ final class RoomChatCoordinator: ObservableObject {
     /// written for; a thread is summarized again only once it has grown.
     private var threadSummaries: [Int64: (replies: Int, summary: SummaryReading?)] = [:]
     private var summarizing: Int64?
+    /// How many times the room has taken in a change to the block list (the tests read it). A summary that was being
+    /// written when it changed was written from words that may now be hidden: it is dropped when it lands, and the
+    /// thread is summarized again.
+    private(set) var blockChanges = 0
     private let summarizer: (any ThreadSummarizing)?
     private let canInvite: Bool
     private let transport: any RoomTransport
     private let sender: (any RoomMessageSending)?
     private let identity: (any AccountIdentityProviding)?
     private var ownAuthorIds: Set<String>
+    /// The id this account posted under before the server bound ids to accounts (sentinelayer-api #1105): what it
+    /// wrote there is its own, so it is never offered to report or block it.
+    private var formerOwnAuthorIds: Set<String> = []
     private var postingRefusedReason: String?
     private let sleep: @Sendable (TimeInterval) async -> Void
     private let now: @Sendable () -> Date
@@ -39,8 +47,6 @@ final class RoomChatCoordinator: ObservableObject {
         var sentAt: Date?
     }
     private var pending: [PendingSend] = []
-    /// Run once a send's POST succeeds (a shared crash report is marked handled only then).
-    private var sentCallbacks: [String: () -> Void] = [:]
     /// Sends not yet confirmed, kept on the phone so a relaunch retries them under the same client id.
     private let outbox: RoomSendOutbox?
     /// The account key the outbox is read and written under, fixed when the room opens (the ids learned later never
@@ -51,9 +57,32 @@ final class RoomChatCoordinator: ObservableObject {
     private let draftKey: String?
     private var identityRequested = false
 
+    // Report and Block (App Store guideline 1.2), and the AI consent (5.1.2(i)).
+    private let reporter: (any RoomReporting)?
+    /// This account's blocks, shared by every room and Settings.
+    private let blocks: BlockList?
+    /// This account's OK for what it sends to reach a room's AI agents.
+    private let aiConsent: AIConsent?
+    private var report: RoomReportState?
+    /// Writes waiting for this account's OK to share with AI, in order: they go after OK, and not after Not now.
+    private var heldForConsent: [RoomChatIntent] = []
+    /// Messages and replies from someone you blocked that you chose to see (`RoomBlocking.revealKey`), while the room
+    /// is open.
+    private var revealedBlocked: Set<String> = []
+    /// A block or unblock elsewhere (another room, Settings), or the consent given or withdrawn, shows here at once.
+    private var safetyWatch: Set<AnyCancellable> = []
+
     // Replies and reactions (GET /actions projection), and the open thread.
     private let actionSender: (any RoomActionSending)?
     private var summaries: [Int64: RoomReactionSummary] = [:]
+    /// Messages ("<sequence>") and replies ("<sequence>:<reply id>") whose like or dislike is on its way to the API: a
+    /// tap there is ignored until it lands, so taps never stack (ticket ce169567: a like that showed nothing once
+    /// stacked to 10 likes and a dislike in 30 seconds).
+    private var reactionsInFlight: Set<String> = []
+    /// Your own likes and dislikes placed on each message (a tap ignored while one is on its way is not one): its row
+    /// pops the thumb and taps your hand for each, and taking one back is quiet (`RoomOwnTaps`). A refresh never changes
+    /// them, so a count that changes on its own only rolls.
+    private var ownTaps: [Int64: RoomOwnTaps] = [:]
     /// Who answered in threads, as of each one's newest reply: most agent and box output is replies, so they are
     /// offered for @ like anyone who posted.
     private var replyAuthors: [String: (name: String, isHuman: Bool, date: Date?)] = [:]
@@ -69,6 +98,20 @@ final class RoomChatCoordinator: ObservableObject {
     /// The reply the open thread was opened at (a reply notification), brought into view there.
     private var threadFocusReply: String?
     private var threadReplies: [RoomReply] = []
+    /// Each opening of a thread (and its closing) starts a new one: a read begun for an earlier one is dropped.
+    private var threadGeneration = 0
+    /// The open thread has been read once: later reads merge into what is loaded instead of replacing it.
+    private var threadRead = false
+    /// What reads the open thread's next page back (its oldest page's `nextCursor`); nil once it is read to its start.
+    private var threadOlderCursor: String?
+    private var threadLoadingOlder = false
+    /// The reply the thread was opened at is being looked for, page by page: the reader's own scrolling waits.
+    private var threadSearching = false
+    /// The reply the thread was opened at is further back than one search reads: the thread offers to go on.
+    private var threadFocusMissing = false
+    /// Older pages let the newest replies go (`threadHeld`): the replies held are further back than the newest, and the
+    /// thread offers its newest again.
+    private var threadNewerDropped = false
     private var threadLoading = false
     private var threadFailure: String?
     /// A reply you sent that its thread has not shown yet. Kept per thread, so closing the sheet keeps it. Its nonce
@@ -145,8 +188,11 @@ final class RoomChatCoordinator: ObservableObject {
     }
     /// Replies seen before any were read are not news.
     private var hasReadReplies = false
-    /// The room on screen sounding and vibrating: your message sent, a message or reply arriving, a mention of you.
+    /// The room on screen sounding and vibrating: your message sent, a message or reply arriving, a mention of you. Set
+    /// by the room's screen with nothing of the screen in it (ticket 02a80e6f), and taken away when the screen goes.
     var onFeedback: (@MainActor (RoomFeedbackEvent) -> Void)?
+    /// A voice room speaks instead: while one is on, the room makes no sound. Its screen keeps this in step.
+    var feedbackMuted = false
     /// Something to tell the person once (an edit that did not save).
     private var notice: String?
     static let viewerReason = "You're a viewer in this room: you can read it, but not post."
@@ -186,7 +232,15 @@ final class RoomChatCoordinator: ObservableObject {
     private var lastAppliedSequence: Int64 = 0
     private var nextBeforeSequence: Int64?
     private var connection: RoomConnectionState = .connecting
+    /// How many times the room has built its state (`publish()`), for the tests: a build that changes nothing is
+    /// never written, so the state alone cannot show it.
+    private(set) var statesBuilt = 0
+    /// Who is preparing a reply, and until when: each lease's own expiry, so a line never outlasts it.
     private var composing: [String: Date] = [:]
+    /// Wakes when the soonest lease expires, to take its line away even if no other frame comes.
+    private var composingExpiry: Task<Void, Never>?
+    /// A direct message: Senti never answers in one, so it is never shown typing there.
+    private let isDirect: Bool
     /// The room's boxes as the mint lists them, by name: running, and ended (`setBoxes`).
     private var runningBoxNames: Set<String> = []
     private var endedBoxNames: Set<String> = []
@@ -220,6 +274,8 @@ final class RoomChatCoordinator: ObservableObject {
     /// Owners and admins can read the member list, so they can mention people who have not posted yet.
     private let readsMembers: Bool
     private var members: [RoomMember] = []
+    /// The room takes `@any` (its read says `features.agentBroadcast`): offered in the picker only once it has said so.
+    private var offersAny = false
     /// The room's member directory (every member may read it), read once per open, for @-mentions.
     private let directory: (any RoomTicketExtrasReading)?
     private var directoryPeople: [RoomDirectoryMember] = []
@@ -235,6 +291,8 @@ final class RoomChatCoordinator: ObservableObject {
     /// Each side of a jump to an older message: this many messages up to it and this many events after it.
     static let windowPageSize = 50
     static let composingLifetime: TimeInterval = 20
+    /// Senti's agent id: it answers in rooms, never in a direct message.
+    static let senti = "senti"
     static let pollWhileLive: TimeInterval = 60
     /// A stream that stayed open this long and then closed was the server's periodic close, not a failure: the room
     /// reconnects at once and stays Live (Carter, #59940: "it keeps saying connecting"). A sooner close still backs off.
@@ -270,9 +328,17 @@ final class RoomChatCoordinator: ObservableObject {
         outbox: RoomSendOutbox? = nil,
         outboxAccount: String? = nil,
         emojiReactions: Bool = false,
+        reporter: (any RoomReporting)? = nil,
+        blocks: BlockList? = nil,
+        aiConsent: AIConsent? = nil,
+        isDirect: Bool = false,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.emojiReactions = emojiReactions
+        self.reporter = reporter
+        self.blocks = blocks
+        self.aiConsent = aiConsent
+        self.isDirect = isDirect
         self.outbox = outbox
         self.attachmentFetcher = attachmentFetcher
         self.previewStore = previewStore
@@ -345,6 +411,22 @@ final class RoomChatCoordinator: ObservableObject {
                 onChange: { [weak self] in self?.publish() }
             )
         }
+        // Published before the new value is set: the room redraws on the next turn, with it.
+        blocks?.$actorIds.dropFirst().sink { [weak self] _ in
+            Task { @MainActor in
+                // A summary written before a block may carry the blocked person's words: each is written again, and
+                // one still being written is dropped when it lands.
+                self?.blockChanges += 1
+                self?.threadSummaries = [:]
+                self?.publish()
+            }
+        }.store(in: &safetyWatch)
+        aiConsent?.$givenAt.dropFirst().sink { [weak self] _ in
+            Task { @MainActor in self?.publish() }
+        }.store(in: &safetyWatch)
+        #if DEBUG
+        RootPreview.meter.roomCoordinatorMade(self)
+        #endif
     }
 
     // MARK: - Lifecycle
@@ -375,6 +457,9 @@ final class RoomChatCoordinator: ObservableObject {
         receiptsTracker?.start()
         generation &+= 1
         let current = generation
+        // What the room offers, read beside its messages and never before them: @any stays out of the picker until
+        // the room has answered.
+        liveTasks.append(Task { [weak self] in await self?.readFeatures() })
         liveTasks.append(Task { [weak self] in
             guard let self else { return }
             if !self.hasLoadedInitial {
@@ -407,6 +492,12 @@ final class RoomChatCoordinator: ObservableObject {
     private var expandedRepeats: Set<String> = []
 
     func send(_ intent: RoomChatIntent) {
+        // Nothing is written to a room before this account's OK to share with AI: the write waits, and the room asks.
+        if intent.isRoomWrite, needsAIConsent {
+            heldForConsent.append(intent)
+            publish()
+            return
+        }
         switch intent {
         case .loadOlder:
             loadOlder()
@@ -496,6 +587,7 @@ final class RoomChatCoordinator: ObservableObject {
             // Unsent replies stay with their thread and show again when it reopens.
             openThreadSequence = nil
             threadFocusReply = nil
+            resetThreadPages()
             threadReplies = []
             threadFailure = nil
             publish()
@@ -536,8 +628,98 @@ final class RoomChatCoordinator: ObservableObject {
             receiptsTracker?.setOnScreen(target, isOnScreen)
         case .attachmentAppeared(let attachmentId):
             loadPreview(attachmentId)
+        case .openReport(let target):
+            guard reporter != nil else { return }
+            report = RoomReportState(target: target)
+            publish()
+        case .loadOlderReplies(let sequenceId):
+            guard !threadSearching else { return }
+            Task { [weak self] in await self?.loadOlderReplies(sequenceId, limit: RoomChatCoordinator.threadPageSize) }
+        case .jumpToNewestReplies(let sequenceId):
+            guard openThreadSequence == sequenceId, threadNewerDropped else { return }
+            threadFocusReply = nil
+            openThread(sequenceId)
+        case .continueToReply(let sequenceId):
+            guard openThreadSequence == sequenceId, threadFocusMissing, !threadSearching else { return }
+            Task { [weak self] in await self?.findFocusedReply(sequenceId) }
+        case .sendReport(let reason, let note):
+            sendReport(reason: reason, note: note)
+        case .closeReport:
+            report = nil
+            publish()
+        case .block(let target):
+            // Chosen on a message or a reply here, the server is told which post.
+            blocks?.block(target, in: sessionId)
+            publish()
+        case .revealBlocked(let key):
+            revealedBlocked.insert(key)
+            publish()
+        case .allowAIAgents:
+            aiConsent?.grant()
+            let held = heldForConsent
+            heldForConsent = []
+            publish()
+            held.forEach(send)
+        case .declineAIAgents:
+            let held = heldForConsent
+            heldForConsent = []
+            // What was written stays, to edit and send again; a reaction, a pin or an edit is let go.
+            for write in held { keepUnsent(write) }
+            publish()
         }
     }
+
+    /// A message or reply that did not go for want of the OK, kept whole as a row to edit and send again.
+    private func keepUnsent(_ write: RoomChatIntent) {
+        let failed = RoomChatPendingRow.Status.failed(reason: Self.consentReason, canRetry: false)
+        switch write {
+        case .sendMessage(let text):
+            pending.append(PendingSend(clientId: Self.makeClientId(), text: text, status: failed))
+        case .sendReply(let sequenceId, let text):
+            pendingReplies.append(PendingReply(nonce: UUID().uuidString.lowercased(), targetSequenceId: sequenceId,
+                                               text: text, status: failed))
+        case .sendReplyToReply(let sequenceId, let replyId, let text):
+            pendingReplies.append(PendingReply(nonce: UUID().uuidString.lowercased(), targetSequenceId: sequenceId,
+                                               toReply: replyId, text: text, status: failed))
+        default:
+            break
+        }
+    }
+
+    // MARK: - Report, Block and the AI consent
+
+    /// Sends the open report (`POST /api/v1/sessions/{id}/reports`). When it does not go (offline, or the API without
+    /// the route yet) the sheet says it couldn't be sent right now, and keeps the reason and note to send again.
+    private func sendReport(reason: RoomReportReason, note: String) {
+        // Sent once; a refusal is final, and only a report that did not go is sent again.
+        guard let reporter, let open = report, open.phase == .choosing || open.phase == .failed else { return }
+        report?.phase = .sending
+        publish()
+        let request = RoomReportRequest(target: open.target, reason: reason, note: note)
+        let sessionId = self.sessionId
+        Task { [weak self] in
+            var phase = RoomReportState.Phase.sent
+            do {
+                try await reporter.report(sessionId: sessionId, request)
+            } catch RoomSendError.reauthenticationRequired {
+                phase = .failed
+                self?.onReauthenticationRequired()
+            } catch RoomSendError.rejected, RoomSendError.notAllowed {
+                // The server won't take it: no point trying again.
+                phase = .refused
+            } catch {
+                phase = .failed
+            }
+            guard let self, self.report?.target == open.target else { return }
+            self.report?.phase = phase
+            self.publish()
+        }
+    }
+
+    /// This account has not said OK to sharing with AI: a write to the room asks first, whatever the room.
+    private var needsAIConsent: Bool { aiConsent?.asks ?? false }
+
+    static let consentReason = "Not sent. Edit it and send again to say whether it may be shared with AI."
 
     /// Brings a message into view and highlights it: a link, a notification, a search result, a pinned message or a
     /// reply's parent. One further back than the loaded rows is loaded as a window around it in one step, however far
@@ -1003,6 +1185,16 @@ final class RoomChatCoordinator: ObservableObject {
         publish()
     }
 
+    /// Reads what the room offers, each time it opens or comes back. A failed read changes nothing: @any is offered
+    /// only by a room that said so.
+    func readFeatures() async {
+        guard sender != nil, !failureIsTerminal,
+              let features = try? await transport.roomFeatures(sessionId: sessionId),
+              features.agentBroadcast != offersAny else { return }
+        offersAny = features.agentBroadcast
+        publish()
+    }
+
     /// Re-reads the room's people (owners and admins only). A failed read keeps the list already loaded.
     func refreshMembers() async {
         guard readsMembers, sender != nil, !failureIsTerminal,
@@ -1156,23 +1348,62 @@ final class RoomChatCoordinator: ObservableObject {
         return notePinned(edits) || replaced
     }
 
+    /// Like, dislike, unlike, undislike or acknowledge a message. One like or dislike per person: a tap on your lit
+    /// thumb takes it back (the row sends "unlike"), and like and dislike are exclusive, so choosing one takes back the
+    /// other first. The tap shows at once; if the API does not take it, that is undone, and the refresh then shows the
+    /// server's truth. While a like or dislike is on its way, another tap on the same message is ignored.
     private func react(_ type: String, on sequenceId: Int64) {
         guard let actionSender, canReact, RoomActionRequest.reactionTypes.contains(type) else { return }
-        // Shown at once (display only: the refresh replaces it with the server's truth).
-        applyOptimisticReaction(type, on: sequenceId, actor: ownAuthorIds.sorted().first ?? "you")
+        let slot = String(sequenceId)
+        let isThumb = type != "ack"
+        if isThumb {
+            guard !reactionsInFlight.contains(slot) else { return }
+            reactionsInFlight.insert(slot)
+        }
+        // This tap went: shown with what it changes; a like or dislike placed pops its thumb and taps your hand.
+        ownTaps[sequenceId, default: RoomOwnTaps()].count(type)
+        let before = summaries[sequenceId]
+        let writes = Self.reactionWrites(type, liked: before?.likedByViewer == true,
+                                         disliked: before?.dislikedByViewer == true)
+        let actorName = ownAuthorIds.sorted().first ?? "you"
+        for write in writes { applyOptimisticReaction(write, on: sequenceId, actor: actorName) }
+        let shown = summaries[sequenceId]
+        // What it asked for was already so, so nothing was shown: it is still answered now, never at the next refresh.
+        if isThumb, shown == before { publish() }
         let sessionId = self.sessionId
         Task { [weak self] in
-            // Not sent while you are unknown; the refresh then just restores the server's truth.
+            var landed = false
+            // Not sent while you are unknown; what the tap showed is undone.
             if let actor = await self?.resolvedActorRef() {
                 do {
-                    try await actionSender.sendAction(.reaction(type, sessionId: sessionId, sequenceId: sequenceId, actor: actor))
+                    for write in writes {
+                        try await actionSender.sendAction(.reaction(write, sessionId: sessionId, sequenceId: sequenceId,
+                                                                    actor: actor))
+                    }
+                    landed = true
                 } catch RoomSendError.reauthenticationRequired {
                     self?.onReauthenticationRequired()
                 } catch {
-                    // Fall through: the refresh below restores the server's truth.
+                    // Undone below; the refresh then shows the server's truth.
                 }
             }
-            await self?.refreshActions(force: true)
+            guard let self else { return }
+            if isThumb { self.reactionsInFlight.remove(slot) }
+            if !landed, self.summaries[sequenceId] == shown {
+                self.summaries[sequenceId] = before
+                self.publish()
+            }
+            await self.refreshActions(force: true)
+        }
+    }
+
+    /// What one tap sends: the reaction itself, after taking back the opposite one you hold (like and dislike are
+    /// exclusive). An unlike, undislike or acknowledgement is sent as it is. A pure rule, callable from anywhere.
+    nonisolated static func reactionWrites(_ type: String, liked: Bool, disliked: Bool) -> [String] {
+        switch type {
+        case "like" where disliked: return ["undislike", "like"]
+        case "dislike" where liked: return ["unlike", "dislike"]
+        default: return [type]
         }
     }
 
@@ -1299,8 +1530,20 @@ final class RoomChatCoordinator: ObservableObject {
         onReplyAttachmentSupport?(support)
     }
 
+    /// The open thread's pages forgotten: it opens (or closes) and is read again from its newest page.
+    private func resetThreadPages() {
+        threadGeneration &+= 1
+        threadRead = false
+        threadOlderCursor = nil
+        threadLoadingOlder = false
+        threadSearching = false
+        threadFocusMissing = false
+        threadNewerDropped = false
+    }
+
     private func openThread(_ sequenceId: Int64) {
         if openThreadSequence != sequenceId { threadFocusReply = nil }
+        resetThreadPages()
         openThreadSequence = sequenceId
         threadReplies = summaries[sequenceId]?.latestReplies ?? []
         threadFailure = nil
@@ -1322,20 +1565,183 @@ final class RoomChatCoordinator: ObservableObject {
         }
     }
 
+    /// A thread's newest page of actions (its replies and their reactions); older ones load as the reader scrolls up.
+    /// A thread of any length opens on this, never whole: a thread may hold hundreds of thousands of replies (#62423).
+    static let threadPageSize = 100
+    /// A search for the reply a thread was opened at reads this many actions a page, and at most this many pages at
+    /// once: the API reads 120 a minute for each person and room. Further back, the thread offers to go on.
+    static let threadSearchPageSize = 500
+    static let threadSearchPages = 40
+    /// More arrived since the last read than its newest page holds: at most this many pages (of 500) are read back to
+    /// meet the replies loaded. Further apart, the newest pages stand alone and scrolling up reads on from them.
+    static let threadGapPages = 4
+    /// The most replies of one thread held at once. Every room update goes over all of them (rows, files, mentions), so
+    /// a search 20,000 replies back would make each arrival cost 20,000 rows: older pages past this let the newest go.
+    static let threadHeld = 1_000
+
+    /// Reads the open thread's newest page. The first read replaces the summary's few replies shown while it was on
+    /// its way; a later one (after a send, an edit or a reaction) merges into every page loaded, so the reader keeps
+    /// the older ones. A thread opened at a reply then reads back until that reply is loaded.
     private func loadThread(_ sequenceId: Int64) async {
+        let generation = threadGeneration
+        var firstRead = false
         do {
-            let page = try await transport.roomActions(sessionId: sessionId, targetSequenceId: sequenceId, limit: 500)
+            let page = try await transport.roomActions(sessionId: sessionId, targetSequenceId: sequenceId,
+                                                       limit: Self.threadPageSize, beforeCursor: nil)
             noteReplyAttachmentSupport(page.replyAttachments)
-            guard openThreadSequence == sequenceId else { return }
-            threadReplies = page.replies.filter { $0.targetSequenceId == sequenceId }
+            guard openThreadSequence == sequenceId, threadGeneration == generation else { return }
+            let newestPage = page.replies.filter { $0.targetSequenceId == sequenceId }
+            var newest = newestPage
+            if threadRead, threadNewerDropped {
+                // The replies held are further back than the newest (older pages let the newest go): they stay as they
+                // are, and "Newest replies" reads the newest again.
+            } else if threadRead {
+                // The newest page must meet what is loaded, or the replies between would never show: read back until
+                // it does.
+                let known = Set(threadReplies.map(\.id))
+                var cursor = page.nextCursor
+                var pages = 0
+                while !known.isEmpty, !newest.contains(where: { known.contains($0.id) }), let before = cursor,
+                      pages < Self.threadGapPages {
+                    let more = try await transport.roomActions(sessionId: sessionId, targetSequenceId: sequenceId,
+                                                               limit: Self.threadSearchPageSize, beforeCursor: before)
+                    guard openThreadSequence == sequenceId, threadGeneration == generation else { return }
+                    newest = Self.merged(more.replies.filter { $0.targetSequenceId == sequenceId }, newest)
+                    cursor = more.nextCursor
+                    pages += 1
+                }
+                if newest.contains(where: { known.contains($0.id) }) {
+                    // Read back past the oldest reply loaded: the page before is the one before the last page read.
+                    if let first = newest.first, let oldest = threadReplies.first,
+                       (first.createdAt, first.id) < (oldest.createdAt, oldest.id) {
+                        threadOlderCursor = cursor
+                    }
+                    threadReplies = Self.merged(threadReplies, newest)
+                } else {
+                    // Still apart (or nothing was loaded to meet): the newest page stands alone, and scrolling up reads
+                    // on from it. An older page on its way belongs to the replies dropped.
+                    threadReplies = newestPage
+                    threadOlderCursor = page.nextCursor
+                    threadGeneration &+= 1
+                    threadLoadingOlder = false
+                    threadSearching = false
+                }
+            } else {
+                threadReplies = newest
+                threadOlderCursor = page.nextCursor
+                threadRead = true
+                firstRead = true
+            }
             threadFailure = nil
-            noteReplyAuthors(threadReplies)
+            noteReplyAuthors(newest)
         } catch {
-            guard openThreadSequence == sequenceId else { return }
+            guard openThreadSequence == sequenceId, threadGeneration == generation else { return }
             threadFailure = "Replies could not be loaded. Pull to try again later."
         }
         threadLoading = false
         publish()
+        // Once, as the thread opens: a later read (a send, a reaction) never sets off another search.
+        if firstRead { await findFocusedReply(sequenceId) }
+    }
+
+    /// Reads the page before the oldest one loaded. False when there is none, one is already on its way, or it could
+    /// not be read. `quietly` (a search's pages) shows nothing until the search ends: the room is not drawn again for
+    /// each of up to 40 pages.
+    @discardableResult
+    private func loadOlderReplies(_ sequenceId: Int64, limit: Int, quietly: Bool = false) async -> Bool {
+        guard openThreadSequence == sequenceId, threadRead, let cursor = threadOlderCursor, !threadLoadingOlder else {
+            return false
+        }
+        let generation = threadGeneration
+        threadLoadingOlder = true
+        if !quietly { publish() }
+        do {
+            let page = try await transport.roomActions(sessionId: sessionId, targetSequenceId: sequenceId, limit: limit,
+                                                       beforeCursor: cursor)
+            guard openThreadSequence == sequenceId, threadGeneration == generation else { return false }
+            let older = page.replies.filter { $0.targetSequenceId == sequenceId }
+            threadReplies = Self.prepending(older, to: threadReplies)
+            if threadReplies.count > Self.threadHeld {
+                threadReplies.removeLast(threadReplies.count - Self.threadHeld)
+                threadNewerDropped = true
+            }
+            threadOlderCursor = page.nextCursor
+            noteReplyAuthors(older)
+            threadLoadingOlder = false
+            threadFailure = nil
+            // Scrolled up to the reply it was opened at: there is nothing left to jump to.
+            if threadFocusMissing, let focus = threadFocusReply, older.contains(where: { $0.id == focus }) {
+                threadFocusMissing = false
+            }
+            if !quietly { publish() }
+            return true
+        } catch {
+            guard openThreadSequence == sequenceId, threadGeneration == generation else { return false }
+            threadLoadingOlder = false
+            threadFailure = "Earlier replies could not be loaded. Try again in a moment."
+            publish()
+            return false
+        }
+    }
+
+    /// The reply the thread was opened at (a notification), when it is on an older page: reads back, a search page at a
+    /// time, until it is loaded or the thread's start, at most `threadSearchPages` pages. Past that, or when a page
+    /// could not be read, the thread stays at its newest page and offers "Jump to the reply", which reads on from
+    /// there. Read to its start without it, the thread says the reply is not there. Never silent.
+    private func findFocusedReply(_ sequenceId: Int64) async {
+        guard let focus = threadFocusReply, openThreadSequence == sequenceId, threadRead, !threadSearching else { return }
+        let generation = threadGeneration
+        func current() -> Bool {
+            openThreadSequence == sequenceId && threadGeneration == generation && threadFocusReply == focus
+        }
+        // The room left (or the app gone to the background) pauses it: the search stops there, and Jump goes on.
+        func roomOpen() -> Bool { !liveTasks.isEmpty }
+        func found() -> Bool { threadReplies.contains { $0.id == focus } }
+        guard !found() else {
+            if threadFocusMissing {
+                threadFocusMissing = false
+                publish()
+            }
+            return
+        }
+        threadSearching = true
+        publish()
+        var pages = 0
+        while current(), roomOpen(), !found(), threadOlderCursor != nil, pages < Self.threadSearchPages {
+            guard await loadOlderReplies(sequenceId, limit: Self.threadSearchPageSize, quietly: true) else { break }
+            pages += 1
+        }
+        if threadGeneration == generation { threadSearching = false }
+        guard current() else { return }
+        let isFound = found()
+        threadFocusMissing = !isFound && threadOlderCursor != nil
+        if !isFound, threadOlderCursor == nil {
+            threadFailure = "That reply is no longer in this thread."
+        }
+        publish()
+    }
+
+    /// A page read before the replies loaded, in front of them as it came (the API reads newest first, so a page before
+    /// is older than all loaded): nothing loaded is sorted again. A page that overlaps them is merged.
+    private static func prepending(_ older: [RoomReply], to known: [RoomReply]) -> [RoomReply] {
+        guard let last = older.last, let first = known.first,
+              (last.createdAt, last.id) < (first.createdAt, first.id) else { return merged(known, older) }
+        return older + known
+    }
+
+    /// One thread's replies from two reads, each once at its newest revision (a read of the same revision wins: it
+    /// carries the reply's latest reactions and views), oldest first as the thread shows them.
+    private static func merged(_ known: [RoomReply], _ read: [RoomReply]) -> [RoomReply] {
+        var byId: [String: RoomReply] = [:]
+        for reply in known {
+            if let seen = byId[reply.id], seen.revision >= reply.revision { continue }
+            byId[reply.id] = reply
+        }
+        for reply in read {
+            if let seen = byId[reply.id], seen.revision > reply.revision { continue }
+            byId[reply.id] = reply
+        }
+        return byId.values.sorted { ($0.createdAt, $0.id) < ($1.createdAt, $1.id) }
     }
 
     private func sendReply(_ raw: String, to sequenceId: Int64, toReply: String? = nil) {
@@ -1365,8 +1771,16 @@ final class RoomChatCoordinator: ObservableObject {
     /// A reaction on a reply in a thread (the API takes the reply as `targetActionId`); the thread then re-reads.
     private func reactToReply(_ type: String, on replyId: String, in sequenceId: Int64) {
         guard let actionSender, canReact, RoomActionRequest.reactionTypes.contains(type) else { return }
+        // As on a message: while a like or dislike of this reply is on its way, another tap on it is ignored.
+        let slot = "\(sequenceId):\(replyId)"
+        let isThumb = type != "ack"
+        if isThumb {
+            guard !reactionsInFlight.contains(slot) else { return }
+            reactionsInFlight.insert(slot)
+        }
         let sessionId = self.sessionId
         Task { [weak self] in
+            defer { if isThumb { self?.reactionsInFlight.remove(slot) } }
             guard let actor = await self?.resolvedActorRef() else { return }
             do {
                 try await actionSender.sendAction(.reaction(
@@ -1416,7 +1830,7 @@ final class RoomChatCoordinator: ObservableObject {
                     RoomComposerDraft.forgetSaved(key: draftKey, sent: item.text)
                     RoomReplyDrafts(base: draftKey).forgetSent(item.text, thread: item.targetSequenceId, reply: item.toReply)
                 }
-                self.onFeedback?(.sent)
+                if !self.feedbackMuted { self.onFeedback?(.sent) }
                 if self.openThreadSequence == item.targetSequenceId { await self.loadThread(item.targetSequenceId) }
                 self.pendingReplies.removeAll { $0.clientId == clientId }
                 self.publish()
@@ -1471,17 +1885,18 @@ final class RoomChatCoordinator: ObservableObject {
         return RoomComposerState(canPost: true, disabledReason: nil, maximumLength: HTTPRoomMessageSender.maximumLength)
     }
 
-    /// Sends a crash report the person chose to share, and calls `onSent` only once the room accepted it: a send that
-    /// fails or is cut off leaves the report unhandled, so it is offered again instead of being lost.
-    func sendCrashReport(_ text: String, onSent: @escaping () -> Void) {
-        guard let clientId = enqueueSend(text) else { return }
-        sentCallbacks[clientId] = onSent
-    }
-
     @discardableResult
     private func enqueueSend(_ raw: String) -> String? {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard sender != nil, postingRefusedReason == nil, !text.isEmpty else { return nil }
+        // Never without your OK to share with AI. The room asks first; a send that came another way (a crash report) is
+        // kept here, whole, to edit and send again.
+        guard !needsAIConsent else {
+            pending.append(PendingSend(clientId: Self.makeClientId(), text: text,
+                                       status: .failed(reason: Self.consentReason, canRetry: false)))
+            publish()
+            return nil
+        }
         guard text.unicodeScalars.count <= HTTPRoomMessageSender.maximumLength else {
             // The composer refuses this before sending; this is the backstop. The full text is kept (only the row's
             // display is cut), so nothing typed is lost.
@@ -1563,9 +1978,8 @@ final class RoomChatCoordinator: ObservableObject {
                 let below = self.timeline.hasMoreNewer
                 self.updatePending(clientId) { $0.status = below ? .sentBelow : .sent; $0.sentAt = self.now() }
                 self.forgetUnconfirmed(clientId)
-                self.sentCallbacks.removeValue(forKey: clientId)?()
                 if let draftKey { RoomComposerDraft.forgetSaved(key: draftKey, sent: item.text) }
-                self.onFeedback?(.sent)
+                if !self.feedbackMuted { self.onFeedback?(.sent) }
                 // Pull the echo now instead of waiting for the stream or the next poll.
                 await self.catchUp(self.generation)
                 self.dropSentAfterGrace(clientId)
@@ -1633,20 +2047,43 @@ final class RoomChatCoordinator: ObservableObject {
         }
     }
 
+    /// Who you are, from `/auth/me`: asked again a little later when the first look fails as the room opens, and at the
+    /// next open after that.
     private func learnOwnIdentityIfNeeded() {
         guard !identityRequested, let identity else { return }
         identityRequested = true
         Task { [weak self] in
-            guard let account = await identity.currentAccount(), let self else { return }
-            self.learn(account)
+            for wait in [0] + Self.identityRetries {
+                if wait > 0 { await self?.sleep(wait) }
+                guard self != nil else { return }
+                if let account = await identity.currentAccount() {
+                    self?.learn(account)
+                    return
+                }
+            }
+            self?.identityRequested = false
         }
     }
+
+    /// The waits before `/auth/me` is asked again, in seconds.
+    static let identityRetries: [TimeInterval] = [2, 5, 15]
 
     private func learn(_ account: SignedInAccount) {
         actorRef = account.actorRef
         accountId = account.accountId
         ownLogin = account.login
-        ownAuthorIds.insert(account.authorId)
+        if let senderId = account.senderId {
+            // The id the server writes your posts under (sentinelayer-api #1115): yours, and no other.
+            ownAuthorIds.insert(senderId)
+            // A Google or Apple account wrote under its old form (`human-<email name>`, `human-apple_<hex>`) until
+            // #1105: those posts are yours too, for Report and Block. They show as they did, since a GitHub login of
+            // the same name may have posted under that id too.
+            if senderId != account.authorId { formerOwnAuthorIds.insert(account.authorId) }
+        } else {
+            // An API without it: the GitHub form, and without a verified GitHub login the account-bound one.
+            ownAuthorIds.insert(account.authorId)
+            if let bound = account.accountBoundAuthorId { ownAuthorIds.insert(bound) }
+        }
         publish()
     }
 
@@ -2091,9 +2528,33 @@ final class RoomChatCoordinator: ObservableObject {
             pursueFocus()
             return true
         case .composing(let agentId, _):
+            let wasLive = connection == .live
             connection = .live
-            composing[agentId] = now()
-            publish()
+            guard !(isDirect && agentId == Self.senti) else {
+                if !wasLive { publish() }
+                return false
+            }
+            let isNew = !state.composingAgents.contains(agentId)
+            composing[agentId] = now().addingTimeInterval(Self.composingLifetime)
+            if isNew || !wasLive { publish() }
+            scheduleComposingExpiry()
+            return false
+        case .composingSet(let leases):
+            let wasLive = connection == .live
+            connection = .live
+            // The whole set each time: who is not in it has stopped. A reconnect sends it again, which replaces it.
+            var next: [String: Date] = [:]
+            for lease in leases where !(isDirect && lease.agentId == Self.senti) {
+                next[lease.agentId] = max(next[lease.agentId] ?? .distantPast,
+                                          now().addingTimeInterval(lease.secondsLeft))
+            }
+            next = next.filter { $0.value > now() }
+            // The room redraws only when who is shown typing changes, not for each lease's new expiry. Against what is
+            // shown, not `composing`: that can still hold a spent lease a redraw has already left out.
+            let changed = next.keys.sorted() != state.composingAgents
+            composing = next
+            if changed || !wasLive { publish() }
+            scheduleComposingExpiry()
             return false
         case .control:
             if connection != .live {
@@ -2150,7 +2611,7 @@ final class RoomChatCoordinator: ObservableObject {
     /// A message or reply from someone else arrived in the room on screen: a mention of you sounds the chime, anything
     /// else the soft pop. Your own (echoes of what you sent) make no sound; the send already did.
     private func arrivalFeedback(_ arrivals: [(authorId: String, text: String)]) {
-        guard let onFeedback else { return }
+        guard let onFeedback, !feedbackMuted else { return }
         let others = arrivals.filter { !$0.authorId.isEmpty && !ownAuthorIds.contains($0.authorId.lowercased()) }
         guard !others.isEmpty else { return }
         let handles = state.ownMentionHandles
@@ -2193,21 +2654,32 @@ final class RoomChatCoordinator: ObservableObject {
     /// replies first, and again only once it has grown. A phone without the on-device model writes none.
     private func summarizeNextThread(_ replies: [RoomChatMessageInput], messages: [RoomChatMessageInput]) {
         guard let summarizer, summarizing == nil, !liveTasks.isEmpty else { return }
+        // Someone you blocked is left out: their words never come back through a thread's summary.
+        let isBlocked = { [blocks] (authorId: String) in blocks?.isBlocked(authorId) == true }
         var byThread: [Int64: [RoomChatMessageInput]] = [:]
-        for reply in replies { byThread[reply.sequenceId, default: []].append(reply) }
+        for reply in replies where !isBlocked(reply.authorId) { byThread[reply.sequenceId, default: []].append(reply) }
         let due = byThread
             .filter { $0.value.count >= ThreadSummaryInput.minimumReplies && threadSummaries[$0.key]?.replies != $0.value.count }
             .max { $0.value.count < $1.value.count }
         guard let (parent, thread) = due else { return }
         summarizing = parent
-        let lines = ThreadSummaryInput.lines(thread, parent: messages.first { $0.sequenceId == parent && !$0.isInlineReply })
+        let lines = ThreadSummaryInput.lines(thread, parent: messages.first {
+            $0.sequenceId == parent && !$0.isInlineReply && !isBlocked($0.authorId)
+        })
         let details = ThreadSummaryInput.details(thread)
         let count = thread.count
+        let blockChangesAtStart = blockChanges
         Task.detached(priority: .utility) { [weak self] in
             let text = await summarizer.summarize(thread: lines)
             await MainActor.run {
                 guard let self else { return }
                 self.summarizing = nil
+                // Someone was blocked while this was written, from words that may be theirs: it is never kept, and
+                // the thread is written again from what the room shows now.
+                guard blockChangesAtStart == self.blockChanges else {
+                    self.publish()
+                    return
+                }
                 // Remembered even when there is none, so a phone without the model doesn't ask again for this count.
                 // The phone's own prose, shown as it was composed.
                 let summary = text.map { SummaryReading(prose: $0, details: details) }.flatMap { $0.prose.isEmpty ? nil : $0 }
@@ -2275,11 +2747,26 @@ final class RoomChatCoordinator: ObservableObject {
         }
     }
 
-    private func pruneComposing() {
-        let cutoff = now().addingTimeInterval(-Self.composingLifetime)
+    /// Takes away every line whose lease has expired.
+    func pruneComposing() {
         let before = composing.count
-        composing = composing.filter { $0.value > cutoff }
+        composing = composing.filter { $0.value > now() }
         if composing.count != before { publish() }
+    }
+
+    /// Wakes at the soonest expiry, so a line goes when its lease does, with no other frame needed.
+    private func scheduleComposingExpiry() {
+        composingExpiry?.cancel()
+        guard let soonest = composing.values.min() else { return }
+        let delay = max(soonest.timeIntervalSince(now()), 0) + 0.25
+        composingExpiry = Task { [weak self, sleep = self.sleep] in
+            await sleep(delay)
+            guard !Task.isCancelled, let self else { return }
+            self.pruneComposing()
+            // Again for whoever is still typing (a reply may have taken the soonest lease away before it expired).
+            // Only for a later expiry than this one: a clock that has not moved never spins this.
+            if let next = self.composing.values.min(), next > soonest { self.scheduleComposingExpiry() }
+        }
     }
 
     private var failureIsTerminal: Bool {
@@ -2325,6 +2812,7 @@ final class RoomChatCoordinator: ObservableObject {
             publishesWhenShown = true
             return
         }
+        statesBuilt += 1
         forgetRemovedAttachments()
         // What is shown of a pinned message comes from here, so the newest revision the loaded rows hold is kept
         // first: a board shown at a newer revision (in a window loaded around it, say) never goes back to an older
@@ -2336,9 +2824,15 @@ final class RoomChatCoordinator: ObservableObject {
                            pinnedMessages[pin.targetSequenceId]]
                 .compactMap { $0 }.max { $0.revision < $1.revision }
             let by = pin.pinnedBy.lowercased().hasPrefix("human-") ? String(pin.pinnedBy.dropFirst("human-".count)) : pin.pinnedBy
+            // A pinned message from someone you blocked shows as their one line, as in the room.
+            let hidden = message.map { message in
+                blocks?.isBlocked(message.authorId) == true
+                    && !revealedBlocked.contains(RoomBlocking.revealKey(message: message.id))
+            } ?? false
             return RoomChatPinned(
                 sequenceId: pin.targetSequenceId,
-                snippet: message.map { Self.pinSnippet($0.text) } ?? "Message #\(pin.targetSequenceId)",
+                snippet: hidden ? RoomBlocking.hiddenLine
+                    : message.map { Self.pinSnippet($0.text) } ?? "Message #\(pin.targetSequenceId)",
                 pinnedBy: by,
                 text: message?.text ?? "",
                 board: message.flatMap { message in
@@ -2375,7 +2869,7 @@ final class RoomChatCoordinator: ObservableObject {
                 if let date { dateCache[message.id] = date }
             }
             let summary = summaries[message.sequenceId]
-            return RoomChatMessageInput(
+            var input = RoomChatMessageInput(
                 id: message.id,
                 sequenceId: message.sequenceId,
                 kind: Self.kind(of: message),
@@ -2407,14 +2901,19 @@ final class RoomChatCoordinator: ObservableObject {
                     : nil,
                 work: work[message.sequenceId] ?? [],
                 isVoiceTurn: message.channel == "voice",
-                checkpointSummary: message.checkpointSummary
+                checkpointSummary: message.checkpointSummary,
+                ownTaps: ownTaps[message.sequenceId] ?? RoomOwnTaps()
             )
+            // Reports are taken on posted messages, not a file's upload notice or a relayed line.
+            input.isReportable = message.eventType == "session_message"
+            input.addressedLine = Self.addressedLine(message.addressed)
+            return input
         }
         let threadInput = openThreadSequence.map { sequence in
             RoomChatThreadInput(
                 sequenceId: sequence,
                 replies: threadReplies.map { reply in
-                    RoomChatReplyRow(
+                    var row = RoomChatReplyRow(
                         id: reply.id,
                         authorName: reply.isHuman ? String(reply.authorId.dropFirst("human-".count)) : reply.authorId,
                         isHuman: reply.isHuman,
@@ -2425,8 +2924,11 @@ final class RoomChatCoordinator: ObservableObject {
                         views: views(of: reply.id, at: reply.revision, author: viewAuthor(reply.authorId, isHuman: reply.isHuman)),
                         authorHandle: reply.isHuman ? String(reply.authorId.dropFirst("human-".count)) : reply.authorId,
                         parentReplyId: reply.targetActionId,
+                        authorId: reply.authorId,
                         attachments: reply.attachments.map { Self.chip($0, removed: removedAttachments.contains($0.attachmentId)) }
                     )
+                    row.addressedLine = Self.addressedLine(reply.addressed)
+                    return row
                 },
                 pending: pendingReplies.filter { $0.targetSequenceId == sequence }.map {
                     RoomChatPendingRow(clientId: $0.clientId, text: $0.text, status: $0.status)
@@ -2435,7 +2937,12 @@ final class RoomChatCoordinator: ObservableObject {
                 failureText: threadFailure,
                 canReply: actionSender != nil && postingRefusedReason == nil,
                 maximumReplyLength: RoomActionRequest.replyLimit,
-                focusReplyId: threadFocusReply
+                focusReplyId: threadFocusReply,
+                hasOlder: threadRead && threadOlderCursor != nil,
+                isLoadingOlder: threadLoadingOlder || threadSearching,
+                totalReplies: summaries[sequence]?.replyTotal,
+                focusMissing: threadFocusMissing,
+                hasNewer: threadNewerDropped
             )
         }
         let replyInputs = inlineReplyInputs()
@@ -2455,7 +2962,7 @@ final class RoomChatCoordinator: ObservableObject {
             jumpDownKeepsLatest: hasLoadedInitial && historyTooLongToJumpDown,
             connection: connection,
             composingAgents: composing
-                .filter { $0.value > now().addingTimeInterval(-Self.composingLifetime) }
+                .filter { $0.value > now() }
                 .keys
                 .sorted(),
             failure: failure,
@@ -2483,6 +2990,19 @@ final class RoomChatCoordinator: ObservableObject {
             files: placedFiles?.cards ?? [:],
             fileParts: placedFiles?.parts ?? [:],
             draftKey: draftKey,
+            blockedAuthorIds: blocks?.actorIds ?? [],
+            formerOwnAuthorIds: formerOwnAuthorIds,
+            revealedBlocked: revealedBlocked,
+            canReport: reporter != nil && !failureIsTerminal,
+            canBlock: blocks != nil,
+            report: report.map { open in
+                var shown = open
+                shown.canBlock = blocks != nil
+                shown.authorIsBlocked = blocks?.isBlocked(open.target.authorId) == true
+                return shown
+            },
+            asksAIConsent: needsAIConsent,
+            consentRequested: !heldForConsent.isEmpty,
             runningBoxes: runningBoxNames,
             endedBoxNames: endedBoxNames
         )
@@ -2695,7 +3215,7 @@ final class RoomChatCoordinator: ObservableObject {
             guard let date = ParsedSessionTimestamp(reply.createdAt).date else { return nil }
             if let floor, date < floor { return nil }
             if let ceiling, date > ceiling { return nil }
-            return RoomChatMessageInput(
+            var input = RoomChatMessageInput(
                 id: "reply-\(reply.id)",
                 sequenceId: reply.targetSequenceId,
                 kind: .message,
@@ -2710,6 +3230,17 @@ final class RoomChatCoordinator: ObservableObject {
                 attachments: reply.attachments.map { Self.chip($0, removed: removedAttachments.contains($0.attachmentId)) },
                 inlineReplyId: reply.id
             )
+            input.addressedLine = Self.addressedLine(reply.addressed)
+            return input
+        }
+    }
+
+    /// The line under a message or reply that asked for any free agent (`RoomAddressedLine`), its agent named as the
+    /// room names people and agents.
+    private static func addressedLine(_ addressed: RoomAddressed?) -> String? {
+        addressed.flatMap {
+            RoomAddressedLine.text(pickedBy: $0.any.map(principalName), nobodyFree: $0.anyUnresolved,
+                                   throttled: $0.throttled)
         }
     }
 
@@ -2793,11 +3324,29 @@ final class RoomChatCoordinator: ObservableObject {
             latest[id] = (known?.name ?? author.name, author.isHuman, author.date ?? known?.date)
         }
         let ownHandles = Set(ownAuthorIds.map { $0.hasPrefix("human-") ? String($0.dropFirst("human-".count)) : $0 })
-        return MentionSuggester.candidates(
+        // Agents in a box, under their box: from presence, and from the author of what they posted (messages,
+        // replies), so one who posted but is not here now still groups.
+        var boxes: [String: RoomAgentBox] = [:]
+        func note(_ id: String, _ box: RoomAgentBox?) {
+            if let box, boxes[id.lowercased()] == nil { boxes[id.lowercased()] = box }
+        }
+        for person in receiptsTracker?.presence?.participants ?? [] where !person.isHuman {
+            note(person.id, person.boxMember)
+        }
+        for message in timeline.messages where !message.isHuman {
+            note(message.authorId, message.authorBox)
+        }
+        for reply in threadReplies + Array(inlineReplies.values) where !reply.isHuman {
+            note(reply.authorId, reply.authorBox)
+        }
+        let groups = boxes.mapValues { MentionGroup(id: $0.id, index: $0.index, label: $0.label) }
+        let people = MentionSuggester.candidates(
             authors: latest.map { (id: $0.key, name: $0.value.name, isHuman: $0.value.isHuman, lastActive: $0.value.date) },
             ownHandles: ownHandles,
-            now: now()
+            now: now(),
+            groups: groups
         )
+        return offersAny ? [.anyFree] + people : people
     }
 
     private static func kind(of message: RoomMessage) -> RoomChatMessageInput.Kind {

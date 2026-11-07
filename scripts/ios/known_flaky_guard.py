@@ -14,6 +14,9 @@ step after the gating tests that reports without gating. This guard runs in the 
   with `most: nil` (a gating check moved in without a marker fails here);
 - the guard's own step changes: it must run exactly its tests and this script, with no arguments (so no `--today`),
   before the gating tests, and gate;
+- any of the three LazyList test files changes at all (each is pinned by its sha256 while the split lasts). This closes
+  what the counts above cannot see: a check in a helper of LazyListTestCase, an XCTAssert spelled with backticks or with
+  a comment before its parenthesis, an idle check swapped for a gating one, a check made by a throw;
 - the gating tests no longer skip the class (as a whole token), or its step is no longer after them, run even when
   they fail but not when the run is cancelled (`if: ${{ !cancelled() }}`), kept from gating
   (`continue-on-error: true`), held to 10 minutes, and aimed at the class alone; or anything else in the workflow runs
@@ -25,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import pathlib
 import re
 import sys
@@ -42,6 +46,14 @@ GATING_STEP = "Run hosted unit tests"
 GUARD_STEP = "Known-flaky split guard and time box (ticket 9d7d62f1, ends 2026-11-13)"
 GUARD_RUN = ["python3 scripts/ios/tests/known_flaky_guard_test.py", "python3 scripts/ios/known_flaky_guard.py"]
 FLAKY_STEP_IF = "${{ !cancelled() }}"
+
+# The three files of the split, pinned by sha256 while it lasts (warden, 11-06): any change to them, however it is
+# spelled, fails the gate. Changing them means a new pin here, which warden reviews with the change.
+PINNED_SHA256 = {
+    TESTS / "LazyListTestCase.swift": "3582d4350caa11bc91d24973e6602ef94af8787e97f621543cafb405e290634e",
+    TESTS / "LazyListBuildTests.swift": "b09b26e0460d37108432577a0fe5442d5e8485180d0c018208f485ed708852d7",
+    TESTS / "LazyListKnownFlakyTests.swift": "4056cf7b62b197a7b057b9285eaca27f649e42ee52dd19301623d27520ad8f0a",
+}
 
 # The only tests the non-gating class may hold.
 ALLOWED_TESTS = {
@@ -130,7 +142,18 @@ def check(root: pathlib.Path, today: dt.date) -> list[str]:
                         f"(today {today.isoformat()}). Put the checks back into the gating tests, or get a new date "
                         "from warden.")
 
-    # 2. The class holds exactly its allow-listed tests, and no test reaches it any other way.
+    # 2. The split's three files are exactly as pinned.
+    for path, pinned in PINNED_SHA256.items():
+        file = root / path
+        if not file.is_file():
+            problems.append(f"{path} is missing")
+            continue
+        digest = hashlib.sha256(file.read_bytes()).hexdigest()
+        if digest != pinned:
+            problems.append(f"{path} changed (sha256 {digest}, pinned {pinned}): while the known-flaky split lasts "
+                            f"(ticket {TICKET}) its three files are pinned; a change needs warden's review and a new pin")
+
+    # 3. The class holds exactly its allow-listed tests, and no test reaches it any other way.
     classes = re.findall(r"^\s*(?:@\w+\s+)*(?:final\s+)?class\s+(\w+)\s*:\s*(\w+)", flaky, re.MULTILINE)
     if classes != [(FLAKY_CLASS, BASE_CLASS)]:
         problems.append(f"{FLAKY_FILE} must declare one class, {FLAKY_CLASS}: {BASE_CLASS}; it declares {classes}")
@@ -165,7 +188,7 @@ def check(root: pathlib.Path, today: dt.date) -> list[str]:
     elif TEST_FUNC.search(base):
         problems.append(f"{BASE_FILE} holds a test ({TEST_FUNC.findall(base)}): it would run in {FLAKY_CLASS} too")
 
-    # 3. No gating test makes a known flaky check, and nothing else adds tests to the split's classes.
+    # 4. No gating test makes a known flaky check, and nothing else adds tests to the split's classes.
     for file in sorted((root / TESTS.parts[0]).rglob("*.swift")) + sorted((root / "packages").rglob("*.swift")):
         relative = file.relative_to(root).as_posix()
         if relative == FLAKY_FILE.as_posix():
@@ -186,7 +209,7 @@ def check(root: pathlib.Path, today: dt.date) -> list[str]:
         if re.search(rf":\s*{FLAKY_CLASS}\b", text):
             problems.append(f"{relative} subclasses {FLAKY_CLASS}")
 
-    # 4. The workflow: the gating tests skip the class, and one step after them runs it alone, without gating.
+    # 5. The workflow: the gating tests skip the class, and one step after them runs it alone, without gating.
     workflow = read(root, WORKFLOW) or ""
     skip = f"-skip-testing:SentiPocketAppTests/{FLAKY_CLASS}"
     skip_token = re.compile(rf"(?<!\S){re.escape(skip)}(?!\S)")

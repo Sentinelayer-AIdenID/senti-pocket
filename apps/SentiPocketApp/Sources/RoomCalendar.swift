@@ -200,7 +200,8 @@ final class CalendarCenter: ObservableObject {
     static let noPerson = "Couldn't check who's signed in. Check your connection and try again."
     static let newLinkWarning = "This makes a new subscribe link. "
         + "A calendar already using an older link stops updating."
-    static let resetWarning = "Apple Calendar stops updating from the old link, on every device that subscribed to it. "
+    /// Short enough to show whole on an iPhone SE at the largest text size (the longer one ran past its screen).
+    static let resetWarning = "Calendars on the old link stop updating, on every device. "
         + "You can subscribe again with the new one."
 }
 
@@ -309,13 +310,18 @@ final class CalendarBoard: ObservableObject {
     private let now: () -> Date
     private let onUnavailable: @MainActor () -> Void
     private let onReauthenticationRequired: @MainActor () -> Void
+    /// This account's OK for what is typed to go to Senti's AI (App Store guideline 5.1.2(i)): asked once, before the
+    /// first draft, as a room asks before the first write.
+    private let mayShareWithAI: @MainActor () async -> Bool
     private var allEvents: [CalendarEvent] = []
     private var eventsByDay: [CalendarDay: [CalendarEvent]] = [:]
 
     init(scope: CalendarScope, client: any RoomCalendarServing, calendar: Calendar = CalendarBoard.personsCalendar(),
          now: @escaping () -> Date = { Date() }, onUnavailable: @escaping @MainActor () -> Void = {},
-         onReauthenticationRequired: @escaping @MainActor () -> Void = {}) {
+         onReauthenticationRequired: @escaping @MainActor () -> Void = {},
+         mayShareWithAI: @escaping @MainActor () async -> Bool = { await AIConsentAsker.shared.allows() }) {
         self.scope = scope
+        self.mayShareWithAI = mayShareWithAI
         self.client = client
         self.calendar = calendar
         self.now = now
@@ -421,6 +427,9 @@ final class CalendarBoard: ObservableObject {
         isDrafting = true
         draftProblem = nil
         defer { isDrafting = false }
+        // What was typed goes to Senti's AI to draft the event: never without this account's OK. Not now drafts nothing
+        // and keeps the text.
+        guard await mayShareWithAI() else { return }
         do {
             let draft = try await client.draft(inRoom: room.id, .text(day: day, text: text, timeZone: timeZone.identifier))
             saveProblem = nil

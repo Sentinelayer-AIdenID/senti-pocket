@@ -13,13 +13,31 @@ import PocketUI
 /// only. Never compiled into Release.
 ///
 /// Options:
-/// - `-PocketRootRoom long|mid|none`: the room open at launch. `long` holds 1,000 messages, `mid` 165 (the room
-///   loads its newest 100, then the rest with Load earlier). Default `mid`.
+/// - `-PocketRootRoom long|mid|none|<room id>`: the room open at launch. `long` holds 1,000 messages, `mid` 165 (the
+///   room loads its newest 100, then the rest with Load earlier); `room-000` to `room-137` hold 30 each, so the start of
+///   the room is in reach. Default `mid`.
+/// - `-PocketRootActivity`: the open room's Activity shows a few events and actions (the server's own types, and one
+///   this app does not know); without it Activity is not served here, as before.
+/// - `-PocketRootCreates`: the preview can make a chat, so the side panel offers New chat; without it, as before.
 /// - `-PocketRootStream <posts per second>`: messages arriving in the open room (default none).
 /// - `-PocketRootOneListPage`: every room in the list's first page, so the side panel lists all of them (the API
 ///   pages the list by 50).
+/// - `-PocketRootCrashOffer`: one made-up crash report waits to be offered, and sending it is answered by the preview,
+///   so the offer (`CrashReportOffer`) shows a moment after launch.
+/// - `-PocketRootThreadReading`: a moment after launch, the open room's newest message opens its thread and its first
+///   reply is read aloud (made-up words), for pictures of the Listen bar over a thread.
+/// - `-PocketRootInlineReplies`: every message with replies shows its newest reply in the room, as a row to answer in
+///   place (a reply to a reply, from the room's box).
+/// - `-PocketRootAIConsentGiven`: this account has already said OK to sharing with AI, so a first send is not asked
+///   first (for a test of what follows a send, as on a phone that said OK before). Without it the preview asks.
 enum RootPreview {
     static var isRequested: Bool { ProcessInfo.processInfo.arguments.contains("-PocketRootPreview") }
+
+    /// `-PocketRootAIConsentGiven`, honored in the root preview only: without `-PocketRootPreview` it does nothing. This
+    /// whole file is DEBUG only, so a Release build has neither the flag nor this check.
+    static func startsWithAIConsentGiven(_ arguments: [String] = ProcessInfo.processInfo.arguments) -> Bool {
+        arguments.contains("-PocketRootPreview") && arguments.contains("-PocketRootAIConsentGiven")
+    }
 
     static func argument(_ name: String) -> String? {
         let arguments = ProcessInfo.processInfo.arguments
@@ -32,12 +50,28 @@ enum RootPreview {
         switch argument("-PocketRootRoom") ?? "mid" {
         case "long": return RootPreviewAPI.longRoom
         case "none": return nil
+        case let id where RootPreviewAPI.rooms.contains(where: { $0.id == id }): return id
         default: return RootPreviewAPI.midRoom
         }
     }
 
+    static var offersCrashReport: Bool { ProcessInfo.processInfo.arguments.contains("-PocketRootCrashOffer") }
+
+    /// The made-up report: a crash with a few steps and frames, nothing from a real run.
+    static func madeUpCrashReport(at date: Date = Date()) -> CrashReport {
+        CrashReport(id: "preview-crash-1", kind: .crash, at: date.addingTimeInterval(-20 * 60), build: "2026110600",
+                    system: "iOS 26.1", device: "iPhone17,5", reason: "EXC_BREAKPOINT (SIGTRAP), made up for the preview",
+                    frames: ["SentiPocketApp +0x0001a2b4", "SwiftUI +0x0049f210", "UIKitCore +0x00d1c0e8"],
+                    binaries: ["SentiPocketApp 00000000-0000-4000-8000-0000000000a1",
+                               "SwiftUI 00000000-0000-4000-8000-0000000000a2",
+                               "UIKitCore 00000000-0000-4000-8000-0000000000a3"],
+                    trail: ["opened room", "opened side panel", "closed side panel", "opened room"])
+    }
+
     @MainActor
     static func rootView(whisperModel: WhisperModelProvisioningCoordinator, incomingLinks: IncomingLinkInbox) -> some View {
+        if offersCrashReport { CrashReporter.shared.offerForPreview(madeUpCrashReport()) }
+        if ProcessInfo.processInfo.arguments.contains("-PocketRootThreadReading") { readInAThreadSoon() }
         // The root reopens the room opened last once the room list has loaded, as the app does after a launch.
         UserDefaults.standard.set(openRoomId ?? "", forKey: "pocket.lastRoomId")
         // The freeze watch runs as in the app, so a stall here is written down where the app writes one.
@@ -75,6 +109,23 @@ enum RootPreview {
 
     /// Opens or closes the side panel of a root hosted in a test, as the signals do in the preview.
     static func requestDrawer(_ open: Bool) { drawerSubject.send(open) }
+
+    /// `-PocketRootThreadReading`: the newest message's thread, then its first reply read aloud, as taps would.
+    private static func readInAThreadSoon() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+            requestRoom(.openThread(sequenceId: 165))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                var words = RootPreviewWords(seed: 165)
+                requestRoom(.readAloud(id: RoomReadAloud.reply("reply-165-1"),
+                                       text: (0..<6).map { _ in words.sentence() }.joined(separator: " ")))
+            }
+        }
+    }
+
+    /// What a hosted test asks of the room on screen, as a tap there would (`RoomChatScreen.handle`).
+    static let roomRequests = PassthroughSubject<RoomChatIntent, Never>()
+
+    static func requestRoom(_ intent: RoomChatIntent) { roomRequests.send(intent) }
 
     /// What the main thread did between two signals, for profiles of the root (`RootPreviewMeter`).
     static let meter = RootPreviewMeter()
@@ -143,11 +194,40 @@ final class RootPreviewMeter: @unchecked Sendable {
 
     func roomScreenBodyRan() { roomScreenBodies += 1 }
 
+    private struct WeakRoom {
+        weak var room: RoomChatCoordinator?
+    }
+
+    private var rooms: [WeakRoom] = []
+
+    /// A room's coordinator made (held weakly): `liveRooms` says how many are still there.
+    func roomCoordinatorMade(_ room: RoomChatCoordinator) {
+        rooms = rooms.filter { $0.room != nil } + [WeakRoom(room: room)]
+    }
+
+    /// Room coordinators made and not gone yet: a room put in another's place lets the other go.
+    var liveRooms: Int { rooms.filter { $0.room != nil }.count }
+
+    /// Where each read-aloud bar and its controls were last laid out, by place ("app", "room", "thread").
+    private(set) var readAloudBars: [String: [String: CGRect]] = [:]
+
+    func readAloudBarLaidOut(_ place: String, _ frames: [String: CGRect]) { readAloudBars[place] = frames }
+
+    func forgetReadAloudBars() { readAloudBars = [:] }
+
+    /// Times the root asked for its side panel's rooms to be placed (`placeSidePanelRooms`), open or not.
+    private(set) var sidePanelPlacements = 0
+
+    func sidePanelPlaced() { sidePanelPlacements += 1 }
+
     /// Whether the room's calendar entry offered Calendar the last time its body ran (nil before it ran): it watches
     /// the calendar itself, so an answer that turns the calendar on reaches it without the root drawing again.
     private(set) var calendarEntryOffers: Bool?
 
     func calendarEntryRan(offers: Bool) { calendarEntryOffers = offers }
+
+    /// Forgets what an earlier window's calendar entry said, so a test reads only its own root's entry.
+    func forgetCalendarEntry() { calendarEntryOffers = nil }
 
     private func ran(_ activity: CFRunLoopActivity) {
         let now = CFAbsoluteTimeGetCurrent()
@@ -284,14 +364,22 @@ final class RootPreviewAPI: @unchecked Sendable {
 
     private func count(_ name: String) { lock.withLock { calls[name, default: 0] += 1 } }
 
+    /// Whether the preview can make a chat (`-PocketRootCreates`).
+    static let createsRooms = ProcessInfo.processInfo.arguments.contains("-PocketRootCreates")
+
     var services: RootServices {
-        let sender = RootPreviewSender()
+        let sender: any RoomMessageSending & RoomActionSending
+        if Self.createsRooms {
+            sender = RootPreviewCreatingSender()
+        } else {
+            sender = RootPreviewSender()
+        }
         return RootServices(
             sessions: self, room: self, tickets: self, admissions: self, search: self, notifications: self,
             notificationMarker: self, callLog: self, waiting: self, checkpoints: self, directMessages: self,
             roomFolders: self, admissionDecider: self, sender: sender, actionSender: sender, ticketWriter: self,
             ticketLeases: InMemoryTicketLeaseStore(), ticketExtras: self, identity: self, receipts: self, readMarker: self,
-            registersPush: false
+            registersPush: false, crashReports: RootPreview.offersCrashReport ? RootPreviewCrashReports() as any CrashReportSending : nil
         )
     }
 
@@ -435,7 +523,8 @@ extension RootPreviewAPI: SessionTransport {
     }
 
     func listEvents(sessionId: String, after: String?, fromSequence: Int64?, limit: Int) async throws -> SessionEventForwardPage {
-        throw SessionTransportError.notConfigured
+        guard Self.servesActivity else { throw SessionTransportError.notConfigured }
+        return try Self.activityEvents(sessionId: sessionId)
     }
 
     func listEventsBefore(sessionId: String, beforeSequence: Int64?, limit: Int) async throws -> SessionEventBeforePage {
@@ -444,7 +533,59 @@ extension RootPreviewAPI: SessionTransport {
 
     func listActions(sessionId: String, targetSequenceId: Int64?, targetActionId: String?, limit: Int) async throws
         -> SessionActionPage {
-        throw SessionTransportError.notConfigured
+        guard Self.servesActivity else { throw SessionTransportError.notConfigured }
+        return try Self.activityActions(sessionId: sessionId)
+    }
+
+    /// Whether the open room's Activity is served (`-PocketRootActivity`).
+    static let servesActivity = ProcessInfo.processInfo.arguments.contains("-PocketRootActivity")
+
+    /// A few of a room's events for Activity, as the server writes them: its own types, and one this app does not know
+    /// (it reads as an update). Made-up words only.
+    static func activityEvents(sessionId: String) throws -> SessionEventForwardPage {
+        let rows: [(type: String, name: String, text: String?, minutes: Double)] = [
+            ("session_message", "Alex", "Can someone check the release notes before lunch?", 42),
+            ("agent_response", "review-agent", "The notes read well. Two links were old; I fixed them.", 38),
+            ("session_titled", "Alex", nil, 31),
+            ("room_event_reminder", "Senti", "Design review in 15 minutes.", 15),
+            ("file_lock", "build-agent", nil, 9)
+        ]
+        let now = Date()
+        let events: [[String: Any]] = rows.enumerated().map { index, row in
+            let at = ISO8601DateFormatter().string(from: now.addingTimeInterval(-row.minutes * 60))
+            var event: [String: Any] = [
+                "id": "preview-event-\(index)", "event": row.type, "agent": ["displayName": row.name],
+                "agentId": row.name, "agentModel": "", "payload": [String: Any](), "ts": at, "timestamp": at,
+                "cursor": "c\(index)",
+                "sequenceId": 7_000 + index, "sessionId": sessionId, "source": "preview"
+            ]
+            if let text = row.text { event["payload"] = ["text": text] }
+            return event
+        }
+        let data = try JSONSerialization.data(withJSONObject: ["events": events])
+        return try JSONDecoder().decode(SessionEventForwardPage.self, from: data)
+    }
+
+    /// A few of a room's actions for Activity, as the server writes them (one of a type this app does not know).
+    static func activityActions(sessionId: String) throws -> SessionActionPage {
+        let rows: [(type: String, actor: String, target: Int, minutes: Double)] = [
+            ("ack", "Alex", 7_001, 37), ("like", "Sam", 7_001, 36), ("view", "Sam", 7_000, 35),
+            ("working_on", "review-agent", 0, 30), ("escalate", "ops-agent", 7_003, 12)
+        ]
+        let now = Date()
+        let actions: [[String: Any]] = rows.enumerated().map { index, row in
+            [
+                "id": "preview-action-\(index)", "sessionId": sessionId, "targetSequenceId": row.target,
+                "targetCursor": NSNull(), "targetActionId": NSNull(), "actionType": row.type, "actorKind": "human",
+                "actorId": row.actor, "actorUserId": NSNull(), "actorRole": NSNull(), "note": NSNull(), "metadata": [String: Any](),
+                "idempotencyKey": "preview-\(index)",
+                "createdAt": ISO8601DateFormatter().string(from: now.addingTimeInterval(-row.minutes * 60))
+            ]
+        }
+        let page: [String: Any] = ["sessionId": sessionId, "count": actions.count, "projection": [String: Any](),
+                                   "actions": actions]
+        let data = try JSONSerialization.data(withJSONObject: page)
+        return try JSONDecoder().decode(SessionActionPage.self, from: data)
     }
 
     func listCheckpoints(sessionId: String, limit: Int) async throws -> SessionCheckpointListPage {
@@ -501,12 +642,21 @@ extension RootPreviewAPI: RoomTransport {
             return RoomActionsPage(replies: replies)
         }
         var byTarget: [Int64: RoomReactionSummary] = [:]
+        // With -PocketRootInlineReplies, each of these messages' newest reply is shown in the room as a row,
+        // to answer in place (a reply to a reply, from the room's box).
+        let inline = ProcessInfo.processInfo.arguments.contains("-PocketRootInlineReplies")
+        var replies: [RoomReply] = []
         for target in stride(from: newest, to: max(newest - 120, 0), by: -7) {
             byTarget[target] = RoomReactionSummary(targetSequenceId: target, counts: ["ack": 1, "like": 2, "reply": 3],
                                                    actorsByType: ["ack": [Self.agents[Int(target) % Self.agents.count]]],
                                                    replyTotal: 3)
+            if inline {
+                replies.append(RoomReply(id: "reply-\(target)-3", targetSequenceId: target,
+                                         authorId: Self.agents[3 % Self.agents.count], text: "Reply 3 to message \(target).",
+                                         createdAt: stamp(started.addingTimeInterval(-Double(newest - target) * 47 + 20))))
+            }
         }
-        return RoomActionsPage(byTarget: byTarget)
+        return RoomActionsPage(byTarget: byTarget, replies: replies)
     }
 }
 
@@ -665,6 +815,20 @@ extension RootPreviewAPI: RoomReceiptsClient, RoomReadMarking {
     }
 }
 
+/// The preview's answer to a sent crash report: taken, after a moment. Its credential is made up, with an account.
+private struct RootPreviewCrashReports: CrashReportSending {
+    func currentToken() -> String? {
+        let claims = Data(#"{"sub":"preview-alex"}"#.utf8).base64EncodedString()
+            .replacingOccurrences(of: "=", with: "").replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+        return "e30." + claims + ".preview"
+    }
+
+    func send(_ payload: CrashReportPayload, token: String) async -> CrashReportSendResult {
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        return .accepted
+    }
+}
+
 /// Sends and actions succeed after a moment, as the API answers them.
 private struct RootPreviewSender: RoomMessageSending, RoomActionSending {
     func sendHumanMessage(sessionId: String, text: String, clientId: String) async throws {
@@ -673,6 +837,22 @@ private struct RootPreviewSender: RoomMessageSending, RoomActionSending {
 
     func sendAction(_ action: RoomActionRequest) async throws {
         try? await Task.sleep(nanoseconds: 200_000_000)
+    }
+}
+
+/// The preview's sender that can also make a chat (`-PocketRootCreates`): the side panel offers New chat.
+private struct RootPreviewCreatingSender: RoomMessageSending, RoomActionSending, RoomCreating {
+    func sendHumanMessage(sessionId: String, text: String, clientId: String) async throws {
+        try? await Task.sleep(nanoseconds: 300_000_000)
+    }
+
+    func sendAction(_ action: RoomActionRequest) async throws {
+        try? await Task.sleep(nanoseconds: 200_000_000)
+    }
+
+    func create(title: String, kind: RoomKind) async throws -> String {
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        return "room-made-" + String(UUID().uuidString.prefix(8)).lowercased()
     }
 }
 #endif

@@ -21,6 +21,16 @@ private struct AcceptingSender: RoomMessageSending {
     func sendHumanMessage(sessionId: String, text: String, clientId: String) async throws {}
 }
 
+/// Accepts every send and counts them.
+private final class CountingSender: RoomMessageSending, @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var sends: Int { lock.withLock { count } }
+    func sendHumanMessage(sessionId: String, text: String, clientId: String) async throws {
+        lock.withLock { count += 1 }
+    }
+}
+
 @MainActor
 final class RoomFeedbackTests: XCTestCase {
     private func live(_ seq: Int64, from author: String, _ text: String) -> RoomMessage {
@@ -65,6 +75,43 @@ final class RoomFeedbackTests: XCTestCase {
         coordinator.send(.sendMessage(text: "Ship it"))
         for _ in 0..<500 where !events.contains(.sent) { try? await Task.sleep(nanoseconds: 2_000_000) }
         XCTAssertEqual(events.last, .sent)
+        coordinator.pause()
+    }
+
+    /// A voice room speaks instead: while one is on, its screen mutes the room (`feedbackMuted`, ticket 02a80e6f: the
+    /// screen tells the coordinator, so the closure it sets holds nothing of the screen), and no arrival, mention or
+    /// send makes a sound; once it ends, the room sounds again.
+    ///
+    /// Mutant it must catch: the mute ignored for arrivals, or for a send.
+    func test_a_room_in_a_voice_call_makes_no_sound_and_sounds_again_once_it_ends() async {
+        let sender = CountingSender()
+        let coordinator = RoomChatCoordinator(
+            sessionId: "room_1",
+            title: "Room",
+            transport: QuietRoom(),
+            sender: sender,
+            ownAuthorIds: ["human-mrrcarter"],
+            sleep: { seconds in if seconds > 5 { try? await Task.sleep(nanoseconds: 3_600_000_000_000) } },
+            onReauthenticationRequired: {}
+        )
+        var events: [RoomFeedbackEvent] = []
+        coordinator.onFeedback = { events.append($0) }
+        coordinator.resume()
+        for _ in 0..<500 where coordinator.state.isLoadingInitial { try? await Task.sleep(nanoseconds: 2_000_000) }
+
+        coordinator.feedbackMuted = true
+        coordinator.handle(.message(live(2, from: "pocket-forge", "Build 10 is up")))
+        coordinator.handle(.message(live(3, from: "claude-warden", "@mrrcarter one question")))
+        XCTAssertEqual(events, [], "an arrival and a mention make no sound during a voice room")
+        coordinator.send(.sendMessage(text: "Ship it"))
+        for _ in 0..<500 where sender.sends == 0 { try? await Task.sleep(nanoseconds: 2_000_000) }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(sender.sends, 1)
+        XCTAssertEqual(events, [], "nor does a send")
+
+        coordinator.feedbackMuted = false
+        coordinator.handle(.message(live(4, from: "pocket-forge", "Build 11 is up")))
+        XCTAssertEqual(events, [.received], "the call over, the room sounds again")
         coordinator.pause()
     }
 }

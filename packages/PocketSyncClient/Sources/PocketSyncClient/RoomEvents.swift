@@ -44,6 +44,13 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
     public let checkpointSummary: String?
     /// The wire event type. Only `session_message` rows take view receipts (the API refuses the others).
     public let eventType: String
+    /// Who it was addressed to, as the server decided when it was written: the agent an `@any` went to, or that
+    /// nobody was free (`RoomAddressed`). Nil when the server says nothing.
+    public let addressed: RoomAddressed?
+    /// The box its author runs in, from the author record (`RoomAgentBox`).
+    public let authorBox: RoomAgentBox?
+    /// How the post says it was sent (`RoomPostClient`): a display hint, never authority.
+    public let sentThrough: RoomPostClient?
 
     public init(
         id: String,
@@ -62,7 +69,10 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         attachments: [RoomAttachment] = [],
         eventType: String = "session_message",
         channel: String? = nil,
-        checkpointSummary: String? = nil
+        checkpointSummary: String? = nil,
+        addressed: RoomAddressed? = nil,
+        authorBox: RoomAgentBox? = nil,
+        sentThrough: RoomPostClient? = nil
     ) {
         self.id = id
         self.sequenceId = sequenceId
@@ -81,6 +91,9 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         self.eventType = eventType
         self.channel = channel
         self.checkpointSummary = checkpointSummary
+        self.addressed = addressed
+        self.authorBox = authorBox
+        self.sentThrough = sentThrough
     }
 
     /// Projects one wire event. Returns nil for events a room does not display (control, presence, edit
@@ -164,6 +177,9 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
             ? payload["summary"]?.stringValue.flatMap { $0.isEmpty ? nil : String($0.prefix(20_000)) }
             : nil
         self.eventType = event
+        self.addressed = kind == .message ? RoomAddressed(in: payload) : nil
+        self.authorBox = RoomAgentBox.author(of: json)
+        self.sentThrough = RoomPostClient(event: json)
     }
 
     /// The message as it reads now, from a `session_message_edited` envelope (`session-message-edit:v1`). The
@@ -504,4 +520,34 @@ public struct RoomUnreadState: Equatable, Sendable {
 
 private extension String {
     var trimmed: String { trimmingCharacters(in: .whitespacesAndNewlines) }
+}
+
+/// How a post says it was sent, from the event as the API stores it: the agent's `clientKind` and the payload's `source`.
+/// Hosted MCP stamps `source: "hosted_mcp"` on its own posts, which outranks what a client says of itself, as the API's
+/// own reading does; MCP admissions (the CLI's MCP server) stamp `clientKind: "mcp"`; the CLI says `"cli"`. Anything else
+/// is not known. A display hint, never authority.
+public enum RoomPostClient: String, Equatable, Sendable {
+    /// Hosted MCP (an AI app connected to the Senti MCP server).
+    case hostedMCP = "hosted_mcp"
+    /// The CLI's own MCP server.
+    case cliMCP = "mcp"
+    /// The CLI.
+    case cli
+
+    init?(event json: JSONValue) {
+        let agent = json["agent"] ?? .null
+        let payload = json["payload"] ?? .null
+        let said = [agent["clientKind"], agent["client_kind"], payload["clientKind"], payload["client_kind"],
+                    payload["source"], json["source"]]
+            .compactMap { $0?.stringValue?.trimmingCharacters(in: .whitespaces).lowercased().replacingOccurrences(of: "-", with: "_") }
+        if said.contains("hosted_mcp") {
+            self = .hostedMCP
+        } else if said.contains("mcp") {
+            self = .cliMCP
+        } else if said.contains("cli") {
+            self = .cli
+        } else {
+            return nil
+        }
+    }
 }

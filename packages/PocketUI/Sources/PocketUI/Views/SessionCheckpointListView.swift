@@ -2,15 +2,18 @@
 import SwiftUI
 
 public struct SessionCheckpointListView: View {
+    /// Saved summaries, once "Room checkpoints" (Carter, 2026-11-06), in plain words that keep what each line
+    /// promises: with a signing service, a summary's signature is checked before any of it shows; without one, it is
+    /// shown as saved and never called checked (#266).
     static let exactCheckpointOpenHint =
-        "Fetches and verifies this exact signed checkpoint before any Pocket briefing content is shown."
+        "Checks this summary's signature before showing any of it."
     static let trustBoundaryMessage =
-        "Room checkpoints are available through your membership. Opening one separately fetches and verifies the exact signed Pocket briefing before any briefing content is shown."
-    /// While this build verifies nothing, the list says what opening one does (warden, #266).
+        "You see these summaries because you're in this chat. Each one's signature is checked before any of it is shown."
+    /// While this build verifies nothing, the list says what opening one does (#266).
     static let serverCheckpointOpenHint =
-        "Opens this checkpoint as the server holds it. It is not signed yet."
+        "Opens this summary as it was saved. It isn't signed yet."
     static let serverTrustBoundaryMessage =
-        "Room checkpoints are available through your membership. Opening one shows it as the server holds it; it is not signed yet, so Pocket does not call it verified."
+        "You see these summaries because you're in this chat. They aren't signed yet, so the app doesn't call them checked."
 
     private let state: SessionCheckpointListPresentationState
     private let verifies: Bool
@@ -35,7 +38,7 @@ public struct SessionCheckpointListView: View {
                 checkpointList
             }
         }
-        .navigationTitle("Room checkpoints")
+        .navigationTitle("Saved summaries")
         .accessibilityIdentifier("pocket.session-checkpoints.screen")
         .pocketCanvas()
     }
@@ -58,7 +61,7 @@ public struct SessionCheckpointListView: View {
                 .listRowBackground(PocketPalette.raised)
             }
 
-            Section("Checkpoints") {
+            Section("Summaries") {
                 ForEach(state.rows) { row in
                     Button {
                         send(.openCheckpoint(sessionId: row.sessionId, checkpointId: row.checkpointId))
@@ -76,7 +79,7 @@ public struct SessionCheckpointListView: View {
         .refreshable { send(.refreshCheckpoints(sessionId: state.sessionId)) }
         .overlay {
             if state.isRefreshing {
-                ProgressView("Refreshing checkpoints")
+                ProgressView("Loading")
                     .padding()
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
                     .accessibilityIdentifier("pocket.session-checkpoints.refreshing")
@@ -94,9 +97,9 @@ public struct SessionCheckpointListView: View {
                     .foregroundStyle(state.failure == nil ? PocketPalette.accent : PocketPalette.warning)
                     .accessibilityHidden(true)
 
-                Text(state.failure?.title ?? "No room checkpoints")
+                Text(state.failure?.title ?? "No saved summaries yet")
                     .font(.title2.bold())
-                Text(state.failure?.detail ?? "Checkpoints created in this session will appear here after an authorized sync.")
+                Text(state.failure?.detail ?? "Summaries saved in this chat show up here.")
                     .foregroundStyle(PocketPalette.textSecondary)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
@@ -161,16 +164,7 @@ private struct SessionCheckpointRow: View {
                     .lineLimit(4)
             }
 
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 14) {
-                    sequence
-                    grade
-                }
-                VStack(alignment: .leading, spacing: 5) {
-                    sequence
-                    grade
-                }
-            }
+            grade
 
             ViewThatFits(in: .horizontal) {
                 HStack {
@@ -209,12 +203,6 @@ private struct SessionCheckpointRow: View {
             .foregroundStyle(PocketPalette.accent)
     }
 
-    private var sequence: some View {
-        Label(row.sequenceLabel, systemImage: "number")
-            .font(.caption.monospacedDigit())
-            .foregroundStyle(PocketPalette.textSecondary)
-    }
-
     private var grade: some View {
         Label(row.gradeLabel, systemImage: "chart.bar.doc.horizontal")
             .font(.caption)
@@ -222,7 +210,7 @@ private struct SessionCheckpointRow: View {
     }
 
     private var creator: some View {
-        Text("Created by \(row.createdBy)")
+        Text("Saved by \(row.createdBy)")
     }
 
     @ViewBuilder

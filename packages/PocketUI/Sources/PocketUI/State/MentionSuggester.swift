@@ -11,24 +11,65 @@ public struct MentionCandidate: Equatable, Identifiable, Sendable {
     public let displayName: String
     public let isHuman: Bool
     public let isAll: Bool
+    /// "@any": one free agent, chosen by the server when the message is written.
+    public let isAny: Bool
     /// The last time this participant posted, for ordering agents (recent first).
     public let lastActive: Date?
+    /// The box an agent runs in, which the picker groups it under.
+    public let group: MentionGroup?
 
-    public init(handle: String, displayName: String, isHuman: Bool, isAll: Bool = false, lastActive: Date? = nil) {
+    public init(handle: String, displayName: String, isHuman: Bool, isAll: Bool = false, isAny: Bool = false,
+                lastActive: Date? = nil, group: MentionGroup? = nil) {
         self.handle = handle
         self.displayName = displayName
         self.isHuman = isHuman
         self.isAll = isAll
+        self.isAny = isAny
         self.lastActive = lastActive
+        self.group = group
     }
 
     public static let everyone = MentionCandidate(handle: "all", displayName: "Everyone", isHuman: false, isAll: true)
+
+    /// "@any", offered only in a room that says it takes it: the server picks one free agent to read the message.
+    public static let anyFree = MentionCandidate(
+        handle: "any", displayName: "Any free agent: the first one free picks it up", isHuman: false, isAny: true
+    )
+
+    /// The picker row's symbol.
+    public var symbol: String {
+        isAll ? "person.3.fill" : isAny ? "person.fill.questionmark" : (isHuman ? "person.crop.circle.fill" : "cpu")
+    }
+
+    /// What VoiceOver says for the picker row.
+    public var spokenChoice: String {
+        isAll ? "Mention everyone" : isAny ? "Mention any free agent" : "Mention \(displayName), @\(handle)"
+    }
+}
+
+/// A box an agent runs in, for the @-mention picker: agents of one box are listed together under its label.
+public struct MentionGroup: Equatable, Sendable {
+    /// The box's id.
+    public let id: String
+    /// The agent's place in the box.
+    public let index: Int
+    /// What the group is called in the picker ("Box 3f2a").
+    public let label: String
+
+    public init(id: String, index: Int, label: String) {
+        self.id = id
+        self.index = index
+        self.label = label
+    }
 }
 
 /// @-mention autocomplete with the web's rules (sentinelayer-web `useMentionSuggestions.ts` at d479a03):
 /// - a mention starts with `@` at the start of the text or after whitespace, and runs to the caret;
 /// - humans first, then agents active in the last 10 minutes, then the rest, alphabetical in each group;
 /// - your own handle is never offered; `@all` is offered for an empty query or a prefix of "all";
+/// - `@any` (`MentionCandidate.anyFree`, among the candidates only when the room takes it) right after `@all`, for an
+///   empty query or a prefix of "any";
+/// - agents in a box come after the rest, together under their box, in the box's order;
 /// - a match is a case-insensitive substring of the handle or the display name.
 /// The text field does not say where the caret is, so the composer takes the place the text last changed (Carter: a
 /// mention anywhere in the text, not only at its end).
@@ -150,11 +191,13 @@ public enum MentionSuggester {
         return (String(query), at)
     }
 
-    /// The room's mentionable participants from its authors.
+    /// The room's mentionable participants from its authors. `groups` holds the box of each agent in one, by its id
+    /// in lowercase.
     public static func candidates(
         authors: [(id: String, name: String, isHuman: Bool, lastActive: Date?)],
         ownHandles: Set<String>,
-        now: Date = Date()
+        now: Date = Date(),
+        groups: [String: MentionGroup] = [:]
     ) -> [MentionCandidate] {
         var byHandle: [String: MentionCandidate] = [:]
         for author in authors {
@@ -175,28 +218,46 @@ public enum MentionSuggester {
                 handle: handle,
                 displayName: author.isHuman ? author.name : author.id,
                 isHuman: author.isHuman,
-                lastActive: author.lastActive
+                lastActive: author.lastActive,
+                group: author.isHuman ? nil : groups[handle]
             )
         }
-        func group(_ candidate: MentionCandidate) -> Int {
+        func rank(_ candidate: MentionCandidate) -> Int {
             if candidate.isHuman { return 0 }
+            if candidate.group != nil { return 3 }
             if let last = candidate.lastActive, now.timeIntervalSince(last) < recentWindow { return 1 }
             return 2
         }
         return byHandle.values.sorted {
-            let left = group($0)
-            let right = group($1)
-            return left != right ? left < right : $0.handle < $1.handle
+            let left = rank($0)
+            let right = rank($1)
+            if left != right { return left < right }
+            if let a = $0.group, let b = $1.group, a.id != b.id || a.index != b.index {
+                return a.id != b.id ? a.id < b.id : a.index < b.index
+            }
+            return $0.handle < $1.handle
         }
+    }
+
+    /// The box to label over the row at `index` of `suggestions`, where a box's agents begin; nil elsewhere.
+    public static func groupStarting(at index: Int, in suggestions: [MentionCandidate]) -> MentionGroup? {
+        guard suggestions.indices.contains(index), let group = suggestions[index].group else { return nil }
+        guard index > 0, let before = suggestions[index - 1].group else { return group }
+        return before.id == group.id ? nil : group
     }
 
     public static func suggestions(for query: String, among candidates: [MentionCandidate]) -> [MentionCandidate] {
         let needle = query.lowercased()
-        var matches = candidates.filter {
-            needle.isEmpty || $0.handle.contains(needle) || $0.displayName.lowercased().contains(needle)
+        let offersAny = candidates.contains(where: \.isAny)
+        let matches = candidates.filter {
+            // "@any" has its own place; an agent whose id is "any" would read as it.
+            !$0.isAny && !(offersAny && $0.handle == MentionCandidate.anyFree.handle)
+                && (needle.isEmpty || $0.handle.contains(needle) || $0.displayName.lowercased().contains(needle))
         }
-        if needle.isEmpty || "all".hasPrefix(needle) { matches.insert(.everyone, at: 0) }
-        return Array(matches.prefix(maximumSuggestions))
+        var first: [MentionCandidate] = []
+        if needle.isEmpty || "all".hasPrefix(needle) { first.append(.everyone) }
+        if offersAny, needle.isEmpty || "any".hasPrefix(needle) { first.append(.anyFree) }
+        return Array((first + matches).prefix(maximumSuggestions))
     }
 
     /// Replaces the typed `@query` at the end of `draft` with `@handle ` (trailing space, ready to keep typing).

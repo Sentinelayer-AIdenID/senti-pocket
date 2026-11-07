@@ -73,4 +73,42 @@ final class RoomMediaPresentationTests: XCTestCase {
         XCTAssertTrue(photo.accessibilityLabel.hasPrefix("Photo, a.jpg"))
         XCTAssertFalse(RoomAttachmentChip(attachmentId: "doc-0001", filename: "a.pdf", kind: .pdf).isVisual)
     }
+
+    /// Ticket 77fcdd2b: a file in the tray opens full screen before it is sent; Remove there takes only that one out,
+    /// the others stay; once it has left the tray it closes; its row follows its upload while it is open.
+    func test_a_file_in_the_tray_opens_and_remove_there_takes_only_it_out() {
+        var asked: [RoomMediaIntent] = []
+        let board = RoomMediaBoard(perform: { asked.append($0) })
+        let photo = RoomMediaItemRow(id: "pm_1", filename: "site.jpg", kind: .image, phase: .uploading,
+                                     progress: RoomMediaProgress(), localFile: URL(fileURLWithPath: "/tmp/site.jpg"))
+        let pdf = RoomMediaItemRow(id: "pm_2", filename: "plan.pdf", kind: .file, phase: .uploading,
+                                   progress: RoomMediaProgress(), localFile: URL(fileURLWithPath: "/tmp/plan.pdf"))
+        board.setTray([photo, pdf])
+        XCTAssertNil(board.opened)
+
+        board.open("pm_2")
+        XCTAssertEqual(board.opened?.id, "pm_2")
+        XCTAssertEqual(board.opened?.localFile, URL(fileURLWithPath: "/tmp/plan.pdf"))
+        XCTAssertTrue(asked.isEmpty, "opening sends and removes nothing")
+
+        var uploaded = pdf
+        uploaded.phase = .uploaded
+        board.setTray([photo, uploaded])
+        XCTAssertEqual(board.opened?.phase, .uploaded, "the open file follows its upload")
+
+        board.removeOpened()
+        XCTAssertNil(board.opened, "Remove closes the view")
+        XCTAssertEqual(asked, [.remove(itemId: "pm_2")], "and takes only that file out")
+
+        board.open("pm_1")
+        board.closeOpened()
+        XCTAssertNil(board.opened)
+        XCTAssertEqual(asked, [.remove(itemId: "pm_2")], "Done removes nothing")
+
+        board.open("pm_1")
+        board.setTray([])
+        XCTAssertNil(board.opened, "a file that left the tray closes")
+        board.open("pm_9")
+        XCTAssertNil(board.opened, "nothing opens for a file that is not in the tray")
+    }
 }

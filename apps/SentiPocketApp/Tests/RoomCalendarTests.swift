@@ -241,10 +241,11 @@ final class RoomCalendarTests: XCTestCase {
 
     private func makeBoard(_ fake: FakeCalendar, zone: String = "America/New_York", now: String = "2026-11-04T10:00:00-05:00",
                        scope: CalendarScope = .room(sessionId: "room-1", title: "Launch planning", canAdd: true),
-                       onUnavailable: @escaping @MainActor () -> Void = {}) -> CalendarBoard {
+                       onUnavailable: @escaping @MainActor () -> Void = {},
+                       mayShareWithAI: @escaping @MainActor () async -> Bool = { true }) -> CalendarBoard {
         let instant = at(now)
         return CalendarBoard(scope: scope, client: fake, calendar: calendar(zone), now: { instant },
-                             onUnavailable: onUnavailable)
+                             onUnavailable: onUnavailable, mayShareWithAI: mayShareWithAI)
     }
 
     /// System Keychain items a test made, under a service of its own, removed after it.
@@ -313,6 +314,29 @@ final class RoomCalendarTests: XCTestCase {
 
     /// 01:00 on November 5 in Kolkata is still November 4 in UTC: the day asked for, the zone sent and the times on the
     /// form are the person's.
+    /// What is typed goes to Senti's AI to draft: asked first, and Not now drafts nothing and keeps the text.
+    func test_a_draft_waits_for_the_ai_consent_and_not_now_sends_nothing() async {
+        let fake = FakeCalendar()
+        fake.draftAnswer = .success(lunchDraft("2026-11-05T13:00:00-05:00", "2026-11-05T14:00:00-05:00"))
+        var asked = 0
+        let declined = makeBoard(fake, mayShareWithAI: {
+            asked += 1
+            return false
+        })
+        declined.addText = "Lunch with Sam at 1"
+        await declined.draft()
+        XCTAssertEqual(asked, 1, "asked before drafting")
+        XCTAssertTrue(fake.draftRequests.isEmpty, "Not now: nothing goes to the drafts route")
+        XCTAssertNil(declined.form)
+        XCTAssertEqual(declined.addText, "Lunch with Sam at 1", "and the text stays")
+        XCTAssertFalse(declined.isDrafting)
+
+        let agreed = makeBoard(fake, mayShareWithAI: { true })
+        agreed.addText = "Lunch with Sam at 1"
+        await agreed.draft()
+        XCTAssertEqual(fake.draftRequests.count, 1, "Agree: the draft is asked for")
+    }
+
     func test_the_draft_is_asked_and_shown_in_the_persons_zone() async throws {
         let fake = FakeCalendar()
         fake.draftAnswer = .success(lunchDraft("2026-11-05T13:00:00+05:30", "2026-11-05T14:00:00+05:30"))
@@ -951,6 +975,47 @@ final class RoomCalendarTests: XCTestCase {
         await center.subscribe()
         XCTAssertEqual(center.feedNotice, CalendarCenter.opened)
         XCTAssertEqual(fake.mints, 1, "the link made when it did not open is kept and opened again")
+    }
+
+    /// Follow-up to #330: at the largest text size, in an iPhone SE's width, Subscribe's question (no link kept) wraps
+    /// its whole message at the full width, and each word of its title fits on a line. As a confirmation dialog it was a
+    /// narrow popover that cut the message off and broke "subscribe" in two. (The sheet as it presents, at AX5, is the
+    /// device test `test_the_link_questions_present_as_sheets_that_show_their_whole_message_at_ax5`.)
+    func test_the_new_link_question_wraps_its_whole_message_at_the_largest_text_size() throws {
+        try assertQuestionWrapsWhole(.newLink)
+    }
+
+    /// The same for Reset's question: as a confirmation dialog, its message stopped at "from the old" on an SE at AX5.
+    func test_the_reset_question_wraps_its_whole_message_at_the_largest_text_size() throws {
+        try assertQuestionWrapsWhole(.reset)
+    }
+
+    private func assertQuestionWrapsWhole(_ kind: CalendarLinkQuestion.Kind) throws {
+        let window = try HostedSummary.host(CalendarLinkQuestion(kind: kind, onConfirm: {})
+            .environment(\.dynamicTypeSize, .accessibility5))
+        defer { HostedSummary.close(window) }
+        let id = CalendarLinkQuestion.identifier(kind)
+        let text = CalendarLinkQuestion.message(kind)
+        let message = try XCTUnwrap(HostedSummary.wait(for: "\(id).message", in: window), "the question shows its message")
+        XCTAssertEqual(message.accessibilityLabel, text)
+
+        let ax5 = UITraitCollection(preferredContentSizeCategory: .accessibilityExtraExtraExtraLarge)
+        let body = UIFont.preferredFont(forTextStyle: .body, compatibleWith: ax5)
+        let frame = message.accessibilityFrame
+        let needed = (text as NSString).boundingRect(
+            with: CGSize(width: frame.width, height: .greatestFiniteMagnitude), options: [.usesLineFragmentOrigin],
+            attributes: [.font: body], context: nil).height
+        print("CALAX5 \(id) message \(frame) needs \(needed) window \(window.bounds)")
+        XCTAssertGreaterThanOrEqual(frame.height, needed - body.lineHeight / 2, "every line of the message is drawn: none cut")
+        XCTAssertLessThanOrEqual(frame.height, window.bounds.height, "the whole message fits on an SE's screen at once")
+        XCTAssertGreaterThanOrEqual(frame.width, window.bounds.width * 0.75, "the message runs at the full width")
+
+        let title = try XCTUnwrap(HostedSummary.element("\(id).title", in: window))
+        let titleFont = UIFont.systemFont(ofSize: UIFont.preferredFont(forTextStyle: .title3, compatibleWith: ax5).pointSize,
+                                          weight: .semibold)
+        let widest = CalendarLinkQuestion.title(kind).split(separator: " ")
+            .map { (String($0) as NSString).size(withAttributes: [.font: titleFont]).width }.max() ?? 0
+        XCTAssertLessThanOrEqual(widest, title.accessibilityFrame.width, "each word of the title fits on a line")
     }
 
     // MARK: - Asking the server again (review P3, #330)

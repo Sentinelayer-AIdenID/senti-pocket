@@ -37,10 +37,13 @@ private struct StubRecognizer: SpeechRecognizer {
     let transcript: String
     let prepareFails: Bool
     let transcribeFails: Bool
-    init(transcript: String = "", prepareFails: Bool = false, transcribeFails: Bool = false) {
+    /// False plays Apple's on-device recognizer: no model file.
+    let needsModelFile: Bool
+    init(transcript: String = "", prepareFails: Bool = false, transcribeFails: Bool = false, needsModelFile: Bool = true) {
         self.transcript = transcript
         self.prepareFails = prepareFails
         self.transcribeFails = transcribeFails
+        self.needsModelFile = needsModelFile
     }
     func prepareModel(at modelURL: URL) async throws -> SpeechModelMetrics {
         if prepareFails { throw StubError() }
@@ -160,6 +163,25 @@ final class LiveDialVoiceTests: XCTestCase {
         let voice = makeVoice(modelURL: nil)
         let heard = await voice.listen()
         XCTAssertEqual(heard, "")
+    }
+
+    /// No Whisper file (every Release build): a recognizer that brings its own model still hears the reply.
+    @MainActor
+    func test_listen_without_a_model_file_uses_a_recognizer_that_needs_none() async {
+        let voice = makeVoice(recognizer: StubRecognizer(transcript: "ship it", prepareFails: true, needsModelFile: false),
+                              modelURL: nil)
+        let heard = await voice.listen()
+        XCTAssertEqual(heard, "ship it")
+    }
+
+    /// Without the file the call listens with Apple's on-device speech; with it, with Whisper.
+    func test_default_recognizer_is_apples_without_a_model_file() {
+        let fallback = LiveDialVoice.defaultRecognizer(modelURL: nil)
+        XCTAssertTrue(fallback is AppleOnDeviceSpeechRecognizer)
+        XCTAssertFalse(fallback.needsModelFile)
+        let whisper = LiveDialVoice.defaultRecognizer(modelURL: URL(fileURLWithPath: "/tmp/ggml-base.en.bin"))
+        XCTAssertTrue(whisper is WhisperCPPRecognizer)
+        XCTAssertTrue(whisper.needsModelFile)
     }
 
     @MainActor

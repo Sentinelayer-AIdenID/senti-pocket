@@ -13,8 +13,9 @@ import PocketVoice
 enum RoomPreview {
     static var isRequested: Bool {
         ProcessInfo.processInfo.arguments.contains("-PocketRoomPreview") || isTicketsRequested || isTicketLinkRequested
-            || isAnchorRequested || isSearchRequested || isProfileCardRequested || isDirectRequested
-            || isSidePanelFoldersRequested || isBurstRequested
+            || isAnchorRequested || isSearchRequested || isBlockedPeopleRequested || isProfileCardRequested
+            || isDirectRequested || isSidePanelFoldersRequested || isDialConsentRequested || isBigThreadRequested
+            || isBurstRequested
     }
 
     /// `-PocketRoomBurstPreview` opens a room of eighty earlier messages of every length at its newest, then a burst of
@@ -26,6 +27,25 @@ enum RoomPreview {
     static var isBurstRequested: Bool {
         ProcessInfo.processInfo.arguments.contains("-PocketRoomBurstPreview")
     }
+
+    /// `-PocketBigThreadPreview` gives the review message a thread of 1,000 long replies, read 100 actions a page as the
+    /// API reads them, and opens it at reply 250 as its notification does: typing in it, scrolling up and the jump to an
+    /// older reply can be tried and timed.
+    static var isBigThreadRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-PocketBigThreadPreview")
+    }
+
+    /// The reply the big thread opens at.
+    static let bigThreadFocus = RoomPreviewBigThread.id(250)
+
+    /// `-PocketDialConsentPreview` opens Blocked people as a sheet, then a dial asks its AI question: it shows over the
+    /// open sheet, as on a call.
+    static var isDialConsentRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-PocketDialConsentPreview")
+    }
+
+    /// The preview dial's asker, kept while it asks; in memory only, so it asks every launch.
+    @MainActor private static let dialAsker = AIConsentAsker(storedConsent: { AIConsent(account: nil) })
 
     /// `-PocketProfileCardPreview` opens the room with an agent's profile card over it, as a tap on its avatar does.
     static var isProfileCardRequested: Bool {
@@ -78,10 +98,53 @@ enum RoomPreview {
         ProcessInfo.processInfo.arguments.contains("-PocketRoomLeaderboardSheetPreview")
     }
 
+    /// `-PocketRoomComposerTrayPreview` starts the room's composer with a photo and a PDF in its tray, uploading (they
+    /// never finish), to open before sending.
+    static var isComposerTrayRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-PocketRoomComposerTrayPreview")
+    }
+
+    /// The composer tray preview's files: a photo and a one-page PDF, made into the outbox as a picker would copy them.
+    static func composerTraySources() -> [RoomMediaSource] {
+        var sources: [RoomMediaSource] = []
+        if let folder = try? RoomMediaFiles.newFolder() {
+            let file = folder.appendingPathComponent("original.png")
+            let png = UIGraphicsImageRenderer(size: CGSize(width: 1200, height: 900)).pngData { context in
+                UIColor.systemTeal.setFill()
+                context.fill(CGRect(x: 0, y: 0, width: 1200, height: 900))
+                UIColor.white.setFill()
+                context.fill(CGRect(x: 120, y: 360, width: 960, height: 180))
+            }
+            if (try? png.write(to: file)) != nil { sources.append(RoomMediaSource(file: file, filename: "site.png")) }
+        }
+        if let folder = try? RoomMediaFiles.newFolder() {
+            let file = folder.appendingPathComponent("original.pdf")
+            let pdf = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 612, height: 792)).pdfData { context in
+                context.beginPage()
+                ("Site plan, first floor" as NSString).draw(at: CGPoint(x: 72, y: 72), withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 24, weight: .semibold)
+                ])
+            }
+            if (try? pdf.write(to: file)) != nil { sources.append(RoomMediaSource(file: file, filename: "plan.pdf")) }
+        }
+        return sources
+    }
+
+    /// `-PocketBlockedPeoplePreview` shows Settings' Blocked people with two sample blocks.
+    static var isBlockedPeopleRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-PocketBlockedPeoplePreview")
+    }
+
     /// `-PocketRoomFilesPreview` adds two files posted as base64 parts in replies: one whose parts are all there and
     /// match its declared hash, and one with a part missing.
     static var isFilesRequested: Bool {
         ProcessInfo.processInfo.arguments.contains("-PocketRoomFilesPreview")
+    }
+
+    /// `-PocketRoomStripPreview` adds a last message with twelve photos, and one reply to it with twelve more: two strips
+    /// to drag sideways, one in a room row and one in a thread reply.
+    static var isStripRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-PocketRoomStripPreview")
     }
 
     @MainActor
@@ -103,6 +166,21 @@ enum RoomPreview {
             }
         } else if isSearchRequested {
             RoomSearchView(state: RoomPreviewSearch.sampleState) { _ in }
+        } else if isDialConsentRequested {
+            roomRoot
+                .sheet(isPresented: .constant(true)) {
+                    NavigationStack {
+                        BlockedPeopleView(blocks: sampleBlocks)
+                    }
+                    .task {
+                        try? await Task.sleep(nanoseconds: 1_500_000_000)
+                        _ = await dialAsker.allows()
+                    }
+                }
+        } else if isBlockedPeopleRequested {
+            NavigationStack {
+                BlockedPeopleView(blocks: sampleBlocks)
+            }
         } else if isSidePanelFoldersRequested {
             SidePanelFoldersPreview()
         } else if isDirectRequested {
@@ -163,6 +241,21 @@ enum RoomPreview {
     @MainActor
     private static let reader = MessageReader()
 
+    /// Kept on the phone for this run only, never synced: Block and Show can be tried, and the AI consent is asked
+    /// at each launch.
+    @MainActor
+    private static let blocks = BlockList(account: nil, store: nil, client: nil)
+    @MainActor
+    private static let aiConsent = AIConsent(account: nil)
+
+    @MainActor
+    private static var sampleBlocks: BlockList {
+        let list = BlockList(account: nil, store: nil, client: nil)
+        list.block(RoomBlockTarget(actorId: "build-agent", name: "build-agent"))
+        list.block(RoomBlockTarget(actorId: "human-sam", name: "Sam Rivera"))
+        return list
+    }
+
     @MainActor
     private static var roomRoot: some View {
         NavigationStack {
@@ -171,7 +264,8 @@ enum RoomPreview {
                     sessionId: "preview-room",
                     title: "Design review",
                     membershipRole: "owner",
-                    focusSequenceId: isAnchorRequested ? 30 : nil,
+                    focusSequenceId: isAnchorRequested ? 30 : (isBigThreadRequested ? 111 : nil),
+                    focusReplyId: isBigThreadRequested ? bigThreadFocus : nil,
                     focusTicketId: isTicketLinkRequested ? "t1" : nil
                 ),
                 transport: RoomPreviewTransport(anchorScenario: isAnchorRequested, burstScenario: isBurstRequested),
@@ -187,6 +281,8 @@ enum RoomPreview {
                 receipts: RoomPreviewReceipts(),
                 search: RoomPreviewSearch(),
                 reader: reader,
+                blocks: blocks,
+                aiConsent: aiConsent,
                 // Avatars open profile cards in the preview room too.
                 direct: (isProfileCardRequested || isDirectRequested) ? directContext : nil,
                 onReauthenticationRequired: {}
@@ -578,6 +674,24 @@ private struct RoomPreviewFiles: AttachmentFileFetching {
     }
 }
 
+/// The composer tray preview's uploads: they never finish, so its files stay in the tray to open, and nothing is sent.
+struct RoomPreviewUploader: RoomMediaUploading {
+    func initUpload(sessionId: String, request: RoomMediaInitRequest) async throws -> RoomMediaInitAnswer {
+        try await Task.sleep(nanoseconds: 3_600_000_000_000)
+        throw CancellationError()
+    }
+
+    func put(file: URL, to target: RoomMediaUploadTarget, progress: @escaping @Sendable (Int64, Int64) -> Void) async throws {}
+
+    func completeUpload(sessionId: String, attachmentId: String) async throws -> RoomMediaAttachment {
+        throw CancellationError()
+    }
+
+    func postMessage(sessionId: String, text: String, attachments: [RoomMediaAttachment], clientId: String) async throws {}
+
+    func deleteUpload(sessionId: String, attachmentId: String) async {}
+}
+
 /// Sample tickets for the Tickets tab preview.
 /// Comments on t1 and the room's people, for the preview.
 private struct RoomPreviewExtras: RoomTicketExtrasReading {
@@ -743,6 +857,13 @@ private struct RoomPreviewMint: MintStarting {
 }
 
 /// The voice room in the preview: turns and the transcript go nowhere.
+extension RoomPreviewSender: RoomReporting {
+    /// Taken after a moment, as the API would.
+    func report(sessionId: String, _ request: RoomReportRequest) async throws {
+        try? await Task.sleep(nanoseconds: 600_000_000)
+    }
+}
+
 extension RoomPreviewSender: VoiceRoomPosting {
     func postCallStarted(sessionId: String, text: String, clientId: String) async throws {}
 
@@ -775,7 +896,7 @@ private struct RoomPreviewTransport: RoomTransport {
             sequenceId: seq,
             kind: kind,
             authorId: author,
-            authorName: RoomMessage.isHumanAuthor(author) ? "Alex" : author,
+            authorName: RoomMessage.isHumanAuthor(author) ? String(author.dropFirst("human-".count)).capitalized : author,
             isHuman: RoomMessage.isHumanAuthor(author),
             text: text,
             timestamp: stamp,
@@ -795,6 +916,8 @@ private struct RoomPreviewTransport: RoomTransport {
         withFiles(row(114, "build-agent", minutesAgo: 79, "Simulator screenshots attached to https://github.com/example/app/pull/42")),
         row(116, "build-agent", minutesAgo: 78, "Repro:\n```\nxcodebuild test -scheme App -only-testing:OnboardingTests\n```"),
         row(115, "senti", minutesAgo: 70, "Onboarding review: 2 findings, 1 fixed", kind: .checkpoint),
+        // Someone else in the room, so Report and Block can be tried on a person (alex is you here).
+        row(118, "human-sam", minutesAgo: 14, "Can someone check the email step on a small phone before we ship?"),
         row(120, "human-alex", minutesAgo: 12, "Thanks. Ship the fix for finding 1 first, then the retry counter."),
         row(121, "review-agent", minutesAgo: 10, "@alex fix for finding 1 is up: validation now runs on paste and on blur. Call me at [support](tel:5551234) if you'd rather talk it through."),
         row(122, "build-agent", minutesAgo: 4, "Rebuilding with the fix now."),
@@ -884,7 +1007,8 @@ private struct RoomPreviewTransport: RoomTransport {
         if directScenario { return Self.directHistory }
         if burstScenario { return Self.burstHistory }
         let files = RoomPreview.isFilesRequested ? Self.fileRoots : []
-        return (anchorScenario ? Self.earlier + Self.history : Self.history) + files
+        let strip = RoomPreview.isStripRequested ? [Self.stripRoot] : []
+        return (anchorScenario ? Self.earlier + Self.history : Self.history) + files + strip
     }
 
     // MARK: The burst
@@ -1040,6 +1164,28 @@ private struct RoomPreviewTransport: RoomTransport {
         }
     }
 
+    /// Twelve photos, named `<prefix>-1.jpg` to `<prefix>-12.jpg`.
+    private static func photos(_ prefix: String) -> [RoomAttachment] {
+        (1...12).map {
+            RoomAttachment(attachmentId: "preview-\(prefix)-\($0)", filename: "\(prefix)-\($0).jpg", kind: .image,
+                           contentType: "image/jpeg", sizeBytes: 240_000, summaryStatus: "ready")
+        }
+    }
+
+    /// The strip preview's message: the room's last, with twelve photos.
+    private static let stripRoot: RoomMessage = {
+        let base = row(126, "review-agent", minutesAgo: 1, "Twelve photos from the site walk.")
+        return RoomMessage(id: base.id, sequenceId: base.sequenceId, kind: base.kind, authorId: base.authorId,
+                           authorName: base.authorName, isHuman: base.isHuman, text: base.text,
+                           timestamp: base.timestamp, attachments: photos("site"))
+    }()
+
+    /// Its one reply, by build-agent, with twelve more.
+    private static let stripReply = RoomReply(id: "strip-reply", targetSequenceId: 126, authorId: "build-agent",
+                                              text: "Twelve more from the other side.",
+                                              createdAt: ISO8601DateFormatter().string(from: base.addingTimeInterval(-30)),
+                                              attachments: photos("side"))
+
     /// The files' messages: each says what its replies hold.
     private static let fileRoots = [
         row(124, "review-agent", minutesAgo: 3, "The onboarding checks as CSV, in 3 parts below."),
@@ -1089,6 +1235,15 @@ private struct RoomPreviewTransport: RoomTransport {
         RoomReply(id: "r3", targetSequenceId: 111, authorId: "ticket-keeper", text: "Tickets for this message: [Ticket: Validate the email step on paste](/dashboard/sessions/preview-room?ticket=t1)", createdAt: "2026-10-28T13:28:00Z")
     ]
 
+    func roomActions(sessionId: String, targetSequenceId: Int64?, limit: Int, beforeCursor: String?) async throws
+        -> RoomActionsPage {
+        if RoomPreview.isBigThreadRequested, !directScenario, targetSequenceId == 111 {
+            return RoomPreviewBigThread.page(limit: limit, before: beforeCursor)
+        }
+        guard beforeCursor == nil else { return RoomActionsPage() }
+        return try await roomActions(sessionId: sessionId, targetSequenceId: targetSequenceId, limit: limit)
+    }
+
     func roomActions(sessionId: String, targetSequenceId: Int64?, limit: Int) async throws -> RoomActionsPage {
         if directScenario { return RoomActionsPage() }
         if burstScenario {
@@ -1097,6 +1252,7 @@ private struct RoomPreviewTransport: RoomTransport {
             return RoomActionsPage(replies: page.replies.filter { $0.targetSequenceId == targetSequenceId })
         }
         if targetSequenceId == 111 { return RoomActionsPage(replies: Self.threadReplies) }
+        if targetSequenceId == 126, RoomPreview.isStripRequested { return RoomActionsPage(replies: [Self.stripReply]) }
         let files = RoomPreview.isFilesRequested ? Self.fileParts : []
         if let targetSequenceId, targetSequenceId == 124 || targetSequenceId == 125 {
             return RoomActionsPage(replies: files.filter { $0.targetSequenceId == targetSequenceId })
@@ -1107,8 +1263,9 @@ private struct RoomPreviewTransport: RoomTransport {
                 counts: ["ack": 2, "like": 3, "reply": 2],
                 actorsByType: ["ack": ["build-agent", "human-alex"]],
                 likedByViewer: true,
-                replyTotal: 2,
-                latestReplies: Self.threadReplies,
+                replyTotal: RoomPreview.isBigThreadRequested ? RoomPreviewBigThread.count : 2,
+                latestReplies: RoomPreview.isBigThreadRequested ? Array(RoomPreviewBigThread.replies.suffix(3))
+                    : Self.threadReplies,
                 emojiReactions: [
                     RoomEmojiReaction(emoji: "🎉", count: 3, viewerReacted: true),
                     RoomEmojiReaction(emoji: "👀", count: 1, viewerReacted: false)
@@ -1122,7 +1279,10 @@ private struct RoomPreviewTransport: RoomTransport {
                 actorsByType: ["ack": ["review-agent"]],
                 activeOwners: ["review-agent"]
             )
-        ], replies: files, pinned: (RoomPreview.isLeaderboardRequested
+        ].merging(RoomPreview.isStripRequested
+                  ? [126: RoomReactionSummary(targetSequenceId: 126, counts: ["reply": 1], replyTotal: 1,
+                                              latestReplies: [Self.stripReply])]
+                  : [:]) { first, _ in first }, replies: files, pinned: (RoomPreview.isLeaderboardRequested
                     ? [RoomPinnedMessage(id: "preview-pin-board", targetSequenceId: Self.leaderboard.sequenceId,
                                          pinnedBy: "board-keeper")]
                     : []) + [
@@ -1203,6 +1363,39 @@ private struct RoomPreviewTransport: RoomTransport {
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+}
+
+/// The big-thread preview's replies: 1,000 long ones on the review message, read back a page at a time.
+enum RoomPreviewBigThread {
+    static let count = 1_000
+
+    static func id(_ index: Int) -> String { String(format: "00000000-0000-4000-9000-%012ld", index) }
+
+    static let replies: [RoomReply] = {
+        let formatter = ISO8601DateFormatter()
+        let start = Date().addingTimeInterval(-Double(count + 60) * 60)
+        let authors = ["review-agent", "build-agent", "human-alex", "ticket-keeper"]
+        return (1...count).map { index in
+            RoomReply(id: id(index), targetSequenceId: 111, authorId: authors[index % authors.count], text: text(index),
+                      createdAt: formatter.string(from: start.addingTimeInterval(Double(index) * 60)))
+        }
+    }()
+
+    private static func text(_ index: Int) -> String {
+        "Reply \(index) of \(count). Checked the **email step** again on this pass.\n\n"
+            + "- `retryCount` keeps its value after a failed submit\n"
+            + "- paste runs the same validation as typing\n\n"
+            + "Next: the onboarding copy, step \(index % 12 + 1). Notes in `OnboardingForm.swift`."
+    }
+
+    /// The `limit` actions before `before` (a reply's number, as the cursor), newest first as the API reads them.
+    static func page(limit: Int, before: String?) -> RoomActionsPage {
+        let end = before.flatMap { Int($0) } ?? count + 1
+        let start = max(1, end - max(1, limit))
+        guard start < end else { return RoomActionsPage() }
+        return RoomActionsPage(replies: Array(replies[(start - 1)..<(end - 1)]),
+                               nextCursor: start > 1 ? String(start) : nil)
     }
 }
 #endif
