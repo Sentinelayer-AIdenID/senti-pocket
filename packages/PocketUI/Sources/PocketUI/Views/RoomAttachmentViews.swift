@@ -62,6 +62,17 @@ struct RoomAttachmentsView: View {
     /// Your own message's files line up on the right, with its bubble.
     var alignment: HorizontalAlignment = .leading
     let send: (RoomChatIntent) -> Void
+    /// The strips and photos in view (`RoomStripSight`).
+    @State private var sight = RoomStripSight()
+
+    // Written out: the private state would make the memberwise one private to this file.
+    init(chips: [RoomAttachmentChip], previews: [String: Data], alignment: HorizontalAlignment = .leading,
+         send: @escaping (RoomChatIntent) -> Void) {
+        self.chips = chips
+        self.previews = previews
+        self.alignment = alignment
+        self.send = send
+    }
 
     var body: some View {
         VStack(alignment: alignment, spacing: 6) {
@@ -98,6 +109,40 @@ struct RoomAttachmentsView: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("pocket.room.attachment.strip")
         .roomRowSideScroll()
+        // In the room's list: a photo in sight in a strip below the screen is not in view.
+        .roomSeen { seen in stripSeen(photos, seen) }
+    }
+
+    /// A photo of a strip came into view in the strip, or left it. Where the room's list holds every row at once (iOS 18
+    /// and later), its preview is asked for once the strip is in view in the room too: a photo in sight in its own
+    /// sideways scroll says nothing of the room's. Before, appearing is in view, as it always was.
+    private func photoSeen(_ chip: RoomAttachmentChip, in photos: [RoomAttachmentChip], _ seen: Bool) {
+        if #available(iOS 18.0, macOS 15.0, *) {
+            if seen {
+                sight.photos.insert(chip.attachmentId)
+            } else {
+                sight.photos.remove(chip.attachmentId)
+            }
+            if seen, let strip = photos.first?.attachmentId, sight.strips.contains(strip) {
+                send(.attachmentAppeared(attachmentId: chip.attachmentId))
+            }
+        } else if seen {
+            send(.attachmentAppeared(attachmentId: chip.attachmentId))
+        }
+    }
+
+    /// A strip came into view in the room, or left it: its photos already in sight in it ask for their previews.
+    private func stripSeen(_ photos: [RoomAttachmentChip], _ seen: Bool) {
+        guard #available(iOS 18.0, macOS 15.0, *) else { return }
+        guard let strip = photos.first?.attachmentId else { return }
+        guard seen else {
+            sight.strips.remove(strip)
+            return
+        }
+        sight.strips.insert(strip)
+        for chip in photos where sight.photos.contains(chip.attachmentId) {
+            send(.attachmentAppeared(attachmentId: chip.attachmentId))
+        }
     }
 
     /// The strip in a sideways scroll, on a lazy stack: only the photos in sight are built.
@@ -120,7 +165,7 @@ struct RoomAttachmentsView: View {
                 thumbnail(chip, side: side)
             }
             .buttonStyle(.plain)
-            .onAppear { send(.attachmentAppeared(attachmentId: chip.attachmentId)) }
+            .roomSeen { seen in photoSeen(chip, in: photos, seen) }
             .accessibilityLabel(RoomAttachmentLayoutItem.stripLabel(chip, index: index, count: photos.count))
             .accessibilityHint(chip.accessibilityHint)
             .accessibilityIdentifier("pocket.room.attachment.strip.photo")
@@ -168,7 +213,8 @@ struct RoomAttachmentsView: View {
                 visual(chip)
             }
             .buttonStyle(.plain)
-            .onAppear { send(.attachmentAppeared(attachmentId: chip.attachmentId)) }
+            // Its preview is asked for once it is in view, never because its row was built (`RoomSeen`).
+            .roomSeen { seen in if seen { send(.attachmentAppeared(attachmentId: chip.attachmentId)) } }
             .accessibilityLabel(chip.accessibilityLabel)
             .accessibilityHint(chip.accessibilityHint)
             .accessibilityIdentifier(chip.kind == .video ? "pocket.room.attachment.video" : "pocket.room.attachment")
@@ -294,5 +340,12 @@ struct RoomAttachmentsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(PocketPalette.inset, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
+}
+
+/// The strips of a message in view in the room, and their photos in view in their strips, by attachment (a strip by its
+/// first photo). A reference, so a photo coming into view or leaving it never draws the message again.
+final class RoomStripSight {
+    var strips: Set<String> = []
+    var photos: Set<String> = []
 }
 #endif
