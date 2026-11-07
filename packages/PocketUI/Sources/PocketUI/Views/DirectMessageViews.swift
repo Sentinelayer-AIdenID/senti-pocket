@@ -441,33 +441,56 @@ public struct RoomFolderMenuItems: View {
     }
 
     public var body: some View {
-        Button {
-            send(.pickFolder(roomId: roomId, folderId: filedIn))
-        } label: {
-            Label("Move to folder…", systemImage: "folder")
+        ForEach(ChatRowMenuItem.ordered(foldersAvailable: true, filedInFolder: filedIn != nil, lifecycle: nil), id: \.self) { choice in
+            item(choice)
         }
-        if let filedIn {
-            Button {
-                send(.unfile(roomId: roomId, folderId: filedIn))
-            } label: {
-                Label("Remove from folder", systemImage: "folder.badge.minus")
+    }
+
+    @ViewBuilder
+    func item(_ choice: ChatRowMenuItem) -> some View {
+        switch choice {
+        case .moveToFolder:
+            Button { send(.pickFolder(roomId: roomId, folderId: filedIn)) } label: {
+                Label("Move to folder…", systemImage: "folder")
             }
+        case .removeFromFolder:
+            if let filedIn {
+                Button { send(.unfile(roomId: roomId, folderId: filedIn)) } label: {
+                    Label("Remove from folder", systemImage: "folder.badge.minus")
+                }
+            }
+        default: EmptyView()
         }
     }
 }
 
-/// A room's long press with its folder choices, only where folders are on (`send` not nil): with them off the room has
-/// no long-press menu at all, as before.
+/// The same long-press menu in both chat lists: folder choices first, then an allowed lifecycle action. With folders
+/// off, an owner can still end a chat. Choosing the red item only asks for confirmation.
 struct RoomFolderContextMenu: ViewModifier {
     let roomId: String
     let filedIn: String?
     let send: ((RoomFolderIntent) -> Void)?
+    @Environment(\.chatRowLifecycle) private var lifecycle
 
     @ViewBuilder
     func body(content: Content) -> some View {
-        if let send {
+        let action = lifecycle?.action(for: roomId)
+        let items = ChatRowMenuItem.ordered(foldersAvailable: send != nil, filedInFolder: filedIn != nil, lifecycle: action)
+        if !items.isEmpty {
             content.contextMenu {
-                RoomFolderMenuItems(roomId: roomId, filedIn: filedIn, send: send)
+                ForEach(items, id: \.self) { choice in
+                    switch choice {
+                    case .moveToFolder, .removeFromFolder:
+                        if let send { RoomFolderMenuItems(roomId: roomId, filedIn: filedIn, send: send).item(choice) }
+                    case .divider: Divider()
+                    case .archiveChat, .endChat, .leaveChat:
+                        if let requested = choice.lifecycleAction {
+                            Button(role: .destructive) { lifecycle?.ask(for: roomId, action: requested) } label: {
+                                Label(requested.label, systemImage: requested.symbolName)
+                            }
+                        }
+                    }
+                }
             }
         } else {
             content
