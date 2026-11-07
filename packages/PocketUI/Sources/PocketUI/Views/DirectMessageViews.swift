@@ -60,13 +60,24 @@ public struct RoomProfileCardView: View {
     /// See all, where the server counted more rooms than the card lists.
     private let onSeeAllRooms: (() -> Void)?
     private let onClose: () -> Void
+    /// An agent's lab, for its logo after its name, as its name shows it in the room (`AgentLab.badge`); nil for a
+    /// person or a lab not known.
+    private let lab: AgentLab?
+    /// The model the agent's posts declare (`RoomMemberMessagesState.model`); nil when none did.
+    private let model: String?
 
     /// The most shared rooms listed by name; the rest are counted.
     static let roomsShown = RoomProfileCardState.roomsShown
 
-    public init(state: RoomProfileCardState, onMessage: @escaping () -> Void, onBlock: (() -> Void)? = nil,
-                onSeeAllRooms: (() -> Void)? = nil, onClose: @escaping () -> Void) {
+    /// The lab's logo on the card, larger than after a name in the room.
+    static let labMarkSize: CGFloat = 24
+
+    public init(state: RoomProfileCardState, lab: AgentLab? = nil, model: String? = nil,
+                onMessage: @escaping () -> Void, onBlock: (() -> Void)? = nil, onSeeAllRooms: (() -> Void)? = nil,
+                onClose: @escaping () -> Void) {
         self.state = state
+        self.lab = lab
+        self.model = model
         self.onMessage = onMessage
         self.onBlock = onBlock
         self.onSeeAllRooms = onSeeAllRooms
@@ -79,23 +90,52 @@ public struct RoomProfileCardView: View {
                              canMessage: false).sharedRoomLines
     }
 
+    /// The lab's logo and the declared model show on an agent's card only.
+    private var shownLab: AgentLab? { state.target.isAgent ? lab : nil }
+    private var shownModel: String? { state.target.isAgent ? model : nil }
+
+    /// What VoiceOver reads for the name: "forge, Claude agent" where the logo shows.
+    private var spokenName: String {
+        shownLab.map { AgentLab.spokenName(state.target.name, lab: $0) } ?? state.target.name
+    }
+
     public var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 14) {
                 RoomAvatar(name: state.target.name, isHuman: !state.target.isAgent, size: 56)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(state.target.name)
-                        .font(.title3.bold())
-                        .foregroundStyle(PocketPalette.textPrimary)
-                        .lineLimit(2)
-                        .accessibilityIdentifier("pocket.profile.name")
-                    Text(state.target.isAgent ? "Agent" : "Person")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(PocketPalette.textSecondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(PocketPalette.inset, in: Capsule())
-                        .accessibilityIdentifier("pocket.profile.kind")
+                    // An agent's lab logo after its name, as in the room, larger; read with the name, as one.
+                    HStack(spacing: 8) {
+                        Text(state.target.name)
+                            .font(.title3.bold())
+                            .foregroundStyle(PocketPalette.textPrimary)
+                            .lineLimit(2)
+                        if let lab = shownLab {
+                            AgentLabMark(lab: lab, size: Self.labMarkSize)
+                        }
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(spokenName)
+                    .accessibilityIdentifier("pocket.profile.name")
+                    HStack(spacing: 8) {
+                        Text(state.target.isAgent ? "Agent" : "Person")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(PocketPalette.textSecondary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(PocketPalette.inset, in: Capsule())
+                            .accessibilityIdentifier("pocket.profile.kind")
+                        // The model its posts declare, as they wrote it; nothing when none did.
+                        if let model = shownModel {
+                            Text(model)
+                                .font(.footnote)
+                                .foregroundStyle(PocketPalette.textSecondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .accessibilityLabel("Model \(model)")
+                                .accessibilityIdentifier("pocket.profile.model")
+                        }
+                    }
                 }
                 Spacer(minLength: 0)
                 Button(action: onClose) {

@@ -822,6 +822,9 @@ struct RoomChatScreen: View {
                 sharedRooms: sharedRooms,
                 messages: authorMessages,
                 box: box,
+                // The card's lab logo reads what the agent's name in the room reads.
+                reportedLab: target.isAgent ? coordinator.state.presence?.people
+                    .first(where: { $0.id.lowercased() == target.senderId.lowercased() })?.lab : nil,
                 // Someone you blocked: their messages are not listed.
                 isBlocked: blocked,
                 // Block as from a message, with the one the card hands over (the newest of theirs), never by their id

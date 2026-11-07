@@ -73,6 +73,9 @@ public struct RoomChatView: View {
 
     /// Everyone who came to the room, for its people list.
     private let roster: RoomRoster
+    /// What the room knows of its agents' labs, for the badge after an agent's name: made once here, from who is here
+    /// and the roster, so each row looks its author up instead of scanning the room.
+    private let authorLabs: AgentLab.Known
 
     /// Photos, videos and files on their way, where the room can take them: the composer's paperclip and tray, and the
     /// messages being sent. Read by those parts alone, so an upload never redraws the room.
@@ -90,6 +93,7 @@ public struct RoomChatView: View {
         self.readingAloudId = readingAloudId
         self.composerActions = composerActions
         self.roster = roster
+        self.authorLabs = AgentLab.Known(people: state.presence?.people ?? [], boxModels: roster.modelsById)
         self.media = media
         self.send = send
     }
@@ -602,6 +606,7 @@ public struct RoomChatView: View {
             row: message,
             ownHandles: state.ownMentionHandles,
             isHighlighted: highlightedRowId == RoomChatRow.message(message).id,
+            authorLab: authorLab(message),
             canReact: state.canReact,
             canAddEmoji: state.canAddEmoji,
             canReply: state.composer.canPost,
@@ -653,6 +658,13 @@ public struct RoomChatView: View {
         .equatable()
         .onAppear { send(.messageOnScreen(id: message.id, isOnScreen: true)) }
         .onDisappear { send(.messageOnScreen(id: message.id, isOnScreen: false)) }
+    }
+
+    /// The lab badge after an agent's name (ticket 00bcfcef): the lab the server reports for it while it is here, else
+    /// the model this post declared, else its box's model; never guessed from its name. Nil for a person or a lab not
+    /// known.
+    private func authorLab(_ message: RoomChatMessageRow) -> AgentLab? {
+        authorLabs.badge(authorId: message.authorId, isHuman: message.isHuman, declared: message.model)
     }
 
     /// Below a window further back: the next newer page loads when this comes into view (its identity follows the
@@ -996,6 +1008,8 @@ private struct RoomMessageRowView: View {
     let row: RoomChatMessageRow
     let ownHandles: Set<String>
     let isHighlighted: Bool
+    /// The author's lab, for the badge after an agent's name: nil for a person or a lab not known.
+    var authorLab: AgentLab?
     var canReact = false
     /// The emoji picker is offered.
     var canAddEmoji = false
@@ -1601,24 +1615,7 @@ private struct RoomMessageRowView: View {
     }
 
     private var authorLine: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            // The name opens their profile and messages, as the avatar does.
-            RoomProfileName(senderId: row.authorId, name: row.authorName, isHuman: row.isHuman) {
-                Text(row.authorName)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(row.isHuman ? PocketPalette.accentStrong : PocketPalette.textPrimary)
-                    .lineLimit(1)
-            }
-            if let date = row.date {
-                Text(date, style: .time)
-                    .font(.caption)
-                    .foregroundStyle(PocketPalette.textSecondary)
-            }
-            if let views = row.views {
-                RoomReadTicks(views: views)
-            }
-            Spacer(minLength: 0)
-        }
+        RoomAuthorLine(row: row, lab: authorLab)
     }
 
     /// Copy, listen, like, dislike and more, as the assistant apps put under an answer: the row's own options, so a
@@ -1701,6 +1698,37 @@ private struct RoomMessageRowView: View {
                 Label(option.title, systemImage: option.symbol)
             }
             .disabled(!option.isEnabled)
+        }
+    }
+}
+
+/// The line over the first message of someone's run: their name, which opens their profile as their avatar does, an
+/// agent's lab badge after it (ticket 00bcfcef), the time and the read ticks.
+struct RoomAuthorLine: View {
+    let row: RoomChatMessageRow
+    /// The author's lab, for the badge after the name: nil for a person or a lab not known (`AgentLab.badge`).
+    var lab: AgentLab?
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            // The name opens their profile and messages, as the avatar does.
+            RoomProfileName(senderId: row.authorId, name: row.authorName, isHuman: row.isHuman) {
+                Text(row.authorName)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(row.isHuman ? PocketPalette.accentStrong : PocketPalette.textPrimary)
+                    .lineLimit(1)
+                    // Never on a person's name, whatever is passed.
+                    .modifier(AgentNameBadge(lab: row.isHuman ? nil : lab, name: row.authorName))
+            }
+            if let date = row.date {
+                Text(date, style: .time)
+                    .font(.caption)
+                    .foregroundStyle(PocketPalette.textSecondary)
+            }
+            if let views = row.views {
+                RoomReadTicks(views: views)
+            }
+            Spacer(minLength: 0)
         }
     }
 }
@@ -4408,7 +4436,7 @@ extension RoomMessageRowView: Equatable {
             && lhs.isReadingAloud == rhs.isReadingAloud && lhs.isExpanded == rhs.isExpanded
             && lhs.threadSummary == rhs.threadSummary && lhs.isReadingSummary == rhs.isReadingSummary
             && lhs.isMinimized == rhs.isMinimized && lhs.canReport == rhs.canReport && lhs.canBlock == rhs.canBlock
-            && lhs.asksAIConsent == rhs.asksAIConsent
+            && lhs.asksAIConsent == rhs.asksAIConsent && lhs.authorLab == rhs.authorLab
     }
 
     /// The previews of this row's own attachments: another row's preview arriving leaves it as it is.

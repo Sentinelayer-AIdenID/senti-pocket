@@ -49,6 +49,39 @@ final class RoomEventsTests: XCTestCase {
         XCTAssertEqual(projected?.kind, .message)
     }
 
+    /// Ticket 00bcfcef: the model an author declared, from the event's author record (`agent.model`), else the row's
+    /// own `agentModel`; as written, trimmed; nothing when neither says one.
+    func test_projection_reads_the_declared_model_from_the_author_record() {
+        let declared = RoomMessage(json: json("""
+        {"id":"e1","event":"session_message","sequenceId":10,"agent":{"id":"pocket-forge","model":" claude-opus-5-5 "},
+         "agentId":"pocket-forge","agentModel":"gpt-6","payload":{"message":"hi","model":"payload-model"}}
+        """))
+        XCTAssertEqual(declared?.model, "claude-opus-5-5", "the author record's, trimmed, over the column and payload")
+
+        let column = RoomMessage(json: json("""
+        {"id":"e2","event":"session_message","sequenceId":11,"agent":{"id":"pocket-forge","model":""},
+         "agentId":"pocket-forge","agentModel":"deepseek-v4-pro","payload":{"message":"hi"}}
+        """))
+        XCTAssertEqual(column?.model, "deepseek-v4-pro", "a blank record falls back to the row's column")
+
+        let standIn = RoomMessage(json: json("""
+        {"id":"e3","event":"session_message","sequenceId":12,"agent":{"id":"human-griff","model":"human"},
+         "payload":{"message":"hi"}}
+        """))
+        XCTAssertEqual(standIn?.model, "human", "kept as written: what shows it decides")
+
+        let none = RoomMessage(json: json("""
+        {"id":"e4","event":"session_message","sequenceId":13,"agentId":"pocket-forge",
+         "payload":{"message":"hi","model":"payload-model"}}
+        """))
+        XCTAssertNotNil(none)
+        XCTAssertNil(none?.model, "no author record and no column: none, and never the payload's")
+        XCTAssertNil(RoomMessage(json: json("""
+        {"id":"e5","event":"session_message","sequenceId":14,"agent":{"id":"x","model":"   "},"agentModel":"  ",
+         "payload":{"message":"hi"}}
+        """))?.model, "blank everywhere: none")
+    }
+
     func test_human_rows_use_display_name_or_strip_the_prefix() {
         let named = RoomMessage(json: json("""
         {"id":"e2","event":"session_message","sequenceId":5,"agent":{"id":"human-mrrcarter","displayName":"mrrCarter"},

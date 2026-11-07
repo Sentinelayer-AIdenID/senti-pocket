@@ -24,6 +24,83 @@ final class AgentLabTests: XCTestCase {
         XCTAssertNil(AgentLab.other.initial, "an unknown lab shows a chip, not a letter")
     }
 
+    /// Ticket 00bcfcef: the badge after an agent's name comes from what is known of its model, in order: the lab the
+    /// server reports, the model its post declared, its box's model. A person never gets one, and neither does an agent
+    /// whose lab is not known.
+    func test_a_badge_comes_from_the_reported_lab_then_the_posts_model_then_the_boxs_model() {
+        XCTAssertEqual(AgentLab.badge(isHuman: false, reported: "anthropic", declared: nil, boxModel: nil), .anthropic,
+                       "the lab the server reports")
+        XCTAssertEqual(AgentLab.badge(isHuman: false, reported: "deepseek", declared: "claude-opus-5-5",
+                                      boxModel: "gpt-5"), .deepseek, "the reported lab first")
+        XCTAssertEqual(AgentLab.badge(isHuman: false, reported: nil, declared: "claude-opus-5-5", boxModel: "gpt-5"),
+                       .anthropic, "then the post's own model")
+        XCTAssertEqual(AgentLab.badge(isHuman: false, reported: "other", declared: nil, boxModel: "deepseek-v4-pro"),
+                       .deepseek, "then its box's model")
+        XCTAssertEqual(AgentLab.badge(isHuman: false, reported: nil, declared: "agent", boxModel: "gpt-5"), .openai,
+                       "a stand-in model declares nothing: on to the box's")
+        XCTAssertEqual(AgentLab.badge(isHuman: false, reported: nil, declared: "grok-4", boxModel: nil), .xai,
+                       "a known lab with no logo carried still gets its badge (its initial)")
+        for standIn in ["agent", "human", "mcp", "MCP", "", "  "] {
+            XCTAssertNil(AgentLab.badge(isHuman: false, reported: nil, declared: standIn, boxModel: nil),
+                         "'\(standIn)'")
+        }
+        XCTAssertNil(AgentLab.badge(isHuman: false, reported: "other", declared: "sol-6.1", boxModel: nil),
+                     "a model of a lab the app does not know")
+        XCTAssertNil(AgentLab.badge(isHuman: true, reported: "anthropic", declared: "claude-opus-5-5",
+                                    boxModel: "gpt-5"), "a person, whatever is said")
+        XCTAssertEqual(AgentLab.spokenName("forge", lab: .anthropic), "forge, Claude agent")
+        XCTAssertEqual(AgentLab.spokenName("ds-box-1", lab: .deepseek), "ds-box-1, DeepSeek agent")
+    }
+
+    /// An agent known only by its id gets no badge, even one whose id the who-is-here row reads a lab from: a badge
+    /// says which model an agent runs, so it is never guessed.
+    func test_an_agent_known_only_by_its_id_gets_no_badge() {
+        let room = AgentLab.Known()
+        for id in ["gemini-reviewer", "ds-box-1", "astra-council", "kimi-max", "gpt-helper"] {
+            XCTAssertNotEqual(AgentLab.of(id: id, model: nil), .other,
+                              "\(id): the who-is-here row still reads its name")
+            XCTAssertNil(room.badge(authorId: id, isHuman: false, declared: nil), "\(id): its name gets no badge")
+        }
+    }
+
+    /// What the room knows, looked up by id in any case: the reported lab of an agent here and a running box's model,
+    /// with the post's own model between them.
+    func test_the_rooms_labs_are_looked_up_by_id() {
+        let room = AgentLab.Known(
+            people: [RoomChatPresence.Person(id: "Build-Agent", name: "build-agent", isHuman: false, isIdle: false,
+                                             lab: "anthropic"),
+                     RoomChatPresence.Person(id: "human-alex", name: "alex", isHuman: true, isIdle: false,
+                                             lab: "openai")],
+            boxModels: ["lab-box-1": "deepseek-v4-pro"]
+        )
+        XCTAssertEqual(room.badge(authorId: "build-agent", isHuman: false, declared: nil), .anthropic, "any case")
+        XCTAssertEqual(room.badge(authorId: "build-agent", isHuman: false, declared: "gpt-5"), .anthropic,
+                       "the reported lab before the post's model")
+        XCTAssertEqual(room.badge(authorId: "LAB-BOX-1", isHuman: false, declared: nil), .deepseek,
+                       "a running box's model")
+        XCTAssertEqual(room.badge(authorId: "lab-box-1", isHuman: false, declared: "gpt-5"), .openai,
+                       "the post's own model before its box's")
+        XCTAssertEqual(room.badge(authorId: "review-agent", isHuman: false, declared: "kimi-k3"), .moonshot,
+                       "the post's own model")
+        XCTAssertNil(room.badge(authorId: "review-agent", isHuman: false, declared: nil), "nothing known: none")
+        XCTAssertNil(room.badge(authorId: "human-alex", isHuman: true, declared: "gpt-5"), "a person, whatever is said")
+    }
+
+    /// The model a post declared reaches its row, which reads its badge from it.
+    func test_a_rows_model_is_the_one_its_post_declared() {
+        var input = RoomChatMessageInput(id: "m1", sequenceId: 1, kind: .message, authorId: "review-agent",
+                                         authorName: "review-agent", isHuman: false, text: "Reviewed.", timestamp: "")
+        input.model = "claude-opus-5-5"
+        let state = RoomChatPresentationState(sessionId: "room", title: "Room", messages: [input])
+        let rows = state.rows.compactMap { row -> RoomChatMessageRow? in
+            if case .message(let message) = row { return message }
+            return nil
+        }
+        XCTAssertEqual(rows.map(\.model), ["claude-opus-5-5"])
+        XCTAssertEqual(AgentLab.Known().badge(authorId: rows[0].authorId, isHuman: rows[0].isHuman,
+                                              declared: rows[0].model), .anthropic)
+    }
+
     /// Warden, #254: the match was on any substring.
     func test_a_lab_is_matched_on_whole_words_with_a_version_after_never_inside_a_word() {
         XCTAssertEqual(AgentLab.of(id: "octopus-helper", model: nil), .other, "opus inside octopus")

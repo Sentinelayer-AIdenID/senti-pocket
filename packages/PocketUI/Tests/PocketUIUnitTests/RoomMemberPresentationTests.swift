@@ -112,4 +112,40 @@ final class RoomMemberPresentationTests: XCTestCase {
         XCTAssertNil(RoomMemberMessagesState(rows: rows, isBlocked: true).blockReference)
         XCTAssertEqual(named, [900])
     }
+
+    /// Ticket 00bcfcef: an agent's card shows the model its newest post that declared one declared, as written.
+    func test_the_card_shows_the_model_of_the_newest_post_that_declared_one() {
+        func row(_ sequence: Int64, _ model: String?) -> RoomMemberMessageRow {
+            RoomMemberMessageRow(sequenceId: sequence, text: "post \(sequence)", date: nil, model: model)
+        }
+        // Out of order on purpose: the newest is found by its sequence.
+        let rows = [row(700, "gpt-6-astra"), row(950, nil), row(900, " claude-opus-5-5 "), row(800, "deepseek-v4-pro")]
+        XCTAssertEqual(RoomMemberMessagesState(rows: rows).model, "claude-opus-5-5",
+                       "the newest that declared one, trimmed")
+        XCTAssertEqual(RoomMemberMessagesState(rows: [row(1, "Claude-Opus-5-5")]).model, "Claude-Opus-5-5",
+                       "as written")
+    }
+
+    /// The stand-ins a post writes for no model never show, in any case, and blank ones neither.
+    func test_the_card_hides_a_stand_in_model() {
+        func row(_ sequence: Int64, _ model: String?) -> RoomMemberMessageRow {
+            RoomMemberMessageRow(sequenceId: sequence, text: "post \(sequence)", date: nil, model: model)
+        }
+        for standIn in ["mcp", "agent", "human", "MCP", "Agent", "HUMAN", " agent ", "", "   ", "\n"] {
+            XCTAssertNil(RoomMemberMessagesState.shownModel(standIn), "'\(standIn)'")
+            XCTAssertNil(RoomMemberMessagesState(rows: [row(5, standIn)]).model, "'\(standIn)'")
+        }
+        let rows = [row(900, "agent"), row(850, "MCP"), row(800, "kimi-k3"), row(700, "human")]
+        XCTAssertEqual(RoomMemberMessagesState(rows: rows).model, "kimi-k3", "past newer stand-ins to a real one")
+        XCTAssertEqual(RoomMemberMessagesState.shownModel("agent-x1"), "agent-x1", "only the whole word is a stand-in")
+    }
+
+    /// No post declared a model: nothing is shown, never a guess.
+    func test_the_card_invents_no_model() {
+        XCTAssertNil(RoomMemberMessagesState().model, "no posts")
+        let rows = [RoomMemberMessageRow(sequenceId: 2, text: "a", date: nil),
+                    RoomMemberMessageRow(sequenceId: 1, text: "b", date: nil, model: "agent")]
+        XCTAssertNil(RoomMemberMessagesState(rows: rows).model, "posts with no model or a stand-in")
+        XCTAssertNil(RoomMemberMessagesState.shownModel(nil))
+    }
 }

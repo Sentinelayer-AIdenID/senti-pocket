@@ -49,6 +49,8 @@ public struct RoomChatMessageInput: Equatable, Sendable {
     public let ownTaps: RoomOwnTaps
     /// Who picked up an @any in it, or that nobody was free (`RoomAddressedLine`).
     public var addressedLine: String?
+    /// The model its author declared when posting (`RoomMessage.model`), for the lab badge after an agent's name.
+    public var model: String?
 
     public init(
         id: String,
@@ -365,6 +367,8 @@ public struct RoomChatMessageRow: Equatable, Identifiable, Sendable {
     public var wasYours = false
     /// Who picked up an @any in it, or that nobody was free (`RoomAddressedLine`).
     public var addressedLine: String?
+    /// The model its author declared when posting, for the lab badge after an agent's name (`AgentLab.badge`).
+    public var model: String?
 }
 
 public enum RoomChatRow: Equatable, Identifiable, Sendable {
@@ -994,7 +998,8 @@ public struct RoomChatPresentationState: Equatable, Sendable {
                         ?? RoomBlocking.revealKey(message: input.id)),
                 isReportable: input.isReportable,
                 wasYours: formerIds.contains(input.authorId.lowercased()),
-                addressedLine: input.addressedLine
+                addressedLine: input.addressedLine,
+                model: input.model
             )))
             if input.kind == .message, let date = input.date {
                 run = (input.authorId, date)

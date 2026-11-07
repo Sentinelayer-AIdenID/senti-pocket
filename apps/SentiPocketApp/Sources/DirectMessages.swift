@@ -258,6 +258,8 @@ struct RoomProfileSheet: View {
     let onClose: () -> Void
     /// The rooms you share, from the server; nil keeps the room you are in.
     let sharedRoomsReader: (any SharedRoomsReading)?
+    /// The lab the server reports for an agent here, for the logo on its card, as after its name in the room.
+    let reportedLab: String?
     @StateObject private var model: RoomProfileModel
     @StateObject private var messages: RoomMemberMessagesModel
     @State private var showsAllRooms = false
@@ -265,6 +267,7 @@ struct RoomProfileSheet: View {
     init(target: RoomProfileTarget, roomId: String, sharedRoom: String?, canMessage: Bool, context: RoomDirectContext?,
          sharedRooms sharedRoomsReader: (any SharedRoomsReading)? = nil,
          messages reader: (any RoomAuthorMessagesReading)? = nil, box: FlightRecordState.Box? = nil,
+         reportedLab: String? = nil,
          isBlocked: Bool = false, onBlock: ((Int64) -> Void)? = nil, onOpenMessage: @escaping (Int64) -> Void = { _ in },
          onOpenFlight: (() -> Void)? = nil, onReauthenticationRequired: @escaping @MainActor () -> Void = {},
          onClose: @escaping () -> Void) {
@@ -272,6 +275,7 @@ struct RoomProfileSheet: View {
         self.context = context
         self.onBlock = onBlock
         self.box = box
+        self.reportedLab = reportedLab
         self.onOpenMessage = onOpenMessage
         self.onOpenFlight = onOpenFlight
         self.onClose = onClose
@@ -291,6 +295,9 @@ struct RoomProfileSheet: View {
             card: model.state,
             messages: messages.state,
             box: box,
+            // A box's model, from the Flight record while it runs.
+            boxModel: box?.model,
+            reportedLab: reportedLab,
             onMessage: {
                 guard let context else { return }
                 Task {

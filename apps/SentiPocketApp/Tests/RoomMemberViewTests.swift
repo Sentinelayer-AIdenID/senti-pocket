@@ -50,10 +50,11 @@ private final class WholeRoomTransport: RoomTransport, @unchecked Sendable {
 
 @MainActor
 final class RoomMemberViewTests: XCTestCase {
-    private func message(_ seq: Int64, author: String = "agent-a1", text: String? = nil) -> RoomMessage {
+    private func message(_ seq: Int64, author: String = "agent-a1", text: String? = nil,
+                         model: String? = nil) -> RoomMessage {
         RoomMessage(id: "evt-\(seq)", sequenceId: seq, kind: .message, authorId: author, authorName: author,
                     isHuman: RoomMessage.isHumanAuthor(author), text: text ?? "message \(seq)",
-                    timestamp: "2026-11-04T10:00:00.000000+00:00")
+                    timestamp: "2026-11-04T10:00:00.000000+00:00", model: model)
     }
 
     private func page(_ seqs: [Int64], next: Int64?, connection: RoomAuthorConnection? = nil) -> RoomAuthorPage {
@@ -139,6 +140,29 @@ final class RoomMemberViewTests: XCTestCase {
         XCTAssertTrue(model.state.listedRows.isEmpty)
         XCTAssertEqual(model.state.emptyLine(name: "pat"), "You blocked them.")
         XCTAssertNil(model.state.blockReference, "and Block is not offered again")
+    }
+
+    /// Ticket 00bcfcef: the card shows the model the agent's newest post that declared one declared, across pages; a
+    /// stand-in ("agent", "mcp") never shows, and with no model declared none is shown.
+    func test_the_card_shows_the_model_of_the_newest_post_that_declared_one() async {
+        let reader = ScriptedAuthorPages([
+            RoomAuthorPage(messages: [message(300, model: "agent"), message(280, model: "MCP")],
+                           nextBeforeSequence: 280),
+            RoomAuthorPage(messages: [message(260, model: "claude-opus-5-5"), message(240, model: "gpt-6")],
+                           nextBeforeSequence: nil)
+        ])
+        let model = RoomMemberMessagesModel(sessionId: "room_1", authorId: "agent-a1", reader: reader)
+        await model.loadMore()
+        XCTAssertEqual(model.state.rows.map(\.model), ["agent", "MCP"], "each post's model, as the API gave it")
+        XCTAssertNil(model.state.model, "only stand-ins so far: nothing shown")
+        await model.loadMore()
+        XCTAssertEqual(model.state.model, "claude-opus-5-5", "the newest post that declared one")
+
+        let silent = RoomMemberMessagesModel(sessionId: "room_1", authorId: "agent-a1",
+                                             reader: ScriptedAuthorPages([page([50, 40], next: nil)]))
+        await silent.loadMore()
+        XCTAssertEqual(silent.state.rows.count, 2)
+        XCTAssertNil(silent.state.model, "no post declared a model: none is invented")
     }
 
     /// Ticket f7254a3b: the API's "mcp" covers hosted MCP and the CLI's own MCP server alike, so the newest post's own

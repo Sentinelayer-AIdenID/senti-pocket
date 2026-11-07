@@ -51,6 +51,10 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
     public let authorBox: RoomAgentBox?
     /// How the post says it was sent (`RoomPostClient`): a display hint, never authority.
     public let sentThrough: RoomPostClient?
+    /// The model its author declared when posting, as the server stored it (`agent.model`, else the row's
+    /// `agentModel`), trimmed. Nil when it gave none. The server writes stand-ins for none ("agent", "human"), which
+    /// are kept here as written; what shows them decides.
+    public let model: String?
 
     public init(
         id: String,
@@ -72,7 +76,8 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         checkpointSummary: String? = nil,
         addressed: RoomAddressed? = nil,
         authorBox: RoomAgentBox? = nil,
-        sentThrough: RoomPostClient? = nil
+        sentThrough: RoomPostClient? = nil,
+        model: String? = nil
     ) {
         self.id = id
         self.sequenceId = sequenceId
@@ -94,6 +99,7 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         self.addressed = addressed
         self.authorBox = authorBox
         self.sentThrough = sentThrough
+        self.model = model
     }
 
     /// Projects one wire event. Returns nil for events a room does not display (control, presence, edit
@@ -180,6 +186,9 @@ public struct RoomMessage: Equatable, Identifiable, Sendable {
         self.addressed = kind == .message ? RoomAddressed(in: payload) : nil
         self.authorBox = RoomAgentBox.author(of: json)
         self.sentThrough = RoomPostClient(event: json)
+        // The author record's model (sentinelayer-api `_event_from_db_row`), else the row's own column.
+        self.model = [agent["model"]?.stringValue, json["agentModel"]?.stringValue]
+            .lazy.compactMap { $0?.trimmed }.first { !$0.isEmpty }
     }
 
     /// The message as it reads now, from a `session_message_edited` envelope (`session-message-edit:v1`). The

@@ -182,6 +182,24 @@ final class RoomChatCoordinatorTests: XCTestCase {
         coordinator.pause()
     }
 
+    /// Ticket 00bcfcef: the model a post declared reaches its row, for the lab badge after its author's name; a post
+    /// that declared none brings none.
+    func test_a_posts_declared_model_reaches_its_row() async {
+        let declared = RoomMessage(id: "evt-1", sequenceId: 1, kind: .message, authorId: "review-agent",
+                                   authorName: "review-agent", isHuman: false, text: "Reviewed.",
+                                   timestamp: "2026-10-28T18:00:00.000000+00:00", model: "claude-opus-5-5")
+        let transport = ScriptedRoomTransport(before: [.success(RoomEventPage(messages: [declared, message(2)]))])
+        let coordinator = makeCoordinator(transport)
+        coordinator.resume()
+        await waitUntil("rows shown") { messageSequences(coordinator) == [1, 2] }
+        let models = coordinator.state.rows.compactMap { row -> String?? in
+            if case .message(let message) = row { return .some(message.model) }
+            return nil
+        }
+        XCTAssertEqual(models, ["claude-opus-5-5", nil])
+        coordinator.pause()
+    }
+
     func test_stream_rows_arrive_live_and_composing_clears_when_that_agent_posts() async {
         let transport = ScriptedRoomTransport(
             before: [.success(page([1]))],
