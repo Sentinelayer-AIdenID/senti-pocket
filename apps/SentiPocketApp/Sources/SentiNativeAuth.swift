@@ -338,10 +338,12 @@ final class SentiNativeAuth: NSObject {
     // MARK: Apple's sheet
 
     #if canImport(AuthenticationServices)
-    private func appleCredential(nonceDigest: String) async throws -> ASAuthorizationAppleIDCredential {
-        let request = ASAuthorizationAppleIDProvider().createRequest()
-        request.requestedScopes = []
-        request.nonce = nonceDigest
+    /// The native proof sheet is shared with explicit identity linking. It does not install a Senti session;
+    /// only `finishAppleSignIn` does that for the separate login flow.
+    func appleCredential(nonceDigest: String, state: String? = nil) async throws -> ASAuthorizationAppleIDCredential {
+        try Task.checkCancellation()
+        guard appleContinuation == nil else { throw NativeAuthError.appleUnavailable }
+        let request = Self.appleRequest(nonceDigest: nonceDigest, state: state)
         let controller = ASAuthorizationController(authorizationRequests: [request])
         controller.delegate = self
         controller.presentationContextProvider = self
@@ -355,6 +357,14 @@ final class SentiNativeAuth: NSObject {
             // Cancel on the sign-in screen closes Apple's sheet; its delegate call then ends the wait.
             Task { @MainActor in self.appleController?.cancel() }
         }
+    }
+
+    static func appleRequest(nonceDigest: String, state: String? = nil) -> ASAuthorizationAppleIDRequest {
+        let request = ASAuthorizationAppleIDProvider().createRequest()
+        request.requestedScopes = []
+        request.nonce = nonceDigest
+        request.state = state
+        return request
     }
 
     private func finishApple(_ result: Result<ASAuthorizationAppleIDCredential, Error>) {
