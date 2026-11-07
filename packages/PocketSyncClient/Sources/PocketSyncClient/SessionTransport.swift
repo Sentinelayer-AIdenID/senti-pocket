@@ -271,20 +271,24 @@ public final class HTTPSessionTransport: SessionTransport, @unchecked Sendable {
         return (request, token)
     }
 
-    /// Module-internal entry to the shared authorized GET, for room reads defined in other files.
+    /// Module-internal entry to the shared authorized GET, for room reads defined in other files. `notFound`: a 404
+    /// with the API's own `code` for a thing gone inside a room this account reads (the API reads the room's access
+    /// first) throws its `error`; any other 404 keeps the membership boundary.
     func getDecodable<Response: Decodable>(
         _ responseType: Response.Type,
         path: [String],
-        query: [URLQueryItem]
+        query: [URLQueryItem],
+        notFound: (code: String, error: any Error)? = nil
     ) async throws -> Response {
-        try await get(responseType, path: path, query: query)
+        try await get(responseType, path: path, query: query, notFound: notFound)
     }
 
     private func get<Response: Decodable>(
         _ responseType: Response.Type,
         path: [String],
         query: [URLQueryItem],
-        hideNotFound: Bool = true
+        hideNotFound: Bool = true,
+        notFound: (code: String, error: any Error)? = nil
     ) async throws -> Response {
         let (request, token) = try authorizedRequest(path: path, query: query)
 
@@ -310,6 +314,7 @@ public final class HTTPSessionTransport: SessionTransport, @unchecked Sendable {
         guard let http = response as? HTTPURLResponse else {
             throw SessionTransportError.invalidResponse
         }
+        if http.statusCode == 404, let notFound, Self.errorCode(in: data) == notFound.code { throw notFound.error }
         switch http.statusCode {
         case 200..<300:
             break
@@ -387,6 +392,14 @@ public final class HTTPSessionTransport: SessionTransport, @unchecked Sendable {
             return nil
         }
         return url
+    }
+
+    /// The API's error code (`{"error": {"code": ...}}`, or under FastAPI's `detail`), or nil.
+    static func errorCode(in data: Data) -> String? {
+        guard let json = try? JSONDecoder().decode(JSONValue.self, from: data) else { return nil }
+        return json["error"]?["code"]?.stringValue
+            ?? json["detail"]?["error"]?["code"]?.stringValue
+            ?? json["detail"]?["code"]?.stringValue
     }
 
     static func requireIdentifier(_ value: String) throws {

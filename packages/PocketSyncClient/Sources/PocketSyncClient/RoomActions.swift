@@ -301,6 +301,13 @@ public struct RoomActionsPage: Decodable, Equatable, Sendable {
     public let nextCursor: String?
     /// Older actions than this page's are there (`auditWindow.hasMore`): the API reads newest first.
     public var hasMore: Bool { nextCursor != nil }
+    /// What reads the page newer than this one (`afterCursor`, sent back as `afterCursor`): a read around a reply, and
+    /// the pages read on from it, give one; nil when the page reaches the thread's newest action, and on other reads.
+    public let afterCursor: String?
+    /// The reply a read around a reply (`aroundActionId`, sentinelayer-api #1199) is around: the one asked for, or the
+    /// reply a collapsed one resolved to. Nil on any other read, and from an API without that read, which answers it
+    /// with the thread's newest page.
+    public let anchoredActionId: String?
 
     public init(
         byTarget: [Int64: RoomReactionSummary] = [:],
@@ -310,7 +317,9 @@ public struct RoomActionsPage: Decodable, Equatable, Sendable {
         pinned: [RoomPinnedMessage] = [],
         pinLimit: Int = 10,
         replyAttachments: RoomReplyAttachmentSupport = .unknown,
-        nextCursor: String? = nil
+        nextCursor: String? = nil,
+        afterCursor: String? = nil,
+        anchoredActionId: String? = nil
     ) {
         self.byTarget = byTarget
         self.replies = replies
@@ -320,9 +329,16 @@ public struct RoomActionsPage: Decodable, Equatable, Sendable {
         self.pinLimit = pinLimit
         self.replyAttachments = replyAttachments
         self.nextCursor = nextCursor
+        self.afterCursor = afterCursor
+        self.anchoredActionId = anchoredActionId
     }
 
-    enum CodingKeys: String, CodingKey { case actions, projection, auditWindow }
+    enum CodingKeys: String, CodingKey { case actions, projection, auditWindow, afterCursor, anchoredActionId }
+
+    /// A cursor as the API writes one (1 to 512 bytes), or nil: a cursor that could not be one is never sent back.
+    static func cursor(_ value: String?) -> String? {
+        value.flatMap { (1...512).contains($0.utf8.count) ? $0 : nil }
+    }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -353,9 +369,23 @@ public struct RoomActionsPage: Decodable, Equatable, Sendable {
         // Older pages, as the API reads them: newest first by (created_at, id), the next older through the cursor. A
         // cursor that could not be one is no cursor: the thread is then as far back as it goes.
         let window = (try? container.decode(JSONValue.self, forKey: .auditWindow)) ?? .null
-        let cursor = window["nextCursor"]?.stringValue.flatMap { (1...512).contains($0.utf8.count) ? $0 : nil }
+        let cursor = Self.cursor(window["nextCursor"]?.stringValue)
         self.nextCursor = window["hasMore"]?.boolValue == true ? cursor : nil
+        // A read around a reply (and the pages read on from it): the newer side's cursor, and the reply it is around.
+        self.afterCursor = Self.cursor(try? container.decodeIfPresent(String.self, forKey: .afterCursor))
+        self.anchoredActionId = (try? container.decodeIfPresent(String.self, forKey: .anchoredActionId))
+            .flatMap { (1...128).contains($0.utf8.count) ? $0 : nil }
     }
+}
+
+/// The API's answer to a read around a reply that is not in the thread: missing, deleted, in another room or thread,
+/// or a collapsed reply that resolves nowhere are one answer (404 `ACTION_NOT_FOUND`). The API reads the room's access
+/// first, so this is never a room this account cannot read: that 404 keeps the membership boundary (`accessDenied`).
+public struct RoomActionNotFound: Error, Equatable, Sendable {
+    public init() {}
+
+    /// The API's code for it.
+    static let code = "ACTION_NOT_FOUND"
 }
 
 extension HTTPSessionTransport {
@@ -389,6 +419,57 @@ extension HTTPSessionTransport {
                 URLQueryItem(name: "limit", value: String(limit)),
                 beforeCursor.map { URLQueryItem(name: "beforeCursor", value: $0) }
             ].compactMap { $0 }
+        )
+    }
+
+    /// One thread opened at one of its replies, in ONE read however far back the reply is (`aroundActionId`,
+    /// sentinelayer-api #1199): up to `limit` actions around it, newest first, with the reply it is around
+    /// (`anchoredActionId`) and a cursor each way. No cursor goes with it. A reply not in the thread throws
+    /// `RoomActionNotFound`. An API without this read answers it with the thread's newest page.
+    public func roomActions(
+        sessionId: String,
+        targetSequenceId: Int64,
+        limit: Int,
+        aroundActionId: String
+    ) async throws -> RoomActionsPage {
+        try Self.requireIdentifier(sessionId)
+        try Self.requireLimit(limit, allowed: 1...500)
+        // A reply's id is a UUID: anything else could not be one, and is never sent.
+        guard targetSequenceId >= 1, UUID(uuidString: aroundActionId) != nil else {
+            throw SessionTransportError.invalidRequest
+        }
+        return try await getDecodable(
+            RoomActionsPage.self,
+            path: ["api", "v1", "sessions", sessionId, "actions"],
+            query: [
+                URLQueryItem(name: "targetSequenceId", value: String(targetSequenceId)),
+                URLQueryItem(name: "limit", value: String(limit)),
+                URLQueryItem(name: "aroundActionId", value: aroundActionId)
+            ],
+            notFound: (code: RoomActionNotFound.code, error: RoomActionNotFound())
+        )
+    }
+
+    /// The page newer than `afterCursor` (a read around a reply's, or a page's read on from it), newest first.
+    public func roomActions(
+        sessionId: String,
+        targetSequenceId: Int64,
+        limit: Int,
+        afterCursor: String
+    ) async throws -> RoomActionsPage {
+        try Self.requireIdentifier(sessionId)
+        try Self.requireLimit(limit, allowed: 1...500)
+        guard targetSequenceId >= 1, RoomActionsPage.cursor(afterCursor) != nil else {
+            throw SessionTransportError.invalidRequest
+        }
+        return try await getDecodable(
+            RoomActionsPage.self,
+            path: ["api", "v1", "sessions", sessionId, "actions"],
+            query: [
+                URLQueryItem(name: "targetSequenceId", value: String(targetSequenceId)),
+                URLQueryItem(name: "limit", value: String(limit)),
+                URLQueryItem(name: "afterCursor", value: afterCursor)
+            ]
         )
     }
 }
