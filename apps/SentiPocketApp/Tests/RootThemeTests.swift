@@ -5,18 +5,22 @@ import SwiftUI
 import XCTest
 @testable import SentiPocketApp
 
-/// The theme draws the root only when it really changes (ticket cfb0383e, #382). As `@AppStorage("pocket.theme")` it
-/// drew the root again on any UserDefaults change notice while the key was unset: UIKit posts one when a class first
-/// registers its defaults (the first TextKit 2 text view laid out in the process does), so a test that measured the
-/// root failed only when it happened to lay out the process's first text view. These tests post such a notice
-/// themselves, so they fail on that root whatever ran before them.
+/// The root draws again only when what it shows really changes (ticket cfb0383e, #382). Its two stored keys, the
+/// theme and the last room, were `@AppStorage`: while unset, each drew the root again on any UserDefaults change notice,
+/// and UIKit posts one when a class first registers its defaults (the first TextKit 2 text view laid out in the process
+/// does), so a test that measured the root failed only when it happened to lay out the process's first text view. These
+/// tests post such a notice themselves, so they fail on that root whatever ran before them.
+@MainActor
 final class RootThemeTests: XCTestCase {
     private var window: UIWindow?
-    private var savedTheme: Any?
+    /// The root's two stored keys, as they were before each test (each test unsets or writes them).
+    private var saved: [String: Any] = [:]
+    private static let rootKeys = [PocketThemeStore.key, AuthenticatedRootView.lastRoomKey]
 
     override func setUp() {
         super.setUp()
-        savedTheme = UserDefaults.standard.object(forKey: PocketThemeStore.key)
+        saved = [:]
+        for key in Self.rootKeys { saved[key] = UserDefaults.standard.object(forKey: key) }
         // Unset, as on a phone that never picked one: the case the root redrew in.
         UserDefaults.standard.removeObject(forKey: PocketThemeStore.key)
     }
@@ -26,29 +30,40 @@ final class RootThemeTests: XCTestCase {
         window?.isHidden = true
         window = nil
         pump(0.4)
-        if let savedTheme {
-            UserDefaults.standard.set(savedTheme, forKey: PocketThemeStore.key)
-        } else {
-            UserDefaults.standard.removeObject(forKey: PocketThemeStore.key)
+        for key in Self.rootKeys {
+            if let value = saved[key] {
+                UserDefaults.standard.set(value, forKey: key)
+            } else {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
         }
         super.tearDown()
     }
 
-    func test_a_defaults_notice_that_changes_no_theme_draws_no_root() throws {
+    func test_a_defaults_notice_that_changes_nothing_draws_no_root() throws {
         let window = try showRoot()
+        // Both of the root's stored keys unset, as on a first launch: the room reopened at launch was named by the last
+        // room, which is now forgotten too. The root is let settle again before measuring.
+        UserDefaults.standard.removeObject(forKey: AuthenticatedRootView.lastRoomKey)
+        settleRootBodies()
+        XCTAssertNil(UserDefaults.standard.object(forKey: PocketThemeStore.key), "the theme is unset")
+        XCTAssertNil(UserDefaults.standard.object(forKey: AuthenticatedRootView.lastRoomKey), "the last room is unset")
         let meter = RootPreview.meter
         let rootBodies = meter.rootBodies
         let screens = meter.roomScreens
 
-        // What UIKit does the first time a TextKit 2 text view lays out, and another key written: neither is the theme.
+        // What UIKit does the first time a TextKit 2 text view lays out, and another key written: neither key is
+        // the root's.
         UserDefaults.standard.register(defaults: ["pocket.test.registered.\(UUID().uuidString)": true])
         pump(1)
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "pocket.test.unrelated")
         pump(1)
 
-        XCTAssertEqual(meter.rootBodies - rootBodies, 0, "a defaults notice that changes no theme draws no root")
+        XCTAssertEqual(meter.rootBodies - rootBodies, 0, "a defaults notice that changes nothing draws no root")
         XCTAssertEqual(meter.roomScreens - screens, 0, "and makes no new room screen")
         XCTAssertNil(UserDefaults.standard.object(forKey: PocketThemeStore.key), "no theme was written")
+        XCTAssertNil(UserDefaults.standard.object(forKey: AuthenticatedRootView.lastRoomKey),
+                     "no last room was written")
         _ = window
         UserDefaults.standard.removeObject(forKey: "pocket.test.unrelated")
     }
@@ -61,7 +76,8 @@ final class RootThemeTests: XCTestCase {
         RootPreview.requestTheme(.dark)
         pump(1)
         XCTAssertEqual(meter.rootBodies - rootBodies, 1, "a pick draws the root once")
-        XCTAssertEqual(UserDefaults.standard.string(forKey: PocketThemeStore.key), "dark", "the pick is written to UserDefaults")
+        XCTAssertEqual(UserDefaults.standard.string(forKey: PocketThemeStore.key), "dark",
+                       "the pick is written to UserDefaults")
         XCTAssertEqual(style(of: window), .dark, "and the app is dark")
 
         rootBodies = meter.rootBodies
@@ -135,6 +151,12 @@ final class RootThemeTests: XCTestCase {
         let end = Date().addingTimeInterval(30)
         while Date() < end, !firstReads.allSatisfy({ api.callCount($0) > 0 }) { pump(0.1) }
         XCTAssertTrue(firstReads.allSatisfy { api.callCount($0) > 0 }, "the root's first reads")
+        settleRootBodies()
+        return window
+    }
+
+    /// Runs the main run loop until the root has not run its body for a second (at most 15 s).
+    private func settleRootBodies() {
         let quietEnd = Date().addingTimeInterval(15)
         var last = RootPreview.meter.rootBodies
         var quietSince = Date()
@@ -145,7 +167,6 @@ final class RootThemeTests: XCTestCase {
                 quietSince = Date()
             }
         }
-        return window
     }
 
     private func style(of window: UIWindow) -> UIUserInterfaceStyle {

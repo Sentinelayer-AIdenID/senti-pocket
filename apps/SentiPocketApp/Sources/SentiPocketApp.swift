@@ -462,8 +462,19 @@ struct AuthenticatedRootView: View {
     @State private var accountName: String?
     /// A room being opened from its id while the server says what it is; any other open replaces it.
     @State private var pendingOpen: UUID?
-    /// The room opened last, reopened when the app starts (as the big assistant apps reopen your last chat).
-    @AppStorage("pocket.lastRoomId") private var lastRoomId = ""
+    /// The room opened last, reopened when the app starts (as the big assistant apps reopen your last chat). Read and
+    /// written where it is needed, never watched: nothing the root draws depends on it, and as `@AppStorage` it drew the
+    /// root again on a UserDefaults notice that changed nothing while it was unset, as on a first launch (ticket
+    /// cfb0383e; the theme likewise, `PocketThemeStore`).
+    private var lastRoomId: String {
+        get { UserDefaults.standard.string(forKey: Self.lastRoomKey) ?? "" }
+        nonmutating set {
+            if UserDefaults.standard.string(forKey: Self.lastRoomKey) != newValue {
+                UserDefaults.standard.set(newValue, forKey: Self.lastRoomKey)
+            }
+        }
+    }
+    static let lastRoomKey = "pocket.lastRoomId"
     @State private var restoredLastRoom = false
     /// The theme, published only when it really changes: as `@AppStorage` it drew the root again on any UserDefaults
     /// notice, a class registering its defaults included (`PocketThemeStore`, ticket cfb0383e).
