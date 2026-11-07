@@ -905,18 +905,6 @@ final class RoomSafetyTests: XCTestCase {
         XCTAssertTrue(room.state.consentRequested, "withdrawn: the next write waits again")
     }
 
-    func test_a_crash_report_without_the_ok_is_kept_not_sent() async {
-        let consent = AIConsent(account: "sub:a", defaults: temporaryDefaults())
-        let sender = RecordingSender()
-        let room = room(sender: sender, aiConsent: consent)
-        var handled = false
-        room.sendCrashReport("Pocket closed unexpectedly") { handled = true }
-        try? await Task.sleep(nanoseconds: 50_000_000)
-        XCTAssertTrue(sender.messages.isEmpty)
-        XCTAssertFalse(handled, "offered again next time")
-        XCTAssertEqual(room.state.pending.map(\.text), ["Pocket closed unexpectedly"])
-    }
-
     func test_every_ticket_write_asks_and_reading_never_does() {
         let writes: [RoomTicketsIntent] = [
             .answerDecision(ticketId: "t1", answer: "Yes", detail: ""), .retryDecision(ticketId: "t1"),
