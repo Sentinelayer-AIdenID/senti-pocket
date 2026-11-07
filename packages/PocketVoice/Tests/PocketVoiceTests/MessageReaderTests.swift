@@ -265,3 +265,38 @@ final class MessageReaderTests: XCTestCase {
         XCTAssertNil(VoicePicker.voice(for: "ja", phoneLanguageTag: "en-US", from: options))
     }
 }
+
+/// Ticket 76eeb1bb: the phone's voice list is read once a launch, on its own queue, never on the thread that asks (Read
+/// aloud asked on the main thread, at every Listen). Until that read is done, asking gives no voices at once.
+final class VoiceCatalogTests: XCTestCase {
+    private final class Reads: @unchecked Sendable {
+        private let lock = NSLock()
+        private var all: [Bool] = []
+        func add(onMain: Bool) { lock.lock(); all.append(onMain); lock.unlock() }
+        var count: Int { lock.lock(); defer { lock.unlock() }; return all.count }
+        var onMain: Int { lock.lock(); defer { lock.unlock() }; return all.filter { $0 }.count }
+    }
+
+    func test_the_voice_list_is_read_once_a_launch_on_its_own_queue_never_by_the_asker() {
+        let reads = Reads()
+        let queue = DispatchQueue(label: "test.voices")
+        let catalog = VoiceCatalog(load: {
+            reads.add(onMain: Thread.isMainThread)
+            return [VoiceOption(identifier: "v1", language: "en-US", quality: .premium)]
+        }, queue: queue)
+        // The read is held back: asking gives no voices at once, and reads nothing itself.
+        queue.suspend()
+        XCTAssertEqual(catalog.voices(), [], "asked before the read is done: none, at once")
+        catalog.prepare()
+        XCTAssertEqual(catalog.voices(), [])
+        XCTAssertEqual(reads.count, 0, "nothing read by the asker")
+        queue.resume()
+        queue.sync {}
+        XCTAssertEqual(catalog.voices().map(\.identifier), ["v1"], "the list once it is read")
+        catalog.prepare()
+        _ = catalog.voices()
+        queue.sync {}
+        XCTAssertEqual(reads.count, 1, "read once a launch")
+        XCTAssertEqual(reads.onMain, 0, "never on the main thread")
+    }
+}

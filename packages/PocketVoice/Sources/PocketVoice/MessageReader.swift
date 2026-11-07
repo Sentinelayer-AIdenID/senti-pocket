@@ -80,10 +80,12 @@ public final class MessageReader: ObservableObject {
         self.init(
             engine: AVMessageSpeechEngine(),
             sessions: .shared,
-            voices: VoiceOption.installed,
+            voices: { VoiceCatalog.shared.voices() },
             phoneLanguageTag: { Locale.preferredLanguages.first ?? Locale.current.identifier }
         )
         observeAudioSession()
+        // The voice list is read now, in the background, so the first Listen finds it ready.
+        VoiceCatalog.shared.prepare()
     }
 
     init(
@@ -341,6 +343,48 @@ struct VoiceOption: Equatable, Sendable {
                 isLanguageDefault: defaults.contains(voice.identifier)
             )
         }
+    }
+}
+
+/// The phone's voices, read once a launch and never on the main thread: the system's list can take a long moment to
+/// read, and Read aloud asked for it at every Listen, on the main thread. Until the first read is done, the voices are
+/// none, and a reading uses the system's voice for its language.
+final class VoiceCatalog: @unchecked Sendable {
+    static let shared = VoiceCatalog(load: VoiceOption.installed)
+
+    private let load: @Sendable () -> [VoiceOption]
+    private let queue: DispatchQueue
+    private let lock = NSLock()
+    private var loaded: [VoiceOption]?
+    private var started = false
+
+    init(load: @escaping @Sendable () -> [VoiceOption],
+         queue: DispatchQueue = DispatchQueue(label: "pocket.voices", qos: .utility)) {
+        self.load = load
+        self.queue = queue
+    }
+
+    /// Starts the one read of the list, on its own queue.
+    func prepare() {
+        lock.lock()
+        let starts = !started
+        started = true
+        lock.unlock()
+        guard starts else { return }
+        queue.async { [self] in
+            let voices = load()
+            lock.lock()
+            loaded = voices
+            lock.unlock()
+        }
+    }
+
+    /// The voices read, or none while the read goes on (which this starts, if nothing has). Never reads them here.
+    func voices() -> [VoiceOption] {
+        prepare()
+        lock.lock()
+        defer { lock.unlock() }
+        return loaded ?? []
     }
 }
 
