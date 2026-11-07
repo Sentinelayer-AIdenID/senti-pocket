@@ -92,6 +92,7 @@ final class QuestionCallPreferences: ObservableObject {
     @Published private(set) var enabled = false
     @Published private(set) var loaded = false
     @Published private(set) var working = false
+    @Published private(set) var unavailable = false
     @Published private(set) var notice: String?
     private let api: any QuestionCallPreferencesAPI
 
@@ -104,10 +105,17 @@ final class QuestionCallPreferences: ObservableObject {
         do {
             enabled = try await api.preference()
             loaded = true
+            unavailable = false
+            notice = nil
+        } catch RoomCallsClient.Failure.refused(404) {
+            enabled = false
+            loaded = false
+            unavailable = true
             notice = nil
         } catch {
             loaded = false
             enabled = false
+            unavailable = false
             notice = "Call preferences could not be read. Try again."
         }
     }
@@ -120,8 +128,10 @@ final class QuestionCallPreferences: ObservableObject {
             enabled = try await api.savePreference(value)
             notice = nil
         } catch RoomCallsClient.Failure.refused(404) {
+            enabled = false
             loaded = false
-            notice = "Question calls are not available yet."
+            unavailable = true
+            notice = nil
         } catch {
             // A lost response can hide a successful write. Read the server before offering another change.
             loaded = false
@@ -130,24 +140,33 @@ final class QuestionCallPreferences: ObservableObject {
     }
 }
 
+@MainActor
 struct QuestionCallSettingsSection: View {
-    @StateObject private var preferences = QuestionCallPreferences()
+    @StateObject private var preferences: QuestionCallPreferences
+
+    init(preferences: QuestionCallPreferences? = nil) {
+        _preferences = StateObject(wrappedValue: preferences ?? QuestionCallPreferences())
+    }
 
     var body: some View {
-        Section {
-            Toggle("Call me about unanswered questions", isOn: Binding(
-                get: { preferences.enabled }, set: { value in Task { await preferences.save(value) } }
-            ))
-            .disabled(!preferences.loaded || preferences.working)
-            .accessibilityIdentifier("settings.questionCalls.enabled")
-            if !preferences.loaded, !preferences.working {
-                Button("Read call preferences") { Task { await preferences.load() } }
+        Group {
+            if !preferences.unavailable {
+                Section {
+                    Toggle("Call me about unanswered questions", isOn: Binding(
+                        get: { preferences.enabled }, set: { value in Task { await preferences.save(value) } }
+                    ))
+                    .disabled(!preferences.loaded || preferences.working)
+                    .accessibilityIdentifier("settings.questionCalls.enabled")
+                    if !preferences.loaded, !preferences.working {
+                        Button("Read call preferences") { Task { await preferences.load() } }
+                    }
+                    if preferences.working { ProgressView() }
+                } header: {
+                    Text("Question calls")
+                } footer: {
+                    Text(preferences.notice ?? "Off until you enable it. Your agents can call once after a question waits 30 minutes, at most once every 30 minutes across your rooms. Your quiet hours apply.")
+                }
             }
-            if preferences.working { ProgressView() }
-        } header: {
-            Text("Question calls")
-        } footer: {
-            Text(preferences.notice ?? "Off until you enable it. Your agents can call once after a question waits 30 minutes, at most once every 30 minutes across your rooms. Your quiet hours apply.")
         }
         .task { await preferences.load() }
     }

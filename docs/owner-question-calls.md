@@ -1,7 +1,7 @@
 # Owner question calls (SPEC G)
 
 API dependency: [sentinelayer-api #1201](https://github.com/Sentinelayer-AIdenID/sentinelayer-api/pull/1201).
-The API PR precedes this phone change. **Merge and migration 184 remain held until after HN.**
+API availability and migration 184 precede activation. **API merge and migration 184 remain subject to the post-HN hold and Warden's explicit migration-queue signal.**
 
 Source: [Main room](https://sentinelayer.com/dashboard/sessions/e9e8dc5e-8d57-4603-975f-09156e3b4473),
 original SPEC G at sequence 62879, repeated at 62888; Warden safeguard approval
@@ -46,9 +46,11 @@ An in-flight write can still reach the server after hang-up; the original thread
 
 ## Owner setting and authority
 
-Signed-in Settings includes **Call me about unanswered questions**, backed only by
+When the server makes the feature available, signed-in Settings includes **Call me about unanswered questions**, backed only by
 `GET/PUT /api/v1/me/question-call-preferences`. It starts false and cannot be changed until the server has been
-read. It makes no optimistic success claim after an uncertain save. Each call/settings client is bound to its
+read. A 404 from either read or write hides the entire section, including its explanation and retry button;
+the API returns this before reading question tables when its global feature flag is off. Loading and other
+failures retain the disabled setting and an explicit read retry. It makes no optimistic success claim after an uncertain save. Each call/settings client is bound to its
 starting credential; sign-out/account changes refuse retained writes and late responses. Protected reads use an
 ephemeral URL session with no cache, cookies or credential storage.
 
@@ -65,7 +67,9 @@ refusal; numbered/ambiguous speech; spoken question and choices; actual answer a
 lost-response retry; cancellation during reads/writes; mute; and denied/conflicting answers.
 `QuestionCallsClientTests` exercises real URLSession requests with a hermetic URLProtocol: endpoint/body/bearer
 binding, receipts, default-off preference, account switches before/during a request, invalid inputs and uncertain
-preference saves. Existing ordinary-call tests still run in the hosted app suite.
+preference saves. The flag-off follow-up (ticket 39ed6ca1) adds held-loading, enabled, non-404 retry, read/write 404,
+recovery and hosted accessibility proof that the entire unavailable section disappears. These tests require the
+new head's hosted native receipt before TestFlight. Existing ordinary-call tests still run in the hosted app suite.
 
 The Linux authoring workspace has no Swift/Xcode. Source release preflight and Swift syntax parsing run locally;
 the existing macOS `Hosted app build and tests` workflow is required for the app's real compile and XCTest proof.

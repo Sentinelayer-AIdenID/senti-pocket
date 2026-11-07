@@ -1,5 +1,7 @@
 import Foundation
 import PocketContracts
+import SwiftUI
+import UIKit
 import XCTest
 @testable import SentiPocketApp
 
@@ -41,7 +43,14 @@ private actor QuestionPreferencesStub: QuestionCallPreferencesAPI {
     var value = false
     var writes: [Bool] = []
     var failure: RoomCallsClient.Failure?
-    func preference() async throws -> Bool { value }
+    var readFailure: RoomCallsClient.Failure?
+    var holdRead = false
+    private var readWaiter: CheckedContinuation<Void, Never>?
+    func preference() async throws -> Bool {
+        if holdRead { await withCheckedContinuation { readWaiter = $0 } }
+        if let readFailure { throw readFailure }
+        return value
+    }
     func savePreference(_ enabled: Bool) async throws -> Bool {
         writes.append(enabled)
         if let failure { throw failure }
@@ -49,6 +58,14 @@ private actor QuestionPreferencesStub: QuestionCallPreferencesAPI {
         return value
     }
     func fail(_ failure: RoomCallsClient.Failure) { self.failure = failure }
+    func failRead(_ failure: RoomCallsClient.Failure?) { self.readFailure = failure }
+    func holdNextRead(value: Bool = false) { holdRead = true; self.value = value }
+    func isReadHeld() -> Bool { readWaiter != nil }
+    func releaseRead() {
+        holdRead = false
+        readWaiter?.resume()
+        readWaiter = nil
+    }
 }
 
 @MainActor
@@ -223,5 +240,128 @@ final class QuestionCallsClientTests: XCTestCase {
         XCTAssertEqual(writes, [true, false], "an uncertain write cannot be repeated by toggling")
         await preferences.load()
         XCTAssertTrue(preferences.enabled)
+    }
+
+    func test_flag_off_read_hides_the_setting_and_refuses_writes() async {
+        let client = makeClient { _ in (404, Data()) }
+        let preferences = QuestionCallPreferences(api: client)
+        await preferences.load()
+        XCTAssertTrue(preferences.unavailable)
+        XCTAssertFalse(preferences.loaded)
+        XCTAssertFalse(preferences.enabled)
+        XCTAssertNil(preferences.notice)
+        await preferences.save(true)
+        XCTAssertEqual(QuestionHTTPStub.sent.map(\.httpMethod), ["GET"])
+    }
+
+    func test_loading_remains_visible_and_cannot_write_until_enabled_read_is_confirmed() async {
+        let api = QuestionPreferencesStub()
+        await api.holdNextRead(value: true)
+        let preferences = QuestionCallPreferences(api: api)
+        let load = Task { await preferences.load() }
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if await api.isReadHeld() { break }
+            await Task.yield()
+        }
+        let held = await api.isReadHeld()
+        XCTAssertTrue(held)
+        XCTAssertTrue(preferences.working)
+        XCTAssertFalse(preferences.loaded)
+        XCTAssertFalse(preferences.enabled)
+        XCTAssertFalse(preferences.unavailable)
+        await preferences.save(true)
+        let writes = await api.writes
+        XCTAssertTrue(writes.isEmpty)
+        await api.releaseRead()
+        await load.value
+        XCTAssertFalse(preferences.working)
+        XCTAssertTrue(preferences.loaded)
+        XCTAssertTrue(preferences.enabled)
+        XCTAssertFalse(preferences.unavailable)
+        XCTAssertNil(preferences.notice)
+    }
+
+    func test_non404_read_failures_keep_a_visible_retry_without_claiming_a_setting() async {
+        for failure in [RoomCallsClient.Failure.unreachable, .unreadable, .refused(401), .refused(403), .refused(503)] {
+            let api = QuestionPreferencesStub()
+            await api.failRead(failure)
+            let preferences = QuestionCallPreferences(api: api)
+            await preferences.load()
+            XCTAssertFalse(preferences.unavailable, "only 404 hides the feature")
+            XCTAssertFalse(preferences.loaded)
+            XCTAssertFalse(preferences.enabled)
+            XCTAssertFalse(preferences.working)
+            XCTAssertNotNil(preferences.notice)
+            await preferences.save(true)
+            let writes = await api.writes
+            XCTAssertTrue(writes.isEmpty)
+            await api.failRead(nil)
+            await preferences.load()
+            XCTAssertTrue(preferences.loaded)
+            XCTAssertFalse(preferences.enabled)
+            XCTAssertFalse(preferences.unavailable)
+            XCTAssertNil(preferences.notice)
+        }
+    }
+
+    func test_flag_disabled_during_save_hides_the_section_and_drops_stale_opt_in() async {
+        let api = QuestionPreferencesStub()
+        let preferences = QuestionCallPreferences(api: api)
+        await preferences.load()
+        await preferences.save(true)
+        XCTAssertTrue(preferences.enabled)
+        await api.fail(.refused(404))
+        await preferences.save(false)
+        XCTAssertTrue(preferences.unavailable)
+        XCTAssertFalse(preferences.loaded)
+        XCTAssertFalse(preferences.enabled)
+        XCTAssertNil(preferences.notice)
+        await preferences.save(true)
+        let writes = await api.writes
+        XCTAssertEqual(writes, [true, false])
+    }
+
+    func test_a_new_successful_read_can_restore_an_available_setting() async {
+        let api = QuestionPreferencesStub()
+        let preferences = QuestionCallPreferences(api: api)
+        await api.failRead(.refused(404))
+        await preferences.load()
+        XCTAssertTrue(preferences.unavailable)
+        await api.failRead(nil)
+        await preferences.load()
+        XCTAssertFalse(preferences.unavailable)
+        XCTAssertTrue(preferences.loaded)
+        XCTAssertFalse(preferences.enabled)
+    }
+
+    func test_hosted_settings_removes_the_toggle_and_explanation_after404() async throws {
+        let api = QuestionPreferencesStub()
+        await api.holdNextRead()
+        let preferences = QuestionCallPreferences(api: api)
+        let window = try HostedSummary.host(Form {
+            QuestionCallSettingsSection(preferences: preferences)
+            Text("Other settings").accessibilityIdentifier("question-test.other-settings")
+        })
+        defer { HostedSummary.close(window) }
+        guard HostedSummary.wait(for: "settings.questionCalls.enabled", in: window) != nil else {
+            await api.releaseRead()
+            return XCTFail("the loading section never appeared")
+        }
+        XCTAssertFalse(preferences.loaded)
+        await api.failRead(.refused(404))
+        await api.releaseRead()
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline && (preferences.working || HostedSummary.element("settings.questionCalls.enabled", in: window) != nil) {
+            await Task.yield()
+            HostedSummary.pump(0.02)
+        }
+        XCTAssertTrue(preferences.unavailable)
+        XCTAssertNil(HostedSummary.element("settings.questionCalls.enabled", in: window))
+        XCTAssertNotNil(HostedSummary.wait(for: "question-test.other-settings", in: window))
+        let labels = HostedSummary.elements(in: window).compactMap(\.accessibilityLabel)
+        XCTAssertFalse(labels.contains("Question calls"))
+        XCTAssertFalse(labels.contains { $0.contains("Off until you enable it") })
+        XCTAssertFalse(labels.contains("Read call preferences"))
     }
 }
