@@ -60,46 +60,79 @@ final class RoomAuthorMessagesTests: XCTestCase {
      ],"count":2,"nextBeforeSequence":120,"hasMore":true,"connection":"MCP"}
     """
 
-    /// Tickets f7254a3b and c96649c0 (the web's rule, sentinelayer-web #812): how each post says it was sent. The kind
-    /// it declares (the agent's `clientKind`, else the payload's) with the event's top-level `source`: "mcp" is the
-    /// CLI's MCP server only from the CLI (`source` "cli"), else MCP; "hosted_mcp" is MCP; "cli" the CLI; any other
-    /// kind is one this app does not name; no kind is none.
-    func test_each_post_says_how_it_was_sent() throws {
-        func sent(_ agent: String, _ payload: String, source: String? = nil) throws -> RoomPostClient? {
-            let top = source.map { #","source":"\#($0)""# } ?? ""
-            let json = try JSONDecoder().decode(JSONValue.self, from: Data("""
-            {"id":"e1","event":"session_message","sequenceId":1,"ts":"2026-11-07T10:00:00Z","agent":\(agent),
-             "payload":\(payload)\(top)}
-            """.utf8))
-            return try XCTUnwrap(RoomMessage(json: json)).sentThrough
-        }
-        // A post through the CLI's MCP server, as the server stores it: the event's source "cli", the agent's clientKind
-        // "mcp", the payload's source "mcp".
+    /// How a post says it was sent (tickets f7254a3b, c96649c0): the agent's JSON, the payload's, and the event's
+    /// top-level `source` (absent from a copy that does not carry it).
+    private func sent(_ agent: String, _ payload: String, source: String? = nil) throws -> RoomPostClient? {
+        let top = source.map { #","source":"\#($0)""# } ?? ""
+        let json = try JSONDecoder().decode(JSONValue.self, from: Data("""
+        {"id":"e1","event":"session_message","sequenceId":1,"ts":"2026-11-07T10:00:00Z","agent":\(agent),
+         "payload":\(payload)\(top)}
+        """.utf8))
+        return try XCTUnwrap(RoomMessage(json: json)).sentThrough
+    }
+
+    // One rule with the web (sentinelayer-web #812, `agentConnection.test.tsx`), its six cases in order.
+
+    /// Case 1: the server's stamp (`source` "hosted_mcp", in the payload or at the top level) is MCP, whatever
+    /// `clientKind` says, or if it says nothing (web: "the hosted connector's stamp ... is MCP with no clientKind at
+    /// all", "the hosted stamp outranks a clientKind \"cli\""). A `clientKind` "hosted_mcp" is MCP too.
+    func test_case_1_the_hosted_stamp_is_mcp_whatever_the_client_kind_says() throws {
+        XCTAssertEqual(try sent(#"{"id":"someone"}"#, #"{"text":"hi","source":"hosted_mcp"}"#), .mcp,
+                       "the stamp with no clientKind at all")
+        XCTAssertEqual(try sent(#"{"id":"someone"}"#, #"{"text":"hi","source":"hosted_mcp"}"#, source: "mcp"), .mcp)
+        XCTAssertEqual(try sent(#"{"id":"ticket-keeper","clientKind":"cli"}"#, #"{"text":"hi","source":"hosted_mcp"}"#,
+                                source: "mcp"), .mcp, "the stamp outranks a client that says it is the CLI")
+        XCTAssertEqual(try sent(#"{"id":"ticket-keeper","clientKind":"cli"}"#, #"{"text":"hi"}"#, source: "hosted_mcp"),
+                       .mcp, "a top-level stamp reads the same")
+        XCTAssertEqual(try sent(#"{"id":"review-agent","clientKind":"mcp"}"#, #"{"text":"hi","source":"hosted_mcp"}"#,
+                                source: "cli"), .mcp, "the stamp outranks mcp from the CLI")
+        XCTAssertEqual(try sent(#"{"id":"helper-agent","clientKind":"hosted_mcp"}"#, #"{"text":"hi"}"#, source: "api"),
+                       .mcp)
+    }
+
+    /// Case 2: `clientKind` "mcp" with the top-level `source` "cli" is the CLI's MCP server (web: "clientKind \"mcp\"
+    /// from the CLI (top-level source \"cli\") is the CLI's MCP server").
+    func test_case_2_mcp_from_the_cli_is_the_clis_mcp_server() throws {
         XCTAssertEqual(try sent(#"{"id":"review-agent","clientKind":"mcp"}"#, #"{"text":"hi","source":"mcp"}"#,
-                                source: "cli"), .cliMCP, "mcp from the CLI: the CLI's MCP server")
+                                source: "cli"), .cliMCP, "as the server stores a post through the CLI's MCP server")
         XCTAssertEqual(try sent(#"{"id":"review-agent","clientKind":"mcp"}"#, #"{"text":"hi"}"#, source: "cli"),
                        .cliMCP)
         XCTAssertEqual(try sent(#"{"id":"review-agent"}"#, #"{"text":"hi","clientKind":"mcp"}"#, source: "cli"),
                        .cliMCP, "the payload's kind, when the agent declares none")
-        // Any other source, or none: MCP, true either way (an agent admitted through the hosted connector that posts
-        // over REST still says "mcp").
-        XCTAssertEqual(try sent(#"{"id":"review-agent","clientKind":"mcp"}"#, #"{"text":"hi"}"#), .mcp,
-                       "mcp with no source is MCP, never the CLI's MCP server")
-        XCTAssertEqual(try sent(#"{"id":"review-agent","clientKind":"mcp"}"#, #"{"text":"hi"}"#, source: "hosted_mcp"),
-                       .mcp)
-        XCTAssertEqual(try sent(#"{"id":"review-agent","clientKind":"mcp"}"#, #"{"text":"hi"}"#, source: "web"), .mcp)
-        XCTAssertEqual(try sent(#"{"id":"review-agent","clientKind":"mcp"}"#, #"{"text":"hi","source":"cli"}"#), .mcp,
-                       "the payload's source is not the post's: only the top-level source says the CLI sent it")
-        XCTAssertEqual(try sent(#"{"id":"helper-agent","clientKind":"hosted_mcp"}"#,
-                                #"{"text":"hi","source":"hosted_mcp"}"#, source: "cli"), .mcp)
+    }
+
+    /// Case 3: "mcp" with no top-level source says nothing, so it never overturns an older post that did (web: "a live
+    /// copy (no stored source) decides nothing").
+    func test_case_3_mcp_with_no_top_level_source_says_nothing() throws {
+        XCTAssertNil(try sent(#"{"id":"review-agent","clientKind":"mcp"}"#, #"{"text":"hi"}"#))
+        XCTAssertNil(try sent(#"{"id":"review-agent","clientKind":"mcp"}"#, #"{"text":"hi","source":"cli"}"#),
+                     "the payload's source is not the post's: only the top-level source says the CLI sent it")
+    }
+
+    /// Case 4: "mcp" with any other top-level source is MCP, true either way (web: "clientKind \"mcp\" stored with
+    /// source %j is MCP, true either way").
+    func test_case_4_mcp_with_any_other_top_level_source_is_mcp() throws {
+        for source in ["web", "api", "mcp"] {
+            XCTAssertEqual(try sent(#"{"id":"review-agent","clientKind":"mcp"}"#, #"{"text":"hi"}"#, source: source),
+                           .mcp, "source \(source)")
+        }
+    }
+
+    /// Case 5: "cli" with no stamp is the CLI (web: "\"cli\" is the CLI").
+    func test_case_5_cli_with_no_stamp_is_the_cli() throws {
         XCTAssertEqual(try sent(#"{"id":"ticket-keeper","clientKind":"cli"}"#, #"{"text":"hi"}"#, source: "cli"), .cli)
         XCTAssertEqual(try sent(#"{"id":"ticket-keeper","clientKind":" CLI "}"#, #"{"text":"hi"}"#), .cli)
-        // A kind this app does not name says nothing (the card shows no line); no kind at all is none.
-        XCTAssertEqual(try sent(#"{"id":"someone","clientKind":"telegraph"}"#, #"{"text":"hi"}"#, source: "cli"),
-                       .other)
-        XCTAssertEqual(try sent(#"{"id":"someone","clientKind":"sdk"}"#, #"{"text":"hi"}"#), .other)
+    }
+
+    /// Case 6: any other kind says nothing (no line), and no kind at all is nothing said (web: "clientKind %j says
+    /// nothing", "with no clientKind declared ... says nothing").
+    func test_case_6_any_other_kind_or_none_says_nothing() throws {
+        for kind in ["claude", "codex", "web", "sdk", "telegraph"] {
+            XCTAssertEqual(try sent(#"{"id":"someone","clientKind":"\#(kind)"}"#, #"{"text":"hi"}"#, source: "cli"),
+                           .other, "clientKind \(kind)")
+        }
         XCTAssertNil(try sent(#"{"id":"someone"}"#, #"{"text":"hi"}"#, source: "cli"), "a source alone is no kind")
-        XCTAssertNil(try sent(#"{"id":"someone"}"#, #"{"text":"hi","source":"hosted_mcp"}"#))
+        XCTAssertNil(try sent(#"{"id":"someone"}"#, #"{"text":"hi"}"#))
     }
 
     func test_a_page_is_the_events_rows_newest_first_with_the_api_cursor_and_connection() throws {

@@ -491,11 +491,16 @@ private extension String {
     var trimmed: String { trimmingCharacters(in: .whitespacesAndNewlines) }
 }
 
-/// How a post says it was sent (ticket c96649c0, the web's rule in sentinelayer-web #812): the `clientKind` it declares
-/// (the agent's, else the payload's), with the event's own top-level `source`. "mcp" is the CLI's MCP server only when
-/// the post came from the CLI (`source` "cli"). With any other source, or none, it is MCP, which is true either way: an
-/// agent admitted through the hosted connector that then posts over REST still says "mcp". "hosted_mcp" is MCP, and
-/// "cli" the CLI. Any other kind is declared but not one this app names. A post that declares no kind has none (nil).
+/// How a post says it was sent (ticket c96649c0): one rule with the web (sentinelayer-web #812), checked in order.
+/// 1. The server's stamp, `source` "hosted_mcp" in the payload or at the top level (the hosted connector's own posts):
+///    MCP, whatever `clientKind` says, or if it says nothing. The relay lets that stamp outrank a client's own claim
+///    (sentinelayer-api `_session_event_connection`).
+/// 2. `clientKind` "mcp" (the agent's, else the payload's) with the top-level `source` "cli": the CLI's MCP server.
+/// 3. "mcp" with no top-level source: nothing said (nil), as on the web, which cannot tell yet from a copy without one.
+/// 4. "mcp" with any other top-level source: MCP, true either way (an agent admitted through the hosted connector that
+///    then posts over REST still says "mcp"). A `clientKind` "hosted_mcp" is MCP too.
+/// 5. "cli": the CLI.
+/// 6. Any other kind: declared, but not one this app names (`other`, no line); no kind at all: nothing said (nil).
 /// A display hint, never authority.
 public enum RoomPostClient: String, Equatable, Sendable {
     /// MCP: hosted MCP (an AI app connected to the Senti MCP server), or an MCP client not known to be the CLI's.
@@ -516,10 +521,17 @@ public enum RoomPostClient: String, Equatable, Sendable {
             }
             return text
         }
+        let source = mark(json["source"])
+        if mark(payload["source"]) == "hosted_mcp" || source == "hosted_mcp" {
+            self = .mcp
+            return
+        }
         guard let kind = mark(agent["clientKind"]) ?? mark(agent["client_kind"]) ?? mark(payload["clientKind"])
                 ?? mark(payload["client_kind"]) else { return nil }
         switch kind {
-        case "mcp": self = mark(json["source"]) == "cli" ? .cliMCP : .mcp
+        case "mcp":
+            guard let source else { return nil }
+            self = source == "cli" ? .cliMCP : .mcp
         case "hosted_mcp": self = .mcp
         case "cli": self = .cli
         default: self = .other
