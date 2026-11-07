@@ -142,8 +142,11 @@ struct RoomChatScreen: View {
     @State private var mediaViewer: RoomMediaViewerItem?
     @State private var shareItem: RoomShareItem?
     @State private var listenProblem: String?
-    /// The app's one reader: one message is read at a time, wherever it was started.
-    @ObservedObject private var reader: MessageReader
+    /// The app's one reader: one message is read at a time, wherever it was started. Kept, not watched: its bars watch
+    /// it, and the room draws again only when what is read changes (`readingAloudId`), never at each sentence.
+    private let reader: MessageReader
+    /// The message being read, for its mark in the list.
+    @State private var readingAloudId: String?
     @State private var openingAttachment = false
     @State private var linkedTicket: LinkedTicket?
     @State private var appliedRouteLinks = false
@@ -245,6 +248,7 @@ struct RoomChatScreen: View {
         self.authorMessages = transport as? any RoomAuthorMessagesReading
         self.sharedRooms = transport as? any SharedRoomsReading
         self.reader = reader
+        _readingAloudId = State(initialValue: reader.readingId)
         self.search = search
         self.ticketsTransport = ticketsTransport
         self.admissionsTransport = admissionsTransport
@@ -416,6 +420,25 @@ struct RoomChatScreen: View {
             endedBoxes: endedBoxes,
             now: Date()
         )
+    }
+
+    /// The Listen bars over the room, at its top: this room's reading, or one from another room, whose title takes you
+    /// back to it (Carter, 10-30). Over the list, never in its inset: starting or stopping a reading never lays the
+    /// list out again (#360: a top inset that changes keeps the list laying itself out).
+    private var readAloudBars: some View {
+        VStack(spacing: 0) {
+            readAloudBar(place: "room")
+            ReadAloudBarSlot(reader: reader, place: "other", shows: { [sessionId = route.sessionId] source in
+                source != nil && source != sessionId
+            }, onShowMessage: showOtherRoomReading)
+        }
+    }
+
+    /// The message read from another room, in its room.
+    private func showOtherRoomReading() {
+        if let id = reader.readingId, let source = ReadAloudSource.shared.sessionId {
+            openRoom(ReadAloudSource.link(readingId: id, sessionId: source))
+        }
     }
 
     /// The Listen bar for this room's readings.
@@ -738,7 +761,7 @@ struct RoomChatScreen: View {
         #endif
         RoomChatView(
             state: coordinator.state,
-            readingAloudId: reader.readingId,
+            readingAloudId: readingAloudId,
             composerActions: RoomComposerActions(
                 canFileTicket: ticketsTransport != nil && writesTickets && !route.isBreakout,
                 canSearch: search != nil
@@ -761,10 +784,11 @@ struct RoomChatScreen: View {
                 .accessibilityHidden(true)
                 .modifier(mediaPresenters(isActive: true))
         })
-        // The Listen bar, at the top while this room's message is read (a voice room speaks on its own); a thread shows it
-        // at its own top, so reading a reply keeps the thread open and in view (Carter, #62471). Reading from another
-        // room, the app's own bar shows instead.
-        .safeAreaInset(edge: .top, spacing: 0) { readAloudBar(place: "room") }
+        // The Listen bar, over the top of the room while a message is read (this room's, unless it is a voice room, which
+        // speaks on its own; or another room's); a thread shows it over its own top, so reading a reply keeps the thread
+        // open and in view (Carter, #62471). Only the message read draws the room again, never a sentence.
+        .overlay(alignment: .top) { readAloudBars }
+        .onReceive(reader.$readingId) { id in if id != readingAloudId { readingAloudId = id } }
         .environment(\.roomReadAloudBar, RoomReadAloudBarHost { readAloudBar(place: "thread") })
         // A direct message: whom it is with, the room you share, and for an agent whether it may use this chat there.
         .safeAreaInset(edge: .top, spacing: 0) {

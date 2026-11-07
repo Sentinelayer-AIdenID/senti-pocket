@@ -2358,7 +2358,8 @@ private struct RoomThreadSheet: View {
                 }
             }
             .background { mediaHost?.content() }
-            .safeAreaInset(edge: .top, spacing: 0) { readAloudBar?.content() }
+            // Over the thread's top, never in its inset: starting or stopping a reading never lays the replies out again.
+            .overlay(alignment: .top) { readAloudBar?.content() }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if thread.canReply {
                     VStack(alignment: .leading, spacing: 4) {

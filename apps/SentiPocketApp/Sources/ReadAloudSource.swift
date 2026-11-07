@@ -41,6 +41,9 @@ struct ReadAloudBarSlot: View {
     let onShowMessage: () -> Void
 
     var body: some View {
+        #if DEBUG
+        let _ = RootPreview.meter.readAloudSlotBodyRan(place)
+        #endif
         Group {
             if let playback = reader.playback, shows(source.sessionId) {
                 ReadAloudPlayer(reader: reader, playback: playback, onShowMessage: onShowMessage)

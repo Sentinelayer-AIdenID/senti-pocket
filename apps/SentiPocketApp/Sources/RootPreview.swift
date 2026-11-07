@@ -6,6 +6,7 @@ import PocketCall
 import PocketContracts
 import PocketSyncClient
 import PocketUI
+import PocketVoice
 
 /// DEBUG-only: `-PocketRootPreview` hosts the signed-in app's own root (`AuthenticatedRootView`: the side panel, the
 /// bell and Waiting on you, folders, direct messages and the room on screen) on scripted data, with no network and no
@@ -178,12 +179,24 @@ final class RootPreviewMeter: @unchecked Sendable {
 
     func roomScreenBodyRan() { roomScreenBodies += 1 }
 
-    /// Where each read-aloud bar and its controls were last laid out, by place ("app", "room", "thread").
+    /// Where each read-aloud bar and its controls were last laid out, by place ("room", "other", "thread").
     private(set) var readAloudBars: [String: [String: CGRect]] = [:]
 
     func readAloudBarLaidOut(_ place: String, _ frames: [String: CGRect]) { readAloudBars[place] = frames }
 
-    func forgetReadAloudBars() { readAloudBars = [:] }
+    func forgetReadAloudBars() {
+        readAloudBars = [:]
+        readAloudSlotBodies = [:]
+    }
+
+    /// How often each place's read-aloud bar drew (`ReadAloudBarSlot`, which watches the reader): once a sentence,
+    /// and at each pause and play.
+    private(set) var readAloudSlotBodies: [String: Int] = [:]
+
+    func readAloudSlotBodyRan(_ place: String) { readAloudSlotBodies[place, default: 0] += 1 }
+
+    /// The root's reader (`AuthenticatedRootView.messageReader`), for the hosted tests that pause and play it.
+    weak var reader: MessageReader?
 
     /// Times the root asked for its side panel's rooms to be placed (`placeSidePanelRooms`), open or not.
     private(set) var sidePanelPlacements = 0
