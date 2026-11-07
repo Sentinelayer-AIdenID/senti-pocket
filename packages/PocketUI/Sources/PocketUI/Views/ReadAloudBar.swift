@@ -186,7 +186,8 @@ private extension View {
 /// The read-aloud bar a sheet on the room shows at its top while something is read (a thread). The app supplies it, and
 /// it watches the reader itself, so a reading never draws the sheet or the room again.
 public struct RoomReadAloudBarHost: Equatable {
-    let content: () -> AnyView
+    /// The bar, for the screen that shows it (a room's thread, Settings).
+    public let content: () -> AnyView
 
     public init<Content: View>(@ViewBuilder _ content: @escaping () -> Content) {
         self.content = { AnyView(content()) }
