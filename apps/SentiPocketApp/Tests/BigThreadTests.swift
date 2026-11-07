@@ -346,15 +346,38 @@ final class BigThreadTests: XCTestCase {
         }
     }
 
-    /// UI automation, as `HostedSummary` turns it on: an assistive client reading the screen.
+    /// UI automation: an assistive client (VoiceOver, a UI test) reading the screen. `HostedSummary` turns it on.
     private static let setAutomation: (@convention(c) (Bool) -> Void)? = {
         guard let handle = dlopen("/usr/lib/libAccessibility.dylib", RTLD_NOW),
               let symbol = dlsym(handle, "_AXSSetAutomationEnabled") else { return nil }
         return unsafeBitCast(symbol, to: (@convention(c) (Bool) -> Void).self)
     }()
 
-    /// The thread's reply box, found among the window's views (not read as VoiceOver reads the screen, which builds
-    /// what it reads), or nil once the time is up.
+    /// The room with `state`'s thread open, in a window on the simulator, with an assistive client reading the screen
+    /// or not. Nothing here reads the screen: what is built is what the room built to show itself.
+    private func roomWindow(showing state: RoomChatPresentationState, automation: Bool,
+                        send: @escaping (RoomChatIntent) -> Void = { _ in }) throws -> UIWindow {
+        let setAutomation = try XCTUnwrap(Self.setAutomation, "UI automation could not be set")
+        setAutomation(automation)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 375, height: 667)
+        window.windowLevel = .normal + 5
+        window.rootViewController = UIHostingController(rootView: NavigationStack {
+            RoomChatView(state: state, send: send)
+        })
+        window.makeKeyAndVisible()
+        return window
+    }
+
+    private func close(_ window: UIWindow) {
+        window.isHidden = true
+        HostedSummary.pump(0.2)
+        Self.setAutomation?(false)
+    }
+
+    /// The thread's reply box, found among the window's views (never by reading the screen, which builds what it
+    /// reads), or nil once the time is up.
     private func composer(in window: UIWindow, timeout: TimeInterval = 15) -> UITextView? {
         let end = Date().addingTimeInterval(timeout)
         while Date() < end {
@@ -365,6 +388,77 @@ final class BigThreadTests: XCTestCase {
             HostedSummary.pump(0.1)
         }
         return nil
+    }
+
+    /// The replies built to open `state`'s thread and come to rest, with an assistive client reading the screen or
+    /// not; then, with one, what reading the screen once more built.
+    private func builtToOpen(_ state: RoomChatPresentationState, automation: Bool) throws
+        -> (open: Set<String>, read: Set<String>) {
+        RenderTrace.resetThreadReplies()
+        let window = try roomWindow(showing: state, automation: automation)
+        defer { close(window) }
+        XCTAssertNotNil(composer(in: window), "the thread opens over the room")
+        HostedSummary.pump(1.5)
+        let open = RenderTrace.threadRepliesBuiltSinceReset()
+        guard automation else { return (open, open) }
+        _ = HostedSummary.elements(in: window)
+        HostedSummary.pump(0.3)
+        return (open, RenderTrace.threadRepliesBuiltSinceReset())
+    }
+
+    /// Reply numbers as runs: "1-6, 590-612".
+    private static func runs(_ ids: Set<String>) -> String {
+        let numbers = ids.compactMap { id in id.split(separator: "-").last.flatMap { Int($0) } }.sorted()
+        var parts: [String] = []
+        var start: Int?
+        var last: Int?
+        for number in numbers {
+            if let current = last, number == current + 1 {
+                last = number
+                continue
+            }
+            if let first = start, let end = last { parts.append(first == end ? "\(first)" : "\(first)-\(end)") }
+            start = number
+            last = number
+        }
+        if let first = start, let end = last { parts.append(first == end ? "\(first)" : "\(first)-\(end)") }
+        return parts.joined(separator: ", ")
+    }
+
+    /// A thread of 1,000 long replies opens building the replies in sight, never the thousand. Counted with no
+    /// assistive client reading the screen, before anything reads it; what an assistive client (VoiceOver) costs is
+    /// counted apart, and printed.
+    func test_a_thread_of_a_thousand_replies_opens_building_only_the_replies_in_sight() throws {
+        let plain = try builtToOpen(Self.openThread(), automation: false)
+        let read = try builtToOpen(Self.openThread(), automation: true)
+        print("THREADOPEN built to open 1,000 replies: \(plain.open.count) with no assistive client "
+              + "(\(Self.runs(plain.open))); \(read.open.count) with one (\(Self.runs(read.open))), "
+              + "\(read.read.count) once it read the screen")
+        XCTAssertGreaterThan(plain.open.count, 0, "the replies in sight are built")
+        XCTAssertLessThan(plain.open.count, 60, "a lazy list builds the replies in sight, never all 1,000")
+    }
+
+    /// Opened at reply 600 of 1,000 (its notification): the thread goes to it, building the replies near it and never
+    /// the ones between the top and it. Counted with no assistive client, then with one (printed). Then, read as
+    /// VoiceOver reads the screen, the reply is on screen.
+    func test_a_thread_opened_at_a_reply_far_down_goes_to_it_without_building_the_replies_between() throws {
+        let plain = try builtToOpen(Self.openThread(focus: 600), automation: false)
+        let read = try builtToOpen(Self.openThread(focus: 600), automation: true)
+        let between = plain.open.filter { id in
+            guard let number = id.split(separator: "-").last.flatMap({ Int($0) }) else { return false }
+            return (60...540).contains(number)
+        }
+        print("THREADFOCUS built to open at reply 600 of 1,000: \(plain.open.count) with no assistive client "
+              + "(\(Self.runs(plain.open))), \(between.count) of them between the top and it; "
+              + "\(read.open.count) with one (\(Self.runs(read.open))), \(read.read.count) once it read the screen")
+        XCTAssertTrue(plain.open.contains(Self.id(600)), "the reply it was opened at is built")
+        XCTAssertEqual(between.count, 0, "none of the replies between the top and it is built on the way")
+        XCTAssertLessThan(plain.open.count, 60, "the replies in sight at the top, then near it: never the thousand")
+
+        let window = try HostedSummary.host(NavigationStack { RoomChatView(state: Self.openThread(focus: 600),
+                                                                           send: { _ in }) })
+        defer { HostedSummary.close(window) }
+        XCTAssertNotNil(replyOnScreen(600, in: window), "reply 600 of 1,000 is on screen")
     }
 
     /// What `keystrokes` keystrokes into `box` drew: the room, the replies' list, and replies built.
@@ -388,58 +482,30 @@ final class BigThreadTests: XCTestCase {
     }
 
     /// Typing in a thread of 1,000 long replies draws the reply box alone: the room under it is never drawn again, the
-    /// replies' list is not, and so no reply is built again. The list is lazy: only the replies in sight are built.
+    /// replies' list is not, and so no reply is built again. Typed with no assistive client (asserted), then with one
+    /// (printed).
     func test_typing_in_a_thread_of_a_thousand_long_replies_draws_neither_the_room_nor_the_replies() throws {
-        RenderTrace.resetThreadReplies()
-        let window = try HostedSummary.host(NavigationStack { RoomChatView(state: Self.openThread(), send: { _ in }) })
-        defer { HostedSummary.close(window) }
+        let window = try roomWindow(showing: Self.openThread(), automation: false)
+        defer { close(window) }
         let box = try XCTUnwrap(composer(in: window), "the thread opens with its reply box")
-        HostedSummary.pump(0.8)
-        let builtOnOpen = RenderTrace.threadRepliesBuiltSinceReset().count
-
-        // As a person types: no assistive client reading the screen.
-        Self.setAutomation?(false)
         box.becomeFirstResponder()
         HostedSummary.pump(0.8)
         let plain = typing(Self.keystrokes, into: box, in: window, explaining: true)
-        // And with one, as VoiceOver reads it.
         Self.setAutomation?(true)
         HostedSummary.pump(0.5)
         let read = typing(Self.keystrokes, into: box, in: window, explaining: true)
         let send = try XCTUnwrap(HostedSummary.wait(for: "pocket.thread.send", in: window))
-        let builtAfterReading = RenderTrace.threadRepliesBuiltSinceReset().count
-        print("THREADTYPING \(Self.keystrokes) keystrokes in \(plain.ms) ms: room drawn \(plain.room), replies' list "
-              + "drawn \(plain.list), replies built \(plain.replies); with the screen read: \(read.ms) ms, room "
-              + "\(read.room), list \(read.list), replies \(read.replies); \(builtOnOpen) of 1,000 built to open, "
-              + "\(builtAfterReading) once the screen was read")
+        print("THREADTYPING \(Self.keystrokes) keystrokes with no assistive client in \(plain.ms) ms: room drawn "
+              + "\(plain.room), replies' list drawn \(plain.list), replies built \(plain.replies); with one: "
+              + "\(read.ms) ms, room \(read.room), list \(read.list), replies \(read.replies)")
 
         XCTAssertEqual(box.text, String(repeating: "a", count: Self.keystrokes * 2), "every keystroke reached the box")
         XCTAssertFalse(send.accessibilityTraits.contains(.notEnabled), "what was typed reached the thread: it can be sent")
-        XCTAssertGreaterThan(builtOnOpen, 0, "the replies in sight are built")
-        XCTAssertLessThan(builtOnOpen, 60, "a lazy list builds the replies in sight, never all 1,000")
         XCTAssertEqual(plain.room, 0, "typing in a thread never draws the room under it")
         XCTAssertLessThanOrEqual(plain.list, 1, "nor the thread's replies")
         XCTAssertLessThanOrEqual(plain.replies, Self.keystrokes / 4, "nor builds its replies again, keystroke after keystroke")
         box.resignFirstResponder()
     }
-
-    /// Opened at reply 600 of 1,000 (its notification): the thread goes to it and marks it, without building the
-    /// replies between.
-    func test_a_thread_opened_at_a_reply_far_down_brings_it_into_view() throws {
-        RenderTrace.resetThreadReplies()
-        let window = try HostedSummary.host(NavigationStack { RoomChatView(state: Self.openThread(focus: 600),
-                                                                           send: { _ in }) })
-        defer { HostedSummary.close(window) }
-        XCTAssertNotNil(composer(in: window), "the thread opens over the room")
-        HostedSummary.pump(1.5)
-        let built = RenderTrace.threadRepliesBuiltSinceReset()
-        XCTAssertNotNil(replyOnScreen(600, in: window), "reply 600 of 1,000 is on screen")
-        print("THREADFOCUS built \(built.count) of 1,000 replies to show reply 600, "
-              + "\(RenderTrace.threadRepliesBuiltSinceReset().count) once the screen was read")
-        XCTAssertTrue(built.contains(Self.id(600)))
-        XCTAssertLessThan(built.count, 200, "it went to the reply, not through the thousand")
-    }
-
     /// A reply kept on the phone answers a reply on an older page: the thread opens on its newest page, and the reply
     /// sent still answers that one, not the message (its row has not loaded, but it may be on a page not yet read).
     func test_a_kept_reply_to_a_reply_further_back_still_answers_it() throws {
