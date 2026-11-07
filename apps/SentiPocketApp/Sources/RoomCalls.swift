@@ -39,9 +39,11 @@ struct RoomCallDetails: Equatable, Sendable {
     /// The server says its voice line reads this call's brief when a turn names the call (`voiceLineBrief`). Only then
     /// does a turn carry the call: a refused turn is never taken to mean an older server.
     let briefsVoiceLine: Bool
+    /// Present only for the server's owner-question timer. Malformed question data refuses the whole call.
+    let question: RoomQuestion?
 
     init(callId: String, sessionId: String, callerActorId: String, callerName: String, reason: String?, status: String,
-         ringExpiresAt: Date?, briefsVoiceLine: Bool = false) {
+         ringExpiresAt: Date?, briefsVoiceLine: Bool = false, question: RoomQuestion? = nil) {
         self.callId = callId
         self.sessionId = sessionId
         self.callerActorId = callerActorId
@@ -50,6 +52,7 @@ struct RoomCallDetails: Equatable, Sendable {
         self.status = status
         self.ringExpiresAt = ringExpiresAt
         self.briefsVoiceLine = briefsVoiceLine
+        self.question = question
     }
 
     /// The live ring of exactly this doorbell's call: same call and room, a caller the server named, still ringing,
@@ -57,11 +60,18 @@ struct RoomCallDetails: Equatable, Sendable {
     func isLiveRing(of doorbell: RoomCallDoorbell, at now: Date) -> Bool {
         callId == doorbell.callId && sessionId == doorbell.sessionId && !callerActorId.isEmpty && status == "ringing"
             && (ringExpiresAt.map { $0 > now } ?? true)
+            && (question.map { $0.ringAllowed && $0.canAnswer(at: now) && $0.status == "called" } ?? true)
     }
 
     init?(json: JSONValue) {
         guard let callId = json["callId"]?.stringValue, let sessionId = json["sessionId"]?.stringValue,
               let caller = json["callerActorId"]?.stringValue, !caller.isEmpty else { return nil }
+        var question: RoomQuestion?
+        if let value = json["question"] {
+            guard let parsed = RoomQuestion(json: value), parsed.sessionId == sessionId,
+                  parsed.callId == callId, value["ringAllowed"]?.boolValue != nil else { return nil }
+            question = parsed
+        }
         self.init(
             callId: callId,
             sessionId: sessionId,
@@ -71,7 +81,8 @@ struct RoomCallDetails: Equatable, Sendable {
             // A call read without its status is not taken to be ringing.
             status: json["status"]?.stringValue ?? "unknown",
             ringExpiresAt: json["ringExpiresAt"]?.stringValue.flatMap { ParsedSessionTimestamp($0).date },
-            briefsVoiceLine: json["voiceLineBrief"]?.boolValue ?? false
+            briefsVoiceLine: json["voiceLineBrief"]?.boolValue ?? false,
+            question: question
         )
     }
 }
@@ -84,7 +95,7 @@ protocol RoomCallsAPI: Sendable {
 
 struct RoomCallsClient: RoomCallsAPI {
     let apiBaseURL: URL?
-    var urlSession: URLSession = SentiHTTPTransportPolicy.liveSession
+    var urlSession: URLSession = SentiHTTPTransportPolicy.protectedReadSession
     var tokenProvider: @Sendable () -> String? = { SessionTokenStore.load() }
 
     enum Failure: Error, Equatable { case notConfigured, signedOut, refused(Int), unreachable, unreadable }
@@ -100,7 +111,7 @@ struct RoomCallsClient: RoomCallsAPI {
         _ = try await send("POST", path: "/api/v1/sessions/\(sessionId)/calls/\(callId)/status", body: ["status": status])
     }
 
-    private func send(_ method: String, path: String, body: [String: Any]?) async throws -> Data {
+    func send(_ method: String, path: String, body: [String: Any]?) async throws -> Data {
         guard let apiBaseURL, var components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false) else {
             throw Failure.notConfigured
         }
