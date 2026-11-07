@@ -1,7 +1,7 @@
 #if canImport(SwiftUI)
 import SwiftUI
 
-/// The selected result uses the normal Markdown renderer in full, with its existing links, code and mentions.
+/// The selected result renders full Markdown with its existing links, code and mentions.
 struct RoomSearchMessageView: View {
     let text: String
     let focus: RoomSearchFocus
@@ -9,7 +9,7 @@ struct RoomSearchMessageView: View {
     let onReveal: () -> Void
 
     var body: some View {
-        ChatMarkdownView(text: text, ownHandles: ownHandles, searchFocus: focus)
+        RoomSearchMarkdownView(text: text, ownHandles: ownHandles, focus: focus)
         .accessibilityIdentifier("pocket.search.expanded.\(focus.sequenceId)")
         .task(id: focus.id) {
             // The outer list first materializes the row. Then its inner match can be reached.
