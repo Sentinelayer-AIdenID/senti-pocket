@@ -20,6 +20,10 @@ final class RoomChatCoordinator: ObservableObject {
     /// written for; a thread is summarized again only once it has grown.
     private var threadSummaries: [Int64: (replies: Int, summary: SummaryReading?)] = [:]
     private var summarizing: Int64?
+    /// How many times the room has taken in a change to the block list (the tests read it). A summary that was being
+    /// written when it changed was written from words that may now be hidden: it is dropped when it lands, and the
+    /// thread is summarized again.
+    private(set) var blockChanges = 0
     private let summarizer: (any ThreadSummarizing)?
     private let canInvite: Bool
     private let transport: any RoomTransport
@@ -209,7 +213,15 @@ final class RoomChatCoordinator: ObservableObject {
     private var lastAppliedSequence: Int64 = 0
     private var nextBeforeSequence: Int64?
     private var connection: RoomConnectionState = .connecting
+    /// How many times the room has built its state (`publish()`), for the tests: a build that changes nothing is
+    /// never written, so the state alone cannot show it.
+    private(set) var statesBuilt = 0
+    /// Who is preparing a reply, and until when: each lease's own expiry, so a line never outlasts it.
     private var composing: [String: Date] = [:]
+    /// Wakes when the soonest lease expires, to take its line away even if no other frame comes.
+    private var composingExpiry: Task<Void, Never>?
+    /// A direct message: Senti never answers in one, so it is never shown typing there.
+    private let isDirect: Bool
     /// The room's boxes as the mint lists them, by name: running, and ended (`setBoxes`).
     private var runningBoxNames: Set<String> = []
     private var endedBoxNames: Set<String> = []
@@ -260,6 +272,8 @@ final class RoomChatCoordinator: ObservableObject {
     /// Each side of a jump to an older message: this many messages up to it and this many events after it.
     static let windowPageSize = 50
     static let composingLifetime: TimeInterval = 20
+    /// Senti's agent id: it answers in rooms, never in a direct message.
+    static let senti = "senti"
     static let pollWhileLive: TimeInterval = 60
     /// A stream that stayed open this long and then closed was the server's periodic close, not a failure: the room
     /// reconnects at once and stays Live (Carter, #59940: "it keeps saying connecting"). A sooner close still backs off.
@@ -298,12 +312,14 @@ final class RoomChatCoordinator: ObservableObject {
         reporter: (any RoomReporting)? = nil,
         blocks: BlockList? = nil,
         aiConsent: AIConsent? = nil,
+        isDirect: Bool = false,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         self.emojiReactions = emojiReactions
         self.reporter = reporter
         self.blocks = blocks
         self.aiConsent = aiConsent
+        self.isDirect = isDirect
         self.outbox = outbox
         self.attachmentFetcher = attachmentFetcher
         self.previewStore = previewStore
@@ -379,7 +395,9 @@ final class RoomChatCoordinator: ObservableObject {
         // Published before the new value is set: the room redraws on the next turn, with it.
         blocks?.$actorIds.dropFirst().sink { [weak self] _ in
             Task { @MainActor in
-                // A summary written before a block may carry the blocked person's words: each is written again.
+                // A summary written before a block may carry the blocked person's words: each is written again, and
+                // one still being written is dropped when it lands.
+                self?.blockChanges += 1
                 self?.threadSummaries = [:]
                 self?.publish()
             }
@@ -2226,9 +2244,33 @@ final class RoomChatCoordinator: ObservableObject {
             pursueFocus()
             return true
         case .composing(let agentId, _):
+            let wasLive = connection == .live
             connection = .live
-            composing[agentId] = now()
-            publish()
+            guard !(isDirect && agentId == Self.senti) else {
+                if !wasLive { publish() }
+                return false
+            }
+            let isNew = !state.composingAgents.contains(agentId)
+            composing[agentId] = now().addingTimeInterval(Self.composingLifetime)
+            if isNew || !wasLive { publish() }
+            scheduleComposingExpiry()
+            return false
+        case .composingSet(let leases):
+            let wasLive = connection == .live
+            connection = .live
+            // The whole set each time: who is not in it has stopped. A reconnect sends it again, which replaces it.
+            var next: [String: Date] = [:]
+            for lease in leases where !(isDirect && lease.agentId == Self.senti) {
+                next[lease.agentId] = max(next[lease.agentId] ?? .distantPast,
+                                          now().addingTimeInterval(lease.secondsLeft))
+            }
+            next = next.filter { $0.value > now() }
+            // The room redraws only when who is shown typing changes, not for each lease's new expiry. Against what is
+            // shown, not `composing`: that can still hold a spent lease a redraw has already left out.
+            let changed = next.keys.sorted() != state.composingAgents
+            composing = next
+            if changed || !wasLive { publish() }
+            scheduleComposingExpiry()
             return false
         case .control:
             if connection != .live {
@@ -2342,11 +2384,18 @@ final class RoomChatCoordinator: ObservableObject {
         })
         let details = ThreadSummaryInput.details(thread)
         let count = thread.count
+        let blockChangesAtStart = blockChanges
         Task.detached(priority: .utility) { [weak self] in
             let text = await summarizer.summarize(thread: lines)
             await MainActor.run {
                 guard let self else { return }
                 self.summarizing = nil
+                // Someone was blocked while this was written, from words that may be theirs: it is never kept, and
+                // the thread is written again from what the room shows now.
+                guard blockChangesAtStart == self.blockChanges else {
+                    self.publish()
+                    return
+                }
                 // Remembered even when there is none, so a phone without the model doesn't ask again for this count.
                 // The phone's own prose, shown as it was composed.
                 let summary = text.map { SummaryReading(prose: $0, details: details) }.flatMap { $0.prose.isEmpty ? nil : $0 }
@@ -2414,11 +2463,26 @@ final class RoomChatCoordinator: ObservableObject {
         }
     }
 
-    private func pruneComposing() {
-        let cutoff = now().addingTimeInterval(-Self.composingLifetime)
+    /// Takes away every line whose lease has expired.
+    func pruneComposing() {
         let before = composing.count
-        composing = composing.filter { $0.value > cutoff }
+        composing = composing.filter { $0.value > now() }
         if composing.count != before { publish() }
+    }
+
+    /// Wakes at the soonest expiry, so a line goes when its lease does, with no other frame needed.
+    private func scheduleComposingExpiry() {
+        composingExpiry?.cancel()
+        guard let soonest = composing.values.min() else { return }
+        let delay = max(soonest.timeIntervalSince(now()), 0) + 0.25
+        composingExpiry = Task { [weak self, sleep = self.sleep] in
+            await sleep(delay)
+            guard !Task.isCancelled, let self else { return }
+            self.pruneComposing()
+            // Again for whoever is still typing (a reply may have taken the soonest lease away before it expired).
+            // Only for a later expiry than this one: a clock that has not moved never spins this.
+            if let next = self.composing.values.min(), next > soonest { self.scheduleComposingExpiry() }
+        }
     }
 
     private var failureIsTerminal: Bool {
@@ -2464,6 +2528,7 @@ final class RoomChatCoordinator: ObservableObject {
             publishesWhenShown = true
             return
         }
+        statesBuilt += 1
         forgetRemovedAttachments()
         // What is shown of a pinned message comes from here, so the newest revision the loaded rows hold is kept
         // first: a board shown at a newer revision (in a window loaded around it, say) never goes back to an older
@@ -2608,7 +2673,7 @@ final class RoomChatCoordinator: ObservableObject {
             jumpDownKeepsLatest: hasLoadedInitial && historyTooLongToJumpDown,
             connection: connection,
             composingAgents: composing
-                .filter { $0.value > now().addingTimeInterval(-Self.composingLifetime) }
+                .filter { $0.value > now() }
                 .keys
                 .sorted(),
             failure: failure,

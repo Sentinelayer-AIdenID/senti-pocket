@@ -334,6 +334,67 @@ final class RoomScreenMaker {
     var make: (@MainActor (RoomRoute, String?) -> RoomChatScreen)?
 }
 
+/// The side panel under the room, in the view tree only while open, or fading out after a close (Carter's freeze of
+/// 11-06, #62485): a closed panel kept in the tree, faded out under the room, held its lazy list there, and a room put
+/// in place could set off a layout of all its rows that never settled. Out of the tree it is also out of reach of
+/// VoiceOver (ticket 066aca7a). It fades in and out under the sliding room as it faded before.
+struct SidePanelLayer<Panel: View>: View {
+    let isOpen: Bool
+    /// How far the room card moves right when the panel opens; the panel fits in that space.
+    let width: CGFloat
+    let panel: Panel
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            if isOpen {
+                // The panel ends before the room card begins, so its right edge (unread counts, See all) is never under
+                // it.
+                panel
+                    .frame(width: width - 14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .transition(.opacity)
+            }
+        }
+        // On the holder, which stays in the tree, so they turn off at the close and cover the panel while it fades out
+        // (SidePanelLayerTests: no touch reaches it then).
+        .allowsHitTesting(isOpen)
+        .accessibilityHidden(!isOpen)
+    }
+}
+
+/// Ends editing anywhere in the app, so the keyboard starts going down now: before the side panel's spring, or before a
+/// room is put in place of the one on screen (which takes away the composer the keyboard was for). Carter's freezes of
+/// 11-06 each came after a send or a reply, with the keyboard still up as the panel opened or a room was picked from it;
+/// on master, path (f) with the closed panel left out of the tree still hung once at the panel's open with the keyboard
+/// up.
+@MainActor
+func endAllEditing() {
+    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+}
+
+/// Whether the side panel is open, and its open: editing ends first, then the panel's state changes.
+@MainActor
+final class SidePanelState: ObservableObject {
+    @Published var isOpen = false
+
+    /// What ends editing before the panel opens: `endAllEditing` in the app; a test gives its own, to see it run first.
+    private let endEditing: @MainActor () -> Void
+
+    init(endEditing: @escaping @MainActor () -> Void = endAllEditing) {
+        self.endEditing = endEditing
+    }
+
+    /// Opens the panel, editing ended first, so the keyboard starts going down before the panel's spring.
+    func open() {
+        endEditing()
+        isOpen = true
+    }
+
+    func close() {
+        if isOpen { isOpen = false }
+    }
+}
+
 /// Release composition of the authenticated repository-backed Sessions surface and the selected-session Pocket flow.
 /// When the open side panel reads its rooms again: open, with the app in front.
 struct DrawerPoll: Equatable {
@@ -376,6 +437,7 @@ struct AuthenticatedRootView: View {
     /// not watched: the panel watches it, so a new placing draws the panel and not the root (and the room under it).
     @State private var sidePanelPlacement = SidePanelPlacement()
     @Environment(\.scenePhase) private var rootScenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject private var whisperModelCoordinator: WhisperModelProvisioningCoordinator
     @ObservedObject private var incomingLinks: IncomingLinkInbox
     @State private var presentsNewRoom = false
@@ -383,7 +445,9 @@ struct AuthenticatedRootView: View {
     /// The room on screen, the root of the stack; nil shows your rooms. Breakouts push onto `roomPath`.
     @State private var currentRoom: RoomRoute?
     @State private var roomPath: [RoomRoute] = []
-    @State private var drawerOpen = false
+    /// The side panel's state: its open ends editing first (`SidePanelState.open()`).
+    @StateObject private var panelState = SidePanelState()
+    private var drawerOpen: Bool { panelState.isOpen }
     /// Makes the room screen for `RoomScreenHost`; the same one for the root's life.
     @State private var roomScreenMaker = RoomScreenMaker()
     /// How often the open side panel reads the rooms again, in nanoseconds.
@@ -509,7 +573,12 @@ struct AuthenticatedRootView: View {
         let account = RoomSendOutbox.account(token: SessionTokenStore.load())
         _blocks = StateObject(wrappedValue: BlockList(account: account, store: .standard,
                                                       client: services.blocks(account)))
-        _aiConsent = StateObject(wrappedValue: AIConsent(account: account))
+        let aiConsent = AIConsent(account: account)
+        #if DEBUG
+        // The root preview's tests of what follows a send start as a phone that said OK before (DEBUG only).
+        if RootPreview.startsWithAIConsentGiven() { aiConsent.grant() }
+        #endif
+        _aiConsent = StateObject(wrappedValue: aiConsent)
         _callLog = StateObject(wrappedValue: CallLogCoordinator(
             transport: services.callLog,
             onReauthenticationRequired: { revocationRelay.invalidateAuthentication() }
@@ -574,14 +643,9 @@ struct AuthenticatedRootView: View {
         let _ = RootPreview.meter.rootBodyRan()
         #endif
         ZStack(alignment: .leading) {
-            // The side panel sits underneath; opening it pushes the room aside as a card (Carter #55006).
-            // The panel ends before the room card begins, so its right edge (unread counts, See all) is never under it.
-            sidePanel
-                .frame(width: Self.drawerWidth - 14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .opacity(drawerOpen ? 1 : 0)
-                .allowsHitTesting(drawerOpen)
-                .accessibilityHidden(!drawerOpen)
+            // The side panel sits underneath; opening it pushes the room aside as a card (Carter #55006). It is in the
+            // tree only while open, or fading out after a close.
+            SidePanelLayer(isOpen: drawerOpen, width: Self.drawerWidth, panel: sidePanel)
             NavigationStack(path: $roomPath) {
                 Group {
                     if let currentRoom {
@@ -651,7 +715,15 @@ struct AuthenticatedRootView: View {
         .overlay { LaunchSplash(isReady: roomListSettled) }
         // Crash reports are offered here, once a launch, for the whole app, to send to the team.
         .background { CrashReportOffer(api: crashReports) }
-        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: drawerOpen)
+        // With Reduce Motion, a short fade in place of the spring.
+        .animation(reduceMotion ? .easeInOut(duration: 0.2) : .spring(response: 0.35, dampingFraction: 0.8),
+                   value: drawerOpen)
+        // The side panel's rooms are placed as the rooms, your folders and your blocks change, open or closed: the panel
+        // is in the tree only while open, so these are the root's, and an open shows rooms already placed.
+        .onAppear(perform: placeSidePanelRooms)
+        .onChange(of: sessions.state.rows) { _ in placeSidePanelRooms() }
+        .onChange(of: roomFolders.folders) { _ in placeSidePanelRooms() }
+        .onChange(of: blocks.actorIds) { _ in placeSidePanelRooms() }
         // Opening the side panel reads what it shows that was not read lately: the bell, Waiting on you, whether folders
         // and direct messages are on, and your folders, so no count is older than `panelFreshness`. The rooms are read
         // once, at once, by the panel's own poll below (a second read here was the same request again).
@@ -680,7 +752,9 @@ struct AuthenticatedRootView: View {
         #if DEBUG
         // The root preview's side panel opens and closes on a signal, so a profile of it has no accessibility client
         // tapping (each tap of a UI test reads the screen's whole accessibility tree first).
-        .onReceive(RootPreview.drawerRequests) { open in drawerOpen = open }
+        .onReceive(RootPreview.drawerRequests) { open in
+            if open { panelState.open() } else { panelState.close() }
+        }
         .onAppear {
             guard RootPreview.isRequested else { return }
             let meter = RootPreview.meter
@@ -956,6 +1030,7 @@ struct AuthenticatedRootView: View {
     /// selection Pocket and Activity follow in step, and remembers it for the next launch.
     @MainActor
     private func show(_ route: RoomRoute) {
+        endAllEditing()
         pendingOpen = nil
         if !UTF8ExactIdentity.matches(sessions.selectedSessionId, route.sessionId) {
             sessions.send(.selectSession(sessionId: route.sessionId))
@@ -989,13 +1064,13 @@ struct AuthenticatedRootView: View {
 
     @MainActor
     private func closeDrawer() {
-        if drawerOpen { drawerOpen = false }
+        panelState.close()
     }
 
     private var drawerButton: some View {
         Button {
             CrashReporter.shared.note("drawerOpened")
-            drawerOpen = true
+            panelState.open()
         } label: {
             Image(systemName: "line.3.horizontal")
                 .overlay(alignment: .topTrailing) {
@@ -1025,6 +1100,7 @@ struct AuthenticatedRootView: View {
             theme: theme,
             onSelectRoom: { sessionId in show(roomRoute(for: sessionId)) },
             onAllRooms: {
+                endAllEditing()
                 roomPath = []
                 currentRoom = nil
                 closeDrawer()
@@ -1067,14 +1143,13 @@ struct AuthenticatedRootView: View {
             // Folders show only where they are on.
             onFolder: roomFolders.items == nil ? nil : { roomFolders.send($0) }
         )
-        .onAppear(perform: placeSidePanelRooms)
-        .onChange(of: sessions.state.rows) { _ in placeSidePanelRooms() }
-        .onChange(of: roomFolders.folders) { _ in placeSidePanelRooms() }
-        .onChange(of: blocks.actorIds) { _ in placeSidePanelRooms() }
     }
 
     /// A direct message with someone you blocked is not placed (`withoutDirectMessages`).
     private func placeSidePanelRooms() {
+        #if DEBUG
+        RootPreview.meter.sidePanelPlaced()
+        #endif
         sidePanelPlacement.update(rows: sessions.state.withoutDirectMessages(from: blocks.actorIds).rows,
                                   folders: roomFolders.items)
     }

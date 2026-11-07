@@ -24,8 +24,18 @@ import PocketUI
 ///   pages the list by 50).
 /// - `-PocketRootCrashOffer`: one made-up crash report waits to be offered, and sending it is answered by the preview,
 ///   so the offer (`CrashReportOffer`) shows a moment after launch.
+/// - `-PocketRootInlineReplies`: every message with replies shows its newest reply in the room, as a row to answer in
+///   place (a reply to a reply, from the room's box).
+/// - `-PocketRootAIConsentGiven`: this account has already said OK to sharing with AI, so a first send is not asked
+///   first (for a test of what follows a send, as on a phone that said OK before). Without it the preview asks.
 enum RootPreview {
     static var isRequested: Bool { ProcessInfo.processInfo.arguments.contains("-PocketRootPreview") }
+
+    /// `-PocketRootAIConsentGiven`, honored in the root preview only: without `-PocketRootPreview` it does nothing. This
+    /// whole file is DEBUG only, so a Release build has neither the flag nor this check.
+    static func startsWithAIConsentGiven(_ arguments: [String] = ProcessInfo.processInfo.arguments) -> Bool {
+        arguments.contains("-PocketRootPreview") && arguments.contains("-PocketRootAIConsentGiven")
+    }
 
     static func argument(_ name: String) -> String? {
         let arguments = ProcessInfo.processInfo.arguments
@@ -163,6 +173,11 @@ final class RootPreviewMeter: @unchecked Sendable {
     func roomScreenMade() { roomScreens += 1 }
 
     func roomScreenBodyRan() { roomScreenBodies += 1 }
+
+    /// Times the root asked for its side panel's rooms to be placed (`placeSidePanelRooms`), open or not.
+    private(set) var sidePanelPlacements = 0
+
+    func sidePanelPlaced() { sidePanelPlacements += 1 }
 
     /// Whether the room's calendar entry offered Calendar the last time its body ran (nil before it ran): it watches
     /// the calendar itself, so an answer that turns the calendar on reaches it without the root drawing again.
@@ -586,12 +601,21 @@ extension RootPreviewAPI: RoomTransport {
             return RoomActionsPage(replies: replies)
         }
         var byTarget: [Int64: RoomReactionSummary] = [:]
+        // With -PocketRootInlineReplies, each of these messages' newest reply is shown in the room as a row,
+        // to answer in place (a reply to a reply, from the room's box).
+        let inline = ProcessInfo.processInfo.arguments.contains("-PocketRootInlineReplies")
+        var replies: [RoomReply] = []
         for target in stride(from: newest, to: max(newest - 120, 0), by: -7) {
             byTarget[target] = RoomReactionSummary(targetSequenceId: target, counts: ["ack": 1, "like": 2, "reply": 3],
                                                    actorsByType: ["ack": [Self.agents[Int(target) % Self.agents.count]]],
                                                    replyTotal: 3)
+            if inline {
+                replies.append(RoomReply(id: "reply-\(target)-3", targetSequenceId: target,
+                                         authorId: Self.agents[3 % Self.agents.count], text: "Reply 3 to message \(target).",
+                                         createdAt: stamp(started.addingTimeInterval(-Double(newest - target) * 47 + 20))))
+            }
         }
-        return RoomActionsPage(byTarget: byTarget)
+        return RoomActionsPage(byTarget: byTarget, replies: replies)
     }
 }
 
