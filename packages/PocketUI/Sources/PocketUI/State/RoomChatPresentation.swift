@@ -397,6 +397,10 @@ public struct RoomChatPendingRow: Equatable, Identifiable, Sendable {
         case sending
         /// Accepted by Senti; waiting for the room to show it.
         case sent
+        /// Accepted, and shown in the room's latest messages, below an older stretch the reader is reading (after a
+        /// search or a pin, or a room opened far back): "Sent · ↓ latest" until the latest messages are loaded here,
+        /// so the message never seems to vanish and is never sent twice.
+        case sentBelow
         case failed(reason: String, canRetry: Bool)
     }
 
@@ -1831,6 +1835,11 @@ public enum RoomChatIntent: Equatable, Sendable {
     case openInvite
     /// The reader is about to jump to the bottom of a long loaded history: keep only the newest rows first.
     case keepLatestForJumpDown
+    /// The jump button took the reader to the first new message: the count is taken, the line stays.
+    case newMessagesShown
+    /// The reader is about to go to the first new message from up a long loaded history: keep the rows from just above
+    /// that line on, as for the jump down.
+    case keepFromNewMessagesLine
     /// Open the report sheet for someone else's message or reply.
     case openReport(RoomReportTarget)
     /// The open thread's next page back: the reader scrolled up to its oldest loaded reply.

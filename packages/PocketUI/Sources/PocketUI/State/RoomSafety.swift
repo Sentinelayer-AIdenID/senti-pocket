@@ -210,7 +210,7 @@ extension RoomChatIntent {
              .readAloud, .stopReadingAloud, .attachmentAppeared, .messageOnScreen, .replyOnScreen, .toggleRepeats,
              .peopleOpened, .openInvite, .keepLatestForJumpDown, .openReport, .sendReport, .closeReport, .block,
              .revealBlocked, .allowAIAgents, .declineAIAgents, .loadOlderReplies, .loadLaterReplies, .continueToReply,
-             .jumpToNewestReplies:
+             .jumpToNewestReplies, .newMessagesShown, .keepFromNewMessagesLine:
             return false
         }
     }

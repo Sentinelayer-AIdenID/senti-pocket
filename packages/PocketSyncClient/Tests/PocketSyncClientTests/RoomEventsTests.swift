@@ -220,8 +220,36 @@ final class RoomEventsTests: XCTestCase {
         XCTAssertEqual(unread.unreadCount, 3)
         XCTAssertEqual(unread.dividerSequence, 12, "the divider stays at the first unseen row")
 
+        XCTAssertFalse(unread.noteSeen(11), "a message above the line is not the line")
+        XCTAssertTrue(unread.noteSeen(13))
         unread.readerReachedBottom()
         XCTAssertEqual(unread.unreadCount, 0)
+        XCTAssertNil(unread.dividerSequence, "seen, then the bottom: the line goes")
+    }
+
+    /// The new messages are never skipped (Carter, #61581): getting to the bottom without having seen the first of them
+    /// takes the count away, not the line where they start. The jump button takes the count too, never the line.
+    func test_the_arrivals_line_stays_until_a_message_under_it_has_been_seen() {
+        var unread = RoomUnreadState()
+        unread.noteArrivals([message(12), message(13)], readerIsAtBottom: false, selfAuthorIds: [])
+        XCTAssertTrue(unread.countShown(), "the jump button took the count")
+        XCTAssertEqual(unread.unreadCount, 0)
+        XCTAssertEqual(unread.dividerSequence, 12, "the line stays")
+        XCTAssertFalse(unread.countShown(), "nothing more to take")
+
+        unread.noteArrivals([message(14)], readerIsAtBottom: false, selfAuthorIds: [])
+        XCTAssertTrue(unread.readerReachedBottom())
+        XCTAssertEqual(unread.unreadCount, 0)
+        XCTAssertEqual(unread.dividerSequence, 12, "at the bottom without having seen it: the line stays")
+        XCTAssertFalse(unread.readerReachedBottom(), "and is not news again")
+
+        XCTAssertTrue(unread.noteSeen(12))
+        XCTAssertFalse(unread.noteSeen(13), "seen once")
+        XCTAssertTrue(unread.readerReachedBottom())
         XCTAssertNil(unread.dividerSequence)
+
+        unread.noteArrivals([message(20)], readerIsAtBottom: false, selfAuthorIds: [])
+        XCTAssertFalse(unread.arrivalLineSeen, "a new line starts unseen")
+        XCTAssertEqual(unread.arrivalLine, 20)
     }
 }

@@ -230,6 +230,8 @@ final class RoomChatCoordinator: ObservableObject {
     private var readAppearances: [String: UUID] = [:]
     /// The reader at the bottom, waiting out the dwell.
     private var bottomRead: UUID?
+    /// Rows at or under the arrivals' line on screen, waiting out the dwell before the line counts as seen.
+    private var lineAppearances: [String: UUID] = [:]
     /// How long a row stays on screen, or the reader at the bottom, before it counts as read: as long as the view
     /// receipts wait (`RoomReceiptsTracker.dwell`), so the rows that flash past while the room opens or scrolls never
     /// count.
@@ -519,6 +521,14 @@ final class RoomChatCoordinator: ObservableObject {
                 keepLatestForTheJumpDown()
                 publish()
             }
+        case .newMessagesShown:
+            if unread.countShown() { publish() }
+        case .keepFromNewMessagesLine:
+            if historyTooLongToJumpDown {
+                readerAtBottom = false
+                keepFromTheNewMessagesLine()
+                publish()
+            }
         case .readerAtBottom(let atBottom):
             // Only a change is news: the same place told again never publishes, so it can never loop the room. The
             // line the room opened at stays, so coming back to the bottom publishes only when arrivals were unread.
@@ -611,6 +621,7 @@ final class RoomChatCoordinator: ObservableObject {
         case .messageOnScreen(let id, let isOnScreen):
             guard let message = timeline.messages.first(where: { $0.id == id }) else { return }
             readWhenSeen(message, isOnScreen: isOnScreen)
+            noteLineSeen(message, isOnScreen: isOnScreen)
             guard message.kind == .message, message.eventType == "session_message",
                   let target = RoomViewTarget(kind: .message, id: message.id, revision: message.revision) else { return }
             receiptsTracker?.setOnScreen(target, isOnScreen)
@@ -888,6 +899,7 @@ final class RoomChatCoordinator: ObservableObject {
                 self.timeline.hasMoreOlder = page.hasMore && self.nextBeforeSequence != nil
                 self.nextAfterSequence = nil
                 self.reconcilePending(with: page.messages)
+                self.settleSentBelow()
                 self.readerAtBottom = true
                 self.unread.readerReachedBottom()
                 self.readAtBottomAfterDwell()
@@ -912,6 +924,7 @@ final class RoomChatCoordinator: ObservableObject {
         if readThrough >= lastAppliedSequence {
             timeline.hasMoreNewer = false
             nextAfterSequence = nil
+            settleSentBelow()
         } else {
             timeline.hasMoreNewer = true
             nextAfterSequence = readThrough
@@ -2070,9 +2083,8 @@ final class RoomChatCoordinator: ObservableObject {
             return nil
         }
         let clientId = Self.makeClientId()
-        // Sending from a window further back returns to the live room, where the message appears.
-        jumpToLatest()
-        keepLatestForTheJumpDown()
+        // Sending never moves the reader (Carter, #61581): from up the room, or from a window further back, the rows
+        // they are reading stay loaded and their place stays; the message shows at the bottom of the room.
         pending.append(PendingSend(clientId: clientId, text: text, status: .sending))
         if let outbox, let account = outboxAccount,
            !outbox.add(RoomSendOutbox.Item(clientId: clientId, text: text, createdAt: now()), account: account,
@@ -2080,9 +2092,11 @@ final class RoomChatCoordinator: ObservableObject {
             // The send goes ahead; only its recovery after a kill is lost, and the crash report should say so.
             CrashReporter.shared.note("unsent message not kept on the phone (write failed)")
         }
-        readerAtBottom = true
-        // Your message goes to the bottom, and so do you: no line is left to come back to.
-        unread.caughtUp()
+        if readerAtBottom {
+            // Your message is in view at the bottom, and so are you: no line is left to come back to. Away from the
+            // bottom, the arrow keeps counting what arrived since you left it.
+            unread.caughtUp()
+        }
         publish()
         readAtBottomAfterDwell()
         deliver(clientId)
@@ -2097,10 +2111,11 @@ final class RoomChatCoordinator: ObservableObject {
         !timeline.hasMoreNewer && timeline.messages.count > Self.rowsKeptForTheJumpDown
     }
 
-    /// Going to the bottom of a long loaded history (a send, or Jump to latest) made iOS measure every row in between on
-    /// the main thread: Carter's freezes on 10-30 (07:39, 08:06, 13:43) all came after loading older messages and then
-    /// sending, and the freeze recorder caught the last one "right after sendMessage (497 rows)", stuck 16.9 s. Before
-    /// that jump, only the newest rows are kept; older ones load again when the reader scrolls up.
+    /// Going to the bottom of a long loaded history made iOS measure every row in between on the main thread: Carter's
+    /// freezes on 10-30 (07:39, 08:06, 13:43) all came after loading older messages and then sending (a send took the
+    /// reader down then; it no longer moves them), and the freeze recorder caught the last one "right after sendMessage
+    /// (497 rows)", stuck 16.9 s. Before Jump to latest goes down, only the newest rows are kept; older ones load again
+    /// when the reader scrolls up.
     private func keepLatestForTheJumpDown() {
         guard !readerAtBottom, historyTooLongToJumpDown else { return }
         let oldest = timeline.oldestSequence
@@ -2110,6 +2125,21 @@ final class RoomChatCoordinator: ObservableObject {
         }
     }
 
+    /// Going to the first new message from up a long history: the rows from a few above that line on are kept (the
+    /// same reason as `keepLatestForTheJumpDown`), at least as many as the jump down keeps.
+    private func keepFromTheNewMessagesLine() {
+        guard !readerAtBottom, historyTooLongToJumpDown, let line = unread.dividerSequence else { return }
+        let fromLine = timeline.messages.count - (timeline.messages.firstIndex { $0.sequenceId >= line } ?? 0)
+        let oldest = timeline.oldestSequence
+        if timeline.keepNewest(max(Self.rowsKeptForTheJumpDown, fromLine + Self.rowsKeptAboveTheLine)) {
+            noteOldestTrimmed(was: oldest)
+            CrashReporter.shared.note("kept the rows from the new messages line before going to it")
+        }
+    }
+
+    /// Rows kept above the New messages line when the room goes to it from up a long history.
+    static let rowsKeptAboveTheLine = 5
+
     /// Posts (or re-posts, with the same client id) one pending message.
     private func deliver(_ clientId: String) {
         guard let sender, let item = pending.first(where: { $0.clientId == clientId }) else { return }
@@ -2118,20 +2148,41 @@ final class RoomChatCoordinator: ObservableObject {
             do {
                 try await sender.sendHumanMessage(sessionId: sessionId, text: item.text, clientId: clientId)
                 guard let self else { return }
-                self.updatePending(clientId) { $0.status = .sent; $0.sentAt = self.now() }
+                // Sent from an older stretch, the message shows in the room's latest messages, not here.
+                let below = self.timeline.hasMoreNewer
+                self.updatePending(clientId) { $0.status = below ? .sentBelow : .sent; $0.sentAt = self.now() }
                 self.forgetUnconfirmed(clientId)
                 if let draftKey { RoomComposerDraft.forgetSaved(key: draftKey, sent: item.text) }
                 if !self.feedbackMuted { self.onFeedback?(.sent) }
                 // Pull the echo now instead of waiting for the stream or the next poll.
                 await self.catchUp(self.generation)
-                await self.sleep(Self.sentEchoGrace)
-                self.pending.removeAll { $0.clientId == clientId && $0.status == .sent }
-                self.publish()
+                self.dropSentAfterGrace(clientId)
             } catch {
                 guard let self else { return }
                 let status = self.failedStatus(for: error)
                 self.updatePending(clientId) { $0.status = status }
             }
+        }
+    }
+
+    /// A sent message's row waits out `sentEchoGrace` for its echo, then goes (the next poll still brings the message
+    /// in). One sent from an older stretch stays as "Sent · ↓ latest" until the latest messages are loaded
+    /// (`settleSentBelow`).
+    private func dropSentAfterGrace(_ clientId: String) {
+        Task { [weak self] in
+            await self?.sleep(Self.sentEchoGrace)
+            guard let self else { return }
+            self.pending.removeAll { $0.clientId == clientId && $0.status == .sent }
+            self.publish()
+        }
+    }
+
+    /// The latest messages are loaded here again: rows sent from the older stretch whose echo they show are gone (the
+    /// reconcile did it), and the others wait out the grace like any sent row.
+    private func settleSentBelow() {
+        for index in pending.indices where pending[index].status == .sentBelow {
+            pending[index].status = .sent
+            dropSentAfterGrace(pending[index].clientId)
         }
     }
 
@@ -2148,7 +2199,8 @@ final class RoomChatCoordinator: ObservableObject {
         publish()
     }
 
-    /// Drops pending rows the room has now shown, and learns your author id from your own echoed message.
+    /// Drops pending rows the room has now shown, and learns your author id from your own echoed message. An echo that
+    /// arrives below an older stretch the reader is in is not shown here: its row stays, as "Sent · ↓ latest".
     private func reconcilePending(with messages: [RoomMessage]) {
         if let onOwnEcho {
             let echoed = Set(messages.compactMap(\.clientMessageId))
@@ -2157,7 +2209,12 @@ final class RoomChatCoordinator: ObservableObject {
         guard !pending.isEmpty else { return }
         for message in messages {
             guard let clientId = message.clientMessageId,
-                  pending.contains(where: { $0.clientId == clientId }) else { continue }
+                  let index = pending.firstIndex(where: { $0.clientId == clientId }) else { continue }
+            if timeline.hasMoreNewer, timeline.index(ofSequence: message.sequenceId) == nil {
+                pending[index].status = .sentBelow
+                forgetUnconfirmed(clientId)
+                continue
+            }
             pending.removeAll { $0.clientId == clientId }
             forgetUnconfirmed(clientId)
             if !message.authorId.isEmpty { ownAuthorIds.insert(message.authorId.lowercased()) }
@@ -2419,6 +2476,27 @@ final class RoomChatCoordinator: ObservableObject {
             guard let self, self.readAppearances[id] == appearance else { return }
             self.readAppearances[id] = nil
             self.read(through: sequence)
+        }
+    }
+
+    /// The line for arrivals while the reader was away counts as seen once a message under it has stayed on screen for
+    /// the read dwell: only then does reaching the bottom take it away (Carter, #61581: the new messages are never
+    /// skipped).
+    private func noteLineSeen(_ message: RoomMessage, isOnScreen: Bool) {
+        guard isOnScreen else {
+            lineAppearances[message.id] = nil
+            return
+        }
+        guard let line = unread.arrivalLine, message.sequenceId >= line, !unread.arrivalLineSeen else { return }
+        let appearance = UUID()
+        let id = message.id
+        let sequence = message.sequenceId
+        lineAppearances[id] = appearance
+        Task { [weak self] in
+            await self?.sleep(Self.readDwell)
+            guard let self, self.lineAppearances[id] == appearance else { return }
+            self.lineAppearances[id] = nil
+            self.unread.noteSeen(sequence)
         }
     }
 

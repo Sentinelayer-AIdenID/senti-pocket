@@ -15,6 +15,17 @@ enum RoomPreview {
         ProcessInfo.processInfo.arguments.contains("-PocketRoomPreview") || isTicketsRequested || isTicketLinkRequested
             || isAnchorRequested || isSearchRequested || isBlockedPeopleRequested || isProfileCardRequested
             || isDirectRequested || isSidePanelFoldersRequested || isDialConsentRequested || isBigThreadRequested
+            || isBurstRequested
+    }
+
+    /// `-PocketRoomBurstPreview` opens a room of eighty earlier messages of every length at its newest, then a burst of
+    /// thirty rows arrives, one every 0.3 s: agents' messages, the orchestrator's cost lines, background lines, repeated
+    /// notices that fold into one row, checkpoints and joins, while rows above them change (edits, reactions, a thread's
+    /// newest reply moving down, receipts). Someone reading up the room must not be moved by any of it
+    /// (`RoomPreviewBurst`; `-PocketRoomBurstKind` sends one kind of row alone, or every kind with nothing above
+    /// changing).
+    static var isBurstRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-PocketRoomBurstPreview")
     }
 
     /// `-PocketBigThreadPreview` gives the review message a thread of 1,000 long replies, read 100 actions a page as the
@@ -257,7 +268,7 @@ enum RoomPreview {
                     focusReplyId: isBigThreadRequested ? bigThreadFocus : nil,
                     focusTicketId: isTicketLinkRequested ? "t1" : nil
                 ),
-                transport: RoomPreviewTransport(anchorScenario: isAnchorRequested),
+                transport: RoomPreviewTransport(anchorScenario: isAnchorRequested, burstScenario: isBurstRequested),
                 sender: RoomPreviewSender(),
                 actionSender: RoomPreviewSender(),
                 identity: RoomPreviewIdentity(),
@@ -485,6 +496,102 @@ private final class RoomPreviewFolders: RoomFoldersServing, @unchecked Sendable 
     }
 }
 
+/// The burst room's burst: what it is made of, and when it begins: on the UI test's signal (a Darwin notification, which
+/// reaches the app from the test runner on the same simulator), or on its own `-PocketRoomBurstAfter` seconds (8 by
+/// default) after the room's stream opened, for a run by hand.
+enum RoomPreviewBurst {
+    static let signal = "com.plexaura.sentipocket.preview.burst"
+    /// Said once the burst's last row has been sent: the UI tests measure until then, however slow the machine.
+    static let doneSignal = "com.plexaura.sentipocket.preview.burst.done"
+    static let historyCount = 80
+    static let firstSequence: Int64 = 1001
+    static let firstArrival: Int64 = 1081
+    static let count = 30
+    /// Agents posting every few hundred milliseconds.
+    static let interval: UInt64 = 300_000_000
+
+    /// What the burst is made of (`-PocketRoomBurstKind`): one kind of row alone, to tell which kinds move a reader, or
+    /// every kind together with rows above the reader changing (the default).
+    enum Kind: String {
+        /// Every kind below, with edits above the reader, reactions, a thread's newest reply moving down and receipts.
+        case mixed
+        /// Every kind below, with nothing above the reader changing.
+        case arrivals
+        /// Agents' messages of every length, two with a screenshot.
+        case messages
+        /// The orchestrator's cost lines: background lines, alike but for their numbers, so they fold into one row.
+        case cost
+        /// Agents speaking to other agents: background lines.
+        case quiet
+        /// An agent's notice repeating with only its numbers changing: one row with its count.
+        case repeats
+        /// Checkpoints and agents joining.
+        case system
+    }
+
+    static let kind: Kind = {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard let index = arguments.firstIndex(of: "-PocketRoomBurstKind"), index + 1 < arguments.count else { return .mixed }
+        return Kind(rawValue: arguments[index + 1]) ?? .mixed
+    }()
+
+    /// Rows above the reader change while the burst arrives: the mixed burst, once it has begun.
+    static var changesAbove: Bool { kind == .mixed && hasBegun }
+
+    private static let lock = NSLock()
+    private static var signalled = false
+    private static var began = false
+    private static var listening = false
+
+    /// The burst has begun: the preview's reactions, thread and receipts change from then on.
+    static var hasBegun: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return began
+    }
+
+    private static var startsAfter: TimeInterval {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard let index = arguments.firstIndex(of: "-PocketRoomBurstAfter"), index + 1 < arguments.count,
+              let seconds = TimeInterval(arguments[index + 1]) else { return 8 }
+        return seconds
+    }
+
+    private static func listen() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !listening else { return }
+        listening = true
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(), nil,
+            { _, _, _, _, _ in RoomPreviewBurst.markSignalled() },
+            signal as CFString, nil, .deliverImmediately
+        )
+    }
+
+    private static func markSignalled() {
+        lock.lock()
+        signalled = true
+        lock.unlock()
+    }
+
+    /// Returns once the burst should begin, and from then on `hasBegun` is true.
+    static func waitToBegin() async {
+        listen()
+        let deadline = Date().addingTimeInterval(startsAfter)
+        while Date() < deadline, !Task.isCancelled {
+            lock.lock()
+            let go = signalled
+            lock.unlock()
+            if go { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        lock.lock()
+        began = true
+        lock.unlock()
+    }
+}
+
 /// Search over the preview room's own messages, so a match opens a real row. `-PocketRoomSearchPreview` shows the
 /// matches for "paste", with "Older matches" so that row can be seen too.
 private struct RoomPreviewSearch: RoomSearching {
@@ -519,9 +626,11 @@ private struct RoomPreviewReceipts: RoomReceiptsClient {
         let alex = RoomViewer(isHuman: true, actorId: Self.alex, viewedAt: now)
         let agent = RoomViewer(isHuman: false, actorId: "review-agent", viewedAt: now)
         return targets.map { target in
-            // Some rows nobody has seen yet, some only an agent has, the rest both.
+            // Some rows nobody has seen yet, some only an agent has, the rest both. Once a burst has begun, the burst
+            // room's rows nobody had seen are seen: their lines change while it arrives.
             let seq = Int64(target.id.suffix(12)) ?? 0
-            let viewers = seq % 5 == 0 ? [] : (seq % 3 == 0 ? [agent] : [alex, agent])
+            let seenSince = RoomPreviewBurst.changesAbove && seq >= RoomPreviewBurst.firstSequence
+            let viewers = seq % 5 == 0 && !seenSince ? [] : (seq % 3 == 0 ? [agent] : [alex, agent])
             return RoomViewSummary(kind: target.kind, id: target.id, revision: target.revision,
                                    viewedCount: viewers.count, viewers: viewers)
         }
@@ -880,6 +989,8 @@ private struct RoomPreviewTransport: RoomTransport {
     var anchorScenario = false
     /// A direct message with review-agent: a few messages, your own last.
     var directScenario = false
+    /// The burst scenario: its own history of eighty messages, then the burst (`RoomPreviewBurst`).
+    var burstScenario = false
 
     private static let directHistory: [RoomMessage] = [
         row(201, "human-alex", minutesAgo: 40, "Quick one outside the room: can you look at paste validation before the demo?"),
@@ -894,9 +1005,163 @@ private struct RoomPreviewTransport: RoomTransport {
 
     private var allHistory: [RoomMessage] {
         if directScenario { return Self.directHistory }
+        if burstScenario { return Self.burstHistory }
         let files = RoomPreview.isFilesRequested ? Self.fileRoots : []
         let strip = RoomPreview.isStripRequested ? [Self.stripRoot] : []
         return (anchorScenario ? Self.earlier + Self.history : Self.history) + files + strip
+    }
+
+    // MARK: The burst
+
+    /// Who posts in the burst room, by sequence: three agents, and you now and then.
+    private static func burstAuthor(_ seq: Int64) -> String {
+        ["review-agent", "build-agent", "design-agent", "review-agent", "human-alex", "build-agent", "design-agent"][Int(seq % 7)]
+    }
+
+    /// Every length a room holds: a word, a line, a list, code, and a long note of several paragraphs.
+    private static func burstText(_ seq: Int64) -> String {
+        switch seq % 6 {
+        case 0:
+            return "Done with step \(seq)."
+        case 1:
+            return "Checked the onboarding copy for step \(seq): the labels match the design, the error text reads well, "
+                + "and the help link opens the right page."
+        case 2:
+            return "Findings for build \(seq):\n1. The **email step** skips validation on paste.\n"
+                + "2. `retryCount` resets after a failed submit.\n3. The help link opens the settings page instead of the guide."
+        case 3:
+            return "Repro for \(seq):\n```\nxcodebuild test -scheme App\n  -only-testing:OnboardingTests/test_step_\(seq)\n```"
+        case 4:
+            return (1...4).map {
+                "Paragraph \($0) of a long note on step \(seq): the flow reads well on a small phone, though the second "
+                    + "screen still crowds its buttons and the keyboard covers the last field."
+            }.joined(separator: "\n\n")
+        default:
+            return "On it, step \(seq)."
+        }
+    }
+
+    /// Eighty messages, two minutes apart, the newest a few minutes ago.
+    fileprivate static let burstHistory: [RoomMessage] = (0..<RoomPreviewBurst.historyCount).map { index in
+        let seq = RoomPreviewBurst.firstSequence + Int64(index)
+        return row(seq, burstAuthor(seq), minutesAgo: Double(RoomPreviewBurst.historyCount - index) * 2 + 3, burstText(seq))
+    }
+
+    /// The rows a burst is made of.
+    private enum BurstRow {
+        case message, image, cost, quiet, notice, checkpoint, joined
+    }
+
+    /// The mixed burst: every kind, the alike ones in runs so they fold, the last one a short message.
+    private static let mixedBurst: [BurstRow] = [
+        .message, .cost, .cost, .cost, .quiet, .message, .image, .notice, .notice, .notice,
+        .checkpoint, .quiet, .message, .joined, .cost, .cost, .image, .quiet, .message, .notice,
+        .notice, .checkpoint, .quiet, .message, .cost, .cost, .joined, .quiet, .message, .message
+    ]
+
+    private static func burstRow(_ index: Int) -> BurstRow {
+        switch RoomPreviewBurst.kind {
+        case .mixed, .arrivals: return mixedBurst[index % mixedBurst.count]
+        case .messages: return index == 6 || index == 16 ? .image : .message
+        case .cost: return .cost
+        case .quiet: return .quiet
+        case .repeats: return .notice
+        case .system: return index.isMultiple(of: 2) ? .checkpoint : .joined
+        }
+    }
+
+    /// The burst's rows, one kind or every kind (`RoomPreviewBurst.Kind`).
+    private static func burstMessage(_ index: Int) -> RoomMessage {
+        let seq = RoomPreviewBurst.firstArrival + Int64(index)
+        let agents = ["review-agent", "build-agent", "design-agent"]
+        let agent = agents[index % 3]
+        switch burstRow(index) {
+        case .message:
+            let last = index == RoomPreviewBurst.count - 1
+            return row(seq, agent, minutesAgo: 0, last ? "That's all from me for now." : burstText(seq))
+        case .image:
+            let message = row(seq, agent, minutesAgo: 0, "Screenshot of step \(seq):")
+            return RoomMessage(id: message.id, sequenceId: seq, kind: .message, authorId: agent, authorName: agent,
+                               isHuman: false, text: message.text, timestamp: message.timestamp, attachments: [
+                                   RoomAttachment(attachmentId: "burst-shot-\(seq)", filename: "step-\(seq).png",
+                                                  kind: .image, contentType: "image/png", sizeBytes: 210_000,
+                                                  summaryStatus: "ready")
+                               ])
+        case .cost:
+            return row(seq, "respawn-orchestrator", minutesAgo: 0,
+                       "[cost] box-\(index % 4): $\(12 + index).\(10 + index * 7 % 90) est over \(140 + index * 3) calls")
+        case .quiet:
+            let said = ["the build is green on shard \(index)", "can you rerun the paste tests", "pushed the fix for step \(seq)",
+                        "picking up the retry counter next"][index % 4]
+            return row(seq, agent, minutesAgo: 0, "@\(agents[(index + 1) % 3]) \(said).")
+        case .notice:
+            return row(seq, "build-agent", minutesAgo: 0, "Retrying the upload of build 319: attempt \(index + 1) of 40")
+        case .checkpoint:
+            return row(seq, "senti", minutesAgo: 0, "Build \(seq) reviewed: 2 findings, both fixed", kind: .checkpoint)
+        case .joined:
+            return row(seq, "senti", minutesAgo: 0, "agent-\(index)", kind: .memberJoined)
+        }
+    }
+
+    /// Older messages edited while the mixed burst arrives, each much longer after its edit: some sit above the reader.
+    private static let burstEdits: [Int: Int64] = [3: 1066, 8: 1074, 11: 1058, 13: 1050, 17: 1077]
+
+    private static func burstEdit(of seq: Int64) -> RoomMessage? {
+        guard let original = burstHistory.first(where: { $0.sequenceId == seq }) else { return nil }
+        let longer = original.text + "\n\n" + (1...4).map { "Edited, line \($0): one more thing about step \(seq)." }
+            .joined(separator: "\n")
+        return RoomMessage(id: original.id, sequenceId: seq, kind: original.kind, authorId: original.authorId,
+                           authorName: original.authorName, isHuman: original.isHuman, text: longer,
+                           timestamp: original.timestamp, revision: 2, isEdited: true)
+    }
+
+    /// The burst room's reactions and its one thread: before the burst a reply to 1050 sits at its own time, up the
+    /// room; once the mixed burst has begun, reactions come to rows near the reader, and the thread's newest reply
+    /// arrives, which moves the thread's row from up the room to the bottom.
+    private static func burstActions() -> RoomActionsPage {
+        func stamp(minutesAgo: Double) -> String {
+            ISO8601DateFormatter().string(from: base.addingTimeInterval(-minutesAgo * 60))
+        }
+        var replies = [RoomReply(id: "burst-reply-1", targetSequenceId: 1050, authorId: "build-agent",
+                                 text: "Same cause as 1048: the paste handler.", createdAt: stamp(minutesAgo: 59))]
+        var byTarget: [Int64: RoomReactionSummary] = [
+            1003: RoomReactionSummary(targetSequenceId: 1003, counts: ["like": 1])
+        ]
+        if RoomPreviewBurst.changesAbove {
+            // Just after the newest history row, before the burst's first message.
+            replies.append(RoomReply(id: "burst-reply-2", targetSequenceId: 1050, authorId: "review-agent",
+                                     text: "Fixed in the burst build.", createdAt: stamp(minutesAgo: 1)))
+            for seq: Int64 in [1062, 1068, 1071, 1075, 1078] {
+                byTarget[seq] = RoomReactionSummary(
+                    targetSequenceId: seq, counts: ["like": 2],
+                    emojiReactions: [RoomEmojiReaction(emoji: "👀", count: 1, viewerReacted: false)]
+                )
+            }
+        }
+        return RoomActionsPage(byTarget: byTarget, replies: replies)
+    }
+
+    /// The burst, once it begins: a row every 0.3 s, with the mixed burst's edits among them.
+    private func burstStream() -> AsyncStream<RoomStreamEvent> {
+        AsyncStream { continuation in
+            let task = Task {
+                continuation.yield(.frame(.control))
+                await RoomPreviewBurst.waitToBegin()
+                for index in 0..<RoomPreviewBurst.count {
+                    guard !Task.isCancelled else { return }
+                    continuation.yield(.frame(.message(Self.burstMessage(index))))
+                    if RoomPreviewBurst.kind == .mixed, let seq = Self.burstEdits[index], let edit = Self.burstEdit(of: seq) {
+                        continuation.yield(.frame(.message(edit)))
+                    }
+                    try? await Task.sleep(nanoseconds: RoomPreviewBurst.interval)
+                }
+                CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                                     CFNotificationName(RoomPreviewBurst.doneSignal as CFString),
+                                                     nil, nil, true)
+                // Stay connected like a quiet live room.
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
     }
 
     /// Twelve photos, named `<prefix>-1.jpg` to `<prefix>-12.jpg`.
@@ -981,6 +1246,11 @@ private struct RoomPreviewTransport: RoomTransport {
 
     func roomActions(sessionId: String, targetSequenceId: Int64?, limit: Int) async throws -> RoomActionsPage {
         if directScenario { return RoomActionsPage() }
+        if burstScenario {
+            let page = Self.burstActions()
+            guard let targetSequenceId else { return page }
+            return RoomActionsPage(replies: page.replies.filter { $0.targetSequenceId == targetSequenceId })
+        }
         if targetSequenceId == 111 { return RoomActionsPage(replies: Self.threadReplies) }
         if targetSequenceId == 126, RoomPreview.isStripRequested { return RoomActionsPage(replies: [Self.stripReply]) }
         let files = RoomPreview.isFilesRequested ? Self.fileParts : []
@@ -1045,6 +1315,7 @@ private struct RoomPreviewTransport: RoomTransport {
 
     func roomStream(sessionId: String, fromSequence: Int64?) -> AsyncStream<RoomStreamEvent> {
         if anchorScenario { return anchorStream() }
+        if burstScenario { return burstStream() }
         if directScenario {
             // A direct message to an agent wakes no model by itself: the stream stays quiet.
             return AsyncStream { continuation in continuation.yield(.frame(.control)) }

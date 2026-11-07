@@ -52,6 +52,11 @@ private final class ScriptedRoomTransport: RoomTransport, @unchecked Sendable {
         }
     }
 
+    /// One more before page, answered after the ones given at the start.
+    func queueBefore(_ page: Result<RoomEventPage, Error>) {
+        locked { beforePages.append(page) }
+    }
+
     func hold(beforeCall index: Int) {
         locked { heldBeforeCall = index }
     }
@@ -214,6 +219,8 @@ final class RoomChatCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.state.unreadCount, 1, "your own message is never unread")
         XCTAssertTrue(coordinator.state.rows.contains(.unreadDivider))
 
+        coordinator.send(.messageOnScreen(id: "evt-7", isOnScreen: true))
+        await settle()
         coordinator.send(.readerAtBottom(true))
         XCTAssertEqual(coordinator.state.unreadCount, 0)
         XCTAssertFalse(coordinator.state.rows.contains(.unreadDivider))
@@ -374,18 +381,164 @@ final class RoomChatCoordinatorTests: XCTestCase {
         coordinator.pause()
     }
 
-    /// Carter's freezes came from sending far up a long history (10-30, "sendMessage (497 rows)").
-    func test_sending_from_up_a_long_history_keeps_only_the_newest_rows_first() async {
+    /// Sending from up a long history never moves the reader (Carter, #61581): the rows they are reading stay loaded
+    /// (the send used to keep only the newest 60, for a jump down that no longer happens: Carter's 10-30 freezes came
+    /// from that jump), they stay away from the bottom, and arrivals after it are still counted for the arrow.
+    func test_sending_from_up_a_long_history_keeps_the_rows_being_read_and_the_count() async {
         let transport = ScriptedRoomTransport(before: [.success(page(Array(1...497), hasMore: true))])
         let coordinator = makeCoordinator(transport, sender: AcceptingSender())
         coordinator.resume()
         await waitUntil("loaded") { messageSequences(coordinator).count == 497 }
 
         coordinator.send(.readerAtBottom(false))
-        coordinator.send(.sendMessage(text: "on my way down"))
-        XCTAssertEqual(messageSequences(coordinator), Array(438...497), "only the newest 60 are crossed on the way down")
-        XCTAssertTrue(coordinator.state.canLoadOlder)
-        XCTAssertEqual(coordinator.state.pending.map(\.text), ["on my way down"])
+        coordinator.handle(.message(message(498)))
+        XCTAssertEqual(coordinator.state.unreadCount, 1)
+        coordinator.send(.sendMessage(text: "from where I am"))
+        XCTAssertEqual(messageSequences(coordinator), Array(1...498), "the rows being read stay")
+        XCTAssertEqual(coordinator.state.pending.map(\.text), ["from where I am"])
+        XCTAssertEqual(coordinator.state.unreadCount, 1, "the arrow still counts what arrived since the reader left")
+        coordinator.handle(.message(message(499)))
+        XCTAssertEqual(coordinator.state.unreadCount, 2, "and keeps counting: the reader is still away from the bottom")
+
+        coordinator.send(.readerAtBottom(true))
+        XCTAssertEqual(coordinator.state.unreadCount, 0, "reaching the bottom clears it")
+        coordinator.pause()
+    }
+
+    /// Sending from a window further back (a search result, a link) stays in the window: the live room is not loaded
+    /// over the rows being read.
+    func test_sending_from_a_window_further_back_stays_in_the_window() async {
+        let transport = ScriptedRoomTransport(
+            before: [
+                .success(page([990, 1_000], hasMore: true)),
+                .success(page([760, 770], hasMore: true))
+            ],
+            after: [.success(RoomEventPage(messages: [message(780)], rawCount: 50, maxSequence: 820))]
+        )
+        let coordinator = makeCoordinator(transport, sender: AcceptingSender())
+        coordinator.resume()
+        await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
+        coordinator.focus(on: 770)
+        await waitUntil("window") { coordinator.state.canLoadNewer && !coordinator.state.isLoadingOlder }
+        let window = messageSequences(coordinator)
+
+        coordinator.send(.sendMessage(text: "about this one"))
+        XCTAssertEqual(coordinator.state.pending.map(\.text), ["about this one"])
+        XCTAssertFalse(coordinator.state.isLoadingOlder, "no page of the live room is asked for")
+        XCTAssertTrue(coordinator.state.canLoadNewer, "still the window")
+        XCTAssertEqual(messageSequences(coordinator), window)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(transport.snapshot().before.count, 2, "only the room's first page and the window's")
+        XCTAssertEqual(messageSequences(coordinator), window)
+        coordinator.pause()
+    }
+
+    /// A send from an older stretch (after a search or a pin, or a room opened far back) shows its row as "Sent · ↓
+    /// latest": the message is in the room's latest messages, not under the old ones, and its row no longer vanishes
+    /// when the echo arrives below, which invited sending it twice. It goes once the latest are loaded here and show it.
+    func test_a_send_from_an_older_stretch_stays_as_sent_below_until_the_latest_shows_it() async {
+        let transport = ScriptedRoomTransport(
+            before: [
+                .success(page([990, 1_000], hasMore: true)),
+                .success(page([760, 770], hasMore: true))
+            ],
+            after: [.success(RoomEventPage(messages: [message(780)], rawCount: 50, maxSequence: 820))]
+        )
+        let coordinator = makeCoordinator(transport, sender: AcceptingSender())
+        coordinator.resume()
+        await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
+        coordinator.focus(on: 770)
+        await waitUntil("window") { coordinator.state.canLoadNewer && !coordinator.state.isLoadingOlder }
+
+        coordinator.send(.sendMessage(text: "about this one"))
+        await waitUntil("accepted") { coordinator.state.pending.first?.status == .sentBelow }
+        let clientId = coordinator.state.pending[0].clientId
+        let echo = RoomMessage(id: "evt-1011", sequenceId: 1_011, kind: .message, authorId: "human-mrrcarter",
+                               authorName: "mrrcarter", isHuman: true, text: "about this one",
+                               timestamp: "2026-10-28T18:00:00.000000+00:00", clientMessageId: clientId)
+        coordinator.handle(.message(echo))
+        XCTAssertEqual(coordinator.state.pending.map(\.status), [.sentBelow],
+                       "the echo is in the latest messages, not here: the row stays")
+        XCTAssertTrue(coordinator.state.canLoadNewer)
+
+        transport.queueBefore(.success(RoomEventPage(messages: [message(1_000), echo], maxSequence: 1_011,
+                                                     nextBeforeSequence: 1_000, hasMore: true)))
+        coordinator.send(.jumpToLatest)
+        await waitUntil("live") { !coordinator.state.canLoadNewer && !coordinator.state.isLoadingOlder }
+        XCTAssertTrue(coordinator.state.pending.isEmpty, "the latest show the message: its row goes")
+        XCTAssertEqual(messageSequences(coordinator).last, 1_011)
+        coordinator.pause()
+    }
+
+    /// The jump button takes the reader to the first new message and takes the count, as the web room's does (Carter,
+    /// #61581); the New messages line stays until a message under it has been on screen for the read dwell, so getting
+    /// to the bottom never skips where the new ones start.
+    func test_the_new_messages_line_stays_until_a_message_under_it_has_been_seen() async {
+        let transport = ScriptedRoomTransport(before: [.success(page([1]))])
+        let coordinator = makeCoordinator(transport)
+        coordinator.resume()
+        await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
+        coordinator.send(.readerAtBottom(false))
+        coordinator.handle(.message(message(7)))
+        coordinator.handle(.message(message(8)))
+        XCTAssertEqual(coordinator.state.unreadCount, 2)
+
+        coordinator.send(.newMessagesShown)
+        XCTAssertEqual(coordinator.state.unreadCount, 0, "the button took the count")
+        XCTAssertTrue(coordinator.state.rows.contains(.unreadDivider), "the line stays")
+
+        coordinator.send(.readerAtBottom(true))
+        XCTAssertTrue(coordinator.state.rows.contains(.unreadDivider), "at the bottom without having seen it: it stays")
+
+        coordinator.send(.readerAtBottom(false))
+        coordinator.send(.messageOnScreen(id: "evt-1", isOnScreen: true))
+        await settle()
+        coordinator.send(.readerAtBottom(true))
+        XCTAssertTrue(coordinator.state.rows.contains(.unreadDivider), "a message above the line is not the line")
+
+        coordinator.send(.readerAtBottom(false))
+        coordinator.send(.messageOnScreen(id: "evt-7", isOnScreen: true))
+        await settle()
+        coordinator.send(.readerAtBottom(true))
+        XCTAssertFalse(coordinator.state.rows.contains(.unreadDivider), "seen, then the bottom: it goes")
+        coordinator.pause()
+    }
+
+    /// Going to the first new message from up a long history keeps the rows from a few above the line on (as the jump
+    /// down keeps the newest), so the list opens again at the line rather than scrolling a long way.
+    func test_going_to_the_new_messages_from_up_a_long_history_keeps_the_rows_from_the_line() async {
+        let transport = ScriptedRoomTransport(before: [.success(page(Array(1...130), hasMore: true))])
+        let coordinator = makeCoordinator(transport)
+        coordinator.resume()
+        await waitUntil("loaded") { messageSequences(coordinator).count == 130 }
+        coordinator.send(.readerAtBottom(false))
+        for seq in Int64(131)...200 { coordinator.handle(.message(message(seq))) }
+
+        coordinator.send(.keepFromNewMessagesLine)
+        XCTAssertEqual(messageSequences(coordinator), Array(126...200), "the 70 new ones and 5 above the line")
+        XCTAssertTrue(coordinator.state.rows.contains(.unreadDivider))
+        XCTAssertTrue(coordinator.state.canLoadOlder, "and the rest can load again")
+        coordinator.pause()
+    }
+
+    /// Lets the room's short waits (the read dwell) run.
+    private func settle() async {
+        for _ in 0..<20 { await Task.yield() }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+    }
+
+    /// At the bottom, a send keeps the reader there with their message, and nothing is left unread.
+    func test_sending_at_the_bottom_leaves_nothing_unread() async {
+        let transport = ScriptedRoomTransport(before: [.success(page([1, 2]))])
+        let coordinator = makeCoordinator(transport, sender: AcceptingSender())
+        coordinator.resume()
+        await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
+        coordinator.send(.readerAtBottom(false))
+        coordinator.handle(.message(message(3)))
+        coordinator.send(.readerAtBottom(true))
+        coordinator.send(.sendMessage(text: "here"))
+        XCTAssertEqual(coordinator.state.unreadCount, 0)
+        XCTAssertFalse(coordinator.state.rows.contains(.unreadDivider))
         coordinator.pause()
     }
 

@@ -433,19 +433,25 @@ public struct RoomTimeline: Equatable, Sendable {
 
 /// Unread tracking for one open room, mirroring the web's client-only divider: while the reader is away from the
 /// bottom, arriving rows from OTHER people count as unread and the divider sits at the first of them. Reaching
-/// the bottom clears both.
+/// the bottom clears the count; the divider goes with it only once a message under it has been seen (the jump button
+/// takes the reader to the first of them, and the new messages are never skipped).
 ///
 /// A room opened from the room list with messages you had not read opens at the first of them: that
-/// line stays while the room is open, wherever you scroll, as Discord's does. Only a send, which takes
-/// you to your own message at the bottom, lets it go.
+/// line stays while the room is open, wherever you scroll, as Discord's does. Only a send made at the
+/// bottom, with your own message in view, lets it go (a send from up the room moves nothing).
 public struct RoomUnreadState: Equatable, Sendable {
     public private(set) var unreadCount = 0
     /// The first message you had not read when the room opened.
     public private(set) var openedAt: Int64?
     /// The first message from others that arrived while you were away from the bottom.
     private var arrivedAt: Int64?
+    /// A message at or after `arrivedAt` has stayed on screen: reaching the bottom may take that line away.
+    public private(set) var arrivalLineSeen = false
 
     public init() {}
+
+    /// Where the line for arrivals while you were away sits, if there is one.
+    public var arrivalLine: Int64? { arrivedAt }
 
     /// Where the unread line sits: the earlier of where the room opened and the first arrival while you were away.
     public var dividerSequence: Int64? {
@@ -466,23 +472,48 @@ public struct RoomUnreadState: Equatable, Sendable {
         guard !fromOthers.isEmpty else { return }
         unreadCount += fromOthers.count
         let first = fromOthers.map(\.sequenceId).min()!
+        if arrivedAt == nil { arrivalLineSeen = false }
         arrivedAt = min(arrivedAt ?? first, first)
     }
 
-    /// The reader came back to the bottom: arrivals are read. The line the room opened at stays. Whether anything
-    /// changed, so the same place told again never redraws the room.
+    /// A message stayed on screen: at or after the arrivals' line, that line has been seen. Whether that is news.
     @discardableResult
-    public mutating func readerReachedBottom() -> Bool {
-        guard unreadCount != 0 || arrivedAt != nil else { return false }
-        unreadCount = 0
-        arrivedAt = nil
+    public mutating func noteSeen(_ sequence: Int64) -> Bool {
+        guard let arrivedAt, sequence >= arrivedAt, !arrivalLineSeen else { return false }
+        arrivalLineSeen = true
         return true
     }
 
-    /// You sent a message: you are at the newest, and every line goes.
+    /// The jump button took the reader to the first new message: the count is taken (the button goes plain, and on to
+    /// the latest), and the line stays until it has been seen. Whether anything changed.
+    @discardableResult
+    public mutating func countShown() -> Bool {
+        guard unreadCount != 0 else { return false }
+        unreadCount = 0
+        return true
+    }
+
+    /// The reader came back to the bottom: the count goes, and the arrivals' line too once it has been seen (never
+    /// before: a reader who got to the bottom without seeing the first new message still finds where the new ones
+    /// start). The line the room opened at stays. Whether anything changed, so the same place told again never redraws
+    /// the room.
+    @discardableResult
+    public mutating func readerReachedBottom() -> Bool {
+        let lineGoes = arrivedAt != nil && arrivalLineSeen
+        guard unreadCount != 0 || lineGoes else { return false }
+        unreadCount = 0
+        if lineGoes {
+            arrivedAt = nil
+            arrivalLineSeen = false
+        }
+        return true
+    }
+
+    /// You sent a message at the bottom: you are at the newest, and every line goes.
     public mutating func caughtUp() {
         unreadCount = 0
         arrivedAt = nil
+        arrivalLineSeen = false
         openedAt = nil
     }
 }
