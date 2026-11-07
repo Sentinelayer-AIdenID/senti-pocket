@@ -171,6 +171,27 @@ final class AgentContactsTests: XCTestCase {
         XCTAssertNotNil(contacts[0].lastActiveAt)
     }
 
+    /// Before People, the room asked the AI-sharing OK before its invite sheet opened. People asks it before the link,
+    /// the invite or the agent added, once, until it is given; never again after.
+    func test_inviting_or_adding_an_agent_asks_the_ai_sharing_ok_until_it_is_given() throws {
+        let suite = "people-consent-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let consent = AIConsent(account: "sub:someone", defaults: defaults)
+        var ran = 0
+        var asked: AIConsentHeld?
+        AIConsentGate.run({ ran += 1 }, consent: consent) { asked = $0 }
+        XCTAssertEqual(ran, 0, "nothing goes to the room before the OK")
+        let question = try XCTUnwrap(asked, "the OK is asked first")
+        consent.grant()
+        question.proceed()
+        XCTAssertEqual(ran, 1, "OK runs it")
+        asked = nil
+        AIConsentGate.run({ ran += 1 }, consent: consent) { asked = $0 }
+        XCTAssertNil(asked, "asked once: never again after the OK")
+        XCTAssertEqual(ran, 2)
+    }
+
     func test_the_room_offers_agents_only_when_its_read_says_so() throws {
         func features(_ json: String) throws -> RoomFeatures {
             try JSONDecoder().decode(RoomFeatures.self, from: Data(json.utf8))

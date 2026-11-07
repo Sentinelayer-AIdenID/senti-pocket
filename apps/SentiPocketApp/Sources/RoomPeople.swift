@@ -90,6 +90,20 @@ struct RoomRequestsPage: View {
     }
 }
 
+/// The AI-sharing OK (App Store guideline 5.1.2(i)) before something from People writes to the room: an invite link, an
+/// invite, an agent added. Asked first while this account has not said OK, as the room asked before opening its invite
+/// sheet before People (`afterAIConsent { showsInvite = true }`); `ask` shows the question, and OK runs the action.
+enum AIConsentGate {
+    @MainActor
+    static func run(_ action: @escaping () -> Void, consent: AIConsent?, ask: (AIConsentHeld) -> Void) {
+        guard let consent, consent.asks else {
+            action()
+            return
+        }
+        ask(AIConsentHeld(action))
+    }
+}
+
 /// Invite people, at the top of People: share an invite link at once, or invite someone by email or GitHub username;
 /// and, where the room offers it, the agents you work with, each added in one tap.
 struct RoomInviteRows: View {
@@ -136,11 +150,7 @@ struct RoomInviteRows: View {
 
     /// An invite writes to the room: the first write asks this account's OK to share with AI.
     private func afterConsent(_ action: @escaping () -> Void) {
-        guard let aiConsent, aiConsent.asks else {
-            action()
-            return
-        }
-        consentHeld = AIConsentHeld(action)
+        AIConsentGate.run(action, consent: aiConsent) { consentHeld = $0 }
     }
 
     /// A link anyone signed in joins with, as a contributor, then the system's share sheet.

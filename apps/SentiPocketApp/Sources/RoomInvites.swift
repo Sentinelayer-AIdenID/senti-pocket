@@ -215,11 +215,7 @@ struct RoomInviteForm: View {
     }
 
     private func afterConsent(_ action: @escaping () -> Void) {
-        guard let aiConsent, aiConsent.asks else {
-            action()
-            return
-        }
-        consentHeld = AIConsentHeld(action)
+        AIConsentGate.run(action, consent: aiConsent) { consentHeld = $0 }
     }
 
     private func makeLink() async {
