@@ -6,20 +6,25 @@ import SwiftUI
 public struct ChatMarkdownView: View {
     let text: String
     var ownHandles: Set<String> = []
+    var searchFocus: RoomSearchFocus?
 
-    public init(text: String, ownHandles: Set<String> = []) {
+    public init(text: String, ownHandles: Set<String> = [], searchFocus: RoomSearchFocus? = nil) {
         self.text = text
         self.ownHandles = ownHandles
+        self.searchFocus = searchFocus
     }
 
     public var body: some View {
-        ChatMarkdownBlocksView(blocks: ChatMarkdownCache.blocks(for: text), ownHandles: ownHandles)
+        ChatMarkdownBlocksView(blocks: ChatMarkdownCache.blocks(for: text), ownHandles: ownHandles,
+                               searchFocus: searchFocus)
     }
 }
 
 /// One ticket link as its own row, like the web's ticket chip: one line, cut with "…", and it opens the ticket.
 private struct TicketLinkRow: View {
     let ticket: ChatReferences.TicketLink
+    var searchFocus: RoomSearchFocus?
+    var anchorsMatch = false
 
     var body: some View {
         Link(destination: ticket.url) {
@@ -27,9 +32,9 @@ private struct TicketLinkRow: View {
                 Image(systemName: "ticket")
                     .foregroundStyle(PocketPalette.accentStrong)
                     .accessibilityHidden(true)
-                Text(ticket.title)
+                RoomSearchAttributedText(value: AttributedString(ticket.title), focus: searchFocus, anchorsMatch: anchorsMatch)
                     .foregroundStyle(PocketPalette.textPrimary)
-                    .lineLimit(1)
+                    .lineLimit(anchorsMatch ? nil : 1)
                     .truncationMode(.tail)
                 Spacer(minLength: 4)
                 Image(systemName: "chevron.right")
@@ -79,6 +84,8 @@ struct ChatQuoteFrame<Content: View>: View {
 private struct ChatMarkdownBlocksView: View {
     let blocks: [ChatMarkdownBlock]
     let ownHandles: Set<String>
+    var searchFocus: RoomSearchFocus?
+    var anchorsFirstMatch = true
 
     /// One line of this stack: a block, or the header over a run from a deeper quote.
     private enum Row {
@@ -96,11 +103,18 @@ private struct ChatMarkdownBlocksView: View {
     }
 
     var body: some View {
+        let rows = Self.rows(blocks)
+        let firstMatch = searchFocus.flatMap { focus in
+            rows.firstIndex { row in
+                guard case .block(let block) = row else { return false }
+                return RoomSearchMarkdown.contains(block, query: focus.query, ownHandles: ownHandles)
+            }
+        }
         VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(Self.rows(blocks).enumerated()), id: \.offset) { _, row in
+            ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
                 switch row {
                 case .block(let block):
-                    blockView(block)
+                    blockView(block, anchorsMatch: anchorsFirstMatch && index == firstMatch)
                 case .deeperQuoteHeader(let levels):
                     // Lines from a quote deeper than the deepest shown: one small header on a line of its own saying
                     // how much deeper, then their blocks as any quote's, the full width of the quote.
@@ -114,24 +128,35 @@ private struct ChatMarkdownBlocksView: View {
     }
 
     @ViewBuilder
-    private func blockView(_ block: ChatMarkdownBlock) -> some View {
+    private func blockView(_ block: ChatMarkdownBlock, anchorsMatch: Bool) -> some View {
         switch block {
         case .paragraph(let text):
             let split = ChatReferences.ticketLinks(in: text)
             if split.tickets.isEmpty {
-                inline(text)
+                inline(text, anchorsMatch: anchorsMatch)
             } else {
+                let proseMatches = searchFocus.map {
+                    RoomSearchMarkdown.containsInline(split.prose, query: $0.query, ownHandles: ownHandles)
+                } ?? false
+                let firstTicket = searchFocus.flatMap { focus in
+                    split.tickets.first { RoomSearchMarkdown.contains(AttributedString($0.title), query: focus.query) }
+                }
                 VStack(alignment: .leading, spacing: 6) {
-                    if !split.prose.isEmpty { inline(split.prose) }
+                    if !split.prose.isEmpty { inline(split.prose, anchorsMatch: anchorsMatch && proseMatches) }
                     ForEach(split.tickets, id: \.ticketId) { ticket in
-                        TicketLinkRow(ticket: ticket)
+                        TicketLinkRow(ticket: ticket, searchFocus: searchFocus,
+                                      anchorsMatch: anchorsMatch && !proseMatches && ticket.ticketId == firstTicket?.ticketId)
                     }
                 }
             }
         case .heading(let level, let text):
-            inline(text)
+            inline(text, anchorsMatch: anchorsMatch)
                 .font(level <= 1 ? .title3.bold() : (level == 2 ? .headline : .subheadline.weight(.semibold)))
         case .list(let ordered, let start, let items):
+            let firstItem = searchFocus.flatMap { focus in
+                items.firstIndex { RoomSearchMarkdown.containsInline(ChatMarkdownListItem.task($0.text)?.text ?? $0.text,
+                                                                      query: focus.query, ownHandles: ownHandles) }
+            }
             VStack(alignment: .leading, spacing: 3) {
                 ForEach(Array(items.enumerated()), id: \.offset) { offset, item in
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -140,12 +165,12 @@ private struct ChatMarkdownBlocksView: View {
                             Image(systemName: task.done ? "checkmark.square.fill" : "square")
                                 .foregroundStyle(task.done ? PocketPalette.verified : PocketPalette.textSecondary)
                                 .accessibilityLabel(task.done ? "Done" : "Not done")
-                            inline(task.text)
+                            inline(task.text, anchorsMatch: anchorsMatch && offset == firstItem)
                         } else {
                             Text(ordered ? "\(start + offset)." : (item.depth == 0 ? "•" : "◦"))
                                 .monospacedDigit()
                                 .foregroundStyle(PocketPalette.textSecondary)
-                            inline(item.text)
+                            inline(item.text, anchorsMatch: anchorsMatch && offset == firstItem)
                         }
                     }
                     .padding(.leading, CGFloat(item.depth) * 16)
@@ -153,15 +178,24 @@ private struct ChatMarkdownBlocksView: View {
             }
         case .quote(let inner):
             ChatQuoteFrame {
-                ChatMarkdownBlocksView(blocks: inner, ownHandles: ownHandles)
+                ChatMarkdownBlocksView(blocks: inner, ownHandles: ownHandles, searchFocus: searchFocus,
+                                       anchorsFirstMatch: anchorsMatch)
                     .foregroundStyle(PocketPalette.textSecondary)
             }
         case .code(_, let text):
-            ScrollView(.horizontal, showsIndicators: false) {
-                Text(verbatim: text)
-                    .font(.system(.callout, design: .monospaced))
-                    .textSelection(.enabled)
-                    .padding(10)
+            ScrollViewReader { codeScroll in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    RoomSearchAttributedText(value: AttributedString(text), focus: searchFocus, anchorsMatch: anchorsMatch)
+                        .font(.system(.callout, design: .monospaced))
+                        .textSelection(.enabled)
+                        .padding(10)
+                }
+                .task(id: searchFocus?.id) {
+                    guard anchorsMatch, let focus = searchFocus else { return }
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                    guard !Task.isCancelled else { return }
+                    codeScroll.scrollTo(focus.anchor, anchor: .center)
+                }
             }
             .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(
@@ -174,16 +208,18 @@ private struct ChatMarkdownBlocksView: View {
         case .rule:
             Divider().padding(.vertical, 4)
         case .table(let table):
-            tableView(table)
+            tableView(table, anchorsMatch: anchorsMatch)
         }
     }
 
-    private func tableView(_ table: ChatMarkdownTable) -> some View {
-        ChatMarkdownTableView(table: table, ownHandles: ownHandles)
+    private func tableView(_ table: ChatMarkdownTable, anchorsMatch: Bool) -> some View {
+        ChatMarkdownTableView(table: table, ownHandles: ownHandles, searchFocus: searchFocus,
+                              anchorsFirstMatch: anchorsMatch)
     }
 
-    private func inline(_ text: String) -> some View {
-        Text(ChatInlineMarkdown.attributed(text, ownHandles: ownHandles))
+    private func inline(_ text: String, anchorsMatch: Bool = false) -> some View {
+        RoomSearchAttributedText(value: ChatInlineMarkdown.attributed(text, ownHandles: ownHandles),
+                                 focus: searchFocus, anchorsMatch: anchorsMatch)
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
     }
@@ -195,6 +231,8 @@ private struct ChatMarkdownBlocksView: View {
 private struct ChatMarkdownTableView: View {
     let table: ChatMarkdownTable
     let ownHandles: Set<String>
+    var searchFocus: RoomSearchFocus?
+    var anchorsFirstMatch = true
     /// The width the message gives the table, once measured; a phone's until then.
     @State private var available: Double = 330
 
@@ -205,7 +243,15 @@ private struct ChatMarkdownTableView: View {
         let fit = table.fittedWidths(available: available)
         Group {
             if fit.scrolls {
-                ScrollView(.horizontal, showsIndicators: true) { grid(fit.widths) }
+                ScrollViewReader { tableScroll in
+                    ScrollView(.horizontal, showsIndicators: true) { grid(fit.widths) }
+                        .task(id: searchFocus?.id) {
+                            guard anchorsFirstMatch, let focus = searchFocus else { return }
+                            try? await Task.sleep(nanoseconds: 300_000_000)
+                            guard !Task.isCancelled else { return }
+                            tableScroll.scrollTo(focus.anchor, anchor: .center)
+                        }
+                }
             } else {
                 grid(fit.widths)
             }
@@ -219,20 +265,24 @@ private struct ChatMarkdownTableView: View {
         .accessibilityElement(children: .contain)
     }
 
+    @ViewBuilder
     private func grid(_ widths: [Double]) -> some View {
-        Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
+        let firstMatch = searchFocus.flatMap { RoomSearchMarkdown.firstMatch(in: table, query: $0.query, ownHandles: ownHandles) }
+        let rendered = Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
             GridRow {
                 ForEach(Array(table.header.enumerated()), id: \.offset) { column, text in
-                    cell(text, width: widths[column], alignment: table.alignments[column])
+                    cell(text, width: widths[column], alignment: table.alignments[column],
+                         anchorsMatch: anchorsFirstMatch && firstMatch?.row == -1 && firstMatch?.column == column)
                         .font(.subheadline.weight(.semibold))
                 }
             }
             .background(PocketPalette.inset)
-            ForEach(Array(table.rows.prefix(Self.maximumTableRows).enumerated()), id: \.offset) { _, row in
+            ForEach(Array(table.rows.prefix(Self.maximumTableRows).enumerated()), id: \.offset) { rowIndex, row in
                 Divider()
                 GridRow {
                     ForEach(Array(row.enumerated()), id: \.offset) { column, text in
-                        cell(text, width: widths[column], alignment: table.alignments[column])
+                        cell(text, width: widths[column], alignment: table.alignments[column],
+                             anchorsMatch: anchorsFirstMatch && firstMatch?.row == rowIndex && firstMatch?.column == column)
                             .font(.subheadline)
                     }
                 }
@@ -244,9 +294,24 @@ private struct ChatMarkdownTableView: View {
                 .stroke(PocketPalette.separator, lineWidth: 0.5)
         )
         .padding(.vertical, 2)
+        if let searchFocus, table.rows.count > Self.maximumTableRows {
+            // Keep the table's existing layout budget. Only an opened search result also shows its remaining
+            // cells as text, so a match after the bounded grid stays reachable without laying out thousands of rows.
+            VStack(alignment: .leading, spacing: 6) {
+                rendered
+                RoomSearchAttributedText(value: AttributedString(table.rows.dropFirst(Self.maximumTableRows)
+                    .map { $0.joined(separator: "\t") }.joined(separator: "\n")), focus: searchFocus,
+                    anchorsMatch: anchorsFirstMatch && (firstMatch?.row ?? -1) >= Self.maximumTableRows)
+                    .font(.subheadline)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } else {
+            rendered
+        }
     }
 
-    private func cell(_ text: String, width: Double, alignment: ChatMarkdownTable.Alignment) -> some View {
+    private func cell(_ text: String, width: Double, alignment: ChatMarkdownTable.Alignment, anchorsMatch: Bool) -> some View {
         let frameAlignment: Alignment
         let textAlignment: TextAlignment
         switch alignment {
@@ -254,7 +319,8 @@ private struct ChatMarkdownTableView: View {
         case .center: (frameAlignment, textAlignment) = (.center, .center)
         case .trailing: (frameAlignment, textAlignment) = (.trailing, .trailing)
         }
-        return Text(ChatInlineMarkdown.attributed(text, ownHandles: ownHandles))
+        return RoomSearchAttributedText(value: ChatInlineMarkdown.attributed(text, ownHandles: ownHandles),
+                                        focus: searchFocus, anchorsMatch: anchorsMatch)
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
             .multilineTextAlignment(textAlignment)

@@ -20,8 +20,8 @@ final class RoomSearchModel: ObservableObject {
 
     private let sessionId: String
     private let searcher: any RoomSearching
-    private let people: @MainActor () -> [RoomSearchPerson]
-    private let artifacts: @MainActor () -> (items: [RoomArtifact], isReading: Bool)
+    private var people: @MainActor () -> [RoomSearchPerson]
+    private var artifacts: @MainActor () -> (items: [RoomArtifact], isReading: Bool)
     private let onReauthenticationRequired: @MainActor () -> Void
     /// Someone you blocked: their matches show the room's one line, not their words.
     private let isBlocked: @MainActor (String) -> Bool
@@ -38,6 +38,7 @@ final class RoomSearchModel: ObservableObject {
     private var message: String?
     private var token = 0
     private var pending: Task<Void, Never>?
+    private var scrollAnchor: String?
     private let sleep: @Sendable (TimeInterval) async -> Void
 
     init(
@@ -62,6 +63,23 @@ final class RoomSearchModel: ObservableObject {
 
     func send(_ intent: RoomSearchIntent) {
         switch intent {
+        case .clear:
+            pending?.cancel()
+            token += 1
+            words = ""
+            query = ""
+            rows = []
+            scope = .all
+            from = nil
+            scrollAnchor = nil
+            nextBeforeSequence = nil
+            isSearching = false
+            isLoadingMore = false
+            message = Self.hint
+            publish()
+        case .scrolled(let anchor):
+            scrollAnchor = anchor
+            publish()
         case .submit(let text):
             pending?.cancel()
             words = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -87,6 +105,12 @@ final class RoomSearchModel: ObservableObject {
         publish()
     }
 
+    func updateSources(people: @escaping @MainActor () -> [RoomSearchPerson],
+                       artifacts: @escaping @MainActor () -> (items: [RoomArtifact], isReading: Bool)) {
+        self.people = people
+        self.artifacts = artifacts
+    }
+
     /// What the server searches: the words, or with only "more from" set, the person's name.
     private var messageQuery: String {
         if let from, words.unicodeScalars.count < RoomSearchPresentationState.minimumQueryLength {
@@ -97,6 +121,7 @@ final class RoomSearchModel: ObservableObject {
 
     private func submit(_ text: String) {
         token += 1
+        scrollAnchor = nil
         let search = messageQuery
         guard scope.searchesMessages, search.unicodeScalars.count >= RoomSearchPresentationState.minimumQueryLength else {
             query = ""
@@ -133,6 +158,7 @@ final class RoomSearchModel: ObservableObject {
             rows = []
             nextBeforeSequence = nil
             isSearching = false
+            isLoadingMore = false
             message = words.isEmpty && from == nil ? Self.hint : nil
             publish()
             return
@@ -198,6 +224,8 @@ final class RoomSearchModel: ObservableObject {
                                                              artifacts: shared.items)
         state = RoomSearchPresentationState(
             query: query,
+            input: words,
+            scrollAnchor: scrollAnchor,
             rows: scope.searchesMessages ? rows : [],
             isSearching: isSearching && scope.searchesMessages,
             isLoadingMore: isLoadingMore,

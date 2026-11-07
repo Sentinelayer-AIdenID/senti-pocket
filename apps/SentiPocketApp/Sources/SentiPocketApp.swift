@@ -401,6 +401,7 @@ struct DrawerPoll: Equatable {
 }
 
 struct AuthenticatedRootView: View {
+    @StateObject private var searchSessions: RoomSearchSessions
     @StateObject private var sessions: SessionListCoordinator
     @StateObject private var details: SelectedSessionDetailCoordinator
     @StateObject private var checkpointPocket: CheckpointPocketCoordinator
@@ -501,6 +502,11 @@ struct AuthenticatedRootView: View {
         let revocationRelay = AuthenticatedSessionRevocationRelay(
             onReauthenticationRequired: guardedReauthentication
         )
+        let searchSessions = RoomSearchSessions(onReauthenticationRequired: { [weak revocationRelay] in
+            revocationRelay?.invalidateAuthentication()
+        })
+        revocationRelay.searchSessions = searchSessions
+        _searchSessions = StateObject(wrappedValue: searchSessions)
         let checkpointNarrationRevocation = VerifiedCheckpointNarrationRevocationRelay()
         let checkpointPocket = CheckpointPocketCoordinator(
             transport: checkpointTransport,
@@ -872,6 +878,7 @@ struct AuthenticatedRootView: View {
                 calendar: CalendarSettingsContext(center: calendar, rooms: calendarRooms,
                                                   onReauthenticationRequired: invalidateProtectedAuthentication),
                 onSignOut: {
+                    searchSessions.clear()
                     presentsSettings = false
                     onSignOut()
                 }
@@ -948,6 +955,7 @@ struct AuthenticatedRootView: View {
 
     @MainActor
     private func invalidateProtectedAuthentication() {
+        searchSessions.clear()
         revocationRelay.invalidateAuthentication()
     }
 
@@ -1188,6 +1196,7 @@ struct AuthenticatedRootView: View {
             },
             receipts: roomReceipts,
             search: roomSearch,
+            searchSessions: searchSessions,
             readMarker: roomReadMarker,
             reader: messageReader,
             onRenamed: { sessions.send(.refreshSessions) },
@@ -1252,6 +1261,7 @@ struct AuthenticatedRootView: View {
 /// keeping revocation synchronous on the main actor. References are weak; the authenticated root owns both objects.
 @MainActor
 private final class AuthenticatedSessionRevocationRelay: ObservableObject {
+    weak var searchSessions: RoomSearchSessions?
     weak var sessions: SessionListCoordinator?
     weak var details: SelectedSessionDetailCoordinator?
     weak var checkpointPocket: CheckpointPocketCoordinator?
@@ -1263,6 +1273,7 @@ private final class AuthenticatedSessionRevocationRelay: ObservableObject {
     }
 
     func invalidateAuthentication() {
+        searchSessions?.clear()
         checkpointPocket?.invalidateAuthentication()
         sessions?.invalidateAuthentication()
         details?.invalidateAuthentication()
