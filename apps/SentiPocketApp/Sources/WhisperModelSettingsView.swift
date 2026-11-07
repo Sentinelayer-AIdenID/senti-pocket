@@ -56,6 +56,9 @@ struct WhisperModelSettingsView: View {
             Form {
                 inAppSection
                 notificationsSection
+                if onSignOut != nil {
+                    QuestionCallSettingsSection()
+                }
                 if let directMessages {
                     DirectMessagesSettingsSection(center: directMessages)
                 }

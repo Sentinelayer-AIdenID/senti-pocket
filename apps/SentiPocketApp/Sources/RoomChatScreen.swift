@@ -120,6 +120,9 @@ struct RoomChatScreen: View {
     @State private var showsArtifacts = false
     /// A voice conversation in this room, while one is open.
     @State private var voiceRoom: VoiceRoomCoordinator?
+    /// The server's one-question call uses local speech and the exact question answer endpoint.
+    @State private var questionCall: QuestionCallCoordinator?
+    private var hasCall: Bool { voiceRoom != nil || questionCall != nil }
     /// The call's waveform: your microphone and the agent's words.
     @State private var voiceMeter = VoiceLevelMeter()
     @State private var choosesVoicePartner = false
@@ -475,7 +478,7 @@ struct RoomChatScreen: View {
     /// `answering` is the agent's call you picked up, if this is one: it does not ring, and its reason and brief
     /// ground the quick answers.
     private func startVoiceRoom(with agents: [String], answering call: RoomCallDesk.Call? = nil) {
-        guard voiceRoom == nil, let voicePoster else { return }
+        guard !hasCall, let voicePoster else { return }
         reader.stop()
         let handles = coordinator.state.ownMentionHandles.filter { $0 != "all" }.sorted()
         let meter = voiceMeter
@@ -542,7 +545,7 @@ struct RoomChatScreen: View {
 
     /// This room's own covers: its call, or a profile card. Whether the app covers it (a sheet or the side panel) is read
     /// only by `RoomCoverWatch`, so this screen and its rows never draw again when the side panel opens or closes.
-    private var coversItself: Bool { voiceRoom != nil || profileTarget != nil }
+    private var coversItself: Bool { hasCall || profileTarget != nil }
 
     /// The called agent's lab as the room's presence reports it, for the call screen's logo; nil in a meeting.
     private func partnerLab(of room: VoiceRoomCoordinator) -> AgentLab? {
@@ -557,6 +560,7 @@ struct RoomChatScreen: View {
         coordinator.onNewReplies = nil
         coordinator.readsRepliesOften = false
         voiceRoom = nil
+        questionCall = nil
         VoiceCallWindow.shared.hide()
         voiceMeter.reset()
         // A call that ended in the background lets the room rest again.
@@ -570,7 +574,7 @@ struct RoomChatScreen: View {
     /// An agent's call answered on the call screen: once this room has it and CallKit has given it audio, the voice
     /// room starts with the caller inside the system call, with Pocket in front or not.
     private func takeAnsweredCall() {
-        guard voiceRoom == nil, voicePoster != nil, let call = callDesk.takeWaiting(for: route.sessionId),
+        guard !hasCall, voicePoster != nil, let call = callDesk.takeWaiting(for: route.sessionId),
               let partner = call.partner else { return }
         answeredCall = call
         CrashReporter.shared.note("call answered")
@@ -581,11 +585,36 @@ struct RoomChatScreen: View {
                 answeredCall = nil
                 return
             }
-            startVoiceRoom(with: [partner], answering: call)
+            if let question = call.details?.question {
+                startQuestionCall(question, answering: call)
+            } else {
+                startVoiceRoom(with: [partner], answering: call)
+            }
         }, onDecline: {
             RoomCallDesk.shared.voiceRoomEnded(call)
             answeredCall = nil
         })
+    }
+
+    private func startQuestionCall(_ question: RoomQuestion, answering call: RoomCallDesk.Call) {
+        guard !hasCall else { return }
+        reader.stop()
+        let questionRoom = QuestionCallCoordinator(
+            question: question, api: RoomQuestionsClient(), listener: OnDeviceVoiceListener(),
+            speaker: AgentVoiceSpeaker(), audio: CallKitVoiceRoomAudioSession(),
+            callScreen: RoomCallScreen(desk: .shared, uuid: call.uuid),
+            onEnded: { endVoiceRoom() }, onNotice: { [weak coordinator] message in coordinator?.show(notice: message) }
+        )
+        guard VoiceCallWindow.shared.show(QuestionCallView(call: questionRoom)) else {
+            RoomCallDesk.shared.voiceRoomEnded(call)
+            answeredCall = nil
+            coordinator.show(notice: "The call screen could not open. Open the question in its room to answer.")
+            return
+        }
+        questionCall = questionRoom
+        questionRoom.callScreenMuted(callDesk.muted.contains(call.uuid))
+        coordinator.resume()
+        Task { await questionRoom.begin() }
     }
 
     /// Runs `action` once this account has said OK to sharing with AI (App Store guideline 5.1.2(i)), asking first if it
@@ -843,7 +872,7 @@ struct RoomChatScreen: View {
                     } label: {
                         Label("Talk", systemImage: "waveform")
                     }
-                    .disabled(voiceRoom != nil)
+                    .disabled(hasCall)
                     // A plain name for VoiceOver (Carter, 2026-11-06): "Voice", "Room info", "More".
                     .accessibilityLabel("Voice")
                     .accessibilityIdentifier("pocket.room.talk")
@@ -976,7 +1005,7 @@ struct RoomChatScreen: View {
         .overlay(alignment: .bottom) {
             // The Listen player: above the composer while this room's message is read (a voice room speaks on its
             // own). Reading from another room, the app's own player shows instead, over every screen.
-            if voiceRoom == nil, let playback = reader.playback,
+            if !hasCall, let playback = reader.playback,
                readingSource.sessionId == nil || readingSource.sessionId == route.sessionId {
                 ReadAloudPlayer(reader: reader, playback: playback, onShowMessage: showReadingMessage)
                     .padding(.bottom, 72)
@@ -997,6 +1026,7 @@ struct RoomChatScreen: View {
         .aiConsentPrompt($consentHeld) { coordinator.send(.allowAIAgents) }
         .onDisappear {
             if let voiceRoom { Task { await voiceRoom.hangUp() } }
+            questionCall?.hangUp()
             coordinator.onFeedback = nil
         }
         .onAppear {
@@ -1004,7 +1034,7 @@ struct RoomChatScreen: View {
             media.askAIConsent = { held in consentHeld = held }
             // The room on screen sounds and vibrates, except during a voice room, which speaks instead.
             coordinator.onFeedback = { event in
-                guard voiceRoom == nil else { return }
+                guard !hasCall else { return }
                 RoomFeedback.shared.play(event)
             }
         }
@@ -1246,7 +1276,7 @@ struct RoomChatScreen: View {
                 // Back in front: a mint that gave no answer for New agent is asked again.
                 Task { await newAgentOffer.check() }
             // A call keeps the room live in the background: its answers come through the room.
-            case .background where voiceRoom == nil: coordinator.pause()
+            case .background where !hasCall: coordinator.pause()
             default: break
             }
         }
@@ -1254,12 +1284,14 @@ struct RoomChatScreen: View {
         // Muted on the phone's own call screen, or by the panel's Mute performed there: the voice room stops
         // listening (warden, #281). Never sent back as the panel's Mute, which would ask the call screen again.
         .onReceive(callDesk.$muted) { muted in
-            guard let answeredCall, let voiceRoom else { return }
-            voiceRoom.callScreenMuted(muted.contains(answeredCall.uuid))
+            guard let answeredCall else { return }
+            voiceRoom?.callScreenMuted(muted.contains(answeredCall.uuid))
+            questionCall?.callScreenMuted(muted.contains(answeredCall.uuid))
         }
         // Hung up on the phone's own call screen: the voice room ends with it.
         .onReceive(callDesk.$hungUp) { uuid in
             guard let uuid, answeredCall?.uuid == uuid else { return }
+            if let questionCall { questionCall.hangUp(); return }
             guard let voiceRoom else {
                 // Hung up while the AI question was still asked: the question goes with the call.
                 consentHeld = nil
@@ -1279,7 +1311,7 @@ struct RoomChatScreen: View {
 
     /// Offers the unsent crash reports where they can be posted: in a room you can write in, with nothing else asked.
     private func offerCrashReports() {
-        guard !crashes.unhandled.isEmpty, coordinator.state.composer.canPost, voiceRoom == nil else { return }
+        guard !crashes.unhandled.isEmpty, coordinator.state.composer.canPost, !hasCall else { return }
         offersCrashReports = true
     }
 
