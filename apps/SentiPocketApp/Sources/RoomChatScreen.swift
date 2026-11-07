@@ -591,6 +591,11 @@ struct RoomChatScreen: View {
         })
     }
 
+    /// The room's media asked its AI question (a message with files, retried before this account said OK): asked here.
+    private func askWaitingAIQuestion() {
+        if let held = media.takeConsentRequest() { consentHeld = held }
+    }
+
     /// Runs `action` once this account has said OK to sharing with AI (App Store guideline 5.1.2(i)), asking first if it
     /// has not, whatever the room. Asked `after` a moment when something else is leaving the screen (an alert).
     private func afterAIConsent(after: TimeInterval = 0, _ action: @escaping () -> Void,
@@ -1003,15 +1008,19 @@ struct RoomChatScreen: View {
             if let voiceRoom { Task { await voiceRoom.hangUp() } }
             coordinator.onFeedback = nil
         }
+        // Nothing kept by the room's coordinators may hold this screen: the room's media lives as long as the app, and a
+        // closure from here holds the screen's state, and with it the room it shows (ticket 02a80e6f). They are told,
+        // and the screen asks them.
         .onAppear {
-            // A message with files asks its AI question here, as a text does.
-            media.askAIConsent = { held in consentHeld = held }
             // The room on screen sounds and vibrates, except during a voice room, which speaks instead.
-            coordinator.onFeedback = { event in
-                guard voiceRoom == nil else { return }
-                RoomFeedback.shared.play(event)
-            }
+            coordinator.feedbackMuted = voiceRoom != nil
+            coordinator.onFeedback = { RoomFeedback.shared.play($0) }
+            // A message with files asks its AI question here, as a text does; one asked while the room was away is
+            // asked now.
+            askWaitingAIQuestion()
         }
+        .onChange(of: voiceRoom == nil) { idle in coordinator.feedbackMuted = !idle }
+        .onChange(of: media.consentRequest?.id) { _ in askWaitingAIQuestion() }
         .onChange(of: coordinator.state.presence) { _ in
             if showsFlight {
                 flight.setAgents(flightAgents)
