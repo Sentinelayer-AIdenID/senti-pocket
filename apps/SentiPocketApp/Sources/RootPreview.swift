@@ -22,6 +22,9 @@ import PocketUI
 /// - `-PocketRootStream <posts per second>`: messages arriving in the open room (default none).
 /// - `-PocketRootOneListPage`: every room in the list's first page, so the side panel lists all of them (the API
 ///   pages the list by 50).
+/// - `-PocketRootRoom member`: a room where you are a contributor, not its owner.
+/// - `-PocketRootPeople`: People opens a moment after launch. `-PocketRootAgentRequests <n>`: that many agent requests
+///   wait in every room. `-PocketRootAddAgents`: the rooms you own offer the agents you work with.
 /// - `-PocketRootCrashOffer`: one made-up crash report waits to be offered, and sending it is answered by the preview,
 ///   so the offer (`CrashReportOffer`) shows a moment after launch.
 /// - `-PocketRootThreadReading`: a moment after launch, the open room's newest message opens its thread and its first
@@ -50,10 +53,21 @@ enum RootPreview {
         switch argument("-PocketRootRoom") ?? "mid" {
         case "long": return RootPreviewAPI.longRoom
         case "none": return nil
+        case "member": return "room-000"
         case let id where RootPreviewAPI.rooms.contains(where: { $0.id == id }): return id
         default: return RootPreviewAPI.midRoom
         }
     }
+
+    /// What a hosted test or `-PocketRootPeople` asks of the room on screen: its People sheet.
+    static let peopleRequests = PassthroughSubject<Void, Never>()
+
+    static func requestPeople() { peopleRequests.send(()) }
+
+    /// What a hosted test asks of People's Invite people: Share invite link, as its row does.
+    static let shareLinkRequests = PassthroughSubject<Void, Never>()
+
+    static func requestShareLink() { shareLinkRequests.send(()) }
 
     static var offersCrashReport: Bool { ProcessInfo.processInfo.arguments.contains("-PocketRootCrashOffer") }
 
@@ -70,6 +84,9 @@ enum RootPreview {
 
     @MainActor
     static func rootView(whisperModel: WhisperModelProvisioningCoordinator, incomingLinks: IncomingLinkInbox) -> some View {
+        if ProcessInfo.processInfo.arguments.contains("-PocketRootPeople") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) { requestPeople() }
+        }
         if offersCrashReport { CrashReporter.shared.offerForPreview(madeUpCrashReport()) }
         if ProcessInfo.processInfo.arguments.contains("-PocketRootThreadReading") { readInAThreadSoon() }
         // The root reopens the room opened last once the room list has loaded, as the app does after a launch.
@@ -133,7 +150,9 @@ enum RootPreview {
     static let api = RootPreviewAPI(
         postsPerSecond: Double(argument("-PocketRootStream") ?? "") ?? 0,
         onePage: ProcessInfo.processInfo.arguments.contains("-PocketRootOneListPage"),
-        openRoomId: openRoomId
+        openRoomId: openRoomId,
+        agentRequests: Int(argument("-PocketRootAgentRequests") ?? "") ?? 0,
+        addsAgents: ProcessInfo.processInfo.arguments.contains("-PocketRootAddAgents")
     )
 }
 
@@ -193,6 +212,26 @@ final class RootPreviewMeter: @unchecked Sendable {
     func roomScreenMade() { roomScreens += 1 }
 
     func roomScreenBodyRan() { roomScreenBodies += 1 }
+
+    /// What each room's People showed last, by room: its sections in order, the agent requests' row, the People button's
+    /// count, whether the agents you work with showed, and each agent's row (a room an earlier test left behind writes
+    /// under its own id).
+    var peopleSections: [String: [String]] = [:]
+    var peopleRequestsTitle: [String: String] = [:]
+    var peopleBadge: [String: Int] = [:]
+    var peopleAgentsShown: [String: Bool] = [:]
+    var peopleAgentStates: [String: [String: AgentContactRowState]] = [:]
+    /// How many presenters Invite people has on screen, by room (`RoomInvitePresenters`).
+    var invitePresenters: [String: Int] = [:]
+
+    func forgetPeople() {
+        peopleSections = [:]
+        peopleRequestsTitle = [:]
+        peopleBadge = [:]
+        peopleAgentsShown = [:]
+        peopleAgentStates = [:]
+        invitePresenters = [:]
+    }
 
     private struct WeakRoom {
         weak var room: RoomChatCoordinator?
@@ -341,6 +380,9 @@ final class RootPreviewAPI: @unchecked Sendable {
 
     private let postsPerSecond: Double
     private let onePage: Bool
+    /// Agent requests waiting in every room; the rooms you own offering the agents you work with.
+    private let agentRequests: Int
+    private let addsAgents: Bool
     private let started = Date()
     private let lock = NSLock()
     private var histories: [String: [RoomMessage]] = [:]
@@ -349,10 +391,12 @@ final class RootPreviewAPI: @unchecked Sendable {
     let openRoomId: String?
     private var calls: [String: Int] = [:]
 
-    init(postsPerSecond: Double, onePage: Bool, openRoomId: String?) {
+    init(postsPerSecond: Double, onePage: Bool, openRoomId: String?, agentRequests: Int = 0, addsAgents: Bool = false) {
         self.postsPerSecond = postsPerSecond
         self.onePage = onePage
         self.openRoomId = openRoomId
+        self.agentRequests = agentRequests
+        self.addsAgents = addsAgents
     }
 
     /// How many times each read was asked for: "rooms", "bell", "waiting", "folders", "dmSettings", and the open room's
@@ -379,7 +423,8 @@ final class RootPreviewAPI: @unchecked Sendable {
             notificationMarker: self, callLog: self, waiting: self, checkpoints: self, directMessages: self,
             roomFolders: self, admissionDecider: self, sender: sender, actionSender: sender, ticketWriter: self,
             ticketLeases: InMemoryTicketLeaseStore(), ticketExtras: self, identity: self, receipts: self, readMarker: self,
-            registersPush: false, crashReports: RootPreview.offersCrashReport ? RootPreviewCrashReports() as any CrashReportSending : nil
+            registersPush: false, crashReports: RootPreview.offersCrashReport ? RootPreviewCrashReports() as any CrashReportSending : nil,
+            agentContacts: self
         )
     }
 
@@ -629,6 +674,11 @@ extension RootPreviewAPI: RoomTransport {
         }
     }
 
+    /// The rooms you own offer the agents you work with when asked to (`-PocketRootAddAgents`).
+    func roomFeatures(sessionId: String) async throws -> RoomFeatures {
+        RoomFeatures(addAgents: addsAgents && [Self.midRoom, Self.longRoom].contains(sessionId))
+    }
+
     func roomActions(sessionId: String, targetSequenceId: Int64?, limit: Int) async throws -> RoomActionsPage {
         count("actions")
         let messages = history(sessionId)
@@ -670,7 +720,11 @@ extension RootPreviewAPI: RoomTicketsTransport, RoomAdmissionsTransport, RoomSea
     }
 
     func roomAdmissions(sessionId: String) async throws -> RoomAdmissionsPage {
-        RoomAdmissionsPage(admissions: [])
+        RoomAdmissionsPage(admissions: (0..<agentRequests).map { index in
+            RoomAdmission(admissionId: "request-\(index)", status: "pending", agentId: "helper-agent-\(index)",
+                          displayName: "Helper \(index + 1)", goalSummary: "Read the open tickets and sum them up.",
+                          requestedActions: ["post"], requestedTTLSeconds: 3_600, createdAt: stamp(started))
+        })
     }
 
     func searchRoom(sessionId: String, query: String, beforeSequence: Int64?, limit: Int) async throws -> RoomSearchPage {
@@ -815,6 +869,24 @@ extension RootPreviewAPI: RoomReceiptsClient, RoomReadMarking {
     }
 }
 
+/// The agents you work with: two of your own, one you meet in your rooms. Made up.
+extension RootPreviewAPI: AgentContactsServing {
+    func agentContacts(cursor: String?) async throws -> AgentContactsPage {
+        AgentContactsPage(contacts: [AgentContact(id: "plan-agent", displayName: "plan-agent", lastActiveAt: started.addingTimeInterval(-600),
+                      sharedRooms: 3, canAdd: true),
+         // Not among the room's agents, so People offers Add for it.
+         AgentContact(id: "night-agent", displayName: "night-agent", lastActiveAt: started.addingTimeInterval(-7_200),
+                      sharedRooms: 2, canAdd: true),
+         AgentContact(id: "helper-of-someone", displayName: "Someone's helper", lastActiveAt: started.addingTimeInterval(-86_400),
+                      sharedRooms: 1, canAdd: false)], nextCursor: nil)
+    }
+
+    func addAgent(_ agentId: String, to sessionId: String) async throws -> AddedAgent {
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        return AddedAgent(agentId: agentId, status: "approved", addedAt: Date())
+    }
+}
+
 /// The preview's answer to a sent crash report: taken, after a moment. Its credential is made up, with an account.
 private struct RootPreviewCrashReports: CrashReportSending {
     func currentToken() -> String? {
@@ -830,7 +902,16 @@ private struct RootPreviewCrashReports: CrashReportSending {
 }
 
 /// Sends and actions succeed after a moment, as the API answers them.
-private struct RootPreviewSender: RoomMessageSending, RoomActionSending {
+private struct RootPreviewSender: RoomMessageSending, RoomActionSending, RoomInviting {
+    func createInviteLink(sessionId: String, role: RoomInviteRole) async throws -> URL {
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        return URL(string: "https://sentinelayer.com/invitations/accept?link=made-up-for-the-preview")!
+    }
+
+    func invite(sessionId: String, who: String, role: RoomInviteRole) async throws -> RoomInviteOutcome {
+        .added(who)
+    }
+
     func sendHumanMessage(sessionId: String, text: String, clientId: String) async throws {
         try? await Task.sleep(nanoseconds: 300_000_000)
     }

@@ -59,6 +59,11 @@ public struct RoomChatView: View {
     /// Threads whose file parts are shown (by the thread's root sequence); otherwise they fold behind the file's card.
     @State private var shownFileParts: Set<Int64> = []
     @State private var showsPresence = false
+    /// The People sheet's state when the room screen holds it (its People button opens it too); else the view's own.
+    private let showsPeople: Binding<Bool>?
+    @Environment(\.roomPeopleExtras) private var peopleExtras
+
+    private var peopleShown: Binding<Bool> { showsPeople ?? $showsPresence }
     /// The owner is renaming the room, and the name as typed.
     @State private var renaming = false
     @State private var renameDraft = ""
@@ -84,8 +89,10 @@ public struct RoomChatView: View {
         composerActions: RoomComposerActions = RoomComposerActions(),
         roster: RoomRoster = .empty,
         media: RoomMediaBoard? = nil,
+        showsPeople: Binding<Bool>? = nil,
         send: @escaping (RoomChatIntent) -> Void
     ) {
+        self.showsPeople = showsPeople
         self.state = state
         self.readingAloudId = readingAloudId
         self.composerActions = composerActions
@@ -298,19 +305,16 @@ public struct RoomChatView: View {
         } message: {
             Text("Everyone in the room sees the new name, here and on the web. Up to \(RoomTitle.maximumLength) characters.")
         }
-        .sheet(isPresented: $showsPresence) {
+        .sheet(isPresented: peopleShown) {
             RoomPresenceSheet(
                 presence: state.presence,
                 connection: state.connection,
                 roster: roster,
-                onInvite: state.canInvite ? {
-                    showsPresence = false
-                    // After this sheet has gone, so the invite sheet can come up.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { send(.openInvite) }
-                } : nil,
+                canInvite: state.canInvite,
+                extras: peopleExtras,
                 onProfile: profileOpener.map { opener -> (RoomProfileTarget) -> Void in
                     return { target in
-                        showsPresence = false
+                        peopleShown.wrappedValue = false
                         // After this sheet has gone, so the profile card can come up.
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { opener(target) }
                     }
@@ -420,8 +424,8 @@ public struct RoomChatView: View {
                                       boxes: roster.members.filter { $0.kind == .box && $0.status != .ended }.map(\.name),
                                       activeCount: roster.members.isEmpty ? nil : roster.activeCount,
                                       activeKeys: roster.members.isEmpty ? nil : roster.activeKeys,
-                                      isPaused: showsPresence) {
-                        showsPresence = true
+                                      isPaused: peopleShown.wrappedValue) {
+                        peopleShown.wrappedValue = true
                     }
                         .padding(.top, RoomPeopleAvatars.topGap)
                 }
@@ -4006,8 +4010,11 @@ private struct RoomPresenceSheet: View {
     let connection: RoomConnectionState
     /// Everyone who came, when the room screen knows it; otherwise who is here now.
     var roster: RoomRoster = .empty
-    /// Invite people, for the room's owner or an admin.
-    var onInvite: (() -> Void)?
+    /// Invite people shows for the room's owner or an admin (`RoomChatPresentationState.canInvite`), with what the app
+    /// gives it (`RoomPeopleExtras.invite`).
+    var canInvite = false
+    /// What the app adds: Invite people, and the agent requests for whoever decides them.
+    var extras: RoomPeopleExtras?
     /// Opens a member's profile from their avatar.
     var onProfile: ((RoomProfileTarget) -> Void)?
     var ownAuthorIds: Set<String> = []
@@ -4051,13 +4058,14 @@ private struct RoomPresenceSheet: View {
     var body: some View {
         NavigationStack {
             List {
-                if let onInvite {
+                // Invite people first (Carter, #62868: inviting someone was a hunt).
+                if let invite = shownInvite {
                     Section {
-                        Button(action: onInvite) {
-                            Label("Invite people", systemImage: "person.badge.plus")
-                        }
-                        .accessibilityIdentifier("pocket.room.people.invite")
+                        invite()
+                    } header: {
+                        Text("Invite people")
                     }
+                    .accessibilityIdentifier("pocket.room.people.invite")
                 }
                 // The ring's own count leads, then the whole room's line; the connection is a quiet note beside them
                 // (Carter, #59940: the list did not read as the ring's).
@@ -4143,8 +4151,17 @@ private struct RoomPresenceSheet: View {
                         }
                     }
                 }
+                // The agent requests last, for the room's owner or an admin.
+                if let requests = extras?.requests {
+                    Section {
+                        requests()
+                    }
+                    .accessibilityIdentifier("pocket.room.people.requests")
+                }
             }
-            .navigationTitle("Who is here")
+            // Invite people's sheets, presented from here once, never from its rows.
+            .background { if shownInvite != nil { extras?.presenters?() } }
+            .navigationTitle("People")
             .navigationBarTitleDisplayModeInlineIfAvailable()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -4152,6 +4169,14 @@ private struct RoomPresenceSheet: View {
                 }
             }
         }
+        .onAppear { extras?.shown?(sections) }
+    }
+
+    private var shownInvite: (() -> AnyView)? { canInvite ? extras?.invite : nil }
+
+    /// The sheet's sections, in order.
+    var sections: [String] {
+        (shownInvite == nil ? [] : ["invite"]) + ["members"] + (extras?.requests == nil ? [] : ["requests"])
     }
 }
 

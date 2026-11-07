@@ -14,9 +14,10 @@ import PocketVoice
 /// line is open.
 ///
 /// One thing at a time: while you talk, answers wait; while an answer is read, the next waits. An answer that lands
-/// while the phone is listening but you have not started talking is read at once. With the fast voice line on, it gives
-/// the quick first answer, and the agent's own reply, when it lands, is read after it: a short handoff in the same
-/// voice, then the reply in full. Talking over an agent's post pauses it; it is read again later. Hands-free, listening
+/// while the phone is listening but you have not started talking is read at once. Each turn is answered once, by the
+/// agent's own post. While the agent writes, its fast voice says at most a short bridge with nothing of the answer in
+/// it, and says so when no answer has come in 20 s; only a turn for Senti, whose posts a call never reads, is answered
+/// by the fast voice line itself. Talking over an agent's post pauses it; it is read again later. Hands-free, listening
 /// comes back after the answers and a pause sends your turn. The pause is timed from when the microphone last heard
 /// you, not from the recognizer's last word, and listening stays on a moment after your turn goes, so what you say
 /// next joins it until an answer starts. Hanging up saves the whole transcript to the room as one
@@ -102,40 +103,37 @@ final class VoiceRoomCoordinator: ObservableObject {
     private var awaitingAnswerSince: Date?
     /// The first answer to your latest turn: when it is heard, the gap is measured.
     private var gapAnswerId: String?
-    /// In a call with one agent, the fast voice line is the agent's voice (Carter, 11-02) and gives the quick first
-    /// answer. The agent's own posts used to be kept in the transcript and never read once the line had answered, so
-    /// the real answers went unheard. Now each is a reply (Carter, 11-06): it waits while the line is still answering,
-    /// so it never talks over the line, and is then read in full after a short handoff. A turn whose voice line failed
-    /// reads the agent's later posts as its answer.
-    private var lineFailedThisTurn = false
-    /// The agent's posts queued as replies this turn before the voice line's first sentence, by turn id: the line owes
-    /// nothing more for the turn.
-    private var repliedBeforeLine: [String] = []
+    /// A turn is answered once, by the agent it is for, in its own post. The fast voice line used to answer each turn
+    /// first as the agent, and the agent's own post was then read after a handoff, so every turn was heard twice: a
+    /// paraphrase, then the real answer (Carter, ticket 13ec2d12). Now the line is asked only for a turn for Senti
+    /// (`isSenti(_:)`), whose posts a call never reads. For any other agent the phone waits for its post, and while it
+    /// waits the agent's fast voice says at most `bridge(for:)` once `bridgeAfter` has passed, and
+    /// `noAnswerYet(from:)` at `givesUpAfter`. Both are the phone's own fixed words, never asked of the line, so
+    /// neither can carry any of the answer. The wait ends when the agent posts or leaves the call, or with your next
+    /// turn.
+    private var answerWatch: Task<Void, Never>?
+    /// The agent `answerWatch` waits on (lowercased).
+    private var awaited: String?
     /// Who this turn is for when more than one agent is on the call (`VoiceTurnAddressee`). Nil is everyone. It gets
-    /// the turn's mention, the floor and the voice line.
+    /// the turn's mention, the floor, and the bridge (or, for Senti, the voice line's answer).
     private var turnFor: String?
-    /// The agent the voice line was asked as this turn, lowercased: only that agent's own post is kept for it.
-    private var lineAgentThisTurn: String?
-    /// On a call with several agents, the voice line's debt: for each agent (lowercased), the turns the line answered
-    /// as that agent whose own post has not come yet, oldest first. Agents post well after the line, so the agent's
-    /// next posts, one per turn owed, are read as replies whenever they come, and they take no turn's floor.
-    private var lineOwes: [String: [String]] = [:]
-    /// The posts the debt took since this turn began, with the agent and the turn each paid for: a turn carried on
-    /// owes nothing more for them.
-    private var linePaid: [(post: String, agent: String, turn: String)] = []
-    /// The agent's fast voice answered the ring; the agent's own hello, when it comes, is a reply, read after it
-    /// unless it says the very same words (`lineHello`).
-    private var voicePickedUp = false
+    /// Your latest turn, by its id.
+    private var latestTurn: String?
+    /// The agents (lowercased) whose post came during your latest turn: a turn said to one of them is not owed.
+    private var answeredLatest: Set<String> = []
+    /// On a call with several agents, the answers still owed: for each agent (lowercased), the earlier turns said to it
+    /// alone that it had not answered when the next turn went, oldest first. Agents can take longer than a turn, so
+    /// the agent's next posts, one per turn owed, are its late answers: each is read whenever it comes, takes no
+    /// turn's floor and is never held for one. A turn carried on is still one turn, owed once.
+    private var owed: [String: [String]] = [:]
     /// What the voice line said when it picked up, as `words(_:)`, and the agent it spoke as (lowercased): the agent's
     /// own hello in the same words is the one post that is not read.
     private var lineHello: (agent: String, words: String)?
-    /// The queued posts that are an agent's own reply to a turn the voice line answers first, by turn id. Each waits
-    /// while the line is still answering, and the first after the line spoke is introduced by a handoff.
-    private var replyIds: Set<String> = []
-    /// The voice line's answer still streaming, by its id: the replies wait for it.
+    /// The queued posts that are an agent's late answer to an earlier turn (`owed`), by id. Each waits while the voice
+    /// line is still answering a turn for Senti, so it never cuts into that answer.
+    private var lateAnswers: Set<String> = []
+    /// The voice line's answer still streaming, by its id: late answers wait for it.
     private var lineStreaming: String?
-    /// The voice line has spoken since an agent's reply was last read: the next reply is introduced first.
-    private var handoffDue = false
     /// What is being read aloud now.
     private var reading: Reading?
     /// Agents' posts you talked over that have not been read in full since: the transcript marks any the call never
@@ -146,10 +144,8 @@ final class VoiceRoomCoordinator: ObservableObject {
     private var bargeIn: Int?
 
     private enum Reading {
-        /// A sentence of the voice line's answer, or its hello.
+        /// A sentence of the voice line's answer, its hello, or a line the fast voice says while an agent writes.
         case line
-        /// The voice line's handoff to an agent's reply.
-        case handoff
         /// An agent's own post.
         case post(VoiceRoomTurn)
     }
@@ -187,6 +183,12 @@ final class VoiceRoomCoordinator: ObservableObject {
     /// In a call to one agent with the voice line on, the agent's fast voice picks up this soon, as that agent, so
     /// a busy agent (of any lab) never leaves you ringing (Carter, 11-02: "I kept dialing forge and warden").
     static let voicePicksUpAfter: TimeInterval = 2
+    /// The agent a turn is for has not posted this long after the turn went: its fast voice says the bridge. An answer
+    /// that lands sooner is read with nothing before it.
+    static let bridgeAfter: TimeInterval = 1.5
+    /// Still no post this long after the turn went: its fast voice says the agent has not answered yet. The answer is
+    /// read whenever it comes.
+    static let givesUpAfter: TimeInterval = 20
 
     init(
         sessionId: String,
@@ -322,7 +324,6 @@ final class VoiceRoomCoordinator: ObservableObject {
     private func voicePickUp() {
         guard let agent = state.with.first else { return }
         stopRinging()
-        voicePickedUp = true
         state.notice = nil
         if !state.joined.contains(where: { $0.lowercased() == agent.lowercased() }) { state.joined.append(agent) }
         let text = "Hi, it's \(agent). Go ahead."
@@ -392,6 +393,8 @@ final class VoiceRoomCoordinator: ObservableObject {
             self.state.with.removeAll { $0.lowercased() == key }
             self.invited.removeAll { $0.lowercased() == key }
             self.adding.remove(key)
+            // Not on the call: its fast voice says nothing more while it would have written.
+            self.stopWaiting(on: key)
             self.state.notice = "\(name) could not be added. Try again."
             self.addingNotice = nil
         }
@@ -518,15 +521,17 @@ final class VoiceRoomCoordinator: ObservableObject {
             state.skipped[id] = .sameAsHello
             return
         }
-        // The voice line already answered a turn as this agent, and this is the agent's own post for the oldest such
-        // turn: it is that turn's full reply, read after the line, and it takes no floor from the turn going now.
-        if !isHuman, !isAddedHello, state.with.count > 1, let owed = lineOwes[lowered]?.first {
-            lineOwes[lowered]?.removeFirst()
-            if lineOwes[lowered]?.isEmpty == true { lineOwes[lowered] = nil }
-            linePaid.append((id, lowered, owed))
-            queueReply(turn)
+        // The agent's answer to the oldest earlier turn said to it alone that it had not answered when the next turn
+        // went: read whenever it comes, and it takes no floor from the turn going now.
+        if !isHuman, !isAddedHello, state.with.count > 1, let turns = owed[lowered], !turns.isEmpty {
+            owed[lowered] = turns.count > 1 ? Array(turns.dropFirst()) : nil
+            lateAnswers.insert(id)
+            queue.append(turn)
+            state.turns.append(turn)
+            stopWaiting(on: lowered)
             return
         }
+        if !isHuman { answeredLatest.insert(lowered) }
         // With more than one agent (a meeting, or several picked or added) the first to answer a turn has the floor;
         // the others are kept, not read.
         if state.sharesFloor, !isHuman, !isAddedHello {
@@ -538,14 +543,6 @@ final class VoiceRoomCoordinator: ObservableObject {
             }
             floorHolder = (lowered, name)
         }
-        // The voice line gives this turn's quick answer as this agent; the agent's own post is the full reply, read
-        // after the line has finished (Carter, 11-06). It is never held back.
-        if !isHuman, !isAddedHello, lineSpeaks(for: lowered), turnStoppedAt != nil || voicePickedUp,
-           voiceLineSpeaks, !lineFailedThisTurn {
-            repliedBeforeLine.append(id)
-            queueReply(turn)
-            return
-        }
         if !isAddedHello, let since = awaitingAnswerSince {
             timings.record(.answer, now().timeIntervalSince(since))
             awaitingAnswerSince = nil
@@ -553,16 +550,8 @@ final class VoiceRoomCoordinator: ObservableObject {
         }
         queue.append(turn)
         state.turns.append(turn)
-        state.waiting = queue.count
-    }
-
-    /// An agent's own reply to a turn the voice line answers first: queued in order, never dropped, and read once the
-    /// line has finished.
-    private func queueReply(_ turn: VoiceRoomTurn) {
-        replyIds.insert(turn.id)
-        queue.append(turn)
-        state.turns.append(turn)
-        state.waiting = queue.count
+        // Its post is here: nothing its fast voice was still to say while it wrote comes before it.
+        stopWaiting(on: lowered)
     }
 
     /// Tells the room, once a turn, who has the floor, so the agents still writing hold back.
@@ -616,47 +605,25 @@ final class VoiceRoomCoordinator: ObservableObject {
         }
     }
 
-    /// The next thing to say, out of the queue: the voice line's answer comes first, and an agent's reply that comes
-    /// next after the line spoke is introduced by a handoff.
+    /// The next thing to say, out of the queue.
     private func nextToSay() -> (turn: VoiceRoomTurn, reading: Reading)? {
         guard let index = readyIndex() else { return nil }
-        let next = queue[index]
-        if replyIds.contains(next.id), handoffDue {
-            handoffDue = false
-            return (handoff(to: next), .handoff)
-        }
-        queue.remove(at: index)
-        if Self.isLine(next) {
-            handoffDue = true
-            return (next, .line)
-        }
-        return (next, .post(next))
+        let next = queue.remove(at: index)
+        return (next, Self.isLine(next) ? .line : .post(next))
     }
 
     /// Where in the queue the next thing that can be said now is. While the voice line is still answering (streaming,
-    /// or with sentences still to say), the agents' replies wait and everything else goes in order.
+    /// or with lines still to say), late answers wait and everything else goes in order.
     private func readyIndex() -> Int? {
         let lineAnswering = lineStreaming != nil || queue.contains(where: { Self.isLine($0) })
-        return lineAnswering ? queue.firstIndex(where: { !replyIds.contains($0.id) }) : queue.indices.first
+        return lineAnswering ? queue.firstIndex(where: { !lateAnswers.contains($0.id) }) : queue.indices.first
     }
 
-    /// A sentence of the voice line's quick answer, or its hello.
+    /// A sentence of the voice line's answer, its hello, or a line the fast voice says while an agent writes.
     private static func isLine(_ turn: VoiceRoomTurn) -> Bool { turn.id.hasPrefix("line:") }
 
-    /// The voice line's handoff to an agent's reply, in that agent's voice.
-    private func handoff(to reply: VoiceRoomTurn) -> VoiceRoomTurn {
-        VoiceRoomTurn(id: "handoff:" + UUID().uuidString.lowercased(), speaker: reply.speaker + Self.voiceSuffix,
-                      isYou: false, text: Self.handoff(by: reply.speaker, oneAgent: state.with.count == 1), at: now())
-    }
-
-    /// What the voice line says before an agent's own reply (Carter, 11-06), so you know the full answer follows. On a
-    /// call with one agent the line is that agent's voice, so it speaks in the first person; with several, it names the
-    /// agent.
-    static func handoff(by agent: String, oneAgent: Bool) -> String {
-        oneAgent
-            ? "I have the full update for you now, here it is."
-            : "\(agent) has the full update for you now, here it is."
-    }
+    /// What starts the id of a line the fast voice says while an agent writes (`bridge(for:)`, `noAnswerYet(from:)`).
+    private static let whileWriting = "line:waiting:"
 
     /// A post's words, lowercased, without punctuation: two posts with the same words say the same thing.
     static func words(_ text: String) -> String {
@@ -664,16 +631,12 @@ final class VoiceRoomCoordinator: ObservableObject {
     }
 
     /// You talked over what was being read. An agent's post is paused, never dropped: it goes back to the front of the
-    /// queue and is read in full later, introduced again if it is a reply. The voice line's quick answer is not kept,
-    /// since your new turn gets its own.
+    /// queue and is read in full later. What the fast voice was saying is not kept, since your new turn gets its own.
     private func pauseReading() {
         switch reading {
         case .post(let turn):
             queue.insert(turn, at: 0)
             talkedOver.insert(turn.id)
-            if replyIds.contains(turn.id) { handoffDue = true }
-        case .handoff:
-            handoffDue = true
         case .line, nil:
             break
         }
@@ -910,19 +873,19 @@ final class VoiceRoomCoordinator: ObservableObject {
         floorHolder = nil
         floorAnnounced = false
         gapAnswerId = nil
-        lineFailedThisTurn = false
-        repliedBeforeLine = []
-        linePaid = []
-        lineAgentThisTurn = nil
+        // The turn before, said to one agent that has not answered it, is owed; this one starts with no answers.
+        oweLatestTurn()
+        latestTurn = turn.id
+        answeredLatest = []
         // With more than one agent, a turn that addresses one of them (or, naming none, comes when only one has said
-        // hello) is that agent's: it alone is mentioned, it has the floor, and the voice line answers as it.
+        // hello) is that agent's: it alone is mentioned, it has the floor, and the phone waits for its answer.
         turnFor = VoiceTurnAddressee.of(text, with: state.with, joined: state.joined)
         if let turnFor { floorHolder = (turnFor.lowercased(), turnFor) }
         // What is left of the last quick answer goes first, so none of it plays after you spoke (warden, #274).
         dropVoiceLineLeftovers()
         readyAfterSending()
-        // The voice line is asked first, so its quick answer to this turn comes before any reply still waiting.
-        askVoiceLine(text, turn: turn.id)
+        // Senti's answer is asked of the voice line first, so it comes before any late answer still waiting.
+        answer(text, turn: turn.id)
         speakIfReady()
         let first = TurnPost(text: text, clientId: Self.newClientId())
         let posted = Task { [weak self] () -> [TurnPost] in
@@ -938,8 +901,9 @@ final class VoiceRoomCoordinator: ObservableObject {
     /// What you said just after a turn went joins it (a pause mid-thought used to end the turn, and the rest
     /// was lost). The call keeps one turn, on the same floor. The room gets the new words as a turn that carries on
     /// the last one ("…and the dial?"), addressed the same way and posted after it: the agents' listeners answer new
-    /// messages and never see edits, so editing the first would go unanswered. The voice line is asked again with the
-    /// whole turn, and what it had not yet said about the first part is dropped.
+    /// messages and never see edits, so editing the first would go unanswered. The wait for the answer starts again
+    /// from the whole turn (for Senti, the voice line is asked again with it), and whatever the fast voice had not yet
+    /// said about the first part is dropped.
     private func carryOn(_ sent: SentTurn, with text: String, stoppedTalking: Date) async {
         let whole = sent.text + " " + text
         if let index = state.turns.firstIndex(where: { $0.id == sent.id }) {
@@ -950,7 +914,6 @@ final class VoiceRoomCoordinator: ObservableObject {
         // You stopped talking later than it seemed: the answer's gap is timed from now on.
         turnStoppedAt = stoppedTalking
         dropVoiceLineLeftovers()
-        lineFailedThisTurn = false
         // The words added may change who it is for ("Okay so… Ada, what is next?"). Once it is everyone's, the floor
         // the first part gave its agent is open again.
         let wasFor = turnFor
@@ -963,7 +926,7 @@ final class VoiceRoomCoordinator: ObservableObject {
         }
         if let id = gapAnswerId, !queue.contains(where: { $0.id == id }) { gapAnswerId = nil }
         readyAfterSending()
-        askVoiceLine(whole, turn: sent.id)
+        answer(whole, turn: sent.id)
         speakIfReady()
         let more = TurnPost(text: Self.carriesOn + text, clientId: Self.newClientId())
         let posted = Task { [weak self] () -> [TurnPost] in
@@ -1007,21 +970,30 @@ final class VoiceRoomCoordinator: ObservableObject {
         speaker.hasSuffix(voiceSuffix) ? String(speaker.dropLast(voiceSuffix.count)) : speaker
     }
 
-    /// Asks the voice line for a quick answer while the turn goes to the room (warden, Phase 2): each sentence is read
-    /// as it arrives, and the agent's own answer comes in the room after, to be read once the line has finished. A new
-    /// turn drops what is left of the last quick answer. `turn` is your turn being asked about, which the history
-    /// leaves out.
-    private func askVoiceLine(_ text: String, turn: String) {
-        // Not asked (off, or resting after a 429): nothing will answer this turn, so the agent's posts are its answer,
-        // even when the rest ends before they come.
-        // It answers as one agent only: the call's one agent, or the one this turn is for. It never speaks for "the
-        // room": on a call with two agents it used to answer every turn as the room while the agents waited.
-        guard let voiceLine, !voiceLineOff, now() >= voiceLineRestsUntil,
-              let agent = state.with.count == 1 ? state.with.first : turnFor else {
-            lineDidNotAnswer(turn)
-            return
+    /// Senti, the room's own assistant (agent id `RoomChatCoordinator.senti`, compared without case). A call never reads
+    /// its posts (`RoomChatQuiet.isRoomVoice`), so a turn for it is the one turn the voice line answers.
+    static func isSenti(_ agent: String) -> Bool { agent.lowercased() == RoomChatCoordinator.senti }
+
+    /// Who answers your turn `turn`, said as `text`: the call's one agent, or the one this turn is for. A turn for
+    /// Senti is answered by the voice line. Any other agent answers in the room, and its post is read once when it
+    /// comes; until then the phone waits for it (`waitForAnswer(from:)`). A turn for everyone gets neither: the agents'
+    /// own answers are read. The line never speaks for "the room": on a call with two agents it used to answer every
+    /// turn as the room while the agents waited.
+    private func answer(_ text: String, turn: String) {
+        guard let agent = state.with.count == 1 ? state.with.first : turnFor else { return }
+        if Self.isSenti(agent) {
+            askVoiceLine(text, turn: turn, as: agent)
+        } else {
+            waitForAnswer(from: agent)
         }
-        lineAgentThisTurn = agent.lowercased()
+    }
+
+    /// Asks the voice line for Senti's answer while the turn goes to the room (Phase 2): each sentence is read as it
+    /// arrives. A new turn drops what is left of the last answer. `turn` is your turn being asked about, which the
+    /// history leaves out.
+    private func askVoiceLine(_ text: String, turn: String, as agent: String) {
+        // Not asked while off, or resting after a 429.
+        guard let voiceLine, !voiceLineOff, now() >= voiceLineRestsUntil else { return }
         let speaker = agent + Self.voiceSuffix
         let history = state.turns.filter { $0.id != turn }.suffix(12)
             .map { VoiceLineHistory(speaker: $0.speaker, text: $0.text) }
@@ -1032,73 +1004,40 @@ final class VoiceRoomCoordinator: ObservableObject {
         lineStreaming = answerId
         voiceLineAsk = Task { [weak self] in
             do {
-                var said = 0
                 for try await event in stream {
                     guard let self, !Task.isCancelled else { return }
                     if case .sentence(let sentence) = event {
-                        said += 1
-                        if said == 1 { self.owe(turn, as: agent) }
                         self.takeVoiceLine(sentence, answerId: answerId, as: speaker)
                     }
                 }
                 guard !Task.isCancelled else { return }
-                // An answer that ended without a single sentence said nothing: the agent's posts are its answer.
-                if said == 0 { self?.lineDidNotAnswer(turn) }
                 self?.lineEnded(answerId)
             } catch VoiceLineError.unavailable {
-                // Off for the call either way; only this turn's own ask may settle its turn (a cancelled one belongs
-                // to a turn already gone).
+                // Off for the call either way; only this turn's own ask may end its answer (a cancelled one belongs to
+                // a turn already gone).
                 self?.voiceLineOff = true
-                if !Task.isCancelled { self?.lineDidNotAnswer(turn, answer: answerId) }
+                if !Task.isCancelled { self?.lineEnded(answerId) }
             } catch VoiceLineError.notAllowed {
                 // Not this person's to use (warden, #274): off for the rest of the call.
                 self?.voiceLineOff = true
-                if !Task.isCancelled { self?.lineDidNotAnswer(turn, answer: answerId) }
+                if !Task.isCancelled { self?.lineEnded(answerId) }
             } catch VoiceLineError.rateLimited(let retryAfter) {
                 guard let self else { return }
                 self.voiceLineRestsUntil = self.now().addingTimeInterval(min(300, max(1, retryAfter ?? 30)))
-                if !Task.isCancelled { self.lineDidNotAnswer(turn, answer: answerId) }
+                if !Task.isCancelled { self.lineEnded(answerId) }
             } catch is CancellationError {
                 // A newer turn or the hang-up dropped it.
             } catch {
-                // A failed voice line is quiet: this turn falls back to the agent's own answers. A cancelled ask (a
-                // newer turn, the hang-up) is not a failure, however the client reports it.
+                // A failed voice line is quiet. A cancelled ask (a newer turn, the hang-up) is not a failure, however
+                // the client reports it.
                 guard !Task.isCancelled else { return }
-                self?.lineDidNotAnswer(turn, answer: answerId)
+                self?.lineEnded(answerId)
             }
         }
     }
 
-    /// The voice line started answering `turn` as `agent`. On a call with several agents the agent's own post for that
-    /// turn is then owed: it is read as a reply whenever it comes. Once per turn: not when the agent's post for it
-    /// already came (before the line's first sentence), nor again when the turn is carried on.
-    private func owe(_ turn: String, as agent: String) {
-        let key = agent.lowercased()
-        guard state.with.count > 1, lineOwes[key]?.contains(turn) != true,
-              !linePaid.contains(where: { $0.agent == key && $0.turn == turn }),
-              !repliedBeforeLine.contains(where: { id in
-                  state.turns.contains { $0.id == id && $0.speaker.lowercased() == key }
-              })
-        else { return }
-        lineOwes[key, default: []].append(turn)
-    }
-
-    /// The voice line will not answer this turn (failed, cut short, or said nothing): the agent's later posts are its
-    /// answer, and nothing is owed for it any more. Its replies already queued stay queued, and are read once the
-    /// line's answer `answer` is over (when it was asked).
-    private func lineDidNotAnswer(_ turn: String, answer: String? = nil) {
-        lineFailedThisTurn = true
-        for (agent, owed) in lineOwes where owed.contains(turn) {
-            let left = owed.filter { $0 != turn }
-            lineOwes[agent] = left.isEmpty ? nil : left
-        }
-        repliedBeforeLine = []
-        linePaid.removeAll { $0.turn == turn }
-        if let answer { lineEnded(answer) }
-    }
-
-    /// The voice line's answer `answerId` is over (finished, failed, or said nothing): the replies that waited for it
-    /// are read once the line's last sentence has been said and you are not talking.
+    /// The voice line's answer `answerId` is over (finished, failed, or said nothing): the late answers that waited for
+    /// it are read once the line's last sentence has been said and you are not talking.
     private func lineEnded(_ answerId: String) {
         guard lineStreaming == answerId else { return }
         lineStreaming = nil
@@ -1106,21 +1045,86 @@ final class VoiceRoomCoordinator: ObservableObject {
         speakIfReady()
     }
 
-    /// Whether the voice line speaks for this agent: the agent it was asked as this turn (only that one, also after an
-    /// add that failed), or, before your first turn, the call's one agent, whose ring it picked up.
-    private func lineSpeaks(for lowered: String) -> Bool {
-        guard turnStoppedAt != nil else { return state.with.count == 1 && state.with[0].lowercased() == lowered }
-        return lineAgentThisTurn == lowered
-    }
-
-    /// The voice line is on for this call (on the server, allowed for this person, and not resting after a 429).
+    /// The voice line is on for this call (on the server, allowed for this person, and not resting after a 429). Its
+    /// fast voice then also picks up a busy agent's ring, and speaks while an agent writes.
     private var voiceLineSpeaks: Bool { voiceLine != nil && !voiceLineOff && now() >= voiceLineRestsUntil }
 
-    /// A new turn or hang-up: the last quick answer stops streaming and what is left of it is not read.
+    /// Waits for `agent`'s post, the answer to the turn that just went. If none has come by `bridgeAfter`, the agent's
+    /// fast voice says `bridge(for:)`; if none by `givesUpAfter`, `noAnswerYet(from:)`. Each is said at most once a
+    /// turn, and neither once the post is here.
+    private func waitForAnswer(from agent: String) {
+        guard voiceLineSpeaks else { return }
+        let key = agent.lowercased()
+        let since = now()
+        awaited = key
+        answerWatch = Task { [weak self] in
+            var bridged = false
+            while let self, !Task.isCancelled, self.awaited == key {
+                await self.sleep(0.1)
+                guard !Task.isCancelled, self.awaited == key else { return }
+                let waited = self.now().timeIntervalSince(since)
+                if waited >= Self.givesUpAfter {
+                    self.awaited = nil
+                    self.answerWatch = nil
+                    self.sayWhileWriting(Self.noAnswerYet(from: agent), as: agent)
+                    return
+                }
+                if !bridged, waited >= Self.bridgeAfter {
+                    bridged = true
+                    self.sayWhileWriting(Self.bridge(for: agent), as: agent)
+                }
+            }
+        }
+    }
+
+    /// What the agent's fast voice says while the agent writes its answer: that it is answering, and nothing of what.
+    /// The phone's own words, never asked of the voice line, so it cannot answer for the agent.
+    static func bridge(for agent: String) -> String { "One moment, \(agent) is answering." }
+
+    /// What the agent's fast voice says when no answer has come by `givesUpAfter`.
+    static func noAnswerYet(from agent: String) -> String { "\(agent) hasn't answered yet." }
+
+    /// Queues a line the agent's fast voice says while the agent writes, in the agent's voice. It is not kept in the
+    /// transcript, and one not said yet gives way to the next (the bridge to "hasn't answered yet").
+    private func sayWhileWriting(_ text: String, as agent: String) {
+        guard state.phase != .ending, state.phase != .ended else { return }
+        queue.removeAll { $0.id.hasPrefix(Self.whileWriting) }
+        queue.append(VoiceRoomTurn(id: Self.whileWriting + UUID().uuidString.lowercased(),
+                                   speaker: agent + Self.voiceSuffix, isYou: false, text: text, at: now()))
+        state.waiting = queue.count
+        yieldIfNotTalking()
+        speakIfReady()
+    }
+
+    /// `agent` (lowercased) has posted, or left the call: the phone stops waiting on it, and what its fast voice had
+    /// not said yet while it wrote is dropped, so nothing comes between you and the answer.
+    private func stopWaiting(on agent: String) {
+        if awaited == agent {
+            answerWatch?.cancel()
+            answerWatch = nil
+            awaited = nil
+        }
+        queue.removeAll { $0.id.hasPrefix(Self.whileWriting) && Self.voiceOf($0.speaker).lowercased() == agent }
+        state.waiting = queue.count
+    }
+
+    /// A new turn: the turn before it, if it was said to one agent on a call with several and that agent's post has
+    /// not come since, is owed. Never Senti's, which the voice line answered.
+    private func oweLatestTurn() {
+        guard state.with.count > 1, let turn = latestTurn, let agent = turnFor?.lowercased(), !Self.isSenti(agent),
+              !answeredLatest.contains(agent) else { return }
+        owed[agent, default: []].append(turn)
+    }
+
+    /// A new turn or hang-up: the last quick answer stops streaming and what is left of it is not read, and the wait
+    /// for the last turn's answer ends.
     private func dropVoiceLineLeftovers() {
         voiceLineAsk?.cancel()
         voiceLineAsk = nil
         lineStreaming = nil
+        answerWatch?.cancel()
+        answerWatch = nil
+        awaited = nil
         queue.removeAll(where: { Self.isLine($0) })
         state.waiting = queue.count
     }
