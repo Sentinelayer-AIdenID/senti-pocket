@@ -105,6 +105,9 @@ public struct PocketSidePanel: View {
     private let onNewRoom: (() -> Void)?
     /// Something the folders have to say once (a folder that is gone, a change that did not save).
     private let folderNotice: String?
+    private let pinSaving: Bool
+    /// A verified account is ready to write. This does not change the server's stored pin capability.
+    private let pinActionsAvailable: Bool
     /// What the folder controls ask for; nil where folders are off: then nothing about folders shows.
     private let onFolder: ((RoomFolderIntent) -> Void)?
     @State private var query = ""
@@ -130,6 +133,8 @@ public struct PocketSidePanel: View {
         onSettings: @escaping () -> Void,
         onNewRoom: (() -> Void)? = nil,
         folderNotice: String? = nil,
+        pinSaving: Bool = false,
+        pinActionsAvailable: Bool = true,
         onFolder: ((RoomFolderIntent) -> Void)? = nil
     ) {
         _placement = ObservedObject(wrappedValue: placement)
@@ -147,6 +152,8 @@ public struct PocketSidePanel: View {
         self.onSettings = onSettings
         self.onNewRoom = onNewRoom
         self.folderNotice = onFolder == nil ? nil : folderNotice
+        self.pinSaving = pinSaving
+        self.pinActionsAvailable = pinActionsAvailable
         self.onFolder = onFolder
     }
 
@@ -212,6 +219,7 @@ public struct PocketSidePanel: View {
         VStack(alignment: .leading, spacing: 0) {
             if !controlsScroll { controls }
 
+            ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 2) {
                     if controlsScroll {
@@ -219,6 +227,11 @@ public struct PocketSidePanel: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        if let onFolder, pinActionsAvailable {
+                            PinnedRoomFolders(placement: placement, isSaving: pinSaving, send: onFolder) { id in
+                                proxy.scrollTo("folder:" + id, anchor: .top)
+                            }
+                        }
                         placedRooms
                     } else {
                         // A search is one flat list of what matches, rooms and direct messages alike.
@@ -237,6 +250,7 @@ public struct PocketSidePanel: View {
                 .padding(.bottom, 8)
             }
             .accessibilityIdentifier("pocket.drawer.list")
+            }
 
             Divider()
             footer
@@ -411,6 +425,7 @@ public struct PocketSidePanel: View {
     @ViewBuilder
     private var placedRooms: some View {
         let rows = placement.shown.rows
+        let pinsAvailable = pinActionsAvailable && placement.shown.layout.pinsAvailable
         if rows.isEmpty {
             emptyLine("No rooms yet")
         }
@@ -421,7 +436,7 @@ public struct PocketSidePanel: View {
             VStack(alignment: .leading, spacing: 0) {
                 switch row {
                 case .folder(let line):
-                    folderHeader(line)
+                    folderHeader(line, pinsAvailable: pinsAvailable)
                 case .emptyFolder(_, let depth):
                     Text("No chats in this folder")
                         .font(.caption)
@@ -461,7 +476,7 @@ public struct PocketSidePanel: View {
 
     /// A folder's line: tap to fold or open it; its menu renames it, makes a folder inside it, moves it and deletes it.
     /// Folded, it shows how many rooms are in it (inside its folders too) and their unread.
-    private func folderHeader(_ line: SidePanelLayout.FolderLine) -> some View {
+    private func folderHeader(_ line: SidePanelLayout.FolderLine, pinsAvailable: Bool) -> some View {
         // At the largest text sizes the name keeps the line (two if it needs them) and the counts go under it.
         let largeText = dynamicTypeSize.isAccessibilitySize
         return HStack(spacing: 8) {
@@ -499,6 +514,7 @@ public struct PocketSidePanel: View {
             .accessibilityIdentifier("pocket.drawer.folder.\(line.id)")
             if let onFolder {
                 Menu {
+                    RoomFolderPinMenuAction(folder: line.folder, available: pinsAvailable, isSaving: pinSaving, send: onFolder)
                     Button { onFolder(.rename(folderId: line.id)) } label: { Label("Rename", systemImage: "pencil") }
                     if line.canHoldFolder {
                         Button { onFolder(.createInside(folderId: line.id)) } label: {
@@ -530,6 +546,8 @@ public struct PocketSidePanel: View {
                 .accessibilityIdentifier("pocket.drawer.folder.\(line.id).menu")
             }
         }
+        .id("folder:" + line.id)
+        .modifier(RoomFolderPinContextMenu(folder: line.folder, available: pinsAvailable, isSaving: pinSaving, send: onFolder))
         .padding(.leading, 14 + Self.indent(line.depth))
         .padding(.trailing, 2)
         .padding(.top, 2)
