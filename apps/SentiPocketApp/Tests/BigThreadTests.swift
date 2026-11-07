@@ -346,44 +346,80 @@ final class BigThreadTests: XCTestCase {
         }
     }
 
-    /// Typing in a thread of 1,000 long replies draws the reply box alone: the room under it is never drawn again, the
-    /// replies' list is not, and so no reply is built again. The list is lazy: only the replies in sight are built.
-    func test_typing_in_a_thread_of_a_thousand_long_replies_draws_neither_the_room_nor_the_replies() throws {
-        RenderTrace.resetThreadReplies()
-        let window = try host(Self.openThread())
-        defer { HostedSummary.close(window) }
-        HostedSummary.pump(0.8)
-        let builtOnOpen = RenderTrace.threadRepliesBuiltSinceReset()
-        XCTAssertFalse(builtOnOpen.isEmpty, "the replies in sight are built")
-        XCTAssertLessThan(builtOnOpen.count, 60, "a lazy list builds the replies in sight, never all 1,000")
+    /// UI automation, as `HostedSummary` turns it on: an assistive client reading the screen.
+    private static let setAutomation: (@convention(c) (Bool) -> Void)? = {
+        guard let handle = dlopen("/usr/lib/libAccessibility.dylib", RTLD_NOW),
+              let symbol = dlsym(handle, "_AXSSetAutomationEnabled") else { return nil }
+        return unsafeBitCast(symbol, to: (@convention(c) (Bool) -> Void).self)
+    }()
 
-        let box = try XCTUnwrap(Self.views(in: window).compactMap { $0 as? UITextView }
-            .first { $0.accessibilityIdentifier == "pocket.thread.composer" }, "the thread's reply box")
-        box.becomeFirstResponder()
-        HostedSummary.pump(0.8)
-        let roomBefore = RenderTrace.builtCount(.roomBody)
-        let listBefore = RenderTrace.builtCount(.threadList)
-        let repliesBefore = RenderTrace.builtCount(.threadReply)
+    /// The thread's reply box, found among the window's views (not read as VoiceOver reads the screen, which builds
+    /// what it reads), or nil once the time is up.
+    private func composer(in window: UIWindow, timeout: TimeInterval = 15) -> UITextView? {
+        let end = Date().addingTimeInterval(timeout)
+        while Date() < end {
+            if let box = Self.views(in: window).compactMap({ $0 as? UITextView })
+                .first(where: { $0.accessibilityIdentifier == "pocket.thread.composer" }) {
+                return box
+            }
+            HostedSummary.pump(0.1)
+        }
+        return nil
+    }
+
+    /// What `keystrokes` keystrokes into `box` drew: the room, the replies' list, and replies built.
+    private func typing(_ keystrokes: Int, into box: UITextView, in window: UIWindow, explaining: Bool)
+        -> (room: Int, list: Int, replies: Int, ms: Int) {
+        let room = RenderTrace.builtCount(.roomBody)
+        let list = RenderTrace.builtCount(.threadList)
+        let replies = RenderTrace.builtCount(.threadReply)
         let started = Date()
-        for _ in 0..<Self.keystrokes {
+        for index in 0..<keystrokes {
+            RenderTrace.explainsThreadList = explaining && index < 3
             box.insertText("a")
             RunLoop.main.run(until: Date())
             Self.layout(window)
         }
-        let elapsed = Date().timeIntervalSince(started)
+        let ms = Int(Date().timeIntervalSince(started) * 1_000)
         HostedSummary.pump(0.3)
-        let roomDraws = RenderTrace.builtCount(.roomBody) - roomBefore
-        let listDraws = RenderTrace.builtCount(.threadList) - listBefore
-        let replyBuilds = RenderTrace.builtCount(.threadReply) - repliesBefore
-        print("THREADTYPING \(Self.keystrokes) keystrokes in \(Int(elapsed * 1_000)) ms: room drawn \(roomDraws), "
-              + "replies' list drawn \(listDraws), replies built \(replyBuilds); \(builtOnOpen.count) of 1,000 built to open")
+        RenderTrace.explainsThreadList = false
+        return (RenderTrace.builtCount(.roomBody) - room, RenderTrace.builtCount(.threadList) - list,
+                RenderTrace.builtCount(.threadReply) - replies, ms)
+    }
 
-        XCTAssertEqual(box.text, String(repeating: "a", count: Self.keystrokes), "every keystroke reached the box")
-        let send = try XCTUnwrap(HostedSummary.element("pocket.thread.send", in: window))
+    /// Typing in a thread of 1,000 long replies draws the reply box alone: the room under it is never drawn again, the
+    /// replies' list is not, and so no reply is built again. The list is lazy: only the replies in sight are built.
+    func test_typing_in_a_thread_of_a_thousand_long_replies_draws_neither_the_room_nor_the_replies() throws {
+        RenderTrace.resetThreadReplies()
+        let window = try HostedSummary.host(NavigationStack { RoomChatView(state: Self.openThread(), send: { _ in }) })
+        defer { HostedSummary.close(window) }
+        let box = try XCTUnwrap(composer(in: window), "the thread opens with its reply box")
+        HostedSummary.pump(0.8)
+        let builtOnOpen = RenderTrace.threadRepliesBuiltSinceReset().count
+
+        // As a person types: no assistive client reading the screen.
+        Self.setAutomation?(false)
+        box.becomeFirstResponder()
+        HostedSummary.pump(0.8)
+        let plain = typing(Self.keystrokes, into: box, in: window, explaining: true)
+        // And with one, as VoiceOver reads it.
+        Self.setAutomation?(true)
+        HostedSummary.pump(0.5)
+        let read = typing(Self.keystrokes, into: box, in: window, explaining: true)
+        let send = try XCTUnwrap(HostedSummary.wait(for: "pocket.thread.send", in: window))
+        let builtAfterReading = RenderTrace.threadRepliesBuiltSinceReset().count
+        print("THREADTYPING \(Self.keystrokes) keystrokes in \(plain.ms) ms: room drawn \(plain.room), replies' list "
+              + "drawn \(plain.list), replies built \(plain.replies); with the screen read: \(read.ms) ms, room "
+              + "\(read.room), list \(read.list), replies \(read.replies); \(builtOnOpen) of 1,000 built to open, "
+              + "\(builtAfterReading) once the screen was read")
+
+        XCTAssertEqual(box.text, String(repeating: "a", count: Self.keystrokes * 2), "every keystroke reached the box")
         XCTAssertFalse(send.accessibilityTraits.contains(.notEnabled), "what was typed reached the thread: it can be sent")
-        XCTAssertEqual(roomDraws, 0, "typing in a thread never draws the room under it")
-        XCTAssertLessThanOrEqual(listDraws, 1, "nor the thread's replies")
-        XCTAssertLessThanOrEqual(replyBuilds, Self.keystrokes / 4, "nor builds its replies again, keystroke after keystroke")
+        XCTAssertGreaterThan(builtOnOpen, 0, "the replies in sight are built")
+        XCTAssertLessThan(builtOnOpen, 60, "a lazy list builds the replies in sight, never all 1,000")
+        XCTAssertEqual(plain.room, 0, "typing in a thread never draws the room under it")
+        XCTAssertLessThanOrEqual(plain.list, 1, "nor the thread's replies")
+        XCTAssertLessThanOrEqual(plain.replies, Self.keystrokes / 4, "nor builds its replies again, keystroke after keystroke")
         box.resignFirstResponder()
     }
 
@@ -391,11 +427,15 @@ final class BigThreadTests: XCTestCase {
     /// replies between.
     func test_a_thread_opened_at_a_reply_far_down_brings_it_into_view() throws {
         RenderTrace.resetThreadReplies()
-        let window = try host(Self.openThread(focus: 600))
+        let window = try HostedSummary.host(NavigationStack { RoomChatView(state: Self.openThread(focus: 600),
+                                                                           send: { _ in }) })
         defer { HostedSummary.close(window) }
-        XCTAssertNotNil(replyOnScreen(600, in: window), "reply 600 of 1,000 is on screen")
+        XCTAssertNotNil(composer(in: window), "the thread opens over the room")
+        HostedSummary.pump(1.5)
         let built = RenderTrace.threadRepliesBuiltSinceReset()
-        print("THREADFOCUS built \(built.count) of 1,000 replies to show reply 600")
+        XCTAssertNotNil(replyOnScreen(600, in: window), "reply 600 of 1,000 is on screen")
+        print("THREADFOCUS built \(built.count) of 1,000 replies to show reply 600, "
+              + "\(RenderTrace.threadRepliesBuiltSinceReset().count) once the screen was read")
         XCTAssertTrue(built.contains(Self.id(600)))
         XCTAssertLessThan(built.count, 200, "it went to the reply, not through the thousand")
     }

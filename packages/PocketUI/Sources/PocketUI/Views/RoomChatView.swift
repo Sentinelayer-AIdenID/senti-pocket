@@ -16,7 +16,7 @@ public struct RoomChatView: View {
     private let readingAloudId: String?
 
     /// The reply being typed in each thread, kept while the room is open: closing the sheet does not lose it. A
-    /// reference, so typing never draws the room again: each keystroke in a thread used to (Carter, #62423).
+    /// reference, so typing never draws the room again: each keystroke in a thread used to (#62423).
     @State private var threadDrafts = RoomThreadDraftStore()
     /// Opens a profile card from an avatar, where direct messages are on.
     @Environment(\.roomProfileOpener) private var profileOpener
@@ -2136,7 +2136,125 @@ private struct RoomThreadSheet: View {
     /// drawing anything else.
     let draftStore: RoomThreadDraftStore
     let send: (RoomChatIntent) -> Void
-    /// What is typed in the reply box: this sheet's own, so a keystroke draws the box, never the room or the replies.
+    /// The reply being answered (a reply to a reply nests under it); nil answers the message.
+    @State private var answering: RoomChatReplyRow?
+    /// The reply whose author the reader chose to block, while its row asks to be sure.
+    @State private var blockingReply: RoomChatReplyRow?
+    /// A reply, an edit about to open, or the thread's writes, held for the AI consent question.
+    @State private var consentHeld: AIConsentHeld?
+    /// Your own reply being edited.
+    @State private var editingReply: RoomChatReplyRow?
+    /// What the thread puts in its reply box (a reply answered, an unsent reply taken back): the box's text is its
+    /// own, so the sheet hands it the change.
+    @State private var composerInbox = RoomThreadComposerInbox()
+
+    private func answer(_ reply: RoomChatReplyRow) {
+        answering = reply
+        let mention = "@\(reply.authorHandle) "
+        composerInbox.edit { $0.hasPrefix(mention) ? $0 : mention + $0 }
+    }
+
+    var body: some View {
+        NavigationStack {
+            RoomThreadRepliesList(
+                thread: thread,
+                ownHandles: ownHandles,
+                readingAloudId: readingAloudId,
+                canReact: canReact,
+                canReport: canReport,
+                canBlock: canBlock,
+                media: media,
+                previews: previews,
+                blockingReplyId: blockingReply?.id,
+                send: send,
+                onAnswer: { answer($0) },
+                onEdit: { reply in
+                    // Asked before the editor opens, so an edit is never written to be dropped.
+                    if asksAIConsent {
+                        consentHeld = AIConsentHeld({ editingReply = reply }, onDecline: { send(.declineAIAgents) })
+                    } else {
+                        editingReply = reply
+                    }
+                },
+                onBlock: { blockingReply = $0 },
+                onEditPending: { pending in
+                    composerInbox.edit { RoomComposerDraft.restoring(pending.text, into: $0) }
+                    send(.discardSend(clientId: pending.clientId))
+                }
+            )
+            .sheet(item: $editingReply) { reply in
+                MessageEditSheet(original: reply.text) { text in
+                    send(.editReply(sequenceId: thread.parent.sequenceId, replyId: reply.id, text: text))
+                }
+            }
+            .sheet(isPresented: Binding(
+                get: { report != nil },
+                set: { presented in if !presented { send(.closeReport) } }
+            )) {
+                if let report {
+                    RoomReportSheet(report: report, send: send)
+                }
+            }
+            .aiConsentPrompt($consentHeld) { send(.allowAIAgents) }
+            .onChange(of: consentRequested) { requested in
+                guard requested, consentHeld == nil else { return }
+                consentHeld = AIConsentHeld({}, onDecline: { send(.declineAIAgents) })
+            }
+            .navigationTitle(thread.title)
+            .navigationBarTitleDisplayModeInlineIfAvailable()
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { send(.closeThread) }
+                }
+            }
+            .background { mediaHost?.content() }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if thread.canReply {
+                    RoomThreadComposer(
+                        thread: thread,
+                        mentionCandidates: mentionCandidates,
+                        actions: actions,
+                        asksAIConsent: asksAIConsent,
+                        media: media,
+                        draftKey: draftKey,
+                        draftStore: draftStore,
+                        inbox: composerInbox,
+                        answering: $answering,
+                        consentHeld: $consentHeld,
+                        send: send
+                    )
+                }
+            }
+        }
+    }
+}
+
+/// Hands the thread's reply box a change to what it holds, from the sheet around it.
+final class RoomThreadComposerInbox {
+    /// Set by the box while it shows: applies a change to its text.
+    fileprivate var apply: ((String) -> String) -> Void = { _ in }
+
+    func edit(_ change: (String) -> String) { apply(change) }
+}
+
+/// The thread's reply box. What is typed is its own: a keystroke draws the box alone, never the sheet, the thread's
+/// replies or the room (typing in a long thread lagged, #62423).
+private struct RoomThreadComposer: View {
+    let thread: RoomChatThreadState
+    let mentionCandidates: [MentionCandidate]
+    /// What the room's "+" offers, offered here too.
+    let actions: RoomComposerActions
+    let asksAIConsent: Bool
+    let media: RoomMediaBoard?
+    let draftKey: String?
+    let draftStore: RoomThreadDraftStore
+    let inbox: RoomThreadComposerInbox
+    /// The reply being answered (a reply to a reply nests under it); nil answers the message.
+    @Binding var answering: RoomChatReplyRow?
+    /// A reply held for the AI consent question.
+    @Binding var consentHeld: AIConsentHeld?
+    let send: (RoomChatIntent) -> Void
+    /// What is typed in the reply box: the box's own, so a keystroke draws the box alone.
     @State private var draft = ""
     /// A sent reply's text stays saved until the server has it (the coordinator lets it go then); typing meanwhile is
     /// saved once that has had time to happen, as in the room's box.
@@ -2144,17 +2262,9 @@ private struct RoomThreadSheet: View {
     @State private var sends = 0
     /// The reply the restored text answered, until its row is loaded to answer it again.
     @State private var restoringAnswer: String?
-    /// The reply being answered (a reply to a reply nests under it); nil answers the message.
-    @State private var answering: RoomChatReplyRow?
-    /// The reply whose author the reader chose to block, while its row asks to be sure.
-    @State private var blockingReply: RoomChatReplyRow?
-    /// A reply, an edit about to open, or the thread's writes, held for the AI consent question.
-    @State private var consentHeld: AIConsentHeld?
     /// "File as a ticket": the reply goes to the room's ticket keeper as a ticket request.
     @State private var ticketMode = false
     @State private var isReplying = false
-    /// Your own reply being edited.
-    @State private var editingReply: RoomChatReplyRow?
     /// Where the reply text last changed (the field does not say where the caret is), for an @ anywhere in it.
     @State private var editOffset: Int?
     @State private var lastDraft = ""
@@ -2249,225 +2359,159 @@ private struct RoomThreadSheet: View {
         }
     }
 
-    private func answer(_ reply: RoomChatReplyRow) {
-        answering = reply
-        let mention = "@\(reply.authorHandle) "
-        if !draft.hasPrefix(mention) { draft = mention + draft }
-    }
-
     var body: some View {
-        NavigationStack {
-            RoomThreadRepliesList(
-                thread: thread,
-                ownHandles: ownHandles,
-                readingAloudId: readingAloudId,
-                canReact: canReact,
-                canReport: canReport,
-                canBlock: canBlock,
-                media: media,
-                previews: previews,
-                blockingReplyId: blockingReply?.id,
-                asksAIConsent: asksAIConsent,
-                send: send,
-                onAnswer: { answer($0) },
-                onEdit: { reply in
-                    // Asked before the editor opens, so an edit is never written to be dropped.
-                    if asksAIConsent {
-                        consentHeld = AIConsentHeld({ editingReply = reply }, onDecline: { send(.declineAIAgents) })
-                    } else {
-                        editingReply = reply
-                    }
-                },
-                onBlock: { blockingReply = $0 },
-                onEditPending: { pending in
-                    draft = RoomComposerDraft.restoring(pending.text, into: draft)
-                    send(.discardSend(clientId: pending.clientId))
+        VStack(alignment: .leading, spacing: 4) {
+        if let answering {
+            HStack(spacing: 6) {
+                Image(systemName: "arrowshape.turn.up.left")
+                Text("Replying to \(answering.authorName)")
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Button {
+                    self.answering = nil
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
                 }
-            )
-            // Drawn again only when what it shows changes: never as the reply box is typed in.
-            .equatable()
-            .onAppear {
-                if draft.isEmpty {
-                    lastDraft = draftStore[thread.parent.sequenceId]
-                    draft = lastDraft
-                }
-                restoreDraft()
+                .buttonStyle(.plain)
+                .accessibilityLabel("Stop replying to \(answering.authorName)")
             }
-            // Closing the thread writes what typing had not yet saved.
-            .onDisappear { draftWriter.flush() }
-            .onChange(of: thread.replies.count) { _ in answerRestoredReply() }
-            .onChange(of: thread.isLoading) { _ in answerRestoredReply() }
-            .onChange(of: answering?.id) { _ in saveDraft() }
-            .sheet(item: $editingReply) { reply in
-                MessageEditSheet(original: reply.text) { text in
-                    send(.editReply(sequenceId: thread.parent.sequenceId, replyId: reply.id, text: text))
-                }
-            }
-            .sheet(isPresented: Binding(
-                get: { report != nil },
-                set: { presented in if !presented { send(.closeReport) } }
-            )) {
-                if let report {
-                    RoomReportSheet(report: report, send: send)
-                }
-            }
-            .aiConsentPrompt($consentHeld) { send(.allowAIAgents) }
-            .onChange(of: consentRequested) { requested in
-                guard requested, consentHeld == nil else { return }
-                consentHeld = AIConsentHeld({}, onDecline: { send(.declineAIAgents) })
-            }
-            .navigationTitle(thread.title)
-            .navigationBarTitleDisplayModeInlineIfAvailable()
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { send(.closeThread) }
-                }
-            }
-            .background { mediaHost?.content() }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                if thread.canReply {
-                    VStack(alignment: .leading, spacing: 4) {
-                    if let answering {
-                        HStack(spacing: 6) {
-                            Image(systemName: "arrowshape.turn.up.left")
-                            Text("Replying to \(answering.authorName)")
-                                .lineLimit(1)
-                            Spacer(minLength: 0)
-                            Button {
-                                self.answering = nil
-                            } label: {
-                                Image(systemName: "xmark.circle.fill")
+            .font(.caption)
+            .foregroundStyle(PocketPalette.textSecondary)
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+        }
+        // Read once: each row looks at the one before it for its box's label.
+        let suggestions = self.suggestions
+        if !suggestions.isEmpty {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(suggestions.enumerated()), id: \.element.id) { index, candidate in
+                        VStack(alignment: .leading, spacing: 0) {
+                            if let group = MentionSuggester.groupStarting(at: index, in: suggestions) {
+                                MentionGroupHeader(group: group)
                             }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Stop replying to \(answering.authorName)")
-                        }
-                        .font(.caption)
-                        .foregroundStyle(PocketPalette.textSecondary)
-                        .padding(.horizontal, 16)
-                        .padding(.top, 8)
-                    }
-                    // Read once: each row looks at the one before it for its box's label.
-                    let suggestions = self.suggestions
-                    if !suggestions.isEmpty {
-                        ScrollView {
-                            LazyVStack(alignment: .leading, spacing: 0) {
-                                ForEach(Array(suggestions.enumerated()), id: \.element.id) { index, candidate in
-                                    VStack(alignment: .leading, spacing: 0) {
-                                        if let group = MentionSuggester.groupStarting(at: index, in: suggestions) {
-                                            MentionGroupHeader(group: group)
-                                        }
-                                        Button {
-                                            draft = MentionSuggester.apply(candidate, to: draft,
-                                                                           at: editOffset ?? draft.count)
-                                        } label: {
-                                            HStack(spacing: 10) {
-                                                Image(systemName: candidate.symbol)
-                                                    .foregroundStyle(
-                                                        candidate.isHuman || candidate.isAll || candidate.isAny
-                                                            ? PocketPalette.accent : PocketPalette.listening
-                                                    )
-                                                    .frame(width: 26)
-                                                Text(candidate.isAll ? "@all" : "@\(candidate.handle)")
-                                                    .font(.subheadline.weight(.semibold))
-                                                Text(candidate.isAll ? "Everyone in the room" : candidate.displayName)
-                                                    .font(.caption)
-                                                    .foregroundStyle(PocketPalette.textSecondary)
-                                                    .lineLimit(1)
-                                                Spacer(minLength: 0)
-                                            }
-                                            .padding(.horizontal, 14)
-                                            .padding(.vertical, 7)
-                                            .contentShape(Rectangle())
-                                        }
-                                        .buttonStyle(.plain)
-                                        .accessibilityLabel(candidate.spokenChoice)
-                                        .accessibilityIdentifier("pocket.thread.mention.\(candidate.handle)")
-                                    }
+                            Button {
+                                draft = MentionSuggester.apply(candidate, to: draft,
+                                                               at: editOffset ?? draft.count)
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: candidate.symbol)
+                                        .foregroundStyle(
+                                            candidate.isHuman || candidate.isAll || candidate.isAny
+                                                ? PocketPalette.accent : PocketPalette.listening
+                                        )
+                                        .frame(width: 26)
+                                    Text(candidate.isAll ? "@all" : "@\(candidate.handle)")
+                                        .font(.subheadline.weight(.semibold))
+                                    Text(candidate.isAll ? "Everyone in the room" : candidate.displayName)
+                                        .font(.caption)
+                                        .foregroundStyle(PocketPalette.textSecondary)
+                                        .lineLimit(1)
+                                    Spacer(minLength: 0)
                                 }
-                            }
-                        }
-                        .frame(maxHeight: min(CGFloat(suggestions.count) * 44, 200))
-                    }
-                    if let problem = thread.replyLengthProblem(for: draft) {
-                        Text(problem)
-                            .font(.caption)
-                            .foregroundStyle(PocketPalette.danger)
-                            .padding(.horizontal, 16)
-                            .padding(.top, 6)
-                            .accessibilityIdentifier("pocket.thread.composer.tooLong")
-                    }
-                    if ticketMode {
-                        HStack(spacing: 6) {
-                            Image(systemName: "ticket")
-                                .foregroundStyle(PocketPalette.accentStrong)
-                                .accessibilityHidden(true)
-                            Text("Describe what you want; it becomes a ticket.")
-                                .font(.caption)
-                                .foregroundStyle(PocketPalette.textSecondary)
-                            Spacer(minLength: 4)
-                            Button {
-                                ticketMode = false
-                            } label: {
-                                Image(systemName: "xmark.circle.fill")
-                                    .foregroundStyle(PocketPalette.textSecondary)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 7)
+                                .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
-                            .accessibilityLabel("Not a ticket")
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.top, 6)
-                        .accessibilityElement(children: .contain)
-                        .accessibilityIdentifier("pocket.thread.composer.ticketMode")
-                    }
-                    if let media {
-                        RoomMediaTray(board: media)
-                    }
-                    HStack(alignment: .bottom, spacing: 8) {
-                        // Files go with a reply as with a message (never with a ticket).
-                        RoomComposerPlusButton(board: ticketMode ? nil : media, more: plusActions,
-                                               identifier: "pocket.thread.composer.plus")
-                            .padding(.bottom, 1)
-                        ComposerTextField(placeholder: ticketMode ? "Describe the ticket" : "Reply", text: $draft,
-                                          isFocused: $isReplying, identifier: "pocket.thread.composer")
-                            .onChange(of: draft) { new in
-                                replyWrittenBack.changed(from: lastDraft, to: new, sent: replySent)
-                                editOffset = MentionSuggester.editOffsetUnlessAtEnd(from: lastDraft, to: new)
-                                lastDraft = new
-                                draftStore[thread.parent.sequenceId] = new
-                                saveDraft()
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 9)
-                            .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                        if let media {
-                            // Sends once there are words or files; never with neither.
-                            RoomMediaSendButton(board: media, canSendText: canSendReply,
-                                                hasProblem: thread.replyLengthProblem(for: draft) != nil,
-                                                label: "Send reply", identifier: "pocket.thread.send") {
-                                sendReply()
-                            }
-                        } else {
-                            Button {
-                                sendReply()
-                            } label: {
-                                Image(systemName: "arrow.up.circle.fill").font(.system(size: 32))
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(!canSendReply)
-                            .accessibilityLabel("Send reply")
-                            .accessibilityIdentifier("pocket.thread.send")
+                            .accessibilityLabel(candidate.spokenChoice)
+                            .accessibilityIdentifier("pocket.thread.mention.\(candidate.handle)")
                         }
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    }
-                    .pocketFloating(in: RoundedRectangle(cornerRadius: 26, style: .continuous))
-                    .padding(.horizontal, 10)
-                    .padding(.top, 4)
-                    .padding(.bottom, 6)
                 }
+            }
+            .frame(maxHeight: min(CGFloat(suggestions.count) * 44, 200))
+        }
+        if let problem = thread.replyLengthProblem(for: draft) {
+            Text(problem)
+                .font(.caption)
+                .foregroundStyle(PocketPalette.danger)
+                .padding(.horizontal, 16)
+                .padding(.top, 6)
+                .accessibilityIdentifier("pocket.thread.composer.tooLong")
+        }
+        if ticketMode {
+            HStack(spacing: 6) {
+                Image(systemName: "ticket")
+                    .foregroundStyle(PocketPalette.accentStrong)
+                    .accessibilityHidden(true)
+                Text("Describe what you want; it becomes a ticket.")
+                    .font(.caption)
+                    .foregroundStyle(PocketPalette.textSecondary)
+                Spacer(minLength: 4)
+                Button {
+                    ticketMode = false
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(PocketPalette.textSecondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Not a ticket")
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 6)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("pocket.thread.composer.ticketMode")
+        }
+        if let media {
+            RoomMediaTray(board: media)
+        }
+        HStack(alignment: .bottom, spacing: 8) {
+            // Files go with a reply as with a message (never with a ticket).
+            RoomComposerPlusButton(board: ticketMode ? nil : media, more: plusActions,
+                                   identifier: "pocket.thread.composer.plus")
+                .padding(.bottom, 1)
+            ComposerTextField(placeholder: ticketMode ? "Describe the ticket" : "Reply", text: $draft,
+                              isFocused: $isReplying, identifier: "pocket.thread.composer")
+                .onChange(of: draft) { new in
+                    replyWrittenBack.changed(from: lastDraft, to: new, sent: replySent)
+                    editOffset = MentionSuggester.editOffsetUnlessAtEnd(from: lastDraft, to: new)
+                    lastDraft = new
+                    draftStore[thread.parent.sequenceId] = new
+                    saveDraft()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(PocketPalette.raised, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            if let media {
+                // Sends once there are words or files; never with neither.
+                RoomMediaSendButton(board: media, canSendText: canSendReply,
+                                    hasProblem: thread.replyLengthProblem(for: draft) != nil,
+                                    label: "Send reply", identifier: "pocket.thread.send") {
+                    sendReply()
+                }
+            } else {
+                Button {
+                    sendReply()
+                } label: {
+                    Image(systemName: "arrow.up.circle.fill").font(.system(size: 32))
+                }
+                .buttonStyle(.plain)
+                .disabled(!canSendReply)
+                .accessibilityLabel("Send reply")
+                .accessibilityIdentifier("pocket.thread.send")
             }
         }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        }
+        .pocketFloating(in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+        .padding(.horizontal, 10)
+        .padding(.top, 4)
+        .padding(.bottom, 6)
+        .onAppear {
+            inbox.apply = { change in draft = change(draft) }
+            if draft.isEmpty {
+                lastDraft = draftStore[thread.parent.sequenceId]
+                draft = lastDraft
+            }
+            restoreDraft()
+        }
+        // Closing the thread writes what typing had not yet saved.
+        .onDisappear { draftWriter.flush() }
+        .onChange(of: thread.replies.count) { _ in answerRestoredReply() }
+        .onChange(of: thread.isLoading) { _ in answerRestoredReply() }
+        .onChange(of: answering?.id) { _ in saveDraft() }
     }
 
     private var canSendReply: Bool {
@@ -2528,16 +2572,14 @@ private struct RoomThreadSheet: View {
         }
         answering = nil
     }
-
-
 }
 
 
-/// A thread's message and its replies, oldest first, in a lazy list: it builds the replies in sight. It is drawn again
-/// only when what it shows changes (`==`), never as the reply box is typed in: typing used to draw every reply again at
-/// each keystroke (Carter, #62423, a thread of 106 long replies). A long thread opens at its newest page, and scrolling
-/// up to its top loads the page before. Opened at a reply (its notification), it shows that reply, marked a moment.
-private struct RoomThreadRepliesList: View, Equatable {
+/// A thread's message and its replies, oldest first, in a lazy list: it builds the replies in sight. The reply box is
+/// a view of its own (`RoomThreadComposer`), so typing never draws it again: it used to draw every reply again at each
+/// keystroke (#62423, a thread of 106 long replies). A long thread opens at its newest page, and scrolling up to its
+/// top loads the page before. Opened at a reply (its notification), it shows that reply, marked a moment.
+private struct RoomThreadRepliesList: View {
     let thread: RoomChatThreadState
     let ownHandles: Set<String>
     var readingAloudId: String?
@@ -2548,8 +2590,6 @@ private struct RoomThreadRepliesList: View, Equatable {
     var previews: [String: Data] = [:]
     /// The reply whose author is being blocked, while its row asks to be sure.
     var blockingReplyId: String?
-    /// Read by `onEdit` (an edit asks the AI consent first): compared, so the list takes the closure that reads it anew.
-    var asksAIConsent = false
     let send: (RoomChatIntent) -> Void
     /// Answer this reply from the box.
     let onAnswer: (RoomChatReplyRow) -> Void
@@ -2570,15 +2610,9 @@ private struct RoomThreadRepliesList: View, Equatable {
     /// The oldest reply shown when a page of older ones was asked for: the reader stays on it as they arrive above.
     @State private var anchorBeforeOlder: String?
 
-    static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.thread == rhs.thread && lhs.ownHandles == rhs.ownHandles && lhs.readingAloudId == rhs.readingAloudId
-            && lhs.canReact == rhs.canReact && lhs.canReport == rhs.canReport && lhs.canBlock == rhs.canBlock
-            && lhs.media === rhs.media && lhs.previews == rhs.previews && lhs.blockingReplyId == rhs.blockingReplyId
-            && lhs.asksAIConsent == rhs.asksAIConsent
-    }
-
     var body: some View {
         let _ = RenderTrace.built(.threadList)
+        let _ = RenderTrace.explainsThreadList ? Self._printChanges() : ()
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {

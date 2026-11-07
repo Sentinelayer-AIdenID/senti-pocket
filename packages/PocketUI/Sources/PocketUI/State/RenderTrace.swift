@@ -22,6 +22,9 @@ public enum RenderTrace {
         case threadReply
     }
 
+    /// A test sets this to have the thread's reply list say why SwiftUI drew it (`_printChanges`), in its log.
+    public static var explainsThreadList = false
+
     private static let lock = NSLock()
     private static var draws = 0
     private static var last: Int64 = 0
