@@ -141,19 +141,55 @@ final class RoomMemberViewTests: XCTestCase {
         XCTAssertNil(model.state.blockReference, "and Block is not offered again")
     }
 
-    /// Ticket f7254a3b: the API's "mcp" covers hosted MCP and the CLI's own MCP server alike, so the newest post's own
-    /// marks tell them apart; the CLI says so; with nothing to tell, nothing is shown.
+    /// Tickets f7254a3b and c96649c0: the API's "mcp" covers MCP and the CLI's own MCP server alike, so the newest
+    /// post's own marks tell them apart; the CLI says so. With nothing to tell, marks that disagree with the API, or a
+    /// kind this app does not name, nothing is shown.
     func test_the_card_says_which_way_an_agent_is_connected() {
         let card = RoomMemberMessagesModel.connection
         XCTAssertEqual(card(.mcp, .cliMCP), .cliMCP, "the CLI's MCP server: Connected through the CLI (MCP)")
         XCTAssertEqual(card(.mcp, .cliMCP)?.label, "Connected through the CLI (MCP)")
-        XCTAssertEqual(card(.mcp, .hostedMCP), .hostedMCP, "hosted MCP: Connected through MCP")
-        XCTAssertEqual(card(.mcp, .hostedMCP)?.label, "Connected through MCP")
+        XCTAssertEqual(card(nil, .cliMCP)?.label, "Connected through the CLI (MCP)")
+        XCTAssertEqual(card(.mcp, .mcp), .mcp, "any other MCP: Connected through MCP")
+        XCTAssertEqual(card(.mcp, .mcp)?.label, "Connected through MCP")
         XCTAssertEqual(card(.cli, .cli)?.label, "Connected through the CLI")
         XCTAssertEqual(card(nil, .cli)?.label, "Connected through the CLI")
+        XCTAssertNil(card(.mcp, .cli), "mixed marks (the API's mcp, a post that says cli): no line")
+        XCTAssertNil(card(.mcp, .other), "a kind not named: no line")
+        XCTAssertNil(card(nil, .other))
         XCTAssertNil(card(.mcp, nil), "the API's mcp alone could be either: no line")
         XCTAssertNil(card(nil, nil), "unknown: no line")
         XCTAssertEqual(card(.box, .cli), .box, "a box stays a box")
+    }
+
+    /// The card reads the newest post that says how it was sent, never an older one; a newer post that says nothing
+    /// leaves it to the one before (as the web reads it).
+    func test_the_card_reads_the_newest_posts_marks() async {
+        func line(newestFirst marks: [RoomPostClient?], api: RoomAuthorConnection? = .mcp) async -> String? {
+            let messages = marks.enumerated().map { index, mark in
+                RoomMessage(id: "evt-\(100 - index)", sequenceId: Int64(100 - index), kind: .message,
+                            authorId: "agent-a1", authorName: "agent-a1", isHuman: false, text: "message",
+                            timestamp: "2026-11-07T10:00:00.000000+00:00", sentThrough: mark)
+            }
+            let model = RoomMemberMessagesModel(
+                sessionId: "room_1", authorId: "agent-a1",
+                reader: ScriptedAuthorPages([RoomAuthorPage(messages: messages, nextBeforeSequence: nil,
+                                                            connection: api)])
+            )
+            await model.loadMore()
+            return model.state.connectionLine
+        }
+        let newestMCP = await line(newestFirst: [.mcp, .cliMCP])
+        XCTAssertEqual(newestMCP, "Connected through MCP", "the newest post decides")
+        let newestCLIMCP = await line(newestFirst: [.cliMCP, .mcp])
+        XCTAssertEqual(newestCLIMCP, "Connected through the CLI (MCP)", "the newest post decides")
+        let quietNewest = await line(newestFirst: [nil, .cliMCP, .mcp])
+        XCTAssertEqual(quietNewest, "Connected through the CLI (MCP)", "a newer post that says nothing leaves it")
+        let mixed = await line(newestFirst: [.cli, .cliMCP])
+        XCTAssertNil(mixed, "the API's mcp and a newest post that says cli disagree: no line")
+        let unnamed = await line(newestFirst: [.other, .cliMCP])
+        XCTAssertNil(unnamed, "a newest post of a kind not named says nothing")
+        let fromTheCLI = await line(newestFirst: [.cli, .mcp], api: nil)
+        XCTAssertEqual(fromTheCLI, "Connected through the CLI")
     }
 
     /// For people the API usually knows no connection: nothing is shown then, never a guess.

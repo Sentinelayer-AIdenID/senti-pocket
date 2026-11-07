@@ -95,9 +95,10 @@ final class RoomMemberMessagesModel: ObservableObject {
         }
     }
 
-    /// How their posts reach the room (ticket f7254a3b): what the API read, except that its "mcp" covers both hosted MCP
-    /// and the CLI's own MCP server (sentinelayer-api session_relay_service.py `_session_connection_label`). For "mcp" the
-    /// newest post's own marks tell them apart (`RoomPostClient`); with neither, nothing is shown, never a guess.
+    /// How their posts reach the room (tickets f7254a3b, c96649c0): what the API read, except that its "mcp" covers
+    /// both MCP and the CLI's own MCP server (sentinelayer-api session_relay_service.py `_session_connection_label`).
+    /// For "mcp" the newest post that says how it was sent tells them apart (`RoomPostClient`). With nothing to tell,
+    /// or marks that disagree with the API (its "mcp" and a post that says "cli"), nothing is shown, never a guess.
     static func connection(api: RoomAuthorConnection?, newest: RoomPostClient?) -> RoomMemberConnection? {
         switch api {
         case .box: return .box
@@ -106,12 +107,18 @@ final class RoomMemberMessagesModel: ObservableObject {
         case .cli: return .cli
         case .mcp, nil:
             switch newest {
-            case .hostedMCP: return .hostedMCP
+            case .mcp: return .mcp
             case .cliMCP: return .cliMCP
             case .cli: return api == nil ? .cli : nil
-            case nil: return nil
+            case .other, nil: return nil
             }
         }
+    }
+
+    /// The marks of the newest post that says how it was sent (their messages are newest first): a post that says
+    /// nothing leaves the one before it to decide, as the web reads it.
+    static func newestSentThrough(_ messages: [RoomMessage]) -> RoomPostClient? {
+        messages.lazy.compactMap(\.sentThrough).first
     }
 
     private func publish() {
@@ -123,7 +130,7 @@ final class RoomMemberMessagesModel: ObservableObject {
             phase: isLoading ? .loading : (failure.map { .failed($0) } ?? .idle),
             canLoadMore: !reachedStart,
             isPrivate: isPrivate,
-            connection: Self.connection(api: connection, newest: messages.first?.sentThrough),
+            connection: Self.connection(api: connection, newest: Self.newestSentThrough(messages)),
             olderNeedsTap: olderNeedsTap,
             isBlocked: isBlocked
         )

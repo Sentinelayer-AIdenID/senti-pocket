@@ -32,8 +32,9 @@ final class RoomMemberPresentationTests: XCTestCase {
 
     func test_a_connection_is_said_only_when_the_api_knows_it() {
         XCTAssertNil(RoomMemberMessagesState().connectionLine, "unknown shows nothing")
-        // Ticket f7254a3b: hosted MCP, the CLI's own MCP server and the CLI are told apart.
-        XCTAssertEqual(RoomMemberMessagesState(connection: .hostedMCP).connectionLine, "Connected through MCP")
+        // Tickets f7254a3b and c96649c0: MCP, the CLI's own MCP server and the CLI are told apart, with no vendor
+        // names.
+        XCTAssertEqual(RoomMemberMessagesState(connection: .mcp).connectionLine, "Connected through MCP")
         XCTAssertEqual(RoomMemberMessagesState(connection: .cliMCP).connectionLine, "Connected through the CLI (MCP)")
         XCTAssertEqual(RoomMemberMessagesState(connection: .cli).connectionLine, "Connected through the CLI")
         XCTAssertEqual(RoomMemberMessagesState(connection: .box).connectionLine, "Runs in a box")

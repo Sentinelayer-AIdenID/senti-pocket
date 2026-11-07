@@ -491,32 +491,38 @@ private extension String {
     var trimmed: String { trimmingCharacters(in: .whitespacesAndNewlines) }
 }
 
-/// How a post says it was sent, from the event as the API stores it: the agent's `clientKind` and the payload's `source`.
-/// Hosted MCP stamps `source: "hosted_mcp"` on its own posts, which outranks what a client says of itself, as the API's
-/// own reading does; MCP admissions (the CLI's MCP server) stamp `clientKind: "mcp"`; the CLI says `"cli"`. Anything else
-/// is not known. A display hint, never authority.
+/// How a post says it was sent (ticket c96649c0, the web's rule in sentinelayer-web #812): the `clientKind` it declares
+/// (the agent's, else the payload's), with the event's own top-level `source`. "mcp" is the CLI's MCP server only when
+/// the post came from the CLI (`source` "cli"). With any other source, or none, it is MCP, which is true either way: an
+/// agent admitted through the hosted connector that then posts over REST still says "mcp". "hosted_mcp" is MCP, and
+/// "cli" the CLI. Any other kind is declared but not one this app names. A post that declares no kind has none (nil).
+/// A display hint, never authority.
 public enum RoomPostClient: String, Equatable, Sendable {
-    /// Hosted MCP (an AI app connected to the Senti MCP server).
-    case hostedMCP = "hosted_mcp"
-    /// The CLI's own MCP server.
-    case cliMCP = "mcp"
+    /// MCP: hosted MCP (an AI app connected to the Senti MCP server), or an MCP client not known to be the CLI's.
+    case mcp
+    /// The CLI's own MCP server: "mcp" from a post the CLI sent.
+    case cliMCP = "cli_mcp"
     /// The CLI.
     case cli
+    /// A kind this app does not name (for example a model's name): it says nothing.
+    case other
 
     init?(event json: JSONValue) {
         let agent = json["agent"] ?? .null
         let payload = json["payload"] ?? .null
-        let said = [agent["clientKind"], agent["client_kind"], payload["clientKind"], payload["client_kind"],
-                    payload["source"], json["source"]]
-            .compactMap { $0?.stringValue?.trimmingCharacters(in: .whitespaces).lowercased().replacingOccurrences(of: "-", with: "_") }
-        if said.contains("hosted_mcp") {
-            self = .hostedMCP
-        } else if said.contains("mcp") {
-            self = .cliMCP
-        } else if said.contains("cli") {
-            self = .cli
-        } else {
-            return nil
+        func mark(_ value: JSONValue?) -> String? {
+            guard let text = value?.stringValue?.trimmingCharacters(in: .whitespaces).lowercased(), !text.isEmpty else {
+                return nil
+            }
+            return text
+        }
+        guard let kind = mark(agent["clientKind"]) ?? mark(agent["client_kind"]) ?? mark(payload["clientKind"])
+                ?? mark(payload["client_kind"]) else { return nil }
+        switch kind {
+        case "mcp": self = mark(json["source"]) == "cli" ? .cliMCP : .mcp
+        case "hosted_mcp": self = .mcp
+        case "cli": self = .cli
+        default: self = .other
         }
     }
 }
