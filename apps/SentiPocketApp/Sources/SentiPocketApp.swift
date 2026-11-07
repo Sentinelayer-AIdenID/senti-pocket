@@ -466,8 +466,10 @@ struct AuthenticatedRootView: View {
     @AppStorage("pocket.lastRoomId") private var lastRoomId = ""
     @State private var restoredLastRoom = false
     @AppStorage("pocket.theme") private var themeRaw = PocketThemePreference.system.rawValue
-    @StateObject private var messageReader = MessageReader()
-    @ObservedObject private var readingSource = ReadAloudSource.shared
+    /// The app's one reader. Kept, not watched: its bar (`ReadAloudBarSlot`) watches it, so a reading draws the bar and
+    /// never the root, whose every draw can make the room screen under it again (Carter, #62471: a thread being read
+    /// from went away).
+    @State private var messageReader = MessageReader()
     private let roomTransport: any RoomTransport
     private let ticketsTransport: any RoomTicketsTransport
     private let admissionsTransport: any RoomAdmissionsTransport
@@ -673,21 +675,17 @@ struct AuthenticatedRootView: View {
             }
             // A sheet or the side panel over the room: its moving parts rest (warden, #269).
             .environment(\.roomIsCovered, roomCovered)
-            // Listening goes on when you leave its room (Carter, 10-30): outside that room the app keeps the player,
-            // and its title takes you back to the message.
-            .overlay(alignment: .bottom) {
-                if let playback = messageReader.playback, let source = readingSource.sessionId,
-                   source != (roomPath.last ?? currentRoom)?.sessionId {
-                    ReadAloudPlayer(reader: messageReader, playback: playback) {
-                        if let id = messageReader.readingId {
-                            open(ReadAloudSource.link(readingId: id, sessionId: source))
-                        }
+            // Listening goes on when you leave its room (Carter, 10-30): outside that room the app keeps the player at
+            // the top, and its title takes you back to the message.
+            .safeAreaInset(edge: .top, spacing: 0) {
+                ReadAloudBarSlot(reader: messageReader, place: "app", shows: { [shownRoom = (roomPath.last ?? currentRoom)?.sessionId] source in
+                    source != nil && source != shownRoom
+                }, onShowMessage: {
+                    if let id = messageReader.readingId, let source = ReadAloudSource.shared.sessionId {
+                        open(ReadAloudSource.link(readingId: id, sessionId: source))
                     }
-                    .padding(.bottom, currentRoom == nil ? 16 : 72)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
+                })
             }
-            .animation(.spring(response: 0.3, dampingFraction: 0.9), value: messageReader.playback == nil)
             // The room moves right, a little smaller, its corners rounded into a card; a tap or a swipe on it closes.
             .overlay {
                 if drawerOpen {
@@ -814,6 +812,8 @@ struct AuthenticatedRootView: View {
             .onDisappear { notifications.listShown(false) }
         }
         .sheet(isPresented: $presentsCallLog) {
+            // The reader is watched here, for the call being read: the root keeps it without watching it.
+            ReaderWatch(reader: messageReader) { _ in
             CallLogView(state: callLog.state, readingId: readingCallId) { intent in
                 switch intent {
                 case .refresh:
@@ -841,6 +841,7 @@ struct AuthenticatedRootView: View {
                 case .close:
                     presentsCallLog = false
                 }
+            }
             }
         }
         .sheet(isPresented: $presentsWaiting) {
