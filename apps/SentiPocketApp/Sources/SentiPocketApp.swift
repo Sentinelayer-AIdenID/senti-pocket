@@ -426,6 +426,8 @@ struct AuthenticatedRootView: View {
     @StateObject private var directMessages: DirectMessagesCenter
     /// Your room folders: on when the server lists them (ROOM_FOLDERS_ENABLED), else nothing shows.
     @StateObject private var roomFolders: RoomFoldersCenter
+    /// Kept without observing it: only tip banners redraw when a tip appears or is dismissed.
+    @State private var chatHints = ChatHints()
     /// The calendar: on when the server answers its routes (CALENDAR_DRAFTS_ENABLED, CALENDAR_FEED_ENABLED). Kept, not
     /// watched, as the side panel's placement is: the room's calendar entry and Settings watch it, so its answers draw
     /// them and never the root (each draw of the root can make the room screen under it again).
@@ -706,7 +708,7 @@ struct AuthenticatedRootView: View {
         }
         .pocketCanvas()
         // The logo at launch, while your rooms load underneath (Carter, #55287).
-        .overlay { LaunchSplash(isReady: roomListSettled) }
+        .modifier(ChatHintsAtLaunch(hints: chatHints, isReady: roomListSettled))
         // With Reduce Motion, a short fade in place of the spring.
         .animation(reduceMotion ? .easeInOut(duration: 0.2) : .spring(response: 0.35, dampingFraction: 0.8),
                    value: drawerOpen)
@@ -786,7 +788,10 @@ struct AuthenticatedRootView: View {
             }
         }
         .task {
-            accountName = await accountIdentity.currentAccount()?.login
+            let account = await accountIdentity.currentAccount()
+            guard !Task.isCancelled else { return }
+            accountName = account?.login
+            chatHints.setAccount(account?.accountId)
         }
         .sheet(isPresented: $presentsNotifications) {
             NotificationsView(state: notifications.state) { intent in
