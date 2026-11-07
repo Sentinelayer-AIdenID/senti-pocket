@@ -310,6 +310,9 @@ struct WhisperModelSettingsView: View {
         if let onSignOut {
             Section("Account") {
                 AccountSafetyRows(blocks: blocks, aiConsent: aiConsent)
+                if AppleSignInSetting.isEnabled(in: Bundle.main.infoDictionary) {
+                    AppleIdentityLinkSettingsRow()
+                }
                 Button("Sign out on this device", role: .destructive) {
                     dismiss()
                     onSignOut()
