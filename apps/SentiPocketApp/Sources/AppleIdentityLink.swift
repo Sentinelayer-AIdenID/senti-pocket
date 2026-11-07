@@ -158,9 +158,9 @@ final class AppleLinkSettings: ObservableObject {
     private var operation: Task<Void, Never>?
 
     init(api: any AppleIdentityLinkAPI = AppleIdentityLinkClient(),
-         authorizer: any AppleLinkAuthorizing = NativeAppleLinkAuthorizer(), now: @escaping () -> Date = { Date() }) {
+         authorizer: (any AppleLinkAuthorizing)? = nil, now: @escaping () -> Date = { Date() }) {
         self.api = api
-        self.authorizer = authorizer
+        self.authorizer = authorizer ?? NativeAppleLinkAuthorizer()
         self.now = now
     }
 
