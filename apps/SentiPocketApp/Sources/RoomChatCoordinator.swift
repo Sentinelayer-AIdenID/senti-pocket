@@ -259,6 +259,9 @@ final class RoomChatCoordinator: ObservableObject {
     private var members: [RoomMember] = []
     /// The room takes `@any` (its read says `features.agentBroadcast`): offered in the picker only once it has said so.
     private var offersAny = false
+    /// The room's read says the viewer may add the agents they work with (`features.addAgents`: the room's owner or an
+    /// admin, where the server has contacts). People shows them only then.
+    @Published private(set) var addsAgents = false
     /// The room's member directory (every member may read it), read once per open, for @-mentions.
     private let directory: (any RoomTicketExtrasReading)?
     private var directoryPeople: [RoomDirectoryMember] = []
@@ -1147,8 +1150,9 @@ final class RoomChatCoordinator: ObservableObject {
     /// only by a room that said so.
     func readFeatures() async {
         guard sender != nil, !failureIsTerminal,
-              let features = try? await transport.roomFeatures(sessionId: sessionId),
-              features.agentBroadcast != offersAny else { return }
+              let features = try? await transport.roomFeatures(sessionId: sessionId) else { return }
+        if features.addAgents != addsAgents { addsAgents = features.addAgents }
+        guard features.agentBroadcast != offersAny else { return }
         offersAny = features.agentBroadcast
         publish()
     }

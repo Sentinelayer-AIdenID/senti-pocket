@@ -115,12 +115,15 @@ extension HTTPRoomMessageSender: RoomInviting {
     }
 }
 
-/// The invite sheet: the role first, then a link to share, or an invite by email or GitHub username.
-struct RoomInviteSheet: View {
+/// Inviting by email or GitHub username, opened from People (`RoomInviteRows`): the role first, then a link to share,
+/// or an invite by email or GitHub username.
+struct RoomInviteForm: View {
     let sessionId: String
     let roomTitle: String
     let inviter: any RoomInviting
-    var onClose: () -> Void
+    /// An invite writes to the room: the first asks this account's OK to share with AI.
+    var aiConsent: AIConsent?
+    @State private var consentHeld: AIConsentHeld?
 
     @State private var role: RoomInviteRole = .contributor
     @State private var link: URL?
@@ -133,88 +136,90 @@ struct RoomInviteSheet: View {
     @State private var outcomeIsProblem = false
 
     var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    Picker("They join as", selection: $role) {
-                        ForEach(RoomInviteRole.allCases) { Text($0.name).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    .accessibilityIdentifier("pocket.invite.role")
-                } header: {
-                    Text("They join as")
-                } footer: {
-                    Text(role.explainer)
+        Form {
+            Section {
+                Picker("They join as", selection: $role) {
+                    ForEach(RoomInviteRole.allCases) { Text($0.name).tag($0) }
                 }
-
-                Section {
-                    if let link {
-                        ShareLink(item: link, subject: Text("Join \(roomTitle) on Senti"),
-                                  message: Text("Join me in \(roomTitle) on Senti.")) {
-                            Label("Share the link", systemImage: "square.and.arrow.up")
-                        }
-                        .accessibilityIdentifier("pocket.invite.share")
-                        Button {
-                            copy(link)
-                        } label: {
-                            Label(copied ? "Copied" : "Copy the link", systemImage: copied ? "checkmark" : "doc.on.doc")
-                        }
-                    } else {
-                        Button {
-                            Task { await makeLink() }
-                        } label: {
-                            Label(linkWorking ? "Making the link…" : "Make an invite link", systemImage: "link")
-                        }
-                        .disabled(linkWorking)
-                        .accessibilityIdentifier("pocket.invite.makeLink")
-                    }
-                    if let linkProblem {
-                        Text(linkProblem).font(.footnote).foregroundStyle(.red)
-                    }
-                } header: {
-                    Text("Invite link")
-                } footer: {
-                    Text("Anyone who opens it and signs in joins as a \(role.name.lowercased()).")
-                }
-
-                Section {
-                    TextField("Email or GitHub username", text: $who)
-                        .autocorrectionDisabled()
-                        #if canImport(UIKit)
-                        .textInputAutocapitalization(.never)
-                        .keyboardType(.emailAddress)
-                        #endif
-                        .submitLabel(.send)
-                        .onSubmit { Task { await invite() } }
-                        .accessibilityIdentifier("pocket.invite.who")
-                    Button(inviting ? "Inviting…" : "Invite") {
-                        Task { await invite() }
-                    }
-                    .disabled(inviting || who.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .accessibilityIdentifier("pocket.invite.send")
-                    if let outcome {
-                        Text(outcome)
-                            .font(.footnote)
-                            .foregroundStyle(outcomeIsProblem ? .red : .secondary)
-                            .accessibilityIdentifier("pocket.invite.outcome")
-                    }
-                } header: {
-                    Text("Invite by email or username")
-                }
+                .pickerStyle(.segmented)
+                .accessibilityIdentifier("pocket.invite.role")
+            } header: {
+                Text("They join as")
+            } footer: {
+                Text(role.explainer)
             }
-            .navigationTitle("Invite people")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { onClose() }
+
+            Section {
+                if let link {
+                    ShareLink(item: link, subject: Text("Join \(roomTitle) on Senti"),
+                              message: Text("Join me in \(roomTitle) on Senti.")) {
+                        Label("Share the link", systemImage: "square.and.arrow.up")
+                    }
+                    .accessibilityIdentifier("pocket.invite.share")
+                    Button {
+                        copy(link)
+                    } label: {
+                        Label(copied ? "Copied" : "Copy the link", systemImage: copied ? "checkmark" : "doc.on.doc")
+                    }
+                } else {
+                    Button {
+                        afterConsent { Task { await makeLink() } }
+                    } label: {
+                        Label(linkWorking ? "Making the link…" : "Make an invite link", systemImage: "link")
+                    }
+                    .disabled(linkWorking)
+                    .accessibilityIdentifier("pocket.invite.makeLink")
                 }
+                if let linkProblem {
+                    Text(linkProblem).font(.footnote).foregroundStyle(.red)
+                }
+            } header: {
+                Text("Invite link")
+            } footer: {
+                Text("Anyone who opens it and signs in joins as a \(role.name.lowercased()).")
             }
-            // A link is made for one role.
-            .onChange(of: role) { _ in
-                link = nil
-                copied = false
+
+            Section {
+                TextField("Email or GitHub username", text: $who)
+                    .autocorrectionDisabled()
+                    #if canImport(UIKit)
+                    .textInputAutocapitalization(.never)
+                    .keyboardType(.emailAddress)
+                    #endif
+                    .submitLabel(.send)
+                    .onSubmit { afterConsent { Task { await invite() } } }
+                    .accessibilityIdentifier("pocket.invite.who")
+                Button(inviting ? "Inviting…" : "Invite") {
+                    afterConsent { Task { await invite() } }
+                }
+                .disabled(inviting || who.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .accessibilityIdentifier("pocket.invite.send")
+                if let outcome {
+                    Text(outcome)
+                        .font(.footnote)
+                        .foregroundStyle(outcomeIsProblem ? .red : .secondary)
+                        .accessibilityIdentifier("pocket.invite.outcome")
+                }
+            } header: {
+                Text("Invite by email or username")
             }
         }
+        .navigationTitle("Invite people")
+        .navigationBarTitleDisplayMode(.inline)
+        // A link is made for one role.
+        .onChange(of: role) { _ in
+            link = nil
+            copied = false
+        }
+        .aiConsentPrompt($consentHeld) { aiConsent?.grant() }
+    }
+
+    private func afterConsent(_ action: @escaping () -> Void) {
+        guard let aiConsent, aiConsent.asks else {
+            action()
+            return
+        }
+        consentHeld = AIConsentHeld(action)
     }
 
     private func makeLink() async {

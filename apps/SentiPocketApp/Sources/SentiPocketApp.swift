@@ -244,6 +244,8 @@ struct RootServices {
     var calendar: (any RoomCalendarServing & CalendarFeedServing)?
     /// Your blocks on the server (`/me/blocks`), for the account signed in; nil (a preview) keeps them on the phone.
     var blocks: (_ account: String?) -> (any BlockListClient)? = { _ in nil }
+    /// The agents you work with, and adding one to a room, for People (where the room's read offers it).
+    var agentContacts: (any AgentContactsServing)?
 
     /// The Senti API as you.
     static func live() -> RootServices {
@@ -291,7 +293,8 @@ struct RootServices {
             readMarker: HTTPRoomReadMarker(apiBaseURL: apiURL),
             calendar: HTTPRoomCalendarClient(apiBaseURL: apiURL, urlSession: CalendarHTTP.session,
                                              tokenProvider: { SessionTokenStore.load() }),
-            blocks: { HTTPBlockListClient(apiBaseURL: apiURL, account: $0) }
+            blocks: { HTTPBlockListClient(apiBaseURL: apiURL, account: $0) },
+            agentContacts: HTTPAgentContacts(apiBaseURL: apiURL, sender: sender)
         )
     }
 }
@@ -475,6 +478,7 @@ struct AuthenticatedRootView: View {
     private let ticketLeases: any TicketLeaseStoring
     private let ticketExtras: any RoomTicketExtrasReading
     private let accountIdentity: any AccountIdentityProviding
+    private let agentContacts: (any AgentContactsServing)?
     private let roomReceipts: any RoomReceiptsClient
     private let roomSearch: any RoomSearching
     /// How far you have read each room, told to the server as you read, for the unread badges.
@@ -617,6 +621,7 @@ struct AuthenticatedRootView: View {
         self.ticketLeases = services.ticketLeases
         self.ticketExtras = services.ticketExtras
         self.accountIdentity = services.identity
+        self.agentContacts = services.agentContacts
         self.roomReceipts = services.receipts
         self.roomSearch = services.search
         self.roomReadMarker = services.readMarker
@@ -1194,6 +1199,7 @@ struct AuthenticatedRootView: View {
             blocks: blocks,
             aiConsent: aiConsent,
             direct: direct,
+            agentContacts: agentContacts,
             onReauthenticationRequired: invalidateProtectedAuthentication
         )
     }
