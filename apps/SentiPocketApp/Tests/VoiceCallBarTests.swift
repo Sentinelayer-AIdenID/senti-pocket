@@ -230,6 +230,8 @@ final class VoiceCallMinimizeTests: XCTestCase {
 final class VoiceCallBarRootTests: XCTestCase {
     private var window: UIWindow?
     private var api: RootPreviewAPI?
+    /// When the root was hosted, for the phases' times in the log.
+    private var hostedAt = Date()
 
     override func setUp() {
         super.setUp()
@@ -258,32 +260,48 @@ final class VoiceCallBarRootTests: XCTestCase {
         XCTAssertGreaterThan(tallest.value.height, window.bounds.height / 2,
                              "the tallest list is the room's messages (\(tallest.value))")
         let list = tallest.value
+        phase("hosted")
         let rows = settledRows(in: window, list: list, "before the bar")
         XCTAssertFalse(rows.isEmpty, "rows of the room are on screen, inside its list, to compare")
+        phase("after the first settle (no bar)")
+        // A control, for the log: the room settling once more with no bar and no call screen.
+        _ = settledRows(in: window, list: list, "control")
+        phase("after a control settle (no bar)")
         let rootBodies = meter.rootBodies
         let screens = meter.roomScreens
 
         let bar = VoiceCallBarModel(state: Self.call()) { _ in }
         minimizeACall(bar, in: window)
         assertSamePlacements(placed, placements(in: window), tallest: tallest.key, "the bar coming")
-        assertSameRows(rows, settledRows(in: window, list: list, "with the bar"), "the bar coming")
+        let withBar = settledRows(in: window, list: list, "with the bar")
+        phase("after the settle with the bar")
+        assertSameRows(rows, withBar, "the bar coming")
 
+        phase("before restore")
         VoiceCallWindow.shared.restore()
         HostedSummary.pump(1.5)
+        phase("after restore")
         XCTAssertNil(HostedSummary.element("pocket.callBar.open", in: window),
                      "the bar goes as the call screen comes back")
         assertSamePlacements(placed, placements(in: window), tallest: tallest.key, "the bar going for the call screen")
-        assertSameRows(rows, settledRows(in: window, list: list, "the call screen back"),
-                       "the bar going for the call screen")
+        let screenBack = settledRows(in: window, list: list, "the call screen back")
+        phase("after the settle with the call screen back")
+        assertSameRows(rows, screenBack, "the bar going for the call screen")
 
+        phase("before minimize again")
         VoiceCallWindow.shared.minimize()
         XCTAssertNotNil(HostedSummary.wait(for: "pocket.callBar.open", in: window), "minimized again")
         HostedSummary.pump(1)
+        phase("after minimize again")
+        phase("before hide")
         VoiceCallWindow.shared.hide()
         HostedSummary.pump(1.5)
+        phase("after hide")
         XCTAssertNil(HostedSummary.element("pocket.callBar.open", in: window), "the bar goes with the call")
         assertSamePlacements(placed, placements(in: window), tallest: tallest.key, "the bar going with the call")
-        assertSameRows(rows, settledRows(in: window, list: list, "the call ended"), "the bar going with the call")
+        let ended = settledRows(in: window, list: list, "the call ended")
+        phase("after the settle with the call ended")
+        assertSameRows(rows, ended, "the bar going with the call")
 
         print("BGAUDIT call bar: root bodies \(meter.rootBodies - rootBodies), "
               + "room screens \(meter.roomScreens - screens)")
@@ -353,6 +371,7 @@ final class VoiceCallBarRootTests: XCTestCase {
         .environment(\.scenePhase, .active))
         self.window = window
         self.api = api
+        hostedAt = Date()
         let firstReads = ["rooms", "history", "actions"]
         let end = Date().addingTimeInterval(30)
         while Date() < end, !firstReads.allSatisfy({ api.callCount($0) > 0 }) { HostedSummary.pump(0.1) }
@@ -363,13 +382,27 @@ final class VoiceCallBarRootTests: XCTestCase {
 
     /// A call's screen shown and minimized, as its Minimize does: the bar shows over the room.
     private func minimizeACall(_ bar: VoiceCallBarModel, in window: UIWindow) {
+        phase("before the call screen")
         XCTAssertTrue(VoiceCallWindow.shared.show(Color.black, bar: bar), "the call screen opens")
         HostedSummary.pump(0.5)
+        phase("call screen shown")
         VoiceCallWindow.shared.minimize()
         let shown = HostedSummary.wait(for: "pocket.callBar.open", in: window)
         let ids = HostedSummary.identifiers(in: window).filter { $0.hasPrefix("pocket") }
         XCTAssertNotNil(shown, "the bar shows: \(ids)")
         HostedSummary.pump(1)
+        phase("after minimize")
+    }
+
+    /// One line in the log at a step of a test: how often the root and the room screen have drawn so far, and how
+    /// often each of the room's reads has been asked for, with the time since the root was hosted. Prints only.
+    private func phase(_ step: String) {
+        let meter = RootPreview.meter
+        let reads = ["rooms", "bell", "waiting", "views", "presence", "history", "actions"]
+            .map { "\($0) \(api?.callCount($0) ?? -1)" }.joined(separator: ", ")
+        print("BGAUDIT call bar phase \(String(format: "%.1f", Date().timeIntervalSince(hostedAt))) s, \(name), "
+              + "\(step): root bodies \(meter.rootBodies), room screens \(meter.roomScreens), "
+              + "room screen bodies \(meter.roomScreenBodies), reads \(reads)")
     }
 
     /// Where each list shows its content: its frame in the window inset by its `adjustedContentInset`, which a top
