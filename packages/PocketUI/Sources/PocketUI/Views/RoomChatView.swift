@@ -63,6 +63,11 @@ public struct RoomChatView: View {
     /// Threads whose file parts are shown (by the thread's root sequence); otherwise they fold behind the file's card.
     @State private var shownFileParts: Set<Int64> = []
     @State private var showsPresence = false
+    /// The People sheet's state when the room screen holds it (its People button opens it too); else the view's own.
+    private let showsPeople: Binding<Bool>?
+    @Environment(\.roomPeopleExtras) private var peopleExtras
+
+    private var peopleShown: Binding<Bool> { showsPeople ?? $showsPresence }
     /// The owner is renaming the room, and the name as typed.
     @State private var renaming = false
     @State private var renameDraft = ""
@@ -88,8 +93,10 @@ public struct RoomChatView: View {
         composerActions: RoomComposerActions = RoomComposerActions(),
         roster: RoomRoster = .empty,
         media: RoomMediaBoard? = nil,
+        showsPeople: Binding<Bool>? = nil,
         send: @escaping (RoomChatIntent) -> Void
     ) {
+        self.showsPeople = showsPeople
         self.state = state
         self.readingAloudId = readingAloudId
         self.composerActions = composerActions
@@ -302,19 +309,16 @@ public struct RoomChatView: View {
         } message: {
             Text("Everyone in the room sees the new name, here and on the web. Up to \(RoomTitle.maximumLength) characters.")
         }
-        .sheet(isPresented: $showsPresence) {
+        .sheet(isPresented: peopleShown) {
             RoomPresenceSheet(
                 presence: state.presence,
                 connection: state.connection,
                 roster: roster,
-                onInvite: state.canInvite ? {
-                    showsPresence = false
-                    // After this sheet has gone, so the invite sheet can come up.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { send(.openInvite) }
-                } : nil,
+                canInvite: state.canInvite,
+                extras: peopleExtras,
                 onProfile: profileOpener.map { opener -> (RoomProfileTarget) -> Void in
                     return { target in
-                        showsPresence = false
+                        peopleShown.wrappedValue = false
                         // After this sheet has gone, so the profile card can come up.
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { opener(target) }
                     }
@@ -432,8 +436,8 @@ public struct RoomChatView: View {
                                       boxes: roster.members.filter { $0.kind == .box && $0.status != .ended }.map(\.name),
                                       activeCount: roster.members.isEmpty ? nil : roster.activeCount,
                                       activeKeys: roster.members.isEmpty ? nil : roster.activeKeys,
-                                      isPaused: showsPresence) {
-                        showsPresence = true
+                                      isPaused: peopleShown.wrappedValue) {
+                        peopleShown.wrappedValue = true
                     }
                         .padding(.top, RoomPeopleAvatars.topGap)
                 }
@@ -3062,6 +3066,31 @@ private struct RoomThreadComposer: View {
 }
 
 
+/// Where a thread's shown replies start (`RoomThreadRepliesList`): a lazy list scrolled to a row builds every row
+/// before it, so the thread shows its replies from a first one, kept by id.
+enum RoomThreadShownStart {
+    /// Where in `replies` the shown ones start: the first reply shown, or where the thread opens (a few before the
+    /// reply it was opened at, a long thread's newest, else its first).
+    static func index(in replies: [RoomChatReplyRow], shownFrom: String?, focus: String?, hasOlder: Bool,
+                      focusMissing: Bool) -> Int {
+        if let shownFrom, let index = replies.firstIndex(where: { $0.id == shownFrom }) { return index }
+        if let focus, let index = replies.firstIndex(where: { $0.id == focus }) {
+            return max(0, index - RoomThreadRepliesList.shownBeforeFocus)
+        }
+        if hasOlder || focusMissing { return max(0, replies.count - RoomThreadRepliesList.newestShown) }
+        return 0
+    }
+
+    /// The first reply shown once a page of later replies landed: the same one, unless the oldest replies went to make
+    /// room (a thread holds 1,000 at most) and took it. It is then the first one kept: falling back to the newest 30
+    /// would hide most of each later page.
+    static func afterLaterPage(shownFrom: String?, firstBefore: String?, replies: [RoomChatReplyRow]) -> String? {
+        guard let first = replies.first?.id, first != firstBefore else { return shownFrom }
+        if let shownFrom, replies.contains(where: { $0.id == shownFrom }) { return shownFrom }
+        return first
+    }
+}
+
 /// A thread's message and its replies, oldest first, in a lazy list: it builds the replies in sight. The reply box is
 /// a view of its own (`RoomThreadComposer`), so typing never draws it again: it used to draw every reply again at each
 /// keystroke (#62423, a thread of 106 long replies). A long thread opens at its newest page, and scrolling up to its
@@ -3096,6 +3125,9 @@ private struct RoomThreadRepliesList: View {
     @State private var settled = false
     /// The oldest reply shown when a page of older ones was asked for: the reader stays on it as they arrive above.
     @State private var anchorBeforeOlder: String?
+    /// The replies' first and last when a page of later ones was asked for: when the oldest go to make room, the reader
+    /// stays on the last.
+    @State private var laterAsked: (first: String?, last: String?)?
     /// The first reply shown: the replies before it wait above, shown a few at a time as the reader scrolls up. A lazy
     /// list scrolled to a row builds every row before it (the thread opened at reply 600 of 1,000 built 602), so the
     /// thread opens with its first shown reply near where it opens, and the scroll builds only the rows near it.
@@ -3116,12 +3148,8 @@ private struct RoomThreadRepliesList: View {
     /// Where in `replies` the shown ones start: the first reply shown, or where the thread opens (a few before the
     /// reply it was opened at, a long thread's newest, else its first).
     private func shownStart(in replies: [RoomChatReplyRow]) -> Int {
-        if let shownFrom, let index = replies.firstIndex(where: { $0.id == shownFrom }) { return index }
-        if let focus = thread.focusReplyId, let index = replies.firstIndex(where: { $0.id == focus }) {
-            return max(0, index - Self.shownBeforeFocus)
-        }
-        if thread.hasOlder || thread.focusMissing { return max(0, replies.count - Self.newestShown) }
-        return 0
+        RoomThreadShownStart.index(in: replies, shownFrom: shownFrom, focus: thread.focusReplyId,
+                                   hasOlder: thread.hasOlder, focusMissing: thread.focusMissing)
     }
 
     var body: some View {
@@ -3173,6 +3201,9 @@ private struct RoomThreadRepliesList: View {
                             replyRow(reply)
                         }
                     }
+                    if thread.hasLater {
+                        laterRow
+                    }
                     if thread.hasNewer {
                         newestRow
                     }
@@ -3211,6 +3242,7 @@ private struct RoomThreadRepliesList: View {
                 showFocusedReply(proxy)
             }
             .onChange(of: thread.focusMissing) { missing in if missing { scroll(to: Self.endAnchor, anchor: .bottom) } }
+            .onChange(of: thread.isLoadingLater) { loading in if !loading { keepPlaceAfterLater() } }
             // Back at the newest replies (the shown ones were a long way back): the thread shows them from its end.
             .onChange(of: thread.hasNewer) { newer in
                 guard !newer else { return }
@@ -3308,6 +3340,53 @@ private struct RoomThreadRepliesList: View {
         guard let index = replies.firstIndex(where: { $0.id == anchor }) else { return }
         shownFrom = replies[max(0, index - Self.shownAtOnce)].id
         scroll(to: Self.replyAnchor(anchor), anchor: .top)
+    }
+
+    /// Below the newest reply loaded when the thread was opened at a reply short of its newest (one read around it):
+    /// reached by scrolling down, it loads the page after. A page that could not be read says so here too, where the
+    /// reader is.
+    private var laterRow: some View {
+        VStack(spacing: 4) {
+            if thread.isLoadingLater {
+                HStack(spacing: 8) {
+                    ProgressView()
+                    Text("Loading later replies…")
+                }
+            } else {
+                if let failure = thread.failureText {
+                    Text(failure).foregroundStyle(PocketPalette.warning)
+                }
+                Button("Load later replies") { showLater() }
+                    .accessibilityIdentifier("pocket.thread.later")
+            }
+        }
+        .font(.footnote)
+        .foregroundStyle(PocketPalette.textSecondary)
+        .frame(maxWidth: .infinity)
+        .onAppear { if settled { showLater() } }
+    }
+
+    /// Asks for the page after the newest reply loaded, noting where the replies start and end as it is asked.
+    private func showLater() {
+        guard !thread.isLoadingLater else { return }
+        let replies = self.replies
+        laterAsked = (first: replies.first?.id, last: replies.last?.id)
+        send(.loadLaterReplies(sequenceId: thread.parent.sequenceId))
+    }
+
+    /// A page of later replies landed below. When the oldest went to make room and took the first reply shown, the
+    /// first shown is the first one kept (`RoomThreadShownStart.afterLaterPage`), and the reader stays on the reply
+    /// they were at.
+    private func keepPlaceAfterLater() {
+        guard let asked = laterAsked else { return }
+        laterAsked = nil
+        let replies = self.replies
+        let kept = RoomThreadShownStart.afterLaterPage(shownFrom: shownFrom, firstBefore: asked.first, replies: replies)
+        guard kept != shownFrom else { return }
+        shownFrom = kept
+        if let last = asked.last, replies.contains(where: { $0.id == last }) {
+            scroll(to: Self.replyAnchor(last), anchor: .bottom)
+        }
     }
 
     /// Below the replies shown when they are a long way back (the newest were let go): reads the newest again.
@@ -4402,8 +4481,11 @@ private struct RoomPresenceSheet: View {
     let connection: RoomConnectionState
     /// Everyone who came, when the room screen knows it; otherwise who is here now.
     var roster: RoomRoster = .empty
-    /// Invite people, for the room's owner or an admin.
-    var onInvite: (() -> Void)?
+    /// Invite people shows for the room's owner or an admin (`RoomChatPresentationState.canInvite`), with what the app
+    /// gives it (`RoomPeopleExtras.invite`).
+    var canInvite = false
+    /// What the app adds: Invite people, and the agent requests for whoever decides them.
+    var extras: RoomPeopleExtras?
     /// Opens a member's profile from their avatar.
     var onProfile: ((RoomProfileTarget) -> Void)?
     var ownAuthorIds: Set<String> = []
@@ -4447,13 +4529,14 @@ private struct RoomPresenceSheet: View {
     var body: some View {
         NavigationStack {
             List {
-                if let onInvite {
+                // Invite people first (Carter, #62868: inviting someone was a hunt).
+                if let invite = shownInvite {
                     Section {
-                        Button(action: onInvite) {
-                            Label("Invite people", systemImage: "person.badge.plus")
-                        }
-                        .accessibilityIdentifier("pocket.room.people.invite")
+                        invite()
+                    } header: {
+                        Text("Invite people")
                     }
+                    .accessibilityIdentifier("pocket.room.people.invite")
                 }
                 // The ring's own count leads, then the whole room's line; the connection is a quiet note beside them
                 // (Carter, #59940: the list did not read as the ring's).
@@ -4539,8 +4622,17 @@ private struct RoomPresenceSheet: View {
                         }
                     }
                 }
+                // The agent requests last, for the room's owner or an admin.
+                if let requests = extras?.requests {
+                    Section {
+                        requests()
+                    }
+                    .accessibilityIdentifier("pocket.room.people.requests")
+                }
             }
-            .navigationTitle("Who is here")
+            // Invite people's sheets, presented from here once, never from its rows.
+            .background { if shownInvite != nil { extras?.presenters?() } }
+            .navigationTitle("People")
             .navigationBarTitleDisplayModeInlineIfAvailable()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -4548,6 +4640,14 @@ private struct RoomPresenceSheet: View {
                 }
             }
         }
+        .onAppear { extras?.shown?(sections) }
+    }
+
+    private var shownInvite: (() -> AnyView)? { canInvite ? extras?.invite : nil }
+
+    /// The sheet's sections, in order.
+    var sections: [String] {
+        (shownInvite == nil ? [] : ["invite"]) + ["members"] + (extras?.requests == nil ? [] : ["requests"])
     }
 }
 

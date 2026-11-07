@@ -272,23 +272,3 @@ final class AdmissionsCoordinator: ObservableObject {
         )
     }
 }
-
-/// Hosts the room's agent requests; polls only while visible.
-struct AdmissionsScreen: View {
-    @StateObject private var coordinator: AdmissionsCoordinator
-
-    init(sessionId: String, transport: any RoomAdmissionsTransport, decider: any AdmissionDeciding, onReauthenticationRequired: @escaping @MainActor () -> Void) {
-        _coordinator = StateObject(wrappedValue: AdmissionsCoordinator(
-            sessionId: sessionId,
-            transport: transport,
-            decider: decider,
-            onReauthenticationRequired: onReauthenticationRequired
-        ))
-    }
-
-    var body: some View {
-        AdmissionsView(state: coordinator.state) { coordinator.send($0) }
-            .onAppear { coordinator.start() }
-            .onDisappear { coordinator.stop() }
-    }
-}

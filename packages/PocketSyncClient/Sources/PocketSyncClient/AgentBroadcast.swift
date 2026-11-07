@@ -72,17 +72,21 @@ public struct RoomAgentBox: Equatable, Hashable, Sendable {
 }
 
 /// What a room offers, from its read (`GET /api/v1/sessions/{id}`): `@any` only when `features.agentBroadcast` is
-/// true. Absent, or anything but true, is off.
+/// true, and adding the agents you work with only when `features.addAgents` is (the server says it for the room's
+/// owner or an admin, where it has contacts). Absent, or anything but true, is off.
 public struct RoomFeatures: Decodable, Equatable, Sendable {
     public let agentBroadcast: Bool
+    public let addAgents: Bool
 
-    public init(agentBroadcast: Bool = false) {
+    public init(agentBroadcast: Bool = false, addAgents: Bool = false) {
         self.agentBroadcast = agentBroadcast
+        self.addAgents = addAgents
     }
 
     public init(from decoder: Decoder) throws {
         let room = try decoder.singleValueContainer().decode(JSONValue.self)
-        self.init(agentBroadcast: room["features"]?["agentBroadcast"]?.boolValue == true)
+        self.init(agentBroadcast: room["features"]?["agentBroadcast"]?.boolValue == true,
+                  addAgents: room["features"]?["addAgents"]?.boolValue == true)
     }
 }
 
