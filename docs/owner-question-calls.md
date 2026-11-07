@@ -26,6 +26,10 @@ A complete, unambiguous choice label or numbered option selects that choice; oth
 transcript. Microphone denial leaves choices available. The call screen's mute stops and discards a partial
 answer, including while the recognizer is finishing its final transcript. Hanging up stops speech/listening immediately
 and ignores late responses. Once the answer has been sent, mute cannot withdraw that request.
+After mute, a pending permission or final-recognition operation must finish before the same listener can start
+again. Choices remain available during that short drain; its late completion cannot replace a selected answer.
+The native listener also fences permission completions, recognition callbacks and final-stop cleanup to their
+recognition generation, so an old callback cannot replace a later attempt's words.
 
 Tap sends `{"choiceId":"ship"}`; free speech sends `{"text":"Tomorrow.","inputKind":"voice"}` to
 `POST /api/v1/sessions/{roomId}/questions/{questionId}/answer`. Only the server selects the authenticated human

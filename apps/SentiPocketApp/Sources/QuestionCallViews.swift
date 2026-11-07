@@ -47,9 +47,10 @@ struct QuestionCallView: View {
                         }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(call.isMuted)
+                    .disabled(!call.canSpeak)
                     .accessibilityIdentifier("question.call.speak")
                     Button("Read again") { call.readQuestion() }
+                        .disabled(call.listenerBusy)
                         .accessibilityIdentifier("question.call.read")
                 }
             }
@@ -73,8 +74,10 @@ struct QuestionCallView: View {
         switch call.phase {
         case .loading: return "Reading the question…"
         case .speaking: return "Reading aloud. You can tap a choice at any time."
-        case .ready: return call.isMuted ? "Microphone muted. You can tap a choice." : "Speak your answer or tap a choice."
-        case .listening: return "Listening. A pause sends your answer."
+        case .ready:
+            if call.listenerBusy { return "Finishing the previous speech attempt. You can tap a choice." }
+            return call.isMuted ? "Microphone muted. You can tap a choice." : "Speak your answer or tap a choice."
+        case .listening: return call.listenerBusy ? "Preparing speech…" : "Listening. A pause sends your answer."
         case .recognizing: return "Finishing speech recognition…"
         case .sending: return "Posting your answer…"
         case .retry: return "Answer not confirmed."

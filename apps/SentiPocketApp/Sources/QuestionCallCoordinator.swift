@@ -11,6 +11,7 @@ final class QuestionCallCoordinator: ObservableObject {
     @Published private(set) var partial = ""
     @Published private(set) var notice: String?
     @Published private(set) var isMuted = false
+    @Published private(set) var listenerBusy = false
 
     private let expected: RoomQuestion
     private let api: any RoomQuestionsAPI
@@ -43,6 +44,7 @@ final class QuestionCallCoordinator: ObservableObject {
     }
 
     var canAnswer: Bool { question != nil && submitted == nil && [.speaking, .ready, .listening].contains(phase) }
+    var canSpeak: Bool { canAnswer && !isMuted && !listenerBusy }
 
     func begin() async {
         guard !began, phase == .loading else { return }
@@ -79,7 +81,7 @@ final class QuestionCallCoordinator: ObservableObject {
     }
 
     func listen() async {
-        guard canAnswer, !isMuted, let question else { return }
+        guard canSpeak, let question else { return }
         guard question.canAnswer(at: now()) else { refuse("This question has expired."); return }
         generation += 1
         let revision = generation
@@ -88,6 +90,10 @@ final class QuestionCallCoordinator: ObservableObject {
         partial = ""
         lastWords = nil
         phase = .listening
+        // start() may suspend for permission and stop() for final words. cancel() alone does not drain either.
+        // Keep this listener exclusive until the pending operation returns, even after mute changes the phase.
+        listenerBusy = true
+        defer { listenerBusy = false }
         do {
             try await listener.start { [weak self] text in
                 guard let self, self.generation == revision, self.phase == .listening else { return }
@@ -116,12 +122,14 @@ final class QuestionCallCoordinator: ObservableObject {
     }
 
     func finishSpeaking() async {
-        guard phase == .listening, !isMuted else { return }
+        guard phase == .listening, !isMuted, !listenerBusy else { return }
         generation += 1
         let revision = generation
         silence?.cancel()
         phase = .recognizing
+        listenerBusy = true
         let heard = await listener.stop()
+        listenerBusy = false
         guard revision == generation, phase == .recognizing, !isMuted else { return }
         let text = (heard.isEmpty ? partial : heard).trimmingCharacters(in: .whitespacesAndNewlines)
         partial = ""

@@ -67,21 +67,30 @@ private final class QuestionListener: VoiceListening {
     var starts = 0
     var cancels = 0
     var failure: Error?
+    var active = false
+    var holdStart = false
+    var startWaiter: CheckedContinuation<Void, Never>?
     var holdStop = false
     var stopWaiter: CheckedContinuation<Void, Never>?
     func start(partial: @escaping @MainActor (String) -> Void) async throws {
         starts += 1
         if let failure { throw failure }
+        if holdStart { await withCheckedContinuation { startWaiter = $0 } }
+        words = ""
+        active = true
         self.partial = partial
     }
     func say(_ text: String) { words = text; partial?(text) }
     func stop() async -> String {
         partial = nil
         if holdStop { await withCheckedContinuation { stopWaiter = $0 } }
-        return words
+        let text = words
+        cancel() // Production stop() also finishes/cleans up the current recognition task after its wait.
+        return text
     }
+    func releaseStart() { holdStart = false; startWaiter?.resume(); startWaiter = nil }
     func releaseStop() { holdStop = false; stopWaiter?.resume(); stopWaiter = nil }
-    func cancel() { cancels += 1; partial = nil }
+    func cancel() { cancels += 1; partial = nil; active = false }
 }
 
 @MainActor
@@ -298,6 +307,8 @@ final class QuestionCallsTests: XCTestCase {
         await until("final recognition is pending") { listener.stopWaiter != nil }
         XCTAssertEqual(call.phase, .recognizing)
         call.callScreenMuted(true)
+        XCTAssertTrue(call.canAnswer, "choices stay available while recognition drains")
+        XCTAssertFalse(call.canSpeak)
         listener.releaseStop()
         await finishing.value
         let writes = await api.writes
@@ -305,6 +316,84 @@ final class QuestionCallsTests: XCTestCase {
         XCTAssertEqual(call.partial, "")
         XCTAssertEqual(call.phase, .ready)
         XCTAssertTrue(call.canAnswer, "muting speech still allows an explicit choice")
+        call.hangUp()
+    }
+
+    func test_unmute_cannot_reuse_listener_until_cancelled_final_recognition_finishes() async throws {
+        let api = try stub()
+        let listener = QuestionListener()
+        listener.holdStop = true
+        let call = try QuestionCallCoordinator(question: question(), api: api, listener: listener,
+                                              speaker: QuestionSpeaker(), audio: QuestionAudio(), now: { questionNow }, onEnded: {})
+        await call.begin()
+        await call.listen()
+        listener.say("Discard this old answer")
+        let finishing = Task { await call.finishSpeaking() }
+        await until("old final recognition") { listener.stopWaiter != nil }
+        call.callScreenMuted(true)
+        call.callScreenMuted(false)
+        await call.listen()
+        XCTAssertEqual(listener.starts, 1, "old stop must not be able to finish a new recognition task")
+        XCTAssertFalse(call.canSpeak)
+        listener.releaseStop()
+        await finishing.value
+        XCTAssertTrue(call.canSpeak)
+        await call.listen()
+        XCTAssertEqual(listener.starts, 2)
+        XCTAssertTrue(listener.active)
+        listener.say("This is the new complete answer")
+        await call.finishSpeaking()
+        let writes = await api.writes
+        XCTAssertEqual(writes, [.voice("This is the new complete answer")])
+        XCTAssertEqual(call.phase, .answered)
+        call.hangUp()
+    }
+
+    func test_unmute_cannot_reuse_listener_until_cancelled_permission_wait_finishes() async throws {
+        let api = try stub()
+        let listener = QuestionListener()
+        listener.holdStart = true
+        let call = try QuestionCallCoordinator(question: question(), api: api, listener: listener,
+                                              speaker: QuestionSpeaker(), audio: QuestionAudio(), now: { questionNow }, onEnded: {})
+        await call.begin()
+        let starting = Task { await call.listen() }
+        await until("old permission wait") { listener.startWaiter != nil }
+        call.callScreenMuted(true)
+        call.callScreenMuted(false)
+        await call.listen()
+        XCTAssertEqual(listener.starts, 1)
+        listener.releaseStart()
+        await starting.value
+        XCTAssertFalse(listener.active, "late permission completion is cancelled before reuse")
+        await call.listen()
+        XCTAssertEqual(listener.starts, 2)
+        XCTAssertTrue(listener.active)
+        listener.say("Only this attempt")
+        await call.finishSpeaking()
+        let writes = await api.writes
+        XCTAssertEqual(writes, [.voice("Only this attempt")])
+        call.hangUp()
+    }
+
+    func test_choice_during_recognition_drain_is_not_reset_by_late_stop() async throws {
+        let api = try stub()
+        let listener = QuestionListener()
+        listener.holdStop = true
+        let call = try QuestionCallCoordinator(question: question(), api: api, listener: listener,
+                                              speaker: QuestionSpeaker(), audio: QuestionAudio(), now: { questionNow }, onEnded: {})
+        await call.begin()
+        await call.listen()
+        listener.say("Discard this partial")
+        let finishing = Task { await call.finishSpeaking() }
+        await until("final recognition") { listener.stopWaiter != nil }
+        call.callScreenMuted(true)
+        await call.choose("wait")
+        XCTAssertEqual(call.phase, .answered)
+        listener.releaseStop()
+        await finishing.value
+        let writes = await api.writes
+        XCTAssertEqual(writes, [.choice("wait")])
+        XCTAssertEqual(call.phase, .answered)
         call.hangUp()
     }
 
