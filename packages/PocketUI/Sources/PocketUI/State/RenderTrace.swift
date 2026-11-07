@@ -14,13 +14,29 @@ public enum RenderTrace {
         case roomRow
         /// The side panel's rooms and direct messages.
         case sidePanel
+        /// The room's own view, its body: a keystroke in a thread must never draw it again.
+        case roomBody
+        /// A thread's list of replies, its body: a keystroke in the thread's box must never draw it again.
+        case threadList
+        /// One reply of a thread built.
+        case threadReply
     }
+
+    /// A test sets this to have the thread's reply list say why SwiftUI drew it (`_printChanges`), in its log.
+    public static var explainsThreadList = false
 
     private static let lock = NSLock()
     private static var draws = 0
     private static var last: Int64 = 0
     private static var builtRoomRows = 0
     private static var builtSidePanel = 0
+    private static var builtRoomBodies = 0
+    private static var builtThreadLists = 0
+    private static var builtThreadReplies = 0
+    /// The thread replies built since `resetThreadReplies()`, by id: a lazy list builds only those in sight. Kept only
+    /// once a test has called `resetThreadReplies()`: the app itself never keeps them.
+    private static var threadRepliesBuilt: Set<String> = []
+    private static var recordsThreadReplies = false
     private static var furthestStrip = -1
 
     /// One row drawn (its body evaluated).
@@ -44,7 +60,33 @@ public enum RenderTrace {
         switch list {
         case .roomRow: builtRoomRows &+= 1
         case .sidePanel: builtSidePanel &+= 1
+        case .roomBody: builtRoomBodies &+= 1
+        case .threadList: builtThreadLists &+= 1
+        case .threadReply: builtThreadReplies &+= 1
         }
+        lock.unlock()
+    }
+
+    /// Thread reply `id` built (and counted as a `.threadReply`).
+    public static func builtThreadReply(_ id: String) {
+        lock.lock()
+        builtThreadReplies &+= 1
+        if recordsThreadReplies { threadRepliesBuilt.insert(id) }
+        lock.unlock()
+    }
+
+    /// The thread replies built since `resetThreadReplies()`; safe from any thread.
+    public static func threadRepliesBuiltSinceReset() -> Set<String> {
+        lock.lock()
+        defer { lock.unlock() }
+        return threadRepliesBuilt
+    }
+
+    /// Starts keeping `threadRepliesBuiltSinceReset()`, from none.
+    public static func resetThreadReplies() {
+        lock.lock()
+        threadRepliesBuilt = []
+        recordsThreadReplies = true
         lock.unlock()
     }
 
@@ -77,6 +119,9 @@ public enum RenderTrace {
         switch list {
         case .roomRow: return builtRoomRows
         case .sidePanel: return builtSidePanel
+        case .roomBody: return builtRoomBodies
+        case .threadList: return builtThreadLists
+        case .threadReply: return builtThreadReplies
         }
     }
 }

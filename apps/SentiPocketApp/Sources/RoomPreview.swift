@@ -14,8 +14,18 @@ enum RoomPreview {
     static var isRequested: Bool {
         ProcessInfo.processInfo.arguments.contains("-PocketRoomPreview") || isTicketsRequested || isTicketLinkRequested
             || isAnchorRequested || isSearchRequested || isBlockedPeopleRequested || isProfileCardRequested
-            || isDirectRequested || isSidePanelFoldersRequested || isDialConsentRequested
+            || isDirectRequested || isSidePanelFoldersRequested || isDialConsentRequested || isBigThreadRequested
     }
+
+    /// `-PocketBigThreadPreview` gives the review message a thread of 1,000 long replies, read 100 actions a page as the
+    /// API reads them, and opens it at reply 250 as its notification does: typing in it, scrolling up and the jump to an
+    /// older reply can be tried and timed.
+    static var isBigThreadRequested: Bool {
+        ProcessInfo.processInfo.arguments.contains("-PocketBigThreadPreview")
+    }
+
+    /// The reply the big thread opens at.
+    static let bigThreadFocus = RoomPreviewBigThread.id(250)
 
     /// `-PocketDialConsentPreview` opens Blocked people as a sheet, then a dial asks its AI question: it shows over the
     /// open sheet, as on a call.
@@ -243,7 +253,8 @@ enum RoomPreview {
                     sessionId: "preview-room",
                     title: "Design review",
                     membershipRole: "owner",
-                    focusSequenceId: isAnchorRequested ? 30 : nil,
+                    focusSequenceId: isAnchorRequested ? 30 : (isBigThreadRequested ? 111 : nil),
+                    focusReplyId: isBigThreadRequested ? bigThreadFocus : nil,
                     focusTicketId: isTicketLinkRequested ? "t1" : nil
                 ),
                 transport: RoomPreviewTransport(anchorScenario: isAnchorRequested),
@@ -959,6 +970,15 @@ private struct RoomPreviewTransport: RoomTransport {
         RoomReply(id: "r3", targetSequenceId: 111, authorId: "ticket-keeper", text: "Tickets for this message: [Ticket: Validate the email step on paste](/dashboard/sessions/preview-room?ticket=t1)", createdAt: "2026-10-28T13:28:00Z")
     ]
 
+    func roomActions(sessionId: String, targetSequenceId: Int64?, limit: Int, beforeCursor: String?) async throws
+        -> RoomActionsPage {
+        if RoomPreview.isBigThreadRequested, !directScenario, targetSequenceId == 111 {
+            return RoomPreviewBigThread.page(limit: limit, before: beforeCursor)
+        }
+        guard beforeCursor == nil else { return RoomActionsPage() }
+        return try await roomActions(sessionId: sessionId, targetSequenceId: targetSequenceId, limit: limit)
+    }
+
     func roomActions(sessionId: String, targetSequenceId: Int64?, limit: Int) async throws -> RoomActionsPage {
         if directScenario { return RoomActionsPage() }
         if targetSequenceId == 111 { return RoomActionsPage(replies: Self.threadReplies) }
@@ -973,8 +993,9 @@ private struct RoomPreviewTransport: RoomTransport {
                 counts: ["ack": 2, "like": 3, "reply": 2],
                 actorsByType: ["ack": ["build-agent", "human-alex"]],
                 likedByViewer: true,
-                replyTotal: 2,
-                latestReplies: Self.threadReplies,
+                replyTotal: RoomPreview.isBigThreadRequested ? RoomPreviewBigThread.count : 2,
+                latestReplies: RoomPreview.isBigThreadRequested ? Array(RoomPreviewBigThread.replies.suffix(3))
+                    : Self.threadReplies,
                 emojiReactions: [
                     RoomEmojiReaction(emoji: "🎉", count: 3, viewerReacted: true),
                     RoomEmojiReaction(emoji: "👀", count: 1, viewerReacted: false)
@@ -1071,6 +1092,39 @@ private struct RoomPreviewTransport: RoomTransport {
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+}
+
+/// The big-thread preview's replies: 1,000 long ones on the review message, read back a page at a time.
+enum RoomPreviewBigThread {
+    static let count = 1_000
+
+    static func id(_ index: Int) -> String { String(format: "00000000-0000-4000-9000-%012ld", index) }
+
+    static let replies: [RoomReply] = {
+        let formatter = ISO8601DateFormatter()
+        let start = Date().addingTimeInterval(-Double(count + 60) * 60)
+        let authors = ["review-agent", "build-agent", "human-alex", "ticket-keeper"]
+        return (1...count).map { index in
+            RoomReply(id: id(index), targetSequenceId: 111, authorId: authors[index % authors.count], text: text(index),
+                      createdAt: formatter.string(from: start.addingTimeInterval(Double(index) * 60)))
+        }
+    }()
+
+    private static func text(_ index: Int) -> String {
+        "Reply \(index) of \(count). Checked the **email step** again on this pass.\n\n"
+            + "- `retryCount` keeps its value after a failed submit\n"
+            + "- paste runs the same validation as typing\n\n"
+            + "Next: the onboarding copy, step \(index % 12 + 1). Notes in `OnboardingForm.swift`."
+    }
+
+    /// The `limit` actions before `before` (a reply's number, as the cursor), newest first as the API reads them.
+    static func page(limit: Int, before: String?) -> RoomActionsPage {
+        let end = before.flatMap { Int($0) } ?? count + 1
+        let start = max(1, end - max(1, limit))
+        guard start < end else { return RoomActionsPage() }
+        return RoomActionsPage(replies: Array(replies[(start - 1)..<(end - 1)]),
+                               nextCursor: start > 1 ? String(start) : nil)
     }
 }
 #endif

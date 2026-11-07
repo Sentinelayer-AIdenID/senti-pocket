@@ -8,6 +8,9 @@ public protocol RoomTransport: Sendable {
     func roomStream(sessionId: String, fromSequence: Int64?) -> AsyncStream<RoomStreamEvent>
     /// Replies and reaction summaries: the room's newest actions, or one thread when `targetSequenceId` is set.
     func roomActions(sessionId: String, targetSequenceId: Int64?, limit: Int) async throws -> RoomActionsPage
+    /// The same, the page older than `beforeCursor` (a page's `nextCursor`); nil reads the newest page.
+    func roomActions(sessionId: String, targetSequenceId: Int64?, limit: Int, beforeCursor: String?) async throws
+        -> RoomActionsPage
     /// The breakouts started from this room that the viewer may see (metadata only).
     func roomBreakouts(parentSessionId: String, cursor: String?, limit: Int) async throws -> RoomBreakoutsPage
     /// A short-lived link to one attachment's bytes.
@@ -24,6 +27,13 @@ extension RoomTransport {
     /// Transports without reply and reaction support show none.
     public func roomActions(sessionId: String, targetSequenceId: Int64?, limit: Int) async throws -> RoomActionsPage {
         RoomActionsPage()
+    }
+
+    /// Transports without pages read the newest page only: there is nothing older.
+    public func roomActions(sessionId: String, targetSequenceId: Int64?, limit: Int,
+                            beforeCursor: String?) async throws -> RoomActionsPage {
+        guard beforeCursor == nil else { return RoomActionsPage() }
+        return try await roomActions(sessionId: sessionId, targetSequenceId: targetSequenceId, limit: limit)
     }
 
     /// Transports without breakout support show none.

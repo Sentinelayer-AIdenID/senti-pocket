@@ -327,6 +327,59 @@ final class SessionHTTPTransportTests: XCTestCase {
         XCTAssertEqual(SessionTransportURLProtocol.capturedRequests().count, 0)
     }
 
+    /// A thread is read a page at a time, newest first: each page says what reads the one before it
+    /// (`auditWindow.nextCursor`), sent back as `beforeCursor`, until a page says there is none.
+    func test_a_threads_pages_are_read_back_with_the_cursor_each_page_gives() async throws {
+        let transport = makeTransport { request in
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            let before = query.first { $0.name == "beforeCursor" }?.value
+            let body = before == nil
+                ? #"{"actions":[],"projection":{},"auditWindow":{"hasMore":true,"nextCursor":"page-2"}}"#
+                : #"{"actions":[],"projection":{},"auditWindow":{"hasMore":false,"nextCursor":null}}"#
+            return (self.http(request, status: 200), Data(body.utf8))
+        }
+        let newest = try await transport.roomActions(sessionId: "room_1", targetSequenceId: 42, limit: 100,
+                                                     beforeCursor: nil)
+        XCTAssertEqual(newest.nextCursor, "page-2")
+        XCTAssertTrue(newest.hasMore)
+        let older = try await transport.roomActions(sessionId: "room_1", targetSequenceId: 42, limit: 100,
+                                                    beforeCursor: try XCTUnwrap(newest.nextCursor))
+        XCTAssertNil(older.nextCursor, "the oldest page has nothing before it")
+        XCTAssertFalse(older.hasMore)
+
+        let queries = SessionTransportURLProtocol.capturedRequests().map {
+            Dictionary(uniqueKeysWithValues: (URLComponents(url: $0.url!, resolvingAgainstBaseURL: false)?
+                .queryItems ?? []).map { ($0.name, $0.value ?? "") })
+        }
+        XCTAssertEqual(queries, [
+            ["targetSequenceId": "42", "limit": "100"],
+            ["targetSequenceId": "42", "limit": "100", "beforeCursor": "page-2"]
+        ])
+        await expect(.invalidRequest) {
+            try await transport.roomActions(sessionId: "room_1", targetSequenceId: 42, limit: 100,
+                                            beforeCursor: String(repeating: "c", count: 513))
+        }
+        await expect(.invalidRequest) {
+            try await transport.roomActions(sessionId: "room_1", targetSequenceId: 42, limit: 100, beforeCursor: "")
+        }
+        XCTAssertEqual(SessionTransportURLProtocol.capturedRequests().count, 2, "a cursor that cannot be one is never sent")
+    }
+
+    /// A page that says there is more but gives no usable cursor ends the thread there: nothing could read further.
+    func test_a_page_without_a_usable_cursor_has_nothing_before_it() throws {
+        func page(_ window: String) throws -> RoomActionsPage {
+            try JSONDecoder().decode(RoomActionsPage.self,
+                                     from: Data(#"{"actions":[],"projection":{},"auditWindow":\#(window)}"#.utf8))
+        }
+        XCTAssertNil(try page(#"{"hasMore":true,"nextCursor":""}"#).nextCursor)
+        XCTAssertNil(try page(#"{"hasMore":true}"#).nextCursor)
+        XCTAssertNil(try page("{\"hasMore\":true,\"nextCursor\":\"\(String(repeating: "c", count: 513))\"}").nextCursor)
+        XCTAssertNil(try page(#"{"hasMore":false,"nextCursor":"page-2"}"#).nextCursor, "no more is none")
+        XCTAssertEqual(try page(#"{"hasMore":true,"nextCursor":"page-2"}"#).nextCursor, "page-2")
+        XCTAssertNil(try JSONDecoder().decode(RoomActionsPage.self, from: Data(#"{"actions":[]}"#.utf8)).nextCursor,
+                     "an API without pages has none")
+    }
+
     private func expect<T>(
         _ expected: SessionTransportError,
         operation: () async throws -> T,
