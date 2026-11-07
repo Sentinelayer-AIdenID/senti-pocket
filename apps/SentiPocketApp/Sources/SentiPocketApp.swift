@@ -35,6 +35,11 @@ struct SentiPocketApp: App {
                                                         appleLogin: SentiPocketApp.makeAppleLogin())
     #endif
 
+    init() {
+        // Where a call's sound goes, for every call: the speaker, or the earpiece at the ear (`CallAudioRouter`).
+        CallAudioRouter.shared.followCalls()
+    }
+
     var body: some Scene {
         WindowGroup {
             rootView

@@ -1516,6 +1516,8 @@ struct VoiceRoomHost: View {
 
     var body: some View {
         VoiceRoomPanel(state: room.state, meter: meter, partnerLab: partnerLab, addable: addable, send: room.send)
+            // Where the call's sound goes: Speaker, iPhone or Automatic, and headphones or Bluetooth.
+            .environment(\.voiceRoomAudioRoute, VoiceRoomExtraControl { CallAudioRouteControl() })
     }
 }
 
