@@ -18,12 +18,39 @@ struct ChatLifecycleAccountCredentials: Sendable {
     var tokenProvider: @Sendable () -> String? = { SessionTokenStore.load() }
 
     func current() async throws -> ChatLifecycleCredential {
+        guard let apiBaseURL, var components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false) else {
+            throw ChatLifecycleError.network
+        }
+        components.percentEncodedPath = "/api/v1/auth/me"
+        components.query = nil
+        guard let url = components.url else { throw ChatLifecycleError.network }
         for _ in 0..<2 {
             guard let token = tokenProvider(), !token.isEmpty else { throw ChatLifecycleError.reauthenticationRequired }
-            let identity = HTTPAccountIdentity(apiBaseURL: apiBaseURL, urlSession: urlSession, tokenProvider: { token })
-            let account = await identity.currentAccount()
+            var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            request.httpShouldHandleCookies = false
+            let data: Data
+            let response: URLResponse
+            do { (data, response) = try await urlSession.data(for: request) }
+            catch {
+                guard tokenProvider() == token else { continue }
+                throw ChatLifecycleError.network
+            }
             guard tokenProvider() == token else { continue }
-            guard let accountId = account?.accountId else { throw ChatLifecycleError.network }
+            guard let http = response as? HTTPURLResponse else { throw ChatLifecycleError.network }
+            let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let detail = object?["detail"] as? [String: Any]
+            let error = (object?["error"] as? [String: Any]) ?? (detail?["error"] as? [String: Any])
+            let code = (error?["code"] as? String) ?? (detail?["code"] as? String) ?? (object?["code"] as? String)
+            // The display-name lookup intentionally returns nil for a failed read. A mutation's credential lookup
+            // must preserve an expired or revoked sign-in, including when checked after its write finishes.
+            if http.statusCode == 401 || (http.statusCode == 403 && code?.hasPrefix("ACCOUNT_") == true) {
+                throw ChatLifecycleError.reauthenticationRequired
+            }
+            guard http.statusCode == 200, let rawId = object?["id"] as? String else { throw ChatLifecycleError.network }
+            let accountId = rawId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !accountId.isEmpty else { throw ChatLifecycleError.network }
             return ChatLifecycleCredential(accountId: accountId, token: token)
         }
         throw ChatLifecycleError.accountChanged
@@ -112,7 +139,7 @@ final class ChatLifecycleCenter: ObservableObject {
             }
             return pending.accountId == accountId
         } catch ChatLifecycleError.reauthenticationRequired {
-            onReauthenticationRequired()
+            if pending.accountId == accountId { onReauthenticationRequired() }
         } catch ChatLifecycleError.accountChanged {
             // A response to another sign-in must not change this account's screen or display its result.
         } catch ChatLifecycleError.notAllowed {

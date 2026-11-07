@@ -22,6 +22,36 @@ private actor RecordingChatLifecycle: ChatLifecycleServing {
     }
 }
 
+/// Holds the in-flight result until the test changes the center's account, without sleeps or a blocked thread.
+private actor SuspendedLifecycleAuthenticationFailure: ChatLifecycleServing {
+    private var response: CheckedContinuation<Void, Never>?
+    private var started: CheckedContinuation<Void, Never>?
+
+    func waitUntilCalled() async {
+        if response != nil { return }
+        await withCheckedContinuation { started = $0 }
+    }
+
+    func release() {
+        let held = response
+        response = nil
+        held?.resume()
+    }
+
+    private func failAfterRelease() async throws {
+        await withCheckedContinuation { continuation in
+            response = continuation
+            started?.resume()
+            started = nil
+        }
+        throw ChatLifecycleError.reauthenticationRequired
+    }
+
+    func archiveChat(_ roomId: String, accountId: String) async throws { try await failAfterRelease() }
+    func endChat(_ roomId: String, accountId: String) async throws { try await failAfterRelease() }
+    func leaveChat(_ roomId: String, accountId: String) async throws { try await failAfterRelease() }
+}
+
 @MainActor
 final class ChatLifecycleCenterTests: XCTestCase {
     func test_archive_asks_first_cancel_does_nothing_and_only_a_current_owner_can_confirm() async throws {
@@ -139,6 +169,30 @@ final class ChatLifecycleCenterTests: XCTestCase {
         XCTAssertFalse(accepted)
         XCTAssertTrue(expired)
         XCTAssertNil(center.notice)
+    }
+
+    func test_an_old_pending_authentication_failure_does_not_revoke_the_new_account() async throws {
+        let nextAccounts: [String?] = ["account-b", nil]
+        for nextAccount in nextAccounts {
+            let client = SuspendedLifecycleAuthenticationFailure()
+            var signIns = 0
+            let center = ChatLifecycleCenter(client: client, lookup: { _ in .end },
+                                             onReauthenticationRequired: { signIns += 1 })
+            center.setAccountId("account-a")
+            center.request("owned")
+            let pending = try XCTUnwrap(center.confirmation)
+            let completion = Task { await center.confirm(pending) }
+            await client.waitUntilCalled()
+
+            center.setAccountId(nextAccount)
+            await client.release()
+            let accepted = await completion.value
+
+            XCTAssertFalse(accepted)
+            XCTAssertEqual(signIns, 0, "the old account's failure must not reopen sign-in for another account")
+            XCTAssertNil(center.notice)
+            XCTAssertFalse(center.isSaving)
+        }
     }
 
     func test_leave_requires_the_feature_flag_even_if_a_caller_offers_it() async throws {
