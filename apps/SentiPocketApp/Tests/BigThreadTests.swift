@@ -449,6 +449,34 @@ final class BigThreadTests: XCTestCase {
         room.pause()
     }
 
+    /// After that 404 the thread is no dead end: it offers its replies, and scrolling up reads its newest page, then
+    /// pages back from that page's cursor. Nothing is read until the reader scrolls up.
+    func test_after_a_reply_not_in_the_thread_scrolling_up_reads_the_newest_page_and_pages_back() async throws {
+        let transport = PagedThread(count: 300)
+        let room = coordinator(transport, focus: 42)
+        room.resume()
+        room.openThread(42, at: Self.id(5_000))
+        await waitUntil("the thread says so") {
+            room.state.thread?.failureText == "That reply is no longer in this thread."
+        }
+        XCTAssertEqual(room.state.thread?.hasOlder, true, "the thread's replies are there to read")
+        XCTAssertEqual(transport.reads, [.init(limit: 500, around: Self.id(5_000))])
+
+        room.send(.loadOlderReplies(sequenceId: 42))
+        await waitUntil("its newest page is read") {
+            room.state.thread?.isLoading == false && room.state.thread?.replies.last?.id == Self.id(300)
+        }
+        XCTAssertEqual(room.state.thread?.replies.map(\.id), (201...300).map(Self.id))
+        XCTAssertEqual(room.state.thread?.hasOlder, true)
+
+        room.send(.loadOlderReplies(sequenceId: 42))
+        await waitUntil("the page before it") { room.state.thread?.replies.first?.id == Self.id(101) }
+        XCTAssertEqual(transport.reads, [.init(limit: 500, around: Self.id(5_000)), .init(limit: 100, cursor: nil),
+                                         .init(limit: 100, cursor: "201")],
+                       "the newest page, then back from its cursor")
+        room.pause()
+    }
+
     /// A link to a reply that was collapsed into another: the API resolves it, and the thread opens at the reply it
     /// resolved to (`anchoredActionId`), with that one read.
     func test_a_collapsed_reply_opens_at_the_reply_the_api_resolved_it_to() async throws {
