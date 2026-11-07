@@ -131,10 +131,18 @@ struct RoomChatScreen: View {
     @State private var showsTickets = false
     /// The room's summary, made on request (Carter, 10-30).
     @State private var showsSummary = false
-    @State private var showsInvite = false
+    /// People: Invite people, who is in the room, and the agent requests (Carter, #62868). The People button, the
+    /// ring of who is here, Invite people in the room's menu and an agent request's link all open it.
+    @State private var showsPeople = false
+    /// The room's agent requests, kept, not watched: the People button and its requests row watch them, so a request
+    /// draws those alone. Read for owners and admins only (`peopleRequests`).
+    @State private var admissions: AdmissionsCoordinator?
+    /// The agents you work with, where the room's read says so (`features.addAgents`).
+    @State private var agentContactsModel: AgentContactsModel?
+    /// Invite people's link, share sheet and AI-sharing question, kept, not watched (its rows and presenter watch it).
+    @State private var inviteSharing: RoomInviteSharing?
     /// The tickets screen opens straight into a new ticket (the composer's "File a ticket").
     @State private var ticketsStartFiling = false
-    @State private var showsAdmissions = false
     @State private var showsBreakouts = false
     @State private var showsSearch = false
     @State private var attachmentPreview: AttachmentPreviewItem?
@@ -233,6 +241,7 @@ struct RoomChatScreen: View {
         blocks: BlockList? = nil,
         aiConsent: AIConsent? = nil,
         direct: RoomDirectContext? = nil,
+        agentContacts: (any AgentContactsServing)? = nil,
         onReauthenticationRequired: @escaping @MainActor () -> Void
     ) {
         #if DEBUG
@@ -249,12 +258,25 @@ struct RoomChatScreen: View {
         self.ticketsTransport = ticketsTransport
         self.admissionsTransport = admissionsTransport
         self.admissionDecider = admissionDecider
+        if let admissionsTransport, let admissionDecider {
+            _admissions = State(initialValue: AdmissionsCoordinator(
+                sessionId: route.sessionId, transport: admissionsTransport, decider: admissionDecider,
+                onReauthenticationRequired: onReauthenticationRequired
+            ))
+        }
+        if let agentContacts {
+            _agentContactsModel = State(initialValue: AgentContactsModel(sessionId: route.sessionId, service: agentContacts))
+        }
         // A viewer cannot post, so cannot answer a ticket's decision either.
         self.ticketAnswerSender = route.membershipRole.lowercased() == "viewer" ? nil : sender
         self.voicePoster = route.membershipRole.lowercased() == "viewer" ? nil : sender as? any VoiceRoomPosting
         self.summaryGenerator = sender as? any RoomSummaryGenerating
         self.savedSummary = savedSummary
         self.inviter = sender as? any RoomInviting
+        if let inviter = sender as? any RoomInviting {
+            _inviteSharing = State(initialValue: RoomInviteSharing(sessionId: route.sessionId, inviter: inviter,
+                                                                   aiConsent: aiConsent))
+        }
         self.ticketWriter = ticketWriter
         self.ticketLeases = ticketLeases
         self.ticketExtras = ticketExtras
@@ -654,6 +676,52 @@ struct RoomChatScreen: View {
         return role == "owner" || role.isEmpty
     }
 
+    /// The agents in this chat, by id (lowercased): the roster's agents and boxes that have not ended, online or not.
+    private var memberAgentIds: Set<String> {
+        Set(roster.members.filter { $0.kind != .person && $0.status != .ended }.map { $0.id.lowercased() })
+    }
+
+    /// The agent requests People shows and counts: the room's owner's and an admin's only.
+    private var peopleRequests: AdmissionsCoordinator? {
+        decidesAdmissions ? admissions : nil
+    }
+
+    /// What People shows from here: Invite people (the sheet shows it to whoever may invite), the agents you work with
+    /// where the room offers them, and the agent requests.
+    private var peopleExtras: RoomPeopleExtras {
+        var invite: (() -> AnyView)?
+        var presenters: (() -> AnyView)?
+        if let sharing = inviteSharing {
+            let title = coordinator.state.title
+            let agents = coordinator.addsAgents ? agentContactsModel : nil
+            invite = { AnyView(RoomInviteRows(roomTitle: title, sharing: sharing, agents: agents)) }
+            presenters = { AnyView(RoomInvitePresenters(sharing: sharing)) }
+        }
+        var requests: (() -> AnyView)?
+        if let peopleRequests {
+            let action = linkAction
+            requests = {
+                AnyView(RoomRequestsRow(sessionId: route.sessionId, requests: peopleRequests) {
+                    RoomRequestsPage(requests: peopleRequests).environment(\.openURL, action)
+                })
+            }
+        }
+        // The agents come in once the room's read offers them: the sheet takes the new invite rows then.
+        let revision = coordinator.addsAgents ? 1 : 0
+        #if DEBUG
+        // As People appears, for the hosted tests: its sections, and the requests row's words (that row sits at the
+        // list's foot, made only once scrolled to).
+        let sessionId = route.sessionId, counted = peopleRequests
+        return RoomPeopleExtras(invite: invite, presenters: presenters, requests: requests, revision: revision,
+                                shown: { sections in
+            RootPreview.meter.peopleSections[sessionId] = sections
+            if let counted { RootPreview.meter.peopleRequestsTitle[sessionId] = RoomRequestsTitle.text(count: counted.state.pending.count) }
+        })
+        #else
+        return RoomPeopleExtras(invite: invite, presenters: presenters, requests: requests, revision: revision)
+        #endif
+    }
+
     /// Only owners and admins decide agent requests (the API enforces it; the screen follows it).
     private var decidesAdmissions: Bool {
         route.hasRoomControls && admissionsTransport != nil && admissionDecider != nil
@@ -753,8 +821,8 @@ struct RoomChatScreen: View {
         } else if intent == .stopReadingAloud {
             reader.stop()
         } else if intent == .openInvite {
-            // An invite writes to the room too: the first write asks.
-            afterAIConsent { showsInvite = true }
+            // Invite people is the top of People; what writes to the room there asks first.
+            showsPeople = true
         } else if intent == .peopleOpened {
             // Which boxes still run, so the people list shows them as here or ended.
             Task { await flight.refresh() }
@@ -775,7 +843,8 @@ struct RoomChatScreen: View {
                 canSearch: search != nil
             ),
             roster: roster,
-            media: media.canUpload && coordinator.state.composer.canPost ? media.board : nil
+            media: media.canUpload && coordinator.state.composer.canPost ? media.board : nil,
+            showsPeople: $showsPeople
         ) { intent in handle(intent) }
         #if DEBUG
         // A hosted test asks the room on screen for what a tap would.
@@ -785,6 +854,7 @@ struct RoomChatScreen: View {
         // underneath (#265, #269). The app's cover passes through as it is, read only by what rests.
         .transformEnvironment(\.roomIsCovered) { [coversItself] covered in covered = covered || coversItself }
         .environment(\.roomProfileOpener, profileOpener)
+        .environment(\.roomPeopleExtras, peopleExtras)
         // A thread opens its photos, files and pickers over itself.
         .environment(\.roomSheetMediaHost, RoomSheetMediaHost {
             Color.clear
@@ -912,15 +982,9 @@ struct RoomChatScreen: View {
                 .accessibilityLabel("Room info")
                 .accessibilityIdentifier("pocket.room.flight")
             }
-            if decidesAdmissions {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button {
-                        showsAdmissions = true
-                    } label: {
-                        Label("Agent requests", systemImage: "person.badge.shield.checkmark")
-                    }
-                    .accessibilityIdentifier("pocket.room.admissions")
-                }
+            // People, where agent requests used to have a button of their own that looked like Invite (Carter, #62868).
+            ToolbarItem(placement: .navigationBarTrailing) {
+                RoomPeopleButton(sessionId: route.sessionId, requests: peopleRequests) { showsPeople = true }
             }
             if !route.isBreakout, !coordinator.state.breakouts.isEmpty {
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -1061,20 +1125,6 @@ struct RoomChatScreen: View {
         // from the toolbar's overflow, Tickets froze the app in an endless layout pass on iOS 26 until the system
         // ended it (Carter's crash report, 10-30; reproduced on the simulator, and gone as a sheet): the room kept
         // re-rendering under the pushed screen and rebuilt it, and its search bar changed the room's layout again.
-        .sheet(isPresented: $showsAdmissions) {
-            if let admissionsTransport, let admissionDecider {
-                NavigationStack {
-                    AdmissionsScreen(
-                        sessionId: route.sessionId,
-                        transport: admissionsTransport,
-                        decider: admissionDecider,
-                        onReauthenticationRequired: onReauthenticationRequired
-                    )
-                    .toolbar { doneButton { showsAdmissions = false } }
-                }
-                .environment(\.openURL, linkAction)
-            }
-        }
         .onChange(of: showsTickets) { shown in
             if shown {
                 CrashReporter.shared.note("tickets opened")
@@ -1082,7 +1132,8 @@ struct RoomChatScreen: View {
                 ticketsStartFiling = false
             }
         }
-        .onChange(of: showsAdmissions) { shown in if shown { CrashReporter.shared.note("agent requests opened") } }
+        .modifier(RoomPeopleWatch(showsPeople: $showsPeople, memberIds: memberAgentIds, agents: agentContactsModel,
+                                  requests: peopleRequests, sessionId: route.sessionId))
         .onChange(of: showsBreakouts) { shown in if shown { CrashReporter.shared.note("breakouts opened") } }
         .onChange(of: choosesVoicePartner) { shown in if shown { CrashReporter.shared.note("talk opened") } }
         .sheet(isPresented: $showsSummary) {
@@ -1105,12 +1156,6 @@ struct RoomChatScreen: View {
             if open { CrashReporter.shared.note("summary opened") }
         }
         .onChange(of: coordinator.state.title) { _ in onRenamed() }
-        .sheet(isPresented: $showsInvite) {
-            if let inviter {
-                RoomInviteSheet(sessionId: route.sessionId, roomTitle: coordinator.state.title, inviter: inviter,
-                                onClose: { showsInvite = false })
-            }
-        }
         .sheet(isPresented: $showsTickets) {
             if let ticketsTransport {
                 NavigationStack {
@@ -1307,7 +1352,7 @@ struct RoomChatScreen: View {
         } else if let ticketId = route.focusTicketId, ticketsTransport != nil {
             linkedTicket = LinkedTicket(id: ticketId)
         } else if route.opensAdmissions, decidesAdmissions {
-            showsAdmissions = true
+            showsPeople = true
         }
     }
 
@@ -1413,7 +1458,7 @@ struct RoomChatScreen: View {
     private func focus(on sequence: Int64) {
         linkedTicket = nil
         showsTickets = false
-        showsAdmissions = false
+        showsPeople = false
         coordinator.focus(on: sequence)
     }
 
@@ -1440,7 +1485,7 @@ struct RoomChatScreen: View {
         case .openAdmissions:
             guard decidesAdmissions else { return .discarded }
             linkedTicket = nil
-            showsAdmissions = true
+            showsPeople = true
             return .handled
         case .openRoom(let link):
             openRoom(link)
@@ -1588,5 +1633,33 @@ private struct RoomMediaPresenters: ViewModifier {
             } message: {
                 Text(attachmentProblem ?? "")
             }
+    }
+}
+
+/// People's moving parts on the room screen: its opening noted (and the requests read again), who is here for the agents
+/// added from People, the People button's count read as the room opens, and People opened by a hosted test.
+private struct RoomPeopleWatch: ViewModifier {
+    @Binding var showsPeople: Bool
+    let memberIds: Set<String>
+    let agents: AgentContactsModel?
+    let requests: AdmissionsCoordinator?
+    let sessionId: String
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: showsPeople) { shown in
+                guard shown else { return }
+                CrashReporter.shared.note("people opened")
+                if let requests { Task { await requests.refresh() } }
+            }
+            // The agents already in this chat (the roster) show as such, with no Add, online or not.
+            .onChange(of: memberIds) { agents?.memberIds = $0 }
+            .onAppear { agents?.memberIds = memberIds }
+            .task(id: sessionId) {
+                if let requests { await requests.refresh() }
+            }
+            #if DEBUG
+            .onReceive(RootPreview.peopleRequests) { showsPeople = true }
+            #endif
     }
 }
