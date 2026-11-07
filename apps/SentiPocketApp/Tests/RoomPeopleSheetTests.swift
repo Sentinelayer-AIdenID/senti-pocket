@@ -63,7 +63,7 @@ final class RoomPeopleSheetTests: XCTestCase {
         pump(3)
         RootPreview.requestPeople()
         let expected: [String: AgentContactRowState] = [
-            "plan-agent": .inTheRoom, "ops-agent": .add, "helper-of-someone": .inYourRooms
+            "plan-agent": .inThisChat, "night-agent": .add, "helper-of-someone": .inYourRooms
         ]
         wait("the agents are listed", seconds: 15) { meter.peopleAgentStates[room] == expected }
         XCTAssertEqual(meter.peopleAgentsShown[room], true)
@@ -253,9 +253,9 @@ final class AgentContactsTests: XCTestCase {
         let mine = model.contacts[0]
         await model.add(mine)
         XCTAssertEqual(service.added, ["mine to room-1"])
-        XCTAssertEqual(model.state(of: mine), .joining, "Added, joining… until its presence shows")
-        model.presentIds = ["mine"]
-        XCTAssertEqual(model.state(of: mine), .inTheRoom)
+        XCTAssertEqual(model.state(of: mine), .joining, "Added, joining… until it is in the room's roster")
+        model.memberIds = ["mine"]
+        XCTAssertEqual(model.state(of: mine), .inThisChat)
         await model.add(mine)
         XCTAssertEqual(service.added.count, 1, "added once")
     }
@@ -267,7 +267,7 @@ final class AgentContactsTests: XCTestCase {
         let model = AgentContactsModel(sessionId: "room-1", service: service)
         await model.load()
         await model.add(model.contacts[0])
-        XCTAssertEqual(model.state(of: model.contacts[0]), .alreadyInThisChat, "Already in this chat, never joining")
+        XCTAssertEqual(model.state(of: model.contacts[0]), .inThisChat, "in this chat, never joining")
         XCTAssertNil(model.problem)
         await model.add(model.contacts[0])
         XCTAssertEqual(service.added.count, 1, "not asked again")
@@ -348,15 +348,63 @@ final class AgentContactsTests: XCTestCase {
             .isApproved)
     }
 
-    func test_a_contacts_page_carries_its_next_cursor() {
-        let first = HTTPAgentContacts.page(from: Data("""
+    func test_a_contacts_page_carries_its_next_cursor() throws {
+        let first = try XCTUnwrap(HTTPAgentContacts.page(from: Data("""
         {"contacts": [{"id": "forge", "kind": "agent", "displayName": "forge", "sharedRooms": 2, "canAdd": true}],
          "nextCursor": "aa1.next"}
-        """.utf8))
+        """.utf8)))
         XCTAssertEqual(first.contacts.map(\.id), ["forge"])
         XCTAssertEqual(first.nextCursor, "aa1.next")
-        XCTAssertNil(HTTPAgentContacts.page(from: Data(#"{"contacts": [], "nextCursor": null}"#.utf8)).nextCursor,
-                     "null: the last page")
+        XCTAssertNil(try XCTUnwrap(HTTPAgentContacts.page(from: Data(#"{"contacts": [], "nextCursor": null}"#.utf8)))
+            .nextCursor, "null: the last page")
+    }
+
+    /// A 200 whose body can't be read is an error, never an empty last page that hides the rest.
+    func test_an_unreadable_contacts_answer_is_an_error_not_an_empty_page() {
+        XCTAssertNil(HTTPAgentContacts.page(from: Data("not json".utf8)))
+        XCTAssertNil(HTTPAgentContacts.page(from: Data("".utf8)))
+        XCTAssertNil(HTTPAgentContacts.page(from: Data(#"{"error": "busy"}"#.utf8)), "no list of contacts in it")
+        XCTAssertNotNil(HTTPAgentContacts.page(from: Data(#"{"contacts": []}"#.utf8)), "an empty list is a page")
+    }
+
+    /// The review: an agent already in this chat (the room's roster) shows "In this chat" with no Add, online or not, so
+    /// nothing asks the AI-sharing OK or writes for it; and an agent added that then goes offline stays in this chat.
+    func test_an_agent_in_the_rooms_roster_shows_in_this_chat_and_is_never_added() async {
+        let service = Service()
+        let model = AgentContactsModel(sessionId: "room-1", service: service)
+        await model.load()
+        model.memberIds = ["mine"]
+        let mine = model.contacts[0]
+        XCTAssertEqual(model.state(of: mine), .inThisChat, "a member, whatever its presence")
+        await model.add(mine)
+        XCTAssertTrue(service.added.isEmpty, "never added again: no write, no 409")
+    }
+
+    func test_an_added_agent_stays_in_this_chat_once_it_has_joined() async {
+        let service = Service()
+        let model = AgentContactsModel(sessionId: "room-1", service: service)
+        await model.load()
+        let mine = model.contacts[0]
+        await model.add(mine)
+        XCTAssertEqual(model.state(of: mine), .joining)
+        model.memberIds = ["mine"]
+        XCTAssertEqual(model.state(of: mine), .inThisChat, "joined: in this chat, online or not")
+    }
+
+    /// A page that failed says so; the next page read clears it.
+    func test_a_later_page_clears_the_paging_error() async {
+        let service = Service()
+        let mine = AgentContact(id: "mine", displayName: "mine", lastActiveAt: nil, sharedRooms: 1, canAdd: true)
+        let more = AgentContact(id: "more", displayName: "more", lastActiveAt: nil, sharedRooms: 1, canAdd: true)
+        service.pages = [nil: AgentContactsPage(contacts: [mine], nextCursor: "c2")]
+        let model = AgentContactsModel(sessionId: "room-1", service: service)
+        await model.load()
+        await model.loadMore()
+        XCTAssertEqual(model.problem, AgentContactsModel.moreFailed, "the page failed")
+        service.pages["c2"] = AgentContactsPage(contacts: [more], nextCursor: nil)
+        await model.loadMore()
+        XCTAssertNil(model.problem, "read on: the error goes")
+        XCTAssertEqual(model.contacts.map(\.id), ["mine", "more"])
     }
 
     func test_the_contacts_page_keeps_agents_with_a_name() {

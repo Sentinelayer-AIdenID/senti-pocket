@@ -874,7 +874,8 @@ extension RootPreviewAPI: AgentContactsServing {
     func agentContacts(cursor: String?) async throws -> AgentContactsPage {
         AgentContactsPage(contacts: [AgentContact(id: "plan-agent", displayName: "plan-agent", lastActiveAt: started.addingTimeInterval(-600),
                       sharedRooms: 3, canAdd: true),
-         AgentContact(id: "ops-agent", displayName: "ops-agent", lastActiveAt: started.addingTimeInterval(-7_200),
+         // Not among the room's agents, so People offers Add for it.
+         AgentContact(id: "night-agent", displayName: "night-agent", lastActiveAt: started.addingTimeInterval(-7_200),
                       sharedRooms: 2, canAdd: true),
          AgentContact(id: "helper-of-someone", displayName: "Someone's helper", lastActiveAt: started.addingTimeInterval(-86_400),
                       sharedRooms: 1, canAdd: false)], nextCursor: nil)

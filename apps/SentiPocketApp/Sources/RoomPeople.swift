@@ -251,18 +251,16 @@ protocol AgentContactsServing: Sendable {
     func addAgent(_ agentId: String, to sessionId: String) async throws -> AddedAgent
 }
 
-/// One agent's row: Add, in your rooms (not yours to add), added and joining, already a member of this chat (the
-/// API's 409), or in the room (its presence shows it).
+/// One agent's row: Add, in your rooms (not yours to add), added and joining, or in this chat (a member: in the room's
+/// roster, or the API said so with a 409), whatever its presence.
 enum AgentContactRowState: Equatable {
     case add
     case inYourRooms
     case joining
-    case alreadyInThisChat
-    case inTheRoom
+    case inThisChat
 
-    static func of(_ contact: AgentContact, added: Bool, member: Bool, present: Bool) -> AgentContactRowState {
-        if present { return .inTheRoom }
-        if member { return .alreadyInThisChat }
+    static func of(_ contact: AgentContact, added: Bool, member: Bool) -> AgentContactRowState {
+        if member { return .inThisChat }
         if added { return .joining }
         return contact.canAdd ? .add : .inYourRooms
     }
@@ -280,8 +278,9 @@ final class AgentContactsModel: ObservableObject {
     @Published private(set) var loadingMore = false
     @Published private(set) var adding: Set<String> = []
     @Published private(set) var problem: String?
-    /// Who is in the room now, by id (lowercased): an agent added shows as in the room once it is here.
-    @Published var presentIds: Set<String> = []
+    /// The agents in this chat, from the room's roster, by id (lowercased): a member shows as in this chat with no Add,
+    /// online or not, and an agent added shows so once it has joined.
+    @Published var memberIds: Set<String> = []
     let sessionId: String
     private let service: any AgentContactsServing
     private var loaded = false
@@ -302,11 +301,14 @@ final class AgentContactsModel: ObservableObject {
             contacts = page.contacts
             nextCursor = page.nextCursor
             pages = 1
+            problem = nil
         } catch {
             loaded = false
             problem = "Your agents couldn't be read. Try again in a moment."
         }
     }
+
+    static let moreFailed = "More of your agents couldn't be read. Try again."
 
     /// More pages remain, within the cap: the list ends with a row that reads the next.
     var hasMore: Bool { nextCursor != nil && pages < Self.pageCap }
@@ -324,15 +326,17 @@ final class AgentContactsModel: ObservableObject {
             contacts += page.contacts.filter { !known.contains($0.id) }
             nextCursor = page.nextCursor
             pages += 1
+            // A page read after one that failed: its error goes.
+            if problem == Self.moreFailed { problem = nil }
         } catch {
-            problem = "More of your agents couldn't be read. Try again."
+            problem = Self.moreFailed
         }
     }
 
     func add(_ contact: AgentContact) async {
         // Never asked again once added, or once the API said it is already a member of this chat.
         guard contact.canAdd, !adding.contains(contact.id), !added.contains(contact.id),
-              !members.contains(contact.id) else { return }
+              !isMember(contact) else { return }
         adding.insert(contact.id)
         problem = nil
         defer { adding.remove(contact.id) }
@@ -354,8 +358,12 @@ final class AgentContactsModel: ObservableObject {
     }
 
     func state(of contact: AgentContact) -> AgentContactRowState {
-        AgentContactRowState.of(contact, added: added.contains(contact.id), member: members.contains(contact.id),
-                                present: presentIds.contains(contact.id.lowercased()))
+        AgentContactRowState.of(contact, added: added.contains(contact.id), member: isMember(contact))
+    }
+
+    /// In this chat: in the room's roster, or the API said so (409).
+    private func isMember(_ contact: AgentContact) -> Bool {
+        members.contains(contact.id) || memberIds.contains(contact.id.lowercased())
     }
 }
 
@@ -430,10 +438,8 @@ private struct RoomAgentContactRows: View {
             Text("In your rooms").font(.caption).foregroundStyle(.secondary)
         case .joining:
             Text("Added, joining…").font(.caption).foregroundStyle(.secondary)
-        case .alreadyInThisChat:
-            Text("Already in this chat").font(.caption).foregroundStyle(.secondary)
-        case .inTheRoom:
-            Text("In the room").font(.caption.weight(.semibold)).foregroundStyle(.green)
+        case .inThisChat:
+            Text("In this chat").font(.caption.weight(.semibold)).foregroundStyle(.green)
         }
     }
 
@@ -467,13 +473,19 @@ struct HTTPAgentContacts: AgentContactsServing, @unchecked Sendable {
         guard (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) == true else {
             throw AddAgentError.failed
         }
-        return Self.page(from: data)
+        // A 200 whose body can't be read is an error, never an empty last page.
+        guard let page = Self.page(from: data) else { throw AddAgentError.failed }
+        return page
     }
 
-    /// A contacts page: its agents, and `nextCursor` (null on the last page).
-    static func page(from data: Data) -> AgentContactsPage {
-        let json = try? JSONDecoder().decode(JSONValue.self, from: data)
-        let cursor = json?["nextCursor"]?.stringValue
+    /// A contacts page: its agents, and `nextCursor` (null on the last page). Nil when the body is not one: no JSON, or
+    /// no list of contacts in it.
+    static func page(from data: Data) -> AgentContactsPage? {
+        guard let json = try? JSONDecoder().decode(JSONValue.self, from: data),
+              json["contacts"]?.arrayValue != nil || json["items"]?.arrayValue != nil || json.arrayValue != nil else {
+            return nil
+        }
+        let cursor = json["nextCursor"]?.stringValue
         return AgentContactsPage(contacts: contacts(from: data), nextCursor: (cursor?.isEmpty ?? true) ? nil : cursor)
     }
 

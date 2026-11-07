@@ -676,9 +676,9 @@ struct RoomChatScreen: View {
         return role == "owner" || role.isEmpty
     }
 
-    /// Who is in the room now, by id (lowercased).
-    private var presentIds: Set<String> {
-        Set((coordinator.state.presence?.people ?? []).map { $0.id.lowercased() })
+    /// The agents in this chat, by id (lowercased): the roster's agents and boxes that have not ended, online or not.
+    private var memberAgentIds: Set<String> {
+        Set(roster.members.filter { $0.kind != .person && $0.status != .ended }.map { $0.id.lowercased() })
     }
 
     /// The agent requests People shows and counts: the room's owner's and an admin's only.
@@ -1132,7 +1132,7 @@ struct RoomChatScreen: View {
                 ticketsStartFiling = false
             }
         }
-        .modifier(RoomPeopleWatch(showsPeople: $showsPeople, presentIds: presentIds, agents: agentContactsModel,
+        .modifier(RoomPeopleWatch(showsPeople: $showsPeople, memberIds: memberAgentIds, agents: agentContactsModel,
                                   requests: peopleRequests, sessionId: route.sessionId))
         .onChange(of: showsBreakouts) { shown in if shown { CrashReporter.shared.note("breakouts opened") } }
         .onChange(of: choosesVoicePartner) { shown in if shown { CrashReporter.shared.note("talk opened") } }
@@ -1640,7 +1640,7 @@ private struct RoomMediaPresenters: ViewModifier {
 /// added from People, the People button's count read as the room opens, and People opened by a hosted test.
 private struct RoomPeopleWatch: ViewModifier {
     @Binding var showsPeople: Bool
-    let presentIds: Set<String>
+    let memberIds: Set<String>
     let agents: AgentContactsModel?
     let requests: AdmissionsCoordinator?
     let sessionId: String
@@ -1652,9 +1652,9 @@ private struct RoomPeopleWatch: ViewModifier {
                 CrashReporter.shared.note("people opened")
                 if let requests { Task { await requests.refresh() } }
             }
-            // An agent added from People is in the room once its presence shows it.
-            .onChange(of: presentIds) { agents?.presentIds = $0 }
-            .onAppear { agents?.presentIds = presentIds }
+            // The agents already in this chat (the roster) show as such, with no Add, online or not.
+            .onChange(of: memberIds) { agents?.memberIds = $0 }
+            .onAppear { agents?.memberIds = memberIds }
             .task(id: sessionId) {
                 if let requests { await requests.refresh() }
             }
