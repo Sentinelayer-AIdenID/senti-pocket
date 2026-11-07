@@ -41,12 +41,14 @@ private final class QuestionToken: @unchecked Sendable {
 
 private actor QuestionPreferencesStub: QuestionCallPreferencesAPI {
     var value = false
+    var reads = 0
     var writes: [Bool] = []
     var failure: RoomCallsClient.Failure?
     var readFailure: RoomCallsClient.Failure?
     var holdRead = false
     private var readWaiter: CheckedContinuation<Void, Never>?
     func preference() async throws -> Bool {
+        reads += 1
         if holdRead { await withCheckedContinuation { readWaiter = $0 } }
         if let readFailure { throw readFailure }
         return value
@@ -339,16 +341,17 @@ final class QuestionCallsClientTests: XCTestCase {
         let api = QuestionPreferencesStub()
         await api.holdNextRead()
         let preferences = QuestionCallPreferences(api: api)
-        let window = try HostedSummary.host(Form {
-            QuestionCallSettingsSection(preferences: preferences)
-            Text("Other settings").accessibilityIdentifier("question-test.other-settings")
-        })
+        let window = try HostedSummary.host(WhisperModelSettingsView(
+            coordinator: WhisperModelProvisioningCoordinator(), onSignOut: {},
+            offersModelFile: false, questionCallPreferences: preferences
+        ), height: 2_400)
         defer { HostedSummary.close(window) }
         guard HostedSummary.wait(for: "settings.questionCalls.enabled", in: window) != nil else {
             await api.releaseRead()
             return XCTFail("the loading section never appeared")
         }
         XCTAssertFalse(preferences.loaded)
+        attachSettingsImage(window, name: "settings-before-question-404")
         await api.failRead(.refused(404))
         await api.releaseRead()
         let deadline = Date().addingTimeInterval(5)
@@ -356,12 +359,63 @@ final class QuestionCallsClientTests: XCTestCase {
             await Task.yield()
             HostedSummary.pump(0.02)
         }
+        attachSettingsImage(window, name: "settings-after-question-404")
         XCTAssertTrue(preferences.unavailable)
         XCTAssertNil(HostedSummary.element("settings.questionCalls.enabled", in: window))
-        XCTAssertNotNil(HostedSummary.wait(for: "question-test.other-settings", in: window))
+        XCTAssertNotNil(HostedSummary.wait(for: "settings.account.sign-out", in: window))
         let labels = HostedSummary.elements(in: window).compactMap(\.accessibilityLabel)
         XCTAssertFalse(labels.contains("Question calls"))
         XCTAssertFalse(labels.contains { $0.contains("Off until you enable it") })
         XCTAssertFalse(labels.contains("Read call preferences"))
+    }
+
+    func test_signed_out_settings_never_reads_and_a_new_signed_in_scope_reads_again() async throws {
+        let api = QuestionPreferencesStub()
+        let preferences = QuestionCallPreferences(api: api)
+        let coordinator = WhisperModelProvisioningCoordinator()
+        func settings(signedIn: Bool) -> WhisperModelSettingsView {
+            let signOut: (@MainActor () -> Void)? = signedIn ? {} : nil
+            return WhisperModelSettingsView(coordinator: coordinator, onSignOut: signOut,
+                                            offersModelFile: false, questionCallPreferences: preferences)
+        }
+        let window = try HostedSummary.host(settings(signedIn: false), height: 2_400)
+        defer { HostedSummary.close(window) }
+        XCTAssertNotNil(HostedSummary.wait(for: "settings.inapp.sounds", in: window))
+        XCTAssertNil(HostedSummary.element("settings.questionCalls.enabled", in: window))
+        let none = await api.reads
+        XCTAssertEqual(none, 0)
+        let controller = try XCTUnwrap(window.rootViewController as? UIHostingController<WhisperModelSettingsView>)
+        for expectedReads in 1...2 {
+            controller.rootView = settings(signedIn: true)
+            XCTAssertNotNil(HostedSummary.wait(for: "settings.questionCalls.enabled", in: window))
+            let deadline = Date().addingTimeInterval(5)
+            while Date() < deadline {
+                let reads = await api.reads
+                if reads == expectedReads && preferences.loaded && !preferences.working { break }
+                await Task.yield()
+            }
+            let reads = await api.reads
+            XCTAssertEqual(reads, expectedReads, "each newly signed-in scope performs a fresh read")
+            XCTAssertTrue(preferences.loaded)
+            XCTAssertFalse(preferences.working)
+            controller.rootView = settings(signedIn: false)
+            let removalDeadline = Date().addingTimeInterval(5)
+            while Date() < removalDeadline && HostedSummary.element("settings.questionCalls.enabled", in: window) != nil {
+                await Task.yield()
+                HostedSummary.pump(0.02)
+            }
+            XCTAssertNil(HostedSummary.element("settings.questionCalls.enabled", in: window))
+            XCTAssertNotNil(HostedSummary.element("settings.inapp.sounds", in: window))
+        }
+    }
+
+    private func attachSettingsImage(_ window: UIWindow, name: String) {
+        let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        }
+        let attachment = XCTAttachment(image: image)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 }

@@ -141,33 +141,43 @@ final class QuestionCallPreferences: ObservableObject {
 }
 
 @MainActor
-struct QuestionCallSettingsSection: View {
+struct QuestionCallSettingsHost<Content: View>: View {
     @StateObject private var preferences: QuestionCallPreferences
+    private let content: (QuestionCallPreferences) -> Content
 
-    init(preferences: QuestionCallPreferences? = nil) {
+    init(preferences: QuestionCallPreferences? = nil,
+         @ViewBuilder content: @escaping (QuestionCallPreferences) -> Content) {
         _preferences = StateObject(wrappedValue: preferences ?? QuestionCallPreferences())
+        self.content = content
     }
 
     var body: some View {
-        Group {
-            if !preferences.unavailable {
-                Section {
-                    Toggle("Call me about unanswered questions", isOn: Binding(
-                        get: { preferences.enabled }, set: { value in Task { await preferences.save(value) } }
-                    ))
-                    .disabled(!preferences.loaded || preferences.working)
-                    .accessibilityIdentifier("settings.questionCalls.enabled")
-                    if !preferences.loaded, !preferences.working {
-                        Button("Read call preferences") { Task { await preferences.load() } }
-                    }
-                    if preferences.working { ProgressView() }
-                } header: {
-                    Text("Question calls")
-                } footer: {
-                    Text(preferences.notice ?? "Off until you enable it. Your agents can call once after a question waits 30 minutes, at most once every 30 minutes across your rooms. Your quiet hours apply.")
-                }
+        // Observe at the Form's scope so availability changes its section list.
+        // The signed-in branch owns this host, preserving the prior model lifetime.
+        content(preferences)
+            .task { await preferences.load() }
+    }
+}
+
+@MainActor
+struct QuestionCallSettingsSection: View {
+    @ObservedObject var preferences: QuestionCallPreferences
+
+    var body: some View {
+        Section {
+            Toggle("Call me about unanswered questions", isOn: Binding(
+                get: { preferences.enabled }, set: { value in Task { await preferences.save(value) } }
+            ))
+            .disabled(!preferences.loaded || preferences.working)
+            .accessibilityIdentifier("settings.questionCalls.enabled")
+            if !preferences.loaded, !preferences.working {
+                Button("Read call preferences") { Task { await preferences.load() } }
             }
+            if preferences.working { ProgressView() }
+        } header: {
+            Text("Question calls")
+        } footer: {
+            Text(preferences.notice ?? "Off until you enable it. Your agents can call once after a question waits 30 minutes, at most once every 30 minutes across your rooms. Your quiet hours apply.")
         }
-        .task { await preferences.load() }
     }
 }

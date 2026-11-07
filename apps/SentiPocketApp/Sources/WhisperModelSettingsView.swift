@@ -26,6 +26,7 @@ struct WhisperModelSettingsView: View {
     let onSignOut: (@MainActor () -> Void)?
     /// The model file's sections, picker and notices (`WhisperModelSettings.offersModelFile`).
     let offersModelFile: Bool
+    private let questionCallPreferences: QuestionCallPreferences?
 
     @Environment(\.dismiss) private var dismiss
     @State private var presentsPicker = false
@@ -40,7 +41,8 @@ struct WhisperModelSettingsView: View {
         directMessages: DirectMessagesCenter? = nil,
         calendar: CalendarSettingsContext? = nil,
         onSignOut: (@MainActor () -> Void)? = nil,
-        offersModelFile: Bool = WhisperModelSettings.offersModelFile
+        offersModelFile: Bool = WhisperModelSettings.offersModelFile,
+        questionCallPreferences: QuestionCallPreferences? = nil
     ) {
         _coordinator = ObservedObject(wrappedValue: coordinator)
         self.offersModelFile = offersModelFile
@@ -49,15 +51,26 @@ struct WhisperModelSettingsView: View {
         self.directMessages = directMessages
         self.calendar = calendar
         self.onSignOut = onSignOut
+        self.questionCallPreferences = questionCallPreferences
     }
 
     var body: some View {
+        if onSignOut != nil {
+            QuestionCallSettingsHost(preferences: questionCallPreferences) { preferences in
+                settings(questionPreferences: preferences)
+            }
+        } else {
+            settings(questionPreferences: nil)
+        }
+    }
+
+    private func settings(questionPreferences: QuestionCallPreferences?) -> some View {
         NavigationStack {
             Form {
                 inAppSection
                 notificationsSection
-                if onSignOut != nil {
-                    QuestionCallSettingsSection()
+                if let questionPreferences, !questionPreferences.unavailable {
+                    QuestionCallSettingsSection(preferences: questionPreferences)
                 }
                 if let directMessages {
                     DirectMessagesSettingsSection(center: directMessages)
