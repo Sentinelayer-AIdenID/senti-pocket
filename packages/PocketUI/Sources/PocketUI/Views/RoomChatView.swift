@@ -36,6 +36,10 @@ public struct RoomChatView: View {
     /// is not the reader asking for older history.
     @State private var holdsOlderLoads = false
     @State private var anchorBeforeOlderLoad: String?
+    /// The rows the list holds, from iOS 18 (`RoomRowWindow`), and the room they are of: another room's window is
+    /// never read for this one.
+    @State private var window = RoomRowWindow()
+    @State private var windowRoom = ""
     /// A message the reader was taken to (a link, notification, search result or pin). It stays in place through
     /// pages loading above or below it and messages arriving, until the reader scrolls.
     @State private var heldAnchor: String?
@@ -337,23 +341,26 @@ public struct RoomChatView: View {
     }
 
     private var timeline: some View {
-        ScrollViewReader { proxy in
+        let shown = shownRows
+        RenderTrace.heldRoomRows(shown.count)
+        return ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    olderHistoryHeader
-                    // One view per row, always. Unwrapped, a row made none (a folded file part), one, two (a turn break
-                    // and its message) or more (file cards), and a lazy list that cannot tell how many builds every row
-                    // of the room, on screen or not, at every layout pass, to count them. Carter's phone froze inside
-                    // that walk (11-04 and 11-05: 12 to 13.5 s in a lazy list's placement, going item by item). Wrapped,
-                    // the list builds only the rows it shows. Spacing 0, as the list's own, so nothing moves.
+                RoomTimelineStack {
+                    olderHistoryHeader(above: shown.lowerBound > 0)
+                    // One view per row, always (`RoomTimelineItem`). Unwrapped, a row made none (a folded file part),
+                    // one, two (a turn break and its message) or more (file cards), and a lazy list that cannot tell how
+                    // many builds every row of the room, on screen or not, at every layout pass, to count them. Carter's
+                    // phone froze inside that walk (11-04 and 11-05: 12 to 13.5 s in a lazy list's placement, going item
+                    // by item). Spacing 0, as the list's own, so nothing moves.
                     // A row's id is the loop's own (`RoomChatRow.id`), which every scroll to a row targets. No `.id`
                     // of the same value on the row: with one, the list kept every row it made as it opened and built
-                    // them all again at each update (in CI 404 of 404 at every redraw and arrival), as master did.
-                    ForEach(state.rows) { row in
-                        VStack(alignment: .leading, spacing: 0) {
-                            rowView(row, proxy: proxy)
-                        }
+                    // them all again at each update (in CI 404 of 404 at every redraw and arrival).
+                    // Each row is drawn again only when what it shows changed: from iOS 18 the list holds every row of
+                    // its window, and an update makes again only the rows it changed.
+                    ForEach(state.rows[shown]) { row in
+                        item(row, proxy: proxy).equatable()
                     }
+                    newerRowsEdge(shown)
                     ForEach(state.pending) { pending in
                         RoomPendingRowView(
                             row: pending,
@@ -371,16 +378,22 @@ public struct RoomChatView: View {
                         RoomMediaOutgoingList(board: media)
                     }
                     newerHistoryFooter
-                    if !state.composingAgents.isEmpty, !state.canLoadNewer {
+                    if !state.composingAgents.isEmpty, !state.canLoadNewer, reachesNewest {
                         RoomComposingLine(agents: state.composingAgents)
                     }
                     Color.clear
                         .frame(height: 1)
                         .id(Self.bottomId)
-                        // The bottom of a window further back is not the live room's bottom. The marker only reports:
-                        // the reader's place changes after layout (`markerSeen`).
-                        .onAppear { if !state.canLoadNewer, heldAnchor == nil { markerSeen(true) } }
-                        .onDisappear { markerSeen(false) }
+                        // The bottom of a window further back, or of rows held short of the newest, is not the live
+                        // room's bottom. The marker only reports: the reader's place changes after layout
+                        // (`markerSeen`).
+                        .roomSeen { seen in
+                            if !seen {
+                                markerSeen(false)
+                            } else if !state.canLoadNewer, heldAnchor == nil, reachesNewest {
+                                markerSeen(true)
+                            }
+                        }
                 }
                 .padding(.horizontal, 12)
                 .padding(.bottom, 8)
@@ -405,7 +418,7 @@ public struct RoomChatView: View {
                 if heldAnchor != nil { heldAnchor = nil }
             })
             .overlay(alignment: .bottomTrailing) {
-                if !readerAtBottom || state.canLoadNewer {
+                if !readerAtBottom || state.canLoadNewer || !reachesNewest {
                     jumpToLatestButton(proxy: proxy)
                 }
             }
@@ -444,8 +457,19 @@ public struct RoomChatView: View {
                 }
             }
             .onAppear {
+                holdWindow(rowsWatch)
                 scrollToInitialPosition(proxy)
                 focus(onRow: focusRowId, proxy: proxy)
+            }
+            // The rows loading, arriving or taken away: the window is held by its messages, and put back at the
+            // newest rows once it holds the most it can with the reader there. Carries the rows (see below).
+            .onChange(of: rowsWatch) { now in holdWindow(now) }
+            // A page shown above or below: the reader stays on the row they were at, in this same update, so the page
+            // never shows where they were. Every row above is measured: the scroll lands exactly.
+            .onChange(of: heldWindow) { _ in
+                guard let keep = bottomWatch.keep else { return }
+                bottomWatch.keep = nil
+                proxy.scrollTo(keep.row, anchor: keep.anchor)
             }
             // The new value carries what the action needs: an `onChange(of:perform:)` action can still see the
             // view's previous `state`, where a focus set while the room is open is not there yet.
@@ -497,12 +521,14 @@ public struct RoomChatView: View {
                 }
             }
             .onChange(of: state.firstMessageId) { _ in
-                // Older rows were prepended: keep the row the reader was looking at in place.
+                // Older rows were prepended: keep the row the reader was looking at in place. A window of rows still
+                // starts where the reader is: nothing moved, and a page of the new rows is shown from the rows
+                // themselves (`holdWindow`).
                 if let heldAnchor {
                     proxy.scrollTo(heldAnchor, anchor: .center)
                     anchorBeforeOlderLoad = nil
                 } else if let anchor = anchorBeforeOlderLoad {
-                    proxy.scrollTo(anchor, anchor: .top)
+                    if !Self.holdsWindow { proxy.scrollTo(anchor, anchor: .top) }
                     anchorBeforeOlderLoad = nil
                 }
             }
@@ -511,6 +537,7 @@ public struct RoomChatView: View {
                 guard !canLoadNewer, scrollsToLatestWhenLoaded else { return }
                 scrollsToLatestWhenLoaded = false
                 setReaderAtBottom(true)
+                holdNewest()
                 DispatchQueue.main.async { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
             }
             // A list starts at its newest rows, not at its top (iOS 18 and later; before that, the first scroll takes
@@ -530,12 +557,104 @@ public struct RoomChatView: View {
         anchorBeforeOlderLoad = nil
         didInitialScroll = false
         holdsOlderLoads = true
+        holdNewest()
         listEpoch += 1
     }
 
+    // MARK: - The rows the list holds
+
+    /// The list holds a window of the room's rows (`RoomRowWindow`), every one of them built: from iOS 18, where a row
+    /// can tell it is in view without the list being lazy (`RoomSeen`). Before, a lazy list of every row, as always.
+    private static var holdsWindow: Bool {
+        if #available(iOS 18.0, macOS 15.0, *) {
+            return true
+        } else {
+            return false
+        }
+    }
+
+    /// The window, when it is this room's.
+    private var heldWindow: RoomRowWindow { windowRoom == state.sessionId ? window : RoomRowWindow() }
+
+    /// The rows the list holds, as a range of the room's rows.
+    private var shownRows: Range<Int> {
+        Self.holdsWindow ? heldWindow.range(in: state.rows) : 0..<state.rows.count
+    }
+
+    /// The list holds the room's newest row: its bottom is the live room's.
+    private var reachesNewest: Bool { shownRows.upperBound == state.rows.count }
+
+    private var rowsWatch: RoomRowsWatch {
+        RoomRowsWatch(room: state.sessionId, rows: state.rows, canLoadNewer: state.canLoadNewer)
+    }
+
+    private func hold(_ next: RoomRowWindow, room: String? = nil) {
+        guard Self.holdsWindow else { return }
+        let room = room ?? state.sessionId
+        if windowRoom != room { windowRoom = room }
+        if window != next { window = next }
+    }
+
+    /// The newest rows, held once the rows are next read.
+    private func holdNewest() {
+        bottomWatch.keep = nil
+        bottomWatch.olderAskedAt = nil
+        hold(RoomRowWindow())
+    }
+
+    /// Holds the window by its messages once there are rows to hold; shows a page of the older rows the room asked for
+    /// once they have landed above it; and puts the room back at its newest rows as a new list once the window has
+    /// grown to the most it holds with the reader at the bottom, so rows above are never let go under the reader.
+    private func holdWindow(_ now: RoomRowsWatch) {
+        guard Self.holdsWindow else { return }
+        let current = windowRoom == now.room ? window : RoomRowWindow()
+        if !current.isHeld {
+            hold(current.held(in: now.rows), room: now.room)
+        } else if let asked = bottomWatch.olderAskedAt, now.rows.first?.id != asked,
+                  let page = current.older(in: now.rows) {
+            bottomWatch.olderAskedAt = nil
+            bottomWatch.keep = page.keep.map { RoomBottomWatch.Keep(row: $0, anchor: .top) }
+            hold(page.window, room: now.room)
+        } else if current.isFull(in: now.rows), readerAtBottom, heldAnchor == nil, !now.canLoadNewer, didInitialScroll {
+            reopenAtLatest()
+        }
+    }
+
+    /// The rows above the window, a page of them, the reader staying on the first message they had.
+    private func showOlder() {
+        guard let page = heldWindow.older(in: state.rows) else { return }
+        bottomWatch.keep = page.keep.map { RoomBottomWatch.Keep(row: $0, anchor: .top) }
+        hold(page.window)
+    }
+
+    /// The rows below the window, a page of them; when rows at the top are let go, the reader stays on the last message
+    /// they had.
+    private func showNewer() {
+        guard let page = heldWindow.newer(in: state.rows) else { return }
+        bottomWatch.olderAskedAt = nil
+        bottomWatch.keep = page.keep.map { RoomBottomWatch.Keep(row: $0, anchor: .bottom) }
+        hold(page.window)
+    }
+
+    /// Holds the window around `rowId` when the list does not hold that row (a message the reader is taken to).
+    private func holdAround(_ rowId: String) {
+        guard Self.holdsWindow, !state.rows[shownRows].contains(where: { $0.id == rowId }) else { return }
+        bottomWatch.keep = nil
+        hold(.around(rowId, above: RoomRowWindow.aboveMessage))
+    }
+
+    /// Above the rows: the room's rows above the window, shown a page at a time as the reader reaches them; else the
+    /// room's older history, loaded as the reader reaches it; else the room's start.
     @ViewBuilder
-    private var olderHistoryHeader: some View {
-        if state.isLoadingOlder {
+    private func olderHistoryHeader(above: Bool) -> some View {
+        if above {
+            Button("Load earlier messages") { showOlder() }
+                .font(.footnote.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .roomSeen { seen in if seen, didInitialScroll, !holdsOlderLoads { showOlder() } }
+                .accessibilityIdentifier("pocket.room.loadOlder")
+        } else if state.isLoadingOlder {
             ProgressView("Loading earlier messages")
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 12)
@@ -544,7 +663,7 @@ public struct RoomChatView: View {
                 .font(.footnote.weight(.semibold))
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 12)
-                .onAppear { if didInitialScroll, !holdsOlderLoads { loadOlder() } }
+                .roomSeen { seen in if seen, didInitialScroll, !holdsOlderLoads { loadOlder() } }
                 .accessibilityIdentifier("pocket.room.loadOlder")
         } else {
             Text("Start of the room")
@@ -556,52 +675,27 @@ public struct RoomChatView: View {
         }
     }
 
-    @ViewBuilder
-    private func rowView(_ row: RoomChatRow, proxy: ScrollViewProxy) -> some View {
-        let _ = RenderTrace.built(.roomRow)
-        switch row {
-        case .dayHeader(_, let label):
-            Text(label)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(PocketPalette.textSecondary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
-                .background(PocketPalette.inset, in: Capsule())
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
-        case .unreadDivider:
-            HStack(spacing: 8) {
-                Rectangle().fill(PocketPalette.danger).frame(height: 1)
-                Text("New messages")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(PocketPalette.danger)
-                Rectangle().fill(PocketPalette.danger).frame(height: 1)
-            }
-            .padding(.vertical, 8)
-            .accessibilityIdentifier("pocket.room.unreadDivider")
-        case .message(let message):
-            // A part of a file posted as base64 folds behind the file's card, unless its thread's parts are shown.
-            if message.filePartOf.map(shownFileParts.contains) ?? true {
-                messageRow(message, proxy: proxy)
-            }
-            ForEach(message.files) { card in
-                RoomFileCardView(card: card, showsParts: shownFileParts.contains(card.thread)) {
-                    if shownFileParts.contains(card.thread) {
-                        shownFileParts.remove(card.thread)
-                    } else {
-                        shownFileParts.insert(card.thread)
-                    }
+    /// One row of the list (`RoomTimelineItem`), made again only when what it shows changed.
+    private func item(_ row: RoomChatRow, proxy: ScrollViewProxy) -> RoomTimelineItem {
+        guard case .message(let message) = row else { return RoomTimelineItem(row: row) }
+        // A part of a file posted as base64 folds behind the file's card, unless its thread's parts are shown.
+        let shown = message.filePartOf.map(shownFileParts.contains) ?? true
+        return RoomTimelineItem(
+            row: row,
+            messageView: shown ? messageRow(message, proxy: proxy) : nil,
+            partsShown: shownFileParts.intersection(message.files.map(\.thread)),
+            toggleParts: { thread in
+                if shownFileParts.contains(thread) {
+                    shownFileParts.remove(thread)
+                } else {
+                    shownFileParts.insert(thread)
                 }
-                .padding(.vertical, 6)
-            }
-        }
+            },
+            onScreen: { isOnScreen in send(.messageOnScreen(id: message.id, isOnScreen: isOnScreen)) }
+        )
     }
 
-    @ViewBuilder
-    private func messageRow(_ message: RoomChatMessageRow, proxy: ScrollViewProxy) -> some View {
-        if message.startsTurn {
-            RoomTurnBreak(date: message.date)
-        }
+    private func messageRow(_ message: RoomChatMessageRow, proxy: ScrollViewProxy) -> RoomMessageRowView {
         RoomMessageRowView(
             row: message,
             ownHandles: state.ownMentionHandles,
@@ -653,17 +747,13 @@ public struct RoomChatView: View {
             },
             send: send
         )
-        // Drawn again only when what it shows changed (`RoomMessageRowView.==`).
-        .equatable()
-        .onAppear { send(.messageOnScreen(id: message.id, isOnScreen: true)) }
-        .onDisappear { send(.messageOnScreen(id: message.id, isOnScreen: false)) }
     }
 
     /// Below a window further back: the next newer page loads when this comes into view (its identity follows the
     /// newest row, so it asks again after each page while it stays in view).
     @ViewBuilder
     private var newerHistoryFooter: some View {
-        if state.canLoadNewer {
+        if state.canLoadNewer, reachesNewest {
             Group {
                 if state.isLoadingNewer {
                     ProgressView("Loading newer messages")
@@ -675,7 +765,23 @@ public struct RoomChatView: View {
             .frame(maxWidth: .infinity)
             .padding(.vertical, 12)
             .id("newer-history:\(state.lastMessageId ?? "")")
-            .onAppear { send(.loadNewer) }
+            .roomSeen { seen in if seen { send(.loadNewer) } }
+        }
+    }
+
+    /// Below rows held short of the room's newest (the reader went up the room and its bottom was let go): the rows
+    /// below, shown a page at a time as the reader reaches them. Its identity follows the last row held, so it asks
+    /// again after each page while it stays in view.
+    @ViewBuilder
+    private func newerRowsEdge(_ shown: Range<Int>) -> some View {
+        if shown.upperBound < state.rows.count, shown.upperBound > 0 {
+            Button("Load newer messages") { showNewer() }
+                .font(.footnote.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .roomSeen { seen in if seen, didInitialScroll { showNewer() } }
+                .accessibilityIdentifier("pocket.room.loadNewerRows")
+                .id("newer-rows:\(state.rows[shown.upperBound - 1].id)")
         }
     }
 
@@ -692,6 +798,11 @@ public struct RoomChatView: View {
             // only its newest rows, then the jump is at once.
             if state.jumpDownKeepsLatest {
                 send(.keepLatestForJumpDown)
+                reopenAtLatest()
+                return
+            }
+            // Rows held short of the newest: the newest rows as a new list, never a scroll down past the rest.
+            if !reachesNewest {
                 reopenAtLatest()
                 return
             }
@@ -746,6 +857,8 @@ public struct RoomChatView: View {
     private func loadOlder() {
         guard state.canLoadOlder, !state.isLoadingOlder else { return }
         anchorBeforeOlderLoad = state.firstMessageId.map { "msg:\($0)" }
+        // The page shows above the window once its rows are there (`holdWindow`).
+        if Self.holdsWindow { bottomWatch.olderAskedAt = state.rows.first?.id }
         send(.loadOlder)
     }
 
@@ -759,6 +872,11 @@ public struct RoomChatView: View {
         // and a reader who is not at the bottom must not be pulled down by the next message.
         let opensAtLine = position == .unreadLine
         setReaderAtBottom(!opensAtLine)
+        if opensAtLine, Self.holdsWindow {
+            // The line, with a little of what was read above it, and what came after it.
+            bottomWatch.keep = nil
+            hold(.around(RoomChatRow.unreadDivider.id, above: RoomRowWindow.aboveLine))
+        }
         DispatchQueue.main.async {
             if opensAtLine {
                 proxy.scrollTo(RoomChatRow.unreadDivider.id, anchor: Self.unreadLineAnchor)
@@ -845,6 +963,7 @@ public struct RoomChatView: View {
             return
         }
         setReaderAtBottom(true)
+        if !reachesNewest { holdNewest() }
         DispatchQueue.main.async {
             withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
         }
@@ -859,6 +978,7 @@ public struct RoomChatView: View {
     /// Brings the focused message's row into view, highlights it, and reports it handled.
     private func focus(onRow rowId: String?, proxy: ScrollViewProxy) {
         guard let rowId else { return }
+        holdAround(rowId)
         didInitialScroll = true
         // Reading a message elsewhere in the room: new messages must not pull the view down, and pages loading
         // around it must not move it, until the reader scrolls.
@@ -882,8 +1002,14 @@ public struct RoomChatView: View {
         }
         setReaderAtBottom(false)
         heldAnchor = target.id
-        withAnimation(.easeInOut(duration: 0.25)) {
-            proxy.scrollTo(target.id, anchor: .center)
+        if Self.holdsWindow, !state.rows[shownRows].contains(where: { $0.id == target.id }) {
+            // Loaded but not held: the window is put around it, and the scroll made once its rows are in the list.
+            holdAround(target.id)
+            bottomWatch.keep = RoomBottomWatch.Keep(row: target.id, anchor: .center)
+        } else {
+            withAnimation(.easeInOut(duration: 0.25)) {
+                proxy.scrollTo(target.id, anchor: .center)
+            }
         }
         highlightedRowId = target.id
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
@@ -915,6 +1041,110 @@ private final class RoomBottomWatch {
     var isActive = true
     /// The reader has dragged the list since it opened.
     var readerScrolled = false
+    /// The row the reader stays on once the window's new rows are in the list, and where on the screen.
+    var keep: Keep?
+    /// The room's first row when it was asked for older messages: once its rows start elsewhere, they have landed.
+    var olderAskedAt: String?
+
+    struct Keep {
+        let row: String
+        let anchor: UnitPoint
+    }
+}
+
+/// What the window watches of the room (`RoomChatView.holdWindow`): which room, and how many rows it has and where they
+/// start and end, so rows loading, arriving or taken away are seen and an edit is not. It carries the rows themselves:
+/// an `onChange(of:perform:)` action can still see the view's previous state.
+private struct RoomRowsWatch: Equatable {
+    let room: String
+    let rows: [RoomChatRow]
+    let canLoadNewer: Bool
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.room == rhs.room && lhs.canLoadNewer == rhs.canLoadNewer && lhs.rows.count == rhs.rows.count
+            && lhs.rows.first?.id == rhs.rows.first?.id && lhs.rows.last?.id == rhs.rows.last?.id
+    }
+}
+
+/// The room's rows: from iOS 18 every row of the window built at once, so each is measured and a scroll to one lands
+/// exactly. A lazy list placing rows by estimated heights is where the room froze, and where it opened blank after Jump
+/// to latest. Before iOS 18 a row cannot tell it is in view unless the list is lazy (`RoomSeen`): a lazy list, as always.
+private struct RoomTimelineStack<Content: View>: View {
+    let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        if #available(iOS 18.0, macOS 15.0, *) {
+            VStack(alignment: .leading, spacing: 0) { content }
+        } else {
+            LazyVStack(alignment: .leading, spacing: 0) { content }
+        }
+    }
+}
+
+/// One row of the room's list. Drawn again only when what it shows changed (`==`): the list holds every row of its
+/// window, and an update makes again only the rows it changed (`RenderTrace.built(.roomRow)` counts each one made).
+private struct RoomTimelineItem: View, Equatable {
+    let row: RoomChatRow
+    /// The message's own view as the room made it; nil for a day, the unread line, or a folded file part.
+    var messageView: RoomMessageRowView?
+    /// This row's file threads whose parts are shown.
+    var partsShown: Set<Int64> = []
+    var toggleParts: (Int64) -> Void = { _ in }
+    /// The message came into view, or left it.
+    var onScreen: (Bool) -> Void = { _ in }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.row == rhs.row && lhs.messageView == rhs.messageView && lhs.partsShown == rhs.partsShown
+    }
+
+    var body: some View {
+        let _ = RenderTrace.built(.roomRow)
+        // One view per row, always.
+        VStack(alignment: .leading, spacing: 0) {
+            switch row {
+            case .dayHeader(_, let label):
+                Text(label)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(PocketPalette.textSecondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(PocketPalette.inset, in: Capsule())
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+            case .unreadDivider:
+                HStack(spacing: 8) {
+                    Rectangle().fill(PocketPalette.danger).frame(height: 1)
+                    Text("New messages")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(PocketPalette.danger)
+                    Rectangle().fill(PocketPalette.danger).frame(height: 1)
+                }
+                .padding(.vertical, 8)
+                .accessibilityIdentifier("pocket.room.unreadDivider")
+            case .message(let message):
+                if let messageView {
+                    if message.startsTurn {
+                        RoomTurnBreak(date: message.date)
+                    }
+                    // Drawn again only when what it shows changed (`RoomMessageRowView.==`). Seen once enough of it
+                    // shows: what reads the room and sends receipts.
+                    messageView
+                        .equatable()
+                        .roomSeen(threshold: RoomSeen.messageThreshold, onScreen)
+                }
+                ForEach(message.files) { card in
+                    RoomFileCardView(card: card, showsParts: partsShown.contains(card.thread)) {
+                        toggleParts(card.thread)
+                    }
+                    .padding(.vertical, 6)
+                }
+            }
+        }
+    }
 }
 
 /// A thread summary opened whole: its read-aloud id (so the sheet shows Stop while it is read) and the summary.

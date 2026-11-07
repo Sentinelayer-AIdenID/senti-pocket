@@ -10,7 +10,8 @@ import Foundation
 public enum RenderTrace {
     /// A long list whose items are counted as they are built.
     public enum List: Sendable {
-        /// The room's timeline: one item per row of the room.
+        /// The room's timeline: one item per row of the room, counted when the row is made (drawn anew because what it
+        /// shows changed, or first shown).
         case roomRow
         /// The side panel's rooms and direct messages.
         case sidePanel
@@ -38,6 +39,8 @@ public enum RenderTrace {
     private static var threadRepliesBuilt: Set<String> = []
     private static var recordsThreadReplies = false
     private static var furthestStrip = -1
+    private static var roomRowsNow = 0
+    private static var roomRowsMost = 0
 
     /// One row drawn (its body evaluated).
     public static func row(_ sequenceId: Int64) {
@@ -109,6 +112,29 @@ public enum RenderTrace {
     public static func resetStripPhotos() {
         lock.lock()
         furthestStrip = -1
+        lock.unlock()
+    }
+
+    /// The room's list holds `count` rows now: a window of the room's rows, where it holds every row it shows
+    /// (`RoomRowWindow`), else every row.
+    public static func heldRoomRows(_ count: Int) {
+        lock.lock()
+        roomRowsNow = count
+        roomRowsMost = max(roomRowsMost, count)
+        lock.unlock()
+    }
+
+    /// The rows the room's list holds now, and the most it has held since `resetHeldRoomRows()`; safe from any thread.
+    public static func roomRowsHeld() -> (now: Int, most: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (roomRowsNow, roomRowsMost)
+    }
+
+    /// Starts the most rows held again from what the room's list holds now.
+    public static func resetHeldRoomRows() {
+        lock.lock()
+        roomRowsMost = roomRowsNow
         lock.unlock()
     }
 
