@@ -19,9 +19,11 @@ private final class FakeRoomFolders: RoomFoldersServing, RoomFolderPinsServing, 
     /// Holds the next list read or move until the test lets it go (a slow link).
     private var _holdNextList = false
     private var _holdNextMove = false
+    private var _didHold: (() -> Void)?
     private var held: [CheckedContinuation<Void, Never>] = []
     var holdNextList: Bool { get { lock.withLock { _holdNextList } } set { lock.withLock { _holdNextList = newValue } } }
     var holdNextMove: Bool { get { lock.withLock { _holdNextMove } } set { lock.withLock { _holdNextMove = newValue } } }
+    var didHold: (() -> Void)? { get { lock.withLock { _didHold } } set { lock.withLock { _didHold = newValue } } }
     var holding: Int { lock.withLock { held.count } }
 
     func releaseHeld() {
@@ -39,7 +41,13 @@ private final class FakeRoomFolders: RoomFoldersServing, RoomFolderPinsServing, 
         }
         guard hold else { return }
         lock.withLock { self[keyPath: flag] = false }
-        await withCheckedContinuation { continuation in lock.withLock { held.append(continuation) } }
+        await withCheckedContinuation { continuation in
+            let notify = lock.withLock {
+                held.append(continuation)
+                return _didHold
+            }
+            notify?()
+        }
     }
 
     func setFolders(_ folders: [RoomFolder]) { lock.withLock { _folders = folders } }
@@ -573,6 +581,65 @@ final class RoomFoldersCenterTests: XCTestCase {
         folders.setPinAccountId(nil)
         XCTAssertFalse(folders.canChangePins)
         XCTAssertTrue(RoomFolderPinsPresentation.isAvailable(folders.items ?? []), "sign-in readiness is not a server capability")
+    }
+
+    /// Resolving the first pin identity must not discard the ordinary read that the root already started.
+    func test_initial_pin_identity_keeps_an_inflight_folder_read_and_its_freshness() async {
+        let fake = FakeRoomFolders(three)
+        let folders = RoomFoldersCenter(client: fake, onRoomsChanged: {}, pinClient: fake)
+        let held = expectation(description: "the initial ordinary folder read is in flight")
+        fake.didHold = { held.fulfill() }
+        fake.holdNextList = true
+        let read = Task { await folders.refresh() }
+        await fulfillment(of: [held], timeout: 1)
+
+        folders.setPinAccountId("account-a")
+        fake.releaseHeld()
+        let loaded = await read.value
+        XCTAssertTrue(loaded, "finding this root's identity does not make its folder response obsolete")
+        XCTAssertEqual(folders.items?.map(\.id), three.map(\.id))
+        await folders.refresh(ifOlderThan: 15)
+        XCTAssertEqual(fake.calls, ["list"], "opening the panel keeps the just-read folders fresh")
+    }
+
+    func test_a_changed_or_cleared_known_pin_account_still_discards_an_ordinary_read() async {
+        for nextAccount in ["account-b", nil] as [String?] {
+            let fake = FakeRoomFolders(three)
+            let folders = center(fake)
+            let held = expectation(description: "an old account's ordinary folder read is in flight")
+            fake.didHold = { held.fulfill() }
+            fake.holdNextList = true
+            let read = Task { await folders.refresh() }
+            await fulfillment(of: [held], timeout: 1)
+
+            folders.setPinAccountId(nextAccount)
+            fake.releaseHeld()
+            let loaded = await read.value
+            XCTAssertFalse(loaded)
+            XCTAssertNil(folders.items, "an old account's response is never applied")
+            XCTAssertEqual(fake.calls, ["list"])
+        }
+    }
+
+    func test_an_old_pin_reload_stays_obsolete_after_signout_and_the_same_account_returns() async throws {
+        let initial = [RoomFolder(id: "a", name: "Work", position: 0, supportsPinning: true)]
+        let fake = FakeRoomFolders(initial)
+        let folders = center(fake)
+        await folders.refresh()
+        fake.setFolders([RoomFolder(id: "a", name: "Work", position: 0, pinnedPosition: 0, supportsPinning: true)])
+        let held = expectation(description: "the old account's pin reload is in flight")
+        fake.didHold = { held.fulfill() }
+        fake.holdNextList = true
+        let read = Task { try await folders.refreshPins(accountId: "account-a") }
+        await fulfillment(of: [held], timeout: 1)
+
+        folders.setPinAccountId(nil)
+        folders.setPinAccountId("account-a")
+        fake.releaseHeld()
+        let loaded = try await read.value
+        XCTAssertFalse(loaded, "the read revision still fences an old response after the account returns")
+        XCTAssertEqual(folders.folders, initial)
+        XCTAssertEqual(fake.calls, ["list", "list"], "no further account's GET is started")
     }
 
     /// Mutants: publish pin busy/account state through the root's center, or clear an already nil notice on a pin.

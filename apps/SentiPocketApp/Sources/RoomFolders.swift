@@ -73,9 +73,11 @@ final class RoomFoldersCenter: ObservableObject {
 
     func setPinAccountId(_ value: String?) {
         guard pinAccountId != value else { return }
+        // The first identity belongs to this already signed-in root: keep its ordinary folder read and freshness.
+        // Replacing or clearing a known account still invalidates every older ordinary or pin list response.
+        if pinAccountId != nil { readRevision += 1 }
         pinAccountId = value
         pinControls.setAvailable(canChangePins)
-        readRevision += 1
     }
 
     /// The tree of your folders, for the pickers and the menus: made when one opens.

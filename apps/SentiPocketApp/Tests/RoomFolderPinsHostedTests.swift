@@ -55,12 +55,14 @@ final class RoomFolderPinsHostedTests: XCTestCase {
     }
 
     /// Mutant: stop observing the isolated controls in the panel wrapper. The real group and progress never update.
-    func test_pin_controls_update_the_existing_panel_without_replacing_its_placement() throws {
+    func test_pin_controls_update_the_existing_panel_without_replacing_its_placement() async throws {
         let controls = RoomFolderPinControls()
         let folder = RoomFolderItem(id: "pin-fixture", name: "Planning", position: 0,
                                     pinnedPosition: 0, supportsPinning: true)
         let placement = SidePanelPlacement(rooms: [], folders: [folder])
+        var deliveredStates: [String] = []
         let window = try HostedSummary.host(RoomFolderPinControlsView(controls: controls) { saving, available in
+            let _ = deliveredStates.append("saving=\(saving), available=\(available)")
             PocketSidePanel(
                 placement: placement, currentRoomId: nil, unreadNotifications: 0, accountName: "Member",
                 theme: .constant(.system), onSelectRoom: { _ in }, onAllRooms: {}, onNotifications: {}, onCalls: {},
@@ -68,19 +70,44 @@ final class RoomFolderPinsHostedTests: XCTestCase {
             )
         })
         defer { HostedSummary.close(window) }
-        XCTAssertNotNil(HostedSummary.wait(for: "pocket.drawer.folder.pin-fixture.menu", in: window))
+        let menu = try await waitForElement(in: window) {
+            HostedSummary.identifier(of: $0) == "pocket.drawer.folder.pin-fixture.menu"
+        }
+        XCTAssertNotNil(menu)
         XCTAssertNil(HostedSummary.element("pocket.drawer.pinnedFolders", in: window))
 
         controls.setAvailable(true)
-        XCTAssertNotNil(HostedSummary.wait(for: "pocket.drawer.pinnedFolders", in: window))
+        let group = try await waitForElement(in: window) {
+            HostedSummary.identifier(of: $0) == "pocket.drawer.pinnedFolders"
+        }
+        XCTAssertNotNil(group, "delivered states: \(deliveredStates); identifiers: \(HostedSummary.identifiers(in: window))")
         controls.setSaving(true)
-        HostedSummary.pump(0.3)
-        XCTAssertTrue(HostedSummary.elements(in: window).contains { $0.accessibilityLabel == "Saving pinned folders" })
+        let progress = try await waitForElement(in: window, timeout: 0.3) {
+            $0.accessibilityLabel == "Saving pinned folders"
+        }
+        XCTAssertNotNil(progress, "delivered states: \(deliveredStates); identifiers: \(HostedSummary.identifiers(in: window))")
         controls.setSaving(false)
         controls.setAvailable(false)
-        HostedSummary.pump(0.3)
+        let end = Date().addingTimeInterval(0.3)
+        while HostedSummary.element("pocket.drawer.pinnedFolders", in: window) != nil, Date() < end {
+            await Task.yield()
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
         XCTAssertNil(HostedSummary.element("pocket.drawer.pinnedFolders", in: window))
         XCTAssertEqual(placement.builds, 1, "control state never runs folder placement again")
+    }
+
+    /// Yield the test's main-actor task while SwiftUI delivers an observed value and updates accessibility.
+    /// Keep the same deadline as the synchronous hosted wait; the controls must still appear in the real panel.
+    private func waitForElement(in window: UIWindow, timeout: TimeInterval = 15,
+                                matching: (NSObject) -> Bool) async throws -> NSObject? {
+        let end = Date().addingTimeInterval(timeout)
+        while true {
+            if let element = HostedSummary.elements(in: window).first(where: matching) { return element }
+            if Date() >= end { return nil }
+            await Task.yield()
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
     }
 
     func test_the_actual_pinned_group_scrolls_at_phone_width_in_light_and_dark() throws {
