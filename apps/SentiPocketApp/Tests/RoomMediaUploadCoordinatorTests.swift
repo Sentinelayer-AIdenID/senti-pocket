@@ -2,6 +2,9 @@ import Combine
 import Foundation
 import PocketSyncClient
 import PocketUI
+import PocketVoice
+import SwiftUI
+import UIKit
 import XCTest
 @testable import SentiPocketApp
 
@@ -474,6 +477,138 @@ final class RoomMediaUploadCoordinatorTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 100_000_000)
         XCTAssertTrue(uploader.posts.isEmpty, "and nothing is posted")
     }
+
+    // MARK: The AI question waiting for the room's screen (ticket 02a80e6f)
+
+    #if DEBUG
+    /// Retry tapped while no screen shows the room (the media asks its question as state, which the room's screen takes
+    /// when it shows): the question waits, and nothing of the message goes, however long. Once the room's screen shows,
+    /// it asks; until the person answers nothing goes, and only their OK sends it.
+    ///
+    /// Mutant it must catch: a question with no screen to ask it taken as yes.
+    func test_a_question_asked_with_no_screen_holds_the_message_until_a_screen_asks_and_the_person_says_ok() throws {
+        let consent = AIConsent(account: nil)
+        let held = try heldForTheQuestion(consent)
+        let media = held.media, uploader = held.uploader
+        let puts = uploader.puts.count
+
+        // No screen shows the room: the question waits, and nothing goes.
+        HostedSummary.pump(1.5)
+        XCTAssertNotNil(media.consentRequest, "the question waits for a screen")
+        XCTAssertFalse(consent.isGiven, "no answer is taken as yes")
+        XCTAssertEqual(uploader.puts.count, puts, "no file goes")
+        XCTAssertTrue(uploader.posts.isEmpty, "no message goes")
+        XCTAssertEqual(media.board.outgoing.first?.canRetry, true, "it stays held, with Retry")
+
+        // The room's screen shows: it asks.
+        let window = try HostedSummary.host(AnyView(consentScreen(held.session, consent)))
+        defer { HostedSummary.close(window) }
+        let ok = HostedSummary.wait(for: "pocket.aiConsent.ok", in: window)
+        XCTAssertNotNil(ok, "the room's screen asks the waiting question: \(HostedSummary.identifiers(in: window))")
+        // The screen gave the room its own uploader (none, with no sender): this one lets a file go again, so anything
+        // sent from here would show.
+        media.updateUploader(uploader)
+        XCTAssertNil(media.consentRequest, "taken by the screen that asks it")
+        HostedSummary.pump(1)
+        XCTAssertFalse(consent.isGiven, "asked, not answered: no yes")
+        XCTAssertEqual(uploader.puts.count, puts, "asked, not answered: no file goes")
+        XCTAssertTrue(uploader.posts.isEmpty, "asked, not answered: no message goes")
+
+        // OK: it goes.
+        XCTAssertEqual(ok?.accessibilityActivate(), true)
+        XCTAssertTrue(pumpUntil(15) { uploader.posts.count == 1 }, "after OK the held message goes")
+        XCTAssertTrue(consent.isGiven, "OK is recorded")
+        XCTAssertEqual(uploader.posts.first?.clientId, held.clientId)
+    }
+
+    /// Not now holds across a room switch: Not now in the room, another room opened and the room opened again, nothing
+    /// asks again on its own, nothing is taken as yes and nothing goes. Retry asks again, and sends nothing before an
+    /// answer.
+    ///
+    /// Mutant it must catch: a room opened again forgets the account's answer (its consent dropped, which asks nothing).
+    func test_not_now_holds_across_a_room_switch_and_retry_asks_again() throws {
+        let consent = AIConsent(account: nil)
+        let held = try heldForTheQuestion(consent)
+        let media = held.media, uploader = held.uploader
+        let puts = uploader.puts.count
+        let other = "consent-other-\(UUID().uuidString.prefix(8))"
+
+        let window = try HostedSummary.host(AnyView(consentScreen(held.session, consent)))
+        defer { HostedSummary.close(window) }
+        let host = try XCTUnwrap(window.rootViewController as? UIHostingController<AnyView>)
+        let notNow = try XCTUnwrap(HostedSummary.wait(for: "pocket.aiConsent.notNow", in: window),
+                                   "the room's screen asks the waiting question")
+        media.updateUploader(uploader)
+        XCTAssertTrue(notNow.accessibilityActivate())
+        XCTAssertTrue(pumpUntil(10) { window.rootViewController?.presentedViewController == nil }, "Not now: it goes")
+
+        // Another room, then this one again.
+        host.rootView = AnyView(consentScreen(other, consent))
+        HostedSummary.pump(1.5)
+        host.rootView = AnyView(consentScreen(held.session, consent))
+        HostedSummary.pump(1)
+        media.updateUploader(uploader)
+        HostedSummary.pump(1.5)
+        XCTAssertNil(HostedSummary.element("pocket.aiConsent.ok", in: window), "Not now is not asked again on its own")
+        XCTAssertFalse(consent.isGiven, "nor taken as yes")
+        XCTAssertEqual(uploader.puts.count, puts, "no file goes")
+        XCTAssertTrue(uploader.posts.isEmpty, "no message goes")
+        XCTAssertEqual(media.board.outgoing.first?.id, held.clientId)
+        XCTAssertEqual(media.board.outgoing.first?.canRetry, true, "it stays held, with Retry")
+
+        // Retry asks again, and nothing goes before an answer.
+        media.perform(.retry(clientId: held.clientId))
+        let again = HostedSummary.wait(for: "pocket.aiConsent.notNow", in: window)
+        XCTAssertNotNil(again, "Retry asks again")
+        XCTAssertFalse(consent.isGiven)
+        XCTAssertEqual(uploader.puts.count, puts, "no file goes before an answer")
+        XCTAssertTrue(uploader.posts.isEmpty, "no message goes before an answer")
+        _ = again?.accessibilityActivate()
+        pumpUntil(10) { window.rootViewController?.presentedViewController == nil }
+        XCTAssertTrue(uploader.posts.isEmpty, "Not now again: still nothing goes")
+    }
+
+    /// A room's media made as its screen makes it (`forRoom`, under the account signed in now), with a photo message
+    /// stopped mid-upload while this account had said OK; then the OK withdrawn and Retry tapped with no screen showing
+    /// the room, so its question waits.
+    private func heldForTheQuestion(_ consent: AIConsent) throws
+        -> (media: RoomMediaUploadCoordinator, uploader: FakeUploader, clientId: String, session: String) {
+        let session = "consent-room-\(UUID().uuidString.prefix(8))"
+        let account = RoomSendOutbox.account(token: SessionTokenStore.load())
+        let uploader = FakeUploader()
+        uploader.failingPuts = 1
+        consent.grant()
+        let media = RoomMediaUploadCoordinator.forRoom(session, account: account, uploader: uploader, aiConsent: consent) {
+            self.coordinator(uploader, session: session, account: account, consent: consent)
+        }
+        media.add([try source("IMG_0001.jpg")])
+        media.perform(.send(text: "Hi"))
+        let clientId = try XCTUnwrap(media.board.outgoing.first?.id)
+        XCTAssertTrue(pumpUntil(15) { media.board.outgoing.first?.isFailed == true }, "stopped mid-upload")
+        consent.withdraw()
+        media.perform(.retry(clientId: clientId))
+        XCTAssertNotNil(media.consentRequest, "Retry asks first")
+        return (media, uploader, clientId, session)
+    }
+
+    private func consentScreen(_ session: String, _ consent: AIConsent) -> some View {
+        RoomChatScreen(route: RoomRoute(sessionId: session, title: "Room"),
+                       transport: RootPreviewAPI(postsPerSecond: 0, onePage: false, openRoomId: nil),
+                       reader: MessageReader(), aiConsent: consent, onReauthenticationRequired: {})
+            .id(session)
+    }
+
+    /// Runs the main run loop until `condition` holds or `seconds` pass; whether it holds.
+    @discardableResult
+    private func pumpUntil(_ seconds: TimeInterval, _ condition: () -> Bool) -> Bool {
+        let end = Date().addingTimeInterval(seconds)
+        while Date() < end {
+            if condition() { return true }
+            RunLoop.main.run(until: min(end, Date().addingTimeInterval(0.02)))
+        }
+        return condition()
+    }
+    #endif
 
     func test_a_message_with_files_never_reaches_the_room_without_the_ok() async throws {
         // However it was sent (the room's box asks first; this is the coordinator's own stop).
