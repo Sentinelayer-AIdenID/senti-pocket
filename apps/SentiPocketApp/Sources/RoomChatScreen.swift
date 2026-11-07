@@ -781,6 +781,11 @@ struct RoomChatScreen: View {
         #if DEBUG
         // A hosted test asks the room on screen for what a tap would.
         .onReceive(RootPreview.roomRequests) { intent in handle(intent) }
+        // And starts a voice room in it, as the call picker's Call does.
+        .onReceive(RootPreview.voiceRoomRequests) { request in
+            guard request.sessionId == route.sessionId else { return }
+            startVoiceRoom(with: request.agents)
+        }
         #endif
         // A sheet, the side panel or a call's window covers the room: its moving parts (the presence ring) rest
         // underneath (#265, #269). The app's cover passes through as it is, read only by what rests.

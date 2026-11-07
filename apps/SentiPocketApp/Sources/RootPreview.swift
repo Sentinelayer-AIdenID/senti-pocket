@@ -127,6 +127,14 @@ enum RootPreview {
 
     static func requestRoom(_ intent: RoomChatIntent) { roomRequests.send(intent) }
 
+    /// A voice room a hosted test starts in a room on screen (by its id), with these agents, as Call in the call
+    /// picker starts one.
+    static let voiceRoomRequests = PassthroughSubject<(sessionId: String, agents: [String]), Never>()
+
+    static func requestVoiceRoom(in sessionId: String, with agents: [String]) {
+        voiceRoomRequests.send((sessionId: sessionId, agents: agents))
+    }
+
     /// What the main thread did between two signals, for profiles of the root (`RootPreviewMeter`).
     static let meter = RootPreviewMeter()
 

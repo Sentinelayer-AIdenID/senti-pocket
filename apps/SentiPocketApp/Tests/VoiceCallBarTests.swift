@@ -506,6 +506,132 @@ final class VoiceCallBarRootTests: XCTestCase {
     }
 }
 
+/// The scripted rooms' sender, able to post a call's turns and its record too, so a room offers calls. Nothing leaves
+/// the test.
+private struct CallingSender: RoomMessageSending, VoiceRoomPosting {
+    func sendHumanMessage(sessionId: String, text: String, clientId: String) async throws {}
+
+    func postCallStarted(sessionId: String, text: String, clientId: String) async throws {}
+
+    func postVoiceTurn(sessionId: String, text: String, clientId: String) async throws {}
+
+    func uploadTranscript(sessionId: String, filename: String, markdown: String,
+                          clientId: String) async throws -> VoiceTranscriptAttachment {
+        VoiceTranscriptAttachment(attachmentId: "att-2", filename: filename, kind: "text", contentType: "text/markdown",
+                                  sizeBytes: markdown.utf8.count, status: "ready")
+    }
+
+    func postCallEnded(sessionId: String, text: String, transcript: VoiceTranscriptAttachment?,
+                       clientId: String) async throws {}
+}
+
+/// A voice room started in the room as the call picker starts one, then minimized, on the signed-in root as the app
+/// hosts it (scripted rooms, room-mid open).
+@MainActor
+final class VoiceCallInRoomTests: XCTestCase {
+    private var window: UIWindow?
+    private static let audioBusy = "A call or briefing is using the audio. Listen when it ends."
+
+    override func setUp() {
+        super.setUp()
+        VoiceCallWindow.shared.hide()
+        HostedSummary.pump(0.4)
+    }
+
+    override func tearDown() {
+        RootPreview.requestRoom(.stopReadingAloud)
+        window?.rootViewController?.dismiss(animated: false)
+        // The room's call hangs up as its End does, so nothing of it is left ringing or listening.
+        VoiceCallWindow.shared.minimized?.send(.hangUp)
+        HostedSummary.pump(1)
+        VoiceCallWindow.shared.hide()
+        if let window { HostedSummary.close(window) }
+        window = nil
+        HostedSummary.pump(0.6)
+        super.tearDown()
+    }
+
+    /// Switching rooms ends the call today: the room screen owns its call and hangs it up as it goes. The call window
+    /// and the bar go with it, at once.
+    func test_switching_rooms_ends_a_minimized_call_and_takes_its_bar_away() throws {
+        let links = IncomingLinkInbox()
+        let window = try hostRoot(links: links)
+        minimizeARoomCall(in: window)
+        let screens = RootPreview.meter.roomScreens
+
+        let other = try XCTUnwrap(URL(string: "https://sentinelayer.com/dashboard/sessions/\(RootPreviewAPI.longRoom)"))
+        XCTAssertTrue(links.receive(other), "the link to another room is taken")
+        wait("another room is put in place", seconds: 15) { RootPreview.meter.roomScreens > screens }
+        wait("the call ends with its room", seconds: 10) { !VoiceCallWindow.shared.isShowing }
+        XCTAssertNil(VoiceCallWindow.shared.minimized, "the bar goes with the call")
+        HostedSummary.pump(1)
+        XCTAssertNil(HostedSummary.element("pocket.callBar.open", in: window), "no bar over the new room")
+    }
+
+    /// A call started on the phone holds no audio lease, so a reading would take the audio mid-call and the call would
+    /// lose its microphone. While the call is minimized, its room in view, Listen on a message says the audio is in
+    /// use and reads nothing; the call goes on.
+    func test_listen_is_refused_while_a_call_is_minimized() throws {
+        let window = try hostRoot(links: IncomingLinkInbox())
+        minimizeARoomCall(in: window)
+
+        RootPreview.requestRoom(.readAloud(id: RoomReadAloud.message(165), text: "Read this while the call goes on."))
+        wait("Listen says the audio is in use", seconds: 5) { self.refused(in: window) }
+        XCTAssertNil(HostedSummary.element("pocket.room.readingAloud", in: window), "nothing is read")
+        XCTAssertTrue(VoiceCallWindow.shared.isShowing, "the call goes on")
+        XCTAssertNotNil(VoiceCallWindow.shared.minimized, "still minimized, its bar over the room")
+    }
+
+    /// The signed-in root on room-mid, with a sender that can post calls, once its first reads are in.
+    private func hostRoot(links: IncomingLinkInbox) throws -> UIWindow {
+        let api = RootPreviewAPI(postsPerSecond: 0, onePage: false, openRoomId: RootPreviewAPI.midRoom)
+        UserDefaults.standard.set(RootPreviewAPI.midRoom, forKey: "pocket.lastRoomId")
+        var services = api.services
+        services.sender = CallingSender()
+        let window = try HostedSummary.host(AuthenticatedRootView(
+            authenticationEpoch: 1,
+            whisperModelCoordinator: WhisperModelProvisioningCoordinator(),
+            incomingLinks: links,
+            services: services,
+            onSignOut: {},
+            onReauthenticationRequired: { _ in }
+        )
+        .environment(\.scenePhase, .active))
+        self.window = window
+        let firstReads = ["rooms", "history", "actions"]
+        wait("the room's first reads", seconds: 30) { firstReads.allSatisfy { api.callCount($0) > 0 } }
+        HostedSummary.pump(2.5)
+        return window
+    }
+
+    /// A call with review-agent, started in room-mid as Call in the call picker starts one, then minimized as its
+    /// Minimize does.
+    private func minimizeARoomCall(in window: UIWindow) {
+        RootPreview.requestVoiceRoom(in: RootPreviewAPI.midRoom, with: ["review-agent"])
+        wait("the room's call screen opens", seconds: 10) { VoiceCallWindow.shared.isShowing }
+        HostedSummary.pump(0.5)
+        VoiceCallWindow.shared.minimize()
+        XCTAssertNotNil(HostedSummary.wait(for: "pocket.callBar.open", in: window),
+                        "the call's bar shows over the room")
+        HostedSummary.pump(1)
+    }
+
+    /// Listen was refused: the room's alert says the audio is in use.
+    private func refused(in window: UIWindow) -> Bool {
+        if let alert = window.rootViewController?.presentedViewController as? UIAlertController,
+           alert.message == Self.audioBusy {
+            return true
+        }
+        return HostedSummary.elements(in: window).contains { $0.accessibilityLabel == Self.audioBusy }
+    }
+
+    private func wait(_ what: String, seconds: TimeInterval, until done: () -> Bool) {
+        let end = Date().addingTimeInterval(seconds)
+        while Date() < end, !done() { HostedSummary.pump(0.1) }
+        XCTAssertTrue(done(), what)
+    }
+}
+
 private extension XCTestCase {
     /// A picture of the window on the simulator, kept in the test results.
     @MainActor
