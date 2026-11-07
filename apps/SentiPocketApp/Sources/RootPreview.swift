@@ -24,6 +24,8 @@ import PocketUI
 ///   pages the list by 50).
 /// - `-PocketRootCrashOffer`: one made-up crash report waits to be offered, and sending it is answered by the preview,
 ///   so the offer (`CrashReportOffer`) shows a moment after launch.
+/// - `-PocketRootThreadReading`: a moment after launch, the open room's newest message opens its thread and its first
+///   reply is read aloud (made-up words), for pictures of the Listen bar over a thread.
 /// - `-PocketRootInlineReplies`: every message with replies shows its newest reply in the room, as a row to answer in
 ///   place (a reply to a reply, from the room's box).
 /// - `-PocketRootAIConsentGiven`: this account has already said OK to sharing with AI, so a first send is not asked
@@ -69,6 +71,7 @@ enum RootPreview {
     @MainActor
     static func rootView(whisperModel: WhisperModelProvisioningCoordinator, incomingLinks: IncomingLinkInbox) -> some View {
         if offersCrashReport { CrashReporter.shared.offerForPreview(madeUpCrashReport()) }
+        if ProcessInfo.processInfo.arguments.contains("-PocketRootThreadReading") { readInAThreadSoon() }
         // The root reopens the room opened last once the room list has loaded, as the app does after a launch.
         UserDefaults.standard.set(openRoomId ?? "", forKey: "pocket.lastRoomId")
         // The freeze watch runs as in the app, so a stall here is written down where the app writes one.
@@ -106,6 +109,23 @@ enum RootPreview {
 
     /// Opens or closes the side panel of a root hosted in a test, as the signals do in the preview.
     static func requestDrawer(_ open: Bool) { drawerSubject.send(open) }
+
+    /// `-PocketRootThreadReading`: the newest message's thread, then its first reply read aloud, as taps would.
+    private static func readInAThreadSoon() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+            requestRoom(.openThread(sequenceId: 165))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                var words = RootPreviewWords(seed: 165)
+                requestRoom(.readAloud(id: RoomReadAloud.reply("reply-165-1"),
+                                       text: (0..<6).map { _ in words.sentence() }.joined(separator: " ")))
+            }
+        }
+    }
+
+    /// What a hosted test asks of the room on screen, as a tap there would (`RoomChatScreen.handle`).
+    static let roomRequests = PassthroughSubject<RoomChatIntent, Never>()
+
+    static func requestRoom(_ intent: RoomChatIntent) { roomRequests.send(intent) }
 
     /// What the main thread did between two signals, for profiles of the root (`RootPreviewMeter`).
     static let meter = RootPreviewMeter()
@@ -173,6 +193,13 @@ final class RootPreviewMeter: @unchecked Sendable {
     func roomScreenMade() { roomScreens += 1 }
 
     func roomScreenBodyRan() { roomScreenBodies += 1 }
+
+    /// Where each read-aloud bar and its controls were last laid out, by place ("app", "room", "thread").
+    private(set) var readAloudBars: [String: [String: CGRect]] = [:]
+
+    func readAloudBarLaidOut(_ place: String, _ frames: [String: CGRect]) { readAloudBars[place] = frames }
+
+    func forgetReadAloudBars() { readAloudBars = [:] }
 
     /// Times the root asked for its side panel's rooms to be placed (`placeSidePanelRooms`), open or not.
     private(set) var sidePanelPlacements = 0
