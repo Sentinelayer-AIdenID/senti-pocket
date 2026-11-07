@@ -132,7 +132,8 @@ final class ReadAloudThreadTests: XCTestCase {
     /// or stopping a reading never lays the list out again (#360: a top inset that changes keeps the list laying itself
     /// out).
     func test_a_reading_draws_its_bar_never_the_room_screen_and_never_places_the_list_again() throws {
-        let window = try hostRoot(links: IncomingLinkInbox())
+        // room-long: the thread's test reads in room-mid, and each room's marks are its own.
+        let window = try hostRoot(RootPreviewAPI.longRoom, links: IncomingLinkInbox())
         let meter = RootPreview.meter
         let reader = try XCTUnwrap(meter.reader, "the root's reader")
         let placed = placements(in: window)
@@ -142,7 +143,8 @@ final class ReadAloudThreadTests: XCTestCase {
         wait("the room shows the bar", seconds: 10) { meter.readAloudBars["room"]?["bar"] != nil }
         pump(1.5)
         assertSamePlacements(placed, placements(in: window), "starting to read")
-        XCTAssertEqual(meter.roomReadingMark, RoomReadAloud.message(165), "the room marks the message read")
+        XCTAssertEqual(meter.roomReadingMarks[RootPreviewAPI.longRoom], RoomReadAloud.message(165),
+                       "the room marks the message read")
 
         // Pause and play, as the bar's button does: each changes what the reader says, as each sentence does.
         let bodies = meter.roomScreenBodies
@@ -162,14 +164,14 @@ final class ReadAloudThreadTests: XCTestCase {
         RootPreview.requestRoom(.stopReadingAloud)
         pump(1.5)
         assertSamePlacements(placed, placements(in: window), "stopping")
-        XCTAssertNil(meter.roomReadingMark, "the mark goes when the reading stops")
+        XCTAssertNil(meter.roomReadingMarks[RootPreviewAPI.longRoom], "the mark goes when the reading stops")
     }
 
     /// Reading goes on when you leave its room (Carter, 10-30): the room you open shows the bar over its top, and its
     /// title takes you back to the message.
     func test_a_reading_from_another_room_shows_its_bar_over_the_room_on_screen() throws {
         let links = IncomingLinkInbox()
-        let window = try hostRoot(links: links)
+        let window = try hostRoot(RootPreviewAPI.midRoom, links: links)
         let meter = RootPreview.meter
         RootPreview.requestRoom(.readAloud(id: RoomReadAloud.message(165), text: Self.longText))
         wait("the room shows the bar", seconds: 10) { meter.readAloudBars["room"]?["bar"] != nil }
@@ -185,10 +187,10 @@ final class ReadAloudThreadTests: XCTestCase {
 
     private static let longText = (1...12).map { "This is sentence \($0) of the message." }.joined(separator: " ")
 
-    /// The signed-in root as the app hosts it, on room-mid, once its first reads are in.
-    private func hostRoot(links: IncomingLinkInbox) throws -> UIWindow {
-        let api = RootPreviewAPI(postsPerSecond: 0, onePage: false, openRoomId: RootPreviewAPI.midRoom)
-        UserDefaults.standard.set(RootPreviewAPI.midRoom, forKey: "pocket.lastRoomId")
+    /// The signed-in root as the app hosts it, on `room`, once its first reads are in.
+    private func hostRoot(_ room: String, links: IncomingLinkInbox) throws -> UIWindow {
+        let api = RootPreviewAPI(postsPerSecond: 0, onePage: false, openRoomId: room)
+        UserDefaults.standard.set(room, forKey: "pocket.lastRoomId")
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let window = UIWindow(windowScene: scene)
         window.rootViewController = UIHostingController(rootView: AuthenticatedRootView(

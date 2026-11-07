@@ -187,6 +187,7 @@ final class RootPreviewMeter: @unchecked Sendable {
     func forgetReadAloudBars() {
         readAloudBars = [:]
         readAloudSlotBodies = [:]
+        roomReadingMarks = [:]
     }
 
     /// How often each place's read-aloud bar drew (`ReadAloudBarSlot`, which watches the reader): once a sentence,
@@ -195,10 +196,10 @@ final class RootPreviewMeter: @unchecked Sendable {
 
     func readAloudSlotBodyRan(_ place: String) { readAloudSlotBodies[place, default: 0] += 1 }
 
-    /// The message the room on screen last marked as being read (`RoomChatScreen.readingAloudId`), as its body ran.
-    private(set) var roomReadingMark: String?
+    /// The message each room marked as being read the last time its body ran (`RoomChatScreen.readingAloudId`), by room.
+    private(set) var roomReadingMarks: [String: String] = [:]
 
-    func roomMarksReading(_ id: String?) { roomReadingMark = id }
+    func roomMarksReading(_ sessionId: String, _ id: String?) { roomReadingMarks[sessionId] = id }
 
     /// The root's reader (`AuthenticatedRootView.messageReader`), for the hosted tests that pause and play it.
     weak var reader: MessageReader?
