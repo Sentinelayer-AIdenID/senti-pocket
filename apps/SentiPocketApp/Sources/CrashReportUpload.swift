@@ -42,12 +42,14 @@ struct CrashReportPayload: Encodable, Equatable {
         case .crash: kind = "crash"
         case .hang, .closed: kind = "hang"
         }
-        build = Self.cut(report.build, to: Self.fieldLength)
-        os = Self.cut(report.system, to: Self.fieldLength)
-        device = Self.cut(report.device, to: Self.fieldLength)
+        build = Self.label(report.build)
+        os = Self.label(report.system)
+        device = Self.label(report.device)
         occurredAt = Self.stamp(report.at)
         let reason = report.kind == .closed ? "Closed while open: " + report.reason : report.reason
-        headline = Self.cut(CrashStepScrub.identifiers(in: Self.oneLine(reason)), to: Self.headlineLength)
+        let line = Self.cut(CrashStepScrub.identifiers(in: Self.oneLine(reason)), to: Self.headlineLength)
+        // The API takes no empty headline.
+        headline = line.trimmingCharacters(in: .whitespaces).isEmpty ? "Pocket closed unexpectedly" : line
         frames = report.frames.prefix(Self.frameCount).map { Self.cut($0, to: Self.frameLength) }
         // The newest steps, each by its kind and counts only.
         lastSteps = report.trail.suffix(Self.stepCount).map { Self.cut(CrashStepScrub.step($0), to: Self.stepLength) }
@@ -70,6 +72,16 @@ struct CrashReportPayload: Encodable, Equatable {
             if kept.count == binaryCount { break }
         }
         return kept
+    }
+
+    /// build, os and device as the API takes them (#1191): letters, digits, spaces and . _ ( ) + , - only, 1 to 32 of
+    /// them. Anything else becomes a hyphen; nothing at all is "unknown".
+    static func label(_ text: String) -> String {
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ._()+,-")
+        var kept = String.UnicodeScalarView()
+        kept.append(contentsOf: text.unicodeScalars.map { allowed.contains($0) ? $0 : "-" })
+        let cut = Self.cut(String(kept).trimmingCharacters(in: .whitespaces), to: fieldLength)
+        return cut.trimmingCharacters(in: .whitespaces).isEmpty ? "unknown" : cut
     }
 
     /// At most `length` code points (Python's `len`, as the API counts), never splitting one.

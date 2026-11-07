@@ -175,6 +175,35 @@ final class CrashReportUploadTests: XCTestCase {
         XCTAssertEqual(first, ["name": "SentiPocketApp", "uuid": uuid(1)])
     }
 
+    /// The merged API (#1191) refuses, with a 422, a build, os or device outside [A-Za-z0-9 ._()+,-] or of 0 or over 32
+    /// characters, and an empty headline: none of them is ever sent.
+    func test_the_labels_and_headline_are_ones_the_api_takes() throws {
+        let label = try NSRegularExpression(pattern: #"^[A-Za-z0-9 ._()+,-]{1,32}$"#)
+        func taken(_ text: String) -> Bool {
+            text.unicodeScalars.count <= 32
+                && label.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
+        }
+        var odd = report("odd", minutesAgo: 1, reason: "")
+        odd.build = "1.4 (212)"
+        odd.system = "iOS 26.1 \u{AB} beta \u{BB}"
+        odd.device = "iPhone17,2<script>"
+        let payload = CrashReportPayload(odd)
+        XCTAssertEqual(payload.build, "1.4 (212)", "what the API takes stays as it is")
+        XCTAssertEqual(payload.os, "iOS 26.1 - beta -")
+        XCTAssertEqual(payload.device, "iPhone17,2-script-")
+        XCTAssertEqual(payload.headline, "Pocket closed unexpectedly", "never an empty headline")
+        var empty = report("empty", minutesAgo: 1)
+        empty.build = ""
+        empty.system = "   "
+        empty.device = String(repeating: "\u{1F600}", count: 40)
+        let blank = CrashReportPayload(empty)
+        XCTAssertEqual(blank.build, "unknown")
+        XCTAssertEqual(blank.os, "unknown")
+        for value in [payload.build, payload.os, payload.device, blank.build, blank.os, blank.device] {
+            XCTAssertTrue(taken(value), "\(value) is one the API takes")
+        }
+    }
+
     /// Review, #352: no room's id or title, no message's number or text, no person's name or address, ever.
     func test_breadcrumbs_never_carry_a_room_a_message_a_name_or_an_address() {
         let steps = [
