@@ -6,63 +6,90 @@ import SwiftUI
 public struct RoomSearchView: View {
     private let state: RoomSearchPresentationState
     private let send: (RoomSearchIntent) -> Void
-    @State private var text = ""
+    @State private var text: String
+    @State private var tracksPosition = false
     @Environment(\.dismiss) private var dismiss
 
     public init(state: RoomSearchPresentationState, send: @escaping (RoomSearchIntent) -> Void) {
         self.state = state
         self.send = send
+        _text = State(initialValue: state.input)
     }
 
     public var body: some View {
         NavigationStack {
-            List {
-                scopeTabs
-                    .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
-                    .listRowSeparator(.hidden)
-                if let from = state.from {
-                    fromChip(from)
+            ScrollViewReader { proxy in
+                List {
+                    scopeTabs
+                        .id("search-scopes")
+                        .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
                         .listRowSeparator(.hidden)
-                }
-                if !state.people.isEmpty {
-                    Section {
-                        ForEach(state.scope == .all ? Array(state.people.prefix(3)) : state.people) { person in
-                            Button {
-                                send(.from(person))
-                            } label: {
-                                personRow(person)
+                    if let from = state.from {
+                        fromChip(from)
+                            .listRowSeparator(.hidden)
+                    }
+                    if !state.people.isEmpty {
+                        Section {
+                            ForEach(state.scope == .all ? Array(state.people.prefix(3)) : state.people) { person in
+                                Button {
+                                    send(.from(person))
+                                } label: {
+                                    personRow(person)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityHint("Shows what they wrote")
+                                .accessibilityIdentifier("pocket.search.person.\(person.id)")
+                                .modifier(RoomSearchPosition(id: "person-\(person.id)"))
                             }
-                            .buttonStyle(.plain)
-                            .accessibilityHint("Shows what they wrote")
-                            .accessibilityIdentifier("pocket.search.person.\(person.id)")
+                        } header: {
+                            if state.scope == .all { Text("People") }
                         }
-                    } header: {
-                        if state.scope == .all { Text("People") }
+                    }
+                    if state.scope.searchesMessages {
+                        messagesSection
+                    }
+                    artifactSections
+                    if state.isReadingArtifacts, state.scope != .messages, state.scope != .people {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                            Text("Reading the room's tickets and files…")
+                                .font(.footnote)
+                                .foregroundStyle(PocketPalette.textSecondary)
+                        }
                     }
                 }
-                if state.scope.searchesMessages {
-                    messagesSection
-                }
-                artifactSections
-                if state.isReadingArtifacts, state.scope != .messages, state.scope != .people {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                        Text("Reading the room's tickets and files…")
-                            .font(.footnote)
-                            .foregroundStyle(PocketPalette.textSecondary)
+                .coordinateSpace(name: "roomSearchResults")
+                .onPreferenceChange(RoomSearchPositions.self) { positions in
+                    guard tracksPosition else { return }
+                    if let nearest = positions.filter({ $0.value.maxY > 0 }).min(by: { $0.value.minY < $1.value.minY }) {
+                        if nearest.key != state.scrollAnchor { send(.scrolled(nearest.key)) }
                     }
                 }
-            }
-            .listStyle(.plain)
-            .navigationTitle("Search")
-            .navigationBarTitleDisplayModeInlineIfAvailable()
-            .searchable(text: $text, prompt: "Words, names, tickets or files")
-            .onSubmit(of: .search) { send(.submit(text)) }
-            // Matches come as you type, once you pause (Carter: like lifting your hand for a second).
-            .onChange(of: text) { send(.typed($0)) }
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }
+                .onAppear {
+                    DispatchQueue.main.async {
+                        if let anchor = state.scrollAnchor { proxy.scrollTo(anchor, anchor: .top) }
+                        tracksPosition = true
+                    }
+                }
+                .listStyle(.plain)
+                .navigationTitle("Search")
+                .navigationBarTitleDisplayModeInlineIfAvailable()
+                .searchable(text: $text, prompt: "Words, names, tickets or files")
+                .onSubmit(of: .search) { send(.submit(text)) }
+                // Matches come as you type, once you pause (Carter: like lifting your hand for a second).
+                .onChange(of: text) { send(.typed($0)) }
+                .toolbar {
+                    ToolbarItem(placement: .primaryAction) {
+                        Button("Clear") {
+                            text = ""
+                            send(.clear)
+                            proxy.scrollTo("search-scopes", anchor: .top)
+                        }
+                        .accessibilityIdentifier("pocket.search.clear")
+                    }
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Done") { dismiss() }
+                    }
                 }
             }
         }
@@ -156,6 +183,7 @@ public struct RoomSearchView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("pocket.search.result.\(row.sequenceId)")
+                .modifier(RoomSearchPosition(id: "message-\(row.sequenceId)"))
             }
             if state.hasMore {
                 Button {
@@ -210,10 +238,28 @@ public struct RoomSearchView: View {
                         }
                         .buttonStyle(.plain)
                         .accessibilityIdentifier("pocket.search.artifact.\(artifact.id)")
+                        .modifier(RoomSearchPosition(id: "artifact-\(artifact.id)"))
                     }
                 }
             }
         }
+    }
+}
+
+private struct RoomSearchPositions: PreferenceKey {
+    static var defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, latest in latest })
+    }
+}
+
+private struct RoomSearchPosition: ViewModifier {
+    let id: String
+    func body(content: Content) -> some View {
+        content.id(id).background(GeometryReader { geometry in
+            Color.clear.preference(key: RoomSearchPositions.self,
+                                   value: [id: geometry.frame(in: .named("roomSearchResults"))])
+        })
     }
 }
 

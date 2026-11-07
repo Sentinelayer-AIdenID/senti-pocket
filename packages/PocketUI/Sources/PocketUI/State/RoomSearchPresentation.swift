@@ -62,6 +62,8 @@ public struct RoomSearchPerson: Equatable, Identifiable, Sendable {
 public struct RoomSearchPresentationState: Equatable, Sendable {
     /// The query the results are for.
     public let query: String
+    public let input: String
+    public let scrollAnchor: String?
     public let rows: [RoomSearchRow]
     public let isSearching: Bool
     public let isLoadingMore: Bool
@@ -82,6 +84,8 @@ public struct RoomSearchPresentationState: Equatable, Sendable {
 
     public init(
         query: String = "",
+        input: String? = nil,
+        scrollAnchor: String? = nil,
         rows: [RoomSearchRow] = [],
         isSearching: Bool = false,
         isLoadingMore: Bool = false,
@@ -94,6 +98,8 @@ public struct RoomSearchPresentationState: Equatable, Sendable {
         isReadingArtifacts: Bool = false
     ) {
         self.query = query
+        self.input = input ?? query
+        self.scrollAnchor = scrollAnchor
         self.rows = rows
         self.isSearching = isSearching
         self.isLoadingMore = isLoadingMore
@@ -211,6 +217,8 @@ public struct RoomSearchPresentationState: Equatable, Sendable {
 }
 
 public enum RoomSearchIntent: Equatable, Sendable {
+    case clear
+    case scrolled(String?)
     case submit(String)
     /// The words changed: search once typing pauses.
     case typed(String)

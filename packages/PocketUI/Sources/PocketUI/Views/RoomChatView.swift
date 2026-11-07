@@ -15,6 +15,7 @@ public struct RoomChatView: View {
     /// What is being read aloud (a `RoomReadAloud` id): its row shows a Stop button.
     private let readingAloudId: String?
 
+    @State private var revealedSearchId: UUID?
     /// The reply being typed in each thread, kept while the room is open: closing the sheet does not lose it.
     @State private var threadDrafts: [Int64: String] = [:]
     /// Opens a profile card from an avatar, where direct messages are on.
@@ -614,7 +615,13 @@ public struct RoomChatView: View {
             breakouts: state.breakouts,
             attachmentPreviews: RoomMessageRowView.previews(of: message, in: state.attachmentPreviews),
             isReadingAloud: readingAloudId == message.readAloudId,
-            isExpanded: expandedQuiet.contains(message.id),
+            isExpanded: expandedQuiet.contains(message.id) || state.searchFocus(for: message) != nil,
+            searchFocus: state.searchFocus(for: message),
+            onRevealSearch: { focus in
+                guard state.searchFocus?.id == focus.id, revealedSearchId != focus.id else { return }
+                revealedSearchId = focus.id
+                proxy.scrollTo(focus.anchor, anchor: .center)
+            },
             threadSummary: message.summaryThreadId.flatMap { state.threadSummaries[$0] },
             isReadingSummary: message.summaryReadAloudId.map { readingAloudId == $0 } ?? false,
             onOpenSummary: { summary, id in openSummary = OpenThreadSummary(id: id, summary: summary) },
@@ -1015,6 +1022,8 @@ private struct RoomMessageRowView: View {
     var isReadingAloud = false
     /// A background line opened in place.
     var isExpanded = false
+    var searchFocus: RoomSearchFocus?
+    var onRevealSearch: (RoomSearchFocus) -> Void = { _ in }
     /// What happened in this row's thread, summarized on the phone, for a box line or a thread's newest reply.
     var threadSummary: SummaryReading?
     /// That summary is being read aloud.
@@ -1271,7 +1280,9 @@ private struct RoomMessageRowView: View {
     /// The message's words; a very long one shows its start and a card that opens all of it (Carter, #55006).
     @ViewBuilder
     private var messageText: some View {
-        if let long = LongMessage.shown(row.text) {
+        if let searchFocus {
+            RoomSearchMessageView(text: row.text, focus: searchFocus, ownHandles: ownHandles) { onRevealSearch(searchFocus) }
+        } else if let long = LongMessage.shown(row.text) {
             VStack(alignment: .leading, spacing: 8) {
                 ChatMarkdownView(text: long.preview, ownHandles: ownHandles)
                 LongMessageCard(characters: long.characters) { onOpenLong(row) }
@@ -4069,6 +4080,7 @@ extension RoomMessageRowView: Equatable {
             && lhs.canPin == rhs.canPin && lhs.isPinned == rhs.isPinned && lhs.pinsFull == rhs.pinsFull
             && lhs.breakouts == rhs.breakouts && lhs.attachmentPreviews == rhs.attachmentPreviews
             && lhs.isReadingAloud == rhs.isReadingAloud && lhs.isExpanded == rhs.isExpanded
+            && lhs.searchFocus == rhs.searchFocus
             && lhs.threadSummary == rhs.threadSummary && lhs.isReadingSummary == rhs.isReadingSummary
             && lhs.isMinimized == rhs.isMinimized && lhs.canReport == rhs.canReport && lhs.canBlock == rhs.canBlock
             && lhs.asksAIConsent == rhs.asksAIConsent

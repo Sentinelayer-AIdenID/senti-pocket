@@ -663,6 +663,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
     public let focusFallbackCount: Int
     /// A message to bring into view and highlight once (opened from a notification or link).
     public let focusSequenceId: Int64?
+    public let searchFocus: RoomSearchFocus?
     /// Who the composer can @-mention, in suggestion order.
     public let mentionCandidates: [MentionCandidate]
     /// Breakout cards by child room id, as this viewer may see them.
@@ -740,6 +741,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         thread threadInput: RoomChatThreadInput? = nil,
         focusFallbackCount: Int = 0,
         focusSequenceId: Int64? = nil,
+        searchFocus: RoomSearchFocus? = nil,
         mentionCandidates: [MentionCandidate] = [],
         breakouts: [String: RoomBreakoutCard] = [:],
         attachmentPreviews: [String: Data] = [:],
@@ -794,6 +796,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         self.canAddEmoji = protectedFailure ? false : emojiReactions && canAddEmoji
         self.focusFallbackCount = focusFallbackCount
         self.focusSequenceId = protectedFailure ? nil : focusSequenceId
+        self.searchFocus = protectedFailure ? nil : searchFocus
         self.mentionCandidates = protectedFailure ? [] : mentionCandidates
         self.breakouts = protectedFailure ? [:] : breakouts
         self.attachmentPreviews = protectedFailure ? [:] : attachmentPreviews
@@ -850,7 +853,7 @@ public struct RoomChatPresentationState: Equatable, Sendable {
         // A thread shows once, as its newest reply, so a busy thread is one line that moves down as it grows.
         let trails = RoomChatTrail.fold(folded.kept)
         // An agent's notice that repeats with only its numbers changing (a retry counter) is one row.
-        let repeated = RoomChatRepeats.fold(trails.kept, expanded: expandedRepeats, keep: focusSequenceId)
+        let repeated = RoomChatRepeats.fold(trails.kept, expanded: expandedRepeats, keep: focusSequenceId ?? searchFocus?.sequenceId)
         let ordered = repeated.kept
         let unreadLineRow = unreadDividerSequence.flatMap { line in
             Self.unreadLineRowId(line: line, shown: ordered, messages: messages, cards: folded.cards,
@@ -1114,6 +1117,12 @@ public struct RoomChatPresentationState: Equatable, Sendable {
             if case .message(let message) = row { return !message.isInlineReply && message.sequenceId == sequenceId }
             return false
         }
+    }
+
+    /// Search unfolds only the selected main message, never a reply that shares its sequence.
+    public func searchFocus(for row: RoomChatMessageRow) -> RoomSearchFocus? {
+        guard !row.isInlineReply, searchFocus?.sequenceId == row.sequenceId else { return nil }
+        return searchFocus
     }
 
     /// A pin belongs to its message: a reply shown in the room is never marked by its message's pin.

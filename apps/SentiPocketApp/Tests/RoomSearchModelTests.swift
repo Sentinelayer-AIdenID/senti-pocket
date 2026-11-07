@@ -53,6 +53,88 @@ private final class ScriptedSearch: RoomSearching, @unchecked Sendable {
 
 @MainActor
 final class RoomSearchModelTests: XCTestCase {
+    func test_retained_search_does_not_keep_its_account_owner_alive() {
+        let search = ScriptedSearch()
+        weak var owner: RoomSearchSessions?
+        weak var cached: RoomSearchModel?
+        do {
+            let sessions = RoomSearchSessions()
+            owner = sessions
+            cached = sessions.model(for: "chat", searcher: search)
+            XCTAssertNotNil(cached)
+        }
+        XCTAssertNil(owner, "a cached model must not retain its account root through reauthentication")
+        XCTAssertNil(cached, "ending the account lifetime releases its retained searches")
+    }
+
+    func test_reauthentication_clears_all_retained_chats_before_notifying_the_account() async {
+        let search = ScriptedSearch([
+            .success(RoomSearchPage(query: "needle", results: [result(7, "needle")])),
+            .failure(SessionTransportError.reauthenticationRequired)
+        ])
+        var invalidations = 0
+        let sessions = RoomSearchSessions(onReauthenticationRequired: { invalidations += 1 })
+        let first = sessions.model(for: "first-chat", searcher: search)
+        first.send(.submit("needle"))
+        await waitUntil("retained result") { !first.state.rows.isEmpty }
+        let second = sessions.model(for: "second-chat", searcher: search)
+        second.send(.submit("needle"))
+        await waitUntil("account invalidation") { invalidations == 1 }
+        XCTAssertTrue(first.state.rows.isEmpty)
+        XCTAssertEqual(first.state.input, "")
+        XCTAssertTrue(second.state.rows.isEmpty)
+        XCTAssertFalse(sessions.model(for: "first-chat", searcher: search) === first)
+    }
+
+    func test_reopening_keeps_query_pages_and_scroll_without_searching_again() async {
+        let search = ScriptedSearch([
+            .success(RoomSearchPage(query: "needle", results: [result(20, "needle first")], nextBeforeSequence: 20)),
+            .success(RoomSearchPage(query: "needle", results: [result(10, "needle second")]))
+        ])
+        let sessions = RoomSearchSessions()
+        let model = sessions.model(for: "room") {
+            RoomSearchModel(sessionId: "room", searcher: search, onReauthenticationRequired: {})
+        }
+        model.send(.submit("needle"))
+        await waitUntil("first page") { !model.state.isSearching }
+        model.send(.loadMore)
+        await waitUntil("second page") { !model.state.isLoadingMore }
+        model.send(.scrolled("message-10"))
+        let reopened = sessions.model(for: "room") {
+            XCTFail("opening search must reuse its session")
+            return RoomSearchModel(sessionId: "room", searcher: search, onReauthenticationRequired: {})
+        }
+        XCTAssertTrue(model === reopened)
+        XCTAssertEqual(reopened.state.input, "needle")
+        XCTAssertEqual(reopened.state.rows.map(\.sequenceId), [20, 10])
+        XCTAssertEqual(reopened.state.scrollAnchor, "message-10")
+        XCTAssertEqual(search.recorded().count, 2)
+        let nextAccount = RoomSearchSessions().model(for: "room") {
+            RoomSearchModel(sessionId: "room", searcher: search, onReauthenticationRequired: {})
+        }
+        XCTAssertTrue(nextAccount.state.rows.isEmpty, "another account or app launch starts empty")
+        sessions.clear()
+        XCTAssertTrue(model.state.rows.isEmpty)
+        XCTAssertNil(model.state.scrollAnchor)
+    }
+
+    func test_clear_rejects_a_delayed_response_and_resets_all_retained_state() async {
+        let search = ScriptedSearch([.success(RoomSearchPage(query: "needle", results: [result(7, "needle")]))], gate: true)
+        let model = RoomSearchModel(sessionId: "room", searcher: search, onReauthenticationRequired: {})
+        model.send(.submit("needle"))
+        await waitUntil("held answer") { search.waitingCount() == 1 }
+        model.send(.scrolled("message-7"))
+        model.send(.clear)
+        await search.releaseNewestFirst()
+        XCTAssertEqual(model.state.input, "")
+        XCTAssertEqual(model.state.query, "")
+        XCTAssertTrue(model.state.rows.isEmpty, "the answer from before Clear cannot repopulate search")
+        XCTAssertFalse(model.state.isSearching)
+        XCTAssertFalse(model.state.isLoadingMore)
+        XCTAssertNil(model.state.scrollAnchor)
+        XCTAssertEqual(model.state.scope, .all)
+    }
+
     /// Carter (#54900): matches should come as you type, once you pause, without a search per keystroke.
     func test_typing_searches_once_after_a_pause_and_short_words_clear_quietly() async {
         let search = ScriptedSearch()

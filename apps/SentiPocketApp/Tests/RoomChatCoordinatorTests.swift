@@ -528,6 +528,26 @@ final class RoomChatCoordinatorTests: XCTestCase {
         coordinator.pause()
     }
 
+    func test_search_target_keeps_its_query_after_focus_handled_and_clear_removes_it() async {
+        let transport = ScriptedRoomTransport(before: [.success(page([10, 20]))])
+        let coordinator = makeCoordinator(transport)
+        coordinator.resume()
+        await waitUntil("loaded") { !coordinator.state.isLoadingInitial }
+        coordinator.focus(on: 20, searchQuery: "needle")
+        let first = coordinator.state.searchFocus
+        XCTAssertEqual(first?.sequenceId, 20)
+        XCTAssertEqual(first?.query, "needle")
+        coordinator.send(.focusHandled)
+        XCTAssertNil(coordinator.state.focusSequenceId)
+        XCTAssertEqual(coordinator.state.searchFocus, first, "handling the jump must not fold the match again")
+        coordinator.focus(on: 10, searchQuery: "second")
+        XCTAssertEqual(coordinator.state.searchFocus?.sequenceId, 10)
+        XCTAssertNotEqual(coordinator.state.searchFocus?.id, first?.id)
+        coordinator.clearSearchFocus()
+        XCTAssertNil(coordinator.state.searchFocus)
+        coordinator.pause()
+    }
+
     func test_a_link_to_an_unloaded_message_loads_its_window_and_focuses_it() async {
         let transport = ScriptedRoomTransport(
             before: [

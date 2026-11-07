@@ -152,6 +152,7 @@ final class RoomChatCoordinator: ObservableObject {
     private let boards = RoomLeaderboardCache()
     /// A message to bring into view once (opened from a notification or link); cleared when the view shows it.
     private var focusTarget: Int64?
+    private var searchFocus: RoomSearchFocus?
     /// Links whose message could not be loaded; each one sends the reader to the latest messages.
     private var focusFallbackCount = 0
     /// Arrivals refresh reactions at most this often (the web polls about every 15s).
@@ -684,7 +685,13 @@ final class RoomChatCoordinator: ObservableObject {
     /// Brings a message into view and highlights it: a link, a notification, a search result, a pinned message or a
     /// reply's parent. One further back than the loaded rows is loaded as a window around it in one step, however far
     /// back it is. One newer than the loaded rows arrives through the live stream and is focused when it lands.
-    func focus(on sequenceId: Int64) {
+    func clearSearchFocus() {
+        searchFocus = nil
+        publish()
+    }
+
+    func focus(on sequenceId: Int64, searchQuery: String? = nil) {
+        searchFocus = searchQuery.map { RoomSearchFocus(sequenceId: sequenceId, query: $0) }
         focusTarget = sequenceId
         publish()
         pursueFocus()
@@ -2695,6 +2702,7 @@ final class RoomChatCoordinator: ObservableObject {
             thread: threadInput,
             focusFallbackCount: focusFallbackCount,
             focusSequenceId: focusTarget,
+            searchFocus: searchFocus,
             mentionCandidates: mentionCandidates(),
             breakouts: breakouts.mapValues(Self.card),
             attachmentPreviews: previews,
