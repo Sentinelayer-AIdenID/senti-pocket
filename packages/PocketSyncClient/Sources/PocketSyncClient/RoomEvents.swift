@@ -491,32 +491,51 @@ private extension String {
     var trimmed: String { trimmingCharacters(in: .whitespacesAndNewlines) }
 }
 
-/// How a post says it was sent, from the event as the API stores it: the agent's `clientKind` and the payload's `source`.
-/// Hosted MCP stamps `source: "hosted_mcp"` on its own posts, which outranks what a client says of itself, as the API's
-/// own reading does; MCP admissions (the CLI's MCP server) stamp `clientKind: "mcp"`; the CLI says `"cli"`. Anything else
-/// is not known. A display hint, never authority.
+/// How a post says it was sent (ticket c96649c0): one rule with the web (sentinelayer-web #812), checked in order.
+/// 1. The server's stamp, `source` "hosted_mcp" in the payload or at the top level (the hosted connector's own posts):
+///    MCP, whatever `clientKind` says, or if it says nothing. The relay lets that stamp outrank a client's own claim
+///    (sentinelayer-api `_session_event_connection`).
+/// 2. `clientKind` "mcp" (the agent's, else the payload's) with the top-level `source` "cli": the CLI's MCP server.
+/// 3. "mcp" with no top-level source: nothing said (nil), as on the web, which cannot tell yet from a copy without one.
+/// 4. "mcp" with any other top-level source: MCP, true either way (an agent admitted through the hosted connector that
+///    then posts over REST still says "mcp").
+/// 5. "cli", no stamp: the CLI.
+/// 6. Any other kind, including "hosted_mcp" with no stamp (the stamp says hosted, not a client's claim): no line
+///    (`other`). No kind and no stamp: nothing said (nil).
+/// A post that says nothing (case 3, or no kind) leaves the agent's line as an earlier post set it; any other decides.
+/// A display hint, never authority.
 public enum RoomPostClient: String, Equatable, Sendable {
-    /// Hosted MCP (an AI app connected to the Senti MCP server).
-    case hostedMCP = "hosted_mcp"
-    /// The CLI's own MCP server.
-    case cliMCP = "mcp"
+    /// MCP: hosted MCP (an AI app connected to the Senti MCP server), or an MCP client not known to be the CLI's.
+    case mcp
+    /// The CLI's own MCP server: "mcp" from a post the CLI sent.
+    case cliMCP = "cli_mcp"
     /// The CLI.
     case cli
+    /// A kind this app does not name (for example a model's name): it says nothing.
+    case other
 
     init?(event json: JSONValue) {
         let agent = json["agent"] ?? .null
         let payload = json["payload"] ?? .null
-        let said = [agent["clientKind"], agent["client_kind"], payload["clientKind"], payload["client_kind"],
-                    payload["source"], json["source"]]
-            .compactMap { $0?.stringValue?.trimmingCharacters(in: .whitespaces).lowercased().replacingOccurrences(of: "-", with: "_") }
-        if said.contains("hosted_mcp") {
-            self = .hostedMCP
-        } else if said.contains("mcp") {
-            self = .cliMCP
-        } else if said.contains("cli") {
-            self = .cli
-        } else {
-            return nil
+        func mark(_ value: JSONValue?) -> String? {
+            guard let text = value?.stringValue?.trimmingCharacters(in: .whitespaces).lowercased(), !text.isEmpty else {
+                return nil
+            }
+            return text
+        }
+        let source = mark(json["source"])
+        if mark(payload["source"]) == "hosted_mcp" || source == "hosted_mcp" {
+            self = .mcp
+            return
+        }
+        guard let kind = mark(agent["clientKind"]) ?? mark(agent["client_kind"]) ?? mark(payload["clientKind"])
+                ?? mark(payload["client_kind"]) else { return nil }
+        switch kind {
+        case "mcp":
+            guard let source else { return nil }
+            self = source == "cli" ? .cliMCP : .mcp
+        case "cli": self = .cli
+        default: self = .other
         }
     }
 }

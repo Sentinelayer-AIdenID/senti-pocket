@@ -60,30 +60,77 @@ final class RoomAuthorMessagesTests: XCTestCase {
      ],"count":2,"nextBeforeSequence":120,"hasMore":true,"connection":"MCP"}
     """
 
-    /// Ticket f7254a3b: how each post says it was sent, as the API stores it. Hosted MCP stamps `source: "hosted_mcp"`,
-    /// which outranks what a client says of itself; MCP admissions (the CLI's MCP server) stamp `clientKind: "mcp"`; the
-    /// CLI says "cli"; anything else is not known.
-    func test_each_post_says_how_it_was_sent() throws {
-        func sent(_ agent: String, _ payload: String, source: String? = nil) throws -> RoomPostClient? {
-            let top = source.map { #","source":"\#($0)""# } ?? ""
-            let json = try JSONDecoder().decode(JSONValue.self, from: Data("""
-            {"id":"e1","event":"session_message","sequenceId":1,"ts":"2026-11-07T10:00:00Z","agent":\(agent),
-             "payload":\(payload)\(top)}
-            """.utf8))
-            return try XCTUnwrap(RoomMessage(json: json)).sentThrough
+    /// How a post says it was sent (tickets f7254a3b, c96649c0): the agent's JSON, the payload's, and the event's
+    /// top-level `source` (absent from a copy that does not carry it).
+    private func sent(_ agent: String, _ payload: String, source: String? = nil) throws -> RoomPostClient? {
+        let top = source.map { #","source":"\#($0)""# } ?? ""
+        let json = try JSONDecoder().decode(JSONValue.self, from: Data("""
+        {"id":"e1","event":"session_message","sequenceId":1,"ts":"2026-11-07T10:00:00Z","agent":\(agent),
+         "payload":\(payload)\(top)}
+        """.utf8))
+        return try XCTUnwrap(RoomMessage(json: json)).sentThrough
+    }
+
+    // The "Connected through" table, case by case: one rule with the web (sentinelayer-web #812,
+    // `agentConnection.test.tsx`, "the Connected-through table, case by case"), each test named for its case there.
+
+    /// 1. Stamp present (payload or top-level source "hosted_mcp"): MCP, whatever clientKind says.
+    func test_case_1_stamp_present_is_mcp_whatever_client_kind_says() throws {
+        XCTAssertEqual(try sent(#"{"id":"someone"}"#, #"{"text":"hi","source":"hosted_mcp"}"#), .mcp,
+                       "the stamp with no clientKind at all")
+        XCTAssertEqual(try sent(#"{"id":"someone"}"#, #"{"text":"hi","source":"hosted_mcp"}"#, source: "mcp"), .mcp)
+        XCTAssertEqual(try sent(#"{"id":"ticket-keeper","clientKind":"cli"}"#, #"{"text":"hi","source":"hosted_mcp"}"#,
+                                source: "mcp"), .mcp, "the stamp outranks a client that says it is the CLI")
+        XCTAssertEqual(try sent(#"{"id":"ticket-keeper","clientKind":"cli"}"#, #"{"text":"hi"}"#, source: "hosted_mcp"),
+                       .mcp, "a top-level stamp reads the same")
+        XCTAssertEqual(try sent(#"{"id":"review-agent","clientKind":"mcp"}"#, #"{"text":"hi","source":"hosted_mcp"}"#,
+                                source: "cli"), .mcp, "the stamp outranks mcp from the CLI")
+    }
+
+    /// 2. clientKind "mcp" with top-level source "cli": the CLI (MCP).
+    func test_case_2_mcp_with_top_level_source_cli_is_the_cli_mcp() throws {
+        XCTAssertEqual(try sent(#"{"id":"review-agent","clientKind":"mcp"}"#, #"{"text":"hi","source":"mcp"}"#,
+                                source: "cli"), .cliMCP, "as the server stores a post through the CLI's MCP server")
+        XCTAssertEqual(try sent(#"{"id":"review-agent","clientKind":"mcp"}"#, #"{"text":"hi"}"#, source: "cli"),
+                       .cliMCP)
+        XCTAssertEqual(try sent(#"{"id":"review-agent"}"#, #"{"text":"hi","clientKind":"mcp"}"#, source: "cli"),
+                       .cliMCP, "the payload's kind, when the agent declares none")
+    }
+
+    /// 3. clientKind "mcp" with no top-level source: no line, and it never overturns an earlier post (it says nothing;
+    /// the card's own test shows an earlier post's line kept).
+    func test_case_3_mcp_with_no_top_level_source_says_nothing() throws {
+        XCTAssertNil(try sent(#"{"id":"review-agent","clientKind":"mcp"}"#, #"{"text":"hi"}"#))
+        XCTAssertNil(try sent(#"{"id":"review-agent","clientKind":"mcp"}"#, #"{"text":"hi","source":"cli"}"#),
+                     "the payload's source is not the post's: only the top-level source says the CLI sent it")
+    }
+
+    /// 4. clientKind "mcp" with any other top-level source: MCP.
+    func test_case_4_mcp_with_any_other_top_level_source_is_mcp() throws {
+        for source in ["web", "api", "mcp"] {
+            XCTAssertEqual(try sent(#"{"id":"review-agent","clientKind":"mcp"}"#, #"{"text":"hi"}"#, source: source),
+                           .mcp, "source \(source)")
         }
-        // A post through the CLI's MCP server, as the server stores it: the event's source "cli", the agent's clientKind
-        // "mcp", the payload's source "mcp".
-        XCTAssertEqual(try sent(#"{"id":"claude-warden","clientKind":"mcp"}"#, #"{"text":"hi","source":"mcp"}"#,
-                                source: "cli"), .cliMCP, "the CLI's MCP server, never the CLI alone")
-        XCTAssertEqual(try sent(#"{"id":"claude-warden","clientKind":"mcp"}"#, #"{"text":"hi"}"#), .cliMCP,
-                       "clientKind mcp alone means the CLI's MCP server: hosted connectors say hosted_mcp")
-        XCTAssertEqual(try sent(#"{"id":"gpt-helper","clientKind":"hosted_mcp"}"#,
-                                #"{"text":"hi","source":"hosted_mcp"}"#), .hostedMCP)
-        XCTAssertEqual(try sent(#"{"id":"gpt-helper","clientKind":"mcp"}"#, #"{"text":"hi","source":"hosted_mcp"}"#),
-                       .hostedMCP, "the hosted marker outranks what the client says")
-        XCTAssertEqual(try sent(#"{"id":"ticket-keeper","clientKind":"cli"}"#, #"{"text":"hi"}"#), .cli)
-        XCTAssertNil(try sent(#"{"id":"someone","clientKind":"telegraph"}"#, #"{"text":"hi"}"#), "not known: nothing")
+    }
+
+    /// 5. clientKind "cli", no stamp: the CLI.
+    func test_case_5_cli_with_no_stamp_is_the_cli() throws {
+        XCTAssertEqual(try sent(#"{"id":"ticket-keeper","clientKind":"cli"}"#, #"{"text":"hi"}"#, source: "cli"), .cli)
+        XCTAssertEqual(try sent(#"{"id":"ticket-keeper","clientKind":" CLI "}"#, #"{"text":"hi"}"#), .cli)
+    }
+
+    /// 6. Any other clientKind with no stamp, including "hosted_mcp" (the stamp says hosted, not a client's claim): no
+    /// line.
+    func test_case_6_any_other_client_kind_with_no_stamp_is_no_line() throws {
+        for kind in ["claude", "codex", "web", "sdk", "hosted_mcp"] {
+            XCTAssertEqual(try sent(#"{"id":"someone","clientKind":"\#(kind)"}"#, #"{"text":"hi"}"#, source: "cli"),
+                           .other, "clientKind \(kind)")
+        }
+    }
+
+    /// 6. Nothing declared and no stamp: nothing said (no line, and it never overturns an earlier post).
+    func test_case_6_nothing_declared_and_no_stamp_says_nothing() throws {
+        XCTAssertNil(try sent(#"{"id":"someone"}"#, #"{"text":"hi"}"#, source: "cli"), "a source alone is no kind")
         XCTAssertNil(try sent(#"{"id":"someone"}"#, #"{"text":"hi"}"#))
     }
 
