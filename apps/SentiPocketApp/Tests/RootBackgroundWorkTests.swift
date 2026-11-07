@@ -124,9 +124,11 @@ final class RootBackgroundWorkTests: XCTestCase {
     /// The root holds the panel in its `SidePanelLayer`: closed, the panel is not in the tree, so it builds none of its
     /// rooms; each open makes it again (Carter's freeze of 11-06, #62485). Mutant it must catch: the root drawing the
     /// panel itself, kept in the tree while closed (the closed check catches it). And the root's open ends editing
-    /// first. Mutant it must catch: the root setting the panel open without `SidePanelState.open()`.
+    /// first. Mutant it must catch: the root setting the panel open without `SidePanelState.open()`. And its rooms are
+    /// placed while it is closed. Mutant it must catch: the placing moved back onto the panel.
     func test_opening_the_side_panel_draws_no_message_row_and_reads_only_the_rooms() throws {
         let panelBuiltAtStart = RenderTrace.builtCount(.sidePanel)
+        let placedAtStart = RootPreview.meter.sidePanelPlacements
         let api = Self.api()
         UserDefaults.standard.set(RootPreviewAPI.midRoom, forKey: "pocket.lastRoomId")
         // The root observes its link inbox: a change announced there draws the root again and changes nothing else.
@@ -153,6 +155,10 @@ final class RootBackgroundWorkTests: XCTestCase {
         print("BGAUDIT settled \(String(format: "%.1f", Date().timeIntervalSince(shown))) s after the root was shown")
         XCTAssertEqual(RenderTrace.builtCount(.sidePanel) - panelBuiltAtStart, 0,
                        "closed, the side panel builds none of its rooms: it is not in the root's tree")
+        // Its rooms are placed all the same, by the root (the panel, out of the tree, could not): an open shows rooms
+        // already placed.
+        XCTAssertGreaterThan(RootPreview.meter.sidePanelPlacements - placedAtStart, 0,
+                             "closed since launch, the side panel's rooms were placed")
         let draws = RenderTrace.snapshot().draws
         let reads = Self.reads(api)
         let meter = RootPreview.meter
@@ -239,7 +245,7 @@ final class RootBackgroundWorkTests: XCTestCase {
 
         RootPreview.requestDrawer(true)
         pump(1)
-        RootPreview.requestRoom("room-000")
+        RootPreview.pickRoom("room-000")
         quiet { [RenderTrace.snapshot().draws, meter.roomScreens, api.totalCalls] }
         XCTAssertEqual(meter.roomScreens - screens, 1, "picking another room makes one room screen, the new room's")
         // The room it replaced goes once nothing holds it any more.

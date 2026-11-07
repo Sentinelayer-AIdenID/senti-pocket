@@ -22,6 +22,10 @@ import PocketUI
 /// - `-PocketRootStream <posts per second>`: messages arriving in the open room (default none).
 /// - `-PocketRootOneListPage`: every room in the list's first page, so the side panel lists all of them (the API
 ///   pages the list by 50).
+/// - `-PocketRootCrashOffer`: one made-up crash report waits to be offered, and sending it is answered by the preview,
+///   so the offer (`CrashReportOffer`) shows a moment after launch.
+/// - `-PocketRootThreadReading`: a moment after launch, the open room's newest message opens its thread and its first
+///   reply is read aloud (made-up words), for pictures of the Listen bar over a thread.
 /// - `-PocketRootInlineReplies`: every message with replies shows its newest reply in the room, as a row to answer in
 ///   place (a reply to a reply, from the room's box).
 /// - `-PocketRootAIConsentGiven`: this account has already said OK to sharing with AI, so a first send is not asked
@@ -51,8 +55,23 @@ enum RootPreview {
         }
     }
 
+    static var offersCrashReport: Bool { ProcessInfo.processInfo.arguments.contains("-PocketRootCrashOffer") }
+
+    /// The made-up report: a crash with a few steps and frames, nothing from a real run.
+    static func madeUpCrashReport(at date: Date = Date()) -> CrashReport {
+        CrashReport(id: "preview-crash-1", kind: .crash, at: date.addingTimeInterval(-20 * 60), build: "2026110600",
+                    system: "iOS 26.1", device: "iPhone17,5", reason: "EXC_BREAKPOINT (SIGTRAP), made up for the preview",
+                    frames: ["SentiPocketApp +0x0001a2b4", "SwiftUI +0x0049f210", "UIKitCore +0x00d1c0e8"],
+                    binaries: ["SentiPocketApp 00000000-0000-4000-8000-0000000000a1",
+                               "SwiftUI 00000000-0000-4000-8000-0000000000a2",
+                               "UIKitCore 00000000-0000-4000-8000-0000000000a3"],
+                    trail: ["opened room", "opened side panel", "closed side panel", "opened room"])
+    }
+
     @MainActor
     static func rootView(whisperModel: WhisperModelProvisioningCoordinator, incomingLinks: IncomingLinkInbox) -> some View {
+        if offersCrashReport { CrashReporter.shared.offerForPreview(madeUpCrashReport()) }
+        if ProcessInfo.processInfo.arguments.contains("-PocketRootThreadReading") { readInAThreadSoon() }
         // The root reopens the room opened last once the room list has loaded, as the app does after a launch.
         UserDefaults.standard.set(openRoomId ?? "", forKey: "pocket.lastRoomId")
         // The freeze watch runs as in the app, so a stall here is written down where the app writes one.
@@ -91,13 +110,30 @@ enum RootPreview {
     /// Opens or closes the side panel of a root hosted in a test, as the signals do in the preview.
     static func requestDrawer(_ open: Bool) { drawerSubject.send(open) }
 
-    private static let roomSubject = PassthroughSubject<String, Never>()
+    private static let roomPickSubject = PassthroughSubject<String, Never>()
 
-    /// Rooms picked in a root hosted in a test, as the side panel's rooms are tapped (`requestRoom`).
-    static var roomRequests: AnyPublisher<String, Never> { roomSubject.eraseToAnyPublisher() }
+    /// Rooms picked in a root hosted in a test, as the side panel's rooms are tapped (`pickRoom`).
+    static var roomPicks: AnyPublisher<String, Never> { roomPickSubject.eraseToAnyPublisher() }
 
     /// Puts a room on screen in a root hosted in a test, as a tap on it in the side panel does.
-    static func requestRoom(_ sessionId: String) { roomSubject.send(sessionId) }
+    static func pickRoom(_ sessionId: String) { roomPickSubject.send(sessionId) }
+
+    /// `-PocketRootThreadReading`: the newest message's thread, then its first reply read aloud, as taps would.
+    private static func readInAThreadSoon() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+            requestRoom(.openThread(sequenceId: 165))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                var words = RootPreviewWords(seed: 165)
+                requestRoom(.readAloud(id: RoomReadAloud.reply("reply-165-1"),
+                                       text: (0..<6).map { _ in words.sentence() }.joined(separator: " ")))
+            }
+        }
+    }
+
+    /// What a hosted test asks of the room on screen, as a tap there would (`RoomChatScreen.handle`).
+    static let roomRequests = PassthroughSubject<RoomChatIntent, Never>()
+
+    static func requestRoom(_ intent: RoomChatIntent) { roomRequests.send(intent) }
 
     /// What the main thread did between two signals, for profiles of the root (`RootPreviewMeter`).
     static let meter = RootPreviewMeter()
@@ -179,6 +215,18 @@ final class RootPreviewMeter: @unchecked Sendable {
 
     /// Room coordinators made and not gone yet: a room put in another's place lets the other go.
     var liveRooms: Int { rooms.filter { $0.room != nil }.count }
+
+    /// Where each read-aloud bar and its controls were last laid out, by place ("app", "room", "thread").
+    private(set) var readAloudBars: [String: [String: CGRect]] = [:]
+
+    func readAloudBarLaidOut(_ place: String, _ frames: [String: CGRect]) { readAloudBars[place] = frames }
+
+    func forgetReadAloudBars() { readAloudBars = [:] }
+
+    /// Times the root asked for its side panel's rooms to be placed (`placeSidePanelRooms`), open or not.
+    private(set) var sidePanelPlacements = 0
+
+    func sidePanelPlaced() { sidePanelPlacements += 1 }
 
     /// Whether the room's calendar entry offered Calendar the last time its body ran (nil before it ran): it watches
     /// the calendar itself, so an answer that turns the calendar on reaches it without the root drawing again.
@@ -339,7 +387,7 @@ final class RootPreviewAPI: @unchecked Sendable {
             notificationMarker: self, callLog: self, waiting: self, checkpoints: self, directMessages: self,
             roomFolders: self, admissionDecider: self, sender: sender, actionSender: sender, ticketWriter: self,
             ticketLeases: InMemoryTicketLeaseStore(), ticketExtras: self, identity: self, receipts: self, readMarker: self,
-            registersPush: false
+            registersPush: false, crashReports: RootPreview.offersCrashReport ? RootPreviewCrashReports() as any CrashReportSending : nil
         )
     }
 
@@ -772,6 +820,20 @@ extension RootPreviewAPI: RoomReceiptsClient, RoomReadMarking {
 
     func markRead(sessionId: String, through sequenceId: Int64) async throws -> RoomReadReceipt {
         RoomReadReceipt(outcome: .recorded, lastReadSequenceId: sequenceId)
+    }
+}
+
+/// The preview's answer to a sent crash report: taken, after a moment. Its credential is made up, with an account.
+private struct RootPreviewCrashReports: CrashReportSending {
+    func currentToken() -> String? {
+        let claims = Data(#"{"sub":"preview-alex"}"#.utf8).base64EncodedString()
+            .replacingOccurrences(of: "=", with: "").replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+        return "e30." + claims + ".preview"
+    }
+
+    func send(_ payload: CrashReportPayload, token: String) async -> CrashReportSendResult {
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        return .accepted
     }
 }
 

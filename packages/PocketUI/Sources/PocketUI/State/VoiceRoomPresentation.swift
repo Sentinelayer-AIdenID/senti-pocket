@@ -154,9 +154,8 @@ public struct VoiceRoomState: Equatable, Sendable {
     public var joined: [String] = []
     /// The ring has stopped: an agent picked up, nobody did for a while, or you started talking.
     public var ringStopped = false
-    /// The agents' posts not read because the voice line answered their turn, by turn id: the transcript says so,
-    /// rather than "another agent had the floor".
-    public var answeredByLine: Set<String> = []
+    /// The agents' posts never read in full, by turn id, and why: the transcript says so.
+    public var skipped: [String: VoiceRoomSkip] = [:]
     /// Why the agent called, when you answered its call; shown until someone speaks.
     public var about: String?
     /// Muted, by the panel's Mute or on the phone's call screen: nothing you say is heard or posted until unmuted.
@@ -220,6 +219,18 @@ public struct VoiceRoomState: Equatable, Sendable {
 
     /// The Talk button takes a turn: never while muted, or once the call is ending.
     public var canTalk: Bool { !isMuted && phase != .ending && phase != .ended }
+}
+
+/// Why an agent's post in a call was never read in full. Every post is read unless one of these says why not.
+public enum VoiceRoomSkip: String, Equatable, Sendable {
+    /// You talked over it, and the call ended before it was read again.
+    case youTalkedOver = "you talked over it"
+    /// You tapped Skip while it was read.
+    case youSkipped = "you skipped it"
+    /// It was still waiting when the call ended.
+    case callEnded = "the call ended first"
+    /// The agent's hello in the same words the voice line had already said.
+    case sameAsHello = "same words as the hello"
 }
 
 public enum VoiceRoomIntent: Equatable, Sendable {
