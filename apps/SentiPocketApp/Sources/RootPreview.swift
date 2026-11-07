@@ -185,6 +185,11 @@ final class RootPreviewMeter: @unchecked Sendable {
 
     func forgetReadAloudBars() { readAloudBars = [:] }
 
+    /// Times the root asked for its side panel's rooms to be placed (`placeSidePanelRooms`), open or not.
+    private(set) var sidePanelPlacements = 0
+
+    func sidePanelPlaced() { sidePanelPlacements += 1 }
+
     /// Whether the room's calendar entry offered Calendar the last time its body ran (nil before it ran): it watches
     /// the calendar itself, so an answer that turns the calendar on reaches it without the root drawing again.
     private(set) var calendarEntryOffers: Bool?
