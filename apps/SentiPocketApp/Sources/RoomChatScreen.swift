@@ -524,7 +524,8 @@ struct RoomChatScreen: View {
         // there would be no way to hang up, so the call does not start, nothing of it is left wired, and you are told
         // (warden, #267).
         let host = VoiceRoomHost(room: room, meter: meter, partnerLab: partnerLab(of: room), addable: { voicePartners })
-        guard VoiceCallWindow.shared.show(host) else {
+        // Minimized, the call screen hides and the call goes on in its bar over the app, which keeps Mute and End.
+        guard VoiceCallWindow.shared.show(host, bar: VoiceCallBarModel(room)) else {
             CrashReporter.shared.note("voice call refused: no call screen")
             if let answeredCall {
                 RoomCallDesk.shared.voiceRoomEnded(answeredCall)
@@ -780,6 +781,11 @@ struct RoomChatScreen: View {
         #if DEBUG
         // A hosted test asks the room on screen for what a tap would.
         .onReceive(RootPreview.roomRequests) { intent in handle(intent) }
+        // And starts a voice room in it, as the call picker's Call does.
+        .onReceive(RootPreview.voiceRoomRequests) { request in
+            guard request.sessionId == route.sessionId else { return }
+            startVoiceRoom(with: request.agents)
+        }
         #endif
         // A sheet, the side panel or a call's window covers the room: its moving parts (the presence ring) rest
         // underneath (#265, #269). The app's cover passes through as it is, read only by what rests.
@@ -1515,7 +1521,9 @@ struct VoiceRoomHost: View {
     let addable: () -> [String]
 
     var body: some View {
-        VoiceRoomPanel(state: room.state, meter: meter, partnerLab: partnerLab, addable: addable, send: room.send)
+        // Minimize hides only the call screen: the call goes on, shown by its bar over the app (`VoiceCallBarSlot`).
+        VoiceRoomPanel(state: room.state, meter: meter, partnerLab: partnerLab, addable: addable,
+                       onMinimize: { VoiceCallWindow.shared.minimize() }, send: room.send)
     }
 }
 

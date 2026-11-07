@@ -666,12 +666,22 @@ struct AuthenticatedRootView: View {
                         }
                     }
                 }
+                // A minimized call's bar (ticket bcdba8f3) floats over the top of the room, just under the navigation
+                // bar. Not at the foot: the composer and its Send are there, moving with the keyboard, and the newest
+                // messages land just above them. Not in the navigation bar: the side panel's button and the room's
+                // buttons are there. It covers the top rows in view, which scroll out from under it (and the pins, or
+                // who is here, when the room shows them). An overlay, never an inset: the room's list keeps its frame
+                // and insets as the bar comes and goes (#360). It is the root's, so it is not made again with a room
+                // screen; the call itself ends when its room goes, and the bar with it.
+                .overlay(alignment: .top) { VoiceCallBarSlot() }
                 .toolbar {
                     ToolbarItem(placement: .navigationBarLeading) { drawerButton }
                 }
                 .modifier(calendarEntry)
                 .navigationDestination(for: RoomRoute.self) { route in
+                    // A breakout's own call shows its bar over the breakout.
                     roomScreen(route)
+                        .overlay(alignment: .top) { VoiceCallBarSlot() }
                 }
             }
             // A sheet or the side panel over the room: its moving parts rest (warden, #269).

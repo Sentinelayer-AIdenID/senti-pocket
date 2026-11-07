@@ -11,6 +11,8 @@ public struct VoiceRoomPanel: View {
     private let meter: VoiceLevelMeter
     private let partnerLab: AgentLab?
     private let addable: () -> [String]
+    /// Hides the call screen and leaves the call going, in a bar over the app; nil where the call cannot be minimized.
+    private let onMinimize: (() -> Void)?
     private let send: (VoiceRoomIntent) -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var pressStarted = Date()
@@ -21,13 +23,15 @@ public struct VoiceRoomPanel: View {
     @State private var candidates: [String] = []
 
     /// `partnerLab` is the called agent's lab, for its logo and colour; nil in a meeting. `addable` is who could be
-    /// brought into the call now, asked when Add is tapped.
+    /// brought into the call now, asked when Add is tapped. `onMinimize`, when given, shows Minimize at the top left.
     public init(state: VoiceRoomState, meter: VoiceLevelMeter, partnerLab: AgentLab?,
-                addable: @escaping () -> [String] = { [] }, send: @escaping (VoiceRoomIntent) -> Void) {
+                addable: @escaping () -> [String] = { [] }, onMinimize: (() -> Void)? = nil,
+                send: @escaping (VoiceRoomIntent) -> Void) {
         self.state = state
         self.meter = meter
         self.partnerLab = partnerLab
         self.addable = addable
+        self.onMinimize = onMinimize
         self.send = send
     }
 
@@ -52,6 +56,13 @@ public struct VoiceRoomPanel: View {
                 addButton
                     .padding(.top, 16)
                     .padding(.trailing, 18)
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            if let onMinimize {
+                minimizeButton(onMinimize)
+                    .padding(.top, 16)
+                    .padding(.leading, 18)
             }
         }
         .pocketCanvas()
@@ -87,6 +98,22 @@ public struct VoiceRoomPanel: View {
         .accessibilityIdentifier("pocket.voice.add")
     }
 
+    /// Minimize (Carter, ticket bcdba8f3): the call screen goes and a bar at the top of the app keeps the call, its
+    /// time, Mute and End, so you can read, scroll and type while it goes on. A tap on the bar brings this screen back.
+    private func minimizeButton(_ minimize: @escaping () -> Void) -> some View {
+        Button(action: minimize) {
+            Image(systemName: "chevron.down")
+                .font(.title3.weight(.semibold))
+                .frame(width: 44, height: 44)
+                .background(PocketPalette.inset, in: Circle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(PocketPalette.textPrimary)
+        .accessibilityLabel("Minimize the call")
+        .accessibilityHint("The call goes on in a bar at the top of the app")
+        .accessibilityIdentifier("pocket.voice.minimize")
+    }
+
     /// The called agent's lab, only while the call has one agent: a group shows no one's logo.
     private var lab: AgentLab? {
         state.with.count == 1 ? partnerLab : nil
@@ -100,14 +127,14 @@ public struct VoiceRoomPanel: View {
 
     private var header: some View {
         VStack(spacing: 4) {
-            // Several names shrink a little, then end in "…", and never run under the Add button.
+            // Several names shrink a little, then end in "…", and never run under the Add or Minimize button.
             Text(state.title)
                 .font(.title2.weight(.semibold))
                 .foregroundStyle(PocketPalette.textPrimary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.75)
                 .truncationMode(.tail)
-                .padding(.horizontal, state.canAdd ? 52 : 0)
+                .padding(.horizontal, state.canAdd || onMinimize != nil ? 52 : 0)
             if state.isRinging {
                 Text("Ringing…")
                     .font(.subheadline)
@@ -345,9 +372,9 @@ public struct VoiceRoomPanel: View {
         }
     }
 
+    /// The same clock as a minimized call's bar.
     static func elapsed(from start: Date, to now: Date) -> String {
-        let seconds = max(0, Int(now.timeIntervalSince(start)))
-        return String(format: "%d:%02d", seconds / 60, seconds % 60)
+        VoiceCallBarState.clock(from: start, to: now)
     }
 }
 #endif
