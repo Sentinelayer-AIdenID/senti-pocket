@@ -147,9 +147,6 @@ struct RoomChatScreen: View {
     @State private var openingAttachment = false
     @State private var linkedTicket: LinkedTicket?
     @State private var appliedRouteLinks = false
-    /// The times the app closed unexpectedly, offered once each to send to this room.
-    @ObservedObject private var crashes = CrashReporter.shared
-    @State private var offersCrashReports = false
     /// A box's console, shown in the app.
     @State private var consolePage: InAppPage?
     /// Starting agents, for tickets and from New agent (the mint admits only some accounts; the tickets screen and the
@@ -1170,29 +1167,6 @@ struct RoomChatScreen: View {
         } message: {
             Text(listenProblem ?? "")
         }
-        .alert("Pocket closed unexpectedly", isPresented: $offersCrashReports) {
-            Button("Send to this room") {
-                let reports = crashes.unhandled
-                CrashReporter.shared.note("crash report sent to the room")
-                // Once the alert has gone, as a typed send waits a turn: the alert leaving and the new row are never
-                // laid out in one update. Handled only once the room has it: a lost send offers it again next time.
-                DispatchQueue.main.async {
-                    // Posted to the room, so its agents read it too: the first send there asks first. Not now leaves
-                    // the reports to be offered again.
-                    afterAIConsent(after: 0.4) {
-                        coordinator.sendCrashReport(CrashReportText.message(reports)) { crashes.markHandled(reports) }
-                    }
-                }
-            }
-            Button("Not now", role: .cancel) { crashes.markHandled(crashes.unhandled) }
-        } message: {
-            Text("Send what the phone recorded to this room so it can be fixed? It has where the app stopped and your last few taps, never your messages.")
-        }
-        .task {
-            // A moment after the room opens, so iOS can hand over its own crash records first and both go together.
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
-            offerCrashReports()
-        }
         #if DEBUG
         .task {
             if RoomPreview.isComposerTrayRequested, media.board.tray.isEmpty { media.add(RoomPreview.composerTraySources()) }
@@ -1203,8 +1177,6 @@ struct RoomChatScreen: View {
             coordinator.setBoxes(running: boxes[0], ended: boxes[1])
         }
         .modifier(RoomCoverWatch(coversItself: coversItself, coordinator: coordinator, flight: flight))
-        .onChange(of: crashes.unhandled.count) { _ in offerCrashReports() }
-        .onChange(of: coordinator.state.composer.canPost) { _ in offerCrashReports() }
         .sheet(item: $linkedTicket) { linked in
             if let ticketsTransport {
                 RoomTicketLinkScreen(
@@ -1282,12 +1254,6 @@ struct RoomChatScreen: View {
         ToolbarItem(placement: .cancellationAction) {
             Button("Done", action: close)
         }
-    }
-
-    /// Offers the unsent crash reports where they can be posted: in a room you can write in, with nothing else asked.
-    private func offerCrashReports() {
-        guard !crashes.unhandled.isEmpty, coordinator.state.composer.canPost, voiceRoom == nil else { return }
-        offersCrashReports = true
     }
 
     /// A link that opened this room may also name a reply, a ticket or the agent requests: open those once, over the

@@ -29,6 +29,7 @@ final class VoiceCallWindow {
         made.rootViewController = host
         made.isHidden = false
         window = made
+        CallPresence.shared.callScreen(up: true)
         // It slides up. The view moves, not the window: a window's own transform is not reliably drawn.
         let below = CGAffineTransform(translationX: 0, y: made.bounds.height)
         host.view.transform = below
@@ -43,6 +44,7 @@ final class VoiceCallWindow {
     func hide() {
         guard let window else { return }
         self.window = nil
+        CallPresence.shared.callScreen(up: false)
         let view = window.rootViewController?.view
         UIView.animate(withDuration: 0.25, animations: {
             view?.transform = CGAffineTransform(translationX: 0, y: window.bounds.height)
