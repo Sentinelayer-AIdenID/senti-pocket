@@ -76,6 +76,39 @@ final class ReplyAttachmentsPresentationTests: XCTestCase {
         XCTAssertEqual(window?.hasNewer, false)
     }
 
+    /// Reading on past 1,000 replies lets the oldest go, and with them the first reply shown and the one the thread was
+    /// opened at. The first shown moves to the first reply kept and stays there as later pages land, so the reader's
+    /// first reply does not jump and no reply of a later page is hidden (falling back to the newest 30 hid 70 of each
+    /// page of 100).
+    func test_the_first_reply_shown_stays_put_as_later_pages_let_the_oldest_go() {
+        func rows(_ range: ClosedRange<Int>) -> [RoomChatReplyRow] {
+            range.map {
+                RoomChatReplyRow(id: "r\($0)", authorName: "pat", isHuman: true, isOwn: false, text: "reply \($0)",
+                                 date: nil, isEdited: false)
+            }
+        }
+        // Opened at reply 40,000 with one read around it (39,750 to 40,249), shown from 10 before it. Then pages of
+        // 100 on, held as the thread holds them: at most 1,000, the oldest going up to the start of a page read on.
+        var replies = rows(39_750...40_249)
+        var shownFrom: String? = "r39990"
+        let pages: [(held: ClosedRange<Int>, firstShown: String)] = [
+            (39_750...40_349, "r39990"), (39_750...40_449, "r39990"), (39_750...40_549, "r39990"),
+            (39_750...40_649, "r39990"), (39_750...40_749, "r39990"),
+            (40_250...40_849, "r40250"), (40_250...40_949, "r40250"), (40_250...41_049, "r40250")
+        ]
+        for (number, page) in pages.enumerated() {
+            let firstBefore = replies.first?.id
+            replies = rows(page.held)
+            shownFrom = RoomThreadShownStart.afterLaterPage(shownFrom: shownFrom, firstBefore: firstBefore,
+                                                             replies: replies)
+            XCTAssertEqual(shownFrom, page.firstShown, "page \(number + 1) on")
+            let start = RoomThreadShownStart.index(in: replies, shownFrom: shownFrom, focus: "r40000", hasOlder: true,
+                                                   focusMissing: false)
+            XCTAssertEqual(replies[start].id, page.firstShown, "page \(number + 1) on: the reader's first reply")
+            XCTAssertLessThanOrEqual(start, replies.count - 100, "page \(number + 1) on: all of it is shown")
+        }
+    }
+
     func test_a_reply_bell_has_its_own_mark() {
         let row = NotificationRow(id: "n1", kind: "reply", title: "pat replied", body: "Photo", roomTitle: "Room",
                                   createdAt: "2026-11-04T10:00:00Z", isRead: false, canOpen: true)

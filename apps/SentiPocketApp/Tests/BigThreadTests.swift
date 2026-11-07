@@ -44,6 +44,9 @@ private final class PagedThread: RoomTransport, @unchecked Sendable {
     let anchored: Bool
     /// How long each read of the thread takes, as a slow network answers.
     var readDelay: UInt64 = 0
+    /// How long a page back (a read with a cursor) and a page on take, each on top of `readDelay`.
+    var olderDelay: UInt64 = 0
+    var laterDelay: UInt64 = 0
     /// A read around a reply fails (a 503), as any read may.
     var failsAround = false
     /// A read around a reply answers a window without that reply in it.
@@ -127,6 +130,7 @@ private final class PagedThread: RoomTransport, @unchecked Sendable {
             return (failing.remove(beforeCursor) != nil, visible)
         }
         if readDelay > 0 { try? await Task.sleep(nanoseconds: readDelay) }
+        if beforeCursor != nil, olderDelay > 0 { try? await Task.sleep(nanoseconds: olderDelay) }
         if fails { throw URLError(.timedOut) }
         return page(before: beforeCursor, limit: limit, count: count)
     }
@@ -171,6 +175,7 @@ private final class PagedThread: RoomTransport, @unchecked Sendable {
             kept.append(Read(limit: limit, after: afterCursor))
             return visible
         }
+        if laterDelay > 0 { try? await Task.sleep(nanoseconds: laterDelay) }
         guard anchored, let after = Self.position(afterCursor) else { return RoomActionsPage() }
         let last = min(count, after + min(limit, pageSize))
         return RoomActionsPage(replies: replies(after + 1, last),
@@ -185,6 +190,9 @@ final class BigThreadTests: XCTestCase {
 
     /// Reply `index`'s id, a UUID as a reply's is (a notification names only a UUID).
     nonisolated static func id(_ index: Int) -> String { String(format: "9b2f7a40-0000-4000-8000-%012ld", index) }
+
+    /// The number of the reply an id names.
+    nonisolated static func number(_ id: String) -> Int { id.split(separator: "-").last.flatMap { Int($0) } ?? -1 }
 
     /// A long reply, as agents write them: three paragraphs, a list and code.
     nonisolated static func text(_ index: Int, of count: Int) -> String {
@@ -575,6 +583,67 @@ final class BigThreadTests: XCTestCase {
         XCTAssertEqual(transport.reads.last, PagedThread.Read(limit: 100, cursor: "w1.40250"))
         XCTAssertEqual(room.state.thread?.replies.map(\.id), (40_150...40_849).map(Self.id), "none left out")
         room.pause()
+    }
+
+    /// One page read is on its way at a time, either way. A page back and a page on asked for together never both land,
+    /// whichever would come back first: the thread holds no gap, and its cursors are its loaded edges. (Both landing, a
+    /// page back could let the newest go, or a page on the oldest, and the other would land beyond a gap.)
+    func test_a_page_back_and_a_page_on_asked_together_leave_no_gap_whichever_would_land_first() async throws {
+        for olderLandsFirst in [true, false] {
+            let transport = PagedThread(count: 100_000)
+            let room = coordinator(transport, focus: 42)
+            room.resume()
+            room.openThread(42, at: Self.id(40_000))
+            await waitUntil("the thread is open at the reply") {
+                room.state.thread?.isLoading == false && room.state.thread?.replies.count == 500
+            }
+            for page in 1...5 {
+                room.send(.loadOlderReplies(sequenceId: 42))
+                await waitUntil("page \(page) back is read") {
+                    room.state.thread?.replies.first?.id == Self.id(39_750 - page * 100)
+                        && room.state.thread?.isLoadingOlder == false
+                }
+            }
+            let held = try XCTUnwrap(room.state.thread?.replies.map(\.id))
+            XCTAssertEqual(held, (39_250...40_249).map(Self.id), "1,000 held: one page more either way goes past it")
+
+            // The one asked for second would land first.
+            transport.olderDelay = olderLandsFirst ? 50_000_000 : 400_000_000
+            transport.laterDelay = olderLandsFirst ? 400_000_000 : 50_000_000
+            let before = transport.reads.count
+            if olderLandsFirst {
+                room.send(.loadLaterReplies(sequenceId: 42))
+                room.send(.loadOlderReplies(sequenceId: 42))
+            } else {
+                room.send(.loadOlderReplies(sequenceId: 42))
+                room.send(.loadLaterReplies(sequenceId: 42))
+            }
+            await waitUntil("a page lands") {
+                room.state.thread?.replies.map(\.id) != held && room.state.thread?.isLoadingOlder == false
+                    && room.state.thread?.isLoadingLater == false
+            }
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            XCTAssertEqual(transport.reads.count, before + 1,
+                           "one page on its way at a time (older first: \(olderLandsFirst))")
+            let numbers = try XCTUnwrap(room.state.thread?.replies.map { Self.number($0.id) })
+            let first = try XCTUnwrap(numbers.first)
+            let last = try XCTUnwrap(numbers.last)
+            XCTAssertEqual(numbers, Array(first...last), "no gap (older first: \(olderLandsFirst))")
+
+            // The cursors are the loaded edges.
+            transport.olderDelay = 0
+            transport.laterDelay = 0
+            room.send(.loadOlderReplies(sequenceId: 42))
+            await waitUntil("a page back") { room.state.thread?.replies.first?.id == Self.id(first - 100) }
+            XCTAssertEqual(transport.reads.last, PagedThread.Read(limit: 100, cursor: "w1.\(first)"))
+            if room.state.thread?.hasLater == true {
+                let newest = Self.number(try XCTUnwrap(room.state.thread?.replies.last?.id))
+                room.send(.loadLaterReplies(sequenceId: 42))
+                await waitUntil("a page on") { room.state.thread?.replies.last?.id == Self.id(newest + 100) }
+                XCTAssertEqual(transport.reads.last, PagedThread.Read(limit: 100, after: "w1.\(newest)"))
+            }
+            room.pause()
+        }
     }
 
     /// Reading back from a window past 1,000 lets the newest go, as before: the page on would then leave them out, so
@@ -973,7 +1042,7 @@ final class BigThreadTests: XCTestCase {
     /// and a tap reads on.
     func test_a_thread_opened_short_of_its_newest_offers_its_later_replies() throws {
         var sent: [RoomChatIntent] = []
-        let window = try host(Self.openThread(count: 5, newest: 600, focus: 598, hasOlder: true, hasLater: true)) {
+        let window = try host(Self.openThread(count: 1, newest: 600, focus: 600, hasOlder: true, hasLater: true)) {
             sent.append($0)
         }
         defer { HostedSummary.close(window) }

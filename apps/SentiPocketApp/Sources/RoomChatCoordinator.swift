@@ -1669,12 +1669,13 @@ final class RoomChatCoordinator: ObservableObject {
         if firstRead { await findFocusedReply(sequenceId) }
     }
 
-    /// Reads the page before the oldest one loaded. False when there is none, one is already on its way, or it could
-    /// not be read. `quietly` (a search's pages) shows nothing until the search ends: the room is not drawn again for
-    /// each of up to 40 pages.
+    /// Reads the page before the oldest one loaded. False when there is none, a page is already on its way (either
+    /// way: see `loadLaterReplies`), or it could not be read. `quietly` (a search's pages) shows nothing until the
+    /// search ends: the room is not drawn again for each of up to 40 pages.
     @discardableResult
     private func loadOlderReplies(_ sequenceId: Int64, limit: Int, quietly: Bool = false) async -> Bool {
-        guard openThreadSequence == sequenceId, threadRead, let cursor = threadOlderCursor, !threadLoadingOlder else {
+        guard openThreadSequence == sequenceId, threadRead, let cursor = threadOlderCursor, !threadLoadingOlder,
+              !threadLoadingLater else {
             return false
         }
         let generation = threadGeneration
@@ -1813,8 +1814,13 @@ final class RoomChatCoordinator: ObservableObject {
     /// newest. Past `threadHeld` replies, the oldest go up to the start of a page read on from there, and scrolling up
     /// reads them again with that page's own cursor: none is left out. A page that cannot be read says so; scrolling
     /// down asks again.
+    ///
+    /// One page is on its way at a time, either way: a page back that lands first could let the newest go (and a page
+    /// on, the oldest), and the other page would then land beyond a gap with a cursor past it. A page on that lands
+    /// after the newer edge moved (a later read met the newest, or the newest went) is dropped for the same reason.
     private func loadLaterReplies(_ sequenceId: Int64) async {
-        guard openThreadSequence == sequenceId, threadRead, let cursor = threadLaterCursor, !threadLoadingLater else {
+        guard openThreadSequence == sequenceId, threadRead, let cursor = threadLaterCursor, !threadLoadingLater,
+              !threadLoadingOlder else {
             return
         }
         let generation = threadGeneration
@@ -1824,6 +1830,11 @@ final class RoomChatCoordinator: ObservableObject {
             let page = try await transport.roomActions(sessionId: sessionId, targetSequenceId: sequenceId,
                                                        limit: Self.threadPageSize, afterCursor: cursor)
             guard openThreadSequence == sequenceId, threadGeneration == generation else { return }
+            guard threadLaterCursor == cursor else {
+                threadLoadingLater = false
+                publish()
+                return
+            }
             let later = page.replies.filter { $0.targetSequenceId == sequenceId }
             threadReplies = Self.appending(later, to: threadReplies)
             threadLaterCursor = page.afterCursor
