@@ -10,7 +10,7 @@ final class MainThreadStackTests: XCTestCase {
         var binaries: [String] = []
     }
 
-    /// The stall the reading thread found on disk with its frames.
+    /// The stall the checking thread read from disk.
     private final class Found: @unchecked Sendable {
         var stall: MainThreadWatch.Stall?
     }
@@ -41,28 +41,42 @@ final class MainThreadStackTests: XCTestCase {
 
     /// The freeze watch writes the stack into the stall it records: a main thread held past the threshold leaves a
     /// stall on disk naming the function that held it.
+    ///
+    /// The test makes the watch's look itself (`tick(now:)`), from a thread of its own, once the main thread is held,
+    /// at a time past the threshold (ticket 2c55d2f3). It never waits on the watch's own timer: on loaded CI runners
+    /// that utility queue went tens of seconds without running (this test took 1.5 to 37 s, then ran out its 60 s
+    /// with no stall on disk, or with the stall written and its frames never), while a thread like the one used here
+    /// read the main thread's stack in a third of a second every time.
     func test_the_freeze_watch_records_where_the_main_thread_was_stuck() throws {
         #if !arch(arm64)
         throw XCTSkip("The stack is read on arm64 only.")
         #else
+        MainThreadStack.rememberMainThread()
         // The test's own folder: nothing else in the test process writes or removes files there.
         let folder = FileManager.default.temporaryDirectory
             .appendingPathComponent("MainThreadStackTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: folder) }
         let url = folder.appendingPathComponent("stall.json")
+        // Not started: its timer never runs here, so nothing but the look below writes the file.
         let watch = MainThreadWatch(url: url)
-        watch.start()
-        // Held until the stall on disk has its frames (the watch writes the stall first, then reads the stack), not
-        // for a fixed time: a slow machine only takes longer (CI once let go at 3 s, before the frames were written).
-        // Another thread reads the file and says when; the main thread only waits on that, so the stack the watch
-        // reads is this test's hold, not the middle of a file read or a decode (CI once ran out its 30 s there).
-        // The stall checked is the one that thread read from disk: while the main thread is held, and after, until
-        // it beats again, the watch rewrites the file every half second, so the file is not read a second time.
-        let found = holdTheMainThread(untilFramesIn: url, seconds: 60)
-        // The watch stops before the test goes on.
-        watch.activeChanged(false)
-        let stall = try XCTUnwrap(found, "no stall with frames on disk within 60 s; on disk: \(Self.describe(url))")
+        let found = Found()
+        let holding = DispatchSemaphore(value: 0)
+        let looked = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            // Once the main thread is held, the watch looks, past the threshold since it last heard the main thread.
+            holding.wait()
+            watch.tick(now: Date().addingTimeInterval(MainThreadWatch.threshold + 1))
+            // What the look left on disk, read here, before the main thread goes on.
+            if let data = try? Data(contentsOf: url) {
+                found.stall = try? JSONDecoder().decode(MainThreadWatch.Stall.self, from: data)
+            }
+            looked.signal()
+        }
+        holdTheMainThread(until: looked, saying: holding)
+        let stall = try XCTUnwrap(found.stall, "the watch's look left no stall; on disk: \(Self.describe(url))")
+        XCTAssertFalse(stall.recovered, "the main thread had not answered")
+        XCTAssertGreaterThan(stall.seconds, MainThreadWatch.threshold)
         let ownImage = Bundle(for: Self.self).executablePath.map { ($0 as NSString).lastPathComponent } ?? "SentiPocketAppTests"
         XCTAssertTrue(stall.frames?.contains { $0.hasPrefix(ownImage + " +0x") } == true,
                       "the stall names this test's frame: \(stall.frames ?? [])")
@@ -73,38 +87,14 @@ final class MainThreadStackTests: XCTestCase {
         XCTAssertTrue(MainThreadStack.capture().frames.isEmpty)
     }
 
-    /// Busy on the main thread until `read` is signalled (`seconds` at most), as a stuck main thread is.
+    /// Busy on the main thread until `read` is signalled (`seconds` at most), as a stuck main thread is. `holding` is
+    /// signalled once the main thread is in here.
     @inline(never)
-    private func holdTheMainThread(until read: DispatchSemaphore, seconds: TimeInterval = 5) {
+    private func holdTheMainThread(until read: DispatchSemaphore, saying holding: DispatchSemaphore? = nil,
+                                   seconds: TimeInterval = 5) {
         let end = Date().addingTimeInterval(seconds)
+        holding?.signal()
         while read.wait(timeout: .now()) == .timedOut, Date() < end {}
-    }
-
-    /// Busy on the main thread until the stall written at `url` names frames (`seconds` at most): another thread reads
-    /// the file, and the main thread does nothing but wait for its word. The stall it read, or nil if none had frames.
-    @inline(never)
-    private func holdTheMainThread(untilFramesIn url: URL, seconds: TimeInterval) -> MainThreadWatch.Stall? {
-        let named = DispatchSemaphore(value: 0)
-        let done = DispatchSemaphore(value: 0)
-        let found = Found()
-        DispatchQueue.global(qos: .userInitiated).async {
-            let end = Date().addingTimeInterval(seconds)
-            while Date() < end {
-                if let data = try? Data(contentsOf: url),
-                   let stall = try? JSONDecoder().decode(MainThreadWatch.Stall.self, from: data),
-                   stall.frames?.isEmpty == false {
-                    found.stall = stall
-                    break
-                }
-                Thread.sleep(forTimeInterval: 0.05)
-            }
-            done.signal()
-            named.signal()
-        }
-        holdTheMainThread(until: named, seconds: seconds)
-        // The reading thread is done before its result is read (it stops on its own at the same deadline).
-        _ = done.wait(timeout: .now() + 5)
-        return found.stall
     }
 
     /// What the watch left at `url`, for a failure message.

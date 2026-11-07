@@ -701,8 +701,11 @@ final class MainThreadWatch: @unchecked Sendable {
         lock.unlock()
     }
 
-    private func tick() {
-        let now = Date()
+    /// One look at the main thread, as the watch's timer makes every half second: `now` past `threshold` since the main
+    /// thread last answered is a stall. Not private so a test can make the look itself, at a time it chooses, while it
+    /// holds the main thread (ticket 2c55d2f3): the timer's utility queue can go tens of seconds without running on a
+    /// loaded machine, and a test must not wait on that.
+    func tick(now: Date = Date()) {
         lock.lock()
         let gap = now.timeIntervalSince(lastBeat)
         var written: Stall?
