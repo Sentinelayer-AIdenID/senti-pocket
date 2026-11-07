@@ -22,6 +22,7 @@ public struct RoomChatView: View {
     /// The pickers and viewers a thread opens over itself.
     @Environment(\.roomSheetMediaHost) private var sheetMediaHost
     @Environment(\.roomReadAloudBar) private var readAloudBar
+    @Environment(\.listenBar) private var listenBar
     /// Where the typing line is said: VoiceOver.
     @Environment(\.roomAnnouncer) private var announcer
     @State private var readerAtBottom = true
@@ -426,6 +427,10 @@ public struct RoomChatView: View {
                         .padding(.top, RoomPeopleAvatars.topGap)
                 }
             }
+            // The Listen bar, over who is here in its fixed space while something is read: under the pins and the notice,
+            // never over the first message, and never in an inset, so a reading starting or stopping lays nothing out
+            // again (#360).
+            .overlay(alignment: .top) { listenBar?.content() }
             .safeAreaInset(edge: .top, spacing: 0) {
                 if !state.pinned.isEmpty {
                     RoomPinnedStrip(
@@ -575,6 +580,11 @@ public struct RoomChatView: View {
             }
             .padding(.vertical, 8)
             .accessibilityIdentifier("pocket.room.unreadDivider")
+            #if DEBUG
+            .background(GeometryReader { proxy in
+                Color.clear.preference(key: RoomUnreadLineFrame.self, value: proxy.frame(in: .global))
+            })
+            #endif
         case .message(let message):
             // A part of a file posted as base64 folds behind the file's card, unless its thread's parts are shown.
             if message.filePartOf.map(shownFileParts.contains) ?? true {
@@ -2358,7 +2368,19 @@ private struct RoomThreadSheet: View {
                 }
             }
             .background { mediaHost?.content() }
-            .safeAreaInset(edge: .top, spacing: 0) { readAloudBar?.content() }
+            // A fixed 44 pt at the thread's top, always, where the Listen bar shows while a reply is read: it covers
+            // nothing, and a reading starting or stopping never lays the replies out again.
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if let readAloudBar {
+                    // The clear view holds the space while nothing is read: an empty bar alone reserves none.
+                    ZStack {
+                        Color.clear
+                        readAloudBar.content()
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 44)
+                }
+            }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if thread.canReply {
                     VStack(alignment: .leading, spacing: 4) {

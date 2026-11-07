@@ -433,6 +433,13 @@ enum HostedSummary {
 
     /// `height` makes the window taller than a phone, so a long list draws every row (a row never drawn reads as absent).
     static func host<Content: View>(_ content: Content, height: CGFloat = 667) throws -> UIWindow {
+        try turnOnAutomation()
+        return try window(for: content, height: height)
+    }
+
+    /// UI automation on, for a test that hosts its own window (the signed-in root) and reads what VoiceOver reads;
+    /// `turnOffAutomation` (or `close`) turns it off again.
+    static func turnOnAutomation() throws {
         let setAutomation = try XCTUnwrap(Self.setAutomation, "UI automation could not be turned on")
         setAutomation(true)
         if !warmedUp {
@@ -442,7 +449,10 @@ enum HostedSummary {
             warmUp.isHidden = true
             pump(0.2)
         }
-        return try window(for: content, height: height)
+    }
+
+    static func turnOffAutomation() {
+        setAutomation?(false)
     }
 
     private static func window<Content: View>(for content: Content, height: CGFloat = 667) throws -> UIWindow {

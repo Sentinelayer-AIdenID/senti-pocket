@@ -466,9 +466,9 @@ struct AuthenticatedRootView: View {
     @AppStorage("pocket.lastRoomId") private var lastRoomId = ""
     @State private var restoredLastRoom = false
     @AppStorage("pocket.theme") private var themeRaw = PocketThemePreference.system.rawValue
-    /// The app's one reader. Kept, not watched: its bar (`ReadAloudBarSlot`) watches it, so a reading draws the bar and
-    /// never the root, whose every draw can make the room screen under it again (Carter, #62471: a thread being read
-    /// from went away).
+    /// The app's one reader. Kept, not watched: its bars (`ReadAloudBarSlot`, over the room on screen) watch it, so a
+    /// reading draws the bar and never the root, whose every draw can make the room screen under it again (Carter,
+    /// #62471: a thread being read from went away).
     @State private var messageReader = MessageReader()
     private let roomTransport: any RoomTransport
     private let ticketsTransport: any RoomTicketsTransport
@@ -664,6 +664,8 @@ struct AuthenticatedRootView: View {
                                 show(roomRoute(for: sessionId))
                             }
                         }
+                        // With no room open, the Listen bar over the room list (Carter, 10-30: the player stays).
+                        .overlay(alignment: .top) { listenBar(place: "list") }
                     }
                 }
                 .toolbar {
@@ -676,17 +678,6 @@ struct AuthenticatedRootView: View {
             }
             // A sheet or the side panel over the room: its moving parts rest (warden, #269).
             .environment(\.roomIsCovered, roomCovered)
-            // Listening goes on when you leave its room (Carter, 10-30): outside that room the app keeps the player at
-            // the top, and its title takes you back to the message.
-            .safeAreaInset(edge: .top, spacing: 0) {
-                ReadAloudBarSlot(reader: messageReader, place: "app", shows: { [shownRoom = (roomPath.last ?? currentRoom)?.sessionId] source in
-                    source != nil && source != shownRoom
-                }, onShowMessage: {
-                    if let id = messageReader.readingId, let source = ReadAloudSource.shared.sessionId {
-                        open(ReadAloudSource.link(readingId: id, sessionId: source))
-                    }
-                })
-            }
             // The room moves right, a little smaller, its corners rounded into a card; a tap or a swipe on it closes.
             .overlay {
                 if drawerOpen {
@@ -754,6 +745,8 @@ struct AuthenticatedRootView: View {
             if open { panelState.open() } else { panelState.close() }
         }
         .onAppear {
+            // The reader, for the hosted tests that pause and play it.
+            RootPreview.meter.reader = messageReader
             guard RootPreview.isRequested else { return }
             let meter = RootPreview.meter
             meter.watch("sessions", sessions)
@@ -885,6 +878,8 @@ struct AuthenticatedRootView: View {
                     onSignOut()
                 }
             )
+            // Settings shows the Listen bar over its top while something is read.
+            .environment(\.listenBar, RoomReadAloudBarHost { listenBar(place: "settings") })
         }
         .aiConsentPrompt($newRoomConsentHeld) { aiConsent.grant() }
         .modifier(RoomFolderSheets(center: roomFolders))
@@ -1144,6 +1139,16 @@ struct AuthenticatedRootView: View {
             // Folders show only where they are on.
             onFolder: roomFolders.items == nil ? nil : { roomFolders.send($0) }
         )
+    }
+
+    /// The Listen bar where no room is on screen (the room list, Settings): any reading from a room, over the top, its
+    /// title taking you back to the message.
+    private func listenBar(place: String) -> ReadAloudBarSlot {
+        ReadAloudBarSlot(reader: messageReader, place: place, shows: { $0 != nil }, onShowMessage: {
+            if let id = messageReader.readingId, let source = ReadAloudSource.shared.sessionId {
+                open(ReadAloudSource.link(readingId: id, sessionId: source))
+            }
+        })
     }
 
     /// A direct message with someone you blocked is not placed (`withoutDirectMessages`).

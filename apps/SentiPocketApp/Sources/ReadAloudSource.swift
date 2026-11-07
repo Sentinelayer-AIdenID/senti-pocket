@@ -6,7 +6,8 @@ import SwiftUI
 
 /// Which room the message being read aloud belongs to (Carter, 10-30: "Even if I go to another room my voice player
 /// needs to stay until I click another voice thing"). The room's own player shows while you are in that room; anywhere
-/// else, the app keeps a player on screen whose title takes you back to that room, at the message.
+/// else (another room, the room list, Settings) a player shows over the top of the screen, and its title takes you back
+/// to that room, at the message.
 @MainActor
 final class ReadAloudSource: ObservableObject {
     static let shared = ReadAloudSource()
@@ -41,10 +42,13 @@ struct ReadAloudBarSlot: View {
     let onShowMessage: () -> Void
 
     var body: some View {
+        #if DEBUG
+        let _ = RootPreview.meter.readAloudSlotBodyRan(place)
+        #endif
         Group {
             if let playback = reader.playback, shows(source.sessionId) {
+                // 44 pt and nothing around it: it floats over the page, which shows faintly through its material.
                 ReadAloudPlayer(reader: reader, playback: playback, onShowMessage: onShowMessage)
-                    .padding(.vertical, 4)
                     .transition(.move(edge: .top).combined(with: .opacity))
                     #if DEBUG
                     .onPreferenceChange(ReadAloudBarFrames.self) { frames in

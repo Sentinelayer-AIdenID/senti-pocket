@@ -72,6 +72,16 @@ public struct ReadAloudBarFrames: PreferenceKey {
     }
 }
 
+/// Where the room's unread line was last laid out, in the window (DEBUG builds only): for the app's hosted tests, which
+/// check that the read-aloud bar floating over the room never covers it.
+public struct RoomUnreadLineFrame: PreferenceKey {
+    public static let defaultValue: CGRect? = nil
+
+    public static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
+        value = nextValue() ?? value
+    }
+}
+
 /// The player for Listen: one thin line at the top of the screen (Carter, #62471: "place the reader overlay at the top
 /// and make it thinner"). Who is being read (a tap takes you to the message), the position, pause and play, and close
 /// (which stops), each at least 44 pt, with a thin line of progress along its foot. It stays until the reading ends or
@@ -176,7 +186,8 @@ private extension View {
 /// The read-aloud bar a sheet on the room shows at its top while something is read (a thread). The app supplies it, and
 /// it watches the reader itself, so a reading never draws the sheet or the room again.
 public struct RoomReadAloudBarHost: Equatable {
-    let content: () -> AnyView
+    /// The bar, for the screen that shows it (a room's thread, Settings).
+    public let content: () -> AnyView
 
     public init<Content: View>(@ViewBuilder _ content: @escaping () -> Content) {
         self.content = { AnyView(content()) }
@@ -190,7 +201,19 @@ private struct RoomReadAloudBarHostKey: EnvironmentKey {
     static let defaultValue: RoomReadAloudBarHost? = nil
 }
 
+private struct ListenBarHostKey: EnvironmentKey {
+    static let defaultValue: RoomReadAloudBarHost? = nil
+}
+
 extension EnvironmentValues {
+    /// The Listen bar a screen shows over its top while something is read (a room, Settings): the app supplies it,
+    /// and it watches the reader itself. Shown over the screen, never in its insets, so a reading starting or stopping
+    /// never lays the screen out again.
+    public var listenBar: RoomReadAloudBarHost? {
+        get { self[ListenBarHostKey.self] }
+        set { self[ListenBarHostKey.self] = newValue }
+    }
+
     /// Set by the room screen for its sheets (see `RoomReadAloudBarHost`).
     public var roomReadAloudBar: RoomReadAloudBarHost? {
         get { self[RoomReadAloudBarHostKey.self] }

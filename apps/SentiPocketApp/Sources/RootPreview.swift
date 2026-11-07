@@ -6,6 +6,7 @@ import PocketCall
 import PocketContracts
 import PocketSyncClient
 import PocketUI
+import PocketVoice
 
 /// DEBUG-only: `-PocketRootPreview` hosts the signed-in app's own root (`AuthenticatedRootView`: the side panel, the
 /// bell and Waiting on you, folders, direct messages and the room on screen) on scripted data, with no network and no
@@ -24,6 +25,9 @@ import PocketUI
 ///   pages the list by 50).
 /// - `-PocketRootCrashOffer`: one made-up crash report waits to be offered, and sending it is answered by the preview,
 ///   so the offer (`CrashReportOffer`) shows a moment after launch.
+/// - `-PocketRootRoomReading`: a moment after launch, the open room's newest message is read aloud (made-up words), for
+///   pictures of the Listen bar over the room. With `-PocketRootRoom none`, a reading from room-mid plays over the room
+///   list instead.
 /// - `-PocketRootThreadReading`: a moment after launch, the open room's newest message opens its thread and its first
 ///   reply is read aloud (made-up words), for pictures of the Listen bar over a thread.
 /// - `-PocketRootInlineReplies`: every message with replies shows its newest reply in the room, as a row to answer in
@@ -72,6 +76,7 @@ enum RootPreview {
     static func rootView(whisperModel: WhisperModelProvisioningCoordinator, incomingLinks: IncomingLinkInbox) -> some View {
         if offersCrashReport { CrashReporter.shared.offerForPreview(madeUpCrashReport()) }
         if ProcessInfo.processInfo.arguments.contains("-PocketRootThreadReading") { readInAThreadSoon() }
+        if ProcessInfo.processInfo.arguments.contains("-PocketRootRoomReading") { readInTheRoomSoon() }
         // The root reopens the room opened last once the room list has loaded, as the app does after a launch.
         UserDefaults.standard.set(openRoomId ?? "", forKey: "pocket.lastRoomId")
         // The freeze watch runs as in the app, so a stall here is written down where the app writes one.
@@ -109,6 +114,21 @@ enum RootPreview {
 
     /// Opens or closes the side panel of a root hosted in a test, as the signals do in the preview.
     static func requestDrawer(_ open: Bool) { drawerSubject.send(open) }
+
+    /// `-PocketRootRoomReading`: the newest message read aloud, as its Listen would; with no room open, a reading from
+    /// room-mid, as one left playing when its room closed.
+    private static func readInTheRoomSoon() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+            var words = RootPreviewWords(seed: 166)
+            let text = (0..<6).map { _ in words.sentence() }.joined(separator: " ")
+            if openRoomId == nil {
+                ReadAloudSource.shared.reading(in: RootPreviewAPI.midRoom)
+                _ = meter.reader?.read(id: RoomReadAloud.message(165), markdown: text, title: "ops-agent")
+            } else {
+                requestRoom(.readAloud(id: RoomReadAloud.message(165), text: text))
+            }
+        }
+    }
 
     /// `-PocketRootThreadReading`: the newest message's thread, then its first reply read aloud, as taps would.
     private static func readInAThreadSoon() {
@@ -208,12 +228,36 @@ final class RootPreviewMeter: @unchecked Sendable {
     /// Room coordinators made and not gone yet: a room put in another's place lets the other go.
     var liveRooms: Int { rooms.filter { $0.room != nil }.count }
 
-    /// Where each read-aloud bar and its controls were last laid out, by place ("app", "room", "thread").
+    /// Where each read-aloud bar and its controls were last laid out, by place ("room", "other", "thread").
     private(set) var readAloudBars: [String: [String: CGRect]] = [:]
 
     func readAloudBarLaidOut(_ place: String, _ frames: [String: CGRect]) { readAloudBars[place] = frames }
 
-    func forgetReadAloudBars() { readAloudBars = [:] }
+    func forgetReadAloudBars() {
+        readAloudBars = [:]
+        readAloudSlotBodies = [:]
+        roomReadingMarks = [:]
+        unreadLines = [:]
+    }
+
+    /// How often each place's read-aloud bar drew (`ReadAloudBarSlot`, which watches the reader): once a sentence,
+    /// and at each pause and play.
+    private(set) var readAloudSlotBodies: [String: Int] = [:]
+
+    func readAloudSlotBodyRan(_ place: String) { readAloudSlotBodies[place, default: 0] += 1 }
+
+    /// The message each room marked as being read the last time its body ran (`RoomChatScreen.readingAloudId`), by room.
+    private(set) var roomReadingMarks: [String: String] = [:]
+
+    func roomMarksReading(_ sessionId: String, _ id: String?) { roomReadingMarks[sessionId] = id }
+
+    /// Where each room's unread line was last laid out, in the window, by room.
+    private(set) var unreadLines: [String: CGRect] = [:]
+
+    func unreadLineLaidOut(_ sessionId: String, _ frame: CGRect?) { unreadLines[sessionId] = frame }
+
+    /// The root's reader (`AuthenticatedRootView.messageReader`), for the hosted tests that pause and play it.
+    weak var reader: MessageReader?
 
     /// Times the root asked for its side panel's rooms to be placed (`placeSidePanelRooms`), open or not.
     private(set) var sidePanelPlacements = 0
