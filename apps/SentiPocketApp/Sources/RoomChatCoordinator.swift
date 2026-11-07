@@ -119,6 +119,9 @@ final class RoomChatCoordinator: ObservableObject {
     /// Each page read on from there: its first reply, and what reads the replies before it (its `nextCursor`). Past
     /// `threadHeld`, the oldest replies go up to one of these, and scrolling up reads them again from its cursor.
     private var threadLaterPageStarts: [(replyId: String, olderCursor: String)] = []
+    /// Opened at a reply the API says is not in the thread (its 404), after that one read: scrolling up reads the
+    /// thread's newest page, and then pages back from its cursor, so the reader is never stuck.
+    private var threadReadAfterGone = false
     private var threadLoading = false
     private var threadFailure: String?
     /// A reply you sent that its thread has not shown yet. Kept per thread, so closing the sheet keeps it. Its nonce
@@ -633,6 +636,14 @@ final class RoomChatCoordinator: ObservableObject {
             publish()
         case .loadOlderReplies(let sequenceId):
             guard !threadSearching else { return }
+            if !threadRead {
+                // Opened at a reply that is not in the thread: its newest page first, then pages back from its cursor.
+                guard openThreadSequence == sequenceId, threadReadAfterGone, !threadLoading else { return }
+                threadLoading = true
+                publish()
+                Task { [weak self] in await self?.loadThread(sequenceId) }
+                return
+            }
             Task { [weak self] in await self?.loadOlderReplies(sequenceId, limit: RoomChatCoordinator.threadPageSize) }
         case .loadLaterReplies(let sequenceId):
             Task { [weak self] in await self?.loadLaterReplies(sequenceId) }
@@ -1542,6 +1553,7 @@ final class RoomChatCoordinator: ObservableObject {
         threadLaterCursor = nil
         threadLoadingLater = false
         threadLaterPageStarts = []
+        threadReadAfterGone = false
     }
 
     private func openThread(_ sequenceId: Int64) {
@@ -1653,6 +1665,9 @@ final class RoomChatCoordinator: ObservableObject {
                     threadOlderCursor = page.nextCursor
                     threadGeneration &+= 1
                     threadLoadingOlder = false
+                    // A page on still on its way is dropped with the generation, and would never clear its flag: the
+                    // next page back would then be refused until the thread opened again.
+                    threadLoadingLater = false
                     threadSearching = false
                 }
             } else {
@@ -1787,8 +1802,9 @@ final class RoomChatCoordinator: ObservableObject {
                                                    limit: Self.threadSearchPageSize, aroundActionId: focus)
         } catch is RoomActionNotFound {
             guard current() else { return .done }
-            // Nothing to bring into view: a later read opens the thread at its newest.
+            // Nothing to bring into view: scrolling up (or a later read) opens the thread at its newest.
             threadFocusReply = nil
+            threadReadAfterGone = true
             threadLoading = false
             threadFailure = Self.replyGone
             publish()
@@ -1797,7 +1813,12 @@ final class RoomChatCoordinator: ObservableObject {
             return current() ? .readBack : .done
         }
         guard current() else { return .done }
-        guard let anchored = page.anchoredActionId else { return .newestPage(page) }
+        // No anchor: an API without this read answered with the thread's newest page, which has no newer side. An
+        // answer with a newer side but no anchor is a window that cannot be placed: the thread reads back instead, so
+        // it never stands on a window as if it were the newest.
+        guard let anchored = page.anchoredActionId else {
+            return page.afterCursor == nil ? .newestPage(page) : .readBack
+        }
         let window = page.replies.filter { $0.targetSequenceId == sequenceId }
         // The window keeps a collapsed reply's own row as well as its final one: open at the API's answer.
         guard let reply = window.first(where: { $0.id == anchored }) else { return .readBack }
@@ -3034,8 +3055,9 @@ final class RoomChatCoordinator: ObservableObject {
                 canReply: actionSender != nil && postingRefusedReason == nil,
                 maximumReplyLength: RoomActionRequest.replyLimit,
                 focusReplyId: threadFocusReply,
-                hasOlder: threadRead && threadOlderCursor != nil,
-                isLoadingOlder: threadLoadingOlder || threadSearching,
+                hasOlder: threadRead ? threadOlderCursor != nil : threadReadAfterGone,
+                isLoadingOlder: threadLoadingOlder || threadSearching
+                    || (!threadRead && threadReadAfterGone && threadLoading),
                 totalReplies: summaries[sequence]?.replyTotal,
                 focusMissing: threadFocusMissing,
                 hasNewer: threadNewerDropped,

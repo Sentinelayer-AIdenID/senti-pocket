@@ -2689,8 +2689,14 @@ private struct RoomThreadRepliesList: View {
     /// Where in `replies` the shown ones start: the first reply shown, or where the thread opens (a few before the
     /// reply it was opened at, a long thread's newest, else its first).
     private func shownStart(in replies: [RoomChatReplyRow]) -> Int {
-        RoomThreadShownStart.index(in: replies, shownFrom: shownFrom, focus: thread.focusReplyId,
-                                   hasOlder: thread.hasOlder, focusMissing: thread.focusMissing)
+        // While a page on is asked for, the first reply shown is the one it will be once that page lands: in the very
+        // update that lets the oldest go, the replies the reader is at stay in the list, never falling back to the
+        // newest 30 until `keepPlaceAfterLater` keeps it and scrolls.
+        let from = laterAsked.map {
+            RoomThreadShownStart.afterLaterPage(shownFrom: shownFrom, firstBefore: $0.first, replies: replies)
+        } ?? shownFrom
+        return RoomThreadShownStart.index(in: replies, shownFrom: from, focus: thread.focusReplyId,
+                                          hasOlder: thread.hasOlder, focusMissing: thread.focusMissing)
     }
 
     var body: some View {
